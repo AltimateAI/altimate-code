@@ -1,18 +1,19 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { Effect, Layer, Schema, Context, Stream } from "effect"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 import { errorMessage } from "@/util/error"
 import { ChildProcess } from "effect/unstable/process"
 import { AppProcess } from "@opencode-ai/core/process"
 import path from "path"
-import { EventV2 } from "@opencode-ai/core/event"
 import { makeRuntime } from "@opencode-ai/core/effect/runtime"
 import semver from "semver"
 import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { NpmConfig } from "@opencode-ai/core/npm-config"
+import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
 // altimate_change start — telemetry (lazy import to avoid circular dep with Telemetry → Installation)
 let _telemetryCache: (typeof import("../telemetry"))["Telemetry"] | undefined
@@ -41,20 +42,7 @@ export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop"
 
 export type ReleaseType = "patch" | "minor" | "major"
 
-export const Event = {
-  Updated: EventV2.define({
-    type: "installation.updated",
-    schema: {
-      version: Schema.String,
-    },
-  }),
-  UpdateAvailable: EventV2.define({
-    type: "installation.update-available",
-    schema: {
-      version: Schema.String,
-    },
-  }),
-}
+export const Event = InstallationEvent
 
 export function getReleaseType(current: string, latest: string): ReleaseType {
   const currMajor = semver.major(current)
@@ -120,7 +108,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/In
 
 export const use = serviceUse(Service)
 
-export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Service> = Layer.effect(
+const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient
@@ -480,19 +468,13 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(FetchHttpClient.layer), Layer.provide(AppProcess.defaultLayer)))
-// altimate_change end
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [httpClient, AppProcess.node] })
 
-const { runPromise } = makeRuntime(Service, defaultLayer)
+const { runPromise } = makeRuntime(Service, AppNodeBuilder.build(node))
 
 export const latest = (...args: Parameters<Interface["latest"]>) => runPromise((s) => s.latest(...args))
 export const method = () => runPromise((s) => s.method())
 export const upgrade = (...args: Parameters<Interface["upgrade"]>) => runPromise((s) => s.upgrade(...args))
-
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [httpClient, AppProcess.node])
-// altimate_change end
 
 // altimate_change start — re-export the version constant under the old Installation.VERSION name
 // (upstream moved it to InstallationVersion in @opencode-ai/core/installation/version). Keeps the

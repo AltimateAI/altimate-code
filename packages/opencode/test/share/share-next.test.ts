@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect } from "bun:test"
 import { Effect, Exit, Layer, Option } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 
@@ -19,19 +19,19 @@ import { eq, sql } from "drizzle-orm"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
 
-const env = LayerNode.buildLayer(CrossSpawnSpawner.node)
+const env = LayerNode.compile(LayerNode.group([CrossSpawnSpawner.node]))
 const it = testEffect(env)
 
 const none = HttpClient.make(() => Effect.die("unexpected http call"))
 
 function requestLayer(client: HttpClient.HttpClient) {
-  return LayerNode.buildLayer(LayerNode.group([ShareNext.node, AccountRepo.node]), {
-    replacements: [LayerNode.replace(httpClient, Layer.succeed(HttpClient.HttpClient, client))],
-  })
+  const replacement = [httpClient, Layer.succeed(HttpClient.HttpClient, client)] as const
+  return LayerNode.compile(LayerNode.group([ShareNext.node, AccountRepo.node]), [replacement])
 }
 
 function integrationLayer(client: HttpClient.HttpClient) {
-  return LayerNode.buildLayer(
+  const replacement = [httpClient, Layer.succeed(HttpClient.HttpClient, client)] as const
+  return LayerNode.compile(
     LayerNode.group([
       ShareNext.node,
       EventV2Bridge.node,
@@ -40,9 +40,7 @@ function integrationLayer(client: HttpClient.HttpClient) {
       AccountRepo.node,
       Database.node,
     ]),
-    {
-      replacements: [LayerNode.replace(httpClient, Layer.succeed(HttpClient.HttpClient, client))],
-    },
+    [replacement],
   )
 }
 

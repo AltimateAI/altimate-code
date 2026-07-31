@@ -26,7 +26,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRunState") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const background = yield* BackgroundJob.Service
@@ -153,8 +153,10 @@ function busyError(sessionID: SessionID) {
   return new Session.BusyError({ sessionID })
 }
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [BackgroundJob.node, SessionStatus.node])
-// altimate_change end
+// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
+// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
+// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [BackgroundJob.node, SessionStatus.node] })
 
 export * as SessionRunState from "./run-state"

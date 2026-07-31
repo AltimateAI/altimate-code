@@ -31,19 +31,19 @@ function fakeInstance(directory = "/tmp/upi-runtime") {
 describe("UPI-01 runtime graph: lazy layers and explicit cycle failures", () => {
   test("LayerNode dependency thunks are resolved at build time, after cyclic imports settle", () => {
     let dependency: any
-    const root = LayerNode.make(Layer.empty as any, () => [dependency])
-    dependency = LayerNode.make(Layer.empty as any, [] as any)
+    const root = LayerNode.make({ name: "upi-root", layer: Layer.empty as any, deps: (() => [dependency]) as any })
+    dependency = LayerNode.make({ name: "upi-dep", layer: Layer.empty as any, deps: [] as any })
 
-    expect(() => LayerNode.buildLayer(root as any)).not.toThrow()
+    expect(() => LayerNode.compile(root as any)).not.toThrow()
   })
 
   test("LayerNode reports an explicit cycle path instead of failing with undefined deps", () => {
     let a: any
     let b: any
-    a = LayerNode.make(Layer.empty as any, () => [b])
-    b = LayerNode.make(Layer.empty as any, () => [a])
+    a = LayerNode.make({ name: "upi-a", layer: Layer.empty as any, deps: (() => [b]) as any })
+    b = LayerNode.make({ name: "upi-b", layer: Layer.empty as any, deps: (() => [a]) as any })
 
-    expect(() => LayerNode.buildLayer(a as any)).toThrow(/Cycle detected in app graph: layer#\d+ -> layer#\d+/)
+    expect(() => LayerNode.compile(a as any)).toThrow(/Cycle detected in layer tree: .+ -> .+/)
   })
 
   test("AppLayer defers defaultLayer reads for the circular service graph", async () => {
@@ -68,7 +68,7 @@ describe("UPI-01 runtime graph: lazy layers and explicit cycle failures", () => 
 
     for (const [file, label] of files) {
       const source = stripComments(await readSrc(...file.split("/")))
-      expect(source, `${label} should defer LayerNode dependencies`).toMatch(/LayerNode\.make\([^,]+,\s*\(\)\s*=>\s*\[/s)
+      expect(source, `${label} should defer LayerNode dependencies`).toMatch(/deps:\s*\(\)\s*=>\s*\[/s)
     }
   })
 })

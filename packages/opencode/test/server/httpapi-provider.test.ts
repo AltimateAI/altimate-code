@@ -1,14 +1,23 @@
 import { describe, expect } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Effect, Layer } from "effect"
 import path from "path"
+import { resetDatabase } from "../fixture/db"
 import { TestInstance } from "../fixture/fixture"
 import { markPluginDependenciesReady } from "../fixture/plugin"
 import { testEffect } from "../lib/effect"
 import { Server } from "../../src/server/server"
 import { httpApiLayer, request } from "./httpapi-layer"
 
-const it = testEffect(Layer.mergeAll(FSUtil.defaultLayer, httpApiLayer))
+const testStateLayer = Layer.effectDiscard(
+  Effect.acquireRelease(
+    Effect.promise(() => resetDatabase()),
+    () => Effect.promise(() => resetDatabase()),
+  ),
+)
+
+const it = testEffect(Layer.mergeAll(testStateLayer, LayerNode.compile(FSUtil.node), httpApiLayer))
 const projectOptions = { config: { formatter: false, lsp: false } }
 const googleProjectOptions = { config: { formatter: false, lsp: false, enabled_providers: ["google"] } }
 const providerID = "test-oauth-parity"

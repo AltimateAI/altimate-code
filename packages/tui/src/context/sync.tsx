@@ -34,6 +34,7 @@ import { useKV } from "./kv"
 // altimate_change start - yolo mode + smooth streaming
 import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
+import { usePermission } from "./permission"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -62,6 +63,7 @@ export const {
   init: () => {
     const startup = useTuiStartup()
     const kv = useKV()
+    const permission = usePermission()
     const [store, setStore] = createStore<{
       status: "loading" | "partial" | "complete"
       provider: Provider[]
@@ -215,7 +217,7 @@ export const {
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
-    event.subscribe((event, { workspace }) => {
+    event.subscribe((event, { directory, workspace }) => {
       switch (event.type) {
         case "server.instance.disposed":
           void bootstrap()
@@ -237,12 +239,14 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
-          // altimate_change start - yolo mode: auto-approve without showing prompt
-          if (Flag.ALTIMATE_CLI_YOLO) {
+          // altimate_change start - yolo mode: auto-approve without showing prompt (in addition to
+          // upstream's native permission.mode "auto" toggle)
+          if (Flag.ALTIMATE_CLI_YOLO || permission.mode === "auto") {
             void sdk.client.permission
               .reply({
                 requestID: request.id,
                 reply: "once",
+                directory,
                 workspace,
               })
               .catch((e) => {

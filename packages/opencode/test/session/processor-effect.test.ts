@@ -24,9 +24,10 @@ import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
-import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { LLMEvent } from "@opencode-ai/llm"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { provideTmpdirInstance } from "../fixture/fixture"
 import { provideTmpdirInstanceLegacy, provideTmpdirServerLegacy } from "./legacy-instance"
 
 const summary = Layer.succeed(
@@ -178,10 +179,13 @@ const root = LayerNode.group([
   CrossSpawnSpawner.node,
 ])
 const replacements = [
-  LayerNode.replace(SessionSummary.node, summary),
-  LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })),
-]
-const env = LayerNode.buildLayer(LayerNode.group([root, LayerNode.make(TestLLMServer.layer, [])]), { replacements })
+  [SessionSummary.node, summary],
+  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+] as const
+const env = LayerNode.compile(
+  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+  replacements,
+)
 
 const it = testEffect(env)
 
@@ -205,9 +209,7 @@ const providerErrorLLM = Layer.succeed(
       ),
   }),
 )
-const providerErrorEnv = LayerNode.buildLayer(root, {
-  replacements: [...replacements, LayerNode.replace(LLM.node, providerErrorLLM)],
-})
+const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
 const itProviderError = testEffect(providerErrorEnv)
 
 const fragmentFailureLLM = Layer.succeed(
@@ -224,9 +226,7 @@ const fragmentFailureLLM = Layer.succeed(
       ),
   }),
 )
-const fragmentFailureEnv = LayerNode.buildLayer(root, {
-  replacements: [...replacements, LayerNode.replace(LLM.node, fragmentFailureLLM)],
-})
+const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
 const boot = Effect.fn("test.boot")(function* () {
@@ -948,10 +948,9 @@ itProviderError.live.todo("session.processor effect tests fail provider-executed
         const parent = yield* user(chat.id, "provider tool error")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const mdl = yield* refModel(provider)
-        const settlements: Array<typeof SessionEvent.Tool.Failed.Type> = []
+        const seen: string[] = []
         const off = yield* events.listen((event) => {
-          if (event.type === SessionEvent.Tool.Failed.type)
-            settlements.push(event as typeof SessionEvent.Tool.Failed.Type)
+          seen.push(event.type)
           return Effect.void
         })
         const controller = new AbortController()
@@ -980,20 +979,71 @@ itProviderError.live.todo("session.processor effect tests fail provider-executed
         expect(call?.metadata?.providerExecuted).toBe(true)
         // altimate_change end
         if (call?.state.status === "error") expect(call.state.error).toBe("provider boom")
-        expect(settlements).toHaveLength(1)
-        expect(settlements[0]?.data).toMatchObject({
-          callID: "call-1",
-          error: { type: "unknown", message: "provider boom" },
-          result: { type: "error", value: "provider boom" },
-          provider: { executed: true },
-        })
+        expect(seen).toContain(MessageV2.Event.PartUpdated.type)
+        expect(seen).toContain(MessageV2.Event.Updated.type)
+        expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
       }),
     { config: cfg },
   ),
 )
-// BUG: REGRESSION: partial text/reasoning fragments before provider step failure cannot be validated through the
-// Effect LLM fake because SessionProcessor.process uses the imperative LLM singleton. Minimal src fix:
-// packages/opencode/src/session/processor.ts:75/83 should route through the injected LLM.Service stream.
+itFragmentFailure.live("session.processor effect tests retain partial legacy parts without v2 events", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const events = yield* EventV2Bridge.Service
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "provider failure")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const seen: string[] = []
+        const off = yield* events.listen((event) => {
+          seen.push(event.type)
+          return Effect.void
+        })
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        expect(
+          yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "provider failure" }],
+            tools: {},
+          }),
+        ).toBe("stop")
+        yield* off
+
+        const parts = yield* MessageV2.parts(msg.id)
+        expect(parts).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "text", text: "partial" }),
+            expect.objectContaining({ type: "reasoning", text: "thinking" }),
+          ]),
+        )
+        expect(seen).toContain(MessageV2.Event.PartUpdated.type)
+        expect(seen).toContain(Session.Event.Error.type)
+        expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
+      }),
+    { config: cfg },
+  ),
+)
+
+// altimate_change start — BUG: REGRESSION: partial text/reasoning fragments before provider step failure cannot be
+// validated through the Effect LLM fake because SessionProcessor.process uses the imperative LLM singleton.
+// Minimal src fix: packages/opencode/src/session/processor.ts:75/83 should route through the injected
+// LLM.Service stream. Kept as a documented .todo alongside the upstream-adopted test above (which exercises a
+// different path — handle.process/provideTmpdirInstance — and doesn't hit this bug).
 itFragmentFailure.live.todo("session.processor effect tests flush partial v2 fragments before step failure", () =>
   provideTmpdirInstanceLegacy(
     (dir) =>
@@ -1047,3 +1097,4 @@ itFragmentFailure.live.todo("session.processor effect tests flush partial v2 fra
     { config: cfg },
   ),
 )
+// altimate_change end

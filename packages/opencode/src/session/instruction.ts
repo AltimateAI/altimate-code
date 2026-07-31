@@ -2,7 +2,7 @@
 import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { httpClient } from "@opencode-ai/core/effect/layer-node-platform"
+import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import path from "path"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Effect, Layer, Context } from "effect"
@@ -48,7 +48,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Instruction") {}
 
-export const layer: Layer.Layer<
+const layer: Layer.Layer<
   Service,
   never,
   FSUtil.Service | Config.Service | Global.Service | HttpClient.HttpClient | RuntimeFlags.Service
@@ -243,9 +243,16 @@ export function loaded(messages: SessionV1.WithParts[]) {
   return extract(messages)
 }
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient])
-// altimate_change end
+// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support entirely (see
+// packages/core/src/effect/layer-node.ts, not owned by this file). The fork previously thunked
+// these deps (`() => [...]`) to defer reading cyclically-imported facade `.node` refs past
+// module-init. Using upstream's object-style API with a plain array here; needs verification
+// once layer-node.ts's conflict is resolved that this doesn't reintroduce the undefined-node bug.
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Config.node, FSUtil.node, Global.node, RuntimeFlags.node, httpClient],
+})
 
 // altimate_change start — restore the imperative Promise-based facade upstream removed in the
 // Effect-only migration; the session prompt loop consumes these synchronously.

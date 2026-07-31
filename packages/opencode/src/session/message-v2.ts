@@ -31,6 +31,16 @@ export namespace MessageV2 {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
 
+  // altimate_change start — upstream_fix: strip `providerExecuted` out of forwarded provider
+  // metadata (it's re-signaled explicitly via the `providerExecuted` field below) so it isn't
+  // duplicated in `callProviderMetadata`/`providerMetadata`.
+  function providerMeta(metadata: Record<string, any> | undefined) {
+    if (!metadata) return undefined
+    const { providerExecuted: _, ...rest } = metadata
+    return Object.keys(rest).length > 0 ? rest : undefined
+  }
+  // altimate_change end
+
   // altimate_change start — shared synthetic-attachment prompt text. Used both when
   // injecting tool-result media as a user message (below) and by the GitHub Copilot
   // plugin's imgMsg() heuristic so the two stay in sync.
@@ -642,17 +652,23 @@ export namespace MessageV2 {
     //
     // Only apply this workaround if the model actually supports image input -
     // otherwise there's no point extracting images.
-    const supportsMediaInToolResults = (() => {
+    // altimate_change start — upstream_fix: per-attachment media-support check (some SDKs
+    // support a subset of media in tool results, e.g. Bedrock supports images but not PDFs
+    // there) instead of a single whole-model boolean.
+    const supportsMediaInToolResult = (attachment: { mime: string }) => {
       if (model.api.npm === "@ai-sdk/anthropic") return true
       if (model.api.npm === "@ai-sdk/openai") return true
-      if (model.api.npm === "@ai-sdk/amazon-bedrock") return true
+      if (model.api.npm === "@ai-sdk/amazon-bedrock/mantle") return true
+      if (model.api.npm === "@ai-sdk/amazon-bedrock") return attachment.mime.startsWith("image/")
+      if (model.api.npm === "@ai-sdk/xai") return attachment.mime.startsWith("image/")
       if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
       if (model.api.npm === "@ai-sdk/google") {
         const id = model.api.id.toLowerCase()
         return id.includes("gemini-3") && !id.includes("gemini-2")
       }
       return false
-    })()
+    }
+    // altimate_change end
 
     const toModelOutput = (output: unknown) => {
       // altimate_change — unwrap AI SDK v6 tool-result wrapper.
@@ -799,11 +815,11 @@ export namespace MessageV2 {
               // For providers that don't support media in tool results, extract media files
               // (images, PDFs) to be sent as a separate user message
               const mediaAttachments = attachments.filter((a) => isMedia(a.mime))
-              const nonMediaAttachments = attachments.filter((a) => !isMedia(a.mime))
-              if (!supportsMediaInToolResults && mediaAttachments.length > 0) {
-                media.push(...mediaAttachments)
+              const extractedMedia = mediaAttachments.filter((a) => !supportsMediaInToolResult(a))
+              if (extractedMedia.length > 0) {
+                media.push(...extractedMedia)
               }
-              const finalAttachments = supportsMediaInToolResults ? attachments : nonMediaAttachments
+              const finalAttachments = attachments.filter((a) => !isMedia(a.mime) || supportsMediaInToolResult(a))
 
               const output =
                 finalAttachments.length > 0
@@ -819,7 +835,11 @@ export namespace MessageV2 {
                 toolCallId: part.callID,
                 input: part.state.input,
                 output,
-                ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                // altimate_change start — upstream_fix: forward providerExecuted so the AI SDK
+                // doesn't re-send tool calls the provider already executed server-side (e.g. MCP).
+                ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+                // altimate_change end
               })
             }
             if (part.state.status === "error") {
@@ -832,7 +852,8 @@ export namespace MessageV2 {
                   toolCallId: part.callID,
                   input: part.state.input,
                   output,
-                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                  ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                  ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
                 })
               } else {
                 assistantMessage.parts.push({
@@ -841,7 +862,8 @@ export namespace MessageV2 {
                   toolCallId: part.callID,
                   input: part.state.input,
                   errorText: part.state.error,
-                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                  ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                  ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
                 })
               }
               // altimate_change end
@@ -855,7 +877,10 @@ export namespace MessageV2 {
                 toolCallId: part.callID,
                 input: part.state.input,
                 errorText: "[Tool execution was interrupted]",
-                ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                // altimate_change start — upstream_fix: forward providerExecuted (see above)
+                ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
+                ...(differentModel ? {} : { callProviderMetadata: providerMeta(part.metadata) }),
+                // altimate_change end
               })
           }
           if (part.type === "reasoning") {
@@ -1133,6 +1158,33 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
+      // altimate_change start — upstream_fix: dedicated APIError mapping for provider
+      // header-timeout / response-stream failures instead of falling through to the
+      // generic `e instanceof Error` branch below (loses retryability + error code).
+      case e instanceof ProviderError.HeaderTimeoutError:
+        return new MessageV2.APIError(
+          {
+            message: e.message,
+            isRetryable: true,
+            metadata: {
+              code: e.name,
+              timeoutMs: String(e.ms),
+            },
+          },
+          { cause: e },
+        ).toObject()
+      case e instanceof ProviderError.ResponseStreamError:
+        return new MessageV2.APIError(
+          {
+            message: e.message,
+            isRetryable: true,
+            metadata: {
+              code: e.name,
+            },
+          },
+          { cause: e },
+        ).toObject()
+      // altimate_change end
       case APICallError.isInstance(e):
         const parsed = ProviderError.parseAPICallError({
           providerID: ctx.providerID,

@@ -12,6 +12,10 @@
       "dependsOn": ["^build"],
       "outputs": [],
       "passThroughEnv": ["*"]
+    },
+    "@opencode-ai/core#test": {
+      "dependsOn": ["^build"],
+      "outputs": []
     }
   }
 }

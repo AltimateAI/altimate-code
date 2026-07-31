@@ -4,55 +4,21 @@ import { makeRuntime } from "@/effect/run-service"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { InstanceState } from "@/effect/instance-state"
 import { SessionID } from "./schema"
-import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Effect, Layer, Context, Schema } from "effect"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Bus } from "@/bus"
 import { BusEvent } from "@/bus/bus-event"
 import z from "zod"
+import { SessionStatusEvent } from "@opencode-ai/schema/session-status-event"
 
-export const Info = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("idle"),
-  }),
-  Schema.Struct({
-    type: Schema.Literal("retry"),
-    attempt: NonNegativeInt,
-    message: Schema.String,
-    action: Schema.optional(
-      Schema.Struct({
-        reason: Schema.String,
-        provider: Schema.String,
-        title: Schema.String,
-        message: Schema.String,
-        label: Schema.String,
-        link: Schema.optional(Schema.String),
-      }),
-    ),
-    next: NonNegativeInt,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("busy"),
-  }),
-]).annotate({ identifier: "SessionStatus" })
-export type Info = Schema.Schema.Type<typeof Info>
+export const Info = SessionStatusEvent.Info
+export type Info = SessionStatusEvent.Info
 
 export const Event = {
-  Status: EventV2.define({
-    type: "session.status",
-    schema: {
-      sessionID: SessionID,
-      status: Info,
-    },
-  }),
+  Status: SessionStatusEvent.Status,
   // deprecated
-  Idle: EventV2.define({
-    type: "session.idle",
-    schema: {
-      sessionID: SessionID,
-    },
-  }),
+  Idle: SessionStatusEvent.Idle,
   // altimate_change start (AI-7519) — session.phase carries the currently-active bootstrap or per-turn
   // sub-step name so the TUI can render an honest "Loading config..." / "Discovering tools..." label
   // during the invisible pre-first-visible-response window (target <10s to first visible response).
@@ -113,7 +79,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionStatus") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const events = yield* EventV2Bridge.Service
@@ -162,9 +128,11 @@ export const layer = Layer.effect(
 export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(EventV2Bridge.defaultLayer)))
 // altimate_change end
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [EventV2Bridge.node])
-// altimate_change end
+// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
+// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
+// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [EventV2Bridge.node] })
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the session prompt loop sets status synchronously.

@@ -3,6 +3,7 @@ import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { createTestRenderer } from "@opentui/core/testing"
 import { Effect } from "effect"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/core/global"
 import { UPGRADE_KV_KEY } from "../src/component/upgrade-indicator-utils"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
@@ -53,7 +54,7 @@ test("SIGHUP clears title and disposes scoped resources once", async () => {
             disposes++
           },
         },
-      }).pipe(Effect.provide(Global.defaultLayer)),
+      }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))),
     )
     await ready
     process.emit("SIGHUP")
@@ -170,7 +171,7 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
           },
           async dispose() {},
         },
-      }).pipe(Effect.provide(Global.defaultLayer)),
+      }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))),
     )
 
     await ready

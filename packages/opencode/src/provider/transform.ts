@@ -25,6 +25,21 @@ export namespace ProviderTransform {
   export function sanitizeSurrogates(content: string) {
     return content.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "\uFFFD")
   }
+
+  // altimate_change start — upstream addition (v1.18.10): reusable Kimi/Moonshot family detector
+  function isKimiFamily(model: Provider.Model) {
+    if (
+      [model.providerID, model.api.id].some((id) => {
+        const value = id.toLowerCase()
+        return value.includes("kimi") || value.includes("moonshot")
+      })
+    )
+      return true
+    const url = model.api.url.toLowerCase()
+    return ["api.kimi.com", "api.moonshot.ai", "api.moonshot.cn", "api.moonshotai.cn"].some((host) =>
+      url.includes(host),
+    )
+  }
   // altimate_change end
 
   // Maps npm package to the key the AI SDK expects for providerOptions
@@ -49,12 +64,41 @@ export namespace ProviderTransform {
         return "vertex"
       case "@ai-sdk/google":
         return "google"
+      // altimate_change start — upstream addition (v1.18.10): more bundled-provider sdkKey mappings
+      case "@ai-sdk/alibaba":
+        return "alibaba"
+      case "@ai-sdk/cerebras":
+        return "cerebras"
+      case "@ai-sdk/cohere":
+        return "cohere"
+      case "@ai-sdk/deepinfra":
+        return "deepinfra"
+      case "@ai-sdk/groq":
+        return "groq"
+      case "@ai-sdk/mistral":
+        return "mistral"
+      case "@ai-sdk/perplexity":
+        return "perplexity"
+      case "@ai-sdk/togetherai":
+        return "togetherai"
+      case "@ai-sdk/vercel":
+        return "vercel"
+      case "@ai-sdk/xai":
+        return "xai"
+      case "venice-ai-sdk-provider":
+        return "venice"
+      // altimate_change end
       case "@ai-sdk/gateway":
         return "gateway"
       case "@openrouter/ai-sdk-provider":
         return "openrouter"
       // altimate_change start — ai-gateway-provider wraps @ai-sdk/openai-compatible
       case "ai-gateway-provider":
+        // ai-gateway-provider/unified wraps createOpenAICompatible({ name: "Unified" }),
+        // and @ai-sdk/openai-compatible parses compatibleOptions from one of
+        // "openai-compatible" / "openaiCompatible" / "Unified" / "unified". The
+        // "openai-compatible" key emits a deprecation warning at runtime, so we
+        // pick the camelCase form the SDK now treats as canonical.
         return "openaiCompatible"
       // altimate_change end
     }
@@ -180,9 +224,11 @@ export namespace ProviderTransform {
     }
     if (
       model.providerID === "mistral" ||
-      model.api.id.toLowerCase().includes("mistral") ||
-      // altimate_change start — upstream_fix: use locale-safe Devstral model detection
-      model.api.id.toLowerCase().includes("devstral")
+      // altimate_change start — upstream_fix: use locale-safe, family-wide Mistral model detection
+      // (upstream v1.18.10 broadened this from mistral/devstral to the full Mistral model family)
+      ["mistral", "devstral", "codestral", "pixtral", "mixtral"].some((family) =>
+        model.api.id.toLowerCase().includes(family),
+      )
       // altimate_change end
     ) {
       const scrub = (id: string) => {
@@ -229,6 +275,26 @@ export namespace ProviderTransform {
       }
       return result
     }
+
+    // altimate_change start — upstream addition (v1.18.10): Deepseek requires all assistant
+    // messages to carry a reasoning part, even an empty one.
+    if (model.api.id.toLowerCase().includes("deepseek")) {
+      msgs = msgs.map((msg) => {
+        if (msg.role !== "assistant") return msg
+        if (Array.isArray(msg.content)) {
+          if (msg.content.some((part) => part.type === "reasoning")) return msg
+          return { ...msg, content: [...msg.content, { type: "reasoning", text: "" }] }
+        }
+        return {
+          ...msg,
+          content: [
+            ...(msg.content ? [{ type: "text" as const, text: msg.content }] : []),
+            { type: "reasoning" as const, text: "" },
+          ],
+        }
+      })
+    }
+    // altimate_change end
 
     if (
       typeof model.capabilities.interleaved === "object" &&
@@ -386,6 +452,13 @@ export namespace ProviderTransform {
   export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
     msgs = unsupportedParts(msgs, model)
     msgs = normalizeMessages(msgs, model, options)
+    // altimate_change start — upstream addition (v1.18.10): skip fork's manual cache-control
+    // injection when the caller already set an explicit cacheControl option and Anthropic's
+    // own automatic caching applies, to avoid double-injecting cache breakpoints.
+    const usesAnthropicAutomaticCaching =
+      options.cacheControl !== undefined &&
+      (model.api.npm === "@ai-sdk/anthropic" || model.api.npm === "@ai-sdk/google-vertex/anthropic")
+    // altimate_change end
     if (
       (model.providerID === "anthropic" ||
         // altimate_change start — altimate-specific Anthropic provider IDs
@@ -401,7 +474,8 @@ export namespace ProviderTransform {
         model.api.npm === "@ai-sdk/alibaba"
         // altimate_change end
       ) &&
-      model.api.npm !== "@ai-sdk/gateway"
+      model.api.npm !== "@ai-sdk/gateway" &&
+      !usesAnthropicAutomaticCaching
     ) {
       msgs = applyCaching(msgs, model)
     }
@@ -425,7 +499,11 @@ export namespace ProviderTransform {
     if (
       options.store !== true &&
       key &&
-      ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/amazon-bedrock/mantle"].includes(model.api.npm)
+      // altimate_change start — upstream addition (v1.18.10): github-copilot also uses the Responses API
+      ["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/amazon-bedrock/mantle", "@ai-sdk/github-copilot"].includes(
+        model.api.npm,
+      )
+      // altimate_change end
     ) {
       msgs = mapProviderOptions(msgs, (options) => {
         if (!options?.[key] || !("itemId" in options[key])) return options
@@ -1182,7 +1260,10 @@ export namespace ProviderTransform {
     if (
       model.providerID === "openai" ||
       model.api.npm === "@ai-sdk/openai" ||
-      model.api.npm === "@ai-sdk/github-copilot"
+      model.api.npm === "@ai-sdk/github-copilot" ||
+      // altimate_change start — upstream addition (v1.18.10): xai also uses the store option
+      model.api.npm === "@ai-sdk/xai"
+      // altimate_change end
     ) {
       return mergeDeep({ store: false }, small)
     }

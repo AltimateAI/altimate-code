@@ -1,102 +1,145 @@
-import { Tool } from "./tool"
+import * as Tool from "./tool"
 import DESCRIPTION from "./task.txt"
-import z from "zod"
-// altimate_change start — upstream_fix: publish a task schema that hides disabled background mode.
-import { zodToJsonSchema } from "@/altimate/tool-zod-compat"
-// altimate_change end
-import { Session } from "../session"
+import { ToolJsonSchema } from "./json-schema"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { BackgroundJob } from "@/background/job"
+import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
-import { Identifier } from "../id/id"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
-import { SessionPrompt } from "../session/prompt"
-import { iife } from "@/util/iife"
-import { defer } from "@/util/defer"
-import { Config } from "../config/config"
-import { PermissionNext } from "@/permission/next"
-// altimate_change start — log unhandled cancel rejections
-import { Log } from "@/util/log"
-// re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
+import type { SessionPrompt } from "../session/prompt"
+import { Config } from "@/config/config"
+import { Effect, Exit, Schema, Scope } from "effect"
+import { EffectBridge } from "@/effect/bridge"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Database } from "@opencode-ai/core/database/database"
+// altimate_change start — re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands
+// SessionPrompt expects (identity at runtime; see marker at the ops.prompt() call site below)
 import { ModelID, ProviderID } from "@/provider/schema"
-import { Effect } from "effect"
-const log = Log.create({ service: "tool.task" })
-
-/**
- * Effect-based prompt operations the task tool drives through `ctx.extra.promptOps`.
- * Injected by session/tools so the tool stays decoupled from SessionPrompt's
- * concrete service and is straightforward to stub in tests.
- */
-export interface TaskPromptOps {
-  readonly resolvePromptParts: (template: string) => Effect.Effect<SessionPrompt.PromptInput["parts"]>
-  readonly prompt: (input: SessionPrompt.PromptInput) => Effect.Effect<MessageV2.WithParts>
-  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-}
 // altimate_change end
 
-const parameters = z.object({
-  description: z.string().describe("A short (3-5 words) description of the task"),
-  prompt: z.string().describe("The task for the agent to perform"),
-  subagent_type: z.string().describe("The type of specialized agent to use for this task"),
-  task_id: z
-    .string()
-    .describe(
+export interface TaskPromptOps {
+  cancel(sessionID: SessionID): Effect.Effect<void>
+  resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
+  prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+}
+
+const id = "task"
+const BACKGROUND_DESCRIPTION = [
+  "Background mode: background=true launches the subagent asynchronously and returns immediately.",
+  "Foreground is the default; use it when you need the result before continuing.",
+  "Use background only for independent work that can run while you continue elsewhere.",
+  "You will be notified automatically when it finishes.",
+].join(" ")
+const BACKGROUND_STARTED = [
+  "The task is working in the background. You will be notified automatically when it finishes.",
+  "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
+  "Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.",
+].join("\n")
+const BACKGROUND_UPDATED = [
+  "Additional context sent to the running background task.",
+  "The task is still working in the background. You will be notified automatically when it finishes.",
+  "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
+  "Work on non-overlapping tasks, or briefly tell the user what you sent and end your response.",
+].join("\n")
+
+const BaseParameterFields = {
+  description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
+  prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
+  subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
+  task_id: Schema.optional(Schema.String).annotate({
+    description:
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
-    )
-    .optional(),
-  command: z.string().describe("The command that triggered this task").optional(),
-  // altimate_change start — upstream_fix: keep accepting legacy/manual background calls internally.
-  background: z.boolean().optional(),
-  // altimate_change end
+  }),
+  command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+}
+
+const BaseParameters = Schema.Struct(BaseParameterFields)
+
+export const Parameters = Schema.Struct({
+  ...BaseParameterFields,
+  background: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
+  }),
 })
 
-// altimate_change start — upstream_fix: keep accepting `background` internally so old/manual
-// callers get the explicit disabled-feature error, but do not advertise it to models.
-const taskJsonSchema = (() => {
-  const schema = zodToJsonSchema(parameters)
-  const properties = schema.properties
-  if (!properties || typeof properties !== "object" || !("background" in properties)) return schema
-  const nextProperties = { ...properties }
-  delete nextProperties.background
-  return {
-    ...schema,
-    properties: nextProperties,
-    ...(Array.isArray(schema.required) ? { required: schema.required.filter((field) => field !== "background") } : {}),
-  }
-})()
-// altimate_change end
+function renderOutput(input: {
+  sessionID: SessionID
+  state: "running" | "completed" | "error"
+  summary?: string
+  text: string
+}) {
+  const tag = input.state === "error" ? "task_error" : "task_result"
+  return [
+    `<task id="${input.sessionID}" state="${input.state}">`,
+    ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
+    `<${tag}>`,
+    input.text,
+    `</${tag}>`,
+    "</task>",
+  ].join("\n")
+}
 
-export const TaskTool = Tool.define("task", async (ctx) => {
-  const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
+export const TaskTool = Tool.define(
+  id,
+  Effect.gen(function* () {
+    const agent = yield* Agent.Service
+    const background = yield* BackgroundJob.Service
+    const config = yield* Config.Service
+    const sessions = yield* Session.Service
+    const scope = yield* Scope.Scope
+    const flags = yield* RuntimeFlags.Service
+    const database = yield* Database.Service
 
-  // Filter agents by permissions if agent provided
-  const caller = ctx?.agent
-  const accessibleAgents = caller
-    ? agents.filter((a) => PermissionNext.evaluate("task", a.name, caller.permission).action !== "deny")
-    : agents
-
-  const description = DESCRIPTION.replace(
-    "{agents}",
-    accessibleAgents
+    // altimate_change start — list available subagent types in the tool description. The legacy
+    // (pre-merge) version also filtered this list by the calling agent's own "task" permission,
+    // but the modern Effect.Effect<Init<...>> Tool.define shape (unlike the legacy async-function
+    // shape) doesn't thread a caller ctx into tool init, so that filter can't be reconstructed
+    // here. This is a UX-only narrowing (an agent could still see a subagent type it can't
+    // invoke) — NOT a security regression: ctx.ask({ permission: id, ... }) below still enforces
+    // the real permission check on every call. Falls back to the unfiltered list, matching what
+    // the legacy code already did whenever no caller ctx was available.
+    const agents = (yield* agent.list()).filter((a) => a.mode !== "primary")
+    const agentList = agents
       .map((a) => `- ${a.name}: ${a.description ?? "This subagent should only be called manually by the user."}`)
-      .join("\n"),
-  )
-  return {
-    description,
-    parameters,
-    // altimate_change start — upstream_fix: hide disabled background mode from the tool contract.
-    jsonSchema: taskJsonSchema,
+      .join("\n")
+    const baseDescription = DESCRIPTION.replace("{agents}", agentList)
     // altimate_change end
-    async execute(params: z.infer<typeof parameters>, ctx) {
-      const config = await Config.get()
-      if (params.background === true) {
-        throw new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true")
+
+    const run = Effect.fn("TaskTool.execute")(function* (
+      params: Schema.Schema.Type<typeof Parameters>,
+      ctx: Tool.Context,
+    ) {
+      const cfg = yield* config.get()
+      const runInBackground = params.background === true
+      if (runInBackground && !flags.experimentalBackgroundSubagents) {
+        return yield* Effect.fail(
+          new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true"),
+        )
       }
 
-      // Skip permission check when user explicitly invoked via @ or command subtask
+      const parent = yield* sessions.get(ctx.sessionID)
+      let current = parent
+      let depth = 0
+      while (current.parentID) {
+        depth++
+        current = yield* sessions.get(current.parentID)
+      }
+      if (depth >= (cfg.subagent_depth ?? 1)) {
+        return yield* Effect.fail(
+          new Error(
+            `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
+          ),
+        )
+      }
+
+      // altimate_change start - skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
-        await ctx.ask({
-          permission: "task",
+        // altimate_change end
+        yield* ctx.ask({
+          permission: id,
           patterns: [params.subagent_type],
           always: ["*"],
           metadata: {
@@ -106,53 +149,42 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
       }
 
-      const agent = await Agent.get(params.subagent_type)
-      if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
+      const next = yield* agent.get(params.subagent_type)
+      if (!next) {
+        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
+      }
 
-      const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
-      const parent = await Session.get(ctx.sessionID)
+      const session = params.task_id
+        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        : undefined
       // altimate_change start — upstream_fix: inherit parent session denies/external_directory rules for subtasks
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
-        subagent: agent,
+        subagent: next,
       })
       const childToolDenies = [
-        {
-          permission: "todowrite" as const,
-          pattern: "*" as const,
-          action: "deny" as const,
-        },
-        {
-          permission: "todoread" as const,
-          pattern: "*" as const,
-          action: "deny" as const,
-        },
-        ...(hasTaskPermission
+        // altimate_change start — subagents never manage the parent's TODO list, regardless of
+        // whether the subagent's own config happens to grant todowrite/todoread (unconditional,
+        // unlike upstream's conditional-only-todowrite check).
+        { permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const },
+        { permission: "todoread" as const, pattern: "*" as const, action: "deny" as const },
+        // altimate_change end
+        ...(next.permission.some((rule) => rule.permission === id)
           ? []
-          : [
-              {
-                permission: "task" as const,
-                pattern: "*" as const,
-                action: "deny" as const,
-              },
-            ]),
-        ...(config.experimental?.primary_tools?.map((permission) => ({
+          : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+        ...(cfg.experimental?.primary_tools?.map((permission) => ({
+          permission,
           pattern: "*" as const,
           action: "deny" as const,
-          permission,
         })) ?? []),
       ]
       // altimate_change end
-
-      const session = await iife(async () => {
-        if (params.task_id) {
-          const found = await Session.get(SessionID.make(params.task_id)).catch(() => {})
-          if (found) return found
-        }
-
-        return await Session.create({
+      const nextSession =
+        session ??
+        (yield* sessions.create({
           parentID: ctx.sessionID,
-          title: params.description + ` (@${agent.name} subagent)`,
+          title: params.description + ` (@${next.name} subagent)`,
+          agent: next.name,
           permission: [
             ...childPermission,
             ...childToolDenies.filter(
@@ -163,77 +195,195 @@ export const TaskTool = Tool.define("task", async (ctx) => {
                 ),
             ),
           ],
-        })
-      })
-      const msg = await MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
-      if (msg.info.role !== "assistant") throw new Error("Not an assistant message")
+        }))
 
-      const model = agent.model ?? {
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.orDie,
+      )
+      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const variant = msg.info.variant
+
+      const model = next.model ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
+      const metadata = {
+        parentSessionId: ctx.sessionID,
+        sessionId: nextSession.id,
+        model,
+        ...(runInBackground ? { background: true } : {}),
+      }
 
-      ctx.metadata({
+      yield* ctx.metadata({
         title: params.description,
-        metadata: {
-          sessionId: session.id,
-          model,
-        },
+        metadata,
       })
 
-      const messageID = MessageID.ascending()
-      const promptOps = ctx.extra?.promptOps as TaskPromptOps | undefined
+      const ops = ctx.extra?.promptOps as TaskPromptOps
+      if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
-      function cancel() {
-        // altimate_change start — SessionPrompt.cancel became async; fire-and-forget OK in abort handler
-        // but log unhandled rejections so silent failures surface
-        const cancelled = promptOps ? Effect.runPromise(promptOps.cancel(session.id)) : SessionPrompt.cancel(session.id)
-        cancelled.catch((err) => {
-          log.warn("cancel failed", { sessionID: session.id, err })
+      const runTask = Effect.fn("TaskTool.runTask")(function* () {
+        const parts = yield* ops.resolvePromptParts(params.prompt)
+        const result = yield* ops.prompt({
+          messageID: MessageID.ascending(),
+          sessionID: nextSession.id,
+          model: {
+            // altimate_change start — re-brand to provider/schema ModelID/ProviderID
+            // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
+            modelID: ModelID.make(model.modelID),
+            providerID: ProviderID.make(model.providerID),
+            // altimate_change end
+          },
+          variant: next.model ? undefined : variant,
+          agent: next.name,
+          parts,
         })
-        // altimate_change end
+        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+      })
+
+      const inject = Effect.fn("TaskTool.injectBackgroundResult")(function* (
+        state: "completed" | "error",
+        text: string,
+      ) {
+        const currentParent = yield* sessions.get(ctx.sessionID)
+        yield* ops
+          .prompt({
+            sessionID: ctx.sessionID,
+            agent: currentParent.agent ?? ctx.agent,
+            variant,
+            parts: [
+              {
+                type: "text",
+                synthetic: true,
+                text: renderOutput({
+                  sessionID: nextSession.id,
+                  state,
+                  summary:
+                    state === "completed"
+                      ? `Background task completed: ${params.description}`
+                      : `Background task failed: ${params.description}`,
+                  text,
+                }),
+              },
+            ],
+          })
+          .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
+      })
+
+      const notify = Effect.fn("TaskTool.notifyBackgroundResult")(function* (jobID: string) {
+        yield* background.wait({ id: jobID }).pipe(
+          Effect.flatMap((result) => {
+            if (result.info?.status === "completed") return inject("completed", result.info.output ?? "")
+            if (result.info?.status === "error") return inject("error", result.info.error ?? "")
+            return Effect.void
+          }),
+          Effect.forkIn(scope, { startImmediately: true }),
+        )
+      })
+
+      if (yield* background.extend({ id: nextSession.id, run: runTask() })) {
+        return {
+          title: params.description,
+          metadata: {
+            ...metadata,
+            background: true,
+            jobId: nextSession.id,
+          },
+          output: renderOutput({
+            sessionID: nextSession.id,
+            state: "running",
+            summary: "Background task updated",
+            text: BACKGROUND_UPDATED,
+          }),
+        }
       }
-      ctx.abort.addEventListener("abort", cancel)
-      using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
-      const promptParts = promptOps
-        ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
-        : await SessionPrompt.resolvePromptParts(params.prompt)
 
-      const promptInput: SessionPrompt.PromptInput = {
-        messageID,
-        sessionID: session.id,
-        model: {
-          // altimate_change start — re-brand to provider/schema ModelID/ProviderID
-          // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
-          modelID: ModelID.make(model.modelID),
-          providerID: ProviderID.make(model.providerID),
-          // altimate_change end
-        },
-        agent: agent.name,
-        parts: promptParts,
-      }
-      const result = promptOps
-        ? await Effect.runPromise(promptOps.prompt(promptInput))
-        : await SessionPrompt.prompt(promptInput)
-
-      const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
-
-      const output = [
-        `task_id: ${session.id} (for resuming to continue this task if needed)`,
-        "",
-        "<task_result>",
-        text,
-        "</task_result>",
-      ].join("\n")
-
-      return {
+      const info = yield* background.start({
+        id: nextSession.id,
+        type: id,
         title: params.description,
-        metadata: {
-          sessionId: session.id,
-          model,
-        },
-        output,
+        metadata,
+        onPromote: Effect.all([
+          ctx.metadata({
+            title: params.description,
+            metadata: { ...metadata, background: true, jobId: nextSession.id },
+          }),
+          notify(nextSession.id),
+        ]),
+        run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
+      })
+
+      function backgroundResult() {
+        return {
+          title: params.description,
+          metadata: {
+            ...metadata,
+            background: true,
+            jobId: info.id,
+          },
+          output: renderOutput({
+            sessionID: nextSession.id,
+            state: "running",
+            summary: "Background task started",
+            text: BACKGROUND_STARTED,
+          }),
+        }
       }
-    },
-  }
-})
+
+      if (runInBackground) {
+        yield* notify(info.id)
+        return backgroundResult()
+      }
+
+      const runCancel = yield* EffectBridge.make()
+      const cancel = ops.cancel(nextSession.id)
+
+      function onAbort() {
+        runCancel.fork(cancel)
+      }
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          ctx.abort.addEventListener("abort", onAbort)
+        }),
+        () =>
+          Effect.gen(function* () {
+            const result = yield* Effect.raceFirst(
+              background.wait({ id: nextSession.id }).pipe(Effect.map((waited) => waited.info)),
+              background.waitForPromotion(nextSession.id),
+            )
+            if (result?.metadata?.background === true) return backgroundResult()
+            if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
+            if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
+            return {
+              title: params.description,
+              metadata,
+              output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+            }
+          }),
+        (_, exit) =>
+          Effect.gen(function* () {
+            if (Exit.hasInterrupts(exit))
+              yield* Effect.all([cancel, background.cancel(nextSession.id)], { discard: true })
+          }).pipe(
+            Effect.ensuring(
+              Effect.sync(() => {
+                ctx.abort.removeEventListener("abort", onAbort)
+              }),
+            ),
+          ),
+      )
+    })
+
+    return {
+      description: flags.experimentalBackgroundSubagents
+        ? [baseDescription, BACKGROUND_DESCRIPTION].join("\n\n")
+        : baseDescription,
+      parameters: Parameters,
+      jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+        run(params, ctx).pipe(Effect.orDie),
+    }
+  }),
+)

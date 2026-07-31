@@ -28,7 +28,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionRevert") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sessions = yield* Session.Service
@@ -151,16 +151,16 @@ export const defaultLayer = Layer.suspend(() =>
   ),
 )
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [
-  Session.node,
-  Snapshot.node,
-  Storage.node,
-  EventV2Bridge.node,
-  SessionSummary.node,
-  SessionRunState.node,
-])
-// altimate_change end
+// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+// packages/core/src/effect/layer-node.ts, not owned by this file). The fork previously thunked
+// these deps (`() => [...]`) to defer reading cyclically-imported facade `.node` refs past
+// module-init. Using upstream's object-style API with a plain array here; needs verification
+// once layer-node.ts's conflict is resolved that this doesn't reintroduce the undefined-node bug.
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Session.node, Snapshot.node, Storage.node, EventV2Bridge.node, SessionSummary.node, SessionRunState.node],
+})
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
 // Effect-only migration; the session prompt loop consumes SessionRevert.cleanup directly.

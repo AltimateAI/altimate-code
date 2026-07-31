@@ -1,14 +1,16 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+// altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 // altimate_change end
-import { Effect, Layer, Context, Schema, Stream, Scope } from "effect"
+import { Effect, Layer, Context, Schema, Scope } from "effect"
 import { formatPatch, structuredPatch } from "diff"
 import { InstanceState } from "@/effect/instance-state"
 import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 import { Git } from "@/git"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+import { VcsEvent } from "@opencode-ai/schema/vcs-event"
 
 const PATCH_CONTEXT_LINES = 2_147_483_647
 const MAX_PATCH_BYTES = 10_000_000
@@ -237,14 +239,7 @@ const track = Effect.fnUntraced(function* (
 export const Mode = Schema.Literals(["git", "branch"])
 export type Mode = Schema.Schema.Type<typeof Mode>
 
-export const Event = {
-  BranchUpdated: EventV2.define({
-    type: "vcs.branch.updated",
-    schema: {
-      branch: Schema.optional(Schema.String),
-    },
-  }),
-}
+export const Event = VcsEvent
 
 export const Info = Schema.Struct({
   branch: Schema.optional(Schema.String),
@@ -304,7 +299,7 @@ interface State {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Vcs") {}
 
-export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = Layer.effect(
+const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const git = yield* Git.Service
@@ -427,16 +422,13 @@ export const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Serv
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(Layer.provide(Git.defaultLayer), Layer.provide(EventV2Bridge.defaultLayer)))
-// altimate_change end
-
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Git.node, EventV2Bridge.node])
-// altimate_change end
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Git.node, EventV2Bridge.node] })
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
-// Effect-only migration; the HTTP server consumes Vcs.branch() directly.
+// Effect-only migration; the HTTP server consumes Vcs.branch()/defaultBranch()/diff() directly.
+// defaultLayer is compiled from `node` since per-service `.defaultLayer` facades were dropped
+// upstream in favor of the LayerNode graph.
+export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
 const { runPromise: runVcs } = makeRuntime(Service, defaultLayer)
 export async function branch() {
   return runVcs((s) => s.branch())

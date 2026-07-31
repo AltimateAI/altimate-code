@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Effect } from "effect"
 import path from "path"
 import { unlink } from "fs/promises"
 import { Global } from "@opencode-ai/core/global"
@@ -12,7 +13,7 @@ import { testEffect } from "../lib/effect"
 // Provider.list()/getModel use the fork's ProviderID/ModelID brands.
 import { ProviderID, ModelID } from "@/provider/schema"
 
-const it = testEffect(Layer.mergeAll(Provider.defaultLayer, Env.defaultLayer))
+const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node])))
 
 const BEDROCK = ProviderID.make("amazon-bedrock")
 

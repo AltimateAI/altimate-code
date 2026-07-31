@@ -76,9 +76,44 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+// NOTE: upstream v1.18.10 introduced Database/ModelV2/ProviderV2/SessionTable-direct reads plus two
+// new modules — SessionReminders (./reminders) and SessionTools (./tools) — and an LLMEvent from a
+// new @opencode-ai/llm package, all part of upstream's further Effect-native rewrite of session
+// orchestration. The fork keeps the Promise-based SessionPrompt namespace (bridged into Effect via
+// AppRuntime/EventV2Bridge, same pattern as the rest of session/*) rather than adopting that
+// rewrite, so these upstream-only imports are not wired in here. Flagged for a follow-up
+// feature-parity review — not a silent drop, just out of scope for a conflict-resolution pass.
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
+
+// altimate_change start — upstream v1.18.10 MCP resource attachment size/mime guard, ported onto
+// the fork's Promise-based path (see resource.blob handling below). decodeMessageInfo/
+// decodeMessagePart from upstream's version are NOT ported: they validate raw SessionV1 rows read
+// straight off Database, which is upstream's Effect-native architecture — the fork's SessionPrompt
+// reads through the MessageV2/Session facades instead, so there's no equivalent raw-row boundary
+// here for them to guard.
+const MAX_MCP_RESOURCE_BLOB_BYTES = 10 * 1024 * 1024
+const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
+  "application/pdf",
+  "image/gif",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+])
+
+function mcpResourceBase64Size(value: string) {
+  const trimmed = value.replace(/\s/g, "")
+  const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0
+  return Math.max(0, Math.floor((trimmed.length * 3) / 4) - padding)
+}
+
+function formatMcpResourceBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${Math.ceil(value / 1024)} KB`
+  return `${Math.ceil(value / (1024 * 1024))} MB`
+}
+// altimate_change end
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
@@ -170,6 +205,15 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // NOTE: upstream v1.18.10 replaced this whole module's implementation with an Effect-native
+  // `Layer.effect(Service, Effect.gen(...))` that yields every dependency (SessionStatus, Session,
+  // Agent, Provider, SessionProcessor, SessionCompaction, Plugin, Command, Config, Permission,
+  // FSUtil, MCP, LSP, ToolRegistry, Truncate, Image, ChildProcessSpawner, Instruction,
+  // SessionRunState, SessionRevert, SessionSummary, SystemPrompt, LLM, EventV2Bridge, RuntimeFlags,
+  // Database) as an Effect Context.Service. The fork deliberately keeps SessionPrompt as a
+  // Promise-based namespace (bridged into Effect via AppRuntime/EventV2Bridge — same pattern used
+  // across session/*), so upstream's Service/Layer rewrite is not adopted here; this is the same
+  // architectural divergence noted at the top of the file, not a new decision.
   const state = Instance.state(
     () => {
       const data: Record<
@@ -557,6 +601,14 @@ export namespace SessionPrompt {
           tasks.push(...task)
         }
       }
+
+      // NOTE: upstream v1.18.10 factored shell-tool execution (shellImpl), and model resolution
+      // (getModel/currentModel reading SessionTable directly via Database) into named Effect
+      // service methods here. The fork keeps equivalent capability inline via `Provider.getModel`
+      // (see e.g. below in this file) and `Shell.preferred`/`Shell.args` + `Bun.spawn` (see the
+      // shell tool call handling later in this file) rather than these factored Effect helpers —
+      // not adopted here due to the architecture mismatch (Effect Service vs Promise namespace),
+      // but equivalent behavior already exists elsewhere in this file.
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       // altimate_change start — always track the current agent name so early breaks still report it
@@ -1036,6 +1088,14 @@ export namespace SessionPrompt {
           },
         })
       }
+
+      // NOTE: upstream v1.18.10's Effect-native `createUserMessage` service method lived here.
+      // The fork already has its own `createUserMessage` (see below in this file) that resolves
+      // agent/model the same way; the one difference is upstream's version also persists a
+      // session-level agent/model change via `sessions.setAgentModel` when it differs from the
+      // session's current stored agent/model — the fork's `createUserMessage` does not appear to
+      // do this persistence step. UNSURE whether that's an intentional fork difference or a gap;
+      // flagged for follow-up rather than guessing at a port.
 
       if (step === 1) {
         // altimate_change start - reset training session tracking to avoid stale applied counts
@@ -1973,7 +2033,6 @@ export namespace SessionPrompt {
                 text: `Reading MCP resource: ${part.filename} (${uri})`,
               },
             ]
-
             try {
               const resourceContent = await MCP.readResource(clientName, uri)
               if (!resourceContent) {
@@ -1986,7 +2045,8 @@ export namespace SessionPrompt {
                 : [resourceContent.contents]
 
               for (const content of contents) {
-                if ("text" in content && content.text) {
+                if (!content || typeof content !== "object") continue
+                if ("text" in content && typeof content.text === "string" && content.text) {
                   pieces.push({
                     messageID: info.id,
                     sessionID: input.sessionID,
@@ -1994,16 +2054,48 @@ export namespace SessionPrompt {
                     synthetic: true,
                     text: content.text as string,
                   })
-                } else if ("blob" in content && content.blob) {
-                  // Handle binary content if needed
-                  const mimeType = "mimeType" in content ? content.mimeType : part.mime
+                  // altimate_change start — upstream v1.18.10 MCP resource attachment size/mime guard
+                } else if ("blob" in content && typeof content.blob === "string" && content.blob) {
+                  const mime =
+                    "mimeType" in content && typeof content.mimeType === "string" ? content.mimeType : part.mime
+                  const filename = "uri" in content && typeof content.uri === "string" ? content.uri : part.filename
+                  const size = mcpResourceBase64Size(content.blob)
+                  if (!SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES.has(mime)) {
+                    pieces.push({
+                      messageID: info.id,
+                      sessionID: input.sessionID,
+                      type: "text",
+                      synthetic: true,
+                      text: `[Binary MCP resource omitted: ${filename ?? uri} (${mime}, ${formatMcpResourceBytes(size)}) is not a supported attachment type]`,
+                    })
+                    continue
+                  }
+                  if (size > MAX_MCP_RESOURCE_BLOB_BYTES) {
+                    pieces.push({
+                      messageID: info.id,
+                      sessionID: input.sessionID,
+                      type: "text",
+                      synthetic: true,
+                      text: `[Binary MCP resource omitted: ${filename ?? uri} (${mime}, ${formatMcpResourceBytes(size)}) exceeds ${formatMcpResourceBytes(MAX_MCP_RESOURCE_BLOB_BYTES)}]`,
+                    })
+                    continue
+                  }
                   pieces.push({
                     messageID: info.id,
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `[Binary content: ${mimeType}]`,
+                    text: `[Binary MCP resource attached: ${filename ?? uri} (${mime})]`,
                   })
+                  pieces.push({
+                    messageID: info.id,
+                    sessionID: input.sessionID,
+                    type: "file",
+                    mime,
+                    filename,
+                    url: `data:${mime};base64,${content.blob}`,
+                  })
+                  // altimate_change end
                 }
               }
 
@@ -3114,6 +3206,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       variant: input.variant,
     })) as MessageV2.WithParts
 
+    // NOTE: upstream v1.18.10 declared ModelRef/PromptInput/LoopInput/ShellInput/CommandInput as
+    // Effect Schema types here. The fork already defines PromptInput/ShellInput/CommandInput as
+    // zod schemas elsewhere in this file (search `z.infer<typeof PromptInput>` etc.) — not adding
+    // upstream's Schema-based duplicates since they'd collide (same exported type names, two
+    // different schema libraries).
     AppRuntime.runPromise(
       EventV2Bridge.Service.use((events) =>
         events.publish(Command.Event.Executed, {
@@ -3247,6 +3344,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // NOTE: upstream v1.18.10's module-level `node = LayerNode.make({ service, layer, deps: [...] })`
+  // (with the full session-service dependency list) and its `bashRegex`/`argsRegex`/
+  // `placeholderRegex`/`quoteTrimRegex` constants + trailing `export * as SessionPrompt from
+  // "./prompt"` are all specific to upstream's flat-module (non-namespace) file layout. The fork
+  // wraps the whole file in `export namespace SessionPrompt { ... }` (opened above), which already
+  // provides the `SessionPrompt` named export directly — upstream's `export * as SessionPrompt`
+  // re-export trick isn't needed. The regex constants already exist locally inside the fork's
+  // `command` function (search `bashRegex` elsewhere in this file). The bridge-facade `node` just
+  // above (empty deps, since it only wraps Promise calls) is what `SessionPrompt.node` resolves to
+  // for external consumers — not adopting upstream's separate full-dependency-list node here.
+  export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

@@ -14,7 +14,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionShare") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const cfg = yield* Config.Service
@@ -58,8 +58,14 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 ))
 // altimate_change end
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Config.node, Session.node, ShareNext.node, RuntimeFlags.node])
-// altimate_change end
+// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
+// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
+// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Config.node, Session.node, ShareNext.node, RuntimeFlags.node],
+})
 
 export * as SessionShare from "./session"

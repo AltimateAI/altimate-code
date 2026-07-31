@@ -65,6 +65,13 @@ export namespace SessionCompaction {
   }
   // altimate_change end
 
+  // UNSURE: upstream v1.18.10 replaced this with `SessionCompactionEvent` from
+  // `@opencode-ai/schema/session-compaction-event` (EventV2-style, published via injected
+  // EventV2Bridge.Service). Kept the fork's original legacy BusEvent here instead of switching,
+  // since no other file in packages/opencode/src consumes "session.compacted" today (grepped) and
+  // this event is published via the plain-async `process()` below, not an injected Effect service —
+  // switching to EventV2Bridge would require threading DI through the plain-async path. Flagging in
+  // case sibling files (e.g. a TUI/SSE consumer outside this package) expect the new EventV2 shape.
   export const Event = {
     Compacted: BusEvent.define(
       "session.compacted",
@@ -75,9 +82,15 @@ export namespace SessionCompaction {
   }
 
   const COMPACTION_BUFFER = 20_000
+  // altimate_change — caps tool output length when building the compaction summary prompt
+  // (matches the `toolOutputMaxChars` option already supported by MessageV2.toModelMessages)
+  const TOOL_OUTPUT_MAX_CHARS = 2_000
 
   // altimate_change start — improved isOverflow formula with safety guard and unified headroom
-  // See PR #35 — fixes upstream bugs with limit.input models and small-context models
+  // See PR #35 — fixes upstream bugs with limit.input models and small-context models. Upstream's
+  // own `./overflow.ts` (added in v1.18.10) reimplements this with `reserved = cfg.reserved ?? min(buffer, maxOutput)`
+  // and no small-context guard — that's the same bug class this fix addresses, not a fix for it, so
+  // this stays instead of adopting `./overflow.ts`'s isOverflow/usable.
   export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
     const config = await Config.get()
     if (config.compaction?.auto === false) return false
@@ -492,6 +505,11 @@ When constructing the summary, try to stick to this template:
 ---`
 
     const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
+    // altimate_change start — new upstream plugin hook: let plugins transform the messages that
+    // will be summarized before they're turned into model messages
+    const msgsToSummarize = structuredClone(selected.head)
+    await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgsToSummarize })
+    // altimate_change end
     const result = await processor.process({
       user: userMessage,
       agent,
@@ -501,7 +519,11 @@ When constructing the summary, try to stick to this template:
       system: [],
       messages: [
         // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail
-        ...(await MessageV2.toModelMessages(selected.head, model, { stripMedia: true })),
+        // altimate_change — toolOutputMaxChars caps tool output length in the compaction summary prompt
+        ...(await MessageV2.toModelMessages(msgsToSummarize, model, {
+          stripMedia: true,
+          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        })),
         // altimate_change end
         {
           role: "user",
@@ -565,31 +587,55 @@ When constructing the summary, try to stick to this template:
           })
         }
       } else {
-        const continueMsg = await Session.updateMessage({
-          id: MessageID.ascending(),
-          role: "user",
-          sessionID: input.sessionID,
-          time: { created: Date.now() },
-          agent: userMessage.agent,
-          model: userMessage.model,
-        })
-        const text =
-          (input.overflow
-            ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
-            : "") +
-          "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
-        await Session.updatePart({
-          id: PartID.ascending(),
-          messageID: continueMsg.id,
-          sessionID: input.sessionID,
-          type: "text",
-          synthetic: true,
-          text,
-          time: {
-            start: Date.now(),
-            end: Date.now(),
+        // altimate_change start — new upstream plugin hook: let plugins veto auto-continue
+        const info = await Provider.getProvider(userMessage.model.providerID)
+        const gate = await Plugin.trigger(
+          "experimental.compaction.autocontinue",
+          {
+            sessionID: input.sessionID,
+            agent: userMessage.agent,
+            model: await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID),
+            provider: {
+              source: info.source,
+              info,
+              options: info.options,
+            },
+            message: userMessage,
+            overflow: input.overflow === true,
           },
-        })
+          { enabled: true },
+        )
+        if (gate.enabled) {
+          // altimate_change end
+          const continueMsg = await Session.updateMessage({
+            id: MessageID.ascending(),
+            role: "user",
+            sessionID: input.sessionID,
+            time: { created: Date.now() },
+            agent: userMessage.agent,
+            model: userMessage.model,
+          })
+          const text =
+            (input.overflow
+              ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
+              : "") +
+            "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+          await Session.updatePart({
+            id: PartID.ascending(),
+            messageID: continueMsg.id,
+            sessionID: input.sessionID,
+            type: "text",
+            // altimate_change — internal marker for auto-compaction followups so provider plugins
+            // can distinguish them from manual post-compaction user prompts (new upstream hook).
+            metadata: { compaction_continue: true },
+            synthetic: true,
+            text,
+            time: {
+              start: Date.now(),
+              end: Date.now(),
+            },
+          })
+        }
       }
     }
     if (processor.message.error) {
@@ -644,7 +690,24 @@ When constructing the summary, try to stick to this template:
   // (app-runtime defaultLayer, httpapi node, session handler `yield* Service`) can
   // compose this module. Each method delegates to the existing namespace fns, which
   // self-manage Instance/Session state, so no dependency layers are required.
+  // Interface expanded (isOverflow/prune/process alongside create) to match upstream
+  // v1.18.10's fuller Interface shape for Effect-native callers (e.g. prompt.ts), while
+  // the plain async namespace fns below remain directly callable for legacy callers
+  // (server/routes/session.ts calls `SessionCompaction.create(...)` directly, not via Service).
   export interface Interface {
+    readonly isOverflow: (input: {
+      tokens: MessageV2.Assistant["tokens"]
+      model: Provider.Model
+    }) => Effect.Effect<boolean>
+    readonly prune: (input: { sessionID: SessionID }) => Effect.Effect<void>
+    readonly process: (input: {
+      parentID: MessageID
+      messages: MessageV2.WithParts[]
+      sessionID: SessionID
+      abort: AbortSignal
+      auto: boolean
+      overflow?: boolean
+    }) => Effect.Effect<"continue" | "stop" | void>
     readonly create: (input: {
       sessionID: SessionID
       agent: string
@@ -661,12 +724,20 @@ When constructing the summary, try to stick to this template:
   export const layer = Layer.succeed(
     Service,
     Service.of({
+      isOverflow: (input) => Effect.promise(() => isOverflow(input)),
+      prune: (input) => Effect.promise(() => prune(input)),
+      process: (input) => Effect.promise(() => process(input)),
       create: (input) => Effect.promise(() => create(input)),
     }),
   )
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+  // packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
+  // API. Deps stay empty — our Effect Service layer is a thin `Layer.succeed` shim that delegates to
+  // the plain async functions above (which manage their own dependencies via static imports), unlike
+  // upstream's full Effect.gen rewrite which injects Config/Session/Agent/Plugin/Provider/etc. via DI.
+  export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

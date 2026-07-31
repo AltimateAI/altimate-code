@@ -108,14 +108,15 @@ test("diff fetch failures are checked before the empty state", async () => {
   expect(errorBranch).toBeLessThan(emptyBranch)
 })
 
-async function renderDiffViewer(vcsDiff: unknown[], height = 20) {
+async function renderDiffViewer(vcsDiff: unknown[], height = 20, initialRoute?: TuiRouteCurrent) {
   const commands = new Map<
     string,
     NonNullable<Parameters<TuiPluginApi["keymap"]["registerLayer"]>[0]["commands"]>[number]
   >()
-  let current = startRoute
+  let current = initialRoute ?? startRoute
   let renderDiff: TuiRouteDefinition["render"] | undefined
   let vcsDiffInput: unknown
+  let sessionDiffInput: unknown
   const config = createTuiResolvedConfig()
   function Harness() {
     const renderer = useRenderer()
@@ -134,7 +135,12 @@ async function renderDiffViewer(vcsDiff: unknown[], height = 20) {
             return { data: vcsDiff }
           },
         },
-        session: { diff: async () => ({ data: [] }) },
+        session: {
+          diff: async (input: unknown) => {
+            sessionDiffInput = input
+            return { data: [] }
+          },
+        },
       } as unknown as TuiPluginApi["client"],
       state: {
         session: {
@@ -159,7 +165,7 @@ async function renderDiffViewer(vcsDiff: unknown[], height = 20) {
     } satisfies TuiPluginApi
 
     void diffViewerPlugin.tui(api, undefined, pluginMeta)
-    commands.get("diff.open")?.run?.({} as never)
+    if (!initialRoute) commands.get("diff.open")?.run?.({} as never)
 
     return (
       <TestTuiContexts>
@@ -183,6 +189,7 @@ async function renderDiffViewer(vcsDiff: unknown[], height = 20) {
     commands,
     current: () => current,
     vcsDiffInput: () => vcsDiffInput,
+    sessionDiffInput: () => sessionDiffInput,
   }
 }
 
@@ -210,6 +217,40 @@ const session = {
     updated: 0,
   },
 } satisfies Session
+
+test("branch diff source requests branch VCS diff", async () => {
+  const viewer = await renderDiffViewer([], 20, {
+    name: "diff",
+    params: { mode: "branch", sessionID: "session-1", returnRoute: startRoute },
+  })
+  try {
+    expect(viewer.current()).toEqual({
+      name: "diff",
+      params: { mode: "branch", sessionID: "session-1", returnRoute: startRoute },
+    })
+    expect(viewer.vcsDiffInput()).toEqual({ directory: "/repo/session", mode: "branch", context: 12 })
+    expect(viewer.sessionDiffInput()).toBeUndefined()
+  } finally {
+    viewer.app.renderer.destroy()
+  }
+})
+
+test("last-turn diff source requests session diff", async () => {
+  const viewer = await renderDiffViewer([], 20, {
+    name: "diff",
+    params: { mode: "last-turn", sessionID: "session-1", messageID: "message-1", returnRoute: startRoute },
+  })
+  try {
+    expect(viewer.current()).toEqual({
+      name: "diff",
+      params: { mode: "last-turn", sessionID: "session-1", messageID: "message-1", returnRoute: startRoute },
+    })
+    expect(viewer.sessionDiffInput()).toEqual({ sessionID: "session-1", messageID: "message-1" })
+    expect(viewer.vcsDiffInput()).toBeUndefined()
+  } finally {
+    viewer.app.renderer.destroy()
+  }
+})
 
 async function waitForCommand(
   app: Awaited<ReturnType<typeof testRender>>,

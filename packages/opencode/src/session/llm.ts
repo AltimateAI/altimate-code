@@ -31,6 +31,10 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMAISDK } from "./llm/ai-sdk"
 // altimate_change end
+// altimate_change start — restore upstream's LLMRequestPrep.hasToolCalls re-export; unused by the
+// fork's own stream() implementation but consumed by test/session/llm.test.ts and kept for parity
+import { LLMRequestPrep } from "./llm/request"
+// altimate_change end
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -381,6 +385,18 @@ export namespace LLM {
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // altimate_change start — restore upstream's hasToolCalls re-export (consumed by
+  // test/session/llm.test.ts); the fork's stream() implementation doesn't call it itself
+  export const hasToolCalls = LLMRequestPrep.hasToolCalls
+  // altimate_change end
+
+  // UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+  // packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's
+  // object-style API with an empty deps array — the fork's `layer` above is a Layer.succeed
+  // with no Effect dependencies (stream() is a plain async function, not Effect-service-driven),
+  // so upstream's deps list (Auth.node, Config.node, Provider.node, Plugin.node, Permission.node,
+  // EventV2Bridge.node, llmClient, RuntimeFlags.node) doesn't apply here — those back upstream's
+  // own LLMClient-based Effect service, which the fork's implementation doesn't use.
+  export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

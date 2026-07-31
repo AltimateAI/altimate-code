@@ -963,3 +963,55 @@ You are speaking to a non-technical business executive. Follow these rules stric
     })
   },
 })
+
+type MiniCommandInput = {
+  directory?: string
+  attach?: string
+  password?: string
+  username?: string
+  continue?: boolean
+  session?: string
+  fork?: boolean
+  model?: string
+  agent?: string
+  prompt?: string
+  replay?: boolean
+  replayLimit?: number
+  demo?: boolean
+}
+
+export async function runMini(input: MiniCommandInput) {
+  if (!RunCommand.handler) throw new Error("Mini command handler is unavailable")
+  await RunCommand.handler({
+    $0: "opencode",
+    _: ["mini"],
+    message: input.prompt ? [input.prompt] : [],
+    command: undefined,
+    continue: input.continue,
+    session: input.session,
+    fork: input.fork,
+    share: undefined,
+    model: input.model,
+    agent: input.agent,
+    format: "default",
+    file: undefined,
+    title: undefined,
+    attach: input.attach,
+    password: input.password,
+    username: input.username,
+    dir: input.directory,
+    port: undefined,
+    variant: undefined,
+    thinking: undefined,
+    mini: true,
+    interactive: false,
+    replay: input.replay ?? true,
+    "replay-limit": input.replayLimit,
+    replayLimit: input.replayLimit,
+    auto: false,
+    yolo: false,
+    "dangerously-skip-permissions": false,
+    dangerouslySkipPermissions: false,
+    demo: input.demo ?? false,
+  })
+}

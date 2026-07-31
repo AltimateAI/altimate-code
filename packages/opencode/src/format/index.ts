@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+// altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 // altimate_change end
 import { Effect, Layer, Context, Schema } from "effect"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -31,7 +32,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Fo
 
 export const use = serviceUse(Service)
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -197,20 +198,16 @@ export const layer = Layer.effect(
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(AppProcess.defaultLayer),
-  Layer.provide(RuntimeFlags.defaultLayer),
-))
-// altimate_change end
-
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Config.node, AppProcess.node, RuntimeFlags.node])
-// altimate_change end
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Config.node, AppProcess.node, RuntimeFlags.node],
+})
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
-// Effect-only migration; the HTTP server consumes Format.status() directly.
+// Effect-only migration; the HTTP server consumes Format.status() directly. defaultLayer is
+// compiled from `node` since per-service `.defaultLayer` facades were dropped upstream.
+export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
 const { runPromise: runFormat } = makeRuntime(Service, defaultLayer)
 export async function status() {
   return runFormat((s) => s.status())

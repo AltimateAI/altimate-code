@@ -23,6 +23,18 @@ import { Telemetry } from "@/altimate/telemetry"
 // (app-runtime AppLayer + httpapi server LayerNode list) can compose SessionProcessor as
 // a Service. The fork keeps the imperative `create()` namespace function below; this is a
 // thin delegating facade that preserves behavior exactly.
+//
+// UNSURE / NEEDS FOLLOW-UP: upstream v1.18.10 fully rewrote this file as an Effect-native
+// `Layer.effect` service (pulling in Permission.Service, Image.Service, Database.Service,
+// EventV2Bridge, Scope, Deferred, Usage/LLMEvent) instead of the fork's imperative factory +
+// delegating facade. That rewrite was NOT ported in here — reconciling ~15 interleaved
+// fork-specific behaviors (doom-loop/tool-repeat abuse detection, retry caps, abort/replay
+// safety, plan-refusal detection, per-generation telemetry, content-filter fix, etc., see the
+// altimate_change markers throughout this file) onto a from-scratch rewrite with different
+// service dependencies is not safe to improvise inside a conflict resolution pass. Keeping the
+// fork's existing imperative implementation wholesale (this preserves 100% of current fork
+// behavior) and flagging this file as needing a dedicated follow-up task to properly port
+// upstream's new processor architecture with each fork behavior re-verified individually.
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
 // altimate_change end
@@ -707,6 +719,10 @@ export namespace SessionProcessor {
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+  // packages/core/src/effect/layer-node.ts, not owned by this file). Adopting upstream's
+  // object-style API here (deps stays empty since ours' layer is a pure sync wrapper with no
+  // Effect service dependencies); needs verification once layer-node.ts's conflict is resolved.
+  export const node = LayerNode.make({ service: Service, layer: layer, deps: [] })
   // altimate_change end
 }

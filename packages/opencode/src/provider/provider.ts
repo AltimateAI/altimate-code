@@ -73,7 +73,7 @@ import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 const DEFAULT_CHUNK_TIMEOUT = 300_000
 // altimate_change end
 // altimate_change start — OpenAI-compatible HTTP header timeout support
-const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
+const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
 
@@ -351,6 +351,7 @@ export namespace Provider {
           return { autoload: false }
         }
       }
+      // altimate_change end
       // Path 2: auth store (populated by TUI entry, file not yet written)
       const auth = await Auth.get(ProviderID.make("altimate-backend"))
       if (auth?.type === "api") {
@@ -371,6 +372,16 @@ export namespace Provider {
         await Auth.remove(ProviderID.make("altimate-backend")).catch(() => {})
       }
       return { autoload: false }
+    },
+    // altimate_change end
+    // altimate_change start — upstream addition (v1.18.10): Meta (Llama) native API responses endpoint
+    meta: async () => {
+      return {
+        autoload: false,
+        async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
+          return sdk.responses(modelID)
+        },
+      }
     },
     // altimate_change end
     openai: async () => {
@@ -429,7 +440,7 @@ export namespace Provider {
         },
       }
     },
-    "azure-cognitive-services": async () => {
+    "azure-cognitive-services": async (provider) => {
       const resourceName = Env.get("AZURE_COGNITIVE_SERVICES_RESOURCE_NAME")
       return {
         autoload: false,
@@ -442,7 +453,9 @@ export namespace Provider {
           }
         },
         options: {
-          baseURL: resourceName ? `https://${resourceName}.cognitiveservices.azure.com/openai` : undefined,
+          baseURL: resourceName
+            ? `https://${resourceName}.cognitiveservices.azure.com/openai${provider.options?.useDeploymentBasedUrls ? "" : "/v1"}`
+            : undefined,
         },
       }
     },
@@ -934,6 +947,7 @@ export namespace Provider {
       for (const router of routers) {
         const model = digitalOceanRouterModel(router)
         if (!input.models[model.id]) input.models[model.id] = model
+
       }
 
       const apiKey = env["DIGITALOCEAN_ACCESS_TOKEN"] ?? (auth?.type === "api" ? auth.key : undefined)
@@ -2194,7 +2208,9 @@ export namespace Provider {
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  // altimate_change start — upstream_fix: lazy deps for fork facade import cycles
+  export const node = LayerNode.make({ service: Service, layer, deps: () => [] })
+  // altimate_change end
 
   // Effect accessor over the Service (mirrors Env.use): `Provider.use.list()`
   // returns an Effect requiring `Provider.Service` in R. Used by tests/consumers

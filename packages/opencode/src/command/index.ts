@@ -1,19 +1,20 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-// altimate_change start — makeRuntime for the restored Promise wrapper (bottom of file)
+import path from "path"
+// altimate_change start — makeRuntime + AppNodeBuilder for the restored Promise wrapper (bottom of file)
 import { makeRuntime } from "@/effect/run-service"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 // altimate_change end
 import { InstanceState } from "@/effect/instance-state"
 import { EffectBridge } from "@/effect/bridge"
 import type { InstanceContext } from "@/project/instance-context"
-import { SessionID, MessageID } from "@/session/schema"
 import { Effect, Layer, Context, Schema } from "effect"
 import { Config } from "@/config/config"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import { Log } from "../util/log"
-import { EventV2 } from "@opencode-ai/core/event"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
 // altimate_change start — configure commands for external AI CLIs
 import PROMPT_DISCOVER from "./template/discover.txt"
 import PROMPT_CONFIGURE_CLAUDE from "./template/configure-claude.txt"
@@ -27,15 +28,7 @@ type State = {
 }
 
 export const Event = {
-  Executed: EventV2.define({
-    type: "command.executed",
-    schema: {
-      name: Schema.String,
-      sessionID: SessionID,
-      arguments: Schema.String,
-      messageID: MessageID,
-    },
-  }),
+  Executed: LegacyEvent.CommandExecuted,
 }
 
 export const Info = Schema.Struct({
@@ -87,7 +80,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Command") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -237,12 +230,19 @@ export const layer = Layer.effect(
       try {
         for (const item of yield* skill.all()) {
           if (commands[item.name]) continue
+          const dir = item.location === "<built-in>" ? undefined : path.dirname(item.location)
           commands[item.name] = {
             name: item.name,
             description: item.description,
             source: "skill",
             get template() {
-              return item.content
+              if (!dir) return item.content
+              return [
+                item.content,
+                "",
+                `Base directory for this skill: ${dir}`,
+                "Relative paths in this skill (e.g., scripts/, references/) are relative to this base directory.",
+              ].join("\n")
             },
             hints: [],
           }
@@ -275,21 +275,13 @@ export const layer = Layer.effect(
   }),
 )
 
-// altimate_change start — Layer.suspend defers facade refs past circular module-init
-export const defaultLayer = Layer.suspend(() => layer.pipe(
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(MCP.defaultLayer),
-  Layer.provide(Skill.defaultLayer),
-))
-// altimate_change end
-
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [Config.node, MCP.node, Skill.node])
-// altimate_change end
+export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, MCP.node, Skill.node] })
 
 // altimate_change start — restore the imperative Promise wrapper upstream removed in the
-// Effect-only migration; the HTTP server consumes Command.list() directly.
-const { runPromise: runCommand } = makeRuntime(Service, defaultLayer as Layer.Layer<Service>)
+// Effect-only migration; the HTTP server consumes Command.list() directly. defaultLayer is
+// compiled from `node` since per-service `.defaultLayer` facades were dropped upstream.
+export const defaultLayer = AppNodeBuilder.build(node) as Layer.Layer<Service>
+const { runPromise: runCommand } = makeRuntime(Service, defaultLayer)
 export async function list() {
   return runCommand((s) => s.list())
 }

@@ -27,6 +27,13 @@ import { Instance } from "@/project/instance"
 
 Heap.start()
 
+const onUnhandledRejection = (_error: unknown) => {}
+
+const onUncaughtException = (_error: Error) => {}
+
+process.on("unhandledRejection", onUnhandledRejection)
+process.on("uncaughtException", onUncaughtException)
+
 const traceConsumer = new TraceConsumer()
 // loadConfig() must complete before the first event: getOrCreateTrace caches, per session, a Trace
 // whose snapshot dir comes from loadConfig's FileExporter — an event handled before it finishes caches
@@ -113,6 +120,8 @@ export const rpc = {
     // altimate_change end
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)
+    process.off("unhandledRejection", onUnhandledRejection)
+    process.off("uncaughtException", onUncaughtException)
   },
 }
 

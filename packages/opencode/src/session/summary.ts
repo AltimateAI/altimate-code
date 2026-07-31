@@ -75,7 +75,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionSummary") {}
 
-export const layer = Layer.effect(
+const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sessions = yield* Session.Service
@@ -187,17 +187,26 @@ export const DiffInput = Schema.Struct({
 })
 export type DiffInput = Schema.Schema.Type<typeof DiffInput>
 
-// altimate_change start — thunk LayerNode deps defers facade refs past circular module-init
-export const node = LayerNode.make(layer, () => [
-  Session.node,
-  Snapshot.node,
-  EventV2Bridge.node,
-  Config.node,
-  // altimate_change start — upstream_fix: Storage node for session diff persistence
-  Storage.node,
-  // altimate_change end
-])
-// altimate_change end
+// UNSURE: upstream v1.18.10 dropped LayerNode's lazy-deps thunk support (see
+// packages/core/src/effect/layer-node.ts, not owned by this file). Using upstream's object-style
+// API with a plain array; needs verification once layer-node.ts's conflict is resolved that this
+// doesn't reintroduce the cyclic-import undefined-node bug the thunk was guarding against.
+// Note: upstream's own node call (theirs) omits Storage.node entirely because upstream has no
+// equivalent to the legacy imperative facade below that needs it — that's not an upstream fix for
+// the same bug, it's a dropped feature, so Storage.node stays (upstream_fix preserved).
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [
+    Session.node,
+    Snapshot.node,
+    EventV2Bridge.node,
+    Config.node,
+    // altimate_change start — upstream_fix: Storage node for session diff persistence
+    Storage.node,
+    // altimate_change end
+  ],
+})
 
 // altimate_change start — the imperative facade is called from the legacy session
 // processor, whose sessions live in src/storage/db.ts. Do not build the Effect
