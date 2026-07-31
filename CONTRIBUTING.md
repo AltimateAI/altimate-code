@@ -302,7 +302,7 @@ This project uses [vouch](https://github.com/mitchellh/vouch) to manage contribu
 ### How it works
 
 - **Vouched users** are explicitly trusted contributors.
-- **Denounced users** are explicitly blocked. Issues and pull requests from denounced users are automatically closed. If you have been denounced, you can request to be unvouched by reaching out to a maintainer on [Discord](https://altimate.ai/discord)
+- **Denounced users** are explicitly blocked. Issues and pull requests from denounced users are automatically closed. If you have been denounced, you can request to be unvouched by reaching out to a maintainer on [Discord](https://altimate.ai/discord?utm_source=altimate-code&utm_medium=github)
 - **Everyone else** can participate normally — you don't need to be vouched to open issues or PRs.
 
 ### For maintainers

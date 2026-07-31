@@ -1,6 +1,6 @@
 # altimate-code GitHub Action
 
-A GitHub Action that integrates [altimate-code](https://altimate.ai) directly into your GitHub workflow.
+A GitHub Action that integrates [altimate-code](https://altimate.ai?utm_source=altimate-code&utm_medium=github) directly into your GitHub workflow.
 
 Mention `/altimate-code` in your comment, and altimate-code will execute tasks within your GitHub Actions runner.
 

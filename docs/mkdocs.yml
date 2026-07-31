@@ -48,7 +48,7 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/AltimateAI/altimate-code
     - icon: fontawesome/brands/discord
-      link: https://altimate.ai/discord
+      link: https://altimate.ai/discord?utm_source=altimate-code&utm_medium=docs
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/altimate-engine/
   analytics:
