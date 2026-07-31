@@ -47,7 +47,10 @@ do). Every option is wired to a real workflow:
 activation menu, no LLM in the loop. You can drive dbt yourself:
 
 ```bash
-pip install dbt-duckdb                    # or `pipx install dbt-duckdb` if you hit PEP 668
+# dbt-duckdb ships the dbt adapter; duckdb-cli ships the standalone `duckdb`
+# binary the query line at the bottom uses. Two distinct PyPI packages — if you
+# skip duckdb-cli, `dbt build` still works but `duckdb target/...` won't.
+pip install dbt-duckdb duckdb-cli         # or `pipx install dbt-duckdb duckdb-cli` if you hit PEP 668
 cd ~/altimate-sample-dbt                  # wherever you materialized the sample
 dbt seed                                  # load the CSVs into DuckDB
 dbt build                                 # run models + tests

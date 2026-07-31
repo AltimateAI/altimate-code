@@ -41,7 +41,7 @@ altimate
 
 ## Step 2.5: First-run scan (optional)
 
-Immediately after model setup, a **"Scan your environment?"** Yes/No dialog appears. Say **Yes** and altimate-code reads local config files (no credentials sent, nothing leaves your computer) and routes you into one of four branches:
+Immediately after model setup, a **"Scan your environment?"** Yes/No dialog appears. Say **Yes** and altimate-code reads local config files (`.dbt/profiles.yml`, `dbt_project.yml`, `.git/config`) — no credentials are read or sent, and no schema, model contents, or queries leave your computer. An anonymous environment summary (e.g. "dbt project detected, no warehouse configured") may be included in the standard telemetry stream if telemetry is enabled; disable via `OPENCODE_DISABLE_TELEMETRY=1` or the [telemetry docs](../usage/telemetry.md) if you want a strictly-offline scan. The scan then routes you into one of four branches:
 
 - **Found a warehouse** → offers to add + verify each connection, then index its schema.
 - **Found dbt project, no warehouse** → asks which warehouse it runs against and walks you through `warehouse_add`.

@@ -192,7 +192,10 @@ moment, not another menu):
            • `pipx install dbt-duckdb`   (isolated per-tool venv, recommended)
            • `uv tool install dbt-duckdb`   (if you already have `uv`)
            • `python3 -m venv ~/.venvs/dbt && ~/.venvs/dbt/bin/pip install dbt-duckdb`
-             then paste `~/.venvs/dbt/bin/dbt` via option 1 above.
+             then paste the ABSOLUTE path (e.g. `/Users/you/.venvs/dbt/bin/dbt`
+             or `/home/you/.venvs/dbt/bin/dbt` — run `echo ~/.venvs/dbt/bin/dbt`
+             in your shell to get it) via option 1 above. Tilde (`~`) does NOT
+             expand inside the single-quoted validation below.
 
   If the user pastes a path (option 1), do NOT interpolate the pasted
   string into a shell pipeline verbatim — a paste like `; rm -rf ~` would

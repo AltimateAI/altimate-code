@@ -283,8 +283,8 @@ export namespace Filesystem {
    * tmp-write-rename pattern is duplicated in `packages/tui/src/util/persistence.ts`,
    * `packages/opencode/src/memory/store.ts`, and
    * `packages/opencode/src/altimate/observability/tracing.ts` — see
-   * https://github.com/AltimateAI/altimate-code/issues for the tracking issue
-   * to migrate them (Tech Lead flagged the promise-vs-reality mismatch
+   * https://github.com/AltimateAI/altimate-code/issues/1052 for the tracking
+   * issue to migrate them (Tech Lead flagged the promise-vs-reality mismatch
    * during v0.9.4 release review; this docstring used to claim the
    * migration was done).
    *
