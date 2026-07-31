@@ -87,13 +87,37 @@ function resolveNodePath(): string {
   return paths.join(path.delimiter)
 }
 
+// altimate_change start — staleness guard.
+// The binary embeds NAPI .node files that get renamed as the altimate-core
+// hash changes; script/build.ts is the source of truth for that embed logic.
+// A local binary older than build.ts is guaranteed to be checked against
+// invariants that no longer match. Skip rather than fail — the developer's
+// intent when running `bun test` after `git pull` is not to rebuild the binary
+// out-of-band, so a stale binary should surface as an actionable skip, not
+// a red suite that would otherwise be green.
+function isBinaryStale(binaryPath: string): boolean {
+  try {
+    const buildScript = path.join(PKG_DIR, "script", "build.ts")
+    if (!fs.existsSync(buildScript)) return false
+    const binMtime = fs.statSync(binaryPath).mtimeMs
+    const scriptMtime = fs.statSync(buildScript).mtimeMs
+    return binMtime < scriptMtime
+  } catch {
+    return false
+  }
+}
+// altimate_change end
+
 describe("compiled binary smoke test", () => {
   const binary = findLocalBinary()
-  const skip = !binary
+  const stale = binary ? isBinaryStale(binary) : false
+  const skip = !binary || stale
   const runTest = skip ? test.skip : test
 
-  if (skip) {
+  if (!binary) {
     test.skip("no local build found — run `bun run build:local` first", () => {})
+  } else if (stale) {
+    test.skip("local binary is older than script/build.ts — run `bun run build:local` to refresh", () => {})
   }
 
   runTest("binary starts and prints version", () => {
