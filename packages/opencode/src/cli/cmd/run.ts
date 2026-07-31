@@ -428,7 +428,18 @@ export const RunCommand = cmd({
           process.exit(1)
         }
 
-        const mime = (await Filesystem.isDir(resolvedPath)) ? "application/x-directory" : "text/plain"
+        const isDirectory = await Filesystem.isDir(resolvedPath)
+        // altimate_change start — upstream_fix: restore upstream's attach + local-directory
+        // guard (PR #33317, "run: inline files for attached servers"), dropped during the
+        // v1.18.10 merge. A directory `file://` URL only resolves against the machine that
+        // opened it; an attached remote server has no such path, so reject it up front
+        // instead of silently sending an unusable reference.
+        if (args.attach && isDirectory) {
+          UI.error(`Cannot attach local directory without a shared filesystem: ${filePath}`)
+          process.exit(1)
+        }
+        // altimate_change end
+        const mime = isDirectory ? "application/x-directory" : "text/plain"
 
         files.push({
           type: "file",
@@ -555,11 +566,30 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const providers = (await sdk.provider.list()).data?.all ?? []
         const provider = providers.find((item) => item.id === parsed.providerID)
         if (!provider?.models?.[parsed.modelID]) {
-          throw new Provider.ModelNotFoundError({
+          const modelError = new Provider.ModelNotFoundError({
             providerID: parsed.providerID,
             modelID: parsed.modelID,
             suggestions: provider ? Object.keys(provider.models).slice(0, 5) : [],
           })
+          // altimate_change start — upstream_fix: --format json must emit a JSON
+          // error record for this early failure too, not a bare stderr message —
+          // this check runs before the `emit()` helper (and the sessionID it
+          // closes over) exist, so the plain throw below always bypassed the
+          // JSON output contract and fell through to index.ts's generic
+          // non-JSON top-level catch. Create the session first purely to carry
+          // a real sessionID on the record; the event loop is never started, so
+          // the #27371 hang-prevention property (never wait on a session for an
+          // unknown model) this block exists for is unaffected.
+          if (args.format === "json") {
+            const sessionID = (await session(sdk)) ?? ""
+            process.stdout.write(
+              JSON.stringify({ type: "error", timestamp: Date.now(), sessionID, error: modelError.toObject() }) + EOL,
+            )
+            process.exitCode = 1
+            return
+          }
+          // altimate_change end
+          throw modelError
         }
       }
       // altimate_change end

@@ -32,6 +32,11 @@ export namespace ProviderError {
     /input is too long for requested model/i, // Amazon Bedrock
     /exceeds the context window/i, // OpenAI (Completions + Responses API message text)
     /input token count.*exceeds the maximum/i, // Google (Gemini)
+    // altimate_change start — port pattern from upstream v1.18.10's
+    // packages/llm/src/provider-error.ts `isContextOverflow` classifier, which
+    // covers a provider message shape this fork's independent pattern list lacked.
+    /tokens in request more than max tokens allowed/i,
+    // altimate_change end
     /maximum prompt length is \d+/i, // xAI (Grok)
     /reduce the length of the messages/i, // Groq
     /maximum context length is \d+ tokens/i, // OpenRouter, DeepSeek
