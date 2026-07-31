@@ -23,6 +23,9 @@ import { useFrecency } from "../../prompt/frecency"
 import { useBindings, useCommandSlashes, useOpencodeModeStack } from "../../keymap"
 import { displayCharAt, mentionTriggerIndex } from "../../prompt/display"
 import type { FileSystemEntry } from "@opencode-ai/sdk/v2"
+// altimate_change — first run: slash menu shows only local actions (e.g. /connect)
+// until a model is ready
+import { useReady } from "../altimate-onboarding"
 
 function removeLineRange(input: string) {
   const hashIndex = input.lastIndexOf("#")
@@ -91,6 +94,9 @@ export function Autocomplete(props: {
   const project = useProject()
   const slashes = useCommandSlashes()
   const modeStack = useOpencodeModeStack()
+  // altimate_change start — readiness gate for first-run slash filtering
+  const ready = useReady()
+  // altimate_change end
   const { theme } = useTheme()
   const dimensions = useTerminalDimensions()
   const frecency = useFrecency()
@@ -458,24 +464,32 @@ export function Autocomplete(props: {
     )
     // altimate_change end
 
-    for (const serverCommand of sync.data.command) {
-      if (serverCommand.source === "skill") continue
-      // altimate_change start — keep one autocomplete row per slash command name
-      if (localSlashNames.has(serverCommand.name)) continue
-      // altimate_change end
-      const label = serverCommand.source === "mcp" ? ":mcp" : ""
-      results.push({
-        display: "/" + serverCommand.name + label,
-        description: serverCommand.description,
-        onSelect: () => {
-          const newText = "/" + serverCommand.name + " "
-          const cursor = props.input().logicalCursor
-          props.input().deleteRange(0, 0, cursor.row, cursor.col)
-          props.input().insertText(newText)
-          props.input().cursorOffset = Bun.stringWidth(newText)
-        },
-      })
+    // altimate_change start — first run: hide server-defined commands (/discover etc.)
+    // until a model is ready; local slash actions (e.g. /connect) above stay visible.
+    if (ready()) {
+      for (const serverCommand of sync.data.command) {
+        if (serverCommand.source === "skill") continue
+        // altimate_change start — keep one autocomplete row per slash command name
+        if (localSlashNames.has(serverCommand.name)) continue
+        // altimate_change end
+        // altimate_change — onboard-connect is invoked programmatically by the Part 2
+        // scan gate, not typed; keep it out of the slash menu.
+        if (serverCommand.name === "onboard-connect") continue
+        const label = serverCommand.source === "mcp" ? ":mcp" : ""
+        results.push({
+          display: "/" + serverCommand.name + label,
+          description: serverCommand.description,
+          onSelect: () => {
+            const newText = "/" + serverCommand.name + " "
+            const cursor = props.input().logicalCursor
+            props.input().deleteRange(0, 0, cursor.row, cursor.col)
+            props.input().insertText(newText)
+            props.input().cursorOffset = Bun.stringWidth(newText)
+          },
+        })
+      }
     }
+    // altimate_change end
 
     results.sort((a, b) => a.display.localeCompare(b.display))
 

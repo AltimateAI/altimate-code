@@ -1,0 +1,27 @@
+{
+  "$comment": "Metadata about this sample project. Distinct from dbt's target/manifest.json — this is our own version stamp for conflict detection on the materialized copy at ~/altimate-sample-dbt/. If you edit any source file below, run ./regenerate.sh and commit the refreshed target/manifest.json alongside your change.",
+  "name": "jaffle-shop-duckdb",
+  "version": "1.0.0",
+  "kind": "altimate-starter-sample",
+  "source": "packages/opencode/sample-projects/jaffle-shop-duckdb",
+  "requires": {
+    "dbt-core": ">=1.7 <2.0",
+    "dbt-duckdb": ">=1.7 <2.0"
+  },
+  "notes": [
+    "Renamed profile from the original test fixture: `test_jaffle_shop` → `jaffle_shop`.",
+    "DuckDB target file resolves project-relative at `target/jaffle.duckdb`; no host paths bake into the profile.",
+    "target/manifest.json ships pre-compiled so static workflows (/discover, /review) work without dbt installed."
+  ],
+  "$assets_comment": "Single source of truth for the file list shipped to end users. `packages/opencode/src/altimate/onboarding/materialize.ts` copies these into the user's home; `packages/opencode/script/publish.ts` copies the same list into the wrapper npm package at release time; `packages/opencode/test/altimate/onboarding/publish-parity.test.ts` cross-checks both consumers use the same list. Adding a new sample file? Add it here — everything else picks it up automatically.",
+  "assets": [
+    { "from": "README.md", "kind": "file", "required": true },
+    { "from": "dbt_project.yml", "kind": "file", "required": true },
+    { "from": "profiles.yml", "kind": "file", "required": true },
+    { "from": "sample-manifest.json", "kind": "file", "required": true },
+    { "from": ".gitignore", "kind": "file", "required": false },
+    { "from": "models", "kind": "dir", "required": true },
+    { "from": "seeds", "kind": "dir", "required": true },
+    { "from": "target/manifest.json", "kind": "file", "required": true }
+  ]
+}

@@ -81,6 +81,20 @@ function show(api: TuiPluginApi) {
   api.ui.dialog.replace(() => <CredentialDialog api={api} />)
 }
 
+// altimate_change start — /logout: clear the stored gateway credential. Self-contained
+// (dispatched from the packages/tui slash command in app.tsx) since AltimateApi is
+// opencode-side and unreachable from packages/tui.
+async function logout(api: TuiPluginApi) {
+  try {
+    await AltimateApi.clearCredentials()
+    await api.client.instance.dispose()
+    api.ui.toast({ variant: "success", message: "Signed out of Altimate LLM Gateway" })
+  } catch (err) {
+    api.ui.toast({ variant: "error", message: err instanceof Error ? err.message : "Sign-out failed" })
+  }
+}
+// altimate_change end
+
 const tui: TuiPlugin = async (api) => {
   api.keymap.registerLayer({
     commands: [
@@ -93,8 +107,22 @@ const tui: TuiPlugin = async (api) => {
           show(api)
         },
       },
+      // altimate_change start — /logout entry point, dispatched by packages/tui/src/app.tsx
+      {
+        name: "altimate.provider.logout",
+        title: "Sign out of Altimate LLM Gateway",
+        category: "Altimate",
+        namespace: "palette",
+        run() {
+          void logout(api)
+        },
+      },
+      // altimate_change end
     ],
-    bindings: api.tuiConfig.keybinds.gather("altimate.palette", ["altimate.provider.connect"]),
+    bindings: api.tuiConfig.keybinds.gather("altimate.palette", [
+      "altimate.provider.connect",
+      "altimate.provider.logout",
+    ]),
   })
 }
 

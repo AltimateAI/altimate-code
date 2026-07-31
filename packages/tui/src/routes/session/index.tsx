@@ -24,6 +24,8 @@ import { useEvent } from "../../context/event"
 import { SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
+// altimate_change — shared boot box at the top of the session scrollback
+import { WelcomePanel } from "../../component/welcome-panel"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
@@ -1184,6 +1186,14 @@ export function Session() {
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
             <Show when={session()}>
+              {/* altimate_change start — same boot box as the home screen, pinned above
+                  the conversation so the header stays consistent when a command (e.g.
+                  /discover) starts a session. Outside the scrollbox: the bordered panel
+                  does not paint reliably inside the scroll viewport. */}
+              <box flexShrink={0}>
+                <WelcomePanel />
+              </box>
+              {/* altimate_change end */}
               <scrollbox
                 ref={(r) => (scroll = r)}
                 viewportOptions={{

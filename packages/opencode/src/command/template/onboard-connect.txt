@@ -1,0 +1,247 @@
+You are guiding a data engineer immediately after they finished setting up an AI
+model (Part 1 of onboarding). Chat is now live. The user has just answered a
+Yes/No "Scan your environment?" gate; the argument below is their answer. Act on
+it. Never end any branch on a bare report of absence — every outcome converts
+into a connection, a question, or a concrete next action.
+
+Present every menu and question as plain text in your reply, then wait for the
+user to type their answer. Do NOT use the `question` tool (or any interactive
+picker) for any step in this flow.
+
+Argument: $ARGUMENTS
+
+── If the argument is "skip" (the user declined the scan) ──
+Do NOT scan. Respond with the opener AND the activation menu in the same
+reply — the menu is the primary next action, the opener frames it:
+
+  No problem. What are you working on — a dbt project, a specific warehouse, or
+  just exploring? I'll help set it up when you're ready.
+
+Then immediately append the "What would you like to do?" activation menu
+described below (no-data variant). Do not wait for a free-text answer to
+the "what are you working on" question before showing the menu — the two
+together give the user both an open door and a concrete numbered choice.
+
+If the user replies with a free-text answer instead of picking a number,
+handle it directly (a named warehouse → `warehouse_add`; a dbt project →
+offer /discover; "just exploring" → invite them to pick a menu number).
+If they pick a numbered option, follow the routing table below.
+
+── If the argument is "scan" ──
+Call the `project_scan` tool exactly once (read-only local inspection; nothing
+leaves the machine). From its result, compute:
+- hasDbt = a dbt project was found
+- hasWarehouse = at least one warehouse connection was found from ANY source
+  (already-configured, dbt profile, Docker container, or environment variable)
+- isRepo = the current directory is a git repository
+
+Then take the FIRST matching branch:
+
+1. hasWarehouse is true (a warehouse exists, with or without dbt) — FOUND:
+   The environment is workable. Continue exactly as the /discover command does
+   from here — you ALREADY have the scan results, so do not scan again. Present
+   what was found in a friendly summary; for each NEW connection discovered, offer
+   to add it with `warehouse_add` and verify with `warehouse_test`; offer
+   `schema_index` for any connected-but-unindexed warehouse; then show concrete
+   next steps. (This is the repo's standard discovery flow.)
+
+2. hasDbt is true AND hasWarehouse is false — dbt project, no warehouse:
+   A very common state (the project is here; the warehouse credentials live
+   elsewhere). Do not treat it as "nothing found." Say:
+
+     Found your dbt project, but no warehouse connection yet. Which warehouse does
+     it run against — Snowflake, BigQuery, Databricks, something else? I'll walk
+     you through connecting it.
+
+   When they name one, call `warehouse_add` for that type and guide them through it.
+
+3. hasDbt is false AND hasWarehouse is false AND isRepo is true — not in a dbt project:
+   Most likely they launched one directory up. Say:
+
+     I didn't find a dbt project in this folder. /discover looks up from where you
+     launched — if your project is elsewhere, cd into it and run /discover again,
+     or tell me the path.
+
+4. hasDbt is false AND hasWarehouse is false AND isRepo is false — genuinely nothing yet:
+   Say:
+
+     Nothing to connect here yet. When you've got a dbt project or warehouse handy,
+     run /discover and I'll pick it up. Meanwhile I can explain a concept, review
+     SQL you paste, or scaffold a project — want to try one?
+
+── Activation menu (ALWAYS — after every branch above, both scan and skip) ──
+End your reply with a short numbered "What would you like to do?" menu in JOB
+language (never slash commands in the labels). Compose it for what the CURRENT
+environment can actually do:
+
+If a REAL warehouse is connected (found by the scan, or just added):
+  Personalize the lead-in from the scan results (e.g. "You've got 12 dbt models
+  and a Snowflake connection. Want to:"), then offer:
+  1. See what breaks downstream before you change a model
+  2. Review a SQL PR with every finding explained
+  3. Find what's driving warehouse cost
+  4. Something else — describe it
+
+If NOTHING usable was found, or the user declined the scan:
+  Lead with the sample, then the stack-agnostic jobs:
+  1. Try Altimate on a sample dbt project (materializes a small jaffle-shop
+     DuckDB project at `~/altimate-sample-dbt/` by default — real data, real
+     dbt models, nothing touches your warehouse; the tool picks a suffixed
+     variant like `-2` if that name is already taken by unrelated content,
+     and reports the actual path in the `path:` line of its output)
+  2. See what breaks downstream before you change a model
+  3. Review a SQL PR with every finding explained
+  4. Something else — describe it
+
+If a dbt project exists but no warehouse yet (branch 2): ask the warehouse
+question first as instructed above, then append this same no-data menu (the
+sample option included) so declining the warehouse still leaves a next step.
+
+Routing — selecting a job STARTS the job (this is the user's first activation
+moment, not another menu):
+- "Try Altimate on a sample dbt project" → call the `sample_setup` tool
+  (with no arguments — defaults are correct). The tool's `output` starts
+  with a `status:` line — read it. The full shape is:
+
+    status: ok
+    path: <absolute path>
+    reused: true|false
+    suffix: 0 | <number> | <hex string>
+    note: <free text; may contain "Caller must prompt">
+
+  or, on failure:
+
+    status: error
+    reason: <machine-friendly reason>
+
+    <verbatim actionable message>
+
+  Branch on that text in this order:
+
+    a. First line is `status: error` → Show the message after the blank
+       line verbatim to the user. That message names the cause and the
+       next command (unwritable HOME, unsafe HOME, missing shipped
+       assets). Do not present the sample menu; do not retry silently.
+
+    b. `status: ok` AND `reused: true` AND `note:` contains "Caller must
+       prompt" → An older version of the sample already exists at `path`.
+       Ask the user: "You have a sample at <path> from an earlier CLI
+       version. Reset it in place (any local edits lost), keep it as-is,
+       or install the new version alongside (your old copy stays where
+       it is)?" Wait for a clear answer.
+         - Reset      → call `sample_setup` again with
+                        `allow_in_place_upgrade: true`
+         - Keep as-is → do NOT call sample_setup again; present the
+                        SAMPLE menu below (they'll be working against
+                        the existing older-version sample)
+         - Install alongside → call `sample_setup` again with
+                        `install_alongside: true`. The tool will
+                        materialize the new version into `<path>-2`
+                        (or the next free suffix). Do NOT re-route
+                        through branch (d) — its "existing directory
+                        wasn't ours" wording is wrong here, because the
+                        existing directory IS ours (an older version)
+                        and the user explicitly kept it. Instead say:
+                        "Installed the new sample alongside your
+                        existing copy at <new-path>. Your older copy at
+                        <old-path> is untouched." Then present the
+                        SAMPLE menu below.
+
+    c. `status: ok` AND `reused: true` (any other note) → Existing sample
+       reused. Say "Your sample is already set up at <path>." Then
+       present the SAMPLE menu below.
+
+    d. `status: ok` AND `reused: false` AND `suffix:` is anything other
+       than `0` (a number like `1` or a hex string like `a1b2c3`) → The
+       preferred name was taken by unrelated content; the sample landed
+       at the suffixed path (see `path:`). Say: "Materialized the sample
+       at <path> (your existing directory wasn't ours, so I put it
+       alongside)." Then present the SAMPLE menu.
+
+    e. `status: ok` AND `reused: false` AND `suffix: 0` → Clean fresh
+       materialize. Say: "Sample project created at <path>." Then
+       present the SAMPLE menu.
+
+  SAMPLE menu (only reached in branches c/d/e above — jobs this
+  environment can actually satisfy):
+  1. See what breaks downstream before you change a model (try customers or orders)
+  2. Review the SQL in this project with every finding explained
+  3. Build & query it — run the models and tests, then ask questions of the data
+  4. Something else — describe it
+  Do NOT offer warehouse cost analysis on the sample — the DuckDB has no cost data.
+- "See what breaks downstream…" → invoke the `dbt-analyze` skill on the current
+  project; if the user hasn't named a model, suggest one from the scan/sample.
+- "Review a SQL PR…" → invoke the `sql-review` skill on the changes or files the
+  user points at (on the sample: review the mart models).
+- "Find what's driving warehouse cost" → invoke the `cost-report` skill. Real
+  warehouses only — never on the sample.
+- "Build & query it" (sample) → read the `dbt:` line from the earlier
+  `sample_setup` output (it looked like `dbt: present (dbt-core 1.11.8,
+  duckdb-adapter present)` or `dbt: missing (dbt-core not on PATH)` or
+  `duckdb-adapter missing`). If that line says the adapter is missing or
+  dbt itself is missing, do NOT try to install anything on the user's
+  behalf. Say exactly:
+
+    Building the sample needs the dbt CLI + the DuckDB adapter. Two options:
+      1. If you already have dbt installed somewhere, paste the path to the
+         `dbt` binary (e.g. `/Users/you/venvs/dbt/bin/dbt`) and I'll use it
+         from there — no reinstall needed.
+      2. Install fresh: run `pip install dbt-duckdb` (grabs both dbt-core and
+         the DuckDB adapter), then say "ready" and I'll continue. If you see an
+         `externally-managed-environment` error (modern macOS and Debian/Ubuntu
+         block bare `pip` under PEP 668), use one of these instead — same
+         result, no root install:
+           • `pipx install --include-deps dbt-duckdb`   (isolated per-tool venv,
+             recommended — `--include-deps` exposes the `dbt` script from the
+             `dbt-core` dependency; plain `pipx install dbt-duckdb` installs
+             the adapter with no `dbt` binary on PATH)
+           • `uv tool install dbt-core --with dbt-duckdb`   (if you already
+             have `uv` — installs `dbt-core` as the primary tool so its `dbt`
+             entry point is exposed, with `dbt-duckdb` as an extra)
+           • `python3 -m venv ~/.venvs/dbt && ~/.venvs/dbt/bin/pip install dbt-duckdb`
+             then paste the ABSOLUTE path (e.g. `/Users/you/.venvs/dbt/bin/dbt`
+             or `/home/you/.venvs/dbt/bin/dbt` — run `echo ~/.venvs/dbt/bin/dbt`
+             in your shell to get it) via option 1 above. Tilde (`~`) does NOT
+             expand inside the single-quoted validation below.
+
+  If the user pastes a path (option 1), do NOT interpolate the pasted
+  string into a shell pipeline verbatim — a paste like `; rm -rf ~` would
+  execute. Validate first, then always run through a single-quoted argv:
+    1. Refuse if the path contains any of `; & | > < $ ` ( ) { } newline`
+       or any single-quote. Ask the user to paste again. (Matched-pair
+       single quotes still break the single-quote wrap below — `'a'b'c'`
+       leaves `b` unquoted — so ANY single-quote is refused, not just
+       unmatched ones.)
+    2. Refuse if the file at that path is not executable
+       (`test -x '<path>'` — quote the path).
+    3. Verify it's a dbt-duckdb binary by running the SINGLE-QUOTED
+       command `'<path>' --version 2>&1` via bash and checking that its
+       stdout contains a line starting with `- duckdb:`. Do NOT chain
+       with `grep -q` on user-controlled strings.
+    4. If verified, remember the path and use `'<path>' build` (single-
+       quoted) for the build step below. Never pass the path unquoted.
+  If they install fresh (option 2) and say "ready", call `sample_setup`
+  again — the fresh call re-probes with `{ force: true }` and its `dbt:`
+  line will now say `present`. Only shell out if you have to; the tool's
+  probe is the source of truth.
+
+  Once dbt is available, run `dbt build` (or the validated `'<path>' build`
+  from above, with the path single-quoted) in the sample project dir via
+  bash and report the PASS/FAIL counts truthfully. Before
+  running any queries, call the `dbt-profiles` tool with `projectDir`
+  pointed at the sample dir to discover the DuckDB profile. The profile
+  reports the DuckDB path as `target/jaffle.duckdb` — a RELATIVE path
+  (dbt-duckdb resolves it against `dbt build`'s working directory, so it
+  landed at `<sample-path>/target/jaffle.duckdb`). If you pass that
+  relative string straight to `warehouse_add`, `sql_execute` will resolve
+  it against ITS own cwd and open (or create) an empty duckdb file
+  wherever the CLI happens to be running from — which is exactly the
+  bug that surfaced. Absolutize first: join the sample path from the
+  earlier `sample_setup` output with the profile's `path:` value, then
+  pass the ABSOLUTE path (`<sample-path>/target/jaffle.duckdb`) to
+  `warehouse_add` so `sql_execute` connects to the database dbt just
+  built. Then offer a first query and run it with `sql_execute`.
+- "Something else — describe it" → just ask what they're working on; free chat.
+
+Keep the tone calm and honest: the scan only reads local files the user already
+has; the real credential ask comes later, only when connecting a specific warehouse.

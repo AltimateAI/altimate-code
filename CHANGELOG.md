@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-07-31
+
+Onboarding UX + first-run OAuth reliability. Ships the CLI's first-run scan + activation menu (Altimate LLM Gateway top of picker; bundled jaffle-shop DuckDB sample for users with no warehouse yet), then hardens the sign-in flow that path leads into.
+
+### Added
+
+- **First-run scan + activation menu.** Fresh installs land on a curated 6-provider picker with Altimate LLM Gateway on top, then a Yes/No "Scan your environment?" gate that reads local config files (`.dbt/profiles.yml`, `dbt_project.yml`, `.git/config`) and routes into one of four branches — warehouse found, dbt-only, git-repo-no-dbt, nothing yet. The last branch offers to materialize a bundled jaffle-shop DuckDB sample dbt project (`~/altimate-sample-dbt/` by default; a suffixed variant if the name is taken) so a user with no warehouse can try Altimate against real data, real dbt models, without touching production. Every branch ends on a numbered "What would you like to do?" menu wired to real skills. (#1001)
+- **Bundled jaffle-shop DuckDB sample project.** Ships with a pre-compiled `target/manifest.json` so `/discover` and `/review` work without dbt-core / dbt-duckdb installed. `dbt build` needs `pip install dbt-duckdb duckdb-cli` (or `pipx install --include-deps dbt-duckdb` / `uv tool install dbt-core --with dbt-duckdb` if you hit PEP 668). (#1001)
+
+### Fixed
+
+- **Loopback OAuth sign-in is resilient to port collisions and long-SSO windows.** The Altimate LLM Gateway callback server now walks 7317-7325 on `EADDRINUSE` (a squatting dev tool on 7317 no longer wedges sign-in) and reports the actual bound port in the redirect. The pending-flow window extended from 5 min to 15 min so corporate SSO + MFA can finish. Two `authorize()` calls arriving concurrently now share one startup promise — both see the actually-bound port instead of one racing past on a stale/undefined value. (#1053)
+- **CI test-isolation leak that turned six `permission/next.test.ts` tilde-expansion tests red.** `mcp/lifecycle.test.ts` was spying on `os.homedir()` in `beforeEach` with no `mockRestore`; the mock leaked forward into the next test file bun loaded, poisoning the tilde-expansion suite with a tmp path. Captured the spy handle and restored it in `afterEach`. Root-fix on the class, not the symptom. (#1053)
+- **`HOME` recovery message is portable and doesn't tell users to write as root.** The prior text pointed at `/Users/you altimate-code` (macOS-only) and suggested `sudo HOME=…` which writes root-owned files a normal-user run then can't modify. Primary guidance is now "re-run without sudo" (install to a per-user prefix, or use nvm/asdf); secondary is `sudo -E HOME="$HOME" altimate-code` with an explicit `chown` recovery hint. (#1053)
+- **PEP 668 install fallbacks actually expose a `dbt` binary.** `pipx install dbt-duckdb` and `uv tool install dbt-duckdb` both succeed but neither publishes the `dbt` entry point (it ships with `dbt-core`, a dependency). Users who followed the fallback after `pip` refused with `externally-managed-environment` hit a second dead end at their point of maximum frustration. Fixed to `pipx install --include-deps dbt-duckdb` and `uv tool install dbt-core --with dbt-duckdb`. The venv option also now asks for the absolute path — `~/.venvs/dbt/bin/dbt` wouldn't expand under the CLI's single-quoted validation. (#1053)
+- **Scan disclosure is honest about telemetry.** The first-run scan's docs previously claimed "nothing leaves your computer". The scan itself doesn't send credentials, model contents, queries, or schema — but it does emit an anonymous environment summary (dbt-detected, warehouse-configured, etc.) through the standard telemetry pipeline if telemetry is enabled. Disclosure updated; `OPENCODE_DISABLE_TELEMETRY=1` remains the offline-strict switch. (#1053)
+- **`sample_setup` error metadata no longer collides with success shape.** The unreachable `suffix: -1` sentinel was reverted to `0`; `success: false` is the disambiguator for metadata consumers, and the error `output` string separately begins `status: error` for the LLM template's failure branch. (#1053)
+- **The auth plugin no longer leaks state-bearing authorize URLs into log files.** An earlier revision wrote the authorize URL to `process.stderr` as a fallback for SSH/tmux users; the auth plugin runs inside a TUI worker whose stdio is redirected to the log file (`packages/opencode/src/cli/tui/worker.ts`), so the write never reached the terminal it was written for. Removed. The TUI's auth dialog already renders the URL as a clickable link and binds `c` to copy it to the clipboard. (#1053)
+
+### Changed
+
+- **`useConnected` and the home-tips visibility gate now share one predicate.** The "is any provider connected?" logic was duplicated in `component/use-connected.tsx` and `feature-plugins/home/tips.tsx`; both now call `isAnyProviderConnected` from `packages/tui/src/util/connected.ts` so a future edit to one can't drift them apart. Behavior unchanged (a semantically identical refactor). Non-`opencode` providers count as connected regardless of `cost` metadata (BYOK / self-hosted / custom-registration path); the `opencode` provider still requires a nonzero-cost model to count. (#1053)
+
 ## [0.9.3] - 2026-07-24
 
 Focused polish on the `altimate review` dbt PR reviewer — plus TUI startup UX

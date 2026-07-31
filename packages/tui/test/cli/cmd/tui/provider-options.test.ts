@@ -15,6 +15,9 @@ describe("providerOptions", () => {
   })
 
   test("keeps popular providers first and sorts the rest alphabetically", () => {
+    // altimate_change — PROVIDER_PRIORITY ranks the Altimate LLM Gateway first, then
+    // anthropic ahead of openai (see component/dialog-provider.tsx); updated from the
+    // upstream fixture's openai-before-anthropic expectation to match.
     expect(
       providerOptions([
         { id: "openai", name: "OpenAI" },
@@ -23,7 +26,7 @@ describe("providerOptions", () => {
         { id: "mistral", name: "Mistral" },
         { id: "aws", name: "AWS Bedrock" },
       ]).map((option) => option.value),
-    ).toEqual(["openai", "anthropic", "aws", "mistral", "custom-z", "__opencode_custom_provider__"])
+    ).toEqual(["anthropic", "openai", "aws", "mistral", "custom-z", "__opencode_custom_provider__"])
   })
 
   test("does not collide with a configured provider named other", () => {

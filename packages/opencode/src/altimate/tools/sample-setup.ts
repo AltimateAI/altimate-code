@@ -1,0 +1,211 @@
+import fs from "node:fs"
+import path from "node:path"
+import z from "zod"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { Tool } from "../../tool/tool"
+import { materializeSample } from "../onboarding/materialize"
+import { DEFAULT_SAMPLE_NAME, resolveSampleSource, type SampleSourceLocation } from "../onboarding/sample-source-resolver"
+import { detectDbtRuntime } from "../onboarding/tool-detection"
+
+/**
+ * `sample_setup` — LLM-invoked tool that copies the shipped jaffle-shop
+ * DuckDB sample onto the user's filesystem and returns a structured
+ * summary the `/onboard-connect` template branches on.
+ *
+ * Contract with the template
+ * (`packages/opencode/src/command/template/onboard-connect.txt`, sample
+ * routing block):
+ *
+ *   Success: `{title, metadata: {targetPath, reused, suffix, note}, output}`
+ *     - reused=true, note contains "Caller must prompt" → template
+ *       prompts before overwriting (different sample version on disk)
+ *     - reused=true, no such note → "already set up at <path>"
+ *     - reused=false, suffix=0 → "Sample project created at <path>"
+ *     - reused=false, suffix>0 → preferred name was taken, used a
+ *       suffixed variant (`<name>-2`, `<name>-3`, …)
+ *   Failure: `{title, metadata: {error}, output}` — `output` carries a
+ *     verbatim actionable message ("Target parent directory X is not
+ *     writable", "HOME=/root but this process is not running as root",
+ *     etc.) that the template passes through unchanged.
+ *
+ * The LLM invokes this with no arguments (the template says so). All
+ * schema parameters are optional and only exist for tests + advanced
+ * callers who want to override the target path.
+ *
+ * The sample version is read from the shipped
+ * `sample-projects/<name>/sample-manifest.json` — bumping the sample
+ * automatically bumps the version stamped into the marker without a
+ * code change here.
+ */
+export const SampleSetupTool = Tool.define("sample_setup", {
+  description:
+    "Materialize the shipped jaffle-shop DuckDB sample dbt project onto the user's disk. " +
+    "Called by the /onboard-connect activation menu when the user picks 'Try Altimate on a " +
+    "sample dbt project'. Idempotent — a second call reuses the existing materialized " +
+    "directory without re-copying. Never overwrites an unrelated user directory: if the " +
+    "preferred path holds unknown content, materializes into a suffixed variant " +
+    "(`<name>-2`, `<name>-3`, ...) instead.",
+  parameters: z.object({
+    preferred_target_name: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, {
+        message:
+          "must be a plain directory name (letters/digits/dot/dash/underscore only, no path separators, no leading dot)",
+      })
+      .optional()
+      .describe(
+        "Directory name (relative to the target parent) to materialize into. Defaults to " +
+          "`altimate-sample-dbt`. Rarely overridden — the default matches what the activation " +
+          "menu documents. Must be a single path segment: letters, digits, dot, dash, " +
+          "underscore only. Not a full path. Do not include `/` or `..`.",
+      ),
+    allow_in_place_upgrade: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "When the target exists at a different sample version, overwrite in place instead of " +
+          "returning `reused: true` with a prompt hint. Only set true after the user has " +
+          "confirmed they want to upgrade AND does not care about local edits in the old copy.",
+      ),
+    install_alongside: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "When the target exists at a different sample version, materialize the new version " +
+          "into `<name>-2` (or the next free suffix) instead of touching the old copy. Use " +
+          "this after the user has picked the 'install alongside' option from the version-" +
+          "conflict prompt. Mutually exclusive with allow_in_place_upgrade; alongside wins.",
+      ),
+  }),
+  async execute(args, _ctx) {
+    const sampleName = DEFAULT_SAMPLE_NAME
+    // Resolve the sample source ONCE per invocation and pass it forward.
+    // materializeSample() would otherwise call resolveSampleSource() again
+    // internally; on the wrapper-bin-parent / dev-source-tree candidates
+    // that means an extra fs.existsSync() sweep across the whole hunt
+    // chain — cheap in absolute terms, but a redundant expense the tool
+    // pays on every activation. Resolving once also guarantees that the
+    // manifest read and the materialize copy come from the SAME source
+    // directory (a mid-invocation env or filesystem change can't put them
+    // out of sync).
+    let sampleSource: SampleSourceLocation
+    let sampleVersion: string
+    try {
+      const resolved = resolveSampleSource(sampleName)
+      if (!resolved) {
+        throw new Error(`resolveSampleSource returned undefined for '${sampleName}'`)
+      }
+      sampleSource = resolved
+      sampleVersion = readSampleVersionAt(sampleSource.path)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      const guidance =
+        `Could not locate the shipped starter sample source. This usually means the CLI ` +
+        `was installed without its wrapper package assets. Reinstall with: ` +
+        `\`npm i -g @altimateai/altimate-code@latest\`\n\n` +
+        `Underlying error: ${message}`
+      return {
+        title: "Starter sample unavailable",
+        // `success: false` is the disambiguator for consumers reading
+        // metadata; the `output` string separately begins `status: error`
+        // for the template branches (which never see metadata). An earlier
+        // version added `suffix: -1` here as a sentinel, but the error path
+        // emits no `suffix:` line in `output`, and no downstream reader of
+        // metadata inspects `suffix` before checking `success` — reverted
+        // in v0.9.4 consensus review m6 to keep the shape typed.
+        metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
+        output: `status: error\nreason: sample_source_missing\n\n${guidance}`,
+      }
+    }
+
+    try {
+      const result = await materializeSample({
+        sampleName,
+        preferredTargetName: args.preferred_target_name,
+        // NOTE: targetParent is deliberately NOT plumbed from tool args — it
+        // was removed from the LLM-facing schema to close a bypass of the
+        // rejectUnsafeHome guard (a caller-controlled parent skipped the
+        // check). Callers who need a specific parent use materializeSample
+        // directly with allowUnsafeParent for tests.
+        cliVersion: InstallationVersion,
+        sampleVersion,
+        allowInPlaceUpgrade: args.allow_in_place_upgrade,
+        installAlongside: args.install_alongside,
+        preResolvedSource: sampleSource,
+      })
+      // Probe dbt-runtime state so the template's "Build & query it" branch
+      // can read it directly instead of shelling out to a duplicate probe.
+      // Force-refresh in case the user pip-installed dbt-duckdb during the
+      // session (cache from an earlier render would say hasDbtDuckdb=false).
+      const dbt = await detectDbtRuntime({ force: true })
+      const dbtLine = dbt.hasDbt
+        ? `dbt: present (dbt-core ${dbt.dbtCoreVersion ?? "unknown"}, duckdb-adapter ${dbt.hasDbtDuckdb ? "present" : "missing"})`
+        : `dbt: missing (dbt-core not on PATH)`
+
+      // Self-describing status prefix — the model only sees `output`, never
+      // `metadata` (packages/opencode/src/session/message-v2.ts:822). The
+      // template branches on `status: ok` vs `status: error` in this text.
+      const outputText =
+        `status: ok\n` +
+        `path: ${result.targetPath}\n` +
+        `reused: ${result.reused}\n` +
+        `suffix: ${result.suffix}\n` +
+        `${dbtLine}\n` +
+        `note: ${result.note}`
+      return {
+        title: result.reused ? `Reused starter sample at ${result.targetPath}` : `Materialized starter sample at ${result.targetPath}`,
+        metadata: {
+          success: true,
+          targetPath: result.targetPath,
+          reused: result.reused,
+          suffix: result.suffix,
+          note: result.note,
+          dbtRuntime: dbt,
+        },
+        output: outputText,
+      }
+    } catch (err) {
+      // materializeSample throws with actionable messages for the three
+      // failure modes: unsafe HOME (rejectUnsafeHome), unwritable target
+      // parent (checkParentWritable), or missing sample source. Wrap the
+      // message with a status prefix so the template's failure branch can
+      // reliably detect it from `output` alone — metadata never reaches
+      // the model.
+      const message = err instanceof Error ? err.message : String(err)
+      return {
+        title: "Starter materialization failed",
+        // `success: false` is the disambiguator for consumers reading
+        // metadata; the `output` string separately begins `status: error`
+        // for the template branches (which never see metadata). An earlier
+        // version added `suffix: -1` here as a sentinel, but the error path
+        // emits no `suffix:` line in `output`, and no downstream reader of
+        // metadata inspects `suffix` before checking `success` — reverted
+        // in v0.9.4 consensus review m6 to keep the shape typed.
+        metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
+        output: `status: error\nreason: materialize_failed\n\n${message}`,
+      }
+    }
+  },
+})
+
+/**
+ * Read the sample's `sample-manifest.json` from an ALREADY-RESOLVED source
+ * directory and return its `version` field. Takes the resolved path (not the
+ * sample name) so the caller can resolve once and share the result with
+ * downstream materializeSample — see finding 25.
+ *
+ * The version stamps into the on-disk marker so a future run can detect
+ * whether the materialized copy is current or lags a CLI upgrade.
+ */
+function readSampleVersionAt(sampleSourcePath: string): string {
+  const manifestPath = path.join(sampleSourcePath, "sample-manifest.json")
+  const raw = fs.readFileSync(manifestPath, "utf8")
+  const parsed = JSON.parse(raw) as { version?: unknown }
+  if (typeof parsed.version !== "string" || parsed.version.length === 0) {
+    throw new Error(`sample-manifest.json at ${manifestPath} is missing a string \`version\` field`)
+  }
+  return parsed.version
+}

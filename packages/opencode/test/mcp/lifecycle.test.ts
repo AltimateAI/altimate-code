@@ -2,7 +2,7 @@ import path from "node:path"
 import { mkdtempSync } from "node:fs"
 import os, { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
-import { expect, beforeEach, spyOn } from "bun:test"
+import { expect, beforeEach, afterEach, spyOn } from "bun:test"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js"
 import {
@@ -31,8 +31,18 @@ const stdioFixture = path.join(import.meta.dir, "../fixture/mcp-lifecycle-stdio.
 // the OPENCODE_TEST_HOME env var preload.ts sets; without this, a developer's real MCP servers
 // leak into these assertions (extra tools/servers → wrong counts). (bun's os.homedir() caches
 // $HOME at startup, so it must be spied rather than set via process.env.)
+// altimate_change start — v0.9.4 harness fixes re-homed onto the rewritten file: (1) hoist
+// mkdtempSync OUT of the mock so every homedir() read within a test sees the SAME dir;
+// (2) restore the spy after each test — bun runs the whole suite in one process, and a
+// leaked homedir mock broke 6 permission/next.test.ts tilde-expansion tests on CI.
+let homedirSpy: ReturnType<typeof spyOn> | undefined
 beforeEach(() => {
-  spyOn(os, "homedir").mockImplementation(() => mkdtempSync(path.join(tmpdir(), "mcp-lifecycle-home-")))
+  const homeDir = mkdtempSync(path.join(tmpdir(), "mcp-lifecycle-home-"))
+  homedirSpy = spyOn(os, "homedir").mockImplementation(() => homeDir)
+})
+afterEach(() => {
+  homedirSpy?.mockRestore()
+  homedirSpy = undefined
 })
 // altimate_change end
 

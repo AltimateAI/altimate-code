@@ -1,5 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from "fs/promises"
-import { createWriteStream, existsSync, statSync } from "fs"
+import { createWriteStream, existsSync, mkdirSync, renameSync, statSync, writeFileSync } from "fs"
+import { randomBytes } from "crypto"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
@@ -270,6 +271,33 @@ export namespace Filesystem {
       }
     }
   }
+
+  // altimate_change start — fork util (AI-7520 onboarding/materialize): atomic JSON write
+  /**
+   * Atomic JSON write via tmp-file + rename. Serializes `value` with 2-space
+   * indent + trailing newline, writes to `<targetPath>.tmp-<random>`, then
+   * renames onto `targetPath`. On POSIX the rename is atomic — a concurrent
+   * reader sees either the old or new file, never a partial write.
+   *
+   * Extracted from an earlier local dance in marker.ts. The same
+   * tmp-write-rename pattern is duplicated in `packages/tui/src/util/persistence.ts`,
+   * `packages/opencode/src/memory/store.ts`, and
+   * `packages/opencode/src/altimate/observability/tracing.ts` — see
+   * https://github.com/AltimateAI/altimate-code/issues/1052 for the tracking
+   * issue to migrate them (Tech Lead flagged the promise-vs-reality mismatch
+   * during v0.9.4 release review; this docstring used to claim the
+   * migration was done).
+   *
+   * @param targetPath Destination path. Parent directory is created if missing.
+   * @param value Value to serialize as JSON.
+   */
+  export function writeJsonAtomic(targetPath: string, value: unknown): void {
+    const tmpPath = `${targetPath}.tmp-${randomBytes(6).toString("hex")}`
+    mkdirSync(dirname(targetPath), { recursive: true })
+    writeFileSync(tmpPath, JSON.stringify(value, null, 2) + "\n")
+    renameSync(tmpPath, targetPath)
+  }
+  // altimate_change end
 
   export async function findUp(target: string, start: string, stop?: string) {
     let current = start

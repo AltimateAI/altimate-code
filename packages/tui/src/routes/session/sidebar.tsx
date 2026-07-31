@@ -29,6 +29,10 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         backgroundColor={theme.backgroundPanel}
         width={42}
         height="100%"
+        // altimate_change start — subtle left edge to separate the panel from the main area
+        border={["left"]}
+        borderColor={theme.border}
+        // altimate_change end
         paddingTop={1}
         paddingBottom={1}
         paddingLeft={2}

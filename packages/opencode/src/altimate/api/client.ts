@@ -1,5 +1,6 @@
 import z from "zod"
 import path from "path"
+import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
 
@@ -134,7 +135,17 @@ export namespace AltimateApi {
     )
   }
 
+  /** Remove the stored gateway credential file (sign out). No-op if absent. */
+  export async function clearCredentials(): Promise<void> {
+    await rm(credentialsPath(), { force: true })
+  }
+
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/
+
+  /** True if `name` is a well-formed instance/tenant name. */
+  export function isValidInstanceName(name: string): boolean {
+    return VALID_TENANT_REGEX.test(name)
+  }
 
   /** Validates credentials against the Altimate API.
    *  Mirrors AltimateSettingsHelper.validateSettings from altimate-mcp-engine. */
@@ -183,6 +194,35 @@ export namespace AltimateApi {
       const detail = err instanceof Error ? err.message : String(err)
       return { ok: false, error: `Could not reach Altimate API: ${detail}` }
     }
+  }
+
+  /**
+   * Exchange a short-lived social `login_token` for the user's gateway
+   * `auth_token` via POST {altimateUrl}/auth/social/exchange. The token is
+   * one-time and short-lived, which keeps the raw api_key out of the loopback
+   * callback URL. Throws on a non-ok response or a missing `auth_token`.
+   */
+  export async function exchangeSocialToken(altimateUrl: string, instance: string, token: string): Promise<string> {
+    const url = `${altimateUrl.replace(/\/+$/, "")}/auth/social/exchange`
+    // upstream_fix parity: bound the request so a network stall can't hang the callback.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15_000)
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "x-tenant": instance,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ token }),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout))
+    if (!res.ok) {
+      const body = await res.text().catch(() => "")
+      throw new Error(`Social token exchange failed (${res.status} ${res.statusText}) ${body}`)
+    }
+    const data = (await res.json()) as { auth_token?: string }
+    if (!data.auth_token) throw new Error("Social token exchange did not return an auth_token")
+    return data.auth_token
   }
 
   async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
@@ -278,8 +318,7 @@ export namespace AltimateApi {
     const allIntegrations = await listIntegrations()
     return integrationIds.map((id) => {
       const def = allIntegrations.find((i) => i.id === id)
-      const tools =
-        def?.tools?.flatMap((t) => (t.enable_all ?? [t.key]).map((k) => ({ key: k }))) ?? []
+      const tools = def?.tools?.flatMap((t) => (t.enable_all ?? [t.key]).map((k) => ({ key: k }))) ?? []
       return { id, tools }
     })
   }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test"
 import type {
   AgentSideConnection,
   RequestPermissionRequest,
@@ -14,6 +14,27 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { ACPEvent } from "@/acp/event"
 import { ACPSession } from "@/acp/session"
+
+// altimate_change start — env-hermetic guard.
+// `Flag.ALTIMATE_CLI_YOLO` (and its OPENCODE_YOLO fallback) short-circuits the
+// permission handler at src/acp/permission.ts:57 with an auto-approve. When a
+// developer has that env var set in their shell (direnv, .zshrc, etc.), every
+// assertion in this file that expects a rejected/queued path silently sees the
+// auto-approve instead. Snapshot + restore the vars for this test file so the
+// suite passes deterministically regardless of the developer's ambient env.
+let savedYolo: string | undefined
+let savedOpencodeYolo: string | undefined
+beforeAll(() => {
+  savedYolo = process.env["ALTIMATE_CLI_YOLO"]
+  savedOpencodeYolo = process.env["OPENCODE_YOLO"]
+  delete process.env["ALTIMATE_CLI_YOLO"]
+  delete process.env["OPENCODE_YOLO"]
+})
+afterAll(() => {
+  if (savedYolo !== undefined) process.env["ALTIMATE_CLI_YOLO"] = savedYolo
+  if (savedOpencodeYolo !== undefined) process.env["OPENCODE_YOLO"] = savedOpencodeYolo
+})
+// altimate_change end
 
 type PermissionEvent = Extract<Event, { type: "permission.asked" }>
 type PermissionReplyParams = Parameters<OpencodeClient["permission"]["reply"]>[0]

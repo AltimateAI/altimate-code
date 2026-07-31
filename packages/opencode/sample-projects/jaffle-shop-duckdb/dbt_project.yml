@@ -1,0 +1,16 @@
+name: "jaffle_shop"
+version: "1.0.0"
+
+profile: "jaffle_shop"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  jaffle_shop:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

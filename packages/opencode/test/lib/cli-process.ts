@@ -312,7 +312,34 @@ export function withCliFixture<A, E>(
     }
 
     const run = (message: string, opts?: RunOpts): Effect.Effect<RunResult> => {
-      return spawn(runArgs(message, opts), runOpts(opts))
+      // altimate_change start — retry once on SQLite "database is locked" from the child
+      // (v0.9.4 harness fix, re-homed here after the v1.18.10 merge split runArgs into a pure
+      // argv builder). Session storage opens SQLite at boot and the WAL checkpoint can collide
+      // with the tracer's write on cold spawns under parallel test load — a real transient, not
+      // a product bug. Retry only this error class; share the ORIGINAL timeout budget across
+      // both attempts (capped at max(remaining, 15s)) so the retry can't blow past bun's
+      // per-test timeout.
+      return Effect.gen(function* () {
+        const startedAt = Date.now()
+        const originalTimeoutMs = opts?.timeoutMs ?? 60_000
+        const argv = runArgs(message, opts)
+        const options = runOpts(opts)
+        const first = yield* spawn(argv, options)
+        if (first.exitCode === 0) return first
+        if (!/database is locked/i.test(first.stderr)) return first
+        // Emit a warning so a silent regression from transient → systematic stays visible in
+        // CI logs — the retry masking the failure would otherwise defeat the harness.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[cli-process] child hit \`database is locked\` on first attempt (exit=${first.exitCode}); retrying once. ` +
+            `If you see this often, the SQLite WAL/checkpoint contention has moved from transient to systematic.`,
+        )
+        const elapsed = Date.now() - startedAt
+        const remaining = Math.max(originalTimeoutMs - elapsed, 15_000)
+        // If the retry ALSO hits the lock, surface it — expectExit fires on the non-zero exit.
+        return yield* spawn(argv, { ...options, timeoutMs: remaining })
+      })
+      // altimate_change end
     }
 
     const startRun = Effect.fn("opencode.startRun")(function* (message: string, opts?: RunOpts) {
