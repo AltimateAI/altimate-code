@@ -89,19 +89,59 @@ function resolveNodePath(): string {
 
 // altimate_change start — staleness guard.
 // The binary embeds NAPI .node files that get renamed as the altimate-core
-// hash changes; script/build.ts is the source of truth for that embed logic.
-// A local binary older than build.ts is guaranteed to be checked against
+// hash changes; both `script/` (build logic) and `src/` (compiled sources)
+// contribute to what the binary actually is. A local binary older than the
+// newest touched .ts under either tree is guaranteed to be checked against
 // invariants that no longer match. Skip rather than fail — the developer's
 // intent when running `bun test` after `git pull` is not to rebuild the binary
 // out-of-band, so a stale binary should surface as an actionable skip, not
 // a red suite that would otherwise be green.
+//
+// Consensus review m5: an earlier version compared against script/build.ts
+// only, which caught the rare "build logic changed" case and missed the
+// common "src/ changed" case. Walk both trees now; ignore node_modules and
+// hidden dirs so a stray watcher touch doesn't invalidate a fresh binary.
+function newestSourceMtime(): number {
+  const roots = [path.join(PKG_DIR, "src"), path.join(PKG_DIR, "script")]
+  let newest = 0
+  const IGNORED = new Set(["node_modules", ".turbo", ".cache", "dist", "target"])
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue
+      if (IGNORED.has(entry.name)) continue
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      // Only consider files that actually contribute to the compiled binary
+      // — build.ts globs *.ts / *.tsx / *.json / *.txt for embedding. A
+      // stray editor swap file (.swp) or backup shouldn't trigger a re-skip.
+      if (!/\.(tsx?|json|txt|md)$/.test(entry.name)) continue
+      try {
+        const m = fs.statSync(full).mtimeMs
+        if (m > newest) newest = m
+      } catch {
+        /* ignore stat errors — a missing file doesn't invalidate the guard */
+      }
+    }
+  }
+  for (const root of roots) walk(root)
+  return newest
+}
+
 function isBinaryStale(binaryPath: string): boolean {
   try {
-    const buildScript = path.join(PKG_DIR, "script", "build.ts")
-    if (!fs.existsSync(buildScript)) return false
     const binMtime = fs.statSync(binaryPath).mtimeMs
-    const scriptMtime = fs.statSync(buildScript).mtimeMs
-    return binMtime < scriptMtime
+    const sourceMtime = newestSourceMtime()
+    if (sourceMtime === 0) return false // couldn't walk sources — err on the side of running
+    return binMtime < sourceMtime
   } catch {
     return false
   }
@@ -117,7 +157,7 @@ describe("compiled binary smoke test", () => {
   if (!binary) {
     test.skip("no local build found — run `bun run build:local` first", () => {})
   } else if (stale) {
-    test.skip("local binary is older than script/build.ts — run `bun run build:local` to refresh", () => {})
+    test.skip("local binary is older than the newest src/ or script/ file — run `bun run build:local` to refresh", () => {})
   }
 
   runTest("binary starts and prints version", () => {

@@ -299,9 +299,22 @@ export function withCliFixture<A, E>(
         const first = yield* spawn(argv, opts)
         if (first.exitCode === 0) return first
         if (!/database is locked/i.test(first.stderr)) return first
+        // Emit a warning so a silent regression from transient → systematic
+        // stays visible in CI logs — the retry masking the failure would
+        // otherwise defeat the point of running the harness.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[cli-process] child hit \`database is locked\` on first attempt (exit=${first.exitCode}); retrying once. ` +
+            `If you see this often, the SQLite WAL/checkpoint contention has moved from transient to systematic.`,
+        )
         const elapsed = Date.now() - startedAt
         const remaining = Math.max(originalTimeoutMs - elapsed, 15_000)
-        return yield* spawn(argv, { ...opts, timeoutMs: remaining })
+        const second = yield* spawn(argv, { ...opts, timeoutMs: remaining })
+        // If the retry ALSO hits the lock, surface it — don't return a
+        // succeeded-looking envelope. Bun's expectExit(second, 0) will
+        // fire on the non-zero exit; the second attempt's stderr is
+        // what will be logged for the debugger.
+        return second
       })
       // altimate_change end
     }
