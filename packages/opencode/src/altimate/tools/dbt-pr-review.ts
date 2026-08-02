@@ -2,6 +2,8 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Instance } from "../../project/instance"
 import { reviewPullRequest } from "../review/run"
+// altimate_change — review feature telemetry
+import { emitReviewRun } from "../review/telemetry"
 import { renderSummary, verdictHeadline } from "../review/format"
 import { ReviewMode } from "../review/verdict"
 
@@ -35,14 +37,36 @@ export const DbtPrReviewTool = Tool.define("dbt_pr_review", {
   }),
   async execute(args, ctx) {
     const cwd = Instance.directory
-    const env = await reviewPullRequest({
-      cwd,
-      base: args.base,
-      head: args.head,
-      manifestPath: args.manifest_path,
-      mode: args.mode,
-      modelVersion: ctx.agent,
+    // altimate_change start — same review_run event as the CLI path, distinguished by
+    // `invocation`. Instrumenting only cli/cmd/review.ts would miss every review the agent runs
+    // through this tool, which is a real share of usage. Unlike the CLI, this path has a session.
+    const startedAt = Date.now()
+    let env
+    try {
+      env = await reviewPullRequest({
+        cwd,
+        base: args.base,
+        head: args.head,
+        manifestPath: args.manifest_path,
+        mode: args.mode,
+        modelVersion: ctx.agent,
+      })
+    } catch (err) {
+      emitReviewRun({
+        invocation: "tool",
+        durationMs: Date.now() - startedAt,
+        sessionID: ctx.sessionID,
+        error: err,
+      })
+      throw err
+    }
+    emitReviewRun({
+      invocation: "tool",
+      durationMs: Date.now() - startedAt,
+      sessionID: ctx.sessionID,
+      envelope: env,
     })
+    // altimate_change end
     return {
       title: verdictHeadline(env),
       metadata: {

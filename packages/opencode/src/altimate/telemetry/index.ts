@@ -906,6 +906,55 @@ export namespace Telemetry {
       }
   // altimate_change end
 
+    // altimate_change start — review feature usage.
+    //
+    // Deliberately NO `source` field on either event: the envelope seeds `source` from
+    // Flag.ALTIMATE_CLI_CLIENT and an event-declared `source` would override it. Leaving it off is
+    // what makes caller attribution work with no other code — a plugin setting
+    // ALTIMATE_CLI_CLIENT is already attributed.
+    | {
+        type: "review_run"
+        timestamp: number
+        /** Real session on the tool path; empty for the CLI command, which has no chat session. */
+        session_id: string
+        /** Which caller reached the engine. `source` says who launched the process; this says how
+         *  review was invoked within it. */
+        invocation: "cli" | "tool"
+        status: "completed" | "failed"
+        duration_ms: number
+        /** Present when status is `completed`. */
+        verdict?: string
+        ideal_verdict?: string
+        mode?: string
+        tier?: string
+        tier_forced?: boolean
+        /** The envelope's fidelity flag: no reviewable files, no usable manifest for the changed
+         *  models, OR a surfaced finding whose engine analysis was undecidable. It does NOT mean
+         *  merely "no warehouse". */
+        degraded?: boolean
+        stale_manifest?: boolean
+        critical?: number
+        warning?: number
+        suggestion?: number
+        /** JSON object of the 14-value ReviewCategory enum, zero-filled. Counts surfaced findings
+         *  after dedupe, rubric exclusion and severity threshold — not raw rule detections, and
+         *  not rule-level: `Finding` does not retain a rule key. */
+        by_category?: Record<string, number>
+        /** Present when status is `failed`. */
+        reason?: "config_error" | "git_error" | "error"
+      }
+    | {
+        type: "review_post_outcome"
+        timestamp: number
+        session_id: string
+        /** `partial` covers every "not fully posted as attempted" state PostResult can express —
+         *  inline comments fell back, a post error was recorded, or no review id came back. The
+         *  shape cannot distinguish finer outcomes than that. */
+        outcome: "not_requested" | "target_unresolved" | "full" | "partial" | "summary_failed"
+        duration_ms: number
+      }
+  // altimate_change end
+
   /** SHA256 hash a masked error message for anonymous grouping. */
   // altimate_change start — provider identity for the onboarding funnel.
   //
