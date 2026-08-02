@@ -1852,6 +1852,10 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
+    // doInit() only assigns userEmail when Account.active() returns one, so without this a
+    // logout followed by a re-init in the same process kept hashing the previous account into
+    // ai.user.id.
+    userEmail = ""
     // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
     // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
     // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.

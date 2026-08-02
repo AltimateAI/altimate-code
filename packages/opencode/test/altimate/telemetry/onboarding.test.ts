@@ -384,7 +384,9 @@ describe("launch correlation id", () => {
 
       // Select by name rather than by position: the telemetry buffer is module-global, so a
       // sibling test file can leave events in it and they flush alongside these.
-      const envelopes = JSON.parse(bodies[0]) as any[]
+      // Across ALL bodies, not bodies[0]: the buffer is module-global and the 5s interval can
+      // fire before this flush, which would put these two events in different batches.
+      const envelopes = bodies.flatMap((body) => JSON.parse(body) as any[])
       const byName = (name: string) => envelopes.find((e) => e.data.baseData.name === name)
       const preSession = byName("onboarding_started")
       const withSession = byName("scan_gate_choice")
@@ -396,7 +398,10 @@ describe("launch correlation id", () => {
       expect(preSession.data.baseData.properties.launch_id).toBeTruthy()
       expect(preSession.data.baseData.properties.launch_id).toBe(withSession.data.baseData.properties.launch_id)
     } finally {
-      process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
+      // Unconditional assignment would coerce an unset original to the string "undefined" and
+      // leak a disabled-telemetry flag into every sibling suite in the process.
+      if (origDisabled !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
+      else delete process.env.ALTIMATE_TELEMETRY_DISABLED
       if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       if (origHome !== undefined) process.env.HOME = origHome
