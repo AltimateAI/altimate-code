@@ -825,7 +825,9 @@ export namespace Telemetry {
         type: "scan_gate_choice"
         timestamp: number
         session_id: string
-        choice: "scan" | "skip"
+        /** `dismissed` is esc / click-away: the gate was shown but neither branch was taken, and
+         *  abandonment cannot cover it because completion already fired on the same transition. */
+        choice: "scan" | "skip" | "dismissed"
       }
     | {
         type: "environment_scan_completed"
@@ -923,12 +925,16 @@ export namespace Telemetry {
   ])
 
   /** The curated picker's own rows map to named enum values; everything else is `other`. */
-  const CURATED_PROVIDER_ENUM: Record<string, string> = {
+  // Null-prototype: a plain literal resolves ["constructor"], ["toString"] and ["valueOf"] to
+  // truthy functions, and normalizeCustomProviderID permits lowercase letters — so a provider id of
+  // `constructor` would be assigned straight to `provider` and shipped, bypassing the allowlist
+  // this function exists to enforce.
+  const CURATED_PROVIDER_ENUM: Record<string, string> = Object.assign(Object.create(null), {
     "altimate-backend": "altimate_gateway",
     anthropic: "anthropic",
     openai: "openai",
     google: "google",
-  }
+  })
 
   /** Classify a provider id for `provider_selected`. Returns the enum value plus the raw id when
    *  it is safe to send. */
@@ -1418,6 +1424,10 @@ export namespace Telemetry {
   // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
   // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
   let shutdownPromise: Promise<void> | undefined
+  // altimate_change — init chained onto an in-flight shutdown; see init().
+  let reinitPromise: Promise<void> | undefined
+  // altimate_change — the currently running flush, so shutdown waits rather than racing it.
+  let inFlightFlush: Promise<void> | undefined
 
   // altimate_change start — per-launch correlation id, shared across threads via the environment.
   // The TUI worker is spawned after the CLI middleware has already initialised telemetry on the
@@ -1533,16 +1543,29 @@ export namespace Telemetry {
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
-    if (!initPromise) {
-      // altimate_change start — never re-init across an in-flight shutdown.
-      // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end,
-      // so a new session can begin while the previous shutdown is still awaiting flush(). Without
-      // this, init() returns immediately, the new session's events land in `buffer`, and the
-      // in-flight doShutdown() then clears that buffer — losing every event tracked in the gap.
-      initPromise = shutdownPromise ? shutdownPromise.catch(() => {}).then(doInit) : doInit()
-      // altimate_change end
+    // altimate_change start — never re-init across an in-flight shutdown.
+    //
+    // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
+    // new session routinely begins while the previous shutdown is still awaiting flush().
+    //
+    // The shutdown check must come FIRST. An earlier version tested it inside `if (!initPromise)`,
+    // but doShutdown() leaves initPromise set for its whole duration — it is cleared only after
+    // `await flush()`. So during the very window this protects against, the old code took the other
+    // branch, handed back the stale resolved promise, and the caller tracked into a buffer that
+    // doShutdown() then emptied. The guard was unreachable and the event loss was live.
+    //
+    // Chaining onto shutdownPromise keeps the generations separate: callers arriving mid-shutdown
+    // wait for the new init rather than joining the dying one.
+    if (shutdownPromise) {
+      return (reinitPromise ??= shutdownPromise
+        .catch(() => {})
+        .then(doInit)
+        .finally(() => {
+          reinitPromise = undefined
+        }))
     }
-    return initPromise
+    return (initPromise ??= doInit())
+    // altimate_change end
   }
 
   async function doInit() {
@@ -1652,7 +1675,23 @@ export namespace Telemetry {
   // flush() against an external timer does not cancel the fetch: the losing promise keeps
   // running and can reset module state after the caller has moved on. Threading the deadline
   // into the existing AbortController actually aborts the request.
-  export async function flush(timeoutMs: number = REQUEST_TIMEOUT_MS) {
+  export async function flush(timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<void> {
+    // altimate_change start — serialize flushes.
+    //
+    // Serializing shutdown() alone was not enough: the 5s interval timer can already have spliced
+    // `buffer` and be awaiting fetch when a shutdown begins. Shutdown's own flush then finds an
+    // empty buffer, resets module state and returns — and in the TUI worker, terminate() follows
+    // immediately, killing the timer's request mid-send. Worse, if that request fails first, its
+    // retry path re-inserts events into a buffer shutdown has already cleared, and a later init()
+    // ships them under the next lifecycle.
+    //
+    // Chaining every flush through one promise means shutdown waits for an in-flight batch instead
+    // of racing it.
+    inFlightFlush = (inFlightFlush ?? Promise.resolve()).then(() => doFlush(timeoutMs)).catch(() => {})
+    return inFlightFlush
+  }
+
+  async function doFlush(timeoutMs: number) {
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
@@ -1762,7 +1801,11 @@ export namespace Telemetry {
       clearInterval(flushTimer)
       flushTimer = undefined
     }
+    // altimate_change — drain any flush already running before the final one, so a timer batch
+    // in mid-request is not abandoned and cannot write back into a buffer we are about to clear.
+    if (inFlightFlush) await inFlightFlush.catch(() => {})
     await flush(timeoutMs)
+    inFlightFlush = undefined
     enabled = false
     appInsights = undefined
     buffer = []
@@ -1770,6 +1813,9 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
+    // altimate_change — the launch id is per process, but tests re-init the module in one process;
+    // leaving it cached made a second lifecycle inherit the first one's id.
+    cachedLaunchId = undefined
     // altimate_change — only clear initPromise if it is still the one this shutdown began with.
     // init() can set `initPromise = shutdownPromise.then(doInit)`; nulling that unconditionally
     // discards a doInit() which has not run yet, so the next init() starts a second one.

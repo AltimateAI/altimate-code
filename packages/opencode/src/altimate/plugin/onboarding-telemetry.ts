@@ -75,7 +75,9 @@ function countScanConnections(metadata: unknown): number {
  */
 function isJobCompletion(tool: string, output: { metadata?: unknown }): boolean {
   if (tool !== "sample_setup") return false
-  return (output.metadata as { success?: unknown } | undefined)?.success !== false
+  // Require an explicit true. `!== false` counted missing or malformed metadata as success, so a
+  // tool that returned nothing usable was recorded as a completed activation job.
+  return (output.metadata as { success?: unknown } | undefined)?.success === true
 }
 
 export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Hooks> {
@@ -126,10 +128,16 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
 
       // Selection lands on the first job-shaped tool call. A job that starts and then fails still
       // counts as selected — the user did choose it.
-      if (OnboardingTelemetry.claimActivationJobSelected(input.sessionID)) {
+      if (OnboardingTelemetry.claimActivationJobSelected(input.sessionID, job)) {
         void OnboardingTelemetry.emit({ type: "activation_job_selected", job }, input.sessionID)
       }
-      if (isJobCompletion(input.tool, output) && OnboardingTelemetry.claimFirstJobCompleted(input.sessionID)) {
+      // Only complete the job that was actually selected. Skill-driven jobs stay without a
+      // completion event, as the docs already state.
+      if (
+        isJobCompletion(input.tool, output) &&
+        OnboardingTelemetry.isSelectedJob(input.sessionID, job) &&
+        OnboardingTelemetry.claimFirstJobCompleted(input.sessionID)
+      ) {
         void OnboardingTelemetry.emit({ type: "first_job_completed", job }, input.sessionID)
       }
     },

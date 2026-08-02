@@ -945,13 +945,14 @@ export const ProjectScanTool = Tool.define("project_scan", {
     // otherwise be recorded as having none.
     //
     // degraded[] is a sorted list of short detection-failure keys — no paths, hosts, or messages.
-    // Only for onboarding runs. project_scan is also reachable via /discover and any
-    // model-initiated call; without this guard an event in the onboarding taxonomy fires for all
-    // of them, and a funnel query on scan_gate_shown → environment_scan_completed can exceed 100%.
+    // Only for onboarding runs, and only once. project_scan is also reachable via /discover and
+    // any model-initiated call; ungated, an onboarding-taxonomy event fires for all of them. The
+    // once-per-session claim matters too: a second scan inside the same onboarding session would
+    // otherwise push scan_gate_shown → environment_scan_completed above 100%.
     //
     // Explicit session id as well: emit() otherwise falls back to the process-global telemetry
     // context, which is set per prompt loop, so two concurrent sessions overwrite each other's.
-    if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID)) {
+    if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID) && OnboardingTelemetry.claimEnvironmentScan(ctx.sessionID)) {
       void OnboardingTelemetry.emit(
         {
           type: "environment_scan_completed",

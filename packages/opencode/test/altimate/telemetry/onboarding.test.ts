@@ -382,8 +382,21 @@ type TuiEventAsEmitInput<E> = E extends { name: infer N } ? Omit<E, "name"> & { 
 // the types at that call site instead.
 type DirectTuiEvent = Exclude<OnboardingTelemetryEvent, { name: "provider_selected" }>
 
+// Assignable in BOTH directions. One-way assignability only proved each TUI variant matched *some*
+// telemetry variant — removing a TUI event, narrowing an enum, or adding an extra field all still
+// compiled. Pinning the name sets equal in both directions catches drift either side introduces.
+type DirectTuiName = DirectTuiEvent["name"]
+type TelemetryOnboardingName = Extract<
+  Onboarding.OnboardingEmitInput,
+  { type: DirectTuiName }
+>["type"]
+
 const _tuiEventsMatchTelemetry: Onboarding.OnboardingEmitInput = null as unknown as TuiEventAsEmitInput<DirectTuiEvent>
+const _namesAreExhaustive: DirectTuiName = null as unknown as TelemetryOnboardingName
+const _namesAreComplete: TelemetryOnboardingName = null as unknown as DirectTuiName
 void _tuiEventsMatchTelemetry
+void _namesAreExhaustive
+void _namesAreComplete
 
 describe("cross-package event parity", () => {
   test("is enforced by the type assertion above, not at runtime", () => {

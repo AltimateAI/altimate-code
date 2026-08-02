@@ -37,7 +37,7 @@ export type OnboardingTelemetryEvent =
   | { name: "big_pickle_confirm_shown"; origin: "welcome" | "model" }
   | { name: "big_pickle_choice"; choice: "accept" | "cancel" }
   | { name: "scan_gate_shown" }
-  | { name: "scan_gate_choice"; choice: "scan" | "skip" }
+  | { name: "scan_gate_choice"; choice: "scan" | "skip" | "dismissed" }
   | { name: "onboarding_completed" }
 
 export type TrackOnboarding = (event: OnboardingTelemetryEvent) => void

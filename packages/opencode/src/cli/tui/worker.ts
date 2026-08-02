@@ -27,6 +27,9 @@ import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
 
+// altimate_change — must match the withTimeout budget in cli/cmd/tui.ts stop().
+const SHUTDOWN_BUDGET_MS = 5000
+
 Heap.start()
 
 const traceConsumer = new TraceConsumer()
@@ -107,30 +110,34 @@ export const rpc = {
     )
   },
   async shutdown() {
+    // altimate_change — cli/cmd/tui.ts allows this RPC 5s before worker.terminate().
+    const shutdownStartedAt = Date.now()
     // altimate_change start — trace: drain pending events (bounded), then finalize SYNCHRONOUSLY.
     // On a quiet Bun Worker thread, pending async fs writes from the consumer don't flush before
     // worker.terminate(), so an async flush() silently writes nothing; flushSync() uses writeFileSync.
     await Promise.race([traceTail, new Promise((r) => setTimeout(r, 2000))]).catch(() => {})
     traceConsumer.flushSync()
     // altimate_change end
-    // altimate_change start — flush this thread's telemetry buffer before the worker dies.
-    // The worker loads its own instance of the Telemetry module (separate buffer from the main
-    // thread), and server-side events — gateway auth, project scan, sample setup, session
-    // events — land here. cli/cmd/tui.ts terminates the worker immediately after this RPC
-    // returns, so anything still buffered is lost.
+    await InstanceRuntime.disposeAllInstances()
+    if (server) await server.stop(true)
+    // altimate_change start — telemetry flush LAST, on whatever of the budget remains.
     //
-    // Bounded at 2s: the caller allows 5s total for this RPC and the trace drain above already
-    // claims up to 2s of it, so an unbounded flush (up to REQUEST_TIMEOUT_MS = 10s) would be
-    // cut off mid-request by worker.terminate() anyway. The bound is applied inside shutdown()
-    // rather than by racing a timer here — racing neither cancels the flush nor clears its timer.
+    // This thread owns its own Telemetry module instance (separate buffer from the main thread),
+    // and the server-side events — gateway auth, project scan, sample setup, session events — land
+    // here. cli/cmd/tui.ts terminates the worker immediately after this RPC returns, so anything
+    // still buffered is lost.
+    //
+    // Ordered after instance disposal and server stop deliberately. The caller gives this whole
+    // RPC 5s; the trace drain above already claims up to 2s. Taking a further fixed 2s here left
+    // core cleanup at risk of being cut off by terminate() — and cleanup losing its slot is worse
+    // than losing a telemetry batch. Whatever is left of the budget goes to telemetry instead.
     try {
-      await Telemetry.shutdown({ timeoutMs: 2000 })
+      const remaining = Math.max(250, SHUTDOWN_BUDGET_MS - (Date.now() - shutdownStartedAt))
+      await Telemetry.shutdown({ timeoutMs: remaining })
     } catch {
       // Telemetry must never block worker shutdown.
     }
     // altimate_change end
-    await InstanceRuntime.disposeAllInstances()
-    if (server) await server.stop(true)
   },
 }
 

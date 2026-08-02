@@ -639,6 +639,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         trackOnboarding({ name: "scan_gate_shown" })
         dialog.replace(() => (
           <DialogScanGate
+            onDismiss={() => trackOnboarding({ name: "scan_gate_choice", choice: "dismissed" })}
             onChoose={(arg) => {
               // altimate_change — funnel: emitted here rather than inside the gate because the
               // dialog overlay renders outside the provider tree; `onChoose` is already the

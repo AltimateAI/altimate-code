@@ -20,7 +20,15 @@ import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 // favorites/recent/provider list into READY / NEEDS-SETUP sections with a Big Pickle
 // fallback. This is an in-place rewrite of the upstream component; on an upstream
 // merge, expect a conflict here and re-apply the READY/NEEDS-SETUP shaping.
-export function DialogModel(props: { providerID?: string }) {
+export function DialogModel(props: {
+  providerID?: string
+  /** altimate_change — funnel: true only when opened from the curated picker's "Search all
+   *  providers…" row. The catalogue is also opened by the gateway no-usable-model branch and the
+   *  BYOK success branch (dialog-provider.tsx), and hardcoding `true` recorded the most common
+   *  non-gateway first run as having gone through search — which is precisely the distinction
+   *  via_search exists to make. */
+  viaSearch?: boolean
+}) {
   // altimate_change — funnel seam (no-op outside a first run, and when no host tracker exists)
   const trackOnboarding = useOnboardingTelemetry()
   const firstRunActive = useFirstRunActive()
@@ -88,7 +96,7 @@ export function DialogModel(props: { providerID?: string }) {
                     name: "provider_selected",
                     providerID: provider.id,
                     modelID,
-                    via_search: true,
+                    via_search: props.viaSearch ?? false,
                   })
                 }
                 onSelect(provider.id, modelID)
@@ -116,7 +124,21 @@ export function DialogModel(props: { providerID?: string }) {
               description: o.description,
               category: "NEEDS SETUP",
               footer: undefined as string | undefined,
-              onSelect: o.onSelect,
+              // altimate_change — funnel: record the choice here too. READY means "already holds
+              // valid credentials", which on a first run is empty or near-empty, so instrumenting
+              // only that section missed every long-tail provider — the exact population the
+              // search path was added to capture. Emitted before the auth flow runs, matching the
+              // documented promise that a sign-in later cancelled still counts as a selection.
+              onSelect: () => {
+                if (firstRunActive()) {
+                  trackOnboarding({
+                    name: "provider_selected",
+                    providerID: o.value,
+                    via_search: props.viaSearch ?? false,
+                  })
+                }
+                return o.onSelect?.()
+              },
             }))
           const bigPickle = {
             value: "big-pickle" as { providerID: string; modelID: string } | string,
@@ -125,6 +147,16 @@ export function DialogModel(props: { providerID?: string }) {
             category: "NEEDS SETUP",
             footer: undefined as string | undefined,
             async onSelect() {
+              // altimate_change — Big Pickle reached through the catalogue emitted its confirm
+              // events but never a provider_selected, so the choice was invisible.
+              if (firstRunActive()) {
+                trackOnboarding({
+                  name: "provider_selected",
+                  providerID: "opencode",
+                  modelID: "big-pickle",
+                  via_search: props.viaSearch ?? false,
+                })
+              }
               dialog.replace(() => <DialogBigPickleConfirm origin="model" />)
             },
           }

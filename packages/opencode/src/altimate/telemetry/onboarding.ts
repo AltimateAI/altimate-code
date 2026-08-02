@@ -126,6 +126,9 @@ export async function emit(event: EmitInput, sessionID?: string): Promise<void> 
     if (stage) advance(stage)
     if (event.type === "onboarding_completed") completed = true
 
+    // Resolve the ambient session BEFORE the await: a setContext() landing during init() would
+    // otherwise reassign it, which is exactly what the note below says this prevents.
+    const resolvedSession = sessionID ?? Telemetry.getContext().sessionId
     await Telemetry.init()
     Telemetry.track({
       ...event,
@@ -134,7 +137,7 @@ export async function emit(event: EmitInput, sessionID?: string): Promise<void> 
       // process-global and set by the session loop, so a plugin hook firing for session A while
       // the context still points at session B would otherwise misattribute the event — or stamp
       // "" when no session has run yet, which is the normal case for the gateway events.
-      session_id: sessionID ?? Telemetry.getContext().sessionId,
+      session_id: resolvedSession,
     } as Telemetry.Event)
   } catch {
     // Telemetry must never break onboarding.
@@ -200,8 +203,11 @@ type SessionRecord = {
   onboarding: boolean
   menuShown: boolean
   jobSelected: boolean
+  /** Which job was selected, so completion cannot name a different one. */
+  selectedJob?: string
   jobCompleted: boolean
   firstPromptSent: boolean
+  environmentScanned: boolean
 }
 
 const sessions = new Map<string, SessionRecord>()
@@ -210,23 +216,41 @@ function record(sessionID: string): SessionRecord {
   const existing = sessions.get(sessionID)
   if (existing) return existing
   if (sessions.size >= MAX_TRACKED_SESSIONS) {
-    const oldest = sessions.keys().next()
-    if (!oldest.done) sessions.delete(oldest.value)
+    // Prefer evicting a non-onboarding record. Plain insertion order could drop a live onboarding
+    // session, after which isOnboardingSession() returns false and the rest of that user's
+    // activation events vanish with no trace.
+    let victim: string | undefined
+    for (const [id, rec] of sessions) {
+      if (!rec.onboarding) {
+        victim = id
+        break
+      }
+    }
+    if (victim === undefined) {
+      const oldest = sessions.keys().next()
+      if (!oldest.done) victim = oldest.value
+    }
+    if (victim !== undefined) sessions.delete(victim)
   }
   const created: SessionRecord = {
     commandSubmission: false,
     onboarding: false,
     menuShown: false,
     jobSelected: false,
+    selectedJob: undefined,
     jobCompleted: false,
     firstPromptSent: false,
+    environmentScanned: false,
   }
   sessions.set(sessionID, created)
   return created
 }
 
 /** Claim a once-per-session flag. Returns false if it was already claimed. */
-function claim(sessionID: string, key: "menuShown" | "jobSelected" | "jobCompleted" | "firstPromptSent"): boolean {
+function claim(
+  sessionID: string,
+  key: "menuShown" | "jobSelected" | "jobCompleted" | "firstPromptSent" | "environmentScanned",
+): boolean {
   const entry = record(sessionID)
   if (entry[key]) return false
   entry[key] = true
@@ -266,9 +290,20 @@ export function isOnboardingSession(sessionID: string): boolean {
 }
 
 export const claimActivationMenu = (sessionID: string) => claim(sessionID, "menuShown")
-export const claimActivationJobSelected = (sessionID: string) => claim(sessionID, "jobSelected")
+export function claimActivationJobSelected(sessionID: string, job: string): boolean {
+  if (!claim(sessionID, "jobSelected")) return false
+  record(sessionID).selectedJob = job
+  return true
+}
+
+/** True only when `job` is the one this session actually selected. Without this the funnel could
+ *  report sql_review selected and sample_duck_db completed — not a coherent conversion pair. */
+export function isSelectedJob(sessionID: string, job: string): boolean {
+  return sessions.get(sessionID)?.selectedJob === job
+}
 export const claimFirstJobCompleted = (sessionID: string) => claim(sessionID, "jobCompleted")
 export const claimFirstPrompt = (sessionID: string) => claim(sessionID, "firstPromptSent")
+export const claimEnvironmentScan = (sessionID: string) => claim(sessionID, "environmentScanned")
 
 /** Test seam — module state is per-process by design, so tests need an explicit reset. */
 export function resetForTest() {

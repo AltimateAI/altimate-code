@@ -1,5 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
+import os from "node:os"
 import z from "zod"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Tool } from "../../tool/tool"
@@ -112,13 +113,14 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       // altimate_change — onboarding funnel: a broken install (sample assets missing) is a
       // sample-setup failure too. Without this the failure count only covers materialization
       // errors and silently under-reports the "CLI shipped without its assets" case.
-      void OnboardingTelemetry.emit({
-        type: "sample_setup_completed",
-        success: false,
-        models: 0,
-        tables: 0,
-        reused: false,
-      }, ctx.sessionID)
+      if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
+        void OnboardingTelemetry.emit({
+            type: "sample_setup_completed",
+          success: false,
+          models: 0,
+          tables: 0,
+          reused: false,
+        }, ctx.sessionID)
       return {
         title: "Starter sample unavailable",
         // `success: false` is the disambiguator for consumers reading
@@ -172,13 +174,14 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       // fires per invocation, not once per sample. targetPath is never sent — it is a filesystem
       // path under the user's home.
       const sampleContents = countSampleContents(sampleSource.path)
-      void OnboardingTelemetry.emit({
-        type: "sample_setup_completed",
-        success: true,
-        models: sampleContents.models,
-        tables: sampleContents.tables,
-        reused: result.reused,
-      }, ctx.sessionID)
+      if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
+        void OnboardingTelemetry.emit({
+            type: "sample_setup_completed",
+          success: true,
+          models: sampleContents.models,
+          tables: sampleContents.tables,
+          reused: result.reused,
+        }, ctx.sessionID)
       // altimate_change end
       return {
         title: result.reused ? `Reused starter sample at ${result.targetPath}` : `Materialized starter sample at ${result.targetPath}`,
@@ -202,13 +205,14 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       const message = err instanceof Error ? err.message : String(err)
       // altimate_change — onboarding funnel: failed setup. The error message embeds filesystem
       // paths (unsafe HOME, unwritable parent), so it is not sent — only the boolean.
-      void OnboardingTelemetry.emit({
-        type: "sample_setup_completed",
-        success: false,
-        models: 0,
-        tables: 0,
-        reused: false,
-      }, ctx.sessionID)
+      if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
+        void OnboardingTelemetry.emit({
+            type: "sample_setup_completed",
+          success: false,
+          models: 0,
+          tables: 0,
+          reused: false,
+        }, ctx.sessionID)
       return {
         title: "Starter materialization failed",
         // `success: false` is the disambiguator for consumers reading
@@ -248,15 +252,37 @@ export const SampleSetupTool = Tool.define("sample_setup", {
 // Best-effort by construction: telemetry must never fail a sample setup, so any fs error
 // yields 0 rather than propagating.
 /**
- * Replace absolute filesystem paths with a placeholder.
+ * Redact filesystem paths from a message that will be shown to the model.
  *
- * Deliberately local rather than reusing Telemetry.maskString: importing the telemetry module
- * here drags in Config/Account and hangs this tool's tests. This only needs to handle paths.
+ * The previous version was a single broad regex, and executed against the real messages it both
+ * over- and under-redacted: `[\w.\-~ ]` includes a space, so a match ran past the path and ate the
+ * rest of the sentence ("cannot write to /a/b and the parent is read-only" → "cannot write to
+ * <path>"), destroying the diagnostic the model needs; a single-segment absolute path like `/root`
+ * — which rejectUnsafeHome produces verbatim — was never matched at all; and any character outside
+ * the class ended the match, so `/Users/José/…` and `/Users/O'Connor/…` survived partially.
+ *
+ * So: replace the specific locations we know by value first, which needs no pattern at all, then
+ * apply a conservative pattern that stops at whitespace and quotes rather than trying to guess
+ * where a path ends. Full detail is kept in `metadata.error`, which the model never sees.
  */
-function redactPaths(message: string): string {
-  return message
-    .replace(/(?:[A-Za-z]:)?[\\/](?:[\w.\-~ ]+[\\/])+[\w.\-~ ]*/g, "<path>")
-    .replace(/~[\\/][^\s'"]*/g, "<path>")
+function redactPaths(message: string, extra: (string | undefined)[] = []): string {
+  let out = message
+  for (const known of [os.homedir(), process.cwd(), os.tmpdir(), ...extra]) {
+    if (!known || known.length < 2) continue
+    out = out.split(known).join("<path>")
+  }
+  // Anything still looking like an absolute path: POSIX, Windows drive, or UNC. Terminates on
+  // whitespace or a quote so it cannot swallow the surrounding sentence.
+  return (
+    out
+      // Apostrophes are allowed inside the run: excluding them left "/Users/O'Connor/x" partially
+      // redacted as "'Connor<path>", leaking a surname. A trailing quote being swallowed is
+      // harmless by comparison — the text is being redacted either way.
+      .replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"`]*/g, "<path>")
+      .replace(/~\/[^\s"`]*/g, "<path>")
+      // Known-value replacement above can leave a prefix that the pattern then matches again.
+      .replace(/(?:<path>){2,}/g, "<path>")
+  )
 }
 
 function countFilesWithExtension(dir: string, extension: string): number {

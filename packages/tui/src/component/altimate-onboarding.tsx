@@ -73,7 +73,7 @@ interface WelcomeRow {
   name: string
   note: string
   tone: WelcomeTone
-  activate: () => void
+  activate: () => boolean
   // altimate_change — funnel: the "search all" row has no provider of its own; every other row
   // is identified by its raw providerID/modelID below and classified host-side.
   analyticsSearchAll?: boolean
@@ -98,25 +98,37 @@ export function DialogModelWelcome(props: {
   const [selected, setSelected] = createSignal(0)
   // altimate_change start — funnel: picker impression + provider choice
   const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
+  // model_picker_shown carries a `trigger`, so a /connect impression is already distinguishable and
+  // is kept. The choice events below are not distinguishable and are gated instead.
   onMount(() => trackOnboarding({ name: "model_picker_shown", trigger: props.trigger ?? "connect_command" }))
   // altimate_change end
 
   onMount(() => dialog.setSize("large"))
 
-  function connectProvider(id: string) {
-    // Reuse the exact provider onSelect (gateway flow for altimate-backend,
-    // auth-method screens for the BYOK providers).
-    providers()
-      .find((o) => o.value === id)
-      ?.onSelect?.()
+  /**
+   * Reuse the exact provider onSelect (gateway flow for altimate-backend, auth-method screens for
+   * the BYOK providers). Returns whether an action was actually dispatched: the server filters
+   * providers via `enabled_providers` / `disabled_providers` while these five rows are hardcoded,
+   * so a row can legitimately have no matching option and this would otherwise no-op in silence.
+   */
+  function connectProvider(id: string): boolean {
+    const option = providers().find((o) => o.value === id)
+    if (!option?.onSelect) return false
+    option.onSelect()
+    return true
   }
 
-  function chooseBigPickle() {
+  function chooseBigPickle(): boolean {
     dialog.replace(() => <DialogBigPickleConfirm origin="welcome" />)
+    return true
   }
 
-  function openFullCatalog() {
-    dialog.replace(() => <DialogModel />)
+  function openFullCatalog(): boolean {
+    // altimate_change — viaSearch marks this as the genuine search path; the catalogue's other
+    // entry points must not inherit it.
+    dialog.replace(() => <DialogModel viaSearch />)
+    return true
   }
 
   const rows = createMemo<WelcomeRow[]>(() => [
@@ -182,14 +194,22 @@ export function DialogModelWelcome(props: {
   let activated = false
   function activateRow(row: WelcomeRow) {
     if (activated) return
+    // Claim the latch only once the action actually dispatched. Setting it first bricked the
+    // dialog: `connectProvider` silently no-ops for a provider the server has filtered out, and
+    // every later Enter, `/` and mouse-up then returned early — on the first-run gate, before the
+    // user has any model at all.
+    const dispatched = row.activate()
+    if (!dispatched) return
     activated = true
-    trackOnboarding({
+    // Funnel-only: /connect opens this same picker for an established user, and provider_selected
+    // carries no trigger, so an ungated emit would contaminate that launch's funnel.
+    if (firstRunActive())
+      trackOnboarding({
       name: "provider_selected",
       ...(row.analyticsSearchAll
         ? { searchAll: true }
         : { providerID: row.providerID, modelID: row.modelID }),
-    })
-    row.activate()
+      })
   }
 
   // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
@@ -306,15 +326,19 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
   // `decided` guards against a double-submit: keyboard and mouse handlers both call yes()/no()
   // directly, and nothing prevents two firing before the dialog unmounts.
   const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
   let decided = false
-  onMount(() => trackOnboarding({ name: "big_pickle_confirm_shown", origin: props.origin }))
+  // Funnel-only: /model reaches this interstitial with origin="model" for an established user.
+  onMount(() => {
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_confirm_shown", origin: props.origin })
+  })
   // altimate_change end
 
   function no() {
     // altimate_change start
     if (decided) return
     decided = true
-    trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
     // altimate_change end
     dialog.replace(() =>
       props.origin === "welcome" ? <DialogModelWelcome trigger="big_pickle_back" /> : <DialogModel />,
@@ -324,7 +348,7 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
     // altimate_change start
     if (decided) return
     decided = true
-    trackOnboarding({ name: "big_pickle_choice", choice: "accept" })
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "accept" })
     // altimate_change end
     dialog.clear()
     local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
