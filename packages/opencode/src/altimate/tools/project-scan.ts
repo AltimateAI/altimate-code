@@ -936,9 +936,6 @@ export const ProjectScanTool = Tool.define("project_scan", {
     // for. Deliberately separate from `environment_census` above, which stays the richer
     // dbt/warehouse fingerprint; this one answers "did the scan find the user a working setup".
     //
-    // Fires on every project_scan, not just the onboarding one — the tool is also reachable via
-    // /discover and any model-initiated call.
-    //
     // has_warehouse and connections_found both come from totalConnections, NOT
     // connections.alreadyConfigured: connections discovered from dbt profiles, docker, and env
     // vars are counted separately, and a user whose only warehouse was auto-discovered would

@@ -3,7 +3,7 @@
 // first-run readiness state, the curated welcome/provider picker, and the Big
 // Pickle interstitial. Imports back into dialog-model are runtime-only (used inside
 // callbacks/JSX), so the circular reference is safe.
-import { createMemo, createSignal, For, Show, onMount } from "solid-js"
+import { createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useLocal } from "../context/local"
 import { useDialog } from "../ui/dialog"
 import { useTheme, selectedForeground } from "../context/theme"
@@ -317,7 +317,14 @@ export function DialogModelWelcome(props: {
 // Big Pickle interstitial — one confirm, default No. Custom component (not
 // DialogSelect) so the full warning wraps instead of clipping; y/n keys work,
 // enter accepts the highlighted row (No by default).
-export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
+export function DialogBigPickleConfirm(props: {
+  origin: "welcome" | "model"
+  /** altimate_change — funnel: carried only so the `no()` return path can hand it back to
+   *  DialogModel. Cancelling out of Big Pickle does not leave the catalogue the user reached
+   *  through "Search all providers…", but dropping it here re-created the next pick as
+   *  via_search:false. */
+  viaSearch?: boolean
+}) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
@@ -332,6 +339,16 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
   onMount(() => {
     if (firstRunActive()) trackOnboarding({ name: "big_pickle_confirm_shown", origin: props.origin })
   })
+  // Every close that is not y/n is still a decision not to take Big Pickle, and the funnel showed
+  // an impression with no choice for all of them. onCleanup (rather than the inline `esc` control)
+  // is what makes this cover ALL of them — the Escape key and click-away are handled by
+  // DialogProvider and never reach this component's own handlers. `decided` keeps yes()/no() from
+  // double-emitting when their dialog.clear()/replace() unmounts us.
+  onCleanup(() => {
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
+  })
   // altimate_change end
 
   function no() {
@@ -341,7 +358,11 @@ export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
     if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
     // altimate_change end
     dialog.replace(() =>
-      props.origin === "welcome" ? <DialogModelWelcome trigger="big_pickle_back" /> : <DialogModel />,
+      props.origin === "welcome" ? (
+        <DialogModelWelcome trigger="big_pickle_back" />
+      ) : (
+        <DialogModel viaSearch={props.viaSearch} />
+      ),
     )
   }
   function yes() {

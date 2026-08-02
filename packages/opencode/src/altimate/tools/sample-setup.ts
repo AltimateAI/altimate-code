@@ -109,13 +109,16 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `Could not locate the shipped starter sample source. This usually means the CLI ` +
         `was installed without its wrapper package assets. Reinstall with: ` +
         `\`npm i -g @altimateai/altimate-code@latest\`\n\n` +
-        `Underlying error: ${message}`
+        // Redacted for the same reason as the materialize_failed branch below: sample-manifest
+        // read/resolve errors embed absolute install paths, and `output` is what the model sees
+        // and what gets replayed to the provider on later turns.
+        `Underlying error: ${redactPaths(message)}`
       // altimate_change — onboarding funnel: a broken install (sample assets missing) is a
       // sample-setup failure too. Without this the failure count only covers materialization
       // errors and silently under-reports the "CLI shipped without its assets" case.
       if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
         void OnboardingTelemetry.emit({
-            type: "sample_setup_completed",
+          type: "sample_setup_completed",
           success: false,
           models: 0,
           tables: 0,
@@ -176,7 +179,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       const sampleContents = countSampleContents(sampleSource.path)
       if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
         void OnboardingTelemetry.emit({
-            type: "sample_setup_completed",
+          type: "sample_setup_completed",
           success: true,
           models: sampleContents.models,
           tables: sampleContents.tables,
@@ -207,7 +210,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       // paths (unsafe HOME, unwritable parent), so it is not sent — only the boolean.
       if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
         void OnboardingTelemetry.emit({
-            type: "sample_setup_completed",
+          type: "sample_setup_completed",
           success: false,
           models: 0,
           tables: 0,

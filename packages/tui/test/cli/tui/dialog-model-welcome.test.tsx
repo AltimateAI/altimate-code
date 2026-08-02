@@ -113,7 +113,7 @@ async function mountPicker(
                         <ThemeProvider mode="dark">
                           <LocalProvider>
                             {/* above DialogProvider, mirroring app.tsx */}
-                            <OnboardingTelemetryProvider track={(e) => events.push(e)}>
+                            <OnboardingTelemetryProvider track={(e) => { events.push(e) }}>
                               <DialogProvider>
                                 <DialogModelWelcome trigger={trigger} />
                               </DialogProvider>

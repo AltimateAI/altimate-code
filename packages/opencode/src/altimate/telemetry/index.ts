@@ -50,6 +50,21 @@ export namespace Telemetry {
   const MAX_BUFFER_SIZE = 200
   const REQUEST_TIMEOUT_MS = 10_000
 
+  /**
+   * altimate_change — single source of truth for the TUI exit-path flush budget, referenced by
+   * BOTH the `withTimeout(client.call("shutdown", ...))` deadline on the main thread
+   * (cli/cmd/tui.ts) and the worker's remaining-budget computation (cli/tui/worker.ts). They must
+   * agree: the worker's buffer flush exists only because `worker.terminate()` would otherwise
+   * discard it, and if the main thread's deadline were the shorter of the two it would truncate
+   * the flush and silently restore the data loss this guards against.
+   */
+  export const TUI_SHUTDOWN_BUDGET_MS = 5000
+
+  /** Exit-path budget for the MAIN thread's own flush. Strictly smaller than the worker's,
+   *  because it runs after the worker shutdown RPC has already returned and still has to finish
+   *  before `process.exit(0)`. */
+  export const EXIT_FLUSH_BUDGET_MS = 2000
+
   export type Event =
     // altimate_change start — add os/arch/node_version for environment segmentation
     | {
@@ -1446,6 +1461,11 @@ export namespace Telemetry {
 
   let cachedLaunchId: string | undefined
 
+  /** Test seam — the cache is intentionally process-lifetime, so shutdown() does not clear it. */
+  export function resetLaunchIdForTest() {
+    cachedLaunchId = undefined
+  }
+
   export function launchId(): string {
     // The worker reads the value the TUI handed it through WorkerOptions.env; the main thread
     // generates it. Cached in module scope rather than written back to process.env — the worker
@@ -1557,12 +1577,19 @@ export namespace Telemetry {
     // Chaining onto shutdownPromise keeps the generations separate: callers arriving mid-shutdown
     // wait for the new init rather than joining the dying one.
     if (shutdownPromise) {
-      return (reinitPromise ??= shutdownPromise
-        .catch(() => {})
-        .then(doInit)
-        .finally(() => {
-          reinitPromise = undefined
-        }))
+      if (!reinitPromise) {
+        reinitPromise = shutdownPromise
+          .catch(() => {})
+          .then(doInit)
+          .finally(() => {
+            reinitPromise = undefined
+          })
+        // Publish it as initPromise too. Without this, a caller arriving after the shutdown had
+        // settled — but before this chained doInit() finished — saw an empty initPromise and
+        // started a SECOND one, replacing the flush timer and racing over the buffer.
+        initPromise = reinitPromise
+      }
+      return reinitPromise
     }
     return (initPromise ??= doInit())
     // altimate_change end
@@ -1803,7 +1830,19 @@ export namespace Telemetry {
     }
     // altimate_change — drain any flush already running before the final one, so a timer batch
     // in mid-request is not abandoned and cannot write back into a buffer we are about to clear.
-    if (inFlightFlush) await inFlightFlush.catch(() => {})
+    if (inFlightFlush) {
+      // Bounded: a flush already in flight uses the DEFAULT request timeout, so awaiting it
+      // unbounded could burn 10s before the bounded flush below even starts — well past the 5s
+      // the TUI allows the whole shutdown RPC.
+      let drainTimer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        inFlightFlush.catch(() => {}),
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, timeoutMs ?? REQUEST_TIMEOUT_MS)
+        }),
+      ])
+      if (drainTimer) clearTimeout(drainTimer)
+    }
     await flush(timeoutMs)
     inFlightFlush = undefined
     enabled = false
@@ -1813,9 +1852,10 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
-    // altimate_change — the launch id is per process, but tests re-init the module in one process;
-    // leaving it cached made a second lifecycle inherit the first one's id.
-    cachedLaunchId = undefined
+    // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
+    // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
+    // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.
+    // Tests use resetLaunchIdForTest() instead.
     // altimate_change — only clear initPromise if it is still the one this shutdown began with.
     // init() can set `initPromise = shutdownPromise.then(doInit)`; nulling that unconditionally
     // discards a doInit() which has not run yet, so the next init() starts a second one.

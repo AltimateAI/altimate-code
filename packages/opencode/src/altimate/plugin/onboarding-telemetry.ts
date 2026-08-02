@@ -103,6 +103,20 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
       }
     },
 
+    "tool.execute.before": async (input, output) => {
+      if (!OnboardingTelemetry.isOnboardingSession(input.sessionID)) return
+      // Selection lands on the first job-shaped tool call, and it is claimed HERE rather than in
+      // tool.execute.after because the docs promise that a job which started and then failed
+      // still counts as selected — the user did choose it. Claiming it after the tool returned
+      // dropped exactly those cases (skill lookup, permission denial, execution error), which are
+      // the ones a funnel most needs to see. Completion detection stays in .after.
+      const job = jobForTool(input.tool, output.args)
+      if (!job) return
+      if (OnboardingTelemetry.claimActivationJobSelected(input.sessionID, job)) {
+        void OnboardingTelemetry.emit({ type: "activation_job_selected", job }, input.sessionID)
+      }
+    },
+
     "tool.execute.after": async (input, output) => {
       if (!OnboardingTelemetry.isOnboardingSession(input.sessionID)) return
 
@@ -126,11 +140,6 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
       const job = jobForTool(input.tool, input.args)
       if (!job) return
 
-      // Selection lands on the first job-shaped tool call. A job that starts and then fails still
-      // counts as selected — the user did choose it.
-      if (OnboardingTelemetry.claimActivationJobSelected(input.sessionID, job)) {
-        void OnboardingTelemetry.emit({ type: "activation_job_selected", job }, input.sessionID)
-      }
       // Only complete the job that was actually selected. Skill-driven jobs stay without a
       // completion event, as the docs already state.
       if (

@@ -27,8 +27,9 @@ import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
 
-// altimate_change — must match the withTimeout budget in cli/cmd/tui.ts stop().
-const SHUTDOWN_BUDGET_MS = 5000
+// altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
+// is enforced by the compiler rather than by a comment.
+const SHUTDOWN_BUDGET_MS = Telemetry.TUI_SHUTDOWN_BUDGET_MS
 
 Heap.start()
 

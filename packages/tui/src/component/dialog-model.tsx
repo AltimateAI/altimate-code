@@ -157,7 +157,7 @@ export function DialogModel(props: {
                   via_search: props.viaSearch ?? false,
                 })
               }
-              dialog.replace(() => <DialogBigPickleConfirm origin="model" />)
+              dialog.replace(() => <DialogBigPickleConfirm origin="model" viaSearch={props.viaSearch} />)
             },
           }
           // Big Pickle sits at priority 4 — just above OpenCode Zen (priority 5).

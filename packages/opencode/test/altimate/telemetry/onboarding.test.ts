@@ -8,6 +8,9 @@
 // implementation — a test that computes its expectation the same way the code does would pass
 // even when both are wrong.
 import { describe, expect, test, beforeEach, afterEach, spyOn, mock } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import { Telemetry } from "@/altimate/telemetry"
 import * as Onboarding from "@/altimate/telemetry/onboarding"
 import { OnboardingTelemetryPlugin } from "@/altimate/plugin/onboarding-telemetry"
@@ -107,6 +110,14 @@ describe("onboarding abandonment", () => {
 // ---------------------------------------------------------------------------
 // Activation — inferred from the plugin hooks
 // ---------------------------------------------------------------------------
+/** A real tool call runs both hooks; driving only `.after` hid which one owns the selection
+ *  claim. Selection is claimed in `.before` precisely so a tool that throws still records it —
+ *  see the "a job that never returns" test below. */
+async function runTool(hooks: any, input: any, output: any) {
+  await hooks["tool.execute.before"]!(input, { args: input.args })
+  await hooks["tool.execute.after"]!(input, output)
+}
+
 describe("activation events", () => {
   const SESSION = "ses_test"
 
@@ -140,7 +151,8 @@ describe("activation events", () => {
     // The adversarial case: nothing is already configured, but the scan discovered a connection
     // from a dbt profile. This user HAS a warehouse and must get the warehouse menu — reading
     // only `existing` would send them down the sample-project branch.
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "project_scan", sessionID: SESSION, callID: "c1", args: {} },
       { title: "", output: "", metadata: { connections: { existing: 0, new_dbt: 1, new_docker: 0, new_env: 0 } } },
     )
@@ -156,7 +168,8 @@ describe("activation events", () => {
     const hooks = await plugin()
     await startOnboarding(hooks, "scan")
 
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "project_scan", sessionID: SESSION, callID: "c1", args: {} },
       { title: "", output: "", metadata: { connections: { existing: 0, new_dbt: 0, new_docker: 0, new_env: 0 } } },
     )
@@ -173,7 +186,8 @@ describe("activation events", () => {
     // The skill tool loads an instruction bundle; the analysis itself happens afterwards through
     // other tools. Reporting completion here would claim the job finished the moment the
     // instructions were read.
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "skill", sessionID: SESSION, callID: "c2", args: { name: "dbt-analyze" } },
       { title: "", output: "", metadata: { name: "dbt-analyze" } },
     )
@@ -190,7 +204,8 @@ describe("activation events", () => {
     const hooks = await plugin()
     await startOnboarding(hooks, "skip")
 
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "sample_setup", sessionID: SESSION, callID: "c3", args: {} },
       { title: "", output: "", metadata: { success: true } },
     )
@@ -205,7 +220,8 @@ describe("activation events", () => {
     const hooks = await plugin()
     await startOnboarding(hooks, "skip")
 
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "sample_setup", sessionID: SESSION, callID: "c4", args: {} },
       { title: "", output: "", metadata: { success: false } },
     )
@@ -220,11 +236,13 @@ describe("activation events", () => {
     const hooks = await plugin()
     await startOnboarding(hooks, "skip")
 
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "sample_setup", sessionID: SESSION, callID: "c5", args: {} },
       { title: "", output: "", metadata: { success: true } },
     )
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "skill", sessionID: SESSION, callID: "c6", args: { name: "sql-review" } },
       { title: "", output: "", metadata: {} },
     )
@@ -239,7 +257,8 @@ describe("activation events", () => {
 
     // No /onboard-connect for this session — an ordinary chat where someone happens to use a
     // reviewable skill must not look like onboarding activation.
-    await hooks["tool.execute.after"]!(
+    await runTool(
+      hooks,
       { tool: "skill", sessionID: "ses_other", callID: "c7", args: { name: "sql-review" } },
       { title: "", output: "", metadata: {} },
     )
@@ -248,16 +267,29 @@ describe("activation events", () => {
     expect(events).toEqual([])
   })
 
+  test("a job whose tool never returns still counts as selected", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    // Skill lookup failure, permission denial, an execution error: the tool throws and
+    // `tool.execute.after` never runs. The user still chose the job.
+    await hooks["tool.execute.before"]!({ tool: "sample_setup", sessionID: SESSION, callID: "c7" }, { args: {} })
+    await settle()
+
+    const selected = events.filter((e) => e.type === "activation_job_selected")
+    expect(selected).toHaveLength(1)
+    expect((selected[0] as any).job).toBe("sample_duck_db")
+    expect(events.some((e) => e.type === "first_job_completed")).toBe(false)
+  })
+
   test("helper tools are not mistaken for activation jobs", async () => {
     const events = captureEvents()
     const hooks = await plugin()
     await startOnboarding(hooks, "skip")
 
     for (const tool of ["read", "bash", "warehouse_add"]) {
-      await hooks["tool.execute.after"]!(
-        { tool, sessionID: SESSION, callID: tool, args: {} },
-        { title: "", output: "", metadata: {} },
-      )
+      await runTool(hooks, { tool, sessionID: SESSION, callID: tool, args: {} }, { title: "", output: "", metadata: {} })
     }
     await settle()
 
@@ -324,6 +356,16 @@ describe("launch correlation id", () => {
   test("every event in a run carries the same launch_id", async () => {
     const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
     const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    // This is the one test in the file that runs the REAL Telemetry.init() — the launch_id is
+    // minted there and nowhere else, so mocking init would leave nothing to assert. Real init
+    // creates `~/.altimate/machine-id` as a side effect, which on a developer machine mints (or
+    // reuses) the identity their actual CLI reports under. Redirect HOME so it lands in a temp
+    // dir instead. os.homedir() reads HOME on POSIX and USERPROFILE on Windows, both at call time.
+    const origHome = process.env.HOME
+    const origUserProfile = process.env.USERPROFILE
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-telemetry-test-"))
+    process.env.HOME = tmpHome
+    process.env.USERPROFILE = tmpHome
     const bodies: string[] = []
     const fetchMock = spyOn(global, "fetch").mockImplementation((async (_input: any, init: any) => {
       bodies.push(String(init?.body ?? ""))
@@ -357,6 +399,11 @@ describe("launch correlation id", () => {
       process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
       if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile
+      else delete process.env.USERPROFILE
+      fs.rmSync(tmpHome, { recursive: true, force: true })
       fetchMock.mockRestore()
     }
   })

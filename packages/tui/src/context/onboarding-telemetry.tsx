@@ -40,7 +40,7 @@ export type OnboardingTelemetryEvent =
   | { name: "scan_gate_choice"; choice: "scan" | "skip" | "dismissed" }
   | { name: "onboarding_completed" }
 
-export type TrackOnboarding = (event: OnboardingTelemetryEvent) => void
+export type TrackOnboarding = (event: OnboardingTelemetryEvent) => void | Promise<void>
 
 const OnboardingTelemetryContext = createContext<TrackOnboarding>()
 
@@ -63,7 +63,9 @@ export function useOnboardingTelemetry(): TrackOnboarding {
   const track = useContext(OnboardingTelemetryContext)
   return (event) => {
     try {
-      track?.(event)
+      // The host callback may be async (the opencode host's is), and a try/catch does not catch
+      // a rejection — it would surface as an unhandled rejection instead.
+      void Promise.resolve(track?.(event)).catch(() => {})
     } catch {
       // Telemetry must never break the UI.
     }

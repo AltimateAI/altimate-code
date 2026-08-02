@@ -596,7 +596,24 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // (same one used for continue/fork above).
     if (!ready() || sync.status !== "complete") return
     firstRunPickerHandled = true
-    if (onboardingReady()) return // already set up — no gate
+    if (onboardingReady()) {
+      // Not necessarily a returning user. The prompt gate (component/prompt/index.tsx) opens the
+      // same picker as soon as the user tries to submit, which can happen BEFORE sync finishes
+      // hydrating — and completing setup there makes onboardingReady() true by the time this
+      // effect finally runs. Bailing out then skipped the funnel and the scan gate entirely for
+      // exactly the impatient-user case. setupComplete() is the discriminator: it starts false
+      // every launch and is only set by a setup the user completed during THIS one, so a genuine
+      // returning user never trips this branch.
+      if (setupComplete()) {
+        markFirstRunActive()
+        scanGateShown = true
+        trackOnboarding({ name: "onboarding_started" })
+        trackOnboarding({ name: "onboarding_completed" })
+        trackOnboarding({ name: "scan_gate_shown" })
+        openScanGate()
+      }
+      return
+    }
     armScanGate = true
     markFirstRunActive()
     // altimate_change — funnel: top of the first-run flow. Emitted only on the branch that
@@ -627,6 +644,15 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // accept path, and the gateway auto-select), which is what this gate and the spec both mean.
   // `prev === false` still requires a genuine transition. We do NOT auto-scan — the gate asks.
   let scanGateShown = false
+  // Single recorder for every way the gate can resolve, latched so the close handler below cannot
+  // double-count after a real choice. Hoisted out of the effect because the early-return branch
+  // above opens the same gate.
+  let scanChoiceRecorded = false
+  function recordScanChoice(choice: "scan" | "skip" | "dismissed") {
+    if (scanChoiceRecorded) return
+    scanChoiceRecorded = true
+    trackOnboarding({ name: "scan_gate_choice", choice })
+  }
   createEffect(
     on(setupComplete, (isComplete, prev) => {
       if (scanGateShown || !armScanGate) return
@@ -637,39 +663,49 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         // so both events are emitted from it.
         trackOnboarding({ name: "onboarding_completed" })
         trackOnboarding({ name: "scan_gate_shown" })
-        dialog.replace(() => (
-          <DialogScanGate
-            onDismiss={() => trackOnboarding({ name: "scan_gate_choice", choice: "dismissed" })}
-            onChoose={(arg) => {
-              // altimate_change — funnel: emitted here rather than inside the gate because the
-              // dialog overlay renders outside the provider tree; `onChoose` is already the
-              // established way to hand the gate something it cannot reach itself.
-              trackOnboarding({ name: "scan_gate_choice", choice: arg })
-              // Yes → /onboard-connect scan; No → /onboard-connect skip.
-              // Both branches now have a real follow-up: `scan` runs
-              // project_scan and branches into the discovery UX; `skip`
-              // asks what the user is working on and offers the activation
-              // menu (sample dbt, downstream impact, SQL PR, or free chat).
-              // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
-              const ref = promptRef.current
-              if (!ref) {
-                // The prompt should be mounted by the time the gate resolves, but
-                // if it isn't, don't silently drop the user's choice — tell them
-                // how to continue instead of a dead keypress.
-                toast.show({
-                  message: `Run /onboard-connect ${arg} to continue.`,
-                  variant: "error",
-                })
-                return
-              }
-              ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
-              ref.submit()
-            }}
-          />
-        ))
+        openScanGate()
       }
     }),
   )
+  // Function declaration (hoisted) so the pre-completed-setup branch above can open the same gate.
+  function openScanGate() {
+    dialog.replace(
+      () => (
+        <DialogScanGate
+          onDismiss={() => recordScanChoice("dismissed")}
+          onChoose={(arg) => {
+              // altimate_change — funnel: emitted here rather than inside the gate because the
+              // dialog overlay renders outside the provider tree; `onChoose` is already the
+              // established way to hand the gate something it cannot reach itself.
+            recordScanChoice(arg)
+            // Yes → /onboard-connect scan; No → /onboard-connect skip.
+            // Both branches now have a real follow-up: `scan` runs
+            // project_scan and branches into the discovery UX; `skip`
+            // asks what the user is working on and offers the activation
+            // menu (sample dbt, downstream impact, SQL PR, or free chat).
+            // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
+            const ref = promptRef.current
+            if (!ref) {
+              // The prompt should be mounted by the time the gate resolves, but
+              // if it isn't, don't silently drop the user's choice — tell them
+              // how to continue instead of a dead keypress.
+              toast.show({
+                message: `Run /onboard-connect ${arg} to continue.`,
+                variant: "error",
+              })
+              return
+            }
+            ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
+            ref.submit()
+          }}
+        />
+      ),
+      // altimate_change — funnel: DialogProvider invokes this on EVERY close, including the
+      // Escape key and click-away, which never reach the gate's own inline `esc` control. The
+      // latch inside recordScanChoice makes it a no-op once a real choice was made.
+      () => recordScanChoice("dismissed"),
+    )
+  }
   // altimate_change end
   const currentWorktreeWorkspace = createMemo(() => {
     const workspaceID = project.workspace.current()

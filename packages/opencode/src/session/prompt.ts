@@ -1124,9 +1124,16 @@ export namespace SessionPrompt {
         //   - `consumeCommandSubmission` excludes slash commands, because the scan gate submits
         //     a hidden `/onboard-connect` as an ordinary user message: it would otherwise be
         //     recorded as the user's first typed prompt in every fresh onboarding.
+        //   - a real text part, because a message carrying only attachments (a dragged-in file,
+        //     a pasted image) reached this block too and was recorded as the user's first typed
+        //     prompt before they had typed anything. Same filter as the intent classifier above.
         const fromCommand = OnboardingTelemetry.consumeCommandSubmission(sessionID)
+        const hasUserText = !!userMsg?.parts.some(
+          (p) => p.type === "text" && !p.ignored && !p.synthetic && p.text.trim().length > 0,
+        )
         if (
           !fromCommand &&
+          hasUserText &&
           OnboardingTelemetry.isOnboardingSession(sessionID) &&
           OnboardingTelemetry.claimFirstPrompt(sessionID)
         ) {

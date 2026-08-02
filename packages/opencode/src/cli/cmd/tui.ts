@@ -153,7 +153,7 @@ export const TuiThreadCommand = cmd({
         if (stopped) return
         stopped = true
         process.off("SIGUSR2", reload)
-        await withTimeout(client.call("shutdown", undefined), 5000).catch(() => {})
+        await withTimeout(client.call("shutdown", undefined), Telemetry.TUI_SHUTDOWN_BUDGET_MS).catch(() => {})
         worker.terminate()
       }
 
@@ -285,13 +285,23 @@ export const TuiThreadCommand = cmd({
       // flush() would otherwise block for REQUEST_TIMEOUT_MS (10s) on a blackholed network — a
       // visible hang between the user quitting and the shell prompt returning.
       try {
-        // Ask whether gateway credentials landed. The success events are emitted on the worker
-        // thread and this state is main-thread-owned, so without this a browser sign-in that
-        // completed just before the user quit is reported as an abandonment in the same launch
-        // that already reported instance_connected.
-        const connected = await AltimateApi.isConfigured().catch(() => false)
-        await OnboardingTelemetry.emitAbandonedIfIncomplete({ connected })
-        await Telemetry.shutdown({ timeoutMs: 2000 })
+        // The inner bound covers the flush only. Two things ahead of it can also stall — the
+        // credential read, and shutdown()'s await of an initialization the request middleware
+        // started — so the whole finalizer is raced too. Racing is safe HERE (unlike inside
+        // flush, per the note above) because the only thing after it is process.exit(0): nothing
+        // resumes to observe module state a straggler might still be mutating.
+        await withTimeout(
+          (async () => {
+            // Ask whether gateway credentials landed. The success events are emitted on the
+            // worker thread and this state is main-thread-owned, so without this a browser
+            // sign-in that completed just before the user quit is reported as an abandonment in
+            // the same launch that already reported instance_connected.
+            const connected = await AltimateApi.isConfigured().catch(() => false)
+            await OnboardingTelemetry.emitAbandonedIfIncomplete({ connected })
+            await Telemetry.shutdown({ timeoutMs: Telemetry.EXIT_FLUSH_BUDGET_MS })
+          })(),
+          Telemetry.EXIT_FLUSH_BUDGET_MS + 1000,
+        )
       } catch {
         // Never let telemetry delay or break exit.
       }

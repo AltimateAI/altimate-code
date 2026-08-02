@@ -61,7 +61,7 @@ We collect the following categories of events:
 | `activation_menu_shown` | The activation menu was (very likely) rendered. `variant` is `warehouse` or `no_data`. **Derived** — see the note below. |
 | `activation_job_selected` / `first_job_completed` | Which activation job the user started and, where observable, finished. Completion is reported only for the job that was actually selected, so the two form a coherent pair. **Derived** — see the note below. |
 | `first_prompt_sent` | The user's first typed message in an onboarding session. Slash commands are excluded, so the hidden `/onboard-connect` submission does not count. |
-| `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, `gateway_auth`, or `connected`. Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. |
+| `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, or `gateway_auth`. (`connected` is a funnel position but never a `last_stage` — reaching it means the run completed, which is not an abandonment.) Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. |
 
 ### A note on the derived activation events
 

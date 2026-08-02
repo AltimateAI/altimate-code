@@ -32,6 +32,9 @@ export const ONBOARDING_STAGES = [
   "provider_setup",
   "big_pickle_confirm",
   "gateway_auth",
+  // NOTE: reaching this stage means the run completed, and emitAbandonedIfIncomplete() returns
+  // early on `completed`. So "connected" is a valid funnel position but never a `last_stage` on
+  // an abandonment — see the enum note in docs/docs/reference/telemetry.md.
   "connected",
 ] as const
 
@@ -148,11 +151,6 @@ export async function emit(event: EmitInput, sessionID?: string): Promise<void> 
  *  telemetry state this thread cannot see — see the thread note at the top of this file. */
 export function markStage(stage: OnboardingStage) {
   advance(stage)
-}
-
-/** True once `onboarding_completed` has been emitted on this thread. */
-export function isCompleted() {
-  return completed
 }
 
 /**
