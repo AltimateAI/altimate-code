@@ -62,6 +62,19 @@ We collect the following categories of events:
 | `activation_job_selected` / `first_job_completed` | Which activation job the user started and, where observable, finished. Completion is reported only for the job that was actually selected, so the two form a coherent pair. **Derived** — see the note below. |
 | `first_prompt_sent` | The user's first typed message in an onboarding session. Slash commands are excluded, so the hidden `/onboard-connect` submission does not count. |
 | `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, or `gateway_auth`. (`connected` is a funnel position but never a `last_stage` — reaching it means the run completed, which is not an abandonment.) Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. Emitted on the exit path under a bounded flush, so the measured rate is a lower bound — see [Delivery & Reliability](#delivery--reliability). |
+| `review_run` | A dbt/SQL review completed or failed — `invocation` (`cli` for `altimate-code review`, `tool` for the `dbt_pr_review` tool), status, duration, and on success the verdict, the pre-gating verdict, mode, risk tier, and finding counts by severity and by category. No file paths, model or column names, finding titles or bodies, SQL, diff content, or repository/branch/PR names. |
+| `review_post_outcome` | Whether a review was published to GitHub — `not_requested`, `target_unresolved`, `full`, `partial`, or `summary_failed`, plus duration. No repository, PR, or comment content. |
+
+### Notes on the review events
+
+- `degraded` is a fidelity flag, not a warehouse flag. It is set when a review found no reviewable
+  files, had no usable manifest for the changed models, or surfaced a finding whose analysis was
+  undecidable. It does not mean "no warehouse was connected".
+- The category breakdown counts findings that were actually surfaced — after de-duplication, rubric
+  exclusion, and the severity threshold. It is not a count of raw rule detections, and it is grouped
+  by category rather than by individual rule.
+- Reviews run through the `dbt_pr_review` tool also emit the standard `tool_call` event. They are
+  the same review; count `review_run` rather than both.
 
 ### A note on the derived activation events
 
