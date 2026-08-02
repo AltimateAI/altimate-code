@@ -12,13 +12,18 @@ import { useConnected } from "./use-connected"
 // interstitial) live in the altimate-owned ./altimate-onboarding to keep this
 // upstream file's rebase surface small. markSetupComplete / DialogBigPickleConfirm
 // are used by the restructured DialogModel below.
-import { markSetupComplete, DialogBigPickleConfirm } from "./altimate-onboarding"
+import { markSetupComplete, useFirstRunActive, DialogBigPickleConfirm } from "./altimate-onboarding"
+// altimate_change — funnel: provider identity for a pick made from the full catalogue
+import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 
 // altimate_change start — DialogModel restructured from the upstream flat
 // favorites/recent/provider list into READY / NEEDS-SETUP sections with a Big Pickle
 // fallback. This is an in-place rewrite of the upstream component; on an upstream
 // merge, expect a conflict here and re-apply the READY/NEEDS-SETUP shaping.
 export function DialogModel(props: { providerID?: string }) {
+  // altimate_change — funnel seam (no-op outside a first run, and when no host tracker exists)
+  const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
@@ -68,8 +73,27 @@ export function DialogModel(props: { providerID?: string }) {
                 // altimate_change — go through the shared onSelect(providerID, modelID)
                 // helper so a ready pick also honors the model-variant follow-up flow,
                 // and mark setup complete so the first-run chat lock lifts.
+                // altimate_change start — funnel: record which provider was actually chosen.
+                // The curated picker's "Search all providers…" row emits provider_selected with
+                // `search_all` and then hands off here, so without this the real choice is never
+                // recorded and "which provider did people pick?" is unanswerable for everyone who
+                // used search — which is precisely the long-tail providers, since the curated
+                // five never need it.
+                //
+                // Gated on firstRunActive: this catalogue is also /model and routine model
+                // switching, and emitting unconditionally would make every model change for the
+                // life of the product look like an onboarding provider choice.
+                if (firstRunActive()) {
+                  trackOnboarding({
+                    name: "provider_selected",
+                    providerID: provider.id,
+                    modelID,
+                    via_search: true,
+                  })
+                }
                 onSelect(provider.id, modelID)
                 markSetupComplete()
+                // altimate_change end
               },
             }
           }),

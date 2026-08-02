@@ -37,7 +37,13 @@ import { DialogProvider, useDialog } from "./ui/dialog"
 // altimate_change start — /auth (gateway sign-in) + /connect (curated welcome picker)
 // + /logout commands
 import { DialogAltimateAuth } from "./component/dialog-provider"
-import { DialogModelWelcome, useReady, useSetupComplete, resetSetupComplete } from "./component/altimate-onboarding"
+import {
+  DialogModelWelcome,
+  useReady,
+  useSetupComplete,
+  markFirstRunActive,
+  resetSetupComplete,
+} from "./component/altimate-onboarding"
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
 import { DialogScanGate } from "./component/dialog-scan-gate"
@@ -592,6 +598,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     firstRunPickerHandled = true
     if (onboardingReady()) return // already set up — no gate
     armScanGate = true
+    markFirstRunActive()
     // altimate_change — funnel: top of the first-run flow. Emitted only on the branch that
     // actually opens the gate, so returning users never enter the funnel.
     trackOnboarding({ name: "onboarding_started" })

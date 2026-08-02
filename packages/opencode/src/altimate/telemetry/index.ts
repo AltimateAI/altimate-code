@@ -762,7 +762,17 @@ export namespace Telemetry {
         type: "provider_selected"
         timestamp: number
         session_id: string
-        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all"
+        /** `search_all` means the user opened the full catalogue; the provider they then chose
+         *  arrives as a second event with `via_search`. `other` is any provider outside the
+         *  curated five. */
+        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all" | "other"
+        /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
+         *  A user-defined provider in opencode.json can be named after their company, so
+         *  anything unrecognised is reported as `other` with this omitted. */
+        provider_id?: string
+        /** True when this selection came from the full catalogue after `search_all`, so the two
+         *  events can be told apart from a direct pick on the curated picker. */
+        via_search?: boolean
       }
     | {
         type: "big_pickle_confirm_shown"
@@ -880,6 +890,59 @@ export namespace Telemetry {
   // altimate_change end
 
   /** SHA256 hash a masked error message for anonymous grouping. */
+  // altimate_change start — provider identity for the onboarding funnel.
+  //
+  // Public provider ids only. `sync.data.provider` also contains anything the user declared in
+  // their own config, and those names are frequently a company or team name — so an id that is
+  // not on this list is reported as `other` with no raw value attached.
+  const KNOWN_PROVIDER_IDS = new Set([
+    "altimate-backend",
+    "anthropic",
+    "openai",
+    "google",
+    "opencode",
+    "opencode-go",
+    "github-copilot",
+    "azure",
+    "amazon-bedrock",
+    "openrouter",
+    "mistral",
+    "groq",
+    "deepseek",
+    "xai",
+    "digitalocean",
+    "cerebras",
+    "together",
+    "fireworks",
+    "vercel",
+    "huggingface",
+    "ollama",
+    "lmstudio",
+    "snowflake-cortex",
+    "databricks",
+  ])
+
+  /** The curated picker's own rows map to named enum values; everything else is `other`. */
+  const CURATED_PROVIDER_ENUM: Record<string, string> = {
+    "altimate-backend": "altimate_gateway",
+    anthropic: "anthropic",
+    openai: "openai",
+    google: "google",
+  }
+
+  /** Classify a provider id for `provider_selected`. Returns the enum value plus the raw id when
+   *  it is safe to send. */
+  export function classifyProvider(
+    providerID: string,
+    modelID?: string,
+  ): { provider: string; provider_id?: string } {
+    if (providerID === "opencode" && modelID === "big-pickle") return { provider: "big_pickle", provider_id: providerID }
+    const curated = CURATED_PROVIDER_ENUM[providerID]
+    if (curated) return { provider: curated, provider_id: providerID }
+    return KNOWN_PROVIDER_IDS.has(providerID) ? { provider: "other", provider_id: providerID } : { provider: "other" }
+  }
+  // altimate_change end
+
   export function hashError(maskedMessage: string): string {
     return createHash("sha256").update(maskedMessage).digest("hex").slice(0, 16)
   }

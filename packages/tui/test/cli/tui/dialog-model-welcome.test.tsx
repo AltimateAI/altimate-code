@@ -147,8 +147,10 @@ test("choosing the first row records the gateway provider", async () => {
     picker.app.mockInput.pressEnter()
     await wait(() => picker.events.some((e) => e.name === "provider_selected"))
 
+    // Raw ids: the host classifies them against its public-provider allowlist.
     const selected = picker.events.filter((e) => e.name === "provider_selected")
-    expect(selected).toEqual([{ name: "provider_selected", provider: "altimate_gateway" }])
+    expect(selected).toHaveLength(1)
+    expect(selected[0]).toMatchObject({ providerID: "altimate-backend" })
   } finally {
     await picker.cleanup()
   }
@@ -176,9 +178,9 @@ test("the / shortcut records the same choice as the search row", async () => {
     picker.app.mockInput.pressKey("/")
     await wait(() => picker.events.some((e) => e.name === "provider_selected"))
 
-    expect(picker.events.filter((e) => e.name === "provider_selected")).toEqual([
-      { name: "provider_selected", provider: "search_all" },
-    ])
+    const searched = picker.events.filter((e) => e.name === "provider_selected")
+    expect(searched).toHaveLength(1)
+    expect(searched[0]).toMatchObject({ searchAll: true })
   } finally {
     await picker.cleanup()
   }

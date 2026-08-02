@@ -25,7 +25,14 @@ export type OnboardingTelemetryEvent =
     }
   | {
       name: "provider_selected"
-      provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all"
+      /** Raw ids, classified by the host — a provider a user named after their own company must
+       *  never reach telemetry, and that policy belongs where the allowlist lives, not here. */
+      providerID?: string
+      modelID?: string
+      /** The "Search all providers…" row itself, which has no provider of its own. */
+      searchAll?: boolean
+      /** Set when the pick came from the full catalogue, i.e. after `searchAll`. */
+      via_search?: boolean
     }
   | { name: "big_pickle_confirm_shown"; origin: "welcome" | "model" }
   | { name: "big_pickle_choice"; choice: "accept" | "cancel" }

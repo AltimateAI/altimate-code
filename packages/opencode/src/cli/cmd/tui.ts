@@ -230,8 +230,24 @@ export const TuiThreadCommand = cmd({
             // itself runs in the worker and cannot reach this thread's abandonment state.
             onTelemetry: (event) => {
               const { name, ...props } = event
-              if (name === "provider_selected" && event.provider === "altimate_gateway") {
-                OnboardingTelemetry.markStage("gateway_auth")
+              if (name === "provider_selected") {
+                // Classify here, not in the TUI: a provider a user declared in their own config
+                // can be named after their company, so the raw id is only forwarded when it is on
+                // the known-public allowlist.
+                const { searchAll, providerID, modelID, ...rest } = props as {
+                  searchAll?: boolean
+                  providerID?: string
+                  modelID?: string
+                  via_search?: boolean
+                }
+                const classified = searchAll
+                  ? { provider: "search_all" as const }
+                  : Telemetry.classifyProvider(providerID ?? "", modelID)
+                if (classified.provider === "altimate_gateway") OnboardingTelemetry.markStage("gateway_auth")
+                void OnboardingTelemetry.emit({ type: name, ...rest, ...classified } as Parameters<
+                  typeof OnboardingTelemetry.emit
+                >[0])
+                return
               }
               void OnboardingTelemetry.emit({ type: name, ...props } as Parameters<
                 typeof OnboardingTelemetry.emit

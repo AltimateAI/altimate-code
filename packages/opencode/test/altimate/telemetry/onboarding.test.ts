@@ -376,7 +376,13 @@ type TuiEventAsEmitInput<E> = E extends { name: infer N } ? Omit<E, "name"> & { 
 
 // Fails to compile if any TUI event lacks a matching Telemetry variant, or if their property
 // names or enum values diverge.
-const _tuiEventsMatchTelemetry: Onboarding.OnboardingEmitInput = null as unknown as TuiEventAsEmitInput<OnboardingTelemetryEvent>
+// provider_selected is excluded deliberately: it is the one event the host TRANSFORMS rather than
+// renames. The TUI sends raw providerID/modelID and cli/cmd/tui.ts classifies them through the
+// public-provider allowlist, so the shapes are not meant to match. Its correctness is enforced by
+// the types at that call site instead.
+type DirectTuiEvent = Exclude<OnboardingTelemetryEvent, { name: "provider_selected" }>
+
+const _tuiEventsMatchTelemetry: Onboarding.OnboardingEmitInput = null as unknown as TuiEventAsEmitInput<DirectTuiEvent>
 void _tuiEventsMatchTelemetry
 
 describe("cross-package event parity", () => {

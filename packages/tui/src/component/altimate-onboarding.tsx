@@ -21,13 +21,28 @@ import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 // lock. Module-global so it is shared across the app and resets on every process
 // launch (so a fresh relaunch is a clean fresh-user state).
 const [setupComplete, setSetupComplete] = createSignal(false)
+
+// Whether a first run is in progress. Set when the first-run gate opens the picker, cleared once
+// setup completes. The full model catalogue (dialog-model.tsx) is shared with /model and routine
+// model switching, so it consults this before emitting any funnel event — otherwise every model
+// change for the life of the product would look like an onboarding provider choice.
+const [firstRunActive, setFirstRunActive] = createSignal(false)
+export function markFirstRunActive() {
+  setFirstRunActive(true)
+}
+export function useFirstRunActive() {
+  return firstRunActive
+}
+
 export function markSetupComplete() {
   setSetupComplete(true)
+  setFirstRunActive(false)
 }
 // Cleared on /logout so first-run tips don't keep showing "you're all set" after
 // the credential is gone.
 export function resetSetupComplete() {
   setSetupComplete(false)
+  setFirstRunActive(false)
 }
 export function useReady() {
   const connected = useConnected()
@@ -59,10 +74,9 @@ interface WelcomeRow {
   note: string
   tone: WelcomeTone
   activate: () => void
-  // altimate_change — funnel: the row's identity in the spec's provider enum. Kept as its own
-  // field rather than derived from providerID/modelID so the enum cannot drift from the row list
-  // (the "search all" row has no provider at all, and Big Pickle is a model, not a provider).
-  analyticsProvider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all"
+  // altimate_change — funnel: the "search all" row has no provider of its own; every other row
+  // is identified by its raw providerID/modelID below and classified host-side.
+  analyticsSearchAll?: boolean
   // Identifies the row for the "currently selected" tick. providerID alone matches
   // any model of that provider; add modelID to match a specific model (Big Pickle).
   providerID?: string
@@ -112,7 +126,6 @@ export function DialogModelWelcome(props: {
       tone: "success",
       providerID: "altimate-backend",
       activate: () => connectProvider("altimate-backend"),
-      analyticsProvider: "altimate_gateway",
     },
     {
       name: "Anthropic (Claude)",
@@ -120,7 +133,6 @@ export function DialogModelWelcome(props: {
       tone: "muted",
       providerID: "anthropic",
       activate: () => connectProvider("anthropic"),
-      analyticsProvider: "anthropic",
     },
     {
       name: "OpenAI (GPT)",
@@ -128,7 +140,6 @@ export function DialogModelWelcome(props: {
       tone: "muted",
       providerID: "openai",
       activate: () => connectProvider("openai"),
-      analyticsProvider: "openai",
     },
     {
       name: "Google (Gemini)",
@@ -136,7 +147,6 @@ export function DialogModelWelcome(props: {
       tone: "muted",
       providerID: "google",
       activate: () => connectProvider("google"),
-      analyticsProvider: "google",
     },
     {
       name: "Big Pickle",
@@ -145,14 +155,13 @@ export function DialogModelWelcome(props: {
       providerID: "opencode",
       modelID: "big-pickle",
       activate: chooseBigPickle,
-      analyticsProvider: "big_pickle",
     },
     {
       name: "Search all providers…",
       note: "/",
       tone: "muted",
       activate: openFullCatalog,
-      analyticsProvider: "search_all",
+      analyticsSearchAll: true,
     },
   ])
 
@@ -174,7 +183,12 @@ export function DialogModelWelcome(props: {
   function activateRow(row: WelcomeRow) {
     if (activated) return
     activated = true
-    trackOnboarding({ name: "provider_selected", provider: row.analyticsProvider })
+    trackOnboarding({
+      name: "provider_selected",
+      ...(row.analyticsSearchAll
+        ? { searchAll: true }
+        : { providerID: row.providerID, modelID: row.modelID }),
+    })
     row.activate()
   }
 
