@@ -26,6 +26,7 @@ import { TraceConsumer } from "@/altimate/observability/trace-consumer"
 import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
 // is enforced by the compiler rather than by a comment.
@@ -101,6 +102,13 @@ export const rpc = {
     })
     // altimate_change end
   },
+  // altimate_change start — onboarding funnel: the TUI owns the first-run decision and this thread
+  // runs the gateway auth flow, so it has to be told. Without it the gateway events cannot tell a
+  // first run from a routine /auth. See telemetry/onboarding.ts markFunnelActive().
+  async onboardingStarted() {
+    OnboardingTelemetry.markFunnelActive()
+  },
+  // altimate_change end
   async reload() {
     await AppRuntime.runPromise(
       Effect.gen(function* () {
@@ -111,8 +119,9 @@ export const rpc = {
     )
   },
   async shutdown() {
-    // altimate_change — cli/cmd/tui.ts allows this RPC 5s before worker.terminate().
+    // altimate_change start — cli/cmd/tui.ts allows this RPC 5s before worker.terminate().
     const shutdownStartedAt = Date.now()
+    // altimate_change end
     // altimate_change start — trace: drain pending events (bounded), then finalize SYNCHRONOUSLY.
     // On a quiet Bun Worker thread, pending async fs writes from the consumer don't flush before
     // worker.terminate(), so an async flush() silently writes nothing; flushSync() uses writeFileSync.

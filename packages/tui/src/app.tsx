@@ -9,12 +9,13 @@ import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
 // altimate_change end
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
 import { ExitProvider, useExit } from "./context/exit"
-// altimate_change — onboarding funnel telemetry seam
+// altimate_change start — onboarding funnel telemetry seam
 import {
   OnboardingTelemetryProvider,
   useOnboardingTelemetry,
   type TrackOnboarding,
 } from "./context/onboarding-telemetry"
+// altimate_change end
 import { EpilogueProvider } from "./context/epilogue"
 import * as Selection from "./util/selection"
 import { createCliRenderer, MouseButton, type CliRenderer } from "@opentui/core"
@@ -165,9 +166,10 @@ export type TuiInput = {
   headers?: RequestInit["headers"]
   events?: EventSource
   pluginHost: TuiPluginHost
-  // altimate_change — onboarding funnel telemetry, injected by the host (packages/tui cannot
+  // altimate_change start — onboarding funnel telemetry, injected by the host (packages/tui cannot
   // reach the Telemetry module). Optional: absent means no tracking, not an error.
   onTelemetry?: TrackOnboarding
+  // altimate_change end
 }
 
 function errorMessage(error: unknown) {

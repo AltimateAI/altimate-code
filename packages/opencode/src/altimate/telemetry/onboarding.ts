@@ -279,6 +279,29 @@ export function consumeCommandSubmission(sessionID: string): boolean {
   return true
 }
 
+/**
+ * Mark this THREAD as being inside a first run.
+ *
+ * The gateway auth flow (plugin/altimate.ts) emits funnel events from the worker, where
+ * `funnelStarted` is always false — `onboarding_started` is emitted on the main thread and the
+ * two threads are separate module instances. Gating those emits on `funnelStarted` would have
+ * silenced them entirely, so they were left ungated and fired for routine `/auth`, `/connect`
+ * and reauthentication too: onboarding-taxonomy events from returning users, which is the exact
+ * contamination the funnel gates exist to prevent.
+ *
+ * The TUI calls the worker's `onboardingStarted` RPC when the first-run gate opens, which lands
+ * here. In non-TUI hosts (`serve`, `run`, `github`) there is no first-run funnel, so this stays
+ * false and the gateway events correctly do not fire.
+ */
+export function markFunnelActive() {
+  funnelStarted = true
+}
+
+/** Whether this thread has been told a first run is in progress. */
+export function isFunnelActive() {
+  return funnelStarted
+}
+
 export function markOnboardingSession(sessionID: string) {
   record(sessionID).onboarding = true
 }

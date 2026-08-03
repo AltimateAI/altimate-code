@@ -318,7 +318,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             try {
               await startCallbackServer()
             } catch (err) {
-              void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: "error" })
+              if (OnboardingTelemetry.isFunnelActive())
+                void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: "error" })
               throw err
             }
             // altimate_change end
@@ -362,12 +363,19 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // attempted". open() failures are swallowed above (the URL is also printed for the
             // user to paste), so this fires even when no browser actually launched.
             // The URL is never sent — it carries the CSRF `state`.
-            void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
+            if (OnboardingTelemetry.isFunnelActive()) void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
 
             // One outcome per attempt. callback() closes over `result` and re-runs its whole body
             // on every invocation, so a repeated call would otherwise re-emit completion/failure
             // (and re-report a connect time measured from the original attempt).
-            let outcomeReported = false
+            //
+            // Tri-state rather than a boolean because concurrent invocations race for it and a
+            // plain latch let the WRONG one win: two callbacks exchanging the same one-time token
+            // means one fails fast, claims the latch, and reports gateway_auth_failed while the
+            // other goes on to save valid credentials — the user is connected and the funnel says
+            // they are not. Success is authoritative, so it emits even after a failure was
+            // reported; failure only reports when nothing else has.
+            let outcome: "none" | "failed" | "completed" = "none"
             // altimate_change end
 
             return {
@@ -399,8 +407,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                   // callback server and browser open, both of which are part of the wait the user
                   // actually experiences — and lives in this attempt's closure, so a concurrent
                   // attempt cannot overwrite it.
-                  if (!outcomeReported) {
-                    outcomeReported = true
+                  if (outcome !== "completed" && OnboardingTelemetry.isFunnelActive()) {
+                    outcome = "completed"
                     void OnboardingTelemetry.emit({ type: "gateway_auth_completed" })
                     void OnboardingTelemetry.emit({
                       type: "instance_connected",
@@ -416,8 +424,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                   // altimate_change — onboarding funnel: only the classified enum is sent. The
                   // message can embed the instance name (see the invalid-instance throw above),
                   // so it never reaches telemetry.
-                  if (!outcomeReported) {
-                    outcomeReported = true
+                  if (outcome === "none" && OnboardingTelemetry.isFunnelActive()) {
+                    outcome = "failed"
                     void OnboardingTelemetry.emit({ type: "gateway_auth_failed", reason: reasonOf(err) })
                   }
                   return { type: "failed" }

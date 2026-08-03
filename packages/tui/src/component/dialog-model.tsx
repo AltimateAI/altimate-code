@@ -4,7 +4,17 @@ import { useSync } from "../context/sync"
 import { map, pipe, flatMap, entries, filter, sortBy } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
-import { createDialogProviderOptions, DialogProvider, WARNLIST, PROVIDER_PRIORITY } from "./dialog-provider"
+// altimate_change start — PROVIDER_PRIORITY orders the READY section like the curated picker;
+// CUSTOM_PROVIDER_OPTION_VALUE identifies the "Other" row, which must not record a provider
+// choice before the user has supplied one.
+import {
+  createDialogProviderOptions,
+  DialogProvider,
+  WARNLIST,
+  PROVIDER_PRIORITY,
+  CUSTOM_PROVIDER_OPTION_VALUE,
+} from "./dialog-provider"
+// altimate_change end
 import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
@@ -39,6 +49,12 @@ export function DialogModel(props: {
 
   const connected = useConnected()
   const providers = createDialogProviderOptions()
+  // altimate_change — one-shot submit latch. DialogSelect.submit() has no guard of its own, and
+  // the NEEDS-SETUP rows record the choice and THEN await an async provider action, so a second
+  // Enter (or a mouse-up landing during the await) emitted provider_selected twice and started a
+  // second authorization flow. The curated picker has the same latch; this catalogue is one
+  // dialog further on and had none.
+  let activated = false
 
   // A provider is "ready" (usable now) when it has valid credentials: it is present
   // in the live provider list with at least one model — and, for the free OpenCode
@@ -78,6 +94,8 @@ export function DialogModel(props: {
               category: "READY",
               footer: isFav ? "★" : undefined,
               onSelect() {
+                if (activated) return
+                activated = true
                 // altimate_change — go through the shared onSelect(providerID, modelID)
                 // helper so a ready pick also honors the model-variant follow-up flow,
                 // and mark setup complete so the first-run chat lock lifts.
@@ -130,7 +148,14 @@ export function DialogModel(props: {
               // search path was added to capture. Emitted before the auth flow runs, matching the
               // documented promise that a sign-in later cancelled still counts as a selection.
               onSelect: () => {
-                if (firstRunActive()) {
+                if (activated) return
+                activated = true
+                // The "Other" row prompts for a provider id and the user can cancel it, so there
+                // is no choice to record yet — emitting here classified an abandoned prompt as a
+                // real `other` selection. Every other row dispatches a concrete provider, where
+                // recording before the auth flow is deliberate (a sign-in later cancelled still
+                // counts as a selection).
+                if (firstRunActive() && o.value !== CUSTOM_PROVIDER_OPTION_VALUE) {
                   trackOnboarding({
                     name: "provider_selected",
                     providerID: o.value,
@@ -147,6 +172,8 @@ export function DialogModel(props: {
             category: "NEEDS SETUP",
             footer: undefined as string | undefined,
             async onSelect() {
+              if (activated) return
+              activated = true
               // altimate_change — Big Pickle reached through the catalogue emitted its confirm
               // events but never a provider_selected, so the choice was invisible.
               if (firstRunActive()) {

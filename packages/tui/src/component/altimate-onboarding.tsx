@@ -30,6 +30,20 @@ const [firstRunActive, setFirstRunActive] = createSignal(false)
 export function markFirstRunActive() {
   setFirstRunActive(true)
 }
+/**
+ * Clear without marking setup complete.
+ *
+ * Needed for exactly one shape: the user HAS credentials but never chose a model, so
+ * markSetupComplete() — the normal clear — will not run. The gateway's connected-but-no-usable-
+ * model branch is the real instance (dialog-provider.tsx). Leaving the flag set there made later
+ * routine /model use emit funnel events for the rest of the session.
+ *
+ * NOT for ordinary dismissals. A user who closes the picker without setting anything up is still
+ * mid-first-run, and their next provider pick genuinely is the onboarding one.
+ */
+export function clearFirstRunActive() {
+  setFirstRunActive(false)
+}
 export function useFirstRunActive() {
   return firstRunActive
 }

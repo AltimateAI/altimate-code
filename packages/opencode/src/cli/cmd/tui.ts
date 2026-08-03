@@ -136,12 +136,13 @@ export const TuiThreadCommand = cmd({
       }
       const cwd = Filesystem.resolve(process.cwd())
 
-      // altimate_change — hand the launch correlation id to the worker explicitly. A Bun Worker
-      // does not see runtime mutations to process.env, so without this the worker mints its own
-      // and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.
+      // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
+      // Worker does not see runtime mutations to process.env, so without this the worker mints its
+      // own and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.
       const worker = new Worker(file, {
         env: { ...process.env, ALTIMATE_LAUNCH_ID: Telemetry.launchId() },
       } as WorkerOptions)
+      // altimate_change end
       const client = Rpc.client<typeof rpc>(worker)
       const reload = () => {
         client.call("reload", undefined).catch(() => {})
@@ -153,7 +154,10 @@ export const TuiThreadCommand = cmd({
         if (stopped) return
         stopped = true
         process.off("SIGUSR2", reload)
+        // altimate_change start — budget shared with the worker's own flush deadline, so the two
+        // halves cannot drift apart and truncate the worker's telemetry buffer.
         await withTimeout(client.call("shutdown", undefined), Telemetry.TUI_SHUTDOWN_BUDGET_MS).catch(() => {})
+        // altimate_change end
         worker.terminate()
       }
 
@@ -215,8 +219,10 @@ export const TuiThreadCommand = cmd({
             pluginHost: createLegacyTuiPluginHost(),
             // altimate_change — onboarding funnel seam. Deliberately a single-line marker, not a
             // start/end pair: this sits inside the "clean up TUI worker after failed --session
-            // validation" region, and a nested `altimate_change end` truncates the block that
-            // test/cli/tui/command.test.ts slices to assert cleanup ordering.
+            // validation" region, and a nested closing marker truncates the block that
+            // test/cli/tui/command.test.ts slices to assert cleanup ordering. (Do not spell that
+            // marker out in prose here either — the parser matches the token in comment text and
+            // would close the region on this very line.)
             //
             // The TUI renders on this thread, so
             // this reaches the main-process Telemetry module directly (already initialized by the
@@ -230,6 +236,14 @@ export const TuiThreadCommand = cmd({
             // itself runs in the worker and cannot reach this thread's abandonment state.
             onTelemetry: (event) => {
               const { name, ...props } = event
+              // The gateway auth flow emits from the WORKER, which cannot see this thread's
+              // funnel state. Tell it once, when the funnel opens, so those events are scoped to a
+              // real first run instead of firing for every /auth. (No nested marker pair here —
+              // see the note above.)
+              if (name === "onboarding_started") {
+                OnboardingTelemetry.markFunnelActive()
+                client.call("onboardingStarted", undefined).catch(() => {})
+              }
               if (name === "provider_selected") {
                 // Classify here, not in the TUI: a provider a user declared in their own config
                 // can be named after their company, so the raw id is only forwarded when it is on
