@@ -99,7 +99,7 @@ export function DialogModel(props: {
                 // altimate_change — go through the shared onSelect(providerID, modelID)
                 // helper so a ready pick also honors the model-variant follow-up flow,
                 // and mark setup complete so the first-run chat lock lifts.
-                // altimate_change start — funnel: record which provider was actually chosen.
+                // altimate_change — funnel: record which provider was actually chosen.
                 // The curated picker's "Search all providers…" row emits provider_selected with
                 // `search_all` and then hands off here, so without this the real choice is never
                 // recorded and "which provider did people pick?" is unanswerable for everyone who
@@ -119,7 +119,6 @@ export function DialogModel(props: {
                 }
                 onSelect(provider.id, modelID)
                 markSetupComplete()
-                // altimate_change end
               },
             }
           }),
