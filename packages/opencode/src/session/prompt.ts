@@ -76,6 +76,7 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1112,6 +1113,33 @@ export namespace SessionPrompt {
           }
         }
         // altimate_change end — task intent classification
+        // altimate_change start — onboarding funnel: first free-text prompt.
+        //
+        // Three guards, each load-bearing:
+        //   - `step === 1` (the enclosing block) is NOT "first message of the session". `step`
+        //     is declared inside loop() and loop() runs once per user turn, so this block runs
+        //     on every turn. `claimFirstPrompt` is what makes this once-per-session.
+        //   - `isOnboardingSession` scopes it to the funnel. Without it, an onboarding-taxonomy
+        //     event would fire for every session in the product — TUI, `run`, GitHub, API.
+        //   - `consumeCommandSubmission` excludes slash commands, because the scan gate submits
+        //     a hidden `/onboard-connect` as an ordinary user message: it would otherwise be
+        //     recorded as the user's first typed prompt in every fresh onboarding.
+        //   - a real text part, because a message carrying only attachments (a dragged-in file,
+        //     a pasted image) reached this block too and was recorded as the user's first typed
+        //     prompt before they had typed anything. Same filter as the intent classifier above.
+        const fromCommand = OnboardingTelemetry.consumeCommandSubmission(sessionID)
+        const hasUserText = !!userMsg?.parts.some(
+          (p) => p.type === "text" && !p.ignored && !p.synthetic && p.text.trim().length > 0,
+        )
+        if (
+          !fromCommand &&
+          hasUserText &&
+          OnboardingTelemetry.isOnboardingSession(sessionID) &&
+          OnboardingTelemetry.claimFirstPrompt(sessionID)
+        ) {
+          void OnboardingTelemetry.emit({ type: "first_prompt_sent" }, sessionID)
+        }
+        // altimate_change end
         // altimate_change end — session start telemetry
       }
 

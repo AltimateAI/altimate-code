@@ -18,7 +18,7 @@ import { useClipboard } from "../context/clipboard"
 import { useLocal } from "../context/local"
 // altimate_change — mark first-run setup complete once the gateway sign-in succeeds
 // (used by AutoMethod below); flips useReady() so the first-run chat lock lifts.
-import { markSetupComplete } from "./altimate-onboarding"
+import { markSetupComplete, clearFirstRunActive } from "./altimate-onboarding"
 
 export const PROVIDER_PRIORITY: Record<string, number> = {
   // altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
@@ -43,7 +43,7 @@ export const WARNLIST: Record<string, string> = {
 }
 // altimate_change end
 
-const CUSTOM_PROVIDER_OPTION_VALUE = "__opencode_custom_provider__"
+export const CUSTOM_PROVIDER_OPTION_VALUE = "__opencode_custom_provider__"
 const CUSTOM_PROVIDER_ID = /^[a-z0-9][a-z0-9-_]*$/
 
 type ProviderOptionBase = {
@@ -398,8 +398,10 @@ function AutoMethod(props: AutoMethodProps) {
     await sdk.client.instance.dispose()
     await sync.bootstrap()
     if (disposed) return
-    // altimate_change start — mark setup complete (flips useReady → unlocks first-run chat/tips)
-    markSetupComplete()
+    // altimate_change start — setup is marked complete once a model is actually selected, not
+    // here. The branch below deliberately refuses to claim success when the gateway connects but
+    // offers nothing usable ("Connected, but no model is available yet"); marking completion up
+    // front contradicted that, and it drives onboarding_completed and the Part 2 scan gate.
     // The gateway sign-in already shows the auth URL + "Waiting for authorization…".
     // On success, confirm inline (green) and auto-close after a moment rather than
     // opening the model picker. Auto-select a model so the user can chat right away.
@@ -415,10 +417,21 @@ function AutoMethod(props: AutoMethodProps) {
           message: "Connected, but no model is available yet — pick one to start.",
           variant: "warning",
         })
-        dialog.replace(() => <DialogModel providerID={props.providerID} />)
+        // altimate_change — funnel: credentials landed, so the first run is effectively over
+        // even though no model was chosen and markSetupComplete() will never run. Without this
+        // the firstRunActive flag stays set for the session and every later /model pick is
+        // recorded as an onboarding provider choice. The gateway choice itself was already
+        // recorded when the user picked it.
+        dialog.replace(
+          () => <DialogModel providerID={props.providerID} />,
+          () => clearFirstRunActive(),
+        )
         return
       }
       local.model.set({ providerID: props.providerID, modelID: model }, { recent: true })
+      // A model is chosen — this is the real end of setup (flips useReady → unlocks first-run
+      // chat/tips, and opens the Part 2 scan gate).
+      markSetupComplete()
       setConnected(true)
       closeTimer = setTimeout(() => {
         if (!disposed) dialog.clear()
@@ -427,6 +440,7 @@ function AutoMethod(props: AutoMethodProps) {
     }
     // altimate_change end
     toast.show({ message: `Connected to ${props.title}`, variant: "success" })
+    // No markSetupComplete() here: this opens the model picker, which marks it on selection.
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
   })
 

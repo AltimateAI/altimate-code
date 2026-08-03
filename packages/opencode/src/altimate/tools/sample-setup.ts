@@ -1,11 +1,14 @@
 import fs from "node:fs"
 import path from "node:path"
+import os from "node:os"
 import z from "zod"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Tool } from "../../tool/tool"
 import { materializeSample } from "../onboarding/materialize"
 import { DEFAULT_SAMPLE_NAME, resolveSampleSource, type SampleSourceLocation } from "../onboarding/sample-source-resolver"
 import { detectDbtRuntime } from "../onboarding/tool-detection"
+// altimate_change — onboarding funnel: sample_setup_completed
+import * as OnboardingTelemetry from "../telemetry/onboarding"
 
 /**
  * `sample_setup` — LLM-invoked tool that copies the shipped jaffle-shop
@@ -80,7 +83,7 @@ export const SampleSetupTool = Tool.define("sample_setup", {
           "conflict prompt. Mutually exclusive with allow_in_place_upgrade; alongside wins.",
       ),
   }),
-  async execute(args, _ctx) {
+  async execute(args, ctx) {
     const sampleName = DEFAULT_SAMPLE_NAME
     // Resolve the sample source ONCE per invocation and pass it forward.
     // materializeSample() would otherwise call resolveSampleSource() again
@@ -106,7 +109,21 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `Could not locate the shipped starter sample source. This usually means the CLI ` +
         `was installed without its wrapper package assets. Reinstall with: ` +
         `\`npm i -g @altimateai/altimate-code@latest\`\n\n` +
-        `Underlying error: ${message}`
+        // Redacted for the same reason as the materialize_failed branch below: sample-manifest
+        // read/resolve errors embed absolute install paths, and `output` is what the model sees
+        // and what gets replayed to the provider on later turns.
+        `Underlying error: ${redactPaths(message)}`
+      // altimate_change — onboarding funnel: a broken install (sample assets missing) is a
+      // sample-setup failure too. Without this the failure count only covers materialization
+      // errors and silently under-reports the "CLI shipped without its assets" case.
+      if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
+        void OnboardingTelemetry.emit({
+          type: "sample_setup_completed",
+          success: false,
+          models: 0,
+          tables: 0,
+          reused: false,
+        }, ctx.sessionID)
       return {
         title: "Starter sample unavailable",
         // `success: false` is the disambiguator for consumers reading
@@ -155,6 +172,20 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         `suffix: ${result.suffix}\n` +
         `${dbtLine}\n` +
         `note: ${result.note}`
+      // altimate_change start — onboarding funnel. `reused` is carried because the tool is
+      // deliberately re-callable (reuse / reset / install-alongside / dbt re-probe), so this
+      // fires per invocation, not once per sample. targetPath is never sent — it is a filesystem
+      // path under the user's home.
+      const sampleContents = countSampleContents(sampleSource.path)
+      if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
+        void OnboardingTelemetry.emit({
+          type: "sample_setup_completed",
+          success: true,
+          models: sampleContents.models,
+          tables: sampleContents.tables,
+          reused: result.reused,
+        }, ctx.sessionID)
+      // altimate_change end
       return {
         title: result.reused ? `Reused starter sample at ${result.targetPath}` : `Materialized starter sample at ${result.targetPath}`,
         metadata: {
@@ -175,6 +206,16 @@ export const SampleSetupTool = Tool.define("sample_setup", {
       // reliably detect it from `output` alone — metadata never reaches
       // the model.
       const message = err instanceof Error ? err.message : String(err)
+      // altimate_change — onboarding funnel: failed setup. The error message embeds filesystem
+      // paths (unsafe HOME, unwritable parent), so it is not sent — only the boolean.
+      if (OnboardingTelemetry.isOnboardingSession(ctx.sessionID))
+        void OnboardingTelemetry.emit({
+          type: "sample_setup_completed",
+          success: false,
+          models: 0,
+          tables: 0,
+          reused: false,
+        }, ctx.sessionID)
       return {
         title: "Starter materialization failed",
         // `success: false` is the disambiguator for consumers reading
@@ -185,7 +226,11 @@ export const SampleSetupTool = Tool.define("sample_setup", {
         // metadata inspects `suffix` before checking `success` — reverted
         // in v0.9.4 consensus review m6 to keep the shape typed.
         metadata: { success: false, error: message, targetPath: "", reused: false, suffix: 0, note: "" },
-        output: `status: error\nreason: materialize_failed\n\n${message}`,
+        // Paths are masked in `output` but kept verbatim in `metadata.error`. `output` is what
+        // the model sees (session/message-v2.ts), so it lands in conversation context and is sent
+        // to the provider on every later turn — and rejectUnsafeHome messages embed HOME
+        // verbatim. metadata never reaches the model, so the full text stays available locally.
+        output: `status: error\nreason: materialize_failed\n\n${redactPaths(message)}`,
       }
     }
   },
@@ -200,6 +245,76 @@ export const SampleSetupTool = Tool.define("sample_setup", {
  * The version stamps into the on-disk marker so a future run can detect
  * whether the materialized copy is current or lags a CLI upgrade.
  */
+// altimate_change start — onboarding funnel: model/seed counts for sample_setup_completed.
+//
+// Counted from the shipped source tree rather than read from a constant or from dbt's
+// target/manifest.json. A constant silently drifts the first time someone adds a model;
+// target/manifest.json is ~17k lines and parsing it to count two things is a waste on a path
+// the user is actively waiting on. Counting files can't drift and costs one shallow walk.
+//
+// Best-effort by construction: telemetry must never fail a sample setup, so any fs error
+// yields 0 rather than propagating.
+/**
+ * Redact filesystem paths from a message that will be shown to the model.
+ *
+ * The previous version was a single broad regex, and executed against the real messages it both
+ * over- and under-redacted: `[\w.\-~ ]` includes a space, so a match ran past the path and ate the
+ * rest of the sentence ("cannot write to /a/b and the parent is read-only" → "cannot write to
+ * <path>"), destroying the diagnostic the model needs; a single-segment absolute path like `/root`
+ * — which rejectUnsafeHome produces verbatim — was never matched at all; and any character outside
+ * the class ended the match, so `/Users/José/…` and `/Users/O'Connor/…` survived partially.
+ *
+ * So: replace the specific locations we know by value first, which needs no pattern at all, then
+ * apply a conservative pattern that stops at whitespace and quotes rather than trying to guess
+ * where a path ends. Full detail is kept in `metadata.error`, which the model never sees.
+ */
+function redactPaths(message: string, extra: (string | undefined)[] = []): string {
+  let out = message
+  for (const known of [os.homedir(), process.cwd(), os.tmpdir(), ...extra]) {
+    if (!known || known.length < 2) continue
+    out = out.split(known).join("<path>")
+  }
+  // Anything still looking like an absolute path: POSIX, Windows drive, or UNC. Terminates on
+  // whitespace or a quote so it cannot swallow the surrounding sentence.
+  return (
+    out
+      // Apostrophes are allowed inside the run: excluding them left "/Users/O'Connor/x" partially
+      // redacted as "'Connor<path>", leaking a surname. A trailing quote being swallowed is
+      // harmless by comparison — the text is being redacted either way.
+      .replace(/(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"`]*/g, "<path>")
+      .replace(/~\/[^\s"`]*/g, "<path>")
+      // Known-value replacement above can leave a prefix that the pattern then matches again.
+      .replace(/(?:<path>){2,}/g, "<path>")
+  )
+}
+
+function countFilesWithExtension(dir: string, extension: string): number {
+  let total = 0
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      total += countFilesWithExtension(path.join(dir, entry.name), extension)
+    } else if (entry.isFile() && entry.name.endsWith(extension)) {
+      total += 1
+    }
+  }
+  return total
+}
+
+/** dbt models (`models/**\/*.sql`) and seed tables (`seeds/*.csv`) in the shipped sample. */
+function countSampleContents(sampleSourcePath: string): { models: number; tables: number } {
+  return {
+    models: countFilesWithExtension(path.join(sampleSourcePath, "models"), ".sql"),
+    tables: countFilesWithExtension(path.join(sampleSourcePath, "seeds"), ".csv"),
+  }
+}
+// altimate_change end
+
 function readSampleVersionAt(sampleSourcePath: string): string {
   const manifestPath = path.join(sampleSourcePath, "sample-manifest.json")
   const raw = fs.readFileSync(manifestPath, "utf8")

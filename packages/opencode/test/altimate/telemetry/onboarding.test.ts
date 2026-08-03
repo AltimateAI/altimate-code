@@ -1,0 +1,532 @@
+// altimate_change — coverage for the onboarding funnel taxonomy.
+//
+// The question these answer is "does user action X emit event Y, with the right properties".
+// Emission is verified by spying on Telemetry.track, so the assertions are about what would be
+// sent, not about the transport.
+//
+// Expected values are written out literally from the product spec rather than derived from the
+// implementation — a test that computes its expectation the same way the code does would pass
+// even when both are wrong.
+import { describe, expect, test, beforeEach, afterEach, spyOn, mock } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
+import { Telemetry } from "@/altimate/telemetry"
+import * as Onboarding from "@/altimate/telemetry/onboarding"
+import { OnboardingTelemetryPlugin } from "@/altimate/plugin/onboarding-telemetry"
+import type { OnboardingTelemetryEvent } from "@opencode-ai/tui/context/onboarding-telemetry"
+
+type Tracked = Telemetry.Event
+
+function captureEvents() {
+  const events: Tracked[] = []
+  // init() reads config and touches the filesystem; the funnel logic under test does not care.
+  spyOn(Telemetry, "init").mockImplementation(async () => {})
+  spyOn(Telemetry, "track").mockImplementation((event: Tracked) => {
+    events.push(event)
+  })
+  return events
+}
+
+/** Wait for the fire-and-forget `void emit(...)` promises to settle. */
+const settle = () => Bun.sleep(0)
+
+beforeEach(() => {
+  Onboarding.resetForTest()
+})
+
+afterEach(() => {
+  mock.restore()
+})
+
+// ---------------------------------------------------------------------------
+// Abandonment — the funnel must only contain people who were actually in it
+// ---------------------------------------------------------------------------
+describe("onboarding abandonment", () => {
+  test("a returning user who opens the picker is not in the funnel", async () => {
+    const events = captureEvents()
+
+    // No onboarding_started: this is /connect from an established user, which mounts the very
+    // same picker. Reaching a stage must not enrol them.
+    Onboarding.markStage("model_picker")
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    expect(events).toEqual([])
+  })
+
+  test("quitting mid first-run reports the furthest stage reached", async () => {
+    const events = captureEvents()
+
+    await Onboarding.emit({ type: "onboarding_started" })
+    await Onboarding.emit({ type: "model_picker_shown", trigger: "first_run" })
+    await Onboarding.emit({ type: "provider_selected", provider: "anthropic" })
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    const abandoned = events.filter((e) => e.type === "onboarding_abandoned")
+    expect(abandoned).toHaveLength(1)
+    // Picking a provider and quitting during key entry is "got as far as setting up a provider",
+    // not "only ever saw the picker".
+    expect((abandoned[0] as any).last_stage).toBe("provider_setup")
+  })
+
+  test("a completed onboarding is never reported as abandoned", async () => {
+    const events = captureEvents()
+
+    await Onboarding.emit({ type: "onboarding_started" })
+    await Onboarding.emit({ type: "onboarding_completed" })
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    expect(events.some((e) => e.type === "onboarding_abandoned")).toBe(false)
+  })
+
+  test("re-opening the picker later does not walk the stage backwards", async () => {
+    const events = captureEvents()
+
+    await Onboarding.emit({ type: "onboarding_started" })
+    await Onboarding.emit({ type: "gateway_device_code_issued" })
+    await Onboarding.emit({ type: "model_picker_shown", trigger: "big_pickle_back" })
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    const abandoned = events.find((e) => e.type === "onboarding_abandoned")
+    expect((abandoned as any).last_stage).toBe("gateway_auth")
+  })
+
+  test("abandonment fires at most once", async () => {
+    const events = captureEvents()
+
+    await Onboarding.emit({ type: "onboarding_started" })
+    await Onboarding.emitAbandonedIfIncomplete()
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    expect(events.filter((e) => e.type === "onboarding_abandoned")).toHaveLength(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Activation — inferred from the plugin hooks
+// ---------------------------------------------------------------------------
+/** A real tool call runs both hooks; driving only `.after` hid which one owns the selection
+ *  claim. Selection is claimed in `.before` precisely so a tool that throws still records it —
+ *  see the "a job that never returns" test below. */
+async function runTool(hooks: any, input: any, output: any) {
+  await hooks["tool.execute.before"]!(input, { args: input.args })
+  await hooks["tool.execute.after"]!(input, output)
+}
+
+describe("activation events", () => {
+  const SESSION = "ses_test"
+
+  async function plugin() {
+    return OnboardingTelemetryPlugin({} as any)
+  }
+
+  async function startOnboarding(hooks: any, args: "scan" | "skip") {
+    await hooks["command.execute.before"]!({ command: "onboard-connect", sessionID: SESSION, arguments: args }, {
+      parts: [],
+    })
+  }
+
+  test("skipping the scan shows the no-data menu immediately", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+
+    await startOnboarding(hooks, "skip")
+    await settle()
+
+    const menu = events.filter((e) => e.type === "activation_menu_shown")
+    expect(menu).toHaveLength(1)
+    expect((menu[0] as any).variant).toBe("no_data")
+  })
+
+  test("a warehouse discovered from dbt profiles still counts as having a warehouse", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "scan")
+
+    // The adversarial case: nothing is already configured, but the scan discovered a connection
+    // from a dbt profile. This user HAS a warehouse and must get the warehouse menu — reading
+    // only `existing` would send them down the sample-project branch.
+    await runTool(
+      hooks,
+      { tool: "project_scan", sessionID: SESSION, callID: "c1", args: {} },
+      { title: "", output: "", metadata: { connections: { existing: 0, new_dbt: 1, new_docker: 0, new_env: 0 } } },
+    )
+    await settle()
+
+    const menu = events.filter((e) => e.type === "activation_menu_shown")
+    expect(menu).toHaveLength(1)
+    expect((menu[0] as any).variant).toBe("warehouse")
+  })
+
+  test("a scan that finds nothing shows the no-data menu", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "scan")
+
+    await runTool(
+      hooks,
+      { tool: "project_scan", sessionID: SESSION, callID: "c1", args: {} },
+      { title: "", output: "", metadata: { connections: { existing: 0, new_dbt: 0, new_docker: 0, new_env: 0 } } },
+    )
+    await settle()
+
+    expect((events.find((e) => e.type === "activation_menu_shown") as any).variant).toBe("no_data")
+  })
+
+  test("loading a skill selects a job but does not complete one", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    // The skill tool loads an instruction bundle; the analysis itself happens afterwards through
+    // other tools. Reporting completion here would claim the job finished the moment the
+    // instructions were read.
+    await runTool(
+      hooks,
+      { tool: "skill", sessionID: SESSION, callID: "c2", args: { name: "dbt-analyze" } },
+      { title: "", output: "", metadata: { name: "dbt-analyze" } },
+    )
+    await settle()
+
+    const selected = events.filter((e) => e.type === "activation_job_selected")
+    expect(selected).toHaveLength(1)
+    expect((selected[0] as any).job).toBe("breaks_downstream")
+    expect(events.some((e) => e.type === "first_job_completed")).toBe(false)
+  })
+
+  test("the sample project both selects and completes a job", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    await runTool(
+      hooks,
+      { tool: "sample_setup", sessionID: SESSION, callID: "c3", args: {} },
+      { title: "", output: "", metadata: { success: true } },
+    )
+    await settle()
+
+    expect((events.find((e) => e.type === "activation_job_selected") as any).job).toBe("sample_duck_db")
+    expect((events.find((e) => e.type === "first_job_completed") as any).job).toBe("sample_duck_db")
+  })
+
+  test("a failed sample setup counts as selected but not completed", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    await runTool(
+      hooks,
+      { tool: "sample_setup", sessionID: SESSION, callID: "c4", args: {} },
+      { title: "", output: "", metadata: { success: false } },
+    )
+    await settle()
+
+    expect(events.some((e) => e.type === "activation_job_selected")).toBe(true)
+    expect(events.some((e) => e.type === "first_job_completed")).toBe(false)
+  })
+
+  test("only the first job counts as the activation job", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    await runTool(
+      hooks,
+      { tool: "sample_setup", sessionID: SESSION, callID: "c5", args: {} },
+      { title: "", output: "", metadata: { success: true } },
+    )
+    await runTool(
+      hooks,
+      { tool: "skill", sessionID: SESSION, callID: "c6", args: { name: "sql-review" } },
+      { title: "", output: "", metadata: {} },
+    )
+    await settle()
+
+    expect(events.filter((e) => e.type === "activation_job_selected")).toHaveLength(1)
+  })
+
+  test("tools run outside an onboarding session emit nothing", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+
+    // No /onboard-connect for this session — an ordinary chat where someone happens to use a
+    // reviewable skill must not look like onboarding activation.
+    await runTool(
+      hooks,
+      { tool: "skill", sessionID: "ses_other", callID: "c7", args: { name: "sql-review" } },
+      { title: "", output: "", metadata: {} },
+    )
+    await settle()
+
+    expect(events).toEqual([])
+  })
+
+  test("a job whose tool never returns still counts as selected", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    // Skill lookup failure, permission denial, an execution error: the tool throws and
+    // `tool.execute.after` never runs. The user still chose the job.
+    await hooks["tool.execute.before"]!({ tool: "sample_setup", sessionID: SESSION, callID: "c7" }, { args: {} })
+    await settle()
+
+    const selected = events.filter((e) => e.type === "activation_job_selected")
+    expect(selected).toHaveLength(1)
+    expect((selected[0] as any).job).toBe("sample_duck_db")
+    expect(events.some((e) => e.type === "first_job_completed")).toBe(false)
+  })
+
+  test("helper tools are not mistaken for activation jobs", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    for (const tool of ["read", "bash", "warehouse_add"]) {
+      await runTool(hooks, { tool, sessionID: SESSION, callID: tool, args: {} }, { title: "", output: "", metadata: {} })
+    }
+    await settle()
+
+    expect(events.some((e) => e.type === "activation_job_selected")).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Slash-command suppression, which first_prompt_sent depends on
+// ---------------------------------------------------------------------------
+describe("command submission tracking", () => {
+  test("a command-submitted message in an onboarding session is flagged, once", () => {
+    Onboarding.markOnboardingSession("ses_a")
+    Onboarding.noteCommandSubmission("ses_a")
+    expect(Onboarding.consumeCommandSubmission("ses_a")).toBe(true)
+    expect(Onboarding.consumeCommandSubmission("ses_a")).toBe(false)
+  })
+
+  test("a session that never ran a command is not flagged", () => {
+    Onboarding.markOnboardingSession("ses_never")
+    expect(Onboarding.consumeCommandSubmission("ses_never")).toBe(false)
+  })
+
+  test("the flag does not leak between sessions", () => {
+    Onboarding.markOnboardingSession("ses_a")
+    Onboarding.markOnboardingSession("ses_b")
+    Onboarding.noteCommandSubmission("ses_a")
+    expect(Onboarding.consumeCommandSubmission("ses_b")).toBe(false)
+    expect(Onboarding.consumeCommandSubmission("ses_a")).toBe(true)
+  })
+
+  test("an untracked session is not created just by running a slash command", () => {
+    // The anti-churn property. command.execute.before fires for every slash command in every
+    // session; if that created a record, ordinary /discover and /model traffic in a long-lived
+    // `serve` process would evict genuine onboarding sessions from the capped map and silently
+    // drop those users' remaining activation events.
+    Onboarding.noteCommandSubmission("ses_unrelated")
+    expect(Onboarding.consumeCommandSubmission("ses_unrelated")).toBe(false)
+    expect(Onboarding.isOnboardingSession("ses_unrelated")).toBe(false)
+  })
+
+  test("/onboard-connect marks the session before flagging its own submission", async () => {
+    // Ordering matters: the command that creates the record must be flagged too, or the hidden
+    // scan-gate submission counts as the user's first typed prompt.
+    const hooks = await OnboardingTelemetryPlugin({} as any)
+    await hooks["command.execute.before"]!(
+      { command: "onboard-connect", sessionID: "ses_c", arguments: "skip" },
+      { parts: [] } as any,
+    )
+    expect(Onboarding.isOnboardingSession("ses_c")).toBe(true)
+    expect(Onboarding.consumeCommandSubmission("ses_c")).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// launch_id — added during envelope conversion, so a track() spy cannot see it
+// ---------------------------------------------------------------------------
+describe("launch correlation id", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("every event in a run carries the same launch_id", async () => {
+    // Before the fetch spy below, not after: every other describe in this file spies
+    // Telemetry.init to a no-op to keep the funnel tests off the filesystem, and this is the only
+    // test that needs the REAL init — the launch id is minted there and nowhere else. Relying on a
+    // sibling's afterEach to have undone that spy makes this test's result depend on ordering.
+    mock.restore()
+    const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    // This is the one test in the file that runs the REAL Telemetry.init() — the launch_id is
+    // minted there and nowhere else, so mocking init would leave nothing to assert. Real init
+    // creates `~/.altimate/machine-id` as a side effect, which on a developer machine mints (or
+    // reuses) the identity their actual CLI reports under. Redirect HOME so it lands in a temp
+    // dir instead. os.homedir() reads HOME on POSIX and USERPROFILE on Windows, both at call time.
+    const origHome = process.env.HOME
+    const origUserProfile = process.env.USERPROFILE
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-telemetry-test-"))
+    process.env.HOME = tmpHome
+    process.env.USERPROFILE = tmpHome
+    const bodies: string[] = []
+    const fetchMock = spyOn(global, "fetch").mockImplementation((async (_input: any, init: any) => {
+      bodies.push(String(init?.body ?? ""))
+      return new Response("", { status: 200 })
+    }) as unknown as typeof fetch)
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
+      // Shut down first. init() is `initPromise ??= doInit()`, so a resolved initPromise left by an
+      // earlier init — including one that ran while telemetry was disabled — is returned as-is and
+      // doInit() never runs. shutdown() clearing initPromise is the only reset seam the module has.
+      await Telemetry.shutdown()
+      Telemetry.resetLaunchIdForTest()
+      await Telemetry.init()
+      // Fail here with a clear cause rather than three lines down on a mysteriously empty batch.
+      // Every way this test can be sabotaged — a surviving init spy, a disabled-telemetry env var,
+      // an unparseable connection string — shows up as `enabled === false`.
+      expect(Telemetry.isEnabled()).toBe(true)
+
+      Telemetry.track({ type: "onboarding_started", timestamp: 1, session_id: "" })
+      Telemetry.track({ type: "scan_gate_choice", timestamp: 2, session_id: "ses_1", choice: "scan" })
+      await Telemetry.flush()
+
+      // Select by name rather than by position: the telemetry buffer is module-global, so a
+      // sibling test file can leave events in it and they flush alongside these.
+      // Across ALL bodies, not bodies[0]: the buffer is module-global and the 5s interval can
+      // fire before this flush, which would put these two events in different batches.
+      const envelopes = bodies.flatMap((body) => JSON.parse(body) as any[])
+      const byName = (name: string) => envelopes.find((e) => e.data.baseData.name === name)
+      const preSession = byName("onboarding_started")
+      const withSession = byName("scan_gate_choice")
+      expect(preSession).toBeDefined()
+      expect(withSession).toBeDefined()
+
+      // The whole point: an event emitted before any session exists and one emitted with a real
+      // session must still be joinable to the same run.
+      expect(preSession.data.baseData.properties.launch_id).toBeTruthy()
+      expect(preSession.data.baseData.properties.launch_id).toBe(withSession.data.baseData.properties.launch_id)
+    } finally {
+      // Unconditional assignment would coerce an unset original to the string "undefined" and
+      // leak a disabled-telemetry flag into every sibling suite in the process.
+      if (origDisabled !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
+      else delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile
+      else delete process.env.USERPROFILE
+      fs.rmSync(tmpHome, { recursive: true, force: true })
+      fetchMock.mockRestore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cross-package event parity
+// ---------------------------------------------------------------------------
+//
+// packages/tui cannot import the Telemetry event union, so it declares its own mirror and the
+// host remaps `name` → `type` through an unchecked cast in cli/cmd/tui.ts. Without this, a rename
+// or an added property on either side compiles clean and ships malformed events.
+//
+// Compile-time only: tsgo runs over test files, so drift is a build failure. There is nothing to
+// assert at runtime — a type is not a value.
+type TuiEventAsEmitInput<E> = E extends { name: infer N } ? Omit<E, "name"> & { type: N } : never
+
+// Fails to compile if any TUI event lacks a matching Telemetry variant, or if their property
+// names or enum values diverge.
+// provider_selected is excluded deliberately: it is the one event the host TRANSFORMS rather than
+// renames. The TUI sends raw providerID/modelID and cli/cmd/tui.ts classifies them through the
+// public-provider allowlist, so the shapes are not meant to match. Its correctness is enforced by
+// the types at that call site instead.
+type DirectTuiEvent = Exclude<OnboardingTelemetryEvent, { name: "provider_selected" }>
+
+// Assignable in BOTH directions. One-way assignability only proved each TUI variant matched *some*
+// telemetry variant — removing a TUI event, narrowing an enum, or adding an extra field all still
+// compiled. Pinning the name sets equal in both directions catches drift either side introduces.
+type DirectTuiName = DirectTuiEvent["name"]
+type TelemetryOnboardingName = Extract<
+  Onboarding.OnboardingEmitInput,
+  { type: DirectTuiName }
+>["type"]
+
+const _tuiEventsMatchTelemetry: Onboarding.OnboardingEmitInput = null as unknown as TuiEventAsEmitInput<DirectTuiEvent>
+const _namesAreExhaustive: DirectTuiName = null as unknown as TelemetryOnboardingName
+const _namesAreComplete: TelemetryOnboardingName = null as unknown as DirectTuiName
+void _tuiEventsMatchTelemetry
+void _namesAreExhaustive
+void _namesAreComplete
+
+describe("cross-package event parity", () => {
+  test("is enforced by the type assertion above, not at runtime", () => {
+    expect(true).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Shutdown budget
+// ---------------------------------------------------------------------------
+//
+// The TUI exit path passes a small budget precisely so quitting does not hang the shell. Before
+// this was enforced, a periodic flush already in flight ran on the DEFAULT 10s request timeout,
+// and shutdown's own flush chained onto it — so the budget bought nothing and exit could stall
+// for the full default instead.
+describe("shutdown budget", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("a slow in-flight flush cannot make shutdown exceed the caller's budget", async () => {
+    const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const origHome = process.env.HOME
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-shutdown-test-"))
+    process.env.HOME = tmpHome
+
+    // Never resolves on its own; only the AbortController can end it. This is the shape of a
+    // blackholed network, which is what the budget exists for.
+    const fetchMock = spyOn(global, "fetch").mockImplementation((async (_i: any, init: any) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))
+      })
+    }) as unknown as typeof fetch)
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
+      await Telemetry.init()
+
+      Telemetry.track({ type: "onboarding_started", timestamp: 1, session_id: "" })
+      // Start a flush on the DEFAULT budget and leave it hanging, exactly as the 5s interval does.
+      const hanging = Telemetry.flush()
+
+      Telemetry.track({ type: "scan_gate_shown", timestamp: 2, session_id: "" })
+      const startedAt = Date.now()
+      await Telemetry.shutdown({ timeoutMs: 300 })
+      const elapsed = Date.now() - startedAt
+
+      // Generous ceiling: the point is that it is bounded by the 300ms budget (plus the 250ms
+      // floor the final request gets) rather than by the 10s default the hanging request holds.
+      expect(elapsed).toBeLessThan(3000)
+      await hanging.catch(() => {})
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled ?? undefined
+      if (origDisabled === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      fs.rmSync(tmpHome, { recursive: true, force: true })
+      fetchMock.mockRestore()
+    }
+  })
+})

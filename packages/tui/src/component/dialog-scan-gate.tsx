@@ -13,14 +13,43 @@ import { useDialog } from "../ui/dialog"
 // `onChoose` is injected by App (which lives inside PromptRefProvider); the dialog
 // overlay is mounted above that provider, so the gate cannot resolve the prompt
 // ref itself — it must be handed in.
-export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void }) {
+export function DialogScanGate(props: {
+  onChoose: (arg: "scan" | "skip") => void
+  /** altimate_change — funnel: the telemetry seam, deliberately separate from `onChoose`.
+   *
+   *  It MUST be invoked before `dialog.clear()`. App registers a close handler on the dialog that
+   *  records a dismissal, and `dialog.clear()` runs that handler synchronously — so recording
+   *  after the clear (as `onChoose` is, to preserve the existing clear-then-submit ordering) loses
+   *  every real choice to the dismissal latch. */
+  onOutcome?: (outcome: "scan" | "skip" | "dismissed") => void
+}) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const [selected, setSelected] = createSignal(0) // 0 = Yes (default, per spec ❯)
 
   onMount(() => dialog.setSize("large"))
 
+  // altimate_change — keyboard (return / y / n) and mouse handlers all call run() directly, and
+  // nothing stops two firing before the dialog unmounts. Without this guard a fast double-press
+  // submits `/onboard-connect` twice and double-counts the funnel choice.
+  let chosen = false
+
+  // altimate_change — esc/click-away previously called dialog.clear() directly, leaving a
+  // scan_gate_shown with no matching choice and no abandonment either (completed is already true
+  // from the same readiness transition). Report it as its own outcome.
+  function dismiss() {
+    if (chosen) return
+    chosen = true
+    props.onOutcome?.("dismissed")
+    dialog.clear()
+  }
+
   function run(arg: "scan" | "skip") {
+    if (chosen) return
+    chosen = true
+    // Before dialog.clear() — see onOutcome's note. onChoose stays after it so the prompt
+    // submission still happens with the overlay already torn down, as it always has.
+    props.onOutcome?.(arg)
     dialog.clear()
     props.onChoose(arg)
   }
@@ -84,7 +113,7 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
           <text fg={theme.text} attributes={TextAttributes.BOLD}>
             Scan your environment?
           </text>
-          <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+          <text fg={theme.textMuted} onMouseUp={() => dismiss()}>
             esc
           </text>
         </box>

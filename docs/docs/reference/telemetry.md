@@ -47,14 +47,42 @@ We collect the following categories of events:
 | `schema_complexity` | Warehouse schema structural metrics from introspection — bucketed table, column, and schema counts plus average columns per table. No schema names or content. |
 | `validator_check` | A completion-gate validator ran on session end — validator name, `ok` boolean, step, retry count, `enforced` flag (false in shadow mode), and structured `details` (model counts, elapsed time, concurrency limit — no SQL or model content). Only emitted when `ALTIMATE_VALIDATORS_ENABLED=1` or `ALTIMATE_VALIDATORS_SHADOW=1`. See [Validators](../data-engineering/validators.md). |
 | `validator_retries_exhausted` | A session terminated with unresolved validator failures after exhausting the synthetic-retry budget — names of the failing validators (no failure body content). |
+| `onboarding_started` | The first-run setup gate opened (fresh launch with no usable model). |
+| `model_picker_shown` | The provider picker was displayed. `trigger` distinguishes the first run from `/connect`, from declining Big Pickle, and from the prompt gate. |
+| `provider_selected` | A provider row was chosen — `altimate_gateway`, `anthropic`, `openai`, `google`, `big_pickle`, `search_all`, or `other` for anything outside the curated five. `provider_id` carries the raw id only for publicly-known providers, so a provider you named yourself in config is reported as `other` with no name attached. `via_search` marks a pick made inside the full catalogue after choosing "Search all providers…". **Choosing search emits this event twice for one user** — once as `search_all`, then again with the provider actually chosen — so count distinct users or filter on `via_search`, not raw event count. Recorded at the moment of choice, so a sign-in that is then cancelled still counts. |
+| `big_pickle_confirm_shown` / `big_pickle_choice` | The Big Pickle interstitial was shown, and what the user decided (`accept`/`cancel`). |
+| `gateway_device_code_issued` | The Altimate Gateway authorize URL was built and the browser open attempted. **Name note:** the flow is a browser loopback OAuth — there is no device code. The name follows the original event spec. |
+| `gateway_auth_completed` / `gateway_auth_failed` | Gateway sign-in outcome. `reason` is `timeout`, `denied`, or `error` — never the underlying message, which can contain the instance name. An unrecognised callback state does not reject the pending attempt, so a CSRF mismatch surfaces as `timeout`. |
+| `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. No instance or tenant name is sent. |
+| `onboarding_completed` | A model is ready and chat is live. |
+| `scan_gate_shown` / `scan_gate_choice` | The "scan your environment?" gate appeared, and what the user did — `scan`, `skip`, or `dismissed` (esc / click-away). |
+| `environment_scan_completed` | A `project_scan` finished during onboarding — `has_dbt`, `has_warehouse`, `is_repo`, `connections_found`, and a bounded list of short `degraded` detection keys. No paths, hostnames, or connection details. Emitted only inside an onboarding session, and only once per session, so scans from `/discover` or a model-initiated call are excluded. |
+| `sample_setup_completed` | The sample dbt project was materialised. `success`, `models`, `tables`, and `reused` — the tool is deliberately re-callable, so this is per invocation. The target path is never sent. |
+| `activation_menu_shown` | The activation menu was (very likely) rendered. `variant` is `warehouse` or `no_data`. **Derived** — see the note below. |
+| `activation_job_selected` / `first_job_completed` | Which activation job the user started and, where observable, finished. Completion is reported only for the job that was actually selected, so the two form a coherent pair. **Derived** — see the note below. |
+| `first_prompt_sent` | The user's first typed message in an onboarding session. Slash commands are excluded, so the hidden `/onboard-connect` submission does not count. |
+| `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, or `gateway_auth`. (`connected` is a funnel position but never a `last_stage` — reaching it means the run completed, which is not an abandonment.) Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. Emitted on the exit path under a bounded flush, so the measured rate is a lower bound — see [Delivery & Reliability](#delivery--reliability). |
 
-Each event includes a timestamp, anonymous session ID, CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
+### A note on the derived activation events
+
+`activation_menu_shown`, `activation_job_selected`, and `first_job_completed` are **inferred, not observed**. The activation menu is not a UI element: it is text the model writes from a prompt template, and the user picks a job by replying in free text. Nothing in the CLI can see either moment directly.
+
+They are therefore inferred from the closest deterministic signals — the menu from the command dispatch or the completed environment scan, the job from the first matching tool or skill invocation that follows. Treat the counts as **lower bounds**, and note two specific gaps:
+
+- The "something else" branch has no tool signature at all and is never counted.
+- `first_job_completed` only fires for jobs with a real completion signal. Skill-driven jobs (downstream impact, SQL review, cost) load an instruction bundle and then do their work through other tools, so their completion is not observable and they are absent from this event rather than wrongly counted in it.
+
+Each event includes a timestamp, anonymous session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
 
 ## Delivery & Reliability
 
 Telemetry events are buffered in memory and flushed periodically. If a flush fails (e.g., due to a transient network error), events are re-added to the buffer for one retry. On process exit, the CLI performs a final flush to avoid losing events from the current session.
 
 No events are ever written to disk. If the process is killed before the final flush, buffered events are lost. This is by design to minimize on-disk footprint.
+
+The final flush is **time-bounded** so that quitting never hangs the shell: 2 seconds on the main thread and 5 seconds in the TUI worker. When that budget expires the in-flight request is aborted and its events are dropped rather than retried — a retry would only re-queue them into a buffer that is cleared moments later, to be shipped under the next launch's correlation id.
+
+The practical consequence is a known bias, not a silent one: events emitted **on the exit path** are the most likely to be lost on a slow or unreachable network, and `onboarding_abandoned` is emitted *only* on that path. So a measured abandonment rate is a **lower bound** — under-reporting is the failure mode, never over-reporting, since a dropped event can only remove an abandonment from the count. Read drop-off numbers as a floor, and treat a change in them as meaningful only if network conditions are comparable.
 
 ## Why We Collect Telemetry
 

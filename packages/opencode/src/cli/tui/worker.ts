@@ -24,6 +24,13 @@ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecy
 // does NOT receive this worker's in-process (Server.Default().fetch) session events.
 import { TraceConsumer } from "@/altimate/observability/trace-consumer"
 import { Instance } from "@/project/instance"
+// altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
+import { Telemetry } from "@/altimate/telemetry"
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+
+// altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
+// is enforced by the compiler rather than by a comment.
+const SHUTDOWN_BUDGET_MS = Telemetry.TUI_SHUTDOWN_BUDGET_MS
 
 Heap.start()
 
@@ -95,6 +102,13 @@ export const rpc = {
     })
     // altimate_change end
   },
+  // altimate_change start — onboarding funnel: the TUI owns the first-run decision and this thread
+  // runs the gateway auth flow, so it has to be told. Without it the gateway events cannot tell a
+  // first run from a routine /auth. See telemetry/onboarding.ts markFunnelActive().
+  async onboardingStarted() {
+    OnboardingTelemetry.markFunnelActive()
+  },
+  // altimate_change end
   async reload() {
     await AppRuntime.runPromise(
       Effect.gen(function* () {
@@ -105,6 +119,9 @@ export const rpc = {
     )
   },
   async shutdown() {
+    // altimate_change start — cli/cmd/tui.ts allows this RPC 5s before worker.terminate().
+    const shutdownStartedAt = Date.now()
+    // altimate_change end
     // altimate_change start — trace: drain pending events (bounded), then finalize SYNCHRONOUSLY.
     // On a quiet Bun Worker thread, pending async fs writes from the consumer don't flush before
     // worker.terminate(), so an async flush() silently writes nothing; flushSync() uses writeFileSync.
@@ -113,6 +130,24 @@ export const rpc = {
     // altimate_change end
     await InstanceRuntime.disposeAllInstances()
     if (server) await server.stop(true)
+    // altimate_change start — telemetry flush LAST, on whatever of the budget remains.
+    //
+    // This thread owns its own Telemetry module instance (separate buffer from the main thread),
+    // and the server-side events — gateway auth, project scan, sample setup, session events — land
+    // here. cli/cmd/tui.ts terminates the worker immediately after this RPC returns, so anything
+    // still buffered is lost.
+    //
+    // Ordered after instance disposal and server stop deliberately. The caller gives this whole
+    // RPC 5s; the trace drain above already claims up to 2s. Taking a further fixed 2s here left
+    // core cleanup at risk of being cut off by terminate() — and cleanup losing its slot is worse
+    // than losing a telemetry batch. Whatever is left of the budget goes to telemetry instead.
+    try {
+      const remaining = Math.max(250, SHUTDOWN_BUDGET_MS - (Date.now() - shutdownStartedAt))
+      await Telemetry.shutdown({ timeoutMs: remaining })
+    } catch {
+      // Telemetry must never block worker shutdown.
+    }
+    // altimate_change end
   },
 }
 

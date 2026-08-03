@@ -17,6 +17,7 @@
     "./context/epilogue": "./src/context/epilogue.tsx",
     "./context/exit": "./src/context/exit.tsx",
     "./context/kv": "./src/context/kv.tsx",
+    "./context/onboarding-telemetry": "./src/context/onboarding-telemetry.tsx",
     "./context/project": "./src/context/project.tsx",
     "./context/runtime": "./src/context/runtime.tsx",
     "./context/sdk": "./src/context/sdk.tsx",

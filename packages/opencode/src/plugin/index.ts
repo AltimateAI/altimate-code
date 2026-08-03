@@ -30,6 +30,9 @@ import { DatabricksAuthPlugin } from "../altimate/plugin/databricks"
 // altimate_change start — altimate backend auth plugin
 import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
 // altimate_change end
+// altimate_change start — onboarding activation-funnel telemetry plugin
+import { OnboardingTelemetryPlugin } from "../altimate/plugin/onboarding-telemetry"
+// altimate_change end
 // altimate_change start — wire plugin experimental_workspace.register into the
 // control-plane adapter registry consumed by control-plane/workspace.ts
 import { registerAdapter } from "../control-plane/adapters"
@@ -60,6 +63,7 @@ export namespace Plugin {
     SnowflakeCortexAuthPlugin,
     DatabricksAuthPlugin,
     AltimateAuthPlugin,
+    OnboardingTelemetryPlugin,
   ]
   // altimate_change end
 

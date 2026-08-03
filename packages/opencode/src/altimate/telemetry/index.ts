@@ -50,6 +50,21 @@ export namespace Telemetry {
   const MAX_BUFFER_SIZE = 200
   const REQUEST_TIMEOUT_MS = 10_000
 
+  /**
+   * altimate_change — single source of truth for the TUI exit-path flush budget, referenced by
+   * BOTH the `withTimeout(client.call("shutdown", ...))` deadline on the main thread
+   * (cli/cmd/tui.ts) and the worker's remaining-budget computation (cli/tui/worker.ts). They must
+   * agree: the worker's buffer flush exists only because `worker.terminate()` would otherwise
+   * discard it, and if the main thread's deadline were the shorter of the two it would truncate
+   * the flush and silently restore the data loss this guards against.
+   */
+  export const TUI_SHUTDOWN_BUDGET_MS = 5000
+
+  /** Exit-path budget for the MAIN thread's own flush. Strictly smaller than the worker's,
+   *  because it runs after the worker shutdown RPC has already returned and still has to finish
+   *  before `process.exit(0)`. */
+  export const EXIT_FLUSH_BUDGET_MS = 2000
+
   export type Event =
     // altimate_change start — add os/arch/node_version for environment segmentation
     | {
@@ -731,9 +746,224 @@ export namespace Telemetry {
         /** output tokens on the stop-without-tools generation — helps distinguish "refused" (low) from "wrote a long text plan" (high) */
         tokens_output: number
       }
+    // altimate_change end
+    // altimate_change start — first-run onboarding funnel taxonomy.
+    //
+    // Event names and property names follow the product spec verbatim so the taxonomy is
+    // queryable under the names it was specified with. Two naming notes for whoever writes
+    // the queries:
+    //   - `gateway_device_code_issued` is a spec name kept for fidelity. The gateway flow is
+    //     actually a browser loopback OAuth (see altimate/plugin/altimate.ts) — there is no
+    //     device code. The event means "authorize URL built and browser open attempted".
+    //   - `environment_scan_completed` overlaps `environment_census` above; census stays the
+    //     richer dbt/warehouse fingerprint, this one is the onboarding-shaped scan result.
+    //
+    // Events tagged "derived" are inferred from a proxy signal, not observed directly — the
+    // activation menu is model-rendered text (src/command/template/onboard-connect.txt), so
+    // there is no UI event to capture. Treat their counts as lower bounds.
+    | {
+        type: "onboarding_started"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "model_picker_shown"
+        timestamp: number
+        session_id: string
+        /** the picker mounts from several paths — without this the event over-counts first runs */
+        trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+      }
+    | {
+        type: "provider_selected"
+        timestamp: number
+        session_id: string
+        /** `search_all` means the user opened the full catalogue; the provider they then chose
+         *  arrives as a second event with `via_search`. `other` is any provider outside the
+         *  curated five. */
+        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all" | "other"
+        /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
+         *  A user-defined provider in opencode.json can be named after their company, so
+         *  anything unrecognised is reported as `other` with this omitted. */
+        provider_id?: string
+        /** True when this selection came from the full catalogue after `search_all`, so the two
+         *  events can be told apart from a direct pick on the curated picker. */
+        via_search?: boolean
+      }
+    | {
+        type: "big_pickle_confirm_shown"
+        timestamp: number
+        session_id: string
+        origin: "welcome" | "model"
+      }
+    | {
+        type: "big_pickle_choice"
+        timestamp: number
+        session_id: string
+        choice: "accept" | "cancel"
+      }
+    | {
+        type: "gateway_device_code_issued"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "gateway_auth_completed"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "gateway_auth_failed"
+        timestamp: number
+        session_id: string
+        /** `denied` only from an explicit error callback; an unknown/invalid state never rejects
+         *  the pending promise, so CSRF mismatches surface as `timeout`. Never carries error text. */
+        reason: "timeout" | "denied" | "error"
+      }
+    | {
+        type: "instance_connected"
+        timestamp: number
+        session_id: string
+        /** measured from the authorize() call that opened the browser */
+        time_to_connect_ms: number
+      }
+    | {
+        type: "onboarding_completed"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "scan_gate_shown"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "scan_gate_choice"
+        timestamp: number
+        session_id: string
+        /** `dismissed` is esc / click-away: the gate was shown but neither branch was taken, and
+         *  abandonment cannot cover it because completion already fired on the same transition. */
+        choice: "scan" | "skip" | "dismissed"
+      }
+    | {
+        type: "environment_scan_completed"
+        timestamp: number
+        session_id: string
+        has_dbt: boolean
+        has_warehouse: boolean
+        is_repo: boolean
+        connections_found: number
+        /** bounded list of short enum reasons — arrays are JSON.stringify'd into customDimensions */
+        degraded: string[]
+      }
+    | {
+        type: "activation_menu_shown"
+        timestamp: number
+        session_id: string
+        variant: "warehouse" | "no_data"
+      }
+    | {
+        /** derived — inferred from the first job tool/skill after the menu. `something_else`
+         *  has no tool anchor and is systematically under-counted. */
+        type: "activation_job_selected"
+        timestamp: number
+        session_id: string
+        job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
+      }
+    | {
+        /** derived — see activation_job_selected */
+        type: "first_job_completed"
+        timestamp: number
+        session_id: string
+        job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
+      }
+    | {
+        /** Deliberately a `success` boolean rather than a `sample_setup_failed` sibling, unlike
+         *  the gateway_auth_completed/_failed pair. The gateway has genuinely distinct failure
+         *  modes worth their own enum (timeout / denied / error); this tool either materialised
+         *  the sample or did not, and the useful breakdown is `reused`, which only exists on the
+         *  success path. Splitting it would duplicate the counts an analyst has to add back up. */
+        type: "sample_setup_completed"
+        timestamp: number
+        session_id: string
+        success: boolean
+        /** counts come from the shipped jaffle-shop manifest; the target path is never sent */
+        models: number
+        tables: number
+        /** the tool is deliberately re-callable (reuse / reset / install-alongside) */
+        reused: boolean
+      }
+    | {
+        type: "first_prompt_sent"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "onboarding_abandoned"
+        timestamp: number
+        session_id: string
+        /** last funnel stage observed before exit without a completion */
+        last_stage: string
+      }
   // altimate_change end
 
   /** SHA256 hash a masked error message for anonymous grouping. */
+  // altimate_change start — provider identity for the onboarding funnel.
+  //
+  // Public provider ids only. `sync.data.provider` also contains anything the user declared in
+  // their own config, and those names are frequently a company or team name — so an id that is
+  // not on this list is reported as `other` with no raw value attached.
+  const KNOWN_PROVIDER_IDS = new Set([
+    "altimate-backend",
+    "anthropic",
+    "openai",
+    "google",
+    "opencode",
+    "opencode-go",
+    "github-copilot",
+    "azure",
+    "amazon-bedrock",
+    "openrouter",
+    "mistral",
+    "groq",
+    "deepseek",
+    "xai",
+    "digitalocean",
+    "cerebras",
+    "together",
+    "fireworks",
+    "vercel",
+    "huggingface",
+    "ollama",
+    "lmstudio",
+    "snowflake-cortex",
+    "databricks",
+  ])
+
+  /** The curated picker's own rows map to named enum values; everything else is `other`. */
+  // Null-prototype: a plain literal resolves ["constructor"], ["toString"] and ["valueOf"] to
+  // truthy functions, and normalizeCustomProviderID permits lowercase letters — so a provider id of
+  // `constructor` would be assigned straight to `provider` and shipped, bypassing the allowlist
+  // this function exists to enforce.
+  const CURATED_PROVIDER_ENUM: Record<string, string> = Object.assign(Object.create(null), {
+    "altimate-backend": "altimate_gateway",
+    anthropic: "anthropic",
+    openai: "openai",
+    google: "google",
+  })
+
+  /** Classify a provider id for `provider_selected`. Returns the enum value plus the raw id when
+   *  it is safe to send. */
+  export function classifyProvider(
+    providerID: string,
+    modelID?: string,
+  ): { provider: string; provider_id?: string } {
+    if (providerID === "opencode" && modelID === "big-pickle") return { provider: "big_pickle", provider_id: providerID }
+    const curated = CURATED_PROVIDER_ENUM[providerID]
+    if (curated) return { provider: curated, provider_id: providerID }
+    return KNOWN_PROVIDER_IDS.has(providerID) ? { provider: "other", provider_id: providerID } : { provider: "other" }
+  }
+  // altimate_change end
+
   export function hashError(maskedMessage: string): string {
     return createHash("sha256").update(maskedMessage).digest("hex").slice(0, 16)
   }
@@ -1206,6 +1436,52 @@ export namespace Telemetry {
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
   let initDone = false
+  // altimate_change — shutdown needs to cancel a flush already in flight, not just stop waiting
+  // for it: `flush()` chains through inFlightFlush, so a timed-out drain still had its final
+  // flush queue behind the very request it gave up on. `shuttingDown` additionally suppresses
+  // the retry write-back, which would otherwise re-insert events into a buffer about to be
+  // cleared and ship them under the NEXT lifecycle.
+  let activeFlushAbort: AbortController | undefined
+  let shuttingDown = false
+  // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
+  // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
+  let shutdownPromise: Promise<void> | undefined
+  // altimate_change — init chained onto an in-flight shutdown; see init().
+  let reinitPromise: Promise<void> | undefined
+  // altimate_change — the currently running flush, so shutdown waits rather than racing it.
+  let inFlightFlush: Promise<void> | undefined
+
+  // altimate_change start — per-launch correlation id, shared across threads via the environment.
+  // The TUI worker is spawned after the CLI middleware has already initialised telemetry on the
+  // main thread, and a Worker inherits a copy of process.env, so whichever thread runs first
+  // publishes the value and the other reads it. Lazy rather than module-init so importing the
+  // telemetry module (in tests, tooling) does not mint ids nobody uses.
+  // One id per process launch, shared with the TUI's server Worker through its environment.
+  //
+  // It has to be handed over explicitly at Worker construction (see cli/cmd/tui.ts). Two things
+  // that look like they would work do not, both confirmed end to end:
+  //   - mutating process.env after startup: a Bun Worker does not observe it, so the worker mints
+  //     its own id and the two halves of the funnel become unjoinable;
+  //   - deriving it from the process (pid + start time): process.uptime() is per-THREAD in Bun,
+  //     so the worker computes a different start time than the main thread.
+  const LAUNCH_ID_ENV = "ALTIMATE_LAUNCH_ID"
+
+  let cachedLaunchId: string | undefined
+
+  /** Test seam — the cache is intentionally process-lifetime, so shutdown() does not clear it. */
+  export function resetLaunchIdForTest() {
+    cachedLaunchId = undefined
+  }
+
+  export function launchId(): string {
+    // The worker reads the value the TUI handed it through WorkerOptions.env; the main thread
+    // generates it. Cached in module scope rather than written back to process.env — the worker
+    // is given it explicitly, so writing it would only leak the id into every subprocess the CLI
+    // spawns, for no benefit.
+    if (!cachedLaunchId) cachedLaunchId = process.env[LAUNCH_ID_ENV] || randomUUID()
+    return cachedLaunchId
+  }
+  // altimate_change end
 
   function parseConnectionString(cs: string): AppInsightsConfig | undefined {
     const parts: Record<string, string> = {}
@@ -1239,6 +1515,12 @@ export namespace Telemetry {
         source: clientSource,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
+        // altimate_change — groups every event from one process launch. The onboarding funnel
+        // spans the TUI main thread and the server worker, and most of it runs before any chat
+        // session exists, so `session_id` is empty for the first half and real for the second —
+        // leaving no key to join a single run on. This is not persisted, not derived from the
+        // machine or the user, and not reused across launches; it only says "same run".
+        launch_id: launchId(),
       }
       const measurements: Record<string, number> = {}
 
@@ -1288,10 +1570,43 @@ export namespace Telemetry {
   // Deduplicates concurrent calls: non-awaited init() in middleware/worker
   // won't race with await init() in session prompt.
   export function init(): Promise<void> {
-    if (!initPromise) {
-      initPromise = doInit()
+    // altimate_change start — never re-init across an in-flight shutdown.
+    //
+    // session/prompt.ts init()s at the start of every session loop and shutdown()s at the end, so a
+    // new session routinely begins while the previous shutdown is still awaiting flush().
+    //
+    // The shutdown check must come FIRST. An earlier version tested it inside `if (!initPromise)`,
+    // but doShutdown() leaves initPromise set for its whole duration — it is cleared only after
+    // `await flush()`. So during the very window this protects against, the old code took the other
+    // branch, handed back the stale resolved promise, and the caller tracked into a buffer that
+    // doShutdown() then emptied. The guard was unreachable and the event loss was live.
+    //
+    // Chaining onto shutdownPromise keeps the generations separate: callers arriving mid-shutdown
+    // wait for the new init rather than joining the dying one.
+    if (shutdownPromise) {
+      if (!reinitPromise) {
+        reinitPromise = shutdownPromise
+          .catch(() => {})
+          .then(doInit)
+          .finally(() => {
+            reinitPromise = undefined
+          })
+        // Publish it as initPromise too. Without this, a caller arriving after the shutdown had
+        // settled — but before this chained doInit() finished — saw an empty initPromise and
+        // started a SECOND one, replacing the flush timer and racing over the buffer.
+        initPromise = reinitPromise
+        // Publishing it also makes the outgoing doShutdown()'s `initPromise === initPromiseAtShutdown`
+        // reset guard miss, which used to leave initDone stuck at `true` from the dying generation
+        // while shutdown had already set `enabled = false`. track()'s "initialized and disabled →
+        // drop" rule then silently discarded every event emitted during the reinit — the exact
+        // window this path exists to keep. Hand the new generation a pre-init state so those
+        // events buffer and flush once doInit() re-enables.
+        initDone = false
+      }
+      return reinitPromise
     }
-    return initPromise
+    return (initPromise ??= doInit())
+    // altimate_change end
   }
 
   async function doInit() {
@@ -1335,15 +1650,33 @@ export namespace Telemetry {
         try {
           machineId = fs.readFileSync(machineIdPath, "utf8").trim()
         } catch {
-          machineId = randomUUID()
+          // altimate_change start — create exclusively so two threads cannot mint different ids.
+          // The TUI main thread and the server worker each initialise their own copy of this
+          // module, and on a genuinely new install both can find the file missing at the same
+          // moment. With a plain write, the loser's value overwrites the winner's while both keep
+          // their own in memory, so a single first run reports two machine_ids — breaking the
+          // fallback identity exactly on the run that matters most. `wx` makes one of them fail,
+          // and the loser re-reads what the winner wrote.
+          const candidate = randomUUID()
           fs.mkdirSync(path.dirname(machineIdPath), { recursive: true })
-          fs.writeFileSync(machineIdPath, machineId, "utf8")
+          try {
+            fs.writeFileSync(machineIdPath, candidate, { encoding: "utf8", flag: "wx" })
+            machineId = candidate
+          } catch {
+            machineId = fs.readFileSync(machineIdPath, "utf8").trim()
+          }
+          // altimate_change end
         }
       } catch {
         // Machine ID unavailable — proceed without it
       }
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
+      // altimate_change — clear any existing interval before installing a new one. doInit() can
+      // run more than once per process (init/shutdown cycles per session in prompt.ts), and
+      // without this each extra run strands the previous timer: shutdown() only ever clears the
+      // current handle, so orphans accumulate for the life of a `serve` process.
+      if (flushTimer) clearInterval(flushTimer)
       const timer = setInterval(flush, FLUSH_INTERVAL_MS)
       if (typeof timer === "object" && timer && "unref" in timer) (timer as any).unref()
       flushTimer = timer
@@ -1379,7 +1712,28 @@ export namespace Telemetry {
     }
   }
 
-  export async function flush() {
+  // altimate_change — `timeoutMs` lets exit paths bound the flush from the INSIDE. Racing
+  // flush() against an external timer does not cancel the fetch: the losing promise keeps
+  // running and can reset module state after the caller has moved on. Threading the deadline
+  // into the existing AbortController actually aborts the request.
+  export async function flush(timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<void> {
+    // altimate_change start — serialize flushes.
+    //
+    // Serializing shutdown() alone was not enough: the 5s interval timer can already have spliced
+    // `buffer` and be awaiting fetch when a shutdown begins. Shutdown's own flush then finds an
+    // empty buffer, resets module state and returns — and in the TUI worker, terminate() follows
+    // immediately, killing the timer's request mid-send. Worse, if that request fails first, its
+    // retry path re-inserts events into a buffer shutdown has already cleared, and a later init()
+    // ships them under the next lifecycle.
+    //
+    // Chaining every flush through one promise means shutdown waits for an in-flight batch instead
+    // of racing it.
+    inFlightFlush = (inFlightFlush ?? Promise.resolve()).then(() => doFlush(timeoutMs)).catch(() => {})
+    return inFlightFlush
+    // altimate_change end
+  }
+
+  async function doFlush(timeoutMs: number) {
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
@@ -1397,7 +1751,8 @@ export namespace Telemetry {
     }
 
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    activeFlushAbort = controller
+    const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetch(appInsights.endpoint, {
         method: "POST",
@@ -1409,6 +1764,10 @@ export namespace Telemetry {
         log.debug("telemetry flush failed", { status: response.status })
       }
     } catch {
+      // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
+      // regardless, so re-inserting here does not save these events; it only leaves them to be
+      // shipped by whatever lifecycle comes next, under a different launch id.
+      if (shuttingDown) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !(e as any)._retried)
       for (const e of retriable) {
@@ -1418,6 +1777,7 @@ export namespace Telemetry {
       buffer.unshift(...retriable.slice(0, space))
     } finally {
       clearTimeout(timeout)
+      if (activeFlushAbort === controller) activeFlushAbort = undefined
     }
   }
 
@@ -1437,7 +1797,44 @@ export namespace Telemetry {
   }
   // altimate_change end
 
-  export async function shutdown() {
+  // altimate_change start — serialize concurrent shutdowns, and let callers bound the flush.
+  //
+  // shutdown() is called from several independent paths (session/prompt.ts at the end of each
+  // session loop, the CLI's outer finally, and — for onboarding telemetry — the TUI exit path
+  // and the TUI worker's rpc.shutdown). Two overlapping calls would both enter flush(), which
+  // splices the shared buffer, so one caller can post a half-empty batch while the other drops
+  // events. The in-flight promise is cleared on settle, so a later init/shutdown cycle (the
+  // per-session pattern in prompt.ts) still works.
+  //
+  // `timeoutMs` bounds the flush from the inside. Racing shutdown() against an external timer
+  // does NOT cancel it: the losing promise keeps running and resets module state after the
+  // caller has already moved on. Exit paths pass a budget so the fetch itself is aborted.
+  export async function shutdown(opts?: { timeoutMs?: number }) {
+    if (shutdownPromise) {
+      // An earlier caller is mid-flush, possibly on the default 10s budget. Returning its promise
+      // unchanged would silently ignore this caller's deadline and make the exit path wait past
+      // it — after which the worker is terminated anyway and the buffer is lost regardless. We
+      // cannot shorten the in-flight flush, but we can stop making the caller wait for it.
+      const budget = opts?.timeoutMs
+      if (budget === undefined) return shutdownPromise
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        shutdownPromise,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, budget)
+        }),
+      ]).catch(() => {})
+      if (timer) clearTimeout(timer)
+      return
+    }
+    shutdownPromise = doShutdown(opts?.timeoutMs).finally(() => {
+      shutdownPromise = undefined
+    })
+    return shutdownPromise
+  }
+
+  async function doShutdown(timeoutMs?: number) {
+    const initPromiseAtShutdown = initPromise
     // Wait for init to complete so we know whether telemetry is enabled
     // and have a valid endpoint to flush to.  init() is fire-and-forget
     // in CLI middleware, so it may still be in-flight when shutdown runs.
@@ -1452,7 +1849,43 @@ export namespace Telemetry {
       clearInterval(flushTimer)
       flushTimer = undefined
     }
-    await flush()
+    // altimate_change — drain any flush already running before the final one, so a timer batch
+    // in mid-request is not abandoned and cannot write back into a buffer we are about to clear.
+    const deadline = Date.now() + (timeoutMs ?? REQUEST_TIMEOUT_MS)
+    shuttingDown = true
+    if (inFlightFlush) {
+      // Bounded: a flush already in flight uses the DEFAULT request timeout, so awaiting it
+      // unbounded could burn 10s before the bounded flush below even starts — well past the 5s
+      // the TUI allows the whole shutdown RPC.
+      //
+      // One ABSOLUTE deadline covers the drain and the final flush together. Giving each the full
+      // `timeoutMs` let a slow in-flight request spend the whole budget and then hand the final
+      // flush a fresh copy of it, so shutdown could still take twice what the caller allowed and
+      // overrun the deadline that keeps the worker's buffer from being discarded.
+      let drainTimer: ReturnType<typeof setTimeout> | undefined
+      let drained = false
+      await Promise.race([
+        inFlightFlush.catch(() => {}).then(() => {
+          drained = true
+        }),
+        new Promise<void>((resolve) => {
+          drainTimer = setTimeout(resolve, Math.max(0, deadline - Date.now()))
+        }),
+      ])
+      if (drainTimer) clearTimeout(drainTimer)
+      if (!drained) {
+        // Giving up on the wait is not enough: flush() chains onto inFlightFlush, so the final
+        // flush below would queue behind the very request the drain just abandoned and inherit
+        // its remaining runtime — up to the full default 10s on top of the budget. Abort it.
+        activeFlushAbort?.abort()
+        await inFlightFlush.catch(() => {})
+      }
+    }
+    // Whatever the drain left of the shared deadline, never below a floor that lets the request
+    // actually be made.
+    await flush(Math.max(250, deadline - Date.now()))
+    inFlightFlush = undefined
+    shuttingDown = false
     enabled = false
     appInsights = undefined
     buffer = []
@@ -1460,7 +1893,27 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
-    initPromise = undefined
-    initDone = false
+    // doInit() only assigns userEmail when Account.active() returns one, so without this a
+    // logout followed by a re-init in the same process kept hashing the previous account into
+    // ai.user.id.
+    userEmail = ""
+    // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
+    // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
+    // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.
+    // Tests use resetLaunchIdForTest() instead.
+    // altimate_change — only clear initPromise if it is still the one this shutdown began with.
+    // init() can set `initPromise = shutdownPromise.then(doInit)`; nulling that unconditionally
+    // discards a doInit() which has not run yet, so the next init() starts a second one.
+    //
+    // Not covered by a test: that assignment requires initPromise to be undefined while
+    // shutdownPromise is still live, and those two are cleared one statement apart — a window I
+    // could not reach deterministically. Kept because it is free and obviously correct; the
+    // clear-before-assign in doInit() is what actually prevents an orphaned interval, whatever
+    // path leads to a second doInit.
+    if (initPromise === initPromiseAtShutdown) {
+      initPromise = undefined
+      initDone = false
+    }
   }
+  // altimate_change end
 }

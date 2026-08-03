@@ -9,6 +9,13 @@ import { UPGRADE_KV_KEY } from "./component/upgrade-indicator-utils"
 // altimate_change end
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
 import { ExitProvider, useExit } from "./context/exit"
+// altimate_change start — onboarding funnel telemetry seam
+import {
+  OnboardingTelemetryProvider,
+  useOnboardingTelemetry,
+  type TrackOnboarding,
+} from "./context/onboarding-telemetry"
+// altimate_change end
 import { EpilogueProvider } from "./context/epilogue"
 import * as Selection from "./util/selection"
 import { createCliRenderer, MouseButton, type CliRenderer } from "@opentui/core"
@@ -31,7 +38,13 @@ import { DialogProvider, useDialog } from "./ui/dialog"
 // altimate_change start — /auth (gateway sign-in) + /connect (curated welcome picker)
 // + /logout commands
 import { DialogAltimateAuth } from "./component/dialog-provider"
-import { DialogModelWelcome, useReady, resetSetupComplete } from "./component/altimate-onboarding"
+import {
+  DialogModelWelcome,
+  useReady,
+  useSetupComplete,
+  markFirstRunActive,
+  resetSetupComplete,
+} from "./component/altimate-onboarding"
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
 import { DialogScanGate } from "./component/dialog-scan-gate"
@@ -153,6 +166,10 @@ export type TuiInput = {
   headers?: RequestInit["headers"]
   events?: EventSource
   pluginHost: TuiPluginHost
+  // altimate_change start — onboarding funnel telemetry, injected by the host (packages/tui cannot
+  // reach the Telemetry module). Optional: absent means no tracking, not an error.
+  onTelemetry?: TrackOnboarding
+  // altimate_change end
 }
 
 function errorMessage(error: unknown) {
@@ -256,6 +273,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                 destroyRenderer(renderer)
               }}
             >
+            {/* altimate_change start — onboarding telemetry seam. Mounted here, above
+                DialogProvider, because dialog contents render as a sibling of DialogProvider's
+                children and cannot see anything provided inside it. Defaults to a no-op so
+                hosts that do not supply a tracker (tests, embedders) work unchanged. */}
+            <OnboardingTelemetryProvider track={input.onTelemetry ?? (() => {})}>
               <EpilogueProvider set={(value) => (exit.epilogue = value)}>
                 <ErrorBoundary fallback={(error, reset) => <ErrorComponent error={error} reset={reset} mode={mode} />}>
                   <TuiPathsProvider
@@ -347,6 +369,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                   </TuiPathsProvider>
                 </ErrorBoundary>
               </EpilogueProvider>
+            </OnboardingTelemetryProvider>
+            {/* altimate_change end */}
             </ExitProvider>
           )
         }, renderer)
@@ -548,6 +572,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   // plugin startup, not onboarding state.
   const connected = useConnected()
   const onboardingReady = useReady()
+  // altimate_change — setup completion alone (no `connected()` term); see the scan-gate effect
+  const setupComplete = useSetupComplete()
+  // altimate_change — onboarding funnel tracker (no-op when the host injected none)
+  const trackOnboarding = useOnboardingTelemetry()
   // altimate_change end
 
   // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
@@ -570,52 +598,120 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     // (same one used for continue/fork above).
     if (!ready() || sync.status !== "complete") return
     firstRunPickerHandled = true
-    if (onboardingReady()) return // already set up — no gate
+    if (onboardingReady()) {
+      // Not necessarily a returning user. The prompt gate (component/prompt/index.tsx) opens the
+      // same picker as soon as the user tries to submit, which can happen BEFORE sync finishes
+      // hydrating — and completing setup there makes onboardingReady() true by the time this
+      // effect finally runs. Bailing out then skipped the funnel and the scan gate entirely for
+      // exactly the impatient-user case. setupComplete() is the discriminator: it starts false
+      // every launch and is only set by a setup the user completed during THIS one, so a genuine
+      // returning user never trips this branch.
+      if (setupComplete()) {
+        // Deliberately NOT markFirstRunActive(): its only clear is markSetupComplete(), which has
+        // already run on this branch and will not run again, so setting it here would latch the
+        // flag true for the rest of the session and make every later /model switch emit funnel
+        // events. The three events below are emitted directly and do not consult it. The prompt
+        // gate arms it instead, at the point the picker actually opens.
+        scanGateShown = true
+        trackOnboarding({ name: "onboarding_started" })
+        trackOnboarding({ name: "onboarding_completed" })
+        trackOnboarding({ name: "scan_gate_shown" })
+        openScanGate()
+      }
+      return
+    }
     armScanGate = true
-    dialog.replace(() => <DialogModelWelcome />)
+    markFirstRunActive()
+    // altimate_change — funnel: top of the first-run flow. Emitted only on the branch that
+    // actually opens the gate, so returning users never enter the funnel.
+    trackOnboarding({ name: "onboarding_started" })
+    dialog.replace(() => <DialogModelWelcome trigger="first_run" />)
   })
   // altimate_change end
 
-  // altimate_change start — Part 2 scan gate: fire EXACTLY once, after the user
-  // completes first-run Part 1. Gated on `armScanGate` (set above only when this
-  // launch started un-onboarded) so a RETURNING user — whose onboardingReady flips
-  // false→true simply because sync finished loading providers — never sees it.
-  // `prev === false` still requires a genuine transition, and a later /model change
-  // (ready stays true) never re-triggers it. We do NOT auto-scan — the gate asks.
+  // altimate_change start — Part 2 scan gate: fire EXACTLY once, when the user has actually
+  // finished picking a model during a first run.
+  //
+  // Two independent guards, because there are two ways this gate goes wrong:
+  //
+  // 1. `armScanGate` (set above only when this launch started un-onboarded) keeps a RETURNING
+  //    user from seeing it — including one who later opens /model and picks a model, which does
+  //    set setupComplete.
+  // 2. The trigger is setupComplete, NOT useReady(). useReady() also counts `connected()`, which
+  //    flips as soon as a provider lands in sync data — and the BYOK confirm handlers do exactly
+  //    that inside `await sync.bootstrap()` before going on to open the model picker
+  //    (dialog-provider.tsx ApiMethod/CodeMethod). Triggering on readiness mounted this gate
+  //    mid-handler, the handler's own `dialog.replace(<DialogModel/>)` destroyed it a moment
+  //    later, and the one-shot latch meant it never came back: `/onboard-connect` was never
+  //    submitted, so every activation event was unreachable for BYOK users while
+  //    `onboarding_completed` and `scan_gate_shown` were still reported for a gate nobody saw.
+  //
+  // setupComplete is only set once a model is genuinely chosen (dialog-model.tsx, the Big Pickle
+  // accept path, and the gateway auto-select), which is what this gate and the spec both mean.
+  // `prev === false` still requires a genuine transition. We do NOT auto-scan — the gate asks.
   let scanGateShown = false
+  // Single recorder for every way the gate can resolve, latched so the close handler below cannot
+  // double-count after a real choice. Hoisted out of the effect because the early-return branch
+  // above opens the same gate.
+  let scanChoiceRecorded = false
+  function recordScanChoice(choice: "scan" | "skip" | "dismissed") {
+    if (scanChoiceRecorded) return
+    scanChoiceRecorded = true
+    trackOnboarding({ name: "scan_gate_choice", choice })
+  }
   createEffect(
-    on(onboardingReady, (isReady, prev) => {
+    on(setupComplete, (isComplete, prev) => {
       if (scanGateShown || !armScanGate) return
-      if (isReady && prev === false) {
+      if (isComplete && prev === false) {
         scanGateShown = true
-        dialog.replace(() => (
-          <DialogScanGate
-            onChoose={(arg) => {
-              // Yes → /onboard-connect scan; No → /onboard-connect skip.
-              // Both branches now have a real follow-up: `scan` runs
-              // project_scan and branches into the discovery UX; `skip`
-              // asks what the user is working on and offers the activation
-              // menu (sample dbt, downstream impact, SQL PR, or free chat).
-              // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
-              const ref = promptRef.current
-              if (!ref) {
-                // The prompt should be mounted by the time the gate resolves, but
-                // if it isn't, don't silently drop the user's choice — tell them
-                // how to continue instead of a dead keypress.
-                toast.show({
-                  message: `Run /onboard-connect ${arg} to continue.`,
-                  variant: "error",
-                })
-                return
-              }
-              ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
-              ref.submit()
-            }}
-          />
-        ))
+        // altimate_change — funnel: Part 1 finished (a model is ready) and the gate is opening.
+        // This false→true transition is exactly the ticket's "onboarding_completed" definition,
+        // so both events are emitted from it.
+        trackOnboarding({ name: "onboarding_completed" })
+        trackOnboarding({ name: "scan_gate_shown" })
+        openScanGate()
       }
     }),
   )
+  // Function declaration (hoisted) so the pre-completed-setup branch above can open the same gate.
+  function openScanGate() {
+    dialog.replace(
+      () => (
+        <DialogScanGate
+          onOutcome={(outcome) => recordScanChoice(outcome)}
+          onChoose={(arg) => {
+              // altimate_change — funnel: emitted here rather than inside the gate because the
+              // dialog overlay renders outside the provider tree; `onChoose` is already the
+              // established way to hand the gate something it cannot reach itself.
+            // Recorded by onOutcome above, which the gate calls before dialog.clear().
+            // Yes → /onboard-connect scan; No → /onboard-connect skip.
+            // Both branches now have a real follow-up: `scan` runs
+            // project_scan and branches into the discovery UX; `skip`
+            // asks what the user is working on and offers the activation
+            // menu (sample dbt, downstream impact, SQL PR, or free chat).
+            // Template lives at packages/opencode/src/command/template/onboard-connect.txt.
+            const ref = promptRef.current
+            if (!ref) {
+              // The prompt should be mounted by the time the gate resolves, but
+              // if it isn't, don't silently drop the user's choice — tell them
+              // how to continue instead of a dead keypress.
+              toast.show({
+                message: `Run /onboard-connect ${arg} to continue.`,
+                variant: "error",
+              })
+              return
+            }
+            ref.set({ input: `/onboard-connect ${arg}`, parts: [] })
+            ref.submit()
+          }}
+        />
+      ),
+      // altimate_change — funnel: DialogProvider invokes this on EVERY close, including the
+      // Escape key and click-away, which never reach the gate's own inline `esc` control. The
+      // latch inside recordScanChoice makes it a no-op once a real choice was made.
+      () => recordScanChoice("dismissed"),
+    )
+  }
   // altimate_change end
   const currentWorktreeWorkspace = createMemo(() => {
     const workspaceID = project.workspace.current()

@@ -16,6 +16,11 @@ import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
 import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
+// altimate_change start — onboarding telemetry: main-thread flush on the TUI exit path
+import { Telemetry } from "@/altimate/telemetry"
+import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+import { AltimateApi } from "@/altimate/api/client"
+// altimate_change end
 
 declare global {
   const OPENCODE_WORKER_PATH: string
@@ -131,7 +136,13 @@ export const TuiThreadCommand = cmd({
       }
       const cwd = Filesystem.resolve(process.cwd())
 
-      const worker = new Worker(file)
+      // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
+      // Worker does not see runtime mutations to process.env, so without this the worker mints its
+      // own and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.
+      const worker = new Worker(file, {
+        env: { ...process.env, ALTIMATE_LAUNCH_ID: Telemetry.launchId() },
+      } as WorkerOptions)
+      // altimate_change end
       const client = Rpc.client<typeof rpc>(worker)
       const reload = () => {
         client.call("reload", undefined).catch(() => {})
@@ -143,7 +154,10 @@ export const TuiThreadCommand = cmd({
         if (stopped) return
         stopped = true
         process.off("SIGUSR2", reload)
-        await withTimeout(client.call("shutdown", undefined), 5000).catch(() => {})
+        // altimate_change start — budget shared with the worker's own flush deadline, so the two
+        // halves cannot drift apart and truncate the worker's telemetry buffer.
+        await withTimeout(client.call("shutdown", undefined), Telemetry.TUI_SHUTDOWN_BUDGET_MS).catch(() => {})
+        // altimate_change end
         worker.terminate()
       }
 
@@ -203,6 +217,56 @@ export const TuiThreadCommand = cmd({
             },
             config,
             pluginHost: createLegacyTuiPluginHost(),
+            // altimate_change — onboarding funnel seam. Deliberately a single-line marker, not a
+            // start/end pair: this sits inside the "clean up TUI worker after failed --session
+            // validation" region, and a nested closing marker truncates the block that
+            // test/cli/tui/command.test.ts slices to assert cleanup ordering. (Do not spell that
+            // marker out in prose here either — the parser matches the token in comment text and
+            // would close the region on this very line.)
+            //
+            // The TUI renders on this thread, so
+            // this reaches the main-process Telemetry module directly (already initialized by the
+            // CLI middleware) — no HTTP, no worker round-trip.
+            //
+            // The `name` → `type` remap is the one untyped point in the chain: packages/tui
+            // cannot import the Telemetry event union, so it declares its own mirror in
+            // context/onboarding-telemetry.tsx. A test pins the two lists together.
+            //
+            // Selecting the gateway provider also marks the auth stage, because the browser flow
+            // itself runs in the worker and cannot reach this thread's abandonment state.
+            onTelemetry: (event) => {
+              const { name, ...props } = event
+              // The gateway auth flow emits from the WORKER, which cannot see this thread's
+              // funnel state. Tell it once, when the funnel opens, so those events are scoped to a
+              // real first run instead of firing for every /auth. (No nested marker pair here —
+              // see the note above.)
+              if (name === "onboarding_started") {
+                OnboardingTelemetry.markFunnelActive()
+                client.call("onboardingStarted", undefined).catch(() => {})
+              }
+              if (name === "provider_selected") {
+                // Classify here, not in the TUI: a provider a user declared in their own config
+                // can be named after their company, so the raw id is only forwarded when it is on
+                // the known-public allowlist.
+                const { searchAll, providerID, modelID, ...rest } = props as {
+                  searchAll?: boolean
+                  providerID?: string
+                  modelID?: string
+                  via_search?: boolean
+                }
+                const classified = searchAll
+                  ? { provider: "search_all" as const }
+                  : Telemetry.classifyProvider(providerID ?? "", modelID)
+                if (classified.provider === "altimate_gateway") OnboardingTelemetry.markStage("gateway_auth")
+                void OnboardingTelemetry.emit({ type: name, ...rest, ...classified } as Parameters<
+                  typeof OnboardingTelemetry.emit
+                >[0])
+                return
+              }
+              void OnboardingTelemetry.emit({ type: name, ...props } as Parameters<
+                typeof OnboardingTelemetry.emit
+              >[0])
+            },
             directory: cwd,
             fetch: transport.fetch,
             events: transport.events,
@@ -224,8 +288,39 @@ export const TuiThreadCommand = cmd({
       try {
         unguard?.()
       } catch {}
+      // altimate_change start — flush main-thread telemetry before the explicit exit below.
+      // This handler ends with process.exit(0), which skips the outer `finally` in src/index.ts
+      // that normally calls Telemetry.shutdown(). Without this, every event tracked on the TUI
+      // thread since the last 5s interval flush is lost — including onboarding_abandoned, which
+      // by definition only fires here. Runs after stop() so the worker has already drained.
+      //
+      // Bounded from the INSIDE (shutdown → flush → AbortController), not by racing a timer:
+      // a lost race would leave the flush running and resetting module state after we resumed.
+      // flush() would otherwise block for REQUEST_TIMEOUT_MS (10s) on a blackholed network — a
+      // visible hang between the user quitting and the shell prompt returning.
+      try {
+        // The inner bound covers the flush only. Two things ahead of it can also stall — the
+        // credential read, and shutdown()'s await of an initialization the request middleware
+        // started — so the whole finalizer is raced too. Racing is safe HERE (unlike inside
+        // flush, per the note above) because the only thing after it is process.exit(0): nothing
+        // resumes to observe module state a straggler might still be mutating.
+        await withTimeout(
+          (async () => {
+            // Ask whether gateway credentials landed. The success events are emitted on the
+            // worker thread and this state is main-thread-owned, so without this a browser
+            // sign-in that completed just before the user quit is reported as an abandonment in
+            // the same launch that already reported instance_connected.
+            const connected = await AltimateApi.isConfigured().catch(() => false)
+            await OnboardingTelemetry.emitAbandonedIfIncomplete({ connected })
+            await Telemetry.shutdown({ timeoutMs: Telemetry.EXIT_FLUSH_BUDGET_MS })
+          })(),
+          Telemetry.EXIT_FLUSH_BUDGET_MS + 1000,
+        )
+      } catch {
+        // Never let telemetry delay or break exit.
+      }
+      // altimate_change end
     }
     process.exit(0)
   },
 })
-// scratch

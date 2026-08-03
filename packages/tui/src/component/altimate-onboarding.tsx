@@ -3,7 +3,7 @@
 // first-run readiness state, the curated welcome/provider picker, and the Big
 // Pickle interstitial. Imports back into dialog-model are runtime-only (used inside
 // callbacks/JSX), so the circular reference is safe.
-import { createMemo, createSignal, For, Show, onMount } from "solid-js"
+import { createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useLocal } from "../context/local"
 import { useDialog } from "../ui/dialog"
 import { useTheme, selectedForeground } from "../context/theme"
@@ -12,6 +12,8 @@ import { useKeyboard } from "@opentui/solid"
 import { createDialogProviderOptions } from "./dialog-provider"
 import { DialogModel } from "./dialog-model"
 import { useConnected } from "./use-connected"
+// altimate_change — onboarding funnel telemetry seam
+import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
 // chooses the free Big Pickle option, or finishes the gateway flow. Combined with
@@ -19,17 +21,59 @@ import { useConnected } from "./use-connected"
 // lock. Module-global so it is shared across the app and resets on every process
 // launch (so a fresh relaunch is a clean fresh-user state).
 const [setupComplete, setSetupComplete] = createSignal(false)
+
+// Whether a first run is in progress. Set when the first-run gate opens the picker, cleared once
+// setup completes. The full model catalogue (dialog-model.tsx) is shared with /model and routine
+// model switching, so it consults this before emitting any funnel event — otherwise every model
+// change for the life of the product would look like an onboarding provider choice.
+const [firstRunActive, setFirstRunActive] = createSignal(false)
+export function markFirstRunActive() {
+  setFirstRunActive(true)
+}
+/**
+ * Clear without marking setup complete.
+ *
+ * Needed for exactly one shape: the user HAS credentials but never chose a model, so
+ * markSetupComplete() — the normal clear — will not run. The gateway's connected-but-no-usable-
+ * model branch is the real instance (dialog-provider.tsx). Leaving the flag set there made later
+ * routine /model use emit funnel events for the rest of the session.
+ *
+ * NOT for ordinary dismissals. A user who closes the picker without setting anything up is still
+ * mid-first-run, and their next provider pick genuinely is the onboarding one.
+ */
+export function clearFirstRunActive() {
+  setFirstRunActive(false)
+}
+export function useFirstRunActive() {
+  return firstRunActive
+}
+
 export function markSetupComplete() {
   setSetupComplete(true)
+  setFirstRunActive(false)
 }
 // Cleared on /logout so first-run tips don't keep showing "you're all set" after
 // the credential is gone.
 export function resetSetupComplete() {
   setSetupComplete(false)
+  setFirstRunActive(false)
 }
 export function useReady() {
   const connected = useConnected()
   return createMemo(() => connected() || setupComplete())
+}
+
+/**
+ * Setup completion ONLY — deliberately without the `connected()` term.
+ *
+ * `connected()` flips as soon as a provider appears in sync data, which happens inside
+ * `await sync.bootstrap()` in the BYOK confirm handlers — before those handlers go on to open the
+ * model picker. Anything driven off `useReady()` therefore fires while the user still has no model
+ * selected, and is then immediately replaced by that picker. Use this accessor for "the user has
+ * finished setting up", and `useReady()` only for "is chat usable at all".
+ */
+export function useSetupComplete() {
+  return setupComplete
 }
 
 // First-run welcome picker (presentation only; reuses the same action handlers as
@@ -43,36 +87,62 @@ interface WelcomeRow {
   name: string
   note: string
   tone: WelcomeTone
-  activate: () => void
+  activate: () => boolean
+  // altimate_change — funnel: the "search all" row has no provider of its own; every other row
+  // is identified by its raw providerID/modelID below and classified host-side.
+  analyticsSearchAll?: boolean
   // Identifies the row for the "currently selected" tick. providerID alone matches
   // any model of that provider; add modelID to match a specific model (Big Pickle).
   providerID?: string
   modelID?: string
 }
 
-export function DialogModelWelcome(props: { intro?: string }) {
+export function DialogModelWelcome(props: {
+  intro?: string
+  // altimate_change — funnel: which path opened the picker. It also opens from /connect, from
+  // declining Big Pickle, and from the prompt gate, so without this every impression would read
+  // as a fresh first run. Defaults to the /connect case since that is the only caller that does
+  // not pass one explicitly.
+  trigger?: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+}) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
   const providers = createDialogProviderOptions()
   const [selected, setSelected] = createSignal(0)
+  // altimate_change start — funnel: picker impression + provider choice
+  const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
+  // model_picker_shown carries a `trigger`, so a /connect impression is already distinguishable and
+  // is kept. The choice events below are not distinguishable and are gated instead.
+  onMount(() => trackOnboarding({ name: "model_picker_shown", trigger: props.trigger ?? "connect_command" }))
+  // altimate_change end
 
   onMount(() => dialog.setSize("large"))
 
-  function connectProvider(id: string) {
-    // Reuse the exact provider onSelect (gateway flow for altimate-backend,
-    // auth-method screens for the BYOK providers).
-    providers()
-      .find((o) => o.value === id)
-      ?.onSelect?.()
+  /**
+   * Reuse the exact provider onSelect (gateway flow for altimate-backend, auth-method screens for
+   * the BYOK providers). Returns whether an action was actually dispatched: the server filters
+   * providers via `enabled_providers` / `disabled_providers` while these five rows are hardcoded,
+   * so a row can legitimately have no matching option and this would otherwise no-op in silence.
+   */
+  function connectProvider(id: string): boolean {
+    const option = providers().find((o) => o.value === id)
+    if (!option?.onSelect) return false
+    option.onSelect()
+    return true
   }
 
-  function chooseBigPickle() {
+  function chooseBigPickle(): boolean {
     dialog.replace(() => <DialogBigPickleConfirm origin="welcome" />)
+    return true
   }
 
-  function openFullCatalog() {
-    dialog.replace(() => <DialogModel />)
+  function openFullCatalog(): boolean {
+    // altimate_change — viaSearch marks this as the genuine search path; the catalogue's other
+    // entry points must not inherit it.
+    dialog.replace(() => <DialogModel viaSearch />)
+    return true
   }
 
   const rows = createMemo<WelcomeRow[]>(() => [
@@ -112,7 +182,13 @@ export function DialogModelWelcome(props: { intro?: string }) {
       modelID: "big-pickle",
       activate: chooseBigPickle,
     },
-    { name: "Search all providers…", note: "/", tone: "muted", activate: openFullCatalog },
+    {
+      name: "Search all providers…",
+      note: "/",
+      tone: "muted",
+      activate: openFullCatalog,
+      analyticsSearchAll: true,
+    },
   ])
 
   // The currently active model → drives the green "selected" tick.
@@ -121,6 +197,33 @@ export function DialogModelWelcome(props: { intro?: string }) {
     const c = current()
     if (!row.providerID || !c || c.providerID !== row.providerID) return false
     return row.modelID ? c.modelID === row.modelID : true
+  }
+
+  // altimate_change — funnel: single choke point for row activation so keyboard and mouse
+  // cannot diverge. Fires on selection, before auth resolves: a cancelled or failed sign-in
+  // still counts as a provider having been chosen, which is what the funnel step means.
+  // Guarded: keyboard return and mouse-up both reach here, and nothing stops two firing before
+  // the dialog unmounts — a fast double input would both double-count and start the provider
+  // flow twice. Per instance, so re-opening the picker is a genuinely new selection.
+  let activated = false
+  function activateRow(row: WelcomeRow) {
+    if (activated) return
+    // Claim the latch only once the action actually dispatched. Setting it first bricked the
+    // dialog: `connectProvider` silently no-ops for a provider the server has filtered out, and
+    // every later Enter, `/` and mouse-up then returned early — on the first-run gate, before the
+    // user has any model at all.
+    const dispatched = row.activate()
+    if (!dispatched) return
+    activated = true
+    // Funnel-only: /connect opens this same picker for an established user, and provider_selected
+    // carries no trigger, so an ungated emit would contaminate that launch's funnel.
+    if (firstRunActive())
+      trackOnboarding({
+      name: "provider_selected",
+      ...(row.analyticsSearchAll
+        ? { searchAll: true }
+        : { providerID: row.providerID, modelID: row.modelID }),
+      })
   }
 
   // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
@@ -135,13 +238,15 @@ export function DialogModelWelcome(props: { intro?: string }) {
     if (evt.name === "return") {
       evt.preventDefault()
       evt.stopPropagation()
-      rows()[selected()].activate()
+      activateRow(rows()[selected()])
       return
     }
     // "/", ctrl+a, or any letter/number reveals the full searchable catalog.
     if (evt.name === "/" || (evt.ctrl && evt.name === "a") || /^[a-z0-9]$/i.test(evt.name ?? "")) {
       evt.preventDefault()
-      openFullCatalog()
+      // altimate_change — the "/" shortcut is the same intent as the "Search all providers…"
+      // row, so it routes through the same guarded path.
+      activateRow(rows()[5])
     }
   })
 
@@ -150,14 +255,14 @@ export function DialogModelWelcome(props: { intro?: string }) {
   const noteColor = (tone: WelcomeTone) =>
     tone === "success" ? theme.success : tone === "warning" ? theme.warning : theme.textMuted
 
-  const Row = (props: { row: WelcomeRow; index: number }) => {
+  const Row = (props: { row: WelcomeRow; index: number; onActivate: (row: WelcomeRow) => void }) => {
     const active = createMemo(() => selected() === props.index)
     return (
       <box
         flexDirection="row"
         gap={1}
         onMouseMove={() => setSelected(props.index)}
-        onMouseUp={() => props.row.activate()}
+        onMouseUp={() => props.onActivate(props.row)}
       >
         <text flexShrink={0} fg={theme.primary}>
           {active() ? "›" : " "}
@@ -214,10 +319,10 @@ export function DialogModelWelcome(props: { intro?: string }) {
           <span style={{ fg: theme.textMuted }}> — you can change this anytime with /model</span>
         </text>
         <box gap={0}>
-          <For each={rows().slice(0, 5)}>{(row, i) => <Row row={row} index={i()} />}</For>
+          <For each={rows().slice(0, 5)}>{(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}</For>
         </box>
         <box border={["top"]} borderColor={theme.border} />
-        <Row row={rows()[5]} index={5} />
+        <Row row={rows()[5]} index={5} onActivate={activateRow} />
       </box>
     </box>
   )
@@ -226,16 +331,60 @@ export function DialogModelWelcome(props: { intro?: string }) {
 // Big Pickle interstitial — one confirm, default No. Custom component (not
 // DialogSelect) so the full warning wraps instead of clipping; y/n keys work,
 // enter accepts the highlighted row (No by default).
-export function DialogBigPickleConfirm(props: { origin: "welcome" | "model" }) {
+export function DialogBigPickleConfirm(props: {
+  origin: "welcome" | "model"
+  /** altimate_change — funnel: carried only so the `no()` return path can hand it back to
+   *  DialogModel. Cancelling out of Big Pickle does not leave the catalogue the user reached
+   *  through "Search all providers…", but dropping it here re-created the next pick as
+   *  via_search:false. */
+  viaSearch?: boolean
+}) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
   const [selected, setSelected] = createSignal(0) // 0 = No (default)
+  // altimate_change start — funnel: interstitial impression + decision.
+  // `decided` guards against a double-submit: keyboard and mouse handlers both call yes()/no()
+  // directly, and nothing prevents two firing before the dialog unmounts.
+  const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
+  let decided = false
+  // Funnel-only: /model reaches this interstitial with origin="model" for an established user.
+  onMount(() => {
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_confirm_shown", origin: props.origin })
+  })
+  // Every close that is not y/n is still a decision not to take Big Pickle, and the funnel showed
+  // an impression with no choice for all of them. onCleanup (rather than the inline `esc` control)
+  // is what makes this cover ALL of them — the Escape key and click-away are handled by
+  // DialogProvider and never reach this component's own handlers. `decided` keeps yes()/no() from
+  // double-emitting when their dialog.clear()/replace() unmounts us.
+  onCleanup(() => {
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
+  })
+  // altimate_change end
 
   function no() {
-    dialog.replace(() => (props.origin === "welcome" ? <DialogModelWelcome /> : <DialogModel />))
+    // altimate_change start
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
+    // altimate_change end
+    dialog.replace(() =>
+      props.origin === "welcome" ? (
+        <DialogModelWelcome trigger="big_pickle_back" />
+      ) : (
+        <DialogModel viaSearch={props.viaSearch} />
+      ),
+    )
   }
   function yes() {
+    // altimate_change start
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "accept" })
+    // altimate_change end
     dialog.clear()
     local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
     markSetupComplete()
