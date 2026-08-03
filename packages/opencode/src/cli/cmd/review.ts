@@ -104,54 +104,83 @@ export const ReviewCommand = cmd({
       }
       emitReviewRun({ invocation: "cli", durationMs: Date.now() - startedAt, sessionID: "", envelope: env })
 
-      if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))
-
-      // Primary output → stdout (pipeable). Diagnostics below → stderr via UI.
-      if (args.json) {
-        process.stdout.write(JSON.stringify(env, null, 2) + "\n")
-      } else {
-        process.stdout.write(renderSummary(env) + "\n")
+      // altimate_change start — publication is its own event: it happens after the review is
+      // computed and can partially succeed, so it must not fold into review_run.
+      //
+      // CONTRACT: exactly one review_post_outcome per COMPLETED review. A review that threw
+      // returned above with `review_run: failed` and never reached a publication phase, so the
+      // absence of a post event means "the review failed" and never "telemetry was lost".
+      //
+      // Enforced by a latch plus the finally below rather than by the control flow being
+      // obviously exhaustive — it was not. The `not_requested` emit used to sit AFTER the
+      // `--output` write and the stdout render, so a bad `--output` path produced a completed
+      // review with no post event at all, indistinguishable from a dropped event.
+      let postOutcomeEmitted = false
+      function emitPostOnce(outcome: Parameters<typeof emitReviewPostOutcome>[0]["outcome"], durationMs: number) {
+        if (postOutcomeEmitted) return
+        postOutcomeEmitted = true
+        emitReviewPostOutcome({ outcome, durationMs, sessionID: "" })
       }
 
-      // altimate_change — publication is its own event: it happens after the review is computed
-      // and can partially succeed, so it must not fold into review_run.
-      const postStartedAt = Date.now()
-      const postDuration = () => Date.now() - postStartedAt
-      if (!args.post) {
-        emitReviewPostOutcome({ outcome: "not_requested", durationMs: 0, sessionID: "" })
-      }
-      if (args.post) {
-        const target = await resolveGitHubTarget()
-        if (!target) {
-          emitReviewPostOutcome({ outcome: "target_unresolved", durationMs: postDuration(), sessionID: "" })
-          UI.println(
-            "⚠️  --post requested but GITHUB_TOKEN / GITHUB_REPOSITORY / PR number could not be resolved; skipping post.",
-          )
+      try {
+        // Emitted before anything that can throw, so the no-publication case cannot be lost.
+        if (!args.post) emitPostOnce("not_requested", 0)
+
+        if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))
+
+        // Primary output → stdout (pipeable). Diagnostics below → stderr via UI.
+        if (args.json) {
+          process.stdout.write(JSON.stringify(env, null, 2) + "\n")
         } else {
-          let r
+          process.stdout.write(renderSummary(env) + "\n")
+        }
+
+        if (args.post) {
+          // Started here, not above: the `not_requested` path reports 0 and never reads these, and
+          // capturing them earlier made that hardcoded 0 look like an oversight.
+          const postStartedAt = Date.now()
+          const postDuration = () => Date.now() - postStartedAt
+          let target
           try {
-            r = await postGitHubReview(env, target)
+            target = await resolveGitHubTarget()
           } catch (err) {
-            // A throw here means the summary comment itself failed; nothing was published.
-            emitReviewPostOutcome({ outcome: "summary_failed", durationMs: postDuration(), sessionID: "" })
+            // Defensive today — the resolver returns undefined rather than throwing — but the
+            // contract should not rest on that staying true. No summary was attempted.
+            emitPostOnce("target_unresolved", postDuration())
             throw err
           }
-          emitReviewPostOutcome({
-            outcome: classifyPostOutcome(r),
-            durationMs: postDuration(),
-            sessionID: "",
-          })
-          const where = `${target.owner}/${target.repo}#${target.prNumber}`
-          if (r.postError) {
-            UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
-          } else {
+          if (!target) {
+            emitPostOnce("target_unresolved", postDuration())
             UI.println(
-              `Posted review to ${where}` +
-                (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
+              "⚠️  --post requested but GITHUB_TOKEN / GITHUB_REPOSITORY / PR number could not be resolved; skipping post.",
             )
+          } else {
+            let r
+            try {
+              r = await postGitHubReview(env, target)
+            } catch (err) {
+              // A throw here means the summary comment itself failed; nothing was published.
+              emitPostOnce("summary_failed", postDuration())
+              throw err
+            }
+            emitPostOnce(classifyPostOutcome(r), postDuration())
+            const where = `${target.owner}/${target.repo}#${target.prNumber}`
+            if (r.postError) {
+              UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
+            } else {
+              UI.println(
+                `Posted review to ${where}` +
+                  (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
+              )
+            }
           }
         }
+      } finally {
+        // Anything that threw between the completed review and the post attempt — a bad
+        // `--output` path, a stdout write error. Latched, so a real outcome always wins.
+        emitPostOnce("not_attempted", 0)
       }
+      // altimate_change end
 
       // Gate: exit non-zero when blocking, so CI fails the check.
       if (env.mode === "gate" && env.verdict === "REQUEST_CHANGES") {

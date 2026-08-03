@@ -85,8 +85,10 @@ describe.skipIf(!enabled)("review telemetry (e2e)", () => {
             },
           },
         )
+        // No sleep needed: the CLI awaits Telemetry.shutdown() in its top-level finally,
+        // shutdown() awaits flush(), flush() awaits the sink's HTTP response, and the sink records
+        // the envelopes before responding. By the time exit resolves, the request has completed.
         expect(await proc.exited).toBe(0)
-        await Bun.sleep(500)
 
         const run = sink.envelopes.find((e) => e.name === "review_run")
         expect(run).toBeDefined()
@@ -99,7 +101,10 @@ describe.skipIf(!enabled)("review telemetry (e2e)", () => {
         expect(run!.properties.verdict).toBeTruthy()
         expect(typeof run!.measurements.duration_ms).toBe("number")
 
-        // Zero-filled across the enum, and serialized as a JSON string per house convention.
+        // Zero-filled across the enum. The field is declared Record<string, number> and the
+        // envelope's object branch stringifies it on the way out — the sibling map-shaped fields
+        // (sql_quality.by_category, dbt_materialization_dist) declare `string` and stringify at
+        // the call site instead. Wire bytes are identical; the two shapes are not.
         const byCategory = JSON.parse(run!.properties.by_category)
         expect(Object.keys(byCategory).length).toBe(14)
 
@@ -109,6 +114,68 @@ describe.skipIf(!enabled)("review telemetry (e2e)", () => {
         expect(post!.properties.outcome).toBe("not_requested")
 
         // Findings are about customer schema; none of it may reach telemetry.
+        const serialized = JSON.stringify(sink.envelopes)
+        for (const leak of ["orders.sql", "as amount", repo]) {
+          expect(serialized).not.toContain(leak)
+        }
+      } finally {
+        sink.stop()
+        await rm(home, { recursive: true, force: true }).catch(() => {})
+        await rm(repo, { recursive: true, force: true }).catch(() => {})
+      }
+    },
+    180_000,
+  )
+
+  test(
+    "a completed review always carries exactly one post outcome, even when the run dies after it",
+    async () => {
+      const sink = startSink()
+      const home = await mkdtemp(path.join(tmpdir(), "review-e2e-home-"))
+      const repo = await fixtureRepo(home)
+
+      try {
+        // `--output` into a directory that does not exist. The write sits between the completed
+        // review and the post attempt, and before the fix it threw there with `review_run:
+        // completed` already emitted and no post event at all — indistinguishable, downstream,
+        // from a dropped event or an older client.
+        const proc = Bun.spawn(
+          [
+            process.execPath,
+            "run",
+            "--conditions=browser",
+            "src/index.ts",
+            "review",
+            "--cwd",
+            repo,
+            "--post",
+            "--output",
+            path.join(repo, "no-such-dir", "verdict.json"),
+          ],
+          {
+            cwd: path.resolve(import.meta.dir, "../.."),
+            stdout: "pipe",
+            stderr: "pipe",
+            env: {
+              ...process.env,
+              HOME: home,
+              APPLICATIONINSIGHTS_CONNECTION_STRING: `InstrumentationKey=e2e;IngestionEndpoint=${sink.url}`,
+              ALTIMATE_TELEMETRY_DISABLED: "false",
+              ALTIMATE_CLI_CLIENT: "plugin:claude-code",
+            },
+          },
+        )
+        // Non-zero: the write error propagates. Telemetry still flushes from the top-level finally.
+        expect(await proc.exited).not.toBe(0)
+
+        const run = sink.envelopes.find((e) => e.name === "review_run")
+        expect(run).toBeDefined()
+        expect(run!.properties.status).toBe("completed")
+
+        const posts = sink.envelopes.filter((e) => e.name === "review_post_outcome")
+        expect(posts).toHaveLength(1)
+        expect(posts[0]!.properties.outcome).toBe("not_attempted")
+
         const serialized = JSON.stringify(sink.envelopes)
         for (const leak of ["orders.sql", "as amount", repo]) {
           expect(serialized).not.toContain(leak)

@@ -950,7 +950,11 @@ export namespace Telemetry {
         /** `partial` covers every "not fully posted as attempted" state PostResult can express —
          *  inline comments fell back, a post error was recorded, or no review id came back. The
          *  shape cannot distinguish finer outcomes than that. */
-        outcome: "not_requested" | "target_unresolved" | "full" | "partial" | "summary_failed"
+        /** `not_attempted`: publication was requested, but the invocation died between the
+         *  completed review and the post attempt (a bad `--output` path, a stdout write error).
+         *  Emitted from the caller's `finally` so a completed review always carries exactly one
+         *  post outcome. */
+        outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed"
         duration_ms: number
       }
   // altimate_change end

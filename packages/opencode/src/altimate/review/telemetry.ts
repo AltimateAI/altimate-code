@@ -24,10 +24,14 @@ export type ReviewInvocation = "cli" | "tool"
  * malformed category would otherwise become a new dimension.
  */
 function countByCategory(findings: Finding[]): Record<string, number> {
-  const counts: Record<string, number> = {}
+  // Prototype-less, and membership tested with Object.hasOwn: `{}` plus `in` accepted every
+  // Object.prototype member, so a finding categorised `toString` both minted a dimension and
+  // evaluated `<native function> + 1` into a Record<string, number>. Zod makes that unreachable
+  // today, but this guard exists precisely for the case where validation was bypassed.
+  const counts: Record<string, number> = Object.create(null)
   for (const category of ReviewCategory.options) counts[category] = 0
   for (const finding of findings) {
-    if (finding.category in counts) counts[finding.category] += 1
+    if (Object.hasOwn(counts, finding.category)) counts[finding.category] += 1
   }
   return counts
 }
@@ -41,15 +45,19 @@ function countByCategory(findings: Finding[]): Record<string, number> {
  * rather than inventing buckets that can never occur.
  *
  * Matching is on the fixed prefix the config loader throws with, and on the spawn identity of the
- * git child process — not broad substring matching over the message, which would drift the moment
- * anything is reworded.
+ * git child process (`err.cmd`, set by `execFile`) — not broad substring matching over the
+ * message, which would drift the moment anything is reworded. A `message.includes("git diff")`
+ * fallback used to sit below the `cmd` check; it was unreachable for the real git path (execFile
+ * always sets `cmd`, and its message begins "Command failed: ") and contradicted this paragraph.
+ *
+ * The `Failed to load` prefix is itself string matching. It is accurate against the config loader
+ * today; a typed error at the throw site is what would make it robust.
  */
 export function classifyReviewFailure(err: unknown): "config_error" | "git_error" | "error" {
   const message = err instanceof Error ? err.message : String(err)
   if (message.startsWith("Failed to load")) return "config_error"
   const cmd = (err as { cmd?: unknown } | undefined)?.cmd
   if (typeof cmd === "string" && /(^|[\\/\s])git(\s|$)/.test(cmd)) return "git_error"
-  if (message.startsWith("git ") || message.includes("git diff")) return "git_error"
   return "error"
 }
 
@@ -113,9 +121,16 @@ export function emitReviewRun(input: {
   }
 }
 
-/** Emitted on the CLI path only — the tool does not publish. */
+/**
+ * Emitted on the CLI path only — the tool does not publish.
+ *
+ * CONTRACT: exactly one of these per *completed* review, never more and never fewer. A review that
+ * threw never reached a publication phase, so it gets `review_run: failed` and no post event —
+ * absence therefore means "the review failed", not "telemetry was lost". The caller enforces the
+ * once-ness with a latch plus a `finally`; see cli/cmd/review.ts.
+ */
 export function emitReviewPostOutcome(input: {
-  outcome: "not_requested" | "target_unresolved" | "full" | "partial" | "summary_failed"
+  outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed"
   durationMs: number
   sessionID: string
 }): void {

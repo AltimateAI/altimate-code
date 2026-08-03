@@ -95,6 +95,54 @@ describe("review_run", () => {
     expect(Object.keys(byCategory)).toHaveLength(ReviewCategory.options.length)
   })
 
+  test("a category naming an Object.prototype member cannot slip past the guard", () => {
+    // The ordinary-string case above cannot catch this: `{}` plus `in` returns true for every
+    // prototype member, so `toString` both minted a dimension AND made `counts[k] += 1` evaluate
+    // `<native function> + 1` — a string inside a Record<string, number>. Fails before the
+    // Object.create(null) / Object.hasOwn fix.
+    const events = captureEvents()
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        findings: [
+          { category: "toString", severity: "warning" },
+          { category: "constructor", severity: "warning" },
+          { category: "valueOf", severity: "warning" },
+          { category: "__proto__", severity: "warning" },
+        ],
+      }),
+    })
+
+    const byCategory = (events[0] as any).by_category
+    expect(Object.keys(byCategory)).toHaveLength(ReviewCategory.options.length)
+    for (const v of Object.values(byCategory)) expect(typeof v).toBe("number")
+  })
+
+  test("stale_manifest and degraded are carried from the envelope", () => {
+    // Same `=== true` normalisation as tier_forced, which has its own test; these two had none,
+    // and the shared envelope() helper omits staleManifest so every other test covers only the
+    // undefined case.
+    const events = captureEvents()
+    emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: envelope() })
+    expect((events[0] as any).stale_manifest).toBe(false)
+    expect((events[0] as any).degraded).toBe(false)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        staleManifest: true,
+        summary: { critical: 0, warning: 0, suggestion: 0, degraded: true },
+      }),
+    })
+    expect((events[0] as any).stale_manifest).toBe(true)
+    expect((events[0] as any).degraded).toBe(true)
+  })
+
   test("the tool path carries its session, the CLI path does not", () => {
     const events = captureEvents()
     emitReviewRun({ invocation: "tool", durationMs: 1, sessionID: "ses_abc", envelope: envelope() })
@@ -142,6 +190,22 @@ describe("review_run", () => {
   })
 })
 
+describe("telemetry failure isolation", () => {
+  // The two empty catch blocks in the emitters are the "observability must never break
+  // functionality" guarantee. Removing either one fails these and nothing else.
+  test("a throwing Telemetry.track cannot propagate out of either emitter", () => {
+    spyOn(Telemetry, "track").mockImplementation(() => {
+      throw new Error("buffer full")
+    })
+
+    expect(() =>
+      emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: envelope() }),
+    ).not.toThrow()
+    expect(() => emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", error: new Error("x") })).not.toThrow()
+    expect(() => emitReviewPostOutcome({ outcome: "not_requested", durationMs: 0, sessionID: "" })).not.toThrow()
+  })
+})
+
 describe("failure classification", () => {
   test("the config loader's fixed prefix", () => {
     expect(classifyReviewFailure(new Error("Failed to load .altimate/review.yml: bad yaml"))).toBe("config_error")
@@ -150,6 +214,13 @@ describe("failure classification", () => {
   test("a git child-process failure by spawn identity, not message text", () => {
     const err = Object.assign(new Error("Command failed"), { cmd: "git diff --name-status" })
     expect(classifyReviewFailure(err)).toBe("git_error")
+  })
+
+  test("a git-shaped message without a cmd is not a git error", () => {
+    // The message fallback that used to classify this was unreachable for the real git path
+    // (execFile always sets `cmd`, and its message starts "Command failed: ") and contradicted
+    // the docstring's promise not to substring-match. Removed.
+    expect(classifyReviewFailure(new Error("git diff exploded"))).toBe("error")
   })
 
   test("anything else is `error` rather than an invented bucket", () => {
@@ -209,7 +280,11 @@ describe("caller attribution", () => {
       expect(run.data.baseData.properties.source).toBe("plugin:claude-code")
       expect(post.data.baseData.properties.source).toBe("plugin:claude-code")
     } finally {
-      process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
+      // Unlike the two restores below, this was unconditional: an originally-absent variable
+      // came back as the string "undefined", leaking a disabled-telemetry flag into later tests
+      // and any child process they spawn.
+      if (origDisabled !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
+      else delete process.env.ALTIMATE_TELEMETRY_DISABLED
       if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       if (origClient !== undefined) process.env.ALTIMATE_CLI_CLIENT = origClient
