@@ -171,7 +171,7 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 | **Column-Level Lineage** | 100% edge match across 500 queries with complex joins, CTEs, and subqueries. |
 | **Snowflake Query Optimization (TPC-H)** | 16.8% average execution speedup (3.6x vs baseline). |
 
-<p class="section-sub" markdown>[:octicons-arrow-right-24: Full benchmark details](https://altimate.ai/benchmarks/)</p>
+<p class="section-sub" markdown>[:octicons-arrow-right-24: Full benchmark details](https://altimate.ai/benchmarks/?utm_source=altimate-code&utm_medium=docs)</p>
 
 ---
 

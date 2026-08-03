@@ -1,10 +1,10 @@
 # altimate-code VS Code Extension
 
-A Visual Studio Code extension that integrates [altimate-code](https://altimate.ai) directly into your development workflow.
+A Visual Studio Code extension that integrates [altimate-code](https://altimate.ai?utm_source=altimate-code&utm_medium=marketplace) directly into your development workflow.
 
 ## Prerequisites
 
-This extension requires the [altimate-code CLI](https://altimate.ai) to be installed on your system. Visit [altimate.ai](https://altimate.ai) for installation instructions.
+This extension requires the [altimate-code CLI](https://altimate.ai?utm_source=altimate-code&utm_medium=marketplace) to be installed on your system. Visit [altimate.ai](https://altimate.ai?utm_source=altimate-code&utm_medium=marketplace) for installation instructions.
 
 ## Features
 
