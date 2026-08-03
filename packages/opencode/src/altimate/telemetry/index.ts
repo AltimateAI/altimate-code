@@ -1730,6 +1730,7 @@ export namespace Telemetry {
     // of racing it.
     inFlightFlush = (inFlightFlush ?? Promise.resolve()).then(() => doFlush(timeoutMs)).catch(() => {})
     return inFlightFlush
+    // altimate_change end
   }
 
   async function doFlush(timeoutMs: number) {

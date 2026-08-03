@@ -354,6 +354,11 @@ describe("launch correlation id", () => {
   })
 
   test("every event in a run carries the same launch_id", async () => {
+    // Before the fetch spy below, not after: every other describe in this file spies
+    // Telemetry.init to a no-op to keep the funnel tests off the filesystem, and this is the only
+    // test that needs the REAL init — the launch id is minted there and nowhere else. Relying on a
+    // sibling's afterEach to have undone that spy makes this test's result depend on ordering.
+    mock.restore()
     const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
     const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     // This is the one test in the file that runs the REAL Telemetry.init() — the launch_id is
@@ -376,7 +381,16 @@ describe("launch correlation id", () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
         "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
+      // Shut down first. init() is `initPromise ??= doInit()`, so a resolved initPromise left by an
+      // earlier init — including one that ran while telemetry was disabled — is returned as-is and
+      // doInit() never runs. shutdown() clearing initPromise is the only reset seam the module has.
+      await Telemetry.shutdown()
+      Telemetry.resetLaunchIdForTest()
       await Telemetry.init()
+      // Fail here with a clear cause rather than three lines down on a mysteriously empty batch.
+      // Every way this test can be sabotaged — a surviving init spy, a disabled-telemetry env var,
+      // an unparseable connection string — shows up as `enabled === false`.
+      expect(Telemetry.isEnabled()).toBe(true)
 
       Telemetry.track({ type: "onboarding_started", timestamp: 1, session_id: "" })
       Telemetry.track({ type: "scan_gate_choice", timestamp: 2, session_id: "ses_1", choice: "scan" })
