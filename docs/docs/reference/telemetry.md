@@ -61,7 +61,7 @@ We collect the following categories of events:
 | `activation_menu_shown` | The activation menu was (very likely) rendered. `variant` is `warehouse` or `no_data`. **Derived** — see the note below. |
 | `activation_job_selected` / `first_job_completed` | Which activation job the user started and, where observable, finished. Completion is reported only for the job that was actually selected, so the two form a coherent pair. **Derived** — see the note below. |
 | `first_prompt_sent` | The user's first typed message in an onboarding session. Slash commands are excluded, so the hidden `/onboard-connect` submission does not count. |
-| `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, or `gateway_auth`. (`connected` is a funnel position but never a `last_stage` — reaching it means the run completed, which is not an abandonment.) Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. |
+| `onboarding_abandoned` | The CLI exited during a first run without connecting. `last_stage` is the furthest point reached: `started`, `model_picker`, `provider_setup`, `big_pickle_confirm`, or `gateway_auth`. (`connected` is a funnel position but never a `last_stage` — reaching it means the run completed, which is not an abandonment.) Only emitted for a genuine first run — opening `/connect` as an existing user does not enter the funnel, and abandonment after setup completes is out of scope by definition. Emitted on the exit path under a bounded flush, so the measured rate is a lower bound — see [Delivery & Reliability](#delivery--reliability). |
 
 ### A note on the derived activation events
 
@@ -79,6 +79,10 @@ Each event includes a timestamp, anonymous session ID, a per-launch correlation 
 Telemetry events are buffered in memory and flushed periodically. If a flush fails (e.g., due to a transient network error), events are re-added to the buffer for one retry. On process exit, the CLI performs a final flush to avoid losing events from the current session.
 
 No events are ever written to disk. If the process is killed before the final flush, buffered events are lost. This is by design to minimize on-disk footprint.
+
+The final flush is **time-bounded** so that quitting never hangs the shell: 2 seconds on the main thread and 5 seconds in the TUI worker. When that budget expires the in-flight request is aborted and its events are dropped rather than retried — a retry would only re-queue them into a buffer that is cleared moments later, to be shipped under the next launch's correlation id.
+
+The practical consequence is a known bias, not a silent one: events emitted **on the exit path** are the most likely to be lost on a slow or unreachable network, and `onboarding_abandoned` is emitted *only* on that path. So a measured abandonment rate is a **lower bound** — under-reporting is the failure mode, never over-reporting, since a dropped event can only remove an abandonment from the count. Read drop-off numbers as a floor, and treat a change in them as meaningful only if network conditions are comparable.
 
 ## Why We Collect Telemetry
 
