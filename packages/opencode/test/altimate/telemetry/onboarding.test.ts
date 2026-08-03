@@ -455,3 +455,64 @@ describe("cross-package event parity", () => {
     expect(true).toBe(true)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Shutdown budget
+// ---------------------------------------------------------------------------
+//
+// The TUI exit path passes a small budget precisely so quitting does not hang the shell. Before
+// this was enforced, a periodic flush already in flight ran on the DEFAULT 10s request timeout,
+// and shutdown's own flush chained onto it — so the budget bought nothing and exit could stall
+// for the full default instead.
+describe("shutdown budget", () => {
+  afterEach(async () => {
+    await Telemetry.shutdown()
+    mock.restore()
+  })
+
+  test("a slow in-flight flush cannot make shutdown exceed the caller's budget", async () => {
+    const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
+    const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    const origHome = process.env.HOME
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-shutdown-test-"))
+    process.env.HOME = tmpHome
+
+    // Never resolves on its own; only the AbortController can end it. This is the shape of a
+    // blackholed network, which is what the budget exists for.
+    const fetchMock = spyOn(global, "fetch").mockImplementation((async (_i: any, init: any) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")))
+      })
+    }) as unknown as typeof fetch)
+
+    try {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
+      await Telemetry.init()
+
+      Telemetry.track({ type: "onboarding_started", timestamp: 1, session_id: "" })
+      // Start a flush on the DEFAULT budget and leave it hanging, exactly as the 5s interval does.
+      const hanging = Telemetry.flush()
+
+      Telemetry.track({ type: "scan_gate_shown", timestamp: 2, session_id: "" })
+      const startedAt = Date.now()
+      await Telemetry.shutdown({ timeoutMs: 300 })
+      const elapsed = Date.now() - startedAt
+
+      // Generous ceiling: the point is that it is bounded by the 300ms budget (plus the 250ms
+      // floor the final request gets) rather than by the 10s default the hanging request holds.
+      expect(elapsed).toBeLessThan(3000)
+      await hanging.catch(() => {})
+    } finally {
+      process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled ?? undefined
+      if (origDisabled === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      if (origCs !== undefined) process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = origCs
+      else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      fs.rmSync(tmpHome, { recursive: true, force: true })
+      fetchMock.mockRestore()
+    }
+  })
+})

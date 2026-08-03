@@ -13,7 +13,16 @@ import { useDialog } from "../ui/dialog"
 // `onChoose` is injected by App (which lives inside PromptRefProvider); the dialog
 // overlay is mounted above that provider, so the gate cannot resolve the prompt
 // ref itself — it must be handed in.
-export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void; onDismiss?: () => void }) {
+export function DialogScanGate(props: {
+  onChoose: (arg: "scan" | "skip") => void
+  /** altimate_change — funnel: the telemetry seam, deliberately separate from `onChoose`.
+   *
+   *  It MUST be invoked before `dialog.clear()`. App registers a close handler on the dialog that
+   *  records a dismissal, and `dialog.clear()` runs that handler synchronously — so recording
+   *  after the clear (as `onChoose` is, to preserve the existing clear-then-submit ordering) loses
+   *  every real choice to the dismissal latch. */
+  onOutcome?: (outcome: "scan" | "skip" | "dismissed") => void
+}) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const [selected, setSelected] = createSignal(0) // 0 = Yes (default, per spec ❯)
@@ -31,13 +40,16 @@ export function DialogScanGate(props: { onChoose: (arg: "scan" | "skip") => void
   function dismiss() {
     if (chosen) return
     chosen = true
-    props.onDismiss?.()
+    props.onOutcome?.("dismissed")
     dialog.clear()
   }
 
   function run(arg: "scan" | "skip") {
     if (chosen) return
     chosen = true
+    // Before dialog.clear() — see onOutcome's note. onChoose stays after it so the prompt
+    // submission still happens with the overlay already torn down, as it always has.
+    props.onOutcome?.(arg)
     dialog.clear()
     props.onChoose(arg)
   }

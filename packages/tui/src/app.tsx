@@ -605,7 +605,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       // every launch and is only set by a setup the user completed during THIS one, so a genuine
       // returning user never trips this branch.
       if (setupComplete()) {
-        markFirstRunActive()
+        // Deliberately NOT markFirstRunActive(): its only clear is markSetupComplete(), which has
+        // already run on this branch and will not run again, so setting it here would latch the
+        // flag true for the rest of the session and make every later /model switch emit funnel
+        // events. The three events below are emitted directly and do not consult it. The prompt
+        // gate arms it instead, at the point the picker actually opens.
         scanGateShown = true
         trackOnboarding({ name: "onboarding_started" })
         trackOnboarding({ name: "onboarding_completed" })
@@ -672,12 +676,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     dialog.replace(
       () => (
         <DialogScanGate
-          onDismiss={() => recordScanChoice("dismissed")}
+          onOutcome={(outcome) => recordScanChoice(outcome)}
           onChoose={(arg) => {
               // altimate_change — funnel: emitted here rather than inside the gate because the
               // dialog overlay renders outside the provider tree; `onChoose` is already the
               // established way to hand the gate something it cannot reach itself.
-            recordScanChoice(arg)
+            // Recorded by onOutcome above, which the gate calls before dialog.clear().
             // Yes → /onboard-connect scan; No → /onboard-connect skip.
             // Both branches now have a real follow-up: `scan` runs
             // project_scan and branches into the discovery UX; `skip`

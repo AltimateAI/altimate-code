@@ -1436,6 +1436,13 @@ export namespace Telemetry {
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
   let initDone = false
+  // altimate_change — shutdown needs to cancel a flush already in flight, not just stop waiting
+  // for it: `flush()` chains through inFlightFlush, so a timed-out drain still had its final
+  // flush queue behind the very request it gave up on. `shuttingDown` additionally suppresses
+  // the retry write-back, which would otherwise re-insert events into a buffer about to be
+  // cleared and ship them under the NEXT lifecycle.
+  let activeFlushAbort: AbortController | undefined
+  let shuttingDown = false
   // altimate_change — in-flight shutdown, declared with the rest of the module state so init()
   // above can consult it. See shutdown() for why concurrent shutdowns must be serialized.
   let shutdownPromise: Promise<void> | undefined
@@ -1588,6 +1595,13 @@ export namespace Telemetry {
         // settled — but before this chained doInit() finished — saw an empty initPromise and
         // started a SECOND one, replacing the flush timer and racing over the buffer.
         initPromise = reinitPromise
+        // Publishing it also makes the outgoing doShutdown()'s `initPromise === initPromiseAtShutdown`
+        // reset guard miss, which used to leave initDone stuck at `true` from the dying generation
+        // while shutdown had already set `enabled = false`. track()'s "initialized and disabled →
+        // drop" rule then silently discarded every event emitted during the reinit — the exact
+        // window this path exists to keep. Hand the new generation a pre-init state so those
+        // events buffer and flush once doInit() re-enables.
+        initDone = false
       }
       return reinitPromise
     }
@@ -1736,6 +1750,7 @@ export namespace Telemetry {
     }
 
     const controller = new AbortController()
+    activeFlushAbort = controller
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetch(appInsights.endpoint, {
@@ -1748,6 +1763,10 @@ export namespace Telemetry {
         log.debug("telemetry flush failed", { status: response.status })
       }
     } catch {
+      // altimate_change — no write-back during shutdown. The buffer is cleared a few lines later
+      // regardless, so re-inserting here does not save these events; it only leaves them to be
+      // shipped by whatever lifecycle comes next, under a different launch id.
+      if (shuttingDown) return
       // Re-add events that haven't been retried yet to avoid data loss
       const retriable = events.filter((e) => !(e as any)._retried)
       for (const e of retriable) {
@@ -1757,6 +1776,7 @@ export namespace Telemetry {
       buffer.unshift(...retriable.slice(0, space))
     } finally {
       clearTimeout(timeout)
+      if (activeFlushAbort === controller) activeFlushAbort = undefined
     }
   }
 
@@ -1830,21 +1850,41 @@ export namespace Telemetry {
     }
     // altimate_change — drain any flush already running before the final one, so a timer batch
     // in mid-request is not abandoned and cannot write back into a buffer we are about to clear.
+    const deadline = Date.now() + (timeoutMs ?? REQUEST_TIMEOUT_MS)
+    shuttingDown = true
     if (inFlightFlush) {
       // Bounded: a flush already in flight uses the DEFAULT request timeout, so awaiting it
       // unbounded could burn 10s before the bounded flush below even starts — well past the 5s
       // the TUI allows the whole shutdown RPC.
+      //
+      // One ABSOLUTE deadline covers the drain and the final flush together. Giving each the full
+      // `timeoutMs` let a slow in-flight request spend the whole budget and then hand the final
+      // flush a fresh copy of it, so shutdown could still take twice what the caller allowed and
+      // overrun the deadline that keeps the worker's buffer from being discarded.
       let drainTimer: ReturnType<typeof setTimeout> | undefined
+      let drained = false
       await Promise.race([
-        inFlightFlush.catch(() => {}),
+        inFlightFlush.catch(() => {}).then(() => {
+          drained = true
+        }),
         new Promise<void>((resolve) => {
-          drainTimer = setTimeout(resolve, timeoutMs ?? REQUEST_TIMEOUT_MS)
+          drainTimer = setTimeout(resolve, Math.max(0, deadline - Date.now()))
         }),
       ])
       if (drainTimer) clearTimeout(drainTimer)
+      if (!drained) {
+        // Giving up on the wait is not enough: flush() chains onto inFlightFlush, so the final
+        // flush below would queue behind the very request the drain just abandoned and inherit
+        // its remaining runtime — up to the full default 10s on top of the budget. Abort it.
+        activeFlushAbort?.abort()
+        await inFlightFlush.catch(() => {})
+      }
     }
-    await flush(timeoutMs)
+    // Whatever the drain left of the shared deadline, never below a floor that lets the request
+    // actually be made.
+    await flush(Math.max(250, deadline - Date.now()))
     inFlightFlush = undefined
+    shuttingDown = false
     enabled = false
     appInsights = undefined
     buffer = []
