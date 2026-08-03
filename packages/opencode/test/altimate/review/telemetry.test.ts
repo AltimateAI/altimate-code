@@ -4,6 +4,9 @@
 // do NOT declare a `source` field, so the envelope's process-level value survives. That is
 // invisible to a Telemetry.track spy — it only appears after serialization — so it is asserted at
 // the transport level.
+import fs from "fs"
+import os from "os"
+import path from "path"
 import { describe, expect, test, afterEach, spyOn, mock } from "bun:test"
 import { Telemetry } from "@/altimate/telemetry"
 import {
@@ -257,6 +260,18 @@ describe("caller attribution", () => {
     const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
     const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     const origClient = process.env.ALTIMATE_CLI_CLIENT
+    // Before the fetch spy below, not after — restoring afterwards would remove that spy and leave
+    // `bodies` empty. Every other describe in this file spies Telemetry.track, and this is the only
+    // test that needs the real one plus a real init; relying on a sibling's afterEach to have
+    // undone that spy makes the result depend on suite ordering.
+    mock.restore()
+    // Real init writes ~/.altimate/machine-id. Point HOME at a temp dir so running the unit suite
+    // cannot mint an identity the developer's own CLI would then reuse.
+    const origHome = process.env.HOME
+    const origUserProfile = process.env.USERPROFILE
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-review-telemetry-"))
+    process.env.HOME = tmpHome
+    process.env.USERPROFILE = tmpHome
     const bodies: string[] = []
     const fetchMock = spyOn(global, "fetch").mockImplementation((async (_i: any, init: any) => {
       bodies.push(String(init?.body ?? ""))
@@ -268,13 +283,23 @@ describe("caller attribution", () => {
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
         "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
       process.env.ALTIMATE_CLI_CLIENT = "plugin:claude-code"
+      // init() is `initPromise ??= doInit()`, so a resolved initPromise left by any earlier init in
+      // this process — including one that ran while telemetry was disabled — is handed back as-is
+      // and the connection string set above is ignored. shutdown() clearing initPromise is the
+      // only reset seam the module exposes.
+      await Telemetry.shutdown()
       await Telemetry.init()
+      // Fail here with a cause rather than below on an empty batch: a surviving spy, a
+      // disabled-telemetry env var and an unparseable connection string all show up as `false`.
+      expect(Telemetry.isEnabled()).toBe(true)
 
       emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: envelope() })
       emitReviewPostOutcome({ outcome: "not_requested", durationMs: 0, sessionID: "" })
       await Telemetry.flush()
 
-      const envelopes = JSON.parse(bodies[0]) as any[]
+      // Across all bodies, not bodies[0]: the buffer is module-global and the periodic flush can
+      // fire before this one, splitting these two events across batches.
+      const envelopes = bodies.flatMap((body) => JSON.parse(body) as any[])
       const run = envelopes.find((e) => e.data.baseData.name === "review_run")
       const post = envelopes.find((e) => e.data.baseData.name === "review_post_outcome")
       expect(run.data.baseData.properties.source).toBe("plugin:claude-code")
@@ -289,6 +314,11 @@ describe("caller attribution", () => {
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       if (origClient !== undefined) process.env.ALTIMATE_CLI_CLIENT = origClient
       else delete process.env.ALTIMATE_CLI_CLIENT
+      if (origHome !== undefined) process.env.HOME = origHome
+      else delete process.env.HOME
+      if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile
+      else delete process.env.USERPROFILE
+      fs.rmSync(tmpHome, { recursive: true, force: true })
       fetchMock.mockRestore()
     }
   })
