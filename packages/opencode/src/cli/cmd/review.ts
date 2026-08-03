@@ -6,6 +6,8 @@ import { Installation } from "../../installation"
 import { reviewPullRequest } from "../../altimate/review/run"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
+// altimate_change — review feature telemetry
+import { classifyPostOutcome, emitReviewPostOutcome, emitReviewRun } from "../../altimate/review/telemetry"
 import type { ReviewMode } from "../../altimate/review/verdict"
 import type { Severity } from "../../altimate/review/finding"
 
@@ -74,52 +76,111 @@ export const ReviewCommand = cmd({
       )
     }
     await bootstrap(cwd, async () => {
-      const env = await reviewPullRequest({
-        cwd,
-        base: args.base as string | undefined,
-        head: args.head as string | undefined,
-        manifestPath: args.manifest as string | undefined,
-        mode: args.mode as ReviewMode | undefined,
-        severityThreshold: args.severity as Severity | undefined,
-        // With `boolean-negation: false` above, `--no-ai` binds to `noAi` and
-        // the historical `--ai=false` programmatic path stays supported.
-        noAi: args.noAi === true || args.ai === false,
-        explainTier: args.explainTier === true,
-        forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
-        // Stamp the CLI version into engine.cliVersion so an auditor can
-        // reconstruct which policy version generated a stored verdict long
-        // after the binary that ran it is gone.
-        cliVersion: Installation.VERSION,
-      })
+      // altimate_change — time the engine only. Output writing and posting happen after this and
+      // must not be counted as review latency, nor turn a computed review into a failed one.
+      const startedAt = Date.now()
+      let env
+      try {
+        env = await reviewPullRequest({
+          cwd,
+          base: args.base as string | undefined,
+          head: args.head as string | undefined,
+          manifestPath: args.manifest as string | undefined,
+          mode: args.mode as ReviewMode | undefined,
+          severityThreshold: args.severity as Severity | undefined,
+          // With `boolean-negation: false` above, `--no-ai` binds to `noAi` and
+          // the historical `--ai=false` programmatic path stays supported.
+          noAi: args.noAi === true || args.ai === false,
+          explainTier: args.explainTier === true,
+          forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
+          // Stamp the CLI version into engine.cliVersion so an auditor can
+          // reconstruct which policy version generated a stored verdict long
+          // after the binary that ran it is gone.
+          cliVersion: Installation.VERSION,
+        })
+      } catch (err) {
+        emitReviewRun({ invocation: "cli", durationMs: Date.now() - startedAt, sessionID: "", error: err })
+        throw err
+      }
+      emitReviewRun({ invocation: "cli", durationMs: Date.now() - startedAt, sessionID: "", envelope: env })
 
-      if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))
-
-      // Primary output → stdout (pipeable). Diagnostics below → stderr via UI.
-      if (args.json) {
-        process.stdout.write(JSON.stringify(env, null, 2) + "\n")
-      } else {
-        process.stdout.write(renderSummary(env) + "\n")
+      // altimate_change start — publication is its own event: it happens after the review is
+      // computed and can partially succeed, so it must not fold into review_run.
+      //
+      // CONTRACT: exactly one review_post_outcome per COMPLETED review. A review that threw
+      // returned above with `review_run: failed` and never reached a publication phase, so the
+      // absence of a post event means "the review failed" and never "telemetry was lost".
+      //
+      // Enforced by a latch plus the finally below rather than by the control flow being
+      // obviously exhaustive — it was not. The `not_requested` emit used to sit AFTER the
+      // `--output` write and the stdout render, so a bad `--output` path produced a completed
+      // review with no post event at all, indistinguishable from a dropped event.
+      let postOutcomeEmitted = false
+      function emitPostOnce(outcome: Parameters<typeof emitReviewPostOutcome>[0]["outcome"], durationMs: number) {
+        if (postOutcomeEmitted) return
+        postOutcomeEmitted = true
+        emitReviewPostOutcome({ outcome, durationMs, sessionID: "" })
       }
 
-      if (args.post) {
-        const target = await resolveGitHubTarget()
-        if (!target) {
-          UI.println(
-            "⚠️  --post requested but GITHUB_TOKEN / GITHUB_REPOSITORY / PR number could not be resolved; skipping post.",
-          )
+      try {
+        // Emitted before anything that can throw, so the no-publication case cannot be lost.
+        if (!args.post) emitPostOnce("not_requested", 0)
+
+        if (args.output) await fs.writeFile(args.output as string, JSON.stringify(env, null, 2))
+
+        // Primary output → stdout (pipeable). Diagnostics below → stderr via UI.
+        if (args.json) {
+          process.stdout.write(JSON.stringify(env, null, 2) + "\n")
         } else {
-          const r = await postGitHubReview(env, target)
-          const where = `${target.owner}/${target.repo}#${target.prNumber}`
-          if (r.postError) {
-            UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
-          } else {
+          process.stdout.write(renderSummary(env) + "\n")
+        }
+
+        if (args.post) {
+          // Started here, not above: the `not_requested` path reports 0 and never reads these, and
+          // capturing them earlier made that hardcoded 0 look like an oversight.
+          const postStartedAt = Date.now()
+          const postDuration = () => Date.now() - postStartedAt
+          let target
+          try {
+            target = await resolveGitHubTarget()
+          } catch (err) {
+            // Defensive today — the resolver returns undefined rather than throwing — but the
+            // contract should not rest on that staying true. No summary was attempted.
+            emitPostOnce("target_unresolved", postDuration())
+            throw err
+          }
+          if (!target) {
+            emitPostOnce("target_unresolved", postDuration())
             UI.println(
-              `Posted review to ${where}` +
-                (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
+              "⚠️  --post requested but GITHUB_TOKEN / GITHUB_REPOSITORY / PR number could not be resolved; skipping post.",
             )
+          } else {
+            let r
+            try {
+              r = await postGitHubReview(env, target)
+            } catch (err) {
+              // A throw here means the summary comment itself failed; nothing was published.
+              emitPostOnce("summary_failed", postDuration())
+              throw err
+            }
+            emitPostOnce(classifyPostOutcome(r), postDuration())
+            const where = `${target.owner}/${target.repo}#${target.prNumber}`
+            if (r.postError) {
+              UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
+            } else {
+              UI.println(
+                `Posted review to ${where}` +
+                  (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
+              )
+            }
           }
         }
+      } finally {
+        // Anything that threw between the completed review and the post attempt — a bad
+        // `--output` path, a stdout write error. Latched, so a real outcome always wins.
+        emitPostOnce("not_attempted", 0)
       }
+      // altimate_change end
 
       // Gate: exit non-zero when blocking, so CI fails the check.
       if (env.mode === "gate" && env.verdict === "REQUEST_CHANGES") {
