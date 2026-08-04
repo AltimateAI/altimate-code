@@ -1,32 +1,64 @@
 import { expect, test } from "bun:test"
 import {
-  COMPACT_MAX_HEIGHT,
-  COMPACT_MAX_WIDTH,
-  MEDIUM_MAX_HEIGHT,
-  MEDIUM_MAX_WIDTH,
+  FULL_MIN_HEIGHT,
+  FULL_MIN_WIDTH,
+  MEDIUM_MIN_HEIGHT,
+  MEDIUM_MIN_WIDTH,
+  PANEL_VERTICAL_RESERVE,
   welcomePanelVariant,
 } from "../../src/component/welcome-panel-utils"
 
-test("large terminals get the full two-column boot box", () => {
-  expect(welcomePanelVariant(MEDIUM_MAX_WIDTH + 20, MEDIUM_MAX_HEIGHT + 10)).toBe("full")
-  expect(welcomePanelVariant(MEDIUM_MAX_WIDTH, MEDIUM_MAX_HEIGHT)).toBe("full") // at the threshold
+// Comfortably above the full floor on one axis, used to isolate the OTHER axis
+// so a single gate's removal is provable (each test below fails if its `<` check
+// is deleted from the source).
+const TALL = FULL_MIN_HEIGHT + 10
+const WIDE = FULL_MIN_WIDTH + 20
+
+test("full requires BOTH width and height to clear the full floor", () => {
+  expect(welcomePanelVariant(WIDE, TALL)).toBe("full")
+  expect(welcomePanelVariant(FULL_MIN_WIDTH, FULL_MIN_HEIGHT)).toBe("full") // exactly at the floor
 })
 
-test("a narrow OR short terminal drops the wordmark (medium)", () => {
-  expect(welcomePanelVariant(80, 24)).toBe("medium")
-  expect(welcomePanelVariant(MEDIUM_MAX_WIDTH - 1, 40)).toBe("medium") // narrow but tall
-  expect(welcomePanelVariant(120, MEDIUM_MAX_HEIGHT - 1)).toBe("medium") // wide but short
+test("full's width gate is real — width one below the floor drops to medium even when tall", () => {
+  expect(welcomePanelVariant(FULL_MIN_WIDTH - 1, TALL)).toBe("medium")
 })
 
-test("a very small terminal collapses to the single-line compact panel", () => {
-  expect(welcomePanelVariant(50, 12)).toBe("compact")
-  expect(welcomePanelVariant(COMPACT_MAX_WIDTH - 1, 40)).toBe("compact") // very narrow, any height
-  expect(welcomePanelVariant(120, COMPACT_MAX_HEIGHT - 1)).toBe("compact") // very short, any width
+test("full's height gate is real — height one below the floor drops to medium even when wide", () => {
+  expect(welcomePanelVariant(WIDE, FULL_MIN_HEIGHT - 1)).toBe("medium")
 })
 
-test("both axes gate each step down — the smaller dimension wins", () => {
-  // Wide enough for full on width, but height forces compact.
-  expect(welcomePanelVariant(200, COMPACT_MAX_HEIGHT - 1)).toBe("compact")
-  // Tall enough for full on height, but width forces compact.
-  expect(welcomePanelVariant(COMPACT_MAX_WIDTH - 1, 200)).toBe("compact")
+test("compact's width gate is real — width one below the medium floor is compact even when tall", () => {
+  expect(welcomePanelVariant(MEDIUM_MIN_WIDTH - 1, TALL)).toBe("compact")
+})
+
+test("compact's height gate is real — height one below the medium floor is compact even when wide", () => {
+  expect(welcomePanelVariant(WIDE, MEDIUM_MIN_HEIGHT - 1)).toBe("compact")
+})
+
+test("compact→medium boundary is exact (at the floor is medium)", () => {
+  expect(welcomePanelVariant(MEDIUM_MIN_WIDTH, MEDIUM_MIN_HEIGHT)).toBe("medium")
+  expect(welcomePanelVariant(MEDIUM_MIN_WIDTH, TALL)).toBe("medium")
+  expect(welcomePanelVariant(WIDE, MEDIUM_MIN_HEIGHT)).toBe("medium")
+})
+
+test("everyday terminals get medium, not the oversized wordmark", () => {
+  // Inputs are AVAILABLE size (terminal minus padding/sidebar on width, minus
+  // PANEL_VERTICAL_RESERVE on height). A 106x31 terminal → ~(102, 23):
+  expect(welcomePanelVariant(102, 23)).toBe("medium")
+  // 80x24 terminal → ~(76, 16) — medium exactly at the height floor:
+  expect(welcomePanelVariant(76, 16)).toBe("medium")
+  // #1067 session case: a 130-col terminal with the 42-col sidebar leaves ~84
+  // usable cols → medium (was wrongly full when it used the whole terminal width).
+  expect(welcomePanelVariant(130 - 42 - 4, 50 - PANEL_VERTICAL_RESERVE)).toBe("medium")
+})
+
+test("a short terminal drops to compact once prompt/footer chrome is reserved (#1067 height)", () => {
+  // 120x22: wide, but only ~14 usable rows after the ~8-row chrome → compact,
+  // where the raw terminal height (22) would have picked medium.
+  expect(welcomePanelVariant(120 - 4, 22 - PANEL_VERTICAL_RESERVE)).toBe("compact")
+})
+
+test("degenerate sizes collapse to compact", () => {
+  expect(welcomePanelVariant(0, 0)).toBe("compact")
+  expect(welcomePanelVariant(1, 1)).toBe("compact")
 })
