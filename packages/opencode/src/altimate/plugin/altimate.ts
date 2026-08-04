@@ -1,6 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
-import { randomBytes } from "crypto"
+import { randomBytes, randomUUID } from "crypto"
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
@@ -54,20 +54,73 @@ const DEFAULT_API_URL = "https://api.myaltimate.com"
 
 const log = Log.create({ service: "altimate-plugin" })
 
-// Build a base64url-encoded context blob so the frontend can correlate this
-// browser auth session with CLI telemetry. Fields are minimal and non-PII:
-// machine_id is a random UUID stored locally, never an email or real identity.
-export function buildCliContext(machineIdPath?: string): string {
+// altimate_change start — shared machine-id helper: reads the file when present,
+// mints a new random UUID with exclusive-create (wx flag) when absent so two
+// racing initializers (TUI main thread + server worker) cannot each mint a
+// different id on a fresh install. The loser of the race re-reads what the
+// winner wrote. Used by both buildCliContext and the telemetry module's doInit().
+export function getOrCreateMachineId(machineIdPath?: string): string {
   const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
-  let machineId = ""
   try {
-    machineId = fs.readFileSync(idPath, "utf8").trim()
-  } catch {
-    log.debug("machine-id file not found — cli_context will omit machine_id")
+    return fs.readFileSync(idPath, "utf8").trim()
+  } catch (readErr) {
+    if ((readErr as NodeJS.ErrnoException)?.code !== "ENOENT") throw readErr
   }
-  const ctx = { v: 1, machine_id: machineId, cli_version: InstallationVersion }
+  // File does not exist — create it exclusively so racing callers converge on
+  // the same UUID rather than each writing their own.
+  const candidate = randomUUID()
+  fs.mkdirSync(path.dirname(idPath), { recursive: true })
+  try {
+    fs.writeFileSync(idPath, candidate, { encoding: "utf8", flag: "wx" })
+    return candidate
+  } catch {
+    // Lost the creation race — read what the winner wrote.
+    return fs.readFileSync(idPath, "utf8").trim()
+  }
+}
+// altimate_change end
+
+// Builds a base64url-encoded context blob for correlating this browser auth
+// session with CLI telemetry in PostHog. The machine_id is a random UUID
+// written by the telemetry module — not tied to hardware, OS, or user identity.
+// After sign-in, the frontend calls posthog.alias(email, machine_id) to link
+// the device to the authenticated account.
+export function buildCliContext(machineIdPath?: string): string {
+  // altimate_change start — honour the telemetry opt-out: if the user disabled
+  // telemetry, do not read or transmit the machine_id (matches the guard in
+  // telemetry/index.ts::doInit around ALTIMATE_TELEMETRY_DISABLED).
+  let machineId = ""
+  if (process.env.ALTIMATE_TELEMETRY_DISABLED !== "true") {
+    try {
+      machineId = getOrCreateMachineId(machineIdPath)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
+      if (code === "ENOENT") log.debug("machine-id not present — cli_context will omit machine_id")
+      else log.warn("machine-id read failed", { code, path: idPath })
+    }
+  }
+  // altimate_change end
+  // altimate_change start — omit machine_id key when empty (matches telemetry
+  // module pattern: `...(machineId && { machine_id: machineId })`). Sending ""
+  // is meaningless for posthog.alias() and misleads downstream consumers.
+  const ctx: Record<string, unknown> = { v: 1, cli_version: InstallationVersion }
+  if (machineId) ctx.machine_id = machineId
+  // altimate_change end
   return Buffer.from(JSON.stringify(ctx)).toString("base64url")
 }
+
+// altimate_change start — exported so tests can assert on the full URL shape
+// without duplicating the construction logic.
+export function buildAuthorizeUrl(webUrl: string, redirect: string, state: string): string {
+  return (
+    `${webUrl}/register?client=altimate-code` +
+    `&redirect=${encodeURIComponent(redirect)}` +
+    `&state=${state}` +
+    `&cli_context=${encodeURIComponent(buildCliContext())}`
+  )
+}
+// altimate_change end
 
 // The one-time login_token is POSTed to the callback-supplied API base, so that
 // base must be trusted — otherwise a crafted callback could exfiltrate the token
@@ -363,11 +416,7 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             const redirect = `http://127.0.0.1:${boundPort}/callback`
             // Land on the sign-up page and let the user choose how to authenticate
             // (Google today, more providers later) rather than forcing Google.
-            const authorizeUrl =
-              `${webUrl}/register?client=altimate-code` +
-              `&redirect=${encodeURIComponent(redirect)}` +
-              `&state=${state}` +
-              `&cli_context=${encodeURIComponent(buildCliContext())}`
+            const authorizeUrl = buildAuthorizeUrl(webUrl, redirect, state)
 
             // Try to open the browser. Failure is silent because the URL is
             // already surfaced elsewhere: the auth dialog in packages/tui/src/
