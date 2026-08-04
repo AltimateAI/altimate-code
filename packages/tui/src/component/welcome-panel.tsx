@@ -1,78 +1,139 @@
-import { Show } from "solid-js"
+import { Match, Show, Switch, createMemo } from "solid-js"
 import { TextAttributes } from "@opentui/core"
+import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../context/theme"
 import { Logo } from "./logo"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { useReady } from "./altimate-onboarding"
+import { welcomePanelVariant } from "./welcome-panel-utils"
 
-// altimate_change — Claude-Code-style full-width boot box: big block wordmark on
-// the left and a single "What is Altimate Code" section on the right. Shared
-// between the home route and the session view so the header stays consistent
-// when a command (e.g. /discover) starts a session. zIndex keeps it above
-// transient top toasts (update/MCP) that would otherwise blank its top rows.
-export function WelcomePanel() {
+const CONNECT_CTA = "Connect your AI model to start."
+
+// altimate_change — Claude-Code-style boot box: "What is Altimate Code" plus the
+// readiness-aware CTA. Shared between the home route and the session view so the
+// header stays consistent when a command (e.g. /discover) starts a session.
+// zIndex keeps it above transient top toasts (update/MCP) that would otherwise
+// blank its top rows.
+//
+// Responsive (issue #1067): the full two-column boot box is a ~13-row bordered
+// box that ate ~40% of the screen. It now scales down by AVAILABLE size,
+// following the repo's breakpoint idiom (createMemo over useTerminalDimensions,
+// cf. routes/session/permission.tsx:450, component/upgrade-indicator.tsx:14):
+//   full   — wordmark + full description (large windows only)
+//   medium — title + one condensed line, no wordmark (the common case)
+//   compact — a short line; the border title already carries the version
+//
+// `availableWidth` / `availableHeight` are the space the panel actually gets, not
+// the whole terminal — the caller subtracts its padding, any sibling sidebar
+// (session's contentWidth), and the fixed prompt/footer chrome
+// (PANEL_VERTICAL_RESERVE). Using the raw terminal would keep `full` selected in
+// a sidebar-narrowed column or a short window and swell the panel back up — the
+// bug #1067 is about. Both fall back to the terminal dimension when omitted.
+export function WelcomePanel(props: { availableWidth?: number; availableHeight?: number }) {
   const { theme } = useTheme()
   const ready = useReady()
+  const dimensions = useTerminalDimensions()
+
+  const variant = createMemo(() =>
+    welcomePanelVariant(props.availableWidth ?? dimensions().width, props.availableHeight ?? dimensions().height),
+  )
+
+  const title = InstallationVersion === "local" ? " Altimate Code " : ` Altimate Code v${InstallationVersion} `
+
   return (
     <box
       border
       borderStyle="rounded"
       borderColor={theme.border}
-      title={InstallationVersion === "local" ? " Altimate Code " : ` Altimate Code v${InstallationVersion} `}
+      title={title}
       titleAlignment="left"
       flexShrink={0}
       width="100%"
       zIndex={2000}
       backgroundColor={theme.background}
-      flexDirection="row"
+      flexDirection="column"
     >
-      {/* left column — the block-letter wordmark (59 cols wide) */}
-      <box
-        width={65}
-        flexShrink={0}
-        alignItems="center"
-        justifyContent="center"
-        gap={1}
-        paddingTop={1}
-        paddingBottom={1}
-        paddingLeft={1}
-      >
-        <text fg={theme.text} attributes={TextAttributes.BOLD}>
-          Welcome to Altimate Code
-        </text>
-        <Logo />
-      </box>
-      {/* right column — tips + what-is sections */}
-      <box
-        flexGrow={1}
-        border={["left"]}
-        borderColor={theme.border}
-        paddingLeft={2}
-        paddingRight={2}
-        paddingTop={1}
-        paddingBottom={1}
-        gap={1}
-      >
-        <box gap={0}>
-          <text fg={theme.accent} attributes={TextAttributes.BOLD}>
-            What is Altimate Code
-          </text>
-          <text fg={theme.text} wrapMode="word" width="100%">
-            Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data
-            stack.
-          </text>
-          <text fg={theme.text} wrapMode="word" width="100%">
-            It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse metadata — so it
-            reasons about your data instead of guessing.
-          </text>
-          {/* CTA only until a model is connected — stale afterwards */}
-          <Show when={!ready()}>
-            <text fg={theme.primary} wrapMode="word" width="100%">
-              Connect your AI model to start.
+      <Switch>
+        {/* compact — a short line; the border title already carries the version.
+            wrapMode keeps it readable if the terminal is extremely narrow. */}
+        <Match when={variant() === "compact"}>
+          <box paddingLeft={2} paddingRight={2} width="100%">
+            <text fg={ready() ? theme.text : theme.primary} wrapMode="word" width="100%">
+              {ready() ? "Your data-aware AI harness." : CONNECT_CTA}
             </text>
-          </Show>
-        </box>
-      </box>
+          </box>
+        </Match>
+
+        {/* medium — title + one condensed description + CTA, no block wordmark */}
+        <Match when={variant() === "medium"}>
+          <box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1} gap={0} width="100%">
+            <text fg={theme.text} attributes={TextAttributes.BOLD}>
+              Welcome to Altimate Code
+            </text>
+            <text fg={theme.text} wrapMode="word" width="100%">
+              Gives your AI real context on your data stack — lineage, SQL, dbt, and live warehouse metadata.
+            </text>
+            <Show when={!ready()}>
+              <text fg={theme.primary} wrapMode="word" width="100%">
+                {CONNECT_CTA}
+              </text>
+            </Show>
+          </box>
+        </Match>
+
+        {/* full — the original two-column boot box */}
+        <Match when={variant() === "full"}>
+          <box flexDirection="row" width="100%">
+            {/* left column — the block-letter wordmark (logo is ~50 cols) */}
+            <box
+              width={54}
+              flexShrink={0}
+              alignItems="center"
+              justifyContent="center"
+              gap={1}
+              paddingTop={1}
+              paddingBottom={1}
+              paddingLeft={1}
+            >
+              <text fg={theme.text} attributes={TextAttributes.BOLD}>
+                Welcome to Altimate Code
+              </text>
+              <Logo />
+            </box>
+            {/* right column — what-is section */}
+            <box
+              flexGrow={1}
+              border={["left"]}
+              borderColor={theme.border}
+              paddingLeft={2}
+              paddingRight={2}
+              paddingTop={1}
+              paddingBottom={1}
+              gap={1}
+            >
+              <box gap={0}>
+                <text fg={theme.accent} attributes={TextAttributes.BOLD}>
+                  What is Altimate Code
+                </text>
+                <text fg={theme.text} wrapMode="word" width="100%">
+                  Altimate Code is a specialized data engineering harness that sits between any LLM and your entire data
+                  stack.
+                </text>
+                <text fg={theme.text} wrapMode="word" width="100%">
+                  It gives your AI real context — column-level lineage, SQL analysis, dbt, and live warehouse metadata —
+                  so it reasons about your data instead of guessing.
+                </text>
+                {/* CTA only until a model is connected — stale afterwards */}
+                <Show when={!ready()}>
+                  <text fg={theme.primary} wrapMode="word" width="100%">
+                    {CONNECT_CTA}
+                  </text>
+                </Show>
+              </box>
+            </box>
+          </box>
+        </Match>
+      </Switch>
     </box>
   )
 }

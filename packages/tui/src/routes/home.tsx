@@ -19,6 +19,7 @@ import { useTheme } from "../context/theme"
 // one-line "Get started: /connect ... /discover ..." hint below, which duplicated the
 // same guidance the panel's "Tips for getting started" section now covers.
 import { WelcomePanel } from "../component/welcome-panel"
+import { PANEL_VERTICAL_RESERVE } from "../component/welcome-panel-utils"
 // altimate_change end
 
 let once = false
@@ -108,7 +109,13 @@ export function Home() {
         <box height={2} flexShrink={0} />
         <box width="100%" flexShrink={0}>
           <pluginRuntime.Slot name="home_logo" mode="replace">
-            <WelcomePanel />
+            {/* Size to the panel's real space, not the whole terminal (#1067):
+                -4 for this column's paddingLeft/Right; -PANEL_VERTICAL_RESERVE for
+                the top spacer + prompt + footer that share the height. */}
+            <WelcomePanel
+              availableWidth={dimensions().width - 4}
+              availableHeight={dimensions().height - PANEL_VERTICAL_RESERVE}
+            />
           </pluginRuntime.Slot>
         </box>
         <box flexGrow={1} minHeight={0} />
