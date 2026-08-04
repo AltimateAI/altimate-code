@@ -5,6 +5,11 @@ import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+import fs from "fs"
+import os from "os"
+import path from "path"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { Log } from "@/altimate/util/log"
 
 /**
  * Why a failure reason is attached at the rejection site rather than inferred from the message:
@@ -46,6 +51,23 @@ const DEFAULT_WEB_URL = "https://app.myaltimate.com"
 // the token exchange at a local backend when the web has no BACKEND_API_URL to
 // deliver.
 const DEFAULT_API_URL = "https://api.myaltimate.com"
+
+const log = Log.create({ service: "altimate-plugin" })
+
+// Build a base64url-encoded context blob so the frontend can correlate this
+// browser auth session with CLI telemetry. Fields are minimal and non-PII:
+// machine_id is a random UUID stored locally, never an email or real identity.
+export function buildCliContext(machineIdPath?: string): string {
+  const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
+  let machineId = ""
+  try {
+    machineId = fs.readFileSync(idPath, "utf8").trim()
+  } catch {
+    log.debug("machine-id file not found — cli_context will omit machine_id")
+  }
+  const ctx = { v: 1, machine_id: machineId, cli_version: InstallationVersion }
+  return Buffer.from(JSON.stringify(ctx)).toString("base64url")
+}
 
 // The one-time login_token is POSTed to the callback-supplied API base, so that
 // base must be trusted — otherwise a crafted callback could exfiltrate the token
@@ -344,7 +366,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             const authorizeUrl =
               `${webUrl}/register?client=altimate-code` +
               `&redirect=${encodeURIComponent(redirect)}` +
-              `&state=${state}`
+              `&state=${state}` +
+              `&cli_context=${encodeURIComponent(buildCliContext())}`
 
             // Try to open the browser. Failure is silent because the URL is
             // already surfaced elsewhere: the auth dialog in packages/tui/src/
