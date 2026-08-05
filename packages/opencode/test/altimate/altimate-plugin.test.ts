@@ -9,7 +9,7 @@ describe("buildCliContext", () => {
   test("returns a valid base64url-encoded JSON blob with machine_id", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-"))
     const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "test-uuid-1234", "utf8")
+    fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440000", "utf8")
 
     const encoded = buildCliContext(idPath)
 
@@ -18,7 +18,7 @@ describe("buildCliContext", () => {
 
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
     expect(ctx["v"]).toBe(1)
-    expect(ctx["machine_id"]).toBe("test-uuid-1234")
+    expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440000")
     expect(typeof ctx["cli_version"]).toBe("string")
 
     fs.rmSync(tmpDir, { recursive: true, force: true })
@@ -47,12 +47,12 @@ describe("buildCliContext", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-ws-"))
     const idPath = path.join(tmpDir, "machine-id")
     // Many editors/tools write a trailing newline
-    fs.writeFileSync(idPath, "  trimmed-uuid  \n", "utf8")
+    fs.writeFileSync(idPath, "  550e8400-e29b-41d4-a716-446655440001  \n", "utf8")
 
     const encoded = buildCliContext(idPath)
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
-    expect(ctx["machine_id"]).toBe("trimmed-uuid")
+    expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440001")
 
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
@@ -74,7 +74,7 @@ describe("buildCliContext", () => {
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-disabled-"))
       const idPath = path.join(tmpDir, "machine-id")
-      fs.writeFileSync(idPath, "should-not-appear", "utf8")
+      fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440004", "utf8")
 
       const encoded = buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
@@ -91,12 +91,12 @@ describe("buildCliContext", () => {
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-enabled-"))
       const idPath = path.join(tmpDir, "machine-id")
-      fs.writeFileSync(idPath, "expected-uuid", "utf8")
+      fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440002", "utf8")
 
       const encoded = buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
-      expect(ctx["machine_id"]).toBe("expected-uuid")
+      expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440002")
 
       fs.rmSync(tmpDir, { recursive: true, force: true })
     })
@@ -107,9 +107,9 @@ describe("getOrCreateMachineId", () => {
   test("returns existing id when file is present", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-"))
     const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "existing-uuid\n", "utf8")
+    fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440003\n", "utf8")
 
-    expect(getOrCreateMachineId(idPath)).toBe("existing-uuid")
+    expect(getOrCreateMachineId(idPath)).toBe("550e8400-e29b-41d4-a716-446655440003")
 
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
@@ -148,7 +148,7 @@ describe("buildAuthorizeUrl", () => {
   test("URL contains cli_context param that decodes to valid JSON", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-auth-url-"))
     const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "url-test-uuid", "utf8")
+    fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440005", "utf8")
 
     // Temporarily override machine-id path via a patched buildCliContext call
     // by providing a custom machine_id file — buildAuthorizeUrl uses buildCliContext()
@@ -184,5 +184,64 @@ describe("buildAuthorizeUrl", () => {
     const url = buildAuthorizeUrl("https://app.myaltimate.com", "http://127.0.0.1:7317/callback", "state-xyz")
     const parsed = new URL(url)
     expect(parsed.searchParams.has("cli_context")).toBe(true)
+  })
+})
+
+// altimate_change — additional failure mode tests for getOrCreateMachineId (MINOR 8)
+describe("getOrCreateMachineId — failure modes", () => {
+  test("returns empty string for non-UUID content without throwing", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-invalid-"))
+    const idPath = path.join(tmpDir, "machine-id")
+    // Write garbage that is not a v4 UUID
+    fs.writeFileSync(idPath, "not-a-uuid-at-all", "utf8")
+
+    const id = getOrCreateMachineId(idPath)
+
+    // Must return empty string (warn logged internally, not thrown)
+    expect(id).toBe("")
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("returns empty string for oversized file without throwing", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-big-"))
+    const idPath = path.join(tmpDir, "machine-id")
+    // Write a file larger than the 512-byte cap
+    fs.writeFileSync(idPath, "x".repeat(513), "utf8")
+
+    const id = getOrCreateMachineId(idPath)
+
+    // Must return empty string — oversized content rejected
+    expect(id).toBe("")
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("returns empty string when file has valid UUID format but wrong version", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-v1-"))
+    const idPath = path.join(tmpDir, "machine-id")
+    // v1 UUID (time-based, not version 4) — third group starts with 1, not 4
+    fs.writeFileSync(idPath, "550e8400-e29b-11d4-a716-446655440000", "utf8")
+
+    const id = getOrCreateMachineId(idPath)
+
+    // Strict UUID v4 validation rejects this
+    expect(id).toBe("")
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("buildCliContext omits machine_id when file contains non-UUID content", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-corrupt-"))
+    const idPath = path.join(tmpDir, "machine-id")
+    fs.writeFileSync(idPath, "not-a-uuid", "utf8")
+
+    const encoded = buildCliContext(idPath)
+    const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+
+    // machine_id must be absent — non-UUID content is rejected
+    expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 })

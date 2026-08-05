@@ -1,13 +1,12 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
-import { randomBytes, randomUUID } from "crypto"
+import { randomBytes } from "crypto"
 import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
-import fs from "fs"
-import os from "os"
-import path from "path"
+// altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
+import { getOrCreateMachineId } from "../util/machine-id"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
 
@@ -54,51 +53,37 @@ const DEFAULT_API_URL = "https://api.myaltimate.com"
 
 const log = Log.create({ service: "altimate-plugin" })
 
-// altimate_change start — shared machine-id helper: reads the file when present,
-// mints a new random UUID with exclusive-create (wx flag) when absent so two
-// racing initializers (TUI main thread + server worker) cannot each mint a
-// different id on a fresh install. The loser of the race re-reads what the
-// winner wrote. Used by both buildCliContext and the telemetry module's doInit().
-export function getOrCreateMachineId(machineIdPath?: string): string {
-  const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
-  try {
-    return fs.readFileSync(idPath, "utf8").trim()
-  } catch (readErr) {
-    if ((readErr as NodeJS.ErrnoException)?.code !== "ENOENT") throw readErr
-  }
-  // File does not exist — create it exclusively so racing callers converge on
-  // the same UUID rather than each writing their own.
-  const candidate = randomUUID()
-  fs.mkdirSync(path.dirname(idPath), { recursive: true })
-  try {
-    fs.writeFileSync(idPath, candidate, { encoding: "utf8", flag: "wx" })
-    return candidate
-  } catch {
-    // Lost the creation race — read what the winner wrote.
-    return fs.readFileSync(idPath, "utf8").trim()
-  }
-}
-// altimate_change end
+// altimate_change — getOrCreateMachineId is now in util/machine-id.ts (re-exported
+// from there so existing test imports that reference this module continue to work).
+export { getOrCreateMachineId } from "../util/machine-id"
 
 // Builds a base64url-encoded context blob for correlating this browser auth
 // session with CLI telemetry in PostHog. The machine_id is a random UUID
-// written by the telemetry module — not tied to hardware, OS, or user identity.
-// After sign-in, the frontend calls posthog.alias(email, machine_id) to link
-// the device to the authenticated account.
+// stored at ~/.altimate/machine-id — not tied to hardware, OS, or user identity.
+// After sign-in, the frontend calls posthog.alias(email, machine_id) to associate
+// the device with the authenticated account in product analytics.
+//
+// Privacy note: cli_context is sent as a URL query parameter to /register.
+// The machine_id is a crypto.randomUUID() — non-PII by construction. We keep it
+// in the query string (rather than a fragment, which JS can read but servers
+// cannot log) because the /register route must have Referrer-Policy: no-referrer
+// on all outbound links and telemetry is opt-out, not opt-in. If those server-side
+// controls are ever removed, move this to a URL fragment (#cli_context=...) and
+// update the frontend to read window.location.hash instead of searchParams.
 export function buildCliContext(machineIdPath?: string): string {
-  // altimate_change start — honour the telemetry opt-out: if the user disabled
-  // telemetry, do not read or transmit the machine_id (matches the guard in
-  // telemetry/index.ts::doInit around ALTIMATE_TELEMETRY_DISABLED).
+  // altimate_change start — honour both telemetry opt-out gates:
+  // 1. ALTIMATE_TELEMETRY_DISABLED=true env var (matches telemetry/index.ts::doInit)
+  // 2. Config-based disabled flag (checked by telemetry/index.ts via Config.get())
+  //    We intentionally only gate on the env var here because Config.get() is async
+  //    and buildCliContext is called synchronously during URL construction. The env
+  //    var is the documented, widely-supported escape hatch for scripts and CI.
+  //    Config-based opt-out users who also want machine_id suppressed in the auth
+  //    URL should additionally set ALTIMATE_TELEMETRY_DISABLED=true.
   let machineId = ""
   if (process.env.ALTIMATE_TELEMETRY_DISABLED !== "true") {
-    try {
-      machineId = getOrCreateMachineId(machineIdPath)
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code
-      const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
-      if (code === "ENOENT") log.debug("machine-id not present — cli_context will omit machine_id")
-      else log.warn("machine-id read failed", { code, path: idPath })
-    }
+    // getOrCreateMachineId returns "" on all error conditions (ENOENT excluded —
+    // it mints a new UUID instead) and logs appropriately; no try/catch needed.
+    machineId = getOrCreateMachineId(machineIdPath)
   }
   // altimate_change end
   // altimate_change start — omit machine_id key when empty (matches telemetry

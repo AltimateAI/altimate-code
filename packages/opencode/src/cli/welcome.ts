@@ -6,6 +6,8 @@ import { EOL } from "os"
 // altimate_change start — import Telemetry for first_launch event
 import { Telemetry } from "../altimate/telemetry"
 // altimate_change end
+// altimate_change — import shared machine-id utility so the path is canonical across all call sites
+import { getOrCreateMachineId } from "../altimate/util/machine-id"
 
 const APP_NAME = "altimate-code"
 const MARKER_FILE = ".installed-version"
@@ -39,12 +41,17 @@ export function showWelcomeBannerIfNeeded(): void {
     // Remove marker first to avoid showing twice even if display fails
     fs.unlinkSync(markerPath)
 
-    // altimate_change start — use ~/.altimate/machine-id existence as a proxy for upgrade vs fresh install
-    // Since postinstall.mjs always writes the current version to the marker file, we can't reliably
-    // use installedVersion !== currentVersion for release builds. Instead, if machine-id exists,
-    // they've run the CLI before.
-    const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
-    const isUpgrade = fs.existsSync(machineIdPath)
+    // altimate_change start — use getOrCreateMachineId() as the upgrade probe so the path is
+    // canonical and consistent with telemetry. Returns "" on a fresh install (before the file
+    // exists), in which case we treat this as a new install. On any subsequent run the file exists
+    // (minted by telemetry on first run) so getOrCreateMachineId() returns the existing UUID,
+    // indicating an upgrade.
+    // NOTE: welcome.ts runs before telemetry.doInit(). Calling getOrCreateMachineId() here mints
+    // the machine-id on fresh installs so telemetry has the ID ready when doInit() runs.
+    const machineId = process.env.ALTIMATE_TELEMETRY_DISABLED !== "true"
+      ? getOrCreateMachineId()
+      : fs.existsSync(path.join(os.homedir(), ".altimate", "machine-id")) ? "exists" : ""
+    const isUpgrade = machineId !== ""
     // altimate_change end
 
     // altimate_change start — track first launch for new user counting (privacy-safe: only version + machine_id)

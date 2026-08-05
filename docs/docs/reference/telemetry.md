@@ -149,6 +149,10 @@ Altimate Code uses two types of anonymous identifiers for analytics, depending o
 
 Both identifiers are only sent when telemetry is enabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
 
+### CLI Authentication Flow
+
+When you sign in using the CLI browser auth flow (`altimate auth login`), an anonymized session identifier (the `machine-id` UUID) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is never used for tracking, advertising, or cross-site identification. Respecting `ALTIMATE_TELEMETRY_DISABLED=true` suppresses this: when telemetry opt-out is set, the machine ID is omitted from the authorization URL entirely.
+
 ### Data Retention
 
 Telemetry data is sent to Azure Application Insights and retained according to [Microsoft's data retention policies](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure). We do not maintain a separate data store. To request deletion of your telemetry data, contact privacy@altimate.ai.

@@ -3,6 +3,8 @@ import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
+// altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
+import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 import { createHash, randomUUID } from "crypto"
 import fs from "fs"
 import path from "path"
@@ -1698,31 +1700,10 @@ export namespace Telemetry {
       } catch {
         // Account unavailable — proceed without user ID
       }
-      try {
-        const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
-        try {
-          machineId = fs.readFileSync(machineIdPath, "utf8").trim()
-        } catch {
-          // altimate_change start — create exclusively so two threads cannot mint different ids.
-          // The TUI main thread and the server worker each initialise their own copy of this
-          // module, and on a genuinely new install both can find the file missing at the same
-          // moment. With a plain write, the loser's value overwrites the winner's while both keep
-          // their own in memory, so a single first run reports two machine_ids — breaking the
-          // fallback identity exactly on the run that matters most. `wx` makes one of them fail,
-          // and the loser re-reads what the winner wrote.
-          const candidate = randomUUID()
-          fs.mkdirSync(path.dirname(machineIdPath), { recursive: true })
-          try {
-            fs.writeFileSync(machineIdPath, candidate, { encoding: "utf8", flag: "wx" })
-            machineId = candidate
-          } catch {
-            machineId = fs.readFileSync(machineIdPath, "utf8").trim()
-          }
-          // altimate_change end
-        }
-      } catch {
-        // Machine ID unavailable — proceed without it
-      }
+      // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
+      // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
+      // logs + returns ""). No try/catch needed — all paths are handled inside.
+      machineId = getOrCreateMachineId()
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
       // altimate_change — clear any existing interval before installing a new one. doInit() can
