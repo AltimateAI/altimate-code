@@ -107,7 +107,7 @@ describe("Write → Read round-trip", () => {
       [DE.SQL.VALIDATION_VALID]: true,
     })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c2",
       state: {
         status: "error",
@@ -541,7 +541,7 @@ describe("DE attributes on different span types in same trace", () => {
 
     // dbt tool
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c2",
       state: { status: "completed", input: { cmd: "dbt test" }, output: "4 passed", time: { start: 2000, end: 5000 } },
     })
@@ -617,7 +617,7 @@ describe("Complete pipeline edge cases", () => {
     })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: { cmd: "ls" }, output: "ok", time: { start: 1000, end: 2000 } },
     })

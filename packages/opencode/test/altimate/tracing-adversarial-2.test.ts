@@ -51,7 +51,7 @@ describe("Clock skew and timing", () => {
     tracer.startTrace("s-clock-skew", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -76,7 +76,7 @@ describe("Clock skew and timing", () => {
     tracer.startTrace("s-zero-dur", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -96,7 +96,7 @@ describe("Clock skew and timing", () => {
     tracer.startTrace("s-epoch0", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -116,7 +116,7 @@ describe("Clock skew and timing", () => {
     tracer.startTrace("s-future", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -136,7 +136,7 @@ describe("Clock skew and timing", () => {
     tracer.startTrace("s-neg-ts", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -163,7 +163,7 @@ describe("Prototype pollution and exotic objects", () => {
 
     const malicious = JSON.parse('{"__proto__": {"polluted": true}, "safe": 1}')
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -190,7 +190,7 @@ describe("Prototype pollution and exotic objects", () => {
     const sym = Symbol("secret")
     const input = { normal: "value", [sym]: "hidden" }
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -214,7 +214,7 @@ describe("Prototype pollution and exotic objects", () => {
 
     const frozen = Object.freeze({ command: "ls", args: Object.freeze(["-la"]) })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -235,7 +235,7 @@ describe("Prototype pollution and exotic objects", () => {
 
     const sealed = Object.seal({ command: "ls" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -260,7 +260,7 @@ describe("Prototype pollution and exotic objects", () => {
       regular: "normal",
     }
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -288,7 +288,7 @@ describe("Prototype pollution and exotic objects", () => {
       },
     }
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -315,7 +315,7 @@ describe("Prototype pollution and exotic objects", () => {
       },
     }
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -341,7 +341,7 @@ describe("Prototype pollution and exotic objects", () => {
       },
     }
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -392,7 +392,7 @@ describe("Attribute and metadata explosion", () => {
       bigInput[`key_${i}`] = `value_${i}`
     }
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -827,7 +827,7 @@ describe("Empty and minimal traces", () => {
     tracer.startTrace("s-tools-only", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1000, end: 2000 } },
     })

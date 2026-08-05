@@ -132,7 +132,7 @@ function sessionEvents(sessionID: string) {
         part: {
           sessionID,
           type: "tool",
-          tool: "bash",
+          tool: "terminal",
           callID: "c1",
           state: {
             status: "completed",

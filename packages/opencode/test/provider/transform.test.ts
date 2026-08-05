@@ -1580,7 +1580,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
           {
             type: "tool-call",
             toolCallId: "test",
-            toolName: "bash",
+            toolName: "terminal",
             input: { command: "echo hello" },
           },
         ],
@@ -1631,7 +1631,7 @@ describe("ProviderTransform.message - DeepSeek reasoning content", () => {
       {
         type: "tool-call",
         toolCallId: "test",
-        toolName: "bash",
+        toolName: "terminal",
         input: { command: "echo hello" },
       },
     ])
@@ -1707,7 +1707,7 @@ describe("ProviderTransform.message - Devstral detection", () => {
     const msgs = [
       {
         role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-id!!", toolName: "bash", input: { command: "pwd" } }],
+        content: [{ type: "tool-call", toolCallId: "call-id!!", toolName: "terminal", input: { command: "pwd" } }],
       },
       {
         role: "tool",
@@ -1715,7 +1715,7 @@ describe("ProviderTransform.message - Devstral detection", () => {
           {
             type: "tool-result",
             toolCallId: "call-id!!",
-            toolName: "bash",
+            toolName: "terminal",
             output: { type: "text", value: "ok" },
           },
         ],
@@ -2086,7 +2086,7 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
         role: "assistant",
         content: [
           { type: "text", text: "" },
-          { type: "tool-call", toolCallId: "123", toolName: "bash", input: { command: "ls" } },
+          { type: "tool-call", toolCallId: "123", toolName: "terminal", input: { command: "ls" } },
         ],
       },
     ] as any[]
@@ -2098,7 +2098,7 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
     expect(result[0].content[0]).toEqual({
       type: "tool-call",
       toolCallId: "123",
-      toolName: "bash",
+      toolName: "terminal",
       input: { command: "ls" },
     })
   })

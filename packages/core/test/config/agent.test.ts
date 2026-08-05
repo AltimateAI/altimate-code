@@ -81,8 +81,8 @@ describe("ConfigAgentPlugin.Plugin", () => {
         { action: "read", resource: "*", effect: "allow" },
         { action: "bash", resource: "git *", effect: "allow" },
       ])
-      expect(PermissionV2.evaluate("bash", "git status", buildAgent.permissions).effect).toBe("allow")
-      expect(PermissionV2.evaluate("bash", "bun test", buildAgent.permissions).effect).toBe("ask")
+      expect(PermissionV2.evaluate("terminal", "git status", buildAgent.permissions).effect).toBe("allow")
+      expect(PermissionV2.evaluate("terminal", "bun test", buildAgent.permissions).effect).toBe("ask")
 
       const reviewer = yield* agents.get(AgentV2.ID.make("reviewer"))
       if (!reviewer) throw new Error("expected configured reviewer agent")

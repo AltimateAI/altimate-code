@@ -353,7 +353,7 @@ describe("release validation PR #937 source-level env plumbing", () => {
   })
 
   test("bash tool strips ALTIMATE_NON_INTERACTIVE from child process env but keeps auto-answer env untouched", async () => {
-    const source = await Bun.file(new URL("../../src/tool/bash.ts", import.meta.url)).text()
+    const source = await Bun.file(new URL("../../src/tool/terminal.ts", import.meta.url)).text()
 
     expect(source).toContain('const mergedEnv: Record<string, string | undefined> = { ...process.env, ...shellEnv.env }')
     expect(source).toContain('delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]')

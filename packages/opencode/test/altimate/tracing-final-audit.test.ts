@@ -187,7 +187,7 @@ describe("logToolCall — tool name edge cases", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -208,7 +208,7 @@ describe("logToolCall — tool name edge cases", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -229,7 +229,7 @@ describe("logToolCall — tool name edge cases", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -495,7 +495,7 @@ describe("Generation span — input from previous tool results", () => {
     // First generation with a tool call
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: { cmd: "ls" }, output: "file1.ts\nfile2.ts", time: { start: 1000, end: 2000 } },
     })
@@ -522,7 +522,7 @@ describe("Generation span — input from previous tool results", () => {
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "error", input: {}, error: "Permission denied", time: { start: 1000, end: 2000 } },
     })
@@ -549,7 +549,7 @@ describe("Generation output composition", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1000, end: 2000 } },
     })
@@ -711,7 +711,7 @@ describe("Structural invariants", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1000, end: 2000 } },
     })
     tracer.logStepFinish(ZERO_STEP)
@@ -753,7 +753,7 @@ describe("Structural invariants", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1000, end: 2000 } },
     })
     tracer.logToolCall({

@@ -165,7 +165,7 @@ describe("Session input schemas", () => {
       parentID: sessionID,
       title: "child",
       metadata: { source: "test" },
-      permission: [{ action: "ask" as const, pattern: "*", permission: "bash" }],
+      permission: [{ action: "ask" as const, pattern: "*", permission: "terminal" }],
       workspaceID,
     }
     expect(decode(populated)).toEqual(populated)

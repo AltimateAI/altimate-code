@@ -86,10 +86,10 @@ describe("toolCallCount accuracy", () => {
     tracer.logStepStart({ id: "1" })
 
     // This will fail inside try/catch because state is null
-    tracer.logToolCall({ tool: "bash", callID: "c1", state: null as any })
+    tracer.logToolCall({ tool: "terminal", callID: "c1", state: null as any })
     // This should succeed
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c2",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -108,7 +108,7 @@ describe("toolCallCount accuracy", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
 
-    tracer.logToolCall({ tool: "bash", callID: "c1", state: undefined as any })
+    tracer.logToolCall({ tool: "terminal", callID: "c1", state: undefined as any })
     tracer.logToolCall({
       tool: "read",
       callID: "c2",
@@ -226,7 +226,7 @@ describe("Orphaned generation — endTrace with unclosed generation", () => {
     await new Promise((r) => setTimeout(r, 200)) // wait for initial snapshot
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -270,7 +270,7 @@ describe("Worker race — events after endTrace", () => {
     const tracer = getOrCreateRecap("race-session")!
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -327,7 +327,7 @@ describe("Worker race — events after endTrace", () => {
     const t1 = getOrCreateRecap("cycle-test")!
     t1.logStepStart({ id: "1" })
     t1.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "cycle1", time: { start: 1, end: 2 } },
     })
@@ -412,7 +412,7 @@ describe("buildTraceFile — status transitions", () => {
     // Start generation — internal state now has currentGenerationSpanId
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })

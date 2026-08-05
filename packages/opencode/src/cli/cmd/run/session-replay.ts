@@ -116,7 +116,7 @@ function isShellSyntheticAssistant(message: SessionMessages[number], shellParent
   return (
     message.info.role === "assistant" &&
     shellParents.has(message.info.parentID) &&
-    message.parts.some((part) => part.type === "tool" && part.tool === "bash")
+    message.parts.some((part) => part.type === "tool" && (part.tool === "terminal" || part.tool === "bash"))
   )
 }
 

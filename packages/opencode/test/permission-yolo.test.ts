@@ -110,64 +110,64 @@ describe("yolo mode: deny rules cannot be bypassed", () => {
 
   test("evaluate still returns deny regardless of any external state", () => {
     const denyRules: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
-      { permission: "bash", pattern: "DROP SCHEMA *", action: "deny" },
-      { permission: "bash", pattern: "TRUNCATE *", action: "deny" },
+      { permission: "terminal", pattern: "DROP DATABASE *", action: "deny" },
+      { permission: "terminal", pattern: "DROP SCHEMA *", action: "deny" },
+      { permission: "terminal", pattern: "TRUNCATE *", action: "deny" },
     ]
 
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE production", denyRules).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "DROP SCHEMA public", denyRules).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "TRUNCATE users", denyRules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE production", denyRules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP SCHEMA public", denyRules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "TRUNCATE users", denyRules).action).toBe("deny")
   })
 
   test("deny rule wins over earlier allow-all wildcard (last-match-wins)", () => {
     const rules: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "allow" },
+      { permission: "terminal", pattern: "DROP DATABASE *", action: "deny" },
     ]
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE prod", rules).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "ls -la", rules).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE prod", rules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "ls -la", rules).action).toBe("allow")
   })
 
   test("deny rule wins even with complex overlapping patterns", () => {
     const rules: PermissionNext.Ruleset = [
       { permission: "*", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "rm -rf *", action: "ask" },
-      { permission: "bash", pattern: "DROP *", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "allow" },
+      { permission: "terminal", pattern: "rm -rf *", action: "ask" },
+      { permission: "terminal", pattern: "DROP *", action: "deny" },
     ]
-    expect(PermissionNext.evaluate("bash", "DROP TABLE users", rules).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "rm -rf /tmp", rules).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "echo hello", rules).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "DROP TABLE users", rules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "rm -rf /tmp", rules).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "echo hello", rules).action).toBe("allow")
   })
 
   test("case-sensitive deny patterns match exactly", () => {
     const rules: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "allow" },
+      { permission: "terminal", pattern: "DROP DATABASE *", action: "deny" },
     ]
     // Uppercase matches
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE prod", rules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE prod", rules).action).toBe("deny")
     // Lowercase does NOT match (patterns are case-sensitive)
-    expect(PermissionNext.evaluate("bash", "drop database prod", rules).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "drop database prod", rules).action).toBe("allow")
   })
 
   test("default agent rules include both cases of dangerous commands", () => {
     // Verify the default agent rules cover both cases (from agent.ts)
-    const defaultBashRules: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "*", action: "ask" },
-      { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
-      { permission: "bash", pattern: "DROP SCHEMA *", action: "deny" },
-      { permission: "bash", pattern: "TRUNCATE *", action: "deny" },
-      { permission: "bash", pattern: "drop database *", action: "deny" },
-      { permission: "bash", pattern: "drop schema *", action: "deny" },
-      { permission: "bash", pattern: "truncate *", action: "deny" },
+    const defaultTerminalRules: PermissionNext.Ruleset = [
+      { permission: "terminal", pattern: "*", action: "ask" },
+      { permission: "terminal", pattern: "DROP DATABASE *", action: "deny" },
+      { permission: "terminal", pattern: "DROP SCHEMA *", action: "deny" },
+      { permission: "terminal", pattern: "TRUNCATE *", action: "deny" },
+      { permission: "terminal", pattern: "drop database *", action: "deny" },
+      { permission: "terminal", pattern: "drop schema *", action: "deny" },
+      { permission: "terminal", pattern: "truncate *", action: "deny" },
     ]
     // Both cases denied
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE prod", defaultBashRules).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "drop database prod", defaultBashRules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE prod", defaultTerminalRules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "drop database prod", defaultTerminalRules).action).toBe("deny")
     // Normal commands still ask
-    expect(PermissionNext.evaluate("bash", "dbt run", defaultBashRules).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "dbt run", defaultTerminalRules).action).toBe("ask")
   })
 })
 
@@ -176,28 +176,28 @@ describe("yolo mode: permission evaluation is unchanged", () => {
   // These tests verify evaluate() behavior is completely unaffected.
 
   test("evaluate returns ask for unmatched permissions (yolo doesn't change this)", () => {
-    expect(PermissionNext.evaluate("bash", "dbt run", []).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "dbt run", []).action).toBe("ask")
     expect(PermissionNext.evaluate("edit", "src/main.ts", []).action).toBe("ask")
     expect(PermissionNext.evaluate("write", "output.sql", []).action).toBe("ask")
   })
 
   test("evaluate returns allow for explicitly allowed permissions", () => {
     const rules: PermissionNext.Ruleset = [{ permission: "*", pattern: "*", action: "allow" }]
-    expect(PermissionNext.evaluate("bash", "dbt run", rules).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "dbt run", rules).action).toBe("allow")
     expect(PermissionNext.evaluate("edit", "any-file.ts", rules).action).toBe("allow")
   })
 
   test("disabled() is unaffected by yolo mode (it checks ruleset, not env)", () => {
-    const rules: PermissionNext.Ruleset = [{ permission: "bash", pattern: "*", action: "deny" }]
-    const disabled = PermissionNext.disabled(["bash", "read", "edit"], rules)
-    expect(disabled.has("bash")).toBe(true)
+    const rules: PermissionNext.Ruleset = [{ permission: "terminal", pattern: "*", action: "deny" }]
+    const disabled = PermissionNext.disabled(["terminal", "read", "edit"], rules)
+    expect(disabled.has("terminal")).toBe(true)
     expect(disabled.has("read")).toBe(false)
     expect(disabled.has("edit")).toBe(false)
   })
 
   test("fromConfig correctly converts nested permission config", () => {
     const config = {
-      bash: {
+      terminal: {
         "*": "ask" as const,
         "dbt *": "allow" as const,
         "DROP *": "deny" as const,
@@ -206,9 +206,9 @@ describe("yolo mode: permission evaluation is unchanged", () => {
     }
     const ruleset = PermissionNext.fromConfig(config)
 
-    expect(PermissionNext.evaluate("bash", "dbt run", ruleset).action).toBe("allow")
-    expect(PermissionNext.evaluate("bash", "DROP TABLE x", ruleset).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "ls", ruleset).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "dbt run", ruleset).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "DROP TABLE x", ruleset).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "ls", ruleset).action).toBe("ask")
     expect(PermissionNext.evaluate("read", "any-file", ruleset).action).toBe("allow")
   })
 })
@@ -216,38 +216,38 @@ describe("yolo mode: permission evaluation is unchanged", () => {
 describe("yolo mode: edge cases and adversarial scenarios", () => {
   test("empty patterns array doesn't crash evaluate", () => {
     const rules: PermissionNext.Ruleset = []
-    expect(PermissionNext.evaluate("bash", "", rules).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "", rules).action).toBe("ask")
     expect(PermissionNext.evaluate("", "", rules).action).toBe("ask")
   })
 
   test("permission with special characters in pattern", () => {
     const rules: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "rm -rf /Users/*/Documents/*", action: "deny" },
+      { permission: "terminal", pattern: "rm -rf /Users/*/Documents/*", action: "deny" },
     ]
-    expect(PermissionNext.evaluate("bash", "rm -rf /Users/john/Documents/important", rules).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "rm -rf /tmp/safe", rules).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "rm -rf /Users/john/Documents/important", rules).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "rm -rf /tmp/safe", rules).action).toBe("ask")
   })
 
   test("multiple rulesets are merged correctly (last wins)", () => {
     const defaults: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "*", action: "ask" },
-      { permission: "bash", pattern: "DROP *", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "ask" },
+      { permission: "terminal", pattern: "DROP *", action: "deny" },
     ]
-    const userOverride: PermissionNext.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]
+    const userOverride: PermissionNext.Ruleset = [{ permission: "terminal", pattern: "*", action: "allow" }]
     // User allow-all comes AFTER default deny, so it wins for everything
-    expect(PermissionNext.evaluate("bash", "DROP TABLE x", defaults, userOverride).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "DROP TABLE x", defaults, userOverride).action).toBe("allow")
     // But if user doesn't override, deny still works
-    expect(PermissionNext.evaluate("bash", "DROP TABLE x", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP TABLE x", defaults).action).toBe("deny")
   })
 
   test("DeniedError contains relevant ruleset info", () => {
     const rules: PermissionNext.Ruleset = [
-      { permission: "bash", pattern: "DROP *", action: "deny" },
+      { permission: "terminal", pattern: "DROP *", action: "deny" },
       { permission: "read", pattern: "*.env", action: "ask" },
     ]
     try {
       // Simulate what ask() does when it encounters deny
-      const result = PermissionNext.evaluate("bash", "DROP TABLE users", rules)
+      const result = PermissionNext.evaluate("terminal", "DROP TABLE users", rules)
       if (result.action === "deny") {
         throw new PermissionNext.DeniedError(rules.filter((r) => r.permission === "bash"))
       }
@@ -288,13 +288,13 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
         await expect(
           PermissionNext.ask({
             sessionID: SessionID.make("ses_yolo_deny_test"),
-            permission: "bash",
+            permission: "terminal",
             patterns: ["DROP DATABASE production"],
             metadata: {},
             always: [],
             ruleset: [
-              { permission: "bash", pattern: "*", action: "ask" },
-              { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
+              { permission: "terminal", pattern: "*", action: "ask" },
+              { permission: "terminal", pattern: "DROP DATABASE *", action: "deny" },
             ],
           }),
         ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
@@ -309,11 +309,11 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
       fn: async () => {
         const result = await PermissionNext.ask({
           sessionID: SessionID.make("ses_yolo_allow_test"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["dbt run"],
           metadata: {},
           always: [],
-          ruleset: [{ permission: "bash", pattern: "*", action: "allow" }],
+          ruleset: [{ permission: "terminal", pattern: "*", action: "allow" }],
         })
         expect(result).toBeUndefined()
       },
@@ -328,7 +328,7 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
         const askPromise = PermissionNext.ask({
           id: PermissionID.make("per_yolo_e2e"),
           sessionID: SessionID.make("ses_yolo_ask_test"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["echo hello"],
           metadata: {},
           always: [],
@@ -356,7 +356,7 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
         const ask1 = PermissionNext.ask({
           id: PermissionID.make("per_yolo_multi_1"),
           sessionID: SessionID.make("ses_yolo_multi_test"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["dbt run"],
           metadata: {},
           always: [],
@@ -401,14 +401,14 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
       directory: tmp.path,
       fn: async () => {
         const rules: PermissionNext.Ruleset = [
-          { permission: "bash", pattern: "*", action: "ask" },
-          { permission: "bash", pattern: "DROP *", action: "deny" },
+          { permission: "terminal", pattern: "*", action: "ask" },
+          { permission: "terminal", pattern: "DROP *", action: "deny" },
         ]
 
         await expect(
           PermissionNext.ask({
             sessionID: SessionID.make("ses_yolo_mixed"),
-            permission: "bash",
+            permission: "terminal",
             patterns: ["DROP TABLE users"],
             metadata: {},
             always: [],
@@ -419,7 +419,7 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
         const askPromise = PermissionNext.ask({
           id: PermissionID.make("per_yolo_mixed"),
           sessionID: SessionID.make("ses_yolo_mixed"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["dbt run"],
           metadata: {},
           always: [],
@@ -441,7 +441,7 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
       git: true,
       config: {
         permission: {
-          bash: {
+          terminal: {
             "*": "ask",
             "dbt *": "allow",
             "DROP *": "deny",
@@ -456,14 +456,14 @@ describe("yolo mode E2E: permission ask/reply flow", () => {
         const config = await Config.get()
         const ruleset = PermissionNext.fromConfig(config.permission ?? {})
 
-        expect(PermissionNext.evaluate("bash", "dbt run", ruleset).action).toBe("allow")
-        expect(PermissionNext.evaluate("bash", "DROP TABLE x", ruleset).action).toBe("deny")
-        expect(PermissionNext.evaluate("bash", "git status", ruleset).action).toBe("ask")
+        expect(PermissionNext.evaluate("terminal", "dbt run", ruleset).action).toBe("allow")
+        expect(PermissionNext.evaluate("terminal", "DROP TABLE x", ruleset).action).toBe("deny")
+        expect(PermissionNext.evaluate("terminal", "git status", ruleset).action).toBe("ask")
 
         await expect(
           PermissionNext.ask({
             sessionID: SessionID.make("ses_yolo_config_test"),
-            permission: "bash",
+            permission: "terminal",
             patterns: ["DROP TABLE users"],
             metadata: {},
             always: [],

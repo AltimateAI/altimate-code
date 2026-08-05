@@ -16,7 +16,7 @@ import { Agent } from "../../src/agent/agent"
 import { PermissionNext } from "../../src/permission/next"
 
 function bashAction(agent: Agent.Info, command: string) {
-  return PermissionNext.evaluate("bash", command, agent.permission).action
+  return PermissionNext.evaluate("terminal", command, agent.permission).action
 }
 
 // The reviewer agent advertises read-only; these pin that NO bash command is
@@ -35,7 +35,7 @@ test("reviewer agent: bash requires approval (base) — never auto-allowed", asy
       // #978: "ask" instead of "deny" so `gh pr view <url>` is possible with
       // explicit user approval. The P0 was auto-run via a bypassable allowlist;
       // "ask" never auto-runs.
-      expect(PermissionNext.evaluate("bash", "*", reviewer!.permission).action).toBe("ask")
+      expect(PermissionNext.evaluate("terminal", "*", reviewer!.permission).action).toBe("ask")
     },
   })
 })

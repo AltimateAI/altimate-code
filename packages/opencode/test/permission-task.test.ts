@@ -228,12 +228,12 @@ describe("permission.task with real config files", () => {
         expect(Permission.evaluate("task", "code-reviewer", ruleset).action).toBe("deny")
 
         // Verify other tool permissions
-        expect(Permission.evaluate("bash", "*", ruleset).action).toBe("allow")
+        expect(Permission.evaluate("terminal", "*", ruleset).action).toBe("allow")
         expect(Permission.evaluate("edit", "*", ruleset).action).toBe("ask")
 
         // Verify disabled tools
-        const disabled = Permission.disabled(["bash", "edit", "task"], ruleset)
-        expect(disabled.has("bash")).toBe(false)
+        const disabled = Permission.disabled(["terminal", "edit", "task"], ruleset)
+        expect(disabled.has("terminal")).toBe(false)
         expect(disabled.has("edit")).toBe(false)
         // task is NOT disabled because disabled() uses findLast, and the last rule
         // matching "task" permission is {pattern: "general", action: "allow"}, not pattern: "*"

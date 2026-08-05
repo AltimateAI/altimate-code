@@ -320,7 +320,7 @@ test("run entry content updates when live commit text changes", async () => {
     source: "tool",
     messageID: "msg-1",
     partID: "part-1",
-    tool: "bash",
+    tool: "terminal",
   })
 
   const app = await testRender(
@@ -346,7 +346,7 @@ test("run entry content updates when live commit text changes", async () => {
       source: "tool",
       messageID: "msg-1",
       partID: "part-1",
-      tool: "bash",
+      tool: "terminal",
     })
     await app.renderOnce()
 

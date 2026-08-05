@@ -20,8 +20,7 @@ type AgentMode = "all" | "primary" | "subagent"
 // Permission keys (not raw tool names). Multiple tools can map to a single
 // permission — e.g. write/edit/apply_patch all gate on `edit` — so we configure
 // agents at the permission level to match how the runtime actually enforces it.
-export const AVAILABLE_PERMISSIONS = [
-  "bash",
+export const AVAILABLE_PERMISSIONS = ["terminal",
   "read",
   "edit",
   // altimate_change start — upstream_fix: keep legacy list permission denyable

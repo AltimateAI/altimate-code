@@ -136,7 +136,7 @@ describe("tool call telemetry", () => {
     let counter = 0
     let prevTool: string | null = null
 
-    for (const tool of ["read", "edit", "bash"]) {
+    for (const tool of ["read", "edit", "terminal"]) {
       const event = simulateToolResult({
         tool,
         isMcpTool: false,
@@ -161,7 +161,7 @@ describe("tool call telemetry", () => {
     let counter = 0
     let prevTool: string | null = null
 
-    for (const tool of ["read", "edit", "bash"]) {
+    for (const tool of ["read", "edit", "terminal"]) {
       const event = simulateToolResult({
         tool,
         isMcpTool: false,
@@ -184,7 +184,7 @@ describe("tool call telemetry", () => {
   test("error tool calls include error_message truncated to 500 chars", () => {
     const longError = "x".repeat(1000)
     const event = simulateToolError({
-      tool: "bash",
+      tool: "terminal",
       isMcpTool: false,
       sessionID: "sess-1",
       messageID: "msg-1",
@@ -201,7 +201,7 @@ describe("tool call telemetry", () => {
 
   test("error tool calls with short messages preserve full message", () => {
     const event = simulateToolError({
-      tool: "bash",
+      tool: "terminal",
       isMcpTool: false,
       sessionID: "sess-1",
       messageID: "msg-1",
@@ -250,7 +250,7 @@ describe("tool call telemetry", () => {
 // ---------------------------------------------------------------------------
 describe("tool categorization", () => {
   test("file tools are categorized correctly", () => {
-    for (const tool of ["read", "write", "edit", "glob", "grep", "bash"]) {
+    for (const tool of ["read", "write", "edit", "glob", "grep", "terminal"]) {
       expect(Telemetry.categorizeToolName(tool, "standard")).toBe("file")
     }
   })
@@ -443,7 +443,7 @@ describe("doom loop detection telemetry", () => {
       type: "doom_loop_detected",
       timestamp: Date.now(),
       session_id: "sess-1",
-      tool_name: "bash",
+      tool_name: "terminal",
       repeat_count: DOOM_LOOP_THRESHOLD,
     }
 

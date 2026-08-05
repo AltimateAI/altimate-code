@@ -570,26 +570,26 @@ describe("E2E: bash deny defaults", () => {
     })
 
     // Database DDL is blocked entirely (deny) — both upper and lowercase
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE production", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "DROP SCHEMA public", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "TRUNCATE users", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "drop database production", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "drop schema public", defaults).action).toBe("deny")
-    expect(PermissionNext.evaluate("bash", "truncate users", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE production", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP SCHEMA public", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "TRUNCATE users", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "drop database production", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "drop schema public", defaults).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "truncate users", defaults).action).toBe("deny")
 
     // Destructive file/git commands are prompted (ask), not blocked
     // This is intentional — rm -rf ./build, git push --force after rebase, etc. are legitimate
-    expect(PermissionNext.evaluate("bash", "rm -rf ./build", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "git push --force origin main", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "git reset --hard HEAD~5", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "git clean -f", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "rm -rf ./build", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "git push --force origin main", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "git reset --hard HEAD~5", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "git clean -f", defaults).action).toBe("ask")
 
     // Regular commands also prompt (ask)
-    expect(PermissionNext.evaluate("bash", "ls -la", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "git status", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "dbt run", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "npm install", defaults).action).toBe("ask")
-    expect(PermissionNext.evaluate("bash", "git push origin main", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "ls -la", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "git status", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "dbt run", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "npm install", defaults).action).toBe("ask")
+    expect(PermissionNext.evaluate("terminal", "git push origin main", defaults).action).toBe("ask")
   })
 
   test("user config can override defaults via merge (last-match-wins)", () => {
@@ -608,9 +608,9 @@ describe("E2E: bash deny defaults", () => {
     const merged = PermissionNext.merge(defaults, userOverride)
 
     // Specific user override allows dropping a test database (last-match-wins)
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE test_db", merged).action).toBe("allow")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE test_db", merged).action).toBe("allow")
     // Other DROP DATABASE commands still denied (deny from defaults, no user override matches)
-    expect(PermissionNext.evaluate("bash", "DROP DATABASE production", merged).action).toBe("deny")
+    expect(PermissionNext.evaluate("terminal", "DROP DATABASE production", merged).action).toBe("deny")
   })
 })
 

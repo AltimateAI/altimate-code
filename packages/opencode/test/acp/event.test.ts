@@ -235,7 +235,7 @@ function runningTool(
     messageID: `msg_${callID}`,
     type: "tool",
     callID,
-    tool: "bash",
+    tool: "terminal",
     state: {
       status: "running",
       input,
@@ -283,7 +283,7 @@ function errorTool(sessionID: string, callID: string) {
     messageID: `msg_${callID}`,
     type: "tool",
     callID,
-    tool: "bash",
+    tool: "terminal",
     state: {
       status: "error",
       input: { cmd: "exit 1" },
@@ -614,7 +614,7 @@ describe("acp event routing", () => {
         messageID: "msg_call_pending",
         type: "tool",
         callID: "call_pending",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "pending",
           input: { cmd: "printf repeat" },

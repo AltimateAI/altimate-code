@@ -24,7 +24,7 @@ import { CodeSearchTool } from "../../tool/codesearch"
 import { WebSearchTool } from "../../tool/websearch"
 import { TaskTool } from "../../tool/task"
 import { SkillTool } from "../../tool/skill"
-import { BashTool } from "../../tool/bash"
+import { TerminalTool } from "../../tool/terminal"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
@@ -200,7 +200,7 @@ function skill(info: ToolProps<typeof SkillTool>) {
   })
 }
 
-function bash(info: ToolProps<typeof BashTool>) {
+function terminal(info: ToolProps<typeof TerminalTool>) {
   const output = info.part.state.status === "completed" ? info.part.state.output?.trim() : undefined
   block(
     {
@@ -566,7 +566,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       function tool(part: ToolPart) {
         try {
-          if (part.tool === "bash") return bash(props<typeof BashTool>(part))
+          if (part.tool === "terminal") return terminal(props<typeof TerminalTool>(part))
           if (part.tool === "glob") return glob(props<typeof GlobTool>(part))
           if (part.tool === "grep") return grep(props<typeof GrepTool>(part))
           if (part.tool === "list") return list(props<typeof ListTool>(part))

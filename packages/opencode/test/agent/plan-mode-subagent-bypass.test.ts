@@ -130,7 +130,7 @@ it.effect("subagent self permissions are preserved", () =>
     )
 
     expect(Permission.evaluate("read", "README.md", effective).action).toBe("allow")
-    expect(Permission.evaluate("bash", "git status", effective).action).toBe("allow")
+    expect(Permission.evaluate("terminal", "git status", effective).action).toBe("allow")
     expect(Permission.evaluate("task", "worker", effective).action).toBe("allow")
     expect(Permission.evaluate("task", "other", effective).action).toBe("deny")
     expect(Permission.disabled(["edit", "write", "apply_patch"], effective)).toEqual(new Set())
@@ -154,6 +154,6 @@ it.effect("subagent inherits parent session deny rules as hard runtime ceilings"
       }),
     )
 
-    expect(Permission.evaluate("bash", "git status", effective).action).toBe("deny")
+    expect(Permission.evaluate("terminal", "git status", effective).action).toBe("deny")
   }),
 )

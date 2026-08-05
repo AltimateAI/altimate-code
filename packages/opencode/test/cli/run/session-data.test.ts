@@ -240,7 +240,7 @@ describe("run session data", () => {
       properties: {
         id: "perm-1",
         sessionID: "session-1",
-        permission: "bash",
+        permission: "terminal",
         patterns: ["src/**/*.ts"],
         metadata: {},
         always: [],
@@ -257,7 +257,7 @@ describe("run session data", () => {
         id: "tool-1",
         messageID: "msg-1",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "running",
           input: {
@@ -290,7 +290,7 @@ describe("run session data", () => {
       tool({
         id: "tool-1",
         messageID: "msg-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "completed",
           input: {
@@ -343,7 +343,7 @@ describe("run session data", () => {
         kind: "tool",
         phase: "start",
         partID: "shell:call-1",
-        tool: "bash",
+        tool: "terminal",
         shell: {
           callID: "call-1",
           command: "pwd",
@@ -367,7 +367,7 @@ describe("run session data", () => {
         kind: "tool",
         phase: "progress",
         partID: "shell:call-1",
-        tool: "bash",
+        tool: "terminal",
         text: "/tmp/demo\n",
         toolState: "completed",
         shell: {
@@ -396,7 +396,7 @@ describe("run session data", () => {
           id: "tool-1",
           messageID: "msg-1",
           callID: "call-1",
-          tool: "bash",
+          tool: "terminal",
           state: {
             status: "running",
             input: {
@@ -425,7 +425,7 @@ describe("run session data", () => {
           id: "tool-1",
           messageID: "msg-1",
           callID: "call-1",
-          tool: "bash",
+          tool: "terminal",
           state: {
             status: "completed",
             input: {
@@ -451,7 +451,7 @@ describe("run session data", () => {
         id: "tool-1",
         messageID: "msg-1",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "running",
           input: {
@@ -480,7 +480,7 @@ describe("run session data", () => {
         id: "tool-1",
         messageID: "msg-1",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "completed",
           input: {

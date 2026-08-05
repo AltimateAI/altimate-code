@@ -77,7 +77,7 @@ function toolEvent(sessionID: string, callID: string) {
       part: {
         sessionID,
         type: "tool",
-        tool: "bash",
+        tool: "terminal",
         callID,
         state: { status: "completed", input: { command: "ls" }, output: "ok", time: { start: now - 5, end: now } },
       },

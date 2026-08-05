@@ -48,7 +48,7 @@ function makePendingPart(overrides?: { tool?: string }): MessageV2.ToolPart {
 describe("SessionCompaction.createObservationMask", () => {
   test("includes tool name, args, line count, byte size, and fingerprint for completed part", () => {
     const part = makeCompletedPart({
-      tool: "bash",
+      tool: "terminal",
       input: { command: "git status" },
       output: "On branch main\nnothing to commit, working tree clean\n",
     })
@@ -76,7 +76,7 @@ describe("SessionCompaction.createObservationMask", () => {
   })
 
   test("shows empty args for pending status (falls through to {} path)", () => {
-    const part = makePendingPart({ tool: "bash" })
+    const part = makePendingPart({ tool: "terminal" })
     const mask = SessionCompaction.createObservationMask(part)
 
     // Pending status → output is "" (since only completed reads output)
@@ -118,7 +118,7 @@ describe("SessionCompaction.createObservationMask", () => {
     circular.self = circular
 
     const part = makeCompletedPart({
-      tool: "bash",
+      tool: "terminal",
       input: circular,
       output: "result",
     })
@@ -157,7 +157,7 @@ describe("SessionCompaction.createObservationMask", () => {
 
   test("fingerprint is capped at 80 characters", () => {
     const longFirstLine = "z".repeat(200)
-    const part = makeCompletedPart({ tool: "bash", output: longFirstLine })
+    const part = makeCompletedPart({ tool: "terminal", output: longFirstLine })
     const mask = SessionCompaction.createObservationMask(part)
 
     // The fingerprint should contain the first 80 chars, not all 200

@@ -151,8 +151,8 @@ export const layer = Layer.effect(
             "*.env.*": "ask",
             "*.env.example": "allow",
           },
-          // altimate_change start - bash safety defaults for destructive file/git/DDL commands
-          // Safety defaults for bash commands.
+          // altimate_change start - terminal safety defaults for destructive file/git/DDL commands
+          // Safety defaults for terminal commands.
           // IMPORTANT: "*": "ask" must come FIRST because evaluation uses last-match-wins.
           //
           // "ask" = user sees prompt and can approve. Used for destructive file/git
@@ -162,7 +162,7 @@ export const layer = Layer.effect(
           //          almost never intentional in an agent context.
           //
           // Users can override any of these in altimate-code.json.
-          bash: {
+          terminal: {
             "*": "ask",
             "rm -rf *": "ask",
             "rm -fr *": "ask",
@@ -186,11 +186,11 @@ export const layer = Layer.effect(
         // Safety deny rules that CANNOT be overridden by wildcard allows.
         // Appended after user config so they always take precedence via last-match-wins.
         // Users who need to override must use specific patterns like
-        // `"DROP DATABASE test_db": "allow"` — wildcard `bash: "allow"` won't work.
+        // `"DROP DATABASE test_db": "allow"` — wildcard `terminal: "allow"` won't work.
         // Both UPPER and lowercase variants are included because Wildcard.match
         // is case-sensitive on Linux/macOS.
         const safetyDenials = Permission.fromConfig({
-          bash: {
+          terminal: {
             "DROP DATABASE *": "deny",
             "DROP SCHEMA *": "deny",
             "TRUNCATE *": "deny",
@@ -291,8 +291,8 @@ export const layer = Layer.effect(
                 websearch: "allow",
                 question: "allow",
                 tool_lookup: "allow",
-                // Bash: last-match-wins — "*": "deny" MUST come first, then specific allows override
-                bash: {
+                // Terminal: last-match-wins — "*": "deny" MUST come first, then specific allows override
+                terminal: {
                   "*": "deny",
                   "ls *": "allow",
                   "grep *": "allow",
@@ -319,7 +319,7 @@ export const layer = Layer.effect(
           reviewer: {
             name: "reviewer",
             description:
-              "dbt PR reviewer. Runs the dbt_pr_review verdict engine (lineage, equivalence, PII, grade) plus read-only analysis tools and posts findings. Edit/write tools are denied; bash prompts for approval.",
+              "dbt PR reviewer. Runs the dbt_pr_review verdict engine (lineage, equivalence, PII, grade) plus read-only analysis tools and posts findings. Edit/write tools are denied; terminal prompts for approval.",
             prompt: PROMPT_REVIEWER,
             options: {},
             permission: Permission.merge(
@@ -340,7 +340,7 @@ export const layer = Layer.effect(
                 schema_detect_pii: "allow",
                 // Writes denied — review never mutates the project.
                 sql_execute_write: "deny",
-                // Read-only file + repo access (structured tools, not bash).
+                // Read-only file + repo access (structured tools, not terminal).
                 read: "allow",
                 grep: "allow",
                 glob: "allow",
@@ -354,20 +354,20 @@ export const layer = Layer.effect(
                 // Read-only web access so the reviewer can pull PR/issue URLs.
                 webfetch: "allow",
                 websearch: "allow",
-                // Bash PROMPTS instead of hard-denying (#978: `gh pr view` is the
+                // terminal PROMPTS instead of hard-denying (#978: `gh pr view` is the
                 // primary way to review a PR URL). A string-prefix allowlist can't
                 // safely bound argv (redirects ride inside the matched command), so
-                // every bash command requires explicit user approval here — the
+                // every terminal command requires explicit user approval here — the
                 // reviewer still never runs shell commands silently.
-                bash: "ask",
+                terminal: "ask",
               }),
               // altimate_change start — reviewer safety must not be overridable by a permissive user
-              // config (e.g. global `permission: {"*":"allow"}` or `bash:"allow"`). Merge user config,
+              // config (e.g. global `permission: {"*":"allow"}` or `terminal:"allow"`). Merge user config,
               // THEN re-apply the reviewer read-only invariants, THEN safetyDenials LAST so DDL denies
-              // still win over the reviewer's bash:"ask". (edit covers write/edit/apply_patch.)
+              // still win over the reviewer's terminal:"ask". (edit covers write/edit/apply_patch.)
               user,
               Permission.fromConfig({
-                bash: "ask",
+                terminal: "ask",
                 edit: "deny",
                 sql_execute_write: "deny",
               }),
@@ -435,7 +435,7 @@ export const layer = Layer.effect(
                 codesearch: "allow",
                 // altimate_change end
                 list: "allow",
-                bash: "allow",
+                terminal: "allow",
                 webfetch: "allow",
                 websearch: "allow",
                 read: "allow",

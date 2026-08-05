@@ -304,7 +304,7 @@ test("settles pending tools when a live failure arrives", async () => {
         assistantMessageID: "msg_explicit_assistant_9",
         timestamp: 2,
         callID: "call-1",
-        name: "bash",
+        name: "terminal",
       },
     })
     emitEvent(events, {
@@ -315,7 +315,7 @@ test("settles pending tools when a live failure arrives", async () => {
         timestamp: 2,
         assistantMessageID: "msg_explicit_assistant_9",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         input: {},
         provider: { executed: false, metadata: { fake: { call: true } } },
       },

@@ -53,9 +53,9 @@ const parser = lazy(async () => {
 })
 
 // TODO: we may wanna rename this tool so it works better on other shells
-export const BashTool = Tool.define("bash", async () => {
+export const TerminalTool = Tool.define("terminal", async () => {
   const shell = Shell.acceptable()
-  log.info("bash tool using shell", { shell })
+  log.info("terminal tool using shell", { shell })
 
   return {
     description: DESCRIPTION.replaceAll("${directory}", Instance.directory)
@@ -153,7 +153,7 @@ export const BashTool = Tool.define("bash", async () => {
 
       if (patterns.size > 0) {
         await ctx.ask({
-          permission: "bash",
+          permission: "terminal",
           patterns: Array.from(patterns),
           always: Array.from(always),
           metadata: {},
@@ -308,7 +308,7 @@ export const BashTool = Tool.define("bash", async () => {
       }
 
       if (resultMetadata.length > 0) {
-        output += "\n\n<bash_metadata>\n" + resultMetadata.join("\n") + "\n</bash_metadata>"
+        output += "\n\n<terminal_metadata>\n" + resultMetadata.join("\n") + "\n</terminal_metadata>"
       }
 
       return {

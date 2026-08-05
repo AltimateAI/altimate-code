@@ -41,7 +41,7 @@ state are never read.
 Use `withJourney("name", async (tui, ctx) => { ... })` from `harness.ts`.
 
 - Script model output with `await tui.ctx.llm.text("...")` or
-  `await tui.ctx.llm.tool("bash", { ... })`.
+  `await tui.ctx.llm.tool("terminal", { ... })`.
 - Drive the terminal with `tui.type("text")` and `tui.send("C-p")`.
 - Assert visible state with `tui.snapshot()` or OSC/hyperlink state with
   `tui.snapshotAnsi()`.

@@ -296,7 +296,7 @@ function shellCommand(input: ToolInput) {
 
 function isShell(toolName: string) {
   const tool = toolName.toLocaleLowerCase()
-  return tool === "bash" || tool === "shell"
+  return tool === "terminal" || tool === "shell"
 }
 
 export const mapToolKind = toToolKind

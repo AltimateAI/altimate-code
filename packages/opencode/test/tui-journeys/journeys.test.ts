@@ -218,7 +218,7 @@ maybeDescribe("real-binary TUI journeys", () => {
         await booted(tui)
         await selectAgent(tui, "reviewer")
 
-        await tui.ctx.llm.tool("bash", {
+        await tui.ctx.llm.tool("terminal", {
           command: "gh pr view 1",
           description: "View pull request details",
         })

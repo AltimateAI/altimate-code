@@ -2661,7 +2661,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       id: PartID.ascending(),
       messageID: msg.id,
       sessionID: input.sessionID,
-      tool: "bash",
+      tool: "terminal",
       callID: ulid(),
       state: {
         status: "running",

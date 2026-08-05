@@ -48,7 +48,11 @@ export namespace PermissionNext {
 
   export function fromConfig(permission: ConfigPermissionV1.Info) {
     const ruleset: Ruleset = []
-    for (const [key, value] of Object.entries(permission)) {
+    for (let [key, value] of Object.entries(permission)) {
+      if (key === "bash") {
+        if (permission.terminal !== undefined) continue // terminal takes precedence
+        key = "terminal"
+      }
       if (typeof value === "string") {
         ruleset.push({
           permission: key,

@@ -310,7 +310,7 @@ describe("Real-world data engineering scenarios", () => {
 
     // Tool call for dbt run
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",

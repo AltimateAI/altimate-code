@@ -1429,7 +1429,7 @@ export namespace Telemetry {
     return JSON.stringify({ "...": `${Object.keys(masked).length} keys` })
   }
 
-  const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep", "bash"])
+  const FILE_TOOLS = new Set(["read", "write", "edit", "glob", "grep", "terminal"])
 
   // Order matters: more specific patterns (e.g. "warehouse_usage") are checked
   // before broader ones (e.g. "warehouse") to avoid miscategorization.

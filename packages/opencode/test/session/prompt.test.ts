@@ -339,7 +339,7 @@ const waitForBusy = (sessionID: SessionID, duration: Duration.Input = "2 seconds
     duration,
   )
 
-const hasBash = Effect.sync(() => Bun.which("bash") !== null)
+const hasTerminal = Effect.sync(() => Bun.which("bash") !== null)
 
 const deferredAsPromise = <A>(deferred: Deferred.Deferred<A>): PromiseLike<A> => ({
   then: (onfulfilled, onrejected) => {
@@ -896,7 +896,7 @@ noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
 
     const reloaded = yield* sessions.get(session.id)
     expect(reloaded.permission).toEqual([{ permission: "read", pattern: "*", action: "allow" }])
-    expect(Permission.evaluate("bash", "anything", reloaded.permission ?? []).action).toBe("ask")
+    expect(Permission.evaluate("terminal", "anything", reloaded.permission ?? []).action).toBe("ask")
   }),
 )
 
@@ -1482,7 +1482,7 @@ unixNoLLMServer(
   () =>
     withSh(() =>
       Effect.gen(function* () {
-        if (!(yield* hasBash)) return
+        if (!(yield* hasTerminal)) return
 
         const { prompt, chat } = yield* boot()
         const result = yield* prompt.shell({
@@ -1681,7 +1681,7 @@ it.instance(
   () =>
     withSh(() =>
       Effect.gen(function* () {
-        if (!(yield* hasBash)) return
+        if (!(yield* hasTerminal)) return
         const { llm } = yield* useServerConfig((url) => ({
           ...providerCfg(url),
           shell: "bash",
@@ -1804,7 +1804,7 @@ it.instance.todo(
         parts: [{ type: "text", text: "run bash" }],
       })
 
-      yield* llm.tool("bash", {
+      yield* llm.tool("terminal", {
         command:
           'i=0; while [ "$i" -lt 4000 ]; do printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx %05d\\n" "$i"; i=$((i + 1)); done; printf truncation-ready; sleep 30',
         description: "Print many lines",

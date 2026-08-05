@@ -281,7 +281,7 @@ export class Subscription {
   private async runningTool(sessionId: string, part: ToolPart, cwd: string) {
     if (part.state.status !== "running") return
 
-    const output = part.tool === "bash" ? shellOutputSnapshot(part.state) : undefined
+    const output = part.tool === "terminal" ? shellOutputSnapshot(part.state) : undefined
     if (output !== undefined) {
       if (this.shellSnapshots.get(part.callID) === output) {
         await this.input.connection.sessionUpdate({

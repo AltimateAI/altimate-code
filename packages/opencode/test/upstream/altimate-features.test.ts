@@ -61,13 +61,13 @@ function evaluate(permission: string, pattern: string, ruleset: Rule[]): Rule {
 // in agent.ts (after user config) so they always win. We mirror those rules
 // here so we can verify the WIRING stays intact even when the agent-level
 // import chain is broken by an in-progress bridge merge.
-const SAFETY_BASH: Rule[] = [
-  { permission: "bash", pattern: "DROP DATABASE *", action: "deny" },
-  { permission: "bash", pattern: "DROP SCHEMA *", action: "deny" },
-  { permission: "bash", pattern: "TRUNCATE *", action: "deny" },
-  { permission: "bash", pattern: "drop database *", action: "deny" },
-  { permission: "bash", pattern: "drop schema *", action: "deny" },
-  { permission: "bash", pattern: "truncate *", action: "deny" },
+const SAFETY_TERMINAL: Rule[] = [
+  { permission: "terminal", pattern: "DROP DATABASE *", action: "deny" },
+  { permission: "terminal", pattern: "DROP SCHEMA *", action: "deny" },
+  { permission: "terminal", pattern: "TRUNCATE *", action: "deny" },
+  { permission: "terminal", pattern: "drop database *", action: "deny" },
+  { permission: "terminal", pattern: "drop schema *", action: "deny" },
+  { permission: "terminal", pattern: "truncate *", action: "deny" },
 ]
 const SAFETY_SQL: Rule[] = [
   { permission: "sql_execute_write", pattern: "DROP DATABASE *", action: "deny" },
@@ -284,7 +284,7 @@ describe("altimate features: agent safety denial wiring", () => {
   })
 
   test("Wildcard-driven evaluate denies 'DROP DATABASE foo' on the safety-bash ruleset", () => {
-    const result = evaluate("bash", "DROP DATABASE foo", SAFETY_BASH)
+    const result = evaluate("terminal", "DROP DATABASE foo", SAFETY_TERMINAL)
     expect(result.action).toBe("deny")
   })
 
@@ -295,11 +295,11 @@ describe("altimate features: agent safety denial wiring", () => {
 
   test("Wildcard-driven evaluate: even after a wildcard 'allow', the safety deny wins via last-match", () => {
     // Mimic what agent.ts does: user config first, then safety denials appended last.
-    const userAllow: Rule[] = [{ permission: "bash", pattern: "*", action: "allow" }]
-    const merged = [...userAllow, ...SAFETY_BASH]
-    expect(evaluate("bash", "DROP DATABASE prod", merged).action).toBe("deny")
+    const userAllow: Rule[] = [{ permission: "terminal", pattern: "*", action: "allow" }]
+    const merged = [...userAllow, ...SAFETY_TERMINAL]
+    expect(evaluate("terminal", "DROP DATABASE prod", merged).action).toBe("deny")
     // Non-destructive bash still allowed
-    expect(evaluate("bash", "ls -la", merged).action).toBe("allow")
+    expect(evaluate("terminal", "ls -la", merged).action).toBe("allow")
   })
 })
 

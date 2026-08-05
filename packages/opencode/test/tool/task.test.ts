@@ -458,7 +458,7 @@ describe("tool.task", () => {
             action: "deny",
           },
           {
-            permission: "bash",
+            permission: "terminal",
             pattern: "*",
             action: "deny",
           },
@@ -482,7 +482,7 @@ describe("tool.task", () => {
           },
         },
         experimental: {
-          primary_tools: ["bash", "read"],
+          primary_tools: ["terminal", "read"],
         },
       },
     },

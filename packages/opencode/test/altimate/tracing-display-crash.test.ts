@@ -104,7 +104,7 @@ describe("flushSync — crash recovery", () => {
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })

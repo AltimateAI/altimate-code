@@ -802,7 +802,7 @@ describe("session.compaction.prune", () => {
             sessionID: info.id,
             type: "tool",
             callID: crypto.randomUUID(),
-            tool: "bash",
+            tool: "terminal",
             state: {
               status: "completed",
               input: {},

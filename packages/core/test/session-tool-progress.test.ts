@@ -74,14 +74,14 @@ describe("Tool.Progress", () => {
             timestamp,
             assistantMessageID,
             callID,
-            name: "bash",
+            name: "terminal",
           })
           yield* service.publish(SessionEvent.Tool.Called, {
             sessionID,
             timestamp,
             assistantMessageID,
             callID,
-            tool: "bash",
+            tool: "terminal",
             input: { command: "pwd" },
             provider: { executed: false },
           })

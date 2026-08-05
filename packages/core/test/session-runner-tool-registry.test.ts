@@ -66,8 +66,7 @@ describe("ToolRegistry", () => {
       const names = (rules: Parameters<ToolRegistry.Interface["materialize"]>[0]) =>
         toolDefinitions(service, rules).pipe(Effect.map((definitions) => definitions.map((tool) => tool.name)))
 
-      expect(yield* names([{ action: "question", resource: "*", effect: "deny" }])).toEqual([
-        "bash",
+      expect(yield* names([{ action: "question", resource: "*", effect: "deny" }])).toEqual(["terminal",
         "edit",
         "write",
         "apply_patch",
@@ -84,7 +83,7 @@ describe("ToolRegistry", () => {
           { action: "*", resource: "*", effect: "deny" },
         ]),
       ).toEqual([])
-      expect(yield* names([{ action: "edit", resource: "*", effect: "deny" }])).toEqual(["question", "bash"])
+      expect(yield* names([{ action: "edit", resource: "*", effect: "deny" }])).toEqual(["question", "terminal"])
     }),
   )
 

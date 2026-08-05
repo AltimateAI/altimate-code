@@ -35,7 +35,7 @@ const KINDS = [
   "error",
   "mix",
 ]
-const PERMISSIONS = ["edit", "bash", "read", "task", "external", "doom"] as const
+const PERMISSIONS = ["edit", "terminal", "read", "task", "external", "doom"] as const
 const QUESTIONS = ["multi", "single", "checklist", "custom"] as const
 
 type PermissionKind = (typeof PERMISSIONS)[number]
@@ -582,8 +582,8 @@ function emitError(state: State, text: string): void {
   feed(state, event)
 }
 
-async function emitBash(state: State, signal?: AbortSignal): Promise<void> {
-  const ref = make(state, "bash", {
+async function emitTerminal(state: State, signal?: AbortSignal): Promise<void> {
+  const ref = make(state, "terminal", {
     command: "git status",
     workdir: process.cwd(),
     description: "Show git status",
@@ -794,16 +794,16 @@ function emitPermission(state: State, kind: PermissionKind = "edit"): void {
   const root = process.cwd()
   const file = path.join(root, "src", "demo-format.ts")
 
-  if (kind === "bash") {
+  if (kind === "terminal") {
     const command = "git status --short"
-    const ref = make(state, "bash", {
+    const ref = make(state, "terminal", {
       command,
       workdir: root,
       description: "Inspect worktree changes",
     })
     askPermission(state, {
       ref,
-      permission: "bash",
+      permission: "terminal",
       patterns: [command],
       always: ["*"],
       done: {
@@ -1041,8 +1041,8 @@ async function emitFmt(state: State, kind: string, body: string, signal?: AbortS
     return true
   }
 
-  if (kind === "bash") {
-    await emitBash(state, signal)
+  if (kind === "terminal") {
+    await emitTerminal(state, signal)
     return true
   }
 
@@ -1086,7 +1086,7 @@ async function emitFmt(state: State, kind: string, body: string, signal?: AbortS
     await wait(50, signal)
     await emitReasoning(state, "Thinking through formatter edge cases [REDACTED].", signal)
     await wait(50, signal)
-    await emitBash(state, signal)
+    await emitTerminal(state, signal)
     emitWrite(state)
     emitEdit(state)
     emitPatch(state)

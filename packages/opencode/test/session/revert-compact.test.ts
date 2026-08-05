@@ -73,7 +73,7 @@ const tool = Effect.fn("test.tool")(function* (sessionID: SessionID, messageID: 
     messageID,
     sessionID,
     type: "tool" as const,
-    tool: "bash",
+    tool: "terminal",
     callID: "call-1",
     state: {
       status: "completed" as const,

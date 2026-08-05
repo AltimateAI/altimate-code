@@ -32,54 +32,54 @@ describe("session.llm.toolNamesFromMessages", () => {
       {
         role: "assistant",
         content: [
-          { type: "tool-call", toolCallId: "call-1", toolName: "bash" },
+          { type: "tool-call", toolCallId: "call-1", toolName: "terminal" },
           { type: "tool-call", toolCallId: "call-2", toolName: "read" },
         ],
       },
     ] as ModelMessage[]
-    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["terminal", "read"]))
   })
 
   test("deduplicates tool names across messages", () => {
     const messages = [
       {
         role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash" }],
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "terminal" }],
       },
       {
         role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-2", toolName: "bash" }],
+        content: [{ type: "tool-call", toolCallId: "call-2", toolName: "terminal" }],
       },
     ] as ModelMessage[]
-    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash"]))
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["terminal"]))
   })
 
   test("extracts tool names from tool-result blocks", () => {
     const messages = [
       {
         role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash" }],
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "terminal" }],
       },
     ] as ModelMessage[]
-    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash"]))
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["terminal"]))
   })
 
   test("extracts from both tool-call and tool-result blocks", () => {
     const messages = [
       {
         role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash" }],
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "terminal" }],
       },
       {
         role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash" }],
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "terminal" }],
       },
       {
         role: "tool",
         content: [{ type: "tool-result", toolCallId: "call-2", toolName: "read" }],
       },
     ] as ModelMessage[]
-    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["terminal", "read"]))
   })
 })
 

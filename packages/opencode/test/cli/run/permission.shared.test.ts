@@ -80,7 +80,7 @@ describe("run permission shared", () => {
     expect(
       permissionInfo(
         req({
-          permission: "bash",
+          permission: "terminal",
           metadata: {
             input: {
               command: "git status --short",
@@ -132,8 +132,8 @@ describe("run permission shared", () => {
 
   test("formats always-allow copy for wildcard and explicit patterns", () => {
     // altimate_change — fork branding: copy says "Altimate Code", not "OpenCode".
-    expect(permissionAlwaysLines(req({ permission: "bash", always: ["*"] }))).toEqual([
-      "This will allow bash until Altimate Code is restarted.",
+    expect(permissionAlwaysLines(req({ permission: "terminal", always: ["*"] }))).toEqual([
+      "This will allow terminal until Altimate Code is restarted.",
     ])
 
     expect(permissionAlwaysLines(req({ always: ["src/**/*.ts", "src/**/*.tsx"] }))).toEqual([

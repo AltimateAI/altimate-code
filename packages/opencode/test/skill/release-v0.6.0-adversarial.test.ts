@@ -193,7 +193,7 @@ describe("toolNamesFromMessages — validation guards", () => {
   }
 
   test("accepts standard tool names", () => {
-    expect(LLM.toolNamesFromMessages(msg("bash"))).toEqual(new Set(["bash"]))
+    expect(LLM.toolNamesFromMessages(msg("bash"))).toEqual(new Set(["terminal"]))
     expect(LLM.toolNamesFromMessages(msg("data_diff"))).toEqual(new Set(["data_diff"]))
     expect(LLM.toolNamesFromMessages(msg("sql-execute"))).toEqual(new Set(["sql-execute"]))
     expect(LLM.toolNamesFromMessages(msg("Tool123"))).toEqual(new Set(["Tool123"]))
@@ -267,7 +267,7 @@ describe("toolNamesFromMessages — validation guards", () => {
       ...msg("bash"),
       ...msg("read"),
     ]
-    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
+    expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["terminal", "read"]))
   })
 
   test("returns empty set for messages with text-only content", () => {

@@ -39,7 +39,7 @@ describe("toolCallCount accumulation", () => {
       { type: "tool", tool: "read" },
       { type: "text", text: "hello" },
       { type: "tool", tool: "edit" },
-      { type: "tool", tool: "bash" },
+      { type: "tool", tool: "terminal" },
     ]
     toolCallCount += step1Parts.filter((p) => p.type === "tool").length
     expect(toolCallCount).toBe(3)
