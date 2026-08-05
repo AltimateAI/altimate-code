@@ -126,6 +126,24 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 When telemetry is disabled, no events are sent and no network requests are made to the telemetry endpoint.
 
+### Test runs are excluded
+
+Test runners never reach the default telemetry endpoint. Telemetry is suppressed when `NODE_ENV=test`,
+`BUN_TEST`, `VITEST`, or `JEST_WORKER_ID` is present. This exists because test processes regenerate
+their machine ID on every run, so without the exclusion they dominate install and active-machine counts.
+
+Running in CI is **not** excluded — that is ordinary product usage (for example
+[altimate-code-actions](https://github.com/AltimateAI/altimate-code-actions) wraps this CLI), so
+`CI` and `GITHUB_ACTIONS` on their own do not suppress anything.
+
+Two escape hatches exist for reporting from a test run deliberately:
+
+- Set `APPLICATIONINSIGHTS_CONNECTION_STRING` to your own endpoint — an explicitly-configured sink
+  is always honoured, which is how the project's own telemetry tests work.
+- Set `ALTIMATE_TELEMETRY_FORCE=true` to use the default endpoint anyway.
+
+`ALTIMATE_TELEMETRY_DISABLED` and the config opt-out take precedence over both.
+
 ## Privacy
 
 We take your privacy seriously. Altimate Code telemetry **never** collects:

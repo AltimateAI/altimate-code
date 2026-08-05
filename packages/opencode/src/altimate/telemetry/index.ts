@@ -45,6 +45,23 @@ const log = Log.create({ service: "telemetry" })
  */
 // altimate_change end
 
+/** True when a test runner is driving the process rather than a real user session.
+ *
+ *  Deliberately keyed on test runners, NOT on CI. Running in CI is legitimate product usage —
+ *  `altimate-code-actions` wraps this CLI and every invocation sets `CI`/`GITHUB_ACTIONS` — so
+ *  gating on those would make a shipped product surface invisible. The polluting population was
+ *  our own suites (`provider_id="test"`, `cli_version="local"`), all of which run under a test
+ *  runner. `bun test` sets NODE_ENV=test, which covers both CI and developer machines.
+ *
+ *  Set `ALTIMATE_TELEMETRY_FORCE=true` to opt back in, or point
+ *  APPLICATIONINSIGHTS_CONNECTION_STRING at your own sink — an explicit sink is always honoured.
+ */
+function isAutomatedRun(): boolean {
+  if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return false
+  if (process.env.NODE_ENV === "test") return true
+  return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
+}
+
 export namespace Telemetry {
   const FLUSH_INTERVAL_MS = 5_000
   const MAX_BUFFER_SIZE = 200
@@ -1680,8 +1697,19 @@ export namespace Telemetry {
       } catch {
         // Config unavailable — proceed with telemetry enabled
       }
-      // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key
-      const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING ?? DEFAULT_CONNECTION_STRING
+      // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
+      // The baked-in key is refused under a test runner so suites never ship to the production
+      // resource. Note this deliberately does NOT key on CI — see isAutomatedRun.
+      // Telemetry's own tests set APPLICATIONINSIGHTS_CONNECTION_STRING explicitly and are unaffected —
+      // only the implicit production sink is withheld. 1,020 of 3,135 machine ids in a 14-day window
+      // were test processes, which regenerate their machine id every run — inflating every install
+      // and active-machine metric by ~33%.
+      const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      if (!explicit && isAutomatedRun()) {
+        buffer = []
+        return
+      }
+      const connectionString = explicit ?? DEFAULT_CONNECTION_STRING
       const cfg = parseConnectionString(connectionString)
       if (!cfg) {
         buffer = []

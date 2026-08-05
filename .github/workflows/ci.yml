@@ -379,6 +379,39 @@ jobs:
           $config.Output.Verbosity = "Detailed"
           Invoke-Pester -Configuration $config
 
+  # altimate_change start — Windows ripgrep E2E (issue #1072)
+  # ---------------------------------------------------------------------------
+  # Real Windows check for ripgrep binary resolution. Downloads and extracts the
+  # actual archive with PowerShell stripped from PATH, then executes the binary.
+  # This is the condition that broke grep for 99 Windows machines; no amount of
+  # unit testing on Linux/macOS covers it.
+  # ---------------------------------------------------------------------------
+  windows-ripgrep-e2e:
+    name: Windows ripgrep E2E
+    needs: changes
+    if: needs.changes.outputs.typescript == 'true' || github.event_name == 'push'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
+        with:
+          bun-version: "1.3.14"
+
+      # --ignore-scripts: `tree-sitter-powershell` has no Windows prebuild and its fallback
+      # compile needs Visual Studio Build Tools, which this runner does not have (see
+      # anomalyco/opencode#25563). This check only needs the pure-JS dependency graph
+      # (effect, @zip.js/zip.js, which, xdg-basedir), so skipping lifecycle scripts is enough.
+      - name: Install dependencies
+        run: bun install --ignore-scripts
+
+      # Run from packages/core so `effect` and the other deps resolve — they are not root deps.
+      - name: Resolve ripgrep with PowerShell unavailable
+        working-directory: packages/core
+        run: bun run script/windows-ripgrep-e2e.ts
+  # altimate_change end
+
   # ---------------------------------------------------------------------------
   # dbt-tools E2E — slow (~3 min), only on push to main.
   # Tests dbt CLI fallbacks against real dbt versions (1.8, 1.10, 1.11) and
