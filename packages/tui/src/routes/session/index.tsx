@@ -26,7 +26,7 @@ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
 // altimate_change — shared boot box at the top of the session scrollback
 import { WelcomePanel } from "../../component/welcome-panel"
-import { PANEL_VERTICAL_RESERVE } from "../../component/welcome-panel-utils"
+import { SESSION_VERTICAL_RESERVE } from "../../component/welcome-panel-utils"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
@@ -1189,10 +1189,10 @@ export function Session() {
               <box flexShrink={0}>
                 {/* Size to the panel's real space, not the terminal (#1067):
                     contentWidth already subtracts the sidebar + padding;
-                    -PANEL_VERTICAL_RESERVE leaves room for the prompt + footer. */}
+                    -SESSION_VERTICAL_RESERVE leaves room for the prompt. */}
                 <WelcomePanel
                   availableWidth={contentWidth()}
-                  availableHeight={dimensions().height - PANEL_VERTICAL_RESERVE}
+                  availableHeight={dimensions().height - SESSION_VERTICAL_RESERVE}
                 />
               </box>
               {/* altimate_change end */}

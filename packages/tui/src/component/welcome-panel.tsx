@@ -1,6 +1,5 @@
 import { Match, Show, Switch, createMemo } from "solid-js"
 import { TextAttributes } from "@opentui/core"
-import { useTerminalDimensions } from "@opentui/solid"
 import { useTheme } from "../context/theme"
 import { Logo } from "./logo"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -16,27 +15,31 @@ const CONNECT_CTA = "Connect your AI model to start."
 // blank its top rows.
 //
 // Responsive (issue #1067): the full two-column boot box is a ~13-row bordered
-// box that ate ~40% of the screen. It now scales down by AVAILABLE size,
-// following the repo's breakpoint idiom (createMemo over useTerminalDimensions,
-// cf. routes/session/permission.tsx:450, component/upgrade-indicator.tsx:14):
+// box that ate ~40% of the screen. It now scales down by AVAILABLE size — the
+// caller measures the terminal (useTerminalDimensions) and passes what the panel
+// actually gets, following the repo's breakpoint idiom (a createMemo over the
+// reactive dimensions, cf. routes/session/permission.tsx:450,
+// component/upgrade-indicator.tsx:14):
 //   full   — wordmark + full description (large windows only)
-//   medium — title + one condensed line, no wordmark (the common case)
+//   medium — title + a condensed description (one line on a wide terminal, two at
+//            medium's narrow end), no wordmark (the common case)
 //   compact — a short line; the border title already carries the version
 //
 // `availableWidth` / `availableHeight` are the space the panel actually gets, not
 // the whole terminal — the caller subtracts its padding, any sibling sidebar
-// (session's contentWidth), and the fixed prompt/footer chrome
-// (PANEL_VERTICAL_RESERVE). Using the raw terminal would keep `full` selected in
-// a sidebar-narrowed column or a short window and swell the panel back up — the
-// bug #1067 is about. Both fall back to the terminal dimension when omitted.
-export function WelcomePanel(props: { availableWidth?: number; availableHeight?: number }) {
+// (session's contentWidth), and the route's vertical reserve (HOME/SESSION_
+// VERTICAL_RESERVE). Using the raw terminal would keep `full` selected in a
+// sidebar-narrowed column or a short window and swell the panel back up — the bug
+// #1067 is about. Both props are REQUIRED: a call site that forgot one would
+// silently get the pre-fix raw-terminal behavior, so the type system guards it
+// (there's no in-repo render test of the call sites).
+export function WelcomePanel(props: { availableWidth: number; availableHeight: number }) {
   const { theme } = useTheme()
   const ready = useReady()
-  const dimensions = useTerminalDimensions()
 
-  const variant = createMemo(() =>
-    welcomePanelVariant(props.availableWidth ?? dimensions().width, props.availableHeight ?? dimensions().height),
-  )
+  // props are reactive getters, so reading them inside the memo tracks — the
+  // variant recomputes when the caller's dimensions/sidebar change.
+  const variant = createMemo(() => welcomePanelVariant(props.availableWidth, props.availableHeight))
 
   const title = InstallationVersion === "local" ? " Altimate Code " : ` Altimate Code v${InstallationVersion} `
 
