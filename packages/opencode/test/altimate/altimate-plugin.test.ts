@@ -6,12 +6,12 @@ import * as path from "path"
 import { buildAuthorizeUrl, buildCliContext, getOrCreateMachineId } from "../../src/altimate/plugin/altimate"
 
 describe("buildCliContext", () => {
-  test("returns a valid base64url-encoded JSON blob with machine_id", () => {
+  test("returns a valid base64url-encoded JSON blob with machine_id", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-"))
     const idPath = path.join(tmpDir, "machine-id")
     fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440000", "utf8")
 
-    const encoded = buildCliContext(idPath)
+    const encoded = await buildCliContext(idPath)
 
     // base64url: only A-Z a-z 0-9 - _ (no +/=)
     expect(encoded).toMatch(/^[A-Za-z0-9\-_]+$/)
@@ -24,13 +24,13 @@ describe("buildCliContext", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test("creates machine_id file when absent and includes it in context", () => {
+  test("creates machine_id file when absent and includes it in context", async () => {
     // getOrCreateMachineId mints a UUID when the file is missing, so machine_id
     // is always present (as a non-empty string) unless telemetry is disabled.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-new-"))
     const nonExistentPath = path.join(tmpDir, "subdir", "machine-id")
 
-    const encoded = buildCliContext(nonExistentPath)
+    const encoded = await buildCliContext(nonExistentPath)
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
     expect(ctx["v"]).toBe(1)
@@ -38,18 +38,18 @@ describe("buildCliContext", () => {
     expect(typeof ctx["machine_id"]).toBe("string")
     expect((ctx["machine_id"] as string).length).toBeGreaterThan(0)
     // The same id must have been written to disk for telemetry to use
-    expect(fs.readFileSync(nonExistentPath, "utf8").trim()).toBe(ctx["machine_id"])
+    expect(fs.readFileSync(nonExistentPath, "utf8").trim()).toBe(ctx["machine_id"] as string)
 
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test("trims whitespace from machine-id file", () => {
+  test("trims whitespace from machine-id file", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-ws-"))
     const idPath = path.join(tmpDir, "machine-id")
     // Many editors/tools write a trailing newline
     fs.writeFileSync(idPath, "  550e8400-e29b-41d4-a716-446655440001  \n", "utf8")
 
-    const encoded = buildCliContext(idPath)
+    const encoded = await buildCliContext(idPath)
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
     expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440001")
@@ -69,14 +69,14 @@ describe("buildCliContext", () => {
       else process.env.ALTIMATE_TELEMETRY_DISABLED = savedEnv
     })
 
-    test("omits machine_id key when ALTIMATE_TELEMETRY_DISABLED=true", () => {
+    test("omits machine_id key when ALTIMATE_TELEMETRY_DISABLED=true", async () => {
       process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-disabled-"))
       const idPath = path.join(tmpDir, "machine-id")
       fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440004", "utf8")
 
-      const encoded = buildCliContext(idPath)
+      const encoded = await buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
       // machine_id must be absent when telemetry is disabled
@@ -86,14 +86,14 @@ describe("buildCliContext", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     })
 
-    test("includes machine_id when ALTIMATE_TELEMETRY_DISABLED is not set", () => {
+    test("includes machine_id when ALTIMATE_TELEMETRY_DISABLED is not set", async () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
 
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-enabled-"))
       const idPath = path.join(tmpDir, "machine-id")
       fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440002", "utf8")
 
-      const encoded = buildCliContext(idPath)
+      const encoded = await buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
       expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440002")
@@ -145,7 +145,7 @@ describe("getOrCreateMachineId", () => {
 })
 
 describe("buildAuthorizeUrl", () => {
-  test("URL contains cli_context param that decodes to valid JSON", () => {
+  test("URL contains cli_context param that decodes to valid JSON", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-auth-url-"))
     const idPath = path.join(tmpDir, "machine-id")
     fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440005", "utf8")
@@ -153,17 +153,24 @@ describe("buildAuthorizeUrl", () => {
     // Temporarily override machine-id path via a patched buildCliContext call
     // by providing a custom machine_id file — buildAuthorizeUrl uses buildCliContext()
     // internally with no path arg, so test the URL shape via the exported helper.
-    const url = buildAuthorizeUrl("https://app.myaltimate.com", "http://127.0.0.1:7317/callback", "test-state-abc")
+    const url = await buildAuthorizeUrl(
+      "https://app.myaltimate.com",
+      "http://127.0.0.1:7317/callback",
+      "test-state-abc",
+    )
 
-    // Must contain cli_context query param
-    expect(url).toContain("cli_context=")
+    // cli_context rides in the fragment (#), not the query string
+    expect(url).toContain("#cli_context=")
     expect(url).toContain("client=altimate-code")
     expect(url).toContain("state=test-state-abc")
     expect(url).toContain("redirect=")
 
-    // Extract and decode cli_context
+    // The durable id must NOT be in the query string (it would hit access logs)
     const parsed = new URL(url)
-    const encoded = parsed.searchParams.get("cli_context")
+    expect(parsed.searchParams.has("cli_context")).toBe(false)
+
+    // Extract and decode cli_context from the fragment
+    const encoded = new URLSearchParams(parsed.hash.replace(/^#/, "")).get("cli_context")
     expect(encoded).toBeTruthy()
 
     const ctx = JSON.parse(Buffer.from(encoded!, "base64url").toString("utf8")) as Record<string, unknown>
@@ -178,12 +185,14 @@ describe("buildAuthorizeUrl", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test("deleting cli_context line would cause cli_context param to be absent — URL integration is guarded", () => {
-    // This test asserts that buildAuthorizeUrl really does embed cli_context.
-    // If the &cli_context=... line were removed from buildAuthorizeUrl, this test fails.
-    const url = buildAuthorizeUrl("https://app.myaltimate.com", "http://127.0.0.1:7317/callback", "state-xyz")
+  test("deleting cli_context line would cause cli_context to be absent — URL integration is guarded", async () => {
+    // This test asserts that buildAuthorizeUrl really does embed cli_context in
+    // the fragment. If the #cli_context=... line were removed, this test fails.
+    const url = await buildAuthorizeUrl("https://app.myaltimate.com", "http://127.0.0.1:7317/callback", "state-xyz")
     const parsed = new URL(url)
-    expect(parsed.searchParams.has("cli_context")).toBe(true)
+    expect(new URLSearchParams(parsed.hash.replace(/^#/, "")).has("cli_context")).toBe(true)
+    // And never in the query string, where it would be logged.
+    expect(parsed.searchParams.has("cli_context")).toBe(false)
   })
 })
 
@@ -231,12 +240,56 @@ describe("getOrCreateMachineId — failure modes", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test("buildCliContext omits machine_id when file contains non-UUID content", () => {
+  test("returns empty string for an empty file without minting over it", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-empty-"))
+    const idPath = path.join(tmpDir, "machine-id")
+    // 0-byte file exists — must NOT be treated as absent (no exclusive-create mint)
+    fs.writeFileSync(idPath, "", "utf8")
+
+    const id = getOrCreateMachineId(idPath)
+
+    // Empty content fails UUID validation → "" (and the file is left untouched)
+    expect(id).toBe("")
+    expect(fs.readFileSync(idPath, "utf8")).toBe("")
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("returns empty string when the path is a directory", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-dir-"))
+    const idPath = path.join(tmpDir, "machine-id")
+    // A directory at the machine-id path — lstat rejects it as a non-regular file
+    fs.mkdirSync(idPath)
+
+    const id = getOrCreateMachineId(idPath)
+
+    expect(id).toBe("")
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("returns empty string when the path is a symlink (not followed)", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-symlink-"))
+    // Target holds a perfectly valid UUID — lstat must still reject the symlink
+    // itself rather than following it to read the target.
+    const targetPath = path.join(tmpDir, "target")
+    fs.writeFileSync(targetPath, "550e8400-e29b-41d4-a716-446655440099", "utf8")
+    const linkPath = path.join(tmpDir, "machine-id")
+    fs.symlinkSync(targetPath, linkPath)
+
+    const id = getOrCreateMachineId(linkPath)
+
+    expect(id).toBe("")
+
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  test("buildCliContext omits machine_id when file contains non-UUID content", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-corrupt-"))
     const idPath = path.join(tmpDir, "machine-id")
     fs.writeFileSync(idPath, "not-a-uuid", "utf8")
 
-    const encoded = buildCliContext(idPath)
+    const encoded = await buildCliContext(idPath)
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
     // machine_id must be absent — non-UUID content is rejected

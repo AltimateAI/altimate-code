@@ -41,17 +41,14 @@ export function showWelcomeBannerIfNeeded(): void {
     // Remove marker first to avoid showing twice even if display fails
     fs.unlinkSync(markerPath)
 
-    // altimate_change start — use getOrCreateMachineId() as the upgrade probe so the path is
-    // canonical and consistent with telemetry. Returns "" on a fresh install (before the file
-    // exists), in which case we treat this as a new install. On any subsequent run the file exists
-    // (minted by telemetry on first run) so getOrCreateMachineId() returns the existing UUID,
-    // indicating an upgrade.
-    // NOTE: welcome.ts runs before telemetry.doInit(). Calling getOrCreateMachineId() here mints
-    // the machine-id on fresh installs so telemetry has the ID ready when doInit() runs.
-    const machineId = process.env.ALTIMATE_TELEMETRY_DISABLED !== "true"
-      ? getOrCreateMachineId()
-      : fs.existsSync(path.join(os.homedir(), ".altimate", "machine-id")) ? "exists" : ""
-    const isUpgrade = machineId !== ""
+    // altimate_change start — "upgrade" means the machine-id file already existed before this
+    // launch. Probe existence with existsSync FIRST — do NOT use getOrCreateMachineId() as the
+    // probe, because it mints the file on a fresh install and would then report every new user
+    // as an upgrade. After probing, mint the id (unless telemetry is opted out via env) so
+    // telemetry.doInit() finds it ready — welcome.ts runs before doInit().
+    const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
+    const isUpgrade = fs.existsSync(machineIdPath)
+    if (process.env.ALTIMATE_TELEMETRY_DISABLED !== "true") getOrCreateMachineId()
     // altimate_change end
 
     // altimate_change start — track first launch for new user counting (privacy-safe: only version + machine_id)

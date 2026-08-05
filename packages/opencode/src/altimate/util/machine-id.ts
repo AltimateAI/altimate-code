@@ -23,9 +23,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
  *
  * - **Race-safe**: two concurrent callers on a fresh install converge on the
  *   same UUID — the winner writes, the loser re-reads.
+ * - **Regular-file-only**: uses `lstat` and rejects symlinks / non-regular
+ *   files rather than following them to an attacker-chosen target.
  * - **Size-capped**: reads at most 512 bytes to avoid multi-MB file attacks.
  * - **UUID-validated**: rejects content that does not match RFC 4122 v4 UUID
- *   format (corrupt file, symlink content, etc.) and returns `""` with a warn
+ *   format (corrupt file, injected content, etc.) and returns `""` with a warn
  *   log so callers can omit the field rather than propagate garbage.
  *
  * @param machineIdPath Override path (for tests). Defaults to `~/.altimate/machine-id`.
@@ -37,8 +39,14 @@ export function getOrCreateMachineId(machineIdPath?: string): string {
   // --- Read path ---
   let raw: string | undefined
   try {
-    // Cap read size to avoid multi-MB files (corrupt or malicious).
-    const stat = fs.statSync(idPath)
+    // lstat (not stat) so a symlink is inspected as itself rather than followed
+    // to an attacker-chosen target. Reject anything that is not a regular file
+    // (symlink, directory, socket, …) and cap read size to avoid multi-MB files.
+    const stat = fs.lstatSync(idPath)
+    if (!stat.isFile()) {
+      log.warn("machine-id is not a regular file — omitting", { path: idPath })
+      return ""
+    }
     if (stat.size > MAX_BYTES) {
       log.warn("machine-id file exceeds size limit — omitting", { path: idPath, size: stat.size })
       return ""

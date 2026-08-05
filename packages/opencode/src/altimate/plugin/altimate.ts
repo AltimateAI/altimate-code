@@ -7,6 +7,7 @@ import { AltimateApi } from "../api/client"
 import * as OnboardingTelemetry from "../telemetry/onboarding"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
+import { Config } from "@/config/config"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
 
@@ -63,24 +64,31 @@ export { getOrCreateMachineId } from "../util/machine-id"
 // After sign-in, the frontend calls posthog.alias(email, machine_id) to associate
 // the device with the authenticated account in product analytics.
 //
-// Privacy note: cli_context is sent as a URL query parameter to /register.
-// The machine_id is a crypto.randomUUID() — non-PII by construction. We keep it
-// in the query string (rather than a fragment, which JS can read but servers
-// cannot log) because the /register route must have Referrer-Policy: no-referrer
-// on all outbound links and telemetry is opt-out, not opt-in. If those server-side
-// controls are ever removed, move this to a URL fragment (#cli_context=...) and
-// update the frontend to read window.location.hash instead of searchParams.
-export function buildCliContext(machineIdPath?: string): string {
-  // altimate_change start — honour both telemetry opt-out gates:
-  // 1. ALTIMATE_TELEMETRY_DISABLED=true env var (matches telemetry/index.ts::doInit)
-  // 2. Config-based disabled flag (checked by telemetry/index.ts via Config.get())
-  //    We intentionally only gate on the env var here because Config.get() is async
-  //    and buildCliContext is called synchronously during URL construction. The env
-  //    var is the documented, widely-supported escape hatch for scripts and CI.
-  //    Config-based opt-out users who also want machine_id suppressed in the auth
-  //    URL should additionally set ALTIMATE_TELEMETRY_DISABLED=true.
+// Privacy note: cli_context is sent in the URL *fragment* (#cli_context=...),
+// not the query string. The browser never transmits a fragment to the server,
+// so the machine_id — though a non-PII crypto.randomUUID() — stays out of
+// app.myaltimate.com's access logs, any fronting CDN/WAF, and the Referer
+// header, while remaining readable by the /register page via location.hash.
+// The frontend reads it from the fragment (see useCliContext.ts). The fragment
+// must be the last URL segment, after all query params.
+export async function buildCliContext(machineIdPath?: string): Promise<string> {
+  // altimate_change start — honour both telemetry opt-out gates, mirroring
+  // telemetry/index.ts::doInit exactly:
+  //   1. ALTIMATE_TELEMETRY_DISABLED=true env var (early, always-works escape hatch)
+  //   2. config.telemetry.disabled (resolved via the async Config.get())
+  // Config.get() may throw outside an Instance context; treat a config failure as
+  // "not disabled" (same as doInit) — the env var above is the hard opt-out.
+  let disabled = process.env.ALTIMATE_TELEMETRY_DISABLED === "true"
+  if (!disabled) {
+    try {
+      const userConfig = (await Config.get()) as any
+      disabled = Boolean(userConfig.telemetry?.disabled)
+    } catch {
+      // Config unavailable — proceed with telemetry enabled.
+    }
+  }
   let machineId = ""
-  if (process.env.ALTIMATE_TELEMETRY_DISABLED !== "true") {
+  if (!disabled) {
     // getOrCreateMachineId returns "" on all error conditions (ENOENT excluded —
     // it mints a new UUID instead) and logs appropriately; no try/catch needed.
     machineId = getOrCreateMachineId(machineIdPath)
@@ -97,12 +105,14 @@ export function buildCliContext(machineIdPath?: string): string {
 
 // altimate_change start — exported so tests can assert on the full URL shape
 // without duplicating the construction logic.
-export function buildAuthorizeUrl(webUrl: string, redirect: string, state: string): string {
+export async function buildAuthorizeUrl(webUrl: string, redirect: string, state: string): Promise<string> {
   return (
     `${webUrl}/register?client=altimate-code` +
     `&redirect=${encodeURIComponent(redirect)}` +
     `&state=${state}` +
-    `&cli_context=${encodeURIComponent(buildCliContext())}`
+    // Fragment (#), not a query param — keeps the durable machine_id out of
+    // server access logs / Referer. Must stay last, after all query params.
+    `#cli_context=${encodeURIComponent(await buildCliContext())}`
   )
 }
 // altimate_change end
@@ -401,7 +411,7 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             const redirect = `http://127.0.0.1:${boundPort}/callback`
             // Land on the sign-up page and let the user choose how to authenticate
             // (Google today, more providers later) rather than forcing Google.
-            const authorizeUrl = buildAuthorizeUrl(webUrl, redirect, state)
+            const authorizeUrl = await buildAuthorizeUrl(webUrl, redirect, state)
 
             // Try to open the browser. Failure is silent because the URL is
             // already surfaced elsewhere: the auth dialog in packages/tui/src/
@@ -420,7 +430,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // attempted". open() failures are swallowed above (the URL is also printed for the
             // user to paste), so this fires even when no browser actually launched.
             // The URL is never sent — it carries the CSRF `state`.
-            if (OnboardingTelemetry.isFunnelActive()) void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
+            if (OnboardingTelemetry.isFunnelActive())
+              void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
 
             // One outcome per attempt. callback() closes over `result` and re-runs its whole body
             // on every invocation, so a repeated call would otherwise re-emit completion/failure
