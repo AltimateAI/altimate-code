@@ -140,7 +140,11 @@ export const layer = Layer.effect(
             return yield* new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
           }
           if (code !== 0 && code !== 1 && code !== 2) {
-            return yield* failure(stderr.trim() || `ripgrep failed with code ${code}`)
+            // altimate_change start — upstream_fix: keep child stderr attributable to ripgrep.
+            // Reporting stderr verbatim made shell-level failures (e.g. a Windows "not recognized"
+            // message) look like they came from the tool itself, with no hint of the real source.
+            return yield* failure(`ripgrep failed with code ${code}: ${stderr.trim() || "no output"}`)
+            // altimate_change end
           }
           return { items: code === 1 ? [] : rows, truncated: false, partial: code === 2 }
         }),
