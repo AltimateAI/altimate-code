@@ -35,7 +35,7 @@ export function DialogYoloConfirm(props: { onChoose: (enable: boolean) => void }
     {
       label: "Yes",
       run: () => run(true),
-      help: "Stop asking for this session. Applies to subagents too.",
+      help: "Stop asking for this conversation and its subagents.",
     },
     {
       label: "No",
@@ -103,7 +103,7 @@ export function DialogYoloConfirm(props: { onChoose: (enable: boolean) => void }
           auto-approved.
         </text>
         <text fg={theme.textMuted} wrapMode="word" width="100%">
-          Applies to this session only, and turns off when you quit. Press{" "}
+          Applies to this conversation and any subagents it spawns, and turns off when you quit. Press{" "}
           <span style={{ fg: theme.text }}>ctrl+y</span> again to turn it off.
         </text>
         <box gap={1}>

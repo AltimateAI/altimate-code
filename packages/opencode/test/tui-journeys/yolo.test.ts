@@ -138,10 +138,19 @@ maybeDescribe("real-binary TUI journeys: yolo mode", () => {
         async (tui) => {
           await booted(tui)
           await openConfirm(tui)
-          const plain = tui.snapshot()
+          // Normalize before matching. The dialog re-wraps to the pane width AND draws a
+          // box border, so a wrapped sentence reads as "... turns off when you │ │ quit".
+          // Asserting on a phrase that happens to fit one line makes the test a hostage
+          // to copy length and terminal size, so strip the border glyphs and collapse
+          // whitespace first.
+          const plain = tui
+            .snapshot()
+            .replace(/[│┃╭╮╰╯─━┄|]/g, " ")
+            .replace(/\s+/g, " ")
           expect(plain).toMatch(/DROP DATABASE/i)
           expect(plain).toMatch(/[Ss]till blocked/)
-          expect(plain).toMatch(/session only|turns off when you quit/i)
+          expect(plain).toMatch(/turns off when you quit/i)
+          expect(plain).toMatch(/subagents/i)
         },
         journeyEnv,
       )

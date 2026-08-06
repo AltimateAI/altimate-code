@@ -1,84 +1,144 @@
 import { describe, expect, test } from "bun:test"
-import { MAX_PARENT_DEPTH, rootSessionID, yoloEnabled } from "../../src/util/yolo"
+import { MAX_PARENT_DEPTH, resolveRoot, yoloEnabled, type SessionNode } from "../../src/util/yolo"
 
-// Build a parentOf lookup from a child -> parent map.
-function chain(map: Record<string, string>) {
-  return (sessionID: string) => map[sessionID]
+// Build a getSession lookup from a child -> parent map. Every id in the map (and every
+// parent it names) is treated as a KNOWN session unless listed in `unknown`.
+function store(map: Record<string, string | undefined>, unknown: string[] = []) {
+  const ids = new Set<string>([...Object.keys(map), ...Object.values(map).filter((v): v is string => !!v)])
+  for (const id of unknown) ids.delete(id)
+  return (sessionID: string): SessionNode | undefined => {
+    if (!ids.has(sessionID)) return undefined
+    return { parentID: map[sessionID] }
+  }
 }
 
-describe("rootSessionID", () => {
+describe("resolveRoot", () => {
   test("a root session resolves to itself", () => {
-    expect(rootSessionID("a", chain({}))).toBe("a")
+    expect(resolveRoot("a", store({ a: undefined }))).toBe("a")
   })
 
   test("a subagent resolves to its parent", () => {
-    expect(rootSessionID("child", chain({ child: "root" }))).toBe("root")
+    expect(resolveRoot("child", store({ child: "root", root: undefined }))).toBe("root")
   })
 
   test("a nested subagent resolves to the top of the chain", () => {
-    expect(rootSessionID("grandchild", chain({ grandchild: "child", child: "root" }))).toBe("root")
+    expect(resolveRoot("grandchild", store({ grandchild: "child", child: "root", root: undefined }))).toBe("root")
   })
 
   test("a self-parenting session terminates instead of looping", () => {
-    expect(rootSessionID("a", chain({ a: "a" }))).toBe("a")
+    expect(resolveRoot("a", store({ a: "a" }))).toBe("a")
   })
 
   test("a parent cycle terminates instead of looping", () => {
-    expect(rootSessionID("a", chain({ a: "b", b: "a" }))).toBe("b")
+    expect(resolveRoot("a", store({ a: "b", b: "a" }))).toBe("b")
   })
 
-  test("a chain longer than the depth cap terminates", () => {
-    const map: Record<string, string> = {}
+  // Fail-closed cases. Each returns undefined, which callers must treat as
+  // "cannot prove the root — do not auto-approve".
+  test("an unknown session does not resolve", () => {
+    expect(resolveRoot("ghost", store({}))).toBeUndefined()
+  })
+
+  test("an unhydrated child does not resolve to itself", () => {
+    // The dangerous case: returning "child" here would miss an override on the root.
+    expect(resolveRoot("child", store({ child: "root", root: undefined }, ["child"]))).toBeUndefined()
+  })
+
+  test("an unknown ancestor does not resolve", () => {
+    expect(resolveRoot("child", store({ child: "root", root: undefined }, ["root"]))).toBeUndefined()
+  })
+
+  test("a chain longer than the depth cap does not resolve", () => {
+    const map: Record<string, string | undefined> = {}
     const length = MAX_PARENT_DEPTH + 10
     for (let i = 0; i < length; i++) map[`s${i}`] = `s${i + 1}`
-    // Must return *something* without hanging; the cap is a safety valve, not a feature.
-    expect(typeof rootSessionID("s0", chain(map))).toBe("string")
+    map[`s${length}`] = undefined
+    expect(resolveRoot("s0", store(map))).toBeUndefined()
+  })
+
+  test("a chain exactly at the depth cap still resolves", () => {
+    // Guards the boundary in the other direction, so the cap cannot silently
+    // shrink to something that rejects ordinary nesting.
+    const map: Record<string, string | undefined> = {}
+    for (let i = 0; i < MAX_PARENT_DEPTH - 1; i++) map[`s${i}`] = `s${i + 1}`
+    map[`s${MAX_PARENT_DEPTH - 1}`] = undefined
+    expect(resolveRoot("s0", store(map))).toBe(`s${MAX_PARENT_DEPTH - 1}`)
   })
 })
 
 describe("yoloEnabled", () => {
-  const parentOf = chain({ child: "root", grandchild: "child" })
+  const sessions = store({ root: undefined, child: "root", grandchild: "child", other: undefined })
 
   test("defaults to off when nothing is set", () => {
-    expect(yoloEnabled({ sessionID: "root", overrides: {}, parentOf, fallback: false })).toBe(false)
+    expect(yoloEnabled({ sessionID: "root", overrides: {}, getSession: sessions, fallback: false })).toBe(false)
   })
 
   test("inherits the process-wide --yolo default", () => {
-    expect(yoloEnabled({ sessionID: "root", overrides: {}, parentOf, fallback: true })).toBe(true)
+    expect(yoloEnabled({ sessionID: "root", overrides: {}, getSession: sessions, fallback: true })).toBe(true)
   })
 
   test("an explicit per-session enable wins over an off default", () => {
-    expect(yoloEnabled({ sessionID: "root", overrides: { root: true }, parentOf, fallback: false })).toBe(true)
+    expect(yoloEnabled({ sessionID: "root", overrides: { root: true }, getSession: sessions, fallback: false })).toBe(
+      true,
+    )
   })
 
-  // The contract from the ticket: "allow users to disable it without confirmation".
+  // The contract from the spec: "allow users to disable it without confirmation".
   // Without this, launching with --yolo would make the session impossible to un-yolo.
   test("an explicit per-session disable wins over --yolo", () => {
-    expect(yoloEnabled({ sessionID: "root", overrides: { root: false }, parentOf, fallback: true })).toBe(false)
+    expect(yoloEnabled({ sessionID: "root", overrides: { root: false }, getSession: sessions, fallback: true })).toBe(
+      false,
+    )
   })
 
-  // The regression that motivated root-session normalization: subagents run in their
-  // own child session, so a naive per-session lookup would leave them prompting.
   test("a subagent inherits its parent's enable", () => {
-    expect(yoloEnabled({ sessionID: "child", overrides: { root: true }, parentOf, fallback: false })).toBe(true)
+    expect(yoloEnabled({ sessionID: "child", overrides: { root: true }, getSession: sessions, fallback: false })).toBe(
+      true,
+    )
   })
 
   test("a nested subagent inherits the root's enable", () => {
-    expect(yoloEnabled({ sessionID: "grandchild", overrides: { root: true }, parentOf, fallback: false })).toBe(true)
+    expect(
+      yoloEnabled({ sessionID: "grandchild", overrides: { root: true }, getSession: sessions, fallback: false }),
+    ).toBe(true)
   })
 
   test("a subagent inherits its parent's disable even under --yolo", () => {
-    expect(yoloEnabled({ sessionID: "child", overrides: { root: false }, parentOf, fallback: true })).toBe(false)
+    expect(yoloEnabled({ sessionID: "child", overrides: { root: false }, getSession: sessions, fallback: true })).toBe(
+      false,
+    )
   })
 
-  // An override written against a CHILD id must not be consulted — the toggle always
-  // writes to the root, so a child-keyed entry means something went wrong upstream and
-  // silently honouring it would reintroduce per-child divergence.
   test("an override keyed by a child id is ignored in favour of the root", () => {
-    expect(yoloEnabled({ sessionID: "child", overrides: { child: true }, parentOf, fallback: false })).toBe(false)
+    expect(yoloEnabled({ sessionID: "child", overrides: { child: true }, getSession: sessions, fallback: false })).toBe(
+      false,
+    )
   })
 
   test("an unrelated session is unaffected by another session's override", () => {
-    expect(yoloEnabled({ sessionID: "other", overrides: { root: true }, parentOf, fallback: false })).toBe(false)
+    expect(yoloEnabled({ sessionID: "other", overrides: { root: true }, getSession: sessions, fallback: false })).toBe(
+      false,
+    )
+  })
+
+  // The bypass this fail-closed rule exists to prevent: launched with --yolo, the user
+  // explicitly turned it OFF on the root, then a child's request arrives before the
+  // child session has been hydrated into the store. Resolving the child to itself would
+  // miss the override and inherit fallback=true — auto-approving despite an explicit off.
+  test("an unhydrated child does NOT inherit --yolo past an explicit parent disable", () => {
+    const lagging = store({ root: undefined, child: "root" }, ["child"])
+    expect(yoloEnabled({ sessionID: "child", overrides: { root: false }, getSession: lagging, fallback: true })).toBe(
+      false,
+    )
+  })
+
+  test("an unknown session never auto-approves, even under --yolo", () => {
+    expect(yoloEnabled({ sessionID: "ghost", overrides: {}, getSession: sessions, fallback: true })).toBe(false)
+  })
+
+  test("an unknown session never auto-approves, even with an override on that id", () => {
+    expect(yoloEnabled({ sessionID: "ghost", overrides: { ghost: true }, getSession: sessions, fallback: false })).toBe(
+      false,
+    )
   })
 })
