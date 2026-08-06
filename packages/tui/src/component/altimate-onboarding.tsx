@@ -16,6 +16,7 @@ import { useConnected } from "./use-connected"
 // server endpoint; the toast surfaces failures that would otherwise be invisible.
 import { useSDK } from "../context/sdk"
 import { useToast } from "../ui/toast"
+import { useSync } from "../context/sync"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 
@@ -421,6 +422,7 @@ export function DialogFreeGeminiConfirm(props: {
   const local = useLocal()
   const sdk = useSDK()
   const toast = useToast()
+  const sync = useSync()
   const [selected, setSelected] = createSignal(0) // 0 = No (default)
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal<string | null>(null)
@@ -486,8 +488,23 @@ export function DialogFreeGeminiConfirm(props: {
     if (decided) return
     decided = true
     // The provider only autoloads once the credential exists, so the running instance has to
-    // re-resolve before the model is selectable.
+    // re-resolve before the model is selectable — and the re-resolve has to be AWAITED. Selecting
+    // against not-yet-refreshed provider state silently fails validation, and the user lands back
+    // in chat with the model they had before, having just been told the free tier was set up.
     await sdk.client.instance.dispose().catch(() => {})
+    await sync.bootstrap().catch(() => {})
+    const available = sync.data.provider.some(
+      (p) => p.id === "altimate-free" && Object.keys(p.models ?? {}).length > 0,
+    )
+    if (!available) {
+      // Registration succeeded and the credential is stored, so this is recoverable — but saying
+      // nothing and leaving the old model selected would be a lie about what just happened.
+      setBusy(false)
+      setError("Set up, but the model isn't available yet. Pick it from /model in a moment.")
+      toast.show({ variant: "error", message: "Free model registered but not ready yet — try /model shortly." })
+      markSetupComplete()
+      return
+    }
     dialog.clear()
     local.model.set({ providerID: "altimate-free", modelID: "gemini-flash-free" }, { recent: true })
     markSetupComplete()
