@@ -177,6 +177,30 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(skill).toMatch(/key:\s*"<leader>k",\s*cmd:\s*"altimate\.skill\.list"/)
   })
 
+  test("free-tier gateway keeps its loader, route, session header, and disclosure", async () => {
+    // Four hooks in four files, each independently droppable by a merge, and each failing
+    // silently: the model would still appear and still answer, while the gateway loses the
+    // ability to enforce budgets (loader), register anyone (route), or group traces by session
+    // (header) — and the disclosure is the consent gate the whole tier rests on.
+    const provider = await read("src/provider/provider.ts")
+    expect(provider).toMatch(/"altimate-free":\s*async\s*\(\)/)
+    expect(provider).toContain("FreeTier.authorizedFetch")
+
+    const server = await read("src/server/server.ts")
+    expect(server).toContain("/altimate/free/register")
+
+    // The live request path is session/llm.ts; llm/request.ts is the unwired Effect-era variant,
+    // so a merge that "keeps" the header there would ship nothing.
+    const llm = await read("src/session/llm.ts")
+    expect(llm).toMatch(/providerID === "altimate-free"[\s\S]{0,80}"X-Session-Id"/)
+
+    const onboarding = await read("src/component/altimate-onboarding.tsx", MONO + "/tui")
+    expect(onboarding).toContain(
+      "Free model — requests and responses are logged and may be used to improve Altimate's products and services. Don't send secrets or confidential code. No signup required.",
+    )
+    expect(onboarding).toContain("/altimate/free/register")
+  })
+
   test("re-homed TUI fork features keep their submit/provider/cache handoffs", async () => {
     const prompt = await read("src/component/prompt/index.tsx", MONO + "/tui")
     expect(prompt).toContain("/altimate/prompt/enhance")
