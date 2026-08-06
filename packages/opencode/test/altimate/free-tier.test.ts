@@ -407,3 +407,57 @@ describe("cli_version", () => {
     expect(String(gateway.calls[0]!.body["cli_version"])).toMatch(GATEWAY_GRAMMAR)
   })
 })
+
+describe("inference rate limits", () => {
+  // One 429 status, two opposite meanings. Keyed on the body discriminator because the gateway
+  // measured budget statuses moving between LiteLLM releases.
+  const body = (type: string, message = "") => JSON.stringify({ error: { type, message } })
+
+  test("throttling tells the user to wait, and uses Retry-After when present", () => {
+    const plain = FreeTier.describeRateLimit({ body: body("throttling_error") })
+    expect(plain).toContain("Too many requests")
+    expect(plain).toContain("shortly")
+
+    const timed = FreeTier.describeRateLimit({ body: body("throttling_error"), retryAfter: "30" })
+    expect(timed).toContain("30s")
+  })
+
+  test("a spent budget says it resets, and never says to retry", () => {
+    const personal = FreeTier.describeRateLimit({
+      body: body("budget_exceeded", "ExceededBudget: User=free-abc123"),
+    })
+    expect(personal).toContain("today's free allowance")
+    expect(personal).toContain("resets tomorrow")
+    expect(personal).not.toMatch(/try again/i)
+  })
+
+  test("the shared ceiling is not reported as the user's own limit", () => {
+    // Telling someone they used up their allowance when the whole tier is out is simply wrong.
+    const shared = FreeTier.describeRateLimit({
+      body: body("budget_exceeded", "Budget has been exceeded! Current cost: 9.99"),
+    })
+    expect(shared).toContain("shared daily limit")
+    expect(shared).not.toContain("You've used")
+  })
+
+  test("an unknown budget message still reads correctly for both cases", () => {
+    const neutral = FreeTier.describeRateLimit({ body: body("budget_exceeded", "something new") })
+    expect(neutral).toContain("resets tomorrow")
+    expect(neutral).not.toContain("You've used")
+    expect(neutral).not.toContain("shared daily")
+  })
+
+  test("an unrecognised discriminator is left to the provider's own message", () => {
+    // The failure mode to avoid: our wording swallowing an error we do not understand.
+    expect(FreeTier.describeRateLimit({ body: body("something_else") })).toBeUndefined()
+    expect(FreeTier.describeRateLimit({ body: '{"error":{}}' })).toBeUndefined()
+    expect(FreeTier.describeRateLimit({ body: "not json at all" })).toBeUndefined()
+    expect(FreeTier.describeRateLimit({})).toBeUndefined()
+  })
+
+  test("the discriminator is read from a top-level type too", () => {
+    expect(FreeTier.describeRateLimit({ body: JSON.stringify({ type: "throttling_error" }) })).toContain(
+      "Too many requests",
+    )
+  })
+})

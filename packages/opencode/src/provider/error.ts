@@ -2,6 +2,9 @@ import { APICallError } from "ai"
 import { STATUS_CODES } from "http"
 import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
+// altimate_change start — free-tier 429s need their own wording (see describeRateLimit)
+import { FreeTier } from "@/altimate/free/client"
+// altimate_change end
 
 export namespace ProviderError {
   // altimate_change start — restore upstream v1.17.9 error classes dropped during
@@ -335,6 +338,30 @@ export namespace ProviderError {
         // altimate_change end
       }
     }
+
+    // altimate_change start — free tier: one 429 status, two opposite meanings. Placed before
+    // the generic path so the user gets "wait a moment" or "you're done for today" instead of a
+    // raw LiteLLM string, and returns undefined for anything unrecognised so a new discriminator
+    // falls through to the provider's own message rather than being swallowed by ours.
+    if (String(input.providerID) === FreeTier.PROVIDER_ID && input.error.statusCode === 429) {
+      const described = FreeTier.describeRateLimit({
+        body: input.error.responseBody,
+        retryAfter: input.error.responseHeaders?.["retry-after"],
+      })
+      if (described) {
+        return {
+          type: "api_error",
+          message: described,
+          statusCode: 429,
+          // Only the throttle is worth another attempt; a spent daily budget never is.
+          isRetryable: described.startsWith("Too many requests"),
+          responseHeaders: input.error.responseHeaders,
+          responseBody: capResponseBody(input.error.responseBody),
+          metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+        }
+      }
+    }
+    // altimate_change end
 
     // altimate_change start — append a `models` discoverability hint when the
     // error code is model_not_found. Pairs with the retry-storm carve-out in

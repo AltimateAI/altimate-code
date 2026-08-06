@@ -125,6 +125,50 @@ export namespace FreeTier {
     return coerced || "unknown"
   }
 
+  /**
+   * User-facing text for a 429 from the inference path, or undefined if we don't recognise it.
+   *
+   * Two limits share the 429 status and mean opposite things to a user: `throttling_error` is
+   * "you are going too fast, wait a moment", `budget_exceeded` is "you are done for the day, and
+   * waiting a moment will not help". Telling someone to retry shortly when their daily allowance
+   * is gone sends them into a retry loop that cannot succeed.
+   *
+   * Keyed on the body discriminator rather than the status: the gateway's own measurements found
+   * budget statuses moving between LiteLLM releases, and an unrecognised discriminator returns
+   * undefined so the caller keeps the provider's original message rather than swallowing it.
+   */
+  export function describeRateLimit(input: { body?: string; retryAfter?: string }): string | undefined {
+    let parsed: { error?: { type?: unknown; message?: unknown }; type?: unknown; message?: unknown } | undefined
+    try {
+      parsed = input.body ? JSON.parse(input.body) : undefined
+    } catch {
+      return undefined
+    }
+    const kind = typeof parsed?.error?.type === "string" ? parsed.error.type : parsed?.type
+    const detail = typeof parsed?.error?.message === "string" ? parsed.error.message : ""
+
+    if (kind === "throttling_error") {
+      const seconds = Number(input.retryAfter)
+      const wait = Number.isFinite(seconds) && seconds > 0 ? ` Try again in ${Math.ceil(seconds)}s.` : " Try again shortly."
+      return `Too many requests to Gemini Flash (Free) right now.${wait}`
+    }
+
+    if (kind === "budget_exceeded") {
+      // Same discriminator, two situations: this install's own daily allowance, or the shared
+      // ceiling across the whole free tier. Reporting the shared one as "your limit" would be
+      // wrong, so the wording falls back to something true of both when neither marker matches.
+      if (detail.includes("ExceededBudget: User=")) {
+        return "You've used today's free allowance for Gemini Flash (Free). It resets tomorrow — switch models or add your own API key to keep going."
+      }
+      if (detail.includes("Budget has been exceeded")) {
+        return "The free tier has reached its shared daily limit. It resets tomorrow — switch models or add your own API key to keep going."
+      }
+      return "The daily limit for Gemini Flash (Free) has been reached. It resets tomorrow — switch models or add your own API key to keep going."
+    }
+
+    return undefined
+  }
+
   function describeFailure(status: number): string {
     if (status === 429) return "Too many sign-ups from this network right now. Try again later."
     if (status === 503) return "The free model is temporarily unavailable. Try again later."
