@@ -100,6 +100,15 @@ export namespace FreeTier {
    * the same budget principal rather than creating a fresh one.
    */
   export async function register(): Promise<Credentials> {
+    // Concurrent callers share one registration. Without this, a burst of parallel 401s would
+    // each mint a key, and every one but the last would be orphaned on the gateway.
+    if (!inflight) inflight = registerOnce().finally(() => (inflight = undefined))
+    return inflight
+  }
+
+  let inflight: Promise<Credentials> | undefined
+
+  async function registerOnce(): Promise<Credentials> {
     const existing = await credentials()
     const installSecret = existing?.installSecret ?? mintInstallSecret()
     const url = `${gatewayUrl()}/register`
@@ -164,5 +173,42 @@ export namespace FreeTier {
       log.warn("free tier key rotation failed; keeping existing credential", { error: err })
       return current
     }
+  }
+
+  /** A body we can send a second time. Streams cannot be replayed, so a retry would send nothing. */
+  function isReplayable(body: BodyInit | null | undefined): boolean {
+    return body == null || typeof body === "string" || body instanceof Uint8Array || body instanceof ArrayBuffer
+  }
+
+  /**
+   * Inference fetch for the provider.
+   *
+   * Two jobs, both driven by the fact that keys are short-lived. It stamps the Authorization
+   * header from the credential on disk rather than the one captured when the SDK was built, and
+   * it re-registers once on a 401 — the gateway can revoke a key before its stated expiry (kill
+   * switch, principal revocation), which the expiry-based rotation in refreshIfNeeded() cannot
+   * see. Failure is non-fatal: the original 401 is returned and surfaces as a normal provider
+   * error.
+   */
+  export async function authorizedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const current = await credentials()
+    if (!current) return fetch(input, init)
+
+    const send = (apiKey: string) => {
+      const headers = new Headers(init?.headers)
+      headers.set("Authorization", `Bearer ${apiKey}`)
+      return fetch(input, { ...init, headers })
+    }
+
+    const response = await send(current.apiKey)
+    if (response.status !== 401 || !isReplayable(init?.body)) return response
+
+    log.info("free tier key rejected; re-registering")
+    const rotated = await register().catch((err) => {
+      log.warn("free tier re-registration after 401 failed", { error: err })
+      return undefined
+    })
+    if (!rotated || rotated.apiKey === current.apiKey) return response
+    return send(rotated.apiKey)
   }
 }

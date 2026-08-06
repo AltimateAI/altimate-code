@@ -388,6 +388,9 @@ export namespace Provider {
         options: {
           baseURL: `${creds.baseURL}/v1`,
           apiKey: creds.apiKey,
+          // Keys are short-lived, and the SDK captures the one it was built with. The wrapper
+          // re-reads the stored credential per request and rotates on a 401.
+          fetch: FreeTier.authorizedFetch,
         },
       }
     },

@@ -168,6 +168,14 @@ describe("silent rotation", () => {
     expect(creds?.apiKey).toBe("sk-free-rotated")
   })
 
+  test("concurrent registrations share one call so keys are not orphaned", async () => {
+    const gateway = mockGateway(() => ok(REGISTERED))
+    const [a, b, c] = await Promise.all([FreeTier.register(), FreeTier.register(), FreeTier.register()])
+    expect(gateway.calls).toHaveLength(1)
+    expect(a.apiKey).toBe(b.apiKey)
+    expect(b.apiKey).toBe(c.apiKey)
+  })
+
   test("a failed rotation keeps the existing credential instead of throwing", async () => {
     // Provider load calls this; a gateway outage must not make the provider fail to resolve.
     mockGateway(() => ok({ ...REGISTERED, expires_at: new Date(Date.now() - 1000).toISOString() }))
@@ -178,5 +186,103 @@ describe("silent rotation", () => {
     const creds = await FreeTier.refreshIfNeeded()
 
     expect(creds?.apiKey).toBe(REGISTERED.api_key)
+  })
+})
+
+describe("inference fetch", () => {
+  const INFERENCE = "https://free.onealtimate.com/v1/chat/completions"
+
+  function auth(init: RequestInit | undefined): string | null {
+    return new Headers(init?.headers).get("Authorization")
+  }
+
+  test("sends the stored key, and passes through unchanged when unregistered", async () => {
+    let seen: string | null = "unset"
+    spyOn(global, "fetch").mockImplementation((async (_i: any, init: any) => {
+      seen = auth(init)
+      return new Response("{}", { status: 200 })
+    }) as unknown as typeof fetch)
+
+    await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+    expect(seen).toBeNull()
+
+    spyOn(global, "fetch").mockRestore()
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+
+    spyOn(global, "fetch").mockRestore()
+    spyOn(global, "fetch").mockImplementation((async (_i: any, init: any) => {
+      seen = auth(init)
+      return new Response("{}", { status: 200 })
+    }) as unknown as typeof fetch)
+    await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+    expect(seen).toBe(`Bearer ${REGISTERED.api_key}`)
+  })
+
+  test("a revoked key is re-registered once and the request retried", async () => {
+    // A key can be revoked before its stated expiry (kill switch, principal revocation), which
+    // expiry-based rotation cannot see.
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    const sent: (string | null)[] = []
+    spyOn(global, "fetch").mockImplementation((async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) return ok({ ...REGISTERED, api_key: "sk-free-fresh" })
+      sent.push(auth(init))
+      return new Response("", { status: auth(init) === "Bearer sk-free-fresh" ? 200 : 401 })
+    }) as unknown as typeof fetch)
+
+    const response = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+
+    expect(response.status).toBe(200)
+    expect(sent).toEqual([`Bearer ${REGISTERED.api_key}`, "Bearer sk-free-fresh"])
+    expect((await FreeTier.credentials())?.apiKey).toBe("sk-free-fresh")
+  })
+
+  test("a 401 that cannot be recovered is returned rather than throwing", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    let attempts = 0
+    spyOn(global, "fetch").mockImplementation((async (input: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) return new Response("", { status: 503 })
+      attempts++
+      return new Response("", { status: 401 })
+    }) as unknown as typeof fetch)
+
+    const response = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+    expect(response.status).toBe(401)
+    expect(attempts).toBe(1)
+  })
+
+  test("a streamed body is not retried, since it cannot be replayed", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    let registrations = 0
+    spyOn(global, "fetch").mockImplementation((async (input: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        registrations++
+        return ok({ ...REGISTERED, api_key: "sk-free-fresh" })
+      }
+      return new Response("", { status: 401 })
+    }) as unknown as typeof fetch)
+
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"))
+        controller.close()
+      },
+    })
+    const response = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body, duplex: "half" } as RequestInit)
+
+    expect(response.status).toBe(401)
+    expect(registrations).toBe(0)
   })
 })

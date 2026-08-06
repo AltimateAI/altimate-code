@@ -208,6 +208,28 @@ test("accepting registers exactly once and records the outcome", async () => {
   }
 })
 
+test("one user records one choice, however the dialog ends", async () => {
+  // The dialog outlives the decision on the failure path, so the accept latch and the "dialog is
+  // finished" latch are not the same thing: a retry, and the dismissal that eventually follows,
+  // must not each add another choice for the same user.
+  const confirm = await mountConfirm({
+    register: () => json({ ok: false, message: "Too many sign-ups", status: 429 }),
+  })
+  try {
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.events.some((e) => e.name === "free_gemini_register_result"))
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.registrations().length === 2)
+    await confirm.cleanup()
+    await Bun.sleep(50)
+
+    const choices = confirm.events.filter((e) => e.name === "free_gemini_choice")
+    expect(choices).toEqual([{ name: "free_gemini_choice", choice: "accept" }])
+  } finally {
+    confirm.app.renderer.destroy()
+  }
+})
+
 test("a rejected registration is visible and leaves the dialog open to retry", async () => {
   const confirm = await mountConfirm({
     register: () => json({ ok: false, message: "Too many sign-ups", status: 429 }),

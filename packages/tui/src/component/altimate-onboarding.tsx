@@ -415,7 +415,18 @@ export function DialogFreeGeminiConfirm(props: {
   const [error, setError] = createSignal<string | null>(null)
   const trackOnboarding = useOnboardingTelemetry()
   const firstRunActive = useFirstRunActive()
+  // Two latches, because the dialog can outlive the decision. `decided` closes the dialog's own
+  // navigation; `choice` is telemetry-only and, unlike `decided`, is claimed the moment the user
+  // accepts — a failed registration keeps the dialog open for a retry, and neither that retry nor
+  // the eventual dismissal may record a second choice for the same user.
   let decided = false
+  let choice = false
+
+  function recordChoice(value: "accept" | "cancel") {
+    if (choice) return
+    choice = true
+    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: value })
+  }
 
   onMount(() => {
     if (firstRunActive()) trackOnboarding({ name: "free_gemini_confirm_shown", origin: props.origin })
@@ -423,15 +434,14 @@ export function DialogFreeGeminiConfirm(props: {
   // Escape and click-away are handled by DialogProvider and never reach the key handler below, so
   // cleanup is the only place that sees every non-y/n dismissal.
   onCleanup(() => {
-    if (decided) return
     decided = true
-    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: "cancel" })
+    recordChoice("cancel")
   })
 
   function no() {
     if (decided || busy()) return
     decided = true
-    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: "cancel" })
+    recordChoice("cancel")
     dialog.replace(() =>
       props.origin === "welcome" ? (
         <DialogModelWelcome trigger="free_gemini_back" />
@@ -443,9 +453,7 @@ export function DialogFreeGeminiConfirm(props: {
 
   async function yes() {
     if (decided || busy()) return
-    // Not `decided` yet: a failed registration leaves the dialog open so the user can retry, and
-    // the cleanup emit must not fire a `cancel` on top of the accept once they do close it.
-    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: "accept" })
+    recordChoice("accept")
     setError(null)
     setBusy(true)
     const outcome = await registerFreeTier(sdk)
