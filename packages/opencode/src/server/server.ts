@@ -37,6 +37,7 @@ import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
+import { FreeTier } from "../altimate/free/client"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -661,6 +662,25 @@ export namespace Server {
           }
         },
       )
+      // altimate_change end
+      // altimate_change start — POST /altimate/free/register
+      // Free-tier registration runs opencode-side so the install secret is minted and stored by
+      // the process that owns the Auth store. The TUI only reaches it from the affirmative path
+      // of the disclosure dialog, which is what keeps the identifier off the wire until the user
+      // has consented.
+      .post("/altimate/free/register", async (c) => {
+        try {
+          await FreeTier.register()
+          return c.json({ ok: true })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Registration failed"
+          // The gateway's own status is echoed so the dialog can tell "too many sign-ups" from
+          // "temporarily unavailable" without parsing the message. Absent on a network failure.
+          const status = err instanceof FreeTier.RegistrationError ? err.status : undefined
+          log.error("free tier registration failed", { error: err })
+          return c.json({ ok: false, message, status }, 502)
+        }
+      })
       // altimate_change end
       // altimate_change start — POST /altimate/mcp/reload-datamate
       // Updates the datamate MCP server config from IDE MCP config files and reconnects
