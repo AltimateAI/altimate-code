@@ -28,6 +28,9 @@ import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
 import { AltimateApi } from "../altimate/api/client"
+// altimate_change start — free-tier gateway credentials for the altimate-free loader
+import { FreeTier } from "../altimate/free/client"
+// altimate_change end
 
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
@@ -371,6 +374,22 @@ export namespace Provider {
         await Auth.remove(ProviderID.make("altimate-backend")).catch(() => {})
       }
       return { autoload: false }
+    },
+    // altimate_change end
+    // altimate_change start — free-tier gateway provider: READ-ONLY. Registration is
+    // consent-gated in the TUI disclosure dialog, so this never mints an identifier or
+    // makes a network call for an unregistered install. Returning autoload:false leaves the
+    // provider available for the picker's NEEDS-SETUP list.
+    "altimate-free": async () => {
+      const creds = await FreeTier.refreshIfNeeded().catch(() => undefined)
+      if (!creds) return { autoload: false }
+      return {
+        autoload: true,
+        options: {
+          baseURL: `${creds.baseURL}/v1`,
+          apiKey: creds.apiKey,
+        },
+      }
     },
     // altimate_change end
     openai: async () => {
@@ -1460,6 +1479,46 @@ export namespace Provider {
         env: [],
         options: {},
         models: backendModels,
+      }
+    }
+    // altimate_change end
+
+    // altimate_change start — register altimate-free, the $0 hosted Gemini Flash tier.
+    // Cost is zero everywhere: the model is funded by us, so a non-zero entry would show
+    // users a spend figure for tokens they are not billed for.
+    if (!database["altimate-free"]) {
+      const freeModels: Record<string, Model> = {
+        [FreeTier.MODEL_ID]: {
+          id: ModelID.make(FreeTier.MODEL_ID),
+          providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+          name: "Gemini Flash (Free)",
+          family: "openai",
+          api: { id: FreeTier.MODEL_ID, url: "", npm: "@ai-sdk/openai-compatible" },
+          status: "active",
+          headers: {},
+          options: {},
+          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+          limit: { context: 1_048_576, output: 16_384 },
+          capabilities: {
+            temperature: true,
+            reasoning: false,
+            attachment: false,
+            toolcall: true,
+            input: { text: true, audio: false, image: true, video: false, pdf: false },
+            output: { text: true, audio: false, image: false, video: false, pdf: false },
+            interleaved: false,
+          },
+          release_date: "2026-08-06",
+          variants: {},
+        },
+      }
+      database["altimate-free"] = {
+        id: ProviderID.make(FreeTier.PROVIDER_ID),
+        name: "Altimate Free",
+        source: "custom",
+        env: [],
+        options: {},
+        models: freeModels,
       }
     }
     // altimate_change end
