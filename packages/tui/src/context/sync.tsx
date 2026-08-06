@@ -360,17 +360,9 @@ export const {
           void bootstrap()
           break
         case "permission.replied": {
-          const requests = store.permission[event.properties.sessionID]
-          if (!requests) break
-          const match = search(requests, event.properties.requestID, (r) => r.id)
-          if (!match.found) break
-          setStore(
-            "permission",
-            event.properties.sessionID,
-            produce((draft) => {
-              draft.splice(match.index, 1)
-            }),
-          )
+          // altimate_change — was inline; shares removePermission with the yolo
+          // auto-approve path so the removal logic exists in one place.
+          removePermission(event.properties.sessionID, event.properties.requestID)
           break
         }
 
@@ -866,16 +858,6 @@ export const {
           const root = rootSessionID(sessionID) ?? sessionID
           if (store.yolo[root] === undefined) setStore("yolo", root, pending)
           setStore("yolo_pending", undefined)
-        },
-        // Drop state for a session that no longer exists.
-        forget(sessionID: string) {
-          if (store.yolo[sessionID] === undefined) return
-          setStore(
-            "yolo",
-            produce((draft) => {
-              delete draft[sessionID]
-            }),
-          )
         },
       },
       // altimate_change end

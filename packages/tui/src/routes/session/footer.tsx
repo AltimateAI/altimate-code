@@ -5,6 +5,9 @@ import { useDirectory } from "../../context/directory"
 import { useConnected } from "../../component/use-connected"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../context/route"
+// altimate_change start - yolo mode visual indicator
+import { Flag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 // altimate_change start - upgrade indicator in session footer
 import { UpgradeIndicator } from "../../component/upgrade-indicator"
 // altimate_change end
@@ -20,11 +23,6 @@ export function Footer() {
     if (route.data.type !== "session") return []
     return sync.data.permission[route.data.sessionID] ?? []
   })
-  // altimate_change start - yolo mode visual indicator, now per-session and reactive.
-  // Previously read Flag.ALTIMATE_CLI_YOLO directly, which is a plain process.env getter
-  // and therefore never re-rendered when the mode changed.
-  const yolo = createMemo(() => sync.yolo.enabled(route.data.type === "session" ? route.data.sessionID : undefined))
-  // altimate_change end
   const directory = useDirectory()
   const connected = useConnected()
 
@@ -69,9 +67,9 @@ export function Footer() {
           </Match>
           <Match when={connected()}>
             {/* altimate_change start - yolo mode visual indicator */}
-            <Show when={yolo()}>
+            <Show when={Flag.ALTIMATE_CLI_YOLO}>
               <text fg={theme.warning}>
-                <span style={{ fg: theme.warning }}>△</span> YOLO ON
+                <span style={{ fg: theme.warning }}>△</span> YOLO
               </text>
             </Show>
             {/* altimate_change end */}

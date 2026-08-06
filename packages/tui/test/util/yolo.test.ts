@@ -25,12 +25,20 @@ describe("resolveRoot", () => {
     expect(resolveRoot("grandchild", store({ grandchild: "child", child: "root", root: undefined }))).toBe("root")
   })
 
-  test("a self-parenting session terminates instead of looping", () => {
-    expect(resolveRoot("a", store({ a: "a" }))).toBe("a")
+  // A cycle has no root, so it must fail closed rather than resolve to whichever node
+  // the walk happened to stop on — that node could carry an override, or inherit --yolo.
+  test("a self-parenting session does not resolve", () => {
+    expect(resolveRoot("a", store({ a: "a" }))).toBeUndefined()
   })
 
-  test("a parent cycle terminates instead of looping", () => {
-    expect(resolveRoot("a", store({ a: "b", b: "a" }))).toBe("b")
+  test("a parent cycle does not resolve", () => {
+    expect(resolveRoot("a", store({ a: "b", b: "a" }))).toBeUndefined()
+  })
+
+  test("a cyclic chain never auto-approves, even under --yolo", () => {
+    const cyclic = store({ a: "b", b: "a" })
+    expect(yoloEnabled({ sessionID: "a", overrides: {}, getSession: cyclic, fallback: true })).toBe(false)
+    expect(yoloEnabled({ sessionID: "a", overrides: { b: true }, getSession: cyclic, fallback: false })).toBe(false)
   })
 
   // Fail-closed cases. Each returns undefined, which callers must treat as

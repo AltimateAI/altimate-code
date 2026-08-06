@@ -79,7 +79,12 @@ function askEvent(sessionID: string, id: string): GlobalEvent {
 const REPLY = /^\/permission\/[^/]+\/reply$/
 
 /** Mount with a known session list and a recorder for permission replies. */
-async function setup(options?: { sessions?: ReturnType<typeof sessionRow>[]; failReply?: boolean }) {
+async function setup(options?: {
+  sessions?: ReturnType<typeof sessionRow>[]
+  failReply?: boolean
+  /** Hold the reply open so a second toggle lands while the first is still in flight. */
+  replyDelayMs?: number
+}) {
   const replies: string[] = []
   const sessions = options?.sessions ?? [sessionRow(ROOT)]
   const tmp = await tmpdir()
@@ -88,8 +93,10 @@ async function setup(options?: { sessions?: ReturnType<typeof sessionRow>[]; fai
     if (url.pathname === "/session") return json(sessions)
     if (REPLY.test(url.pathname)) {
       replies.push(url.pathname)
-      if (options?.failReply) return json({ error: "boom" }, { status: 500 })
-      return json({})
+      const respond = () => (options?.failReply ? json({ error: "boom" }, { status: 500 }) : json({}))
+      // Returning a pending promise (rather than an async fn) keeps the handler's
+      // return type `Response | Promise<Response> | undefined`.
+      return options?.replyDelayMs ? Bun.sleep(options.replyDelayMs).then(respond) : respond()
     }
     return undefined
   }, tmp.path)
@@ -230,20 +237,24 @@ describe("tui sync: yolo auto-approve", () => {
   // second, autoApprove misreads the rejection as a lost reply, and a prompt reappears
   // for a request that was already answered.
   test("enabling twice does not reply to the same request twice", async () => {
-    const { app, emit, sync, replies, tmp } = await setup()
+    // The reply is held open so the second toggle genuinely lands while the first is
+    // in flight. With an instant mock the store is already cleared by the time the
+    // second set() runs, so the second flush is a no-op and the in-flight guard is
+    // never exercised — the test would pass without testing anything.
+    const { app, emit, sync, replies, tmp } = await setup({ replyDelayMs: 250 })
     try {
       emit(askEvent(ROOT, "perm_1"))
       await wait(() => pending(sync, ROOT).length === 1)
 
       sync.yolo.set(ROOT, true)
       await wait(() => replies.length === 1)
-      // Second enable while the first reply is still settling.
+      // Still in flight here: the request has not been removed yet.
+      expect(pending(sync, ROOT)).toHaveLength(1)
       sync.yolo.set(ROOT, true)
-      await Bun.sleep(300)
 
+      await wait(() => pending(sync, ROOT).length === 0)
+      await Bun.sleep(200)
       expect(replies).toHaveLength(1)
-      // And no phantom prompt got re-inserted.
-      expect(pending(sync, ROOT)).toHaveLength(0)
     } finally {
       app.renderer.destroy()
       await tmp[Symbol.asyncDispose]()

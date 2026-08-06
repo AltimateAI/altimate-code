@@ -45,7 +45,11 @@ export function resolveRoot(
     // Unknown session: we cannot tell a true root from an unhydrated child.
     if (!session) return undefined
     const parentID = session.parentID
-    if (!parentID || seen.has(parentID)) return current
+    if (!parentID) return current
+    // A cycle means no root exists. Returning the node we happened to stop on would
+    // treat a malformed chain as a valid root and let it inherit `--yolo` or an override
+    // keyed on that node — the same fail-open shape the unknown-session case guards.
+    if (seen.has(parentID)) return undefined
     seen.add(parentID)
     current = parentID
   }
