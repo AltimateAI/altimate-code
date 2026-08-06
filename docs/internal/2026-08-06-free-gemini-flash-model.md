@@ -1,8 +1,64 @@
 # Free Gemini Flash Model for altimate-code ("our Big Pickle")
 
 **Date:** 2026-08-06
-**Status:** Research complete — recommended architecture below, not yet built. Codex-reviewed (11 findings incorporated, 3 critical).
-**Inputs:** codebase exploration of `altimate-code` (client wiring), `altimate-router`, `altimate-backend` (LiteLLM usage), external deep research (Parallel, run `trun_42322d19c00949b79419889d58d32287`), and a Codex adversarial review of the first draft.
+**Status:** **BUILT AND VERIFIED LOCALLY.** Both sides implemented, security-reviewed, and exercised end to end against real Vertex + Langfuse. Not deployed; not shipped to users. See "Implementation status" below.
+**Inputs:** codebase exploration of `altimate-code` (client wiring), `altimate-router`, `altimate-backend` (LiteLLM usage), external deep research (Parallel, run `trun_42322d19c00949b79419889d58d32287`), and Codex adversarial reviews of the design and of both implementations.
+
+## Implementation status (2026-08-06)
+
+Two deliverables, both local-only, nothing pushed:
+
+**`~/codebase/altimate-gateway`** (new repo, `main`, 12 commits) — LiteLLM proxy pinned to
+`ghcr.io/berriai/litellm-database:v1.95.0` serving `vertex_ai/gemini-2.5-flash` (project
+`altimate-models`, global endpoint), a FastAPI **issuer** holding the master key, Postgres, Redis,
+`docker-compose.yml`, policy + redaction hooks, and a runbook README with a *measured* error taxonomy.
+189 unit tests + 13 pinned-image integration tests + a 7-check smoke script.
+
+**`altimate-code` branch `feat/free-gemini-flash`** (worktree `altimate-bigpickle`, ~11 commits) —
+`altimate-free` provider + read-only loader, `FreeTier` client (install secret, consent-gated
+registration, silent rotation), TUI slot-4 row + disclosure dialog, telemetry funnel, server route,
+docs. Typecheck green, marker check clean, ~32 new tests, plus a 24-assertion E2E harness
+(`script/e2e-free-tier.sh`, with `--dry-run` and `FAKE_BREAK=` fault injection).
+
+**Verified against real services** (not mocks): consent → registration → real `gemini-2.5-flash`
+completion → trace in `langfuse.onealtimate.com` with server-derived `userId`, per-principal
+namespaced session, `tier:free` tags, and a planted AWS key stored as `[REDACTED:aws_access_key]`
+with the raw value absent. Zero gateway contact before consent; only `sha256(install_secret)` on the
+wire; credential at `0600`. Spend attribution confirmed **by querying Postgres directly**
+(`0 → 7.59e-05` on one completion). Rotation leaves exactly one live key per principal. Kill-switch
+latch held through a real `docker compose stop redis` (pre-fix it returned to 200 within ~2s).
+Redis down → honest `503 dependency_unavailable`. Issuer cannot even resolve Postgres (gaierror) and
+holds neither `DATABASE_URL` nor `LANGFUSE_SECRET_KEY`.
+
+**What the build changed about the design.** Codex's review of the gateway returned 17 findings
+(FIX-FIRST, blockers 1–10), all now fixed or documented as deploy gates. Three are worth carrying
+forward as design lessons:
+
+1. **LiteLLM's `internal_user` role includes `/key/generate`, `/key/delete`, `/key/update`,
+   `/key/regenerate`.** A free-tier key could have minted itself unlimited keys through the same port
+   it uses for inference, bypassing every budget and velocity control. Fixed by using
+   `internal_user_viewer`. Note: key-level `allowed_routes` does **not** help — in `route_checks.py`
+   it is only consulted as a later `elif`, so a role branch that already passed never reaches it.
+2. **`async_logging_hook` is only called from the success handler.** The failure path applied no
+   redaction at all, so any forced failure shipped raw prompts to Langfuse. Fixed with
+   `async_log_failure_event` + `async_post_call_failure_hook`.
+3. **Key rotation without revocation is key accumulation.** Old keys stayed valid 7 days, so one IP
+   could bank ~120 live keys/day and multiply every per-key rpm/tpm/concurrency limit. Rotation now
+   revokes predecessors (mint first, then revoke, so the caller never receives a dead key).
+
+Also corrected from the research: the pinned image has **no** `fail_closed_budget_enforcement` key
+(the real control is `allow_requests_on_db_unavailable: false`, already the default), and
+multi-instance limits use `general_settings.coordination_redis` in v1.95.0, not
+`router_settings.redis_host`. And a client-side latent bug surfaced: `Installation.VERSION` can emit
+a 53-char CI sanity string or a slash-bearing branch name, both of which the issuer's `cli_version`
+grammar rejects — now sanitized client-side (a client that can emit a 53-char version is the defect).
+
+**Not done, and required before any public deploy:** everything in "Legal gate" below (unchanged and
+still blocking), plus the deploy gates in the gateway README — TLS ingress with a route allowlist and
+a whole-body size cap, >1 worker, Vertex-side quota + GCP Spend Cap Budget as the hard backstop, and
+real secret management. Budgets remain **soft/post-spend**: there is no atomic pre-reservation
+without forking LiteLLM, so concurrent requests can overshoot a cap. The $50/day global ceiling
+bounds the damage; the provider-side quota is what actually stops it.
 
 ## Goal
 
