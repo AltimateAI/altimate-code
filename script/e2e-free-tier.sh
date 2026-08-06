@@ -59,6 +59,7 @@ LANGFUSE_HOST="${LANGFUSE_HOST:-https://langfuse.onealtimate.com}"
 GATEWAY_REPO="${GATEWAY_REPO:-$HOME/codebase/altimate-gateway}"
 FREE_MODEL="${FREE_MODEL_ALIAS:-gemini-flash-free}"
 TRACE_TIMEOUT="${TRACE_TIMEOUT:-90}"
+COMPLETION_TIMEOUT="${COMPLETION_TIMEOUT:-120}"
 
 # AWS's own published example key. Deliberately a documented non-credential: the point
 # is to prove the redactor fires, and a real key must never be typed into a test.
@@ -244,12 +245,26 @@ SESSION_MARKER="e2e-$(date +%s)"
 # output side of the masker is otherwise never exercised. The key is AWS's own published
 # example value, so nothing sensitive is being round-tripped.
 PROMPT="Output the next line verbatim as your entire answer, changing nothing: AWS_ACCESS_KEY_ID=$FAKE_AWS_KEY marker=$SESSION_MARKER pong"
-RUN_OUT=$(cli run -m "altimate-free/$FREE_MODEL" "$PROMPT" 2>&1)
-if grep -qi "pong" <<< "$RUN_OUT"; then
-  ok "completion returned through the free provider"
+# Bounded, and not with `timeout` — it is absent on stock macOS. `run` does not exit when the
+# first turn errors (reproduced on a clean main checkout, so it is not this branch's doing), and
+# an unbounded wait here took the whole script down with it instead of failing one assertion.
+cli run -m "altimate-free/$FREE_MODEL" "$PROMPT" > "$TMP/run.log" 2>&1 &
+RUN_PID=$!
+RUN_DEADLINE=$(( $(date +%s) + COMPLETION_TIMEOUT ))
+while kill -0 "$RUN_PID" 2>/dev/null && [[ $(date +%s) -lt $RUN_DEADLINE ]]; do sleep 1; done
+if kill -0 "$RUN_PID" 2>/dev/null; then
+  kill "$RUN_PID" 2>/dev/null
+  bad "the CLI did not finish within ${COMPLETION_TIMEOUT}s — see $TMP/run.log"
+  tail -20 "$TMP/run.log"
 else
-  bad "no usable completion"
-  echo "$RUN_OUT" | tail -20
+  wait "$RUN_PID" 2>/dev/null
+  RUN_OUT=$(cat "$TMP/run.log")
+  if grep -qi "pong" <<< "$RUN_OUT"; then
+    ok "completion returned through the free provider"
+  else
+    bad "no usable completion"
+    echo "$RUN_OUT" | tail -20
+  fi
 fi
 
 # ---------------------------------------------------------------------------

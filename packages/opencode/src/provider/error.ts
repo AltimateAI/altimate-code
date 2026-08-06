@@ -329,6 +329,26 @@ export namespace ProviderError {
     // Check responseBody for context_length_exceeded code (e.g., OpenAI-style errors)
     const bodyParsed = json(input.error.responseBody)
     const codeFromBody = bodyParsed?.error?.code
+    // altimate_change start — the free tier's 413 is a fixed byte cap, not a context limit, and
+    // must not enter the compaction-retry path below: the incompressible part of a request can
+    // exceed the cap on its own, and then every retry fails identically. Checked BEFORE the
+    // overflow branch, which would otherwise claim it.
+    if (String(input.providerID) === FreeTier.PROVIDER_ID && input.error.statusCode === 413) {
+      const described = FreeTier.describeRequestTooLarge(input.error.responseBody)
+      if (described) {
+        return {
+          type: "api_error",
+          message: described,
+          statusCode: 413,
+          isRetryable: false,
+          responseHeaders: input.error.responseHeaders,
+          responseBody: capResponseBody(input.error.responseBody),
+          metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+        }
+      }
+    }
+    // altimate_change end
+
     if (isOverflow(m) || input.error.statusCode === 413 || codeFromBody === "context_length_exceeded") {
       return {
         type: "context_overflow",

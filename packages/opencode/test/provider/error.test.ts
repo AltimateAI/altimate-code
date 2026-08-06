@@ -468,3 +468,50 @@ describe("ProviderError.parseAPICallError: free-tier rate limits", () => {
     expect(result.message).not.toContain("resets tomorrow")
   })
 })
+
+// altimate_change — the free tier's 413 is a byte cap, not a context limit
+describe("ProviderError.parseAPICallError: free-tier oversized requests", () => {
+  const body = JSON.stringify({
+    error: {
+      message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",
+      code: "413",
+      provider_specific_fields: {
+        error: { code: "request_too_large", message: "Request is 179608 bytes; the free tier limit is 128000 bytes." },
+      },
+    },
+  })
+
+  test("is terminal, NOT context_overflow", () => {
+    // The bug this guards: classified as overflow, the session compacts and retries, and since
+    // the system prompt and tool schemas alone can exceed the cap, every retry fails identically.
+    // One prompt produced ~90 doomed attempts against a 128KB cap and read as a hang.
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: body }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toContain("too large for Gemini Flash (Free)")
+    if (result.type === "api_error") expect(result.isRetryable).toBe(false)
+  })
+
+  test("a 413 from another provider is still context_overflow", () => {
+    // Elsewhere 413 really does mean "prompt too long", where compaction is the right response.
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: body }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+
+  test("a free-tier 413 we do not recognise falls back to context_overflow", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({
+        message: "Payload Too Large",
+        statusCode: 413,
+        responseBody: JSON.stringify({ error: { code: "context_length_exceeded" } }),
+      }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+})

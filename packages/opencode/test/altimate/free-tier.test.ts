@@ -461,3 +461,47 @@ describe("inference rate limits", () => {
     )
   })
 })
+
+describe("oversized requests", () => {
+  // Verbatim from the gateway (LiteLLM nests our hook's error under provider_specific_fields).
+  const REAL_413 = JSON.stringify({
+    error: {
+      message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",
+      type: "None",
+      param: "None",
+      code: "413",
+      provider_specific_fields: {
+        error: { code: "request_too_large", message: "Request is 179608 bytes; the free tier limit is 128000 bytes." },
+      },
+    },
+  })
+
+  test("the real gateway body is recognised and both sizes are surfaced", () => {
+    const described = FreeTier.describeRequestTooLarge(REAL_413)
+    expect(described).toContain("too large for Gemini Flash (Free)")
+    expect(described).toContain("175KB")
+    expect(described).toContain("125KB")
+    // It must tell the user what to do, since nothing will retry for them any more.
+    expect(described).toContain("new session")
+  })
+
+  test("the flat shape is recognised too", () => {
+    const described = FreeTier.describeRequestTooLarge(
+      JSON.stringify({ error: { code: "request_too_large", message: "Request is 1 bytes; the free tier limit is 2 bytes" } }),
+    )
+    expect(described).toContain("too large")
+  })
+
+  test("a body without the sizes still produces usable text", () => {
+    const described = FreeTier.describeRequestTooLarge(JSON.stringify({ error: { code: "request_too_large" } }))
+    expect(described).toContain("too large")
+    expect(described).not.toContain("undefined")
+    expect(described).not.toContain("NaN")
+  })
+
+  test("unrelated 413 bodies are left alone", () => {
+    expect(FreeTier.describeRequestTooLarge(JSON.stringify({ error: { code: "context_length_exceeded" } }))).toBeUndefined()
+    expect(FreeTier.describeRequestTooLarge("not json")).toBeUndefined()
+    expect(FreeTier.describeRequestTooLarge()).toBeUndefined()
+  })
+})
