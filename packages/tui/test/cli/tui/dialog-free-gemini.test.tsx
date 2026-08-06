@@ -24,7 +24,9 @@ async function wait(fn: () => boolean, timeout = 2000) {
 
 const REGISTER_PATH = "/altimate/free/register"
 
-async function mountConfirm({ register = json({ ok: true }) }: { register?: Response | (() => Response) } = {}) {
+async function mountConfirm({
+  register = json({ ok: true }),
+}: { register?: Response | (() => Response | Promise<Response>) } = {}) {
   const [
     { DialogProvider },
     { DialogFreeGeminiConfirm, FREE_GEMINI_DISCLOSURE, resetSetupComplete, markFirstRunActive },
@@ -226,6 +228,42 @@ test("one user records one choice, however the dialog ends", async () => {
     const choices = confirm.events.filter((e) => e.name === "free_gemini_choice")
     expect(choices).toEqual([{ name: "free_gemini_choice", choice: "accept" }])
   } finally {
+    confirm.app.renderer.destroy()
+  }
+})
+
+test("a rejection delivered as a non-2xx is still classified, not reported as a network failure", async () => {
+  // The route answers 200 with ok:false, but a non-2xx from anywhere else in the stack puts the
+  // body on the client's error channel. Reading only `data` turned every such rejection into
+  // `network`, which is the one classification that tells an operator nothing.
+  const confirm = await mountConfirm({
+    register: () => json({ ok: false, message: "Too many sign-ups", status: 429 }, { status: 502 }),
+  })
+  try {
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.events.some((e) => e.name === "free_gemini_register_result"))
+    expect(confirm.events).toContainEqual({ name: "free_gemini_register_result", result: "rate_limited" })
+  } finally {
+    await confirm.cleanup()
+  }
+})
+
+test("escaping mid-registration does not switch the model out from under the user", async () => {
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  const confirm = await mountConfirm({ register: async () => (await gate, json({ ok: true })) })
+  try {
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.registrations().length === 1)
+    await confirm.cleanup()
+    release!()
+    await Bun.sleep(100)
+
+    // The credential is stored either way — the user can pick the model from the picker. What must
+    // not happen is a dialog we no longer own being cleared, or the model being switched.
+    expect(confirm.requests.filter((p) => p === "/instance/dispose")).toHaveLength(0)
+  } finally {
+    release!()
     confirm.app.renderer.destroy()
   }
 })

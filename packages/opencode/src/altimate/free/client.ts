@@ -87,6 +87,23 @@ export namespace FreeTier {
     }
   }
 
+  /**
+   * Accept only a URL we are willing to send the key and the user's prompts to. The gateway
+   * chooses this value, so an unencrypted or malformed one has to be rejected here rather than
+   * trusted — localhost is allowed for running against a local gateway.
+   */
+  function normalizeBaseUrl(value: string): string | undefined {
+    let url: URL
+    try {
+      url = new URL(value.trim())
+    } catch {
+      return undefined
+    }
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]"
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) return undefined
+    return url.toString().replace(/\/+$/, "")
+  }
+
   function describeFailure(status: number): string {
     if (status === 429) return "Too many sign-ups from this network right now. Try again later."
     if (status === 503) return "The free model is temporarily unavailable. Try again later."
@@ -137,14 +154,16 @@ export namespace FreeTier {
     const body = (await response.json().catch(() => undefined)) as
       | { api_key?: unknown; base_url?: unknown; expires_at?: unknown }
       | undefined
-    if (typeof body?.api_key !== "string" || typeof body.base_url !== "string") {
+    const apiKey = typeof body?.api_key === "string" ? body.api_key.trim() : ""
+    const baseURL = typeof body?.base_url === "string" ? normalizeBaseUrl(body.base_url) : undefined
+    if (!apiKey || !baseURL) {
       throw new RegistrationError("The free model gateway returned an unexpected response.")
     }
 
     const creds: Credentials = {
-      apiKey: body.api_key,
-      baseURL: body.base_url.replace(/\/+$/, ""),
-      expiresAt: typeof body.expires_at === "string" ? body.expires_at : undefined,
+      apiKey,
+      baseURL,
+      expiresAt: typeof body?.expires_at === "string" ? body.expires_at : undefined,
       installSecret,
     }
     await store(creds)
@@ -154,25 +173,28 @@ export namespace FreeTier {
   function isExpired(creds: Credentials): boolean {
     if (!creds.expiresAt) return false
     const expiry = Date.parse(creds.expiresAt)
-    if (Number.isNaN(expiry)) return false
+    // An unparseable expiry is treated as expired, not as immortal. Rotating once replaces the
+    // bad value with a good one; the alternative leaves a credential that can never refresh.
+    if (Number.isNaN(expiry)) return true
     return expiry - REFRESH_SKEW_MS <= Date.now()
   }
 
   /**
-   * Rotate the key when it is at or near expiry. Silent and non-fatal: a network failure returns
-   * the credential we already hold so the session degrades to a 401 from the gateway rather than
-   * an error at provider-load time.
+   * The credential to load the provider with.
+   *
+   * Rotation is started when the credential is at or near expiry but is deliberately NOT awaited:
+   * provider load runs at startup and on every reload, and blocking it on the gateway would put a
+   * remote service on the startup path — a slow or dead gateway would stall the CLI for the
+   * registration timeout, repeatedly. The current credential is returned immediately; if it has
+   * genuinely lapsed, the 401 path in authorizedFetch rotates and retries the request itself.
    */
   export async function refreshIfNeeded(): Promise<Credentials | undefined> {
     const current = await credentials()
     if (!current) return undefined
-    if (!isExpired(current)) return current
-    try {
-      return await register()
-    } catch (err) {
-      log.warn("free tier key rotation failed; keeping existing credential", { error: err })
-      return current
+    if (isExpired(current)) {
+      void register().catch((err) => log.warn("free tier background rotation failed", { error: err }))
     }
+    return current
   }
 
   /** A body we can send a second time. Streams cannot be replayed, so a retry would send nothing. */
@@ -202,6 +224,12 @@ export namespace FreeTier {
 
     const response = await send(current.apiKey)
     if (response.status !== 401 || !isReplayable(init?.body)) return response
+
+    // Re-read before registering. Under concurrency another request's rotation may already have
+    // landed while this one was in flight, in which case the fix is to use that key, not to mint
+    // another and orphan it.
+    const stored = await credentials()
+    if (stored && stored.apiKey !== current.apiKey) return send(stored.apiKey)
 
     log.info("free tier key rejected; re-registering")
     const rotated = await register().catch((err) => {

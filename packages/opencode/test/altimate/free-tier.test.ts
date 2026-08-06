@@ -34,6 +34,14 @@ function mockGateway(handler: (call: FetchCall) => Response | Promise<Response>)
   return { calls, spy }
 }
 
+async function wait(fn: () => boolean | Promise<boolean>, timeout = 2000) {
+  const start = Date.now()
+  while (!(await fn())) {
+    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
+    await Bun.sleep(10)
+  }
+}
+
 function ok(body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } })
 }
@@ -131,9 +139,28 @@ describe("registration", () => {
   })
 
   test("a malformed gateway response is rejected rather than stored", async () => {
-    mockGateway(() => ok({ api_key: 42 }))
-    await expect(FreeTier.register()).rejects.toBeInstanceOf(FreeTier.RegistrationError)
-    expect(await FreeTier.isRegistered()).toBe(false)
+    // Type checks alone let an empty key or a plaintext/arbitrary base URL through — and the base
+    // URL is where the key and every prompt would then be sent.
+    const bad = [
+      { api_key: 42, base_url: "https://free.onealtimate.com" },
+      { api_key: "", base_url: "https://free.onealtimate.com" },
+      { api_key: "  ", base_url: "https://free.onealtimate.com" },
+      { api_key: "sk-x", base_url: "" },
+      { api_key: "sk-x", base_url: "not a url" },
+      { api_key: "sk-x", base_url: "http://evil.example.com" },
+    ]
+    for (const body of bad) {
+      mockGateway(() => ok(body))
+      await expect(FreeTier.register()).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+      expect(await FreeTier.isRegistered()).toBe(false)
+      spyOn(global, "fetch").mockRestore()
+    }
+  })
+
+  test("a local gateway over http is allowed, for development", async () => {
+    mockGateway(() => ok({ ...REGISTERED, base_url: "http://localhost:4000" }))
+    const creds = await FreeTier.register()
+    expect(creds.baseURL).toBe("http://localhost:4000")
   })
 })
 
@@ -156,16 +183,36 @@ describe("silent rotation", () => {
     expect(creds?.apiKey).toBe(REGISTERED.api_key)
   })
 
-  test("an expired credential is rotated", async () => {
+  test("an expired credential rotates in the background without blocking the caller", async () => {
+    // Provider load calls this on every startup and reload. It must never wait on the gateway.
     mockGateway(() => ok({ ...REGISTERED, expires_at: new Date(Date.now() - 1000).toISOString() }))
     await FreeTier.register()
 
     spyOn(global, "fetch").mockRestore()
-    const gateway = mockGateway(() => ok({ ...REGISTERED, api_key: "sk-free-rotated" }))
-    const creds = await FreeTier.refreshIfNeeded()
+    let release: (() => void) | undefined
+    const gateway = mockGateway(async () => {
+      await new Promise<void>((resolve) => (release = resolve))
+      return ok({ ...REGISTERED, api_key: "sk-free-rotated" })
+    })
 
-    expect(gateway.calls).toHaveLength(1)
-    expect(creds?.apiKey).toBe("sk-free-rotated")
+    const creds = await FreeTier.refreshIfNeeded()
+    // Returned while the gateway request is still hanging — that is the property under test.
+    expect(creds?.apiKey).toBe(REGISTERED.api_key)
+
+    await wait(() => gateway.calls.length === 1)
+    release?.()
+    await wait(async () => (await FreeTier.credentials())?.apiKey === "sk-free-rotated")
+  })
+
+  test("an unparseable expiry rotates rather than pinning the credential forever", async () => {
+    mockGateway(() => ok({ ...REGISTERED, expires_at: "whenever" }))
+    await FreeTier.register()
+
+    spyOn(global, "fetch").mockRestore()
+    const gateway = mockGateway(() => ok({ ...REGISTERED, api_key: "sk-free-fixed" }))
+    await FreeTier.refreshIfNeeded()
+    await wait(() => gateway.calls.length === 1)
+    await wait(async () => (await FreeTier.credentials())?.apiKey === "sk-free-fixed")
   })
 
   test("concurrent registrations share one call so keys are not orphaned", async () => {
@@ -186,6 +233,8 @@ describe("silent rotation", () => {
     const creds = await FreeTier.refreshIfNeeded()
 
     expect(creds?.apiKey).toBe(REGISTERED.api_key)
+    // The background rejection must not escape as an unhandled rejection either.
+    await Bun.sleep(20)
   })
 })
 
@@ -239,6 +288,36 @@ describe("inference fetch", () => {
     expect(response.status).toBe(200)
     expect(sent).toEqual([`Bearer ${REGISTERED.api_key}`, "Bearer sk-free-fresh"])
     expect((await FreeTier.credentials())?.apiKey).toBe("sk-free-fresh")
+  })
+
+  test("a 401 racing another request's rotation reuses that key instead of minting one", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    let registrations = 0
+    const sent: (string | null)[] = []
+    spyOn(global, "fetch").mockImplementation((async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        registrations++
+        return ok({ ...REGISTERED, api_key: "sk-free-winner" })
+      }
+      const header = auth(init)
+      sent.push(header)
+      // The first request's key is stale; the winner's key works.
+      return new Response("", { status: header === "Bearer sk-free-winner" ? 200 : 401 })
+    }) as unknown as typeof fetch)
+
+    // First request rotates. Second starts with the same stale key but finds the new one stored.
+    const first = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+    expect(first.status).toBe(200)
+    expect(registrations).toBe(1)
+
+    const second = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+    expect(second.status).toBe(200)
+    // Still one: the second request must not have minted a second key.
+    expect(registrations).toBe(1)
   })
 
   test("a 401 that cannot be recovered is returned rather than throwing", async () => {

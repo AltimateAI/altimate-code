@@ -678,7 +678,11 @@ export namespace Server {
           // "temporarily unavailable" without parsing the message. Absent on a network failure.
           const status = err instanceof FreeTier.RegistrationError ? err.status : undefined
           log.error("free tier registration failed", { error: err })
-          return c.json({ ok: false, message, status }, 502)
+          // 200 with ok:false, not 5xx: the call to THIS server succeeded and is reporting an
+          // outcome. A non-2xx puts the body on the SDK client's `error` channel instead of
+          // `data`, where the caller would lose the status and report every rejection as a
+          // network failure.
+          return c.json({ ok: false, message, status })
         }
       })
       // altimate_change end

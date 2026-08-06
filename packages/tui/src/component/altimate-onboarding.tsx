@@ -387,7 +387,12 @@ async function registerFreeTier(sdk: ReturnType<typeof useSDK>): Promise<Registe
       body: {},
       headers: { "Content-Type": "application/json" },
     })
-    const data = response.data as { ok?: unknown; message?: unknown; status?: unknown } | undefined
+    // The route answers 200 with `ok:false` for a rejection, but read the error channel too: a
+    // non-2xx from anywhere else in the stack lands there, and reading only `data` would report
+    // every one of those as a network failure.
+    const data = (response.data ?? response.error) as
+      | { ok?: unknown; message?: unknown; status?: unknown }
+      | undefined
     if (data?.ok === true) return { ok: true }
     const status = typeof data?.status === "number" ? data.status : undefined
     return {
@@ -468,6 +473,11 @@ export function DialogFreeGeminiConfirm(props: {
       toast.show({ variant: "error", message: outcome.message })
       return
     }
+    // The user can escape while the request is in flight, and this continuation resumes into a
+    // dialog that is already gone. The credential is stored either way — they will find the model
+    // in the picker — but clearing a dialog we no longer own, and switching their model behind
+    // their back, are not ours to do any more.
+    if (decided) return
     decided = true
     // The provider only autoloads once the credential exists, so the running instance has to
     // re-resolve before the model is selectable.
