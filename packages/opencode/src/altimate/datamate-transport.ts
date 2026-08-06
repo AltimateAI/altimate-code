@@ -21,7 +21,26 @@ const MCP_SERVERS_KEYS = ["servers", "mcpServers"] as const
 
 export type DatamateTransport =
   | { type: "remote"; url: string }
-  | { type: "local"; command: string[] }
+  | { type: "local"; command: string[]; environment?: Record<string, string>; updatedAt?: string }
+
+/**
+ * Env block to carry over when spawning the datamate CLI from an IDE mcp.json
+ * entry, minus ALTIMATE_EXTENSION_RPC (the extension-private RPC socket path,
+ * which goes stale whenever the extension restarts and is re-resolved by the
+ * CLI itself). ELECTRON_RUN_AS_NODE must survive: on desktop editors the
+ * entry's command is the editor's Electron binary, and without the flag the
+ * spawn boots the editor GUI — which opens datamate-cli.js as a document in
+ * the IDE — instead of running it as a Node script.
+ */
+function extractSpawnEnvironment(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === "ALTIMATE_EXTENSION_RPC") continue
+    if (typeof value === "string") env[key] = value
+  }
+  return Object.keys(env).length > 0 ? env : undefined
+}
 
 /**
  * Parse a single mcp.json file and return the servers map, trying each of the
@@ -108,11 +127,21 @@ export async function readDatamateTransportFromIde(
         return { type: "remote", url: entry["url"] }
       }
 
-      // stdio entry — reuse the exact command + args the extension registered
+      // stdio entry — reuse the exact command + args + env the extension
+      // registered. Dropping env here regresses desktop editors: the entry's
+      // command is the editor's Electron binary and only runs as Node when
+      // ELECTRON_RUN_AS_NODE=1 is passed through.
       const cmd = typeof entry["command"] === "string" ? entry["command"] : undefined
       const args = Array.isArray(entry["args"]) ? (entry["args"] as string[]) : []
       if (cmd) {
-        return { type: "local", command: [cmd, ...args] }
+        const environment = extractSpawnEnvironment(entry["env"])
+        const updatedAt = typeof entry["updatedAt"] === "string" ? entry["updatedAt"] : undefined
+        return {
+          type: "local",
+          command: [cmd, ...args],
+          ...(environment ? { environment } : {}),
+          ...(updatedAt ? { updatedAt } : {}),
+        }
       }
 
       // Entry exists but has no usable command — treat as local marker
@@ -221,8 +250,7 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
 
             let newEntry: Record<string, unknown>
             if ("command" in datamateVscode) {
-              const env = datamateVscode["env"] as Record<string, string> | undefined
-              const { ALTIMATE_EXTENSION_RPC: _rpc, ...restEnv } = env ?? {}
+              const environment = extractSpawnEnvironment(datamateVscode["env"])
               const cmd =
                 typeof datamateVscode["command"] === "string"
                   ? (datamateVscode["command"] as string)
@@ -231,7 +259,7 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
                 ...preserved,
                 type: "local",
                 command: [cmd, ...((datamateVscode["args"] as string[]) ?? [])],
-                ...(Object.keys(restEnv).length > 0 ? { environment: restEnv } : {}),
+                ...(environment ? { environment } : {}),
                 updatedAt: vscodeUpdatedAt,
               }
             } else {

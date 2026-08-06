@@ -206,11 +206,17 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
       transport?.type === "remote"
         ? { type: "remote" as const, url: transport.url }
         : transport?.type === "local"
-          // Use the exact command from the IDE config so we reuse the process the
-          // extension manages rather than spawning a second one. The extension and
-          // altimate-code would otherwise maintain two separate stdio child processes
-          // connected to the same datamate binary, wasting resources.
-          ? { type: "local" as const, command: transport.command }
+          // Use the exact command + env from the IDE config so we reuse the process
+          // the extension manages rather than spawning a second one. The env block
+          // must be carried: on desktop editors the command is the editor's Electron
+          // binary, which only runs as Node when ELECTRON_RUN_AS_NODE=1 is set —
+          // spawned without it, the editor GUI boots and opens datamate-cli.js as a
+          // document instead.
+          ? {
+              type: "local" as const,
+              command: transport.command,
+              ...(transport.environment ? { environment: transport.environment } : {}),
+            }
           : AltimateApi.buildMcpConfig(creds!, args.datamate_id)
 
     const isGlobal = args.scope === "global"
@@ -258,12 +264,20 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         })
         await MCP.connect(DATAMATE_KEY)
       } else {
-        // Not in config yet — write to disk then connect
+        // Not in config yet — write to disk then connect. The persisted entry
+        // additionally carries the IDE entry's updatedAt (disk-only; the runtime
+        // config schema has no such field) so the mcp.json sync recognizes the
+        // entry as current instead of rewriting it on the next serve boot.
         log.info("handleAdd: adding new datamate entry", {
           serverName: DATAMATE_KEY,
           type: mcpConfig.type,
         })
-        await addMcpToConfig(DATAMATE_KEY, { ...mcpConfig, enabled: true }, configPath)
+        const diskEntry = {
+          ...mcpConfig,
+          enabled: true,
+          ...(transport?.type === "local" && transport.updatedAt ? { updatedAt: transport.updatedAt } : {}),
+        }
+        await addMcpToConfig(DATAMATE_KEY, diskEntry as Parameters<typeof addMcpToConfig>[1], configPath)
         await MCP.add(DATAMATE_KEY, mcpConfig)
       }
     } else {

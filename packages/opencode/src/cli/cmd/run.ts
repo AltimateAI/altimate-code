@@ -942,6 +942,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       return await execute(sdk)
     }
 
+    // altimate_change start — heal the datamate MCP entry before the session starts,
+    // mirroring cli/cmd/serve.ts: an entry persisted without its env block (e.g.
+    // missing ELECTRON_RUN_AS_NODE for an Electron command) would otherwise be
+    // re-spawned broken on every run invocation with no path to self-repair.
+    {
+      const { syncDatamateUrlFromVscodeMcp } = await import("../../altimate/datamate-transport")
+      await syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
+    }
+    // altimate_change end
     await bootstrap(process.cwd(), async () => {
       const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init)
