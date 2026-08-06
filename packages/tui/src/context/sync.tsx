@@ -33,6 +33,7 @@ import path from "path"
 import { useKV } from "./kv"
 // altimate_change start - yolo mode + smooth streaming
 import { Flag } from "@opencode-ai/core/flag/flag"
+import * as Yolo from "../util/yolo"
 // altimate_change end
 
 const emptyConsoleState: ConsoleState = {
@@ -77,6 +78,19 @@ export const {
       permission: {
         [sessionID: string]: PermissionRequest[]
       }
+      // altimate_change start - yolo mode: per-session override, keyed by ROOT session.
+      // Absent = inherit the process-wide Flag.ALTIMATE_CLI_YOLO default (set by --yolo);
+      // present = explicit user choice for this session, which can turn a globally
+      // enabled yolo back off. Deliberately in-memory only: yolo must never survive a
+      // restart, or resuming an old session would silently reinstate it.
+      yolo: {
+        [sessionID: string]: boolean
+      }
+      // Choice made on the welcome screen, before any session exists. Adopted by the
+      // first session created and then cleared, so it does NOT become a process-wide
+      // default that silently yolos every later session ("current session only").
+      yolo_pending: boolean | undefined
+      // altimate_change end
       question: {
         [sessionID: string]: QuestionRequest[]
       }
@@ -128,6 +142,9 @@ export const {
       status: "loading",
       agent: [],
       permission: {},
+      // altimate_change - yolo mode: per-session override map (see type above)
+      yolo: {},
+      yolo_pending: undefined,
       question: {},
       command: [],
       provider: [],
@@ -215,6 +232,30 @@ export const {
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
+    // altimate_change start - yolo mode scoping. The rules (root-session normalization
+    // so subagents inherit, and explicit-choice-beats---yolo) live in util/yolo.ts so
+    // they are unit-testable without a renderer; these are thin bindings to the store.
+    const parentOf = (sessionID: string) => result.session.get(sessionID)?.parentID
+
+    function rootSessionID(sessionID: string): string {
+      return Yolo.rootSessionID(sessionID, parentOf)
+    }
+
+    // A welcome-screen choice acts as the fallback until a session adopts it.
+    function yoloFallback(): boolean {
+      return store.yolo_pending ?? Flag.ALTIMATE_CLI_YOLO
+    }
+
+    function yoloEnabled(sessionID: string): boolean {
+      return Yolo.yoloEnabled({
+        sessionID,
+        overrides: store.yolo,
+        parentOf,
+        fallback: yoloFallback(),
+      })
+    }
+    // altimate_change end
+
     event.subscribe((event, { workspace }) => {
       switch (event.type) {
         case "server.instance.disposed":
@@ -237,8 +278,16 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
-          // altimate_change start - yolo mode: auto-approve without showing prompt
-          if (Flag.ALTIMATE_CLI_YOLO) {
+          // altimate_change start - yolo mode: auto-approve without showing prompt.
+          // Scoped to the request's root session so a subagent's own child session
+          // inherits the choice the user made on the conversation they can actually see.
+          //
+          // Safety note: this can only ever answer requests the SERVER already decided
+          // to ask about. Permission.ask (packages/opencode/src/permission/index.ts)
+          // evaluates the ruleset first and returns DeniedError without emitting any
+          // event for a "deny" match, so configured guardrails (DROP DATABASE, DROP
+          // SCHEMA, TRUNCATE) never reach this handler and cannot be auto-approved.
+          if (yoloEnabled(request.sessionID)) {
             void sdk.client.permission
               .reply({
                 requestID: request.id,
@@ -700,6 +749,34 @@ export const {
       get path() {
         return project.instance.path()
       },
+      // altimate_change start - yolo mode: per-session toggle surfaced to the TUI.
+      // Reads go through yoloEnabled() so callers get root-session semantics and the
+      // --yolo default for free; reactivity comes from the underlying store.
+      yolo: {
+        // sessionID is optional so the welcome screen (no session yet) can read and
+        // set the mode with the same API the session view uses.
+        enabled(sessionID?: string) {
+          if (!sessionID) return yoloFallback()
+          return yoloEnabled(sessionID)
+        },
+        set(sessionID: string | undefined, value: boolean) {
+          if (!sessionID) {
+            setStore("yolo_pending", value)
+            return
+          }
+          setStore("yolo", rootSessionID(sessionID), value)
+        },
+        // Hand a pre-session choice to the first session that appears, then clear it.
+        // Never overwrites an explicit choice already made for that session.
+        adopt(sessionID: string) {
+          const pending = store.yolo_pending
+          if (pending === undefined) return
+          const root = rootSessionID(sessionID)
+          if (store.yolo[root] === undefined) setStore("yolo", root, pending)
+          setStore("yolo_pending", undefined)
+        },
+      },
+      // altimate_change end
       session: {
         get(sessionID: string) {
           const match = search(store.session, sessionID, (s) => s.id)
