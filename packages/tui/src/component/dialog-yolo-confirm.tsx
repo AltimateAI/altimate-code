@@ -56,13 +56,19 @@ export function DialogYoloConfirm(props: { onChoose: (enable: boolean) => void }
       options[selected()].run()
       return
     }
+    // stopPropagation for consistency with the `return` branch above. The dialog blurs
+    // the focused renderable on open and only refocuses in a later tick, so a stray
+    // character cannot reach the prompt today — this keeps it that way if that ordering
+    // ever changes.
     if (evt.name === "y" && !evt.ctrl && !evt.meta) {
       evt.preventDefault()
+      evt.stopPropagation()
       run(true)
       return
     }
     if (evt.name === "n" && !evt.ctrl && !evt.meta) {
       evt.preventDefault()
+      evt.stopPropagation()
       run(false)
     }
   })

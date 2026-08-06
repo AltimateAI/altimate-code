@@ -214,6 +214,10 @@ describe("tui sync: yolo auto-approve", () => {
       await wait(() => pending(sync, ROOT).length === 1)
       sync.yolo.set(ROOT, true)
       await wait(() => replies.length === 1)
+      // Assert the behaviour in the test's name, not just that a reply went out: the
+      // prompt must actually leave the screen. autoApprove removes it optimistically on
+      // success, so this does not depend on the server's permission.replied event.
+      await wait(() => pending(sync, ROOT).length === 0)
     } finally {
       app.renderer.destroy()
       await tmp[Symbol.asyncDispose]()
