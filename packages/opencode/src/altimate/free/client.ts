@@ -104,6 +104,27 @@ export namespace FreeTier {
     return url.toString().replace(/\/+$/, "")
   }
 
+  /**
+   * Coerce the build's version string into the grammar the gateway accepts
+   * (`^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$`, so 32 characters at most).
+   *
+   * Release builds already conform — a tag with its leading `v` stripped. Other builds do not,
+   * and they are not hypothetical: CI's sanity build stamps `0.0.0-sanity-<40-char sha>`, which
+   * is 53 characters, and a build made from a branch rather than a tag carries the branch name,
+   * which in this repo contains slashes. Either one is a 422 from the gateway, surfaced to the
+   * user as a bare "could not set up the free model".
+   *
+   * Sanitising here rather than widening the gateway's rule: a client that can emit a 53-character
+   * version string is the defect, and the gateway is right to be strict about what it stores.
+   */
+  export function sanitizeCliVersion(raw: string): string {
+    const coerced = raw
+      .replace(/[^A-Za-z0-9._+-]/g, "-")
+      .replace(/^[^A-Za-z0-9]+/, "")
+      .slice(0, 32)
+    return coerced || "unknown"
+  }
+
   function describeFailure(status: number): string {
     if (status === 429) return "Too many sign-ups from this network right now. Try again later."
     if (status === 503) return "The free model is temporarily unavailable. Try again later."
@@ -137,7 +158,7 @@ export namespace FreeTier {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           install_secret_hash: hashInstallSecret(installSecret),
-          cli_version: Installation.VERSION,
+          cli_version: sanitizeCliVersion(Installation.VERSION),
         }),
         signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
       })

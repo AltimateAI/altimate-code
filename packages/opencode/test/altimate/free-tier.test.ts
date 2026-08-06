@@ -365,3 +365,45 @@ describe("inference fetch", () => {
     expect(registrations).toBe(0)
   })
 })
+
+describe("cli_version", () => {
+  // The gateway accepts ^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$ and 422s anything else. Release
+  // builds conform; other builds do not, and the two that matter are real: CI's sanity build
+  // (0.0.0-sanity-<40 char sha>, 53 chars) and a build stamped with a branch name, which in this
+  // repo contains slashes.
+  const GATEWAY_GRAMMAR = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/
+
+  test("release and dev versions pass through untouched", () => {
+    for (const version of ["1.4.2", "local", "0.0.0", "1.17.9-beta.3"]) {
+      expect(FreeTier.sanitizeCliVersion(version)).toBe(version)
+      expect(FreeTier.sanitizeCliVersion(version)).toMatch(GATEWAY_GRAMMAR)
+    }
+  })
+
+  test("the CI sanity version is truncated to something the gateway accepts", () => {
+    const sanity = "0.0.0-sanity-" + "a".repeat(40)
+    expect(sanity.length).toBe(53)
+    const sent = FreeTier.sanitizeCliVersion(sanity)
+    expect(sent).toMatch(GATEWAY_GRAMMAR)
+    expect(sent.length).toBe(32)
+  })
+
+  test("branch-stamped versions lose their slashes rather than being rejected", () => {
+    const sent = FreeTier.sanitizeCliVersion("upstream/merge-v1.17.9")
+    expect(sent).toMatch(GATEWAY_GRAMMAR)
+    expect(sent).not.toContain("/")
+  })
+
+  test("versions that start with punctuation, or are empty, still conform", () => {
+    expect(FreeTier.sanitizeCliVersion("-1.2.3")).toMatch(GATEWAY_GRAMMAR)
+    expect(FreeTier.sanitizeCliVersion("")).toBe("unknown")
+    expect(FreeTier.sanitizeCliVersion("---")).toBe("unknown")
+    expect(FreeTier.sanitizeCliVersion("   ")).toBe("unknown")
+  })
+
+  test("whatever the build stamps, the value actually sent conforms", async () => {
+    const gateway = mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    expect(String(gateway.calls[0]!.body["cli_version"])).toMatch(GATEWAY_GRAMMAR)
+  })
+})
