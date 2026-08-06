@@ -30,9 +30,9 @@ Managed LLM access with dynamic routing across Sonnet 4.6, Opus 4.6, GPT-5.4, GP
 ```json
 {
   "provider": {
-    "altimate": {}
+    "altimate-backend": {}
   },
-  "model": "altimate/auto"
+  "model": "altimate-backend/altimate-default"
 }
 ```
 
@@ -40,6 +40,27 @@ For pricing, security, and data handling details, see the [Altimate LLM Gateway 
 
 !!! tip "Automatic model selection"
     When Altimate credentials are configured and no model is explicitly chosen, the Altimate LLM Gateway is selected automatically. You can override this by setting `model` in your config or by restricting the `provider` section to specific providers only.
+
+## Gemini Flash (Free)
+
+A hosted Gemini Flash model we pay for. No signup, no API key: pick **Gemini Flash (Free)** in the model picker, accept the disclosure, and the CLI registers itself with our gateway and stores a short-lived key. The key rotates silently when it expires.
+
+```json
+{
+  "model": "altimate-free/gemini-flash-free"
+}
+```
+
+!!! warning "What you agree to"
+    Free model — requests and responses are logged and may be used to improve Altimate's products and services. Don't send secrets or confidential code. No signup required.
+
+Nothing is sent to the gateway until you accept that disclosure: the install identifier is created in the same step that registers it, so an install that never opts in never contacts the free-tier gateway at all. Usage is subject to per-install daily limits; when a limit is hit, requests are rejected until it resets.
+
+Point the CLI at a different gateway (for local development against your own deployment) with `ALTIMATE_FREE_GATEWAY_URL`:
+
+```bash
+ALTIMATE_FREE_GATEWAY_URL=http://localhost:4000 altimate-code
+```
 
 ## Anthropic
 
