@@ -21,7 +21,7 @@ export type OnboardingTelemetryEvent =
       name: "model_picker_shown"
       /** The picker also opens from /connect, from declining Big Pickle, and from the prompt
        *  gate — without this the event reads as a first-run impression every time. */
-      trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+      trigger: "first_run" | "connect_command" | "big_pickle_back" | "free_gemini_back" | "prompt_gate"
     }
   | {
       name: "provider_selected"
@@ -36,6 +36,13 @@ export type OnboardingTelemetryEvent =
     }
   | { name: "big_pickle_confirm_shown"; origin: "welcome" | "model" }
   | { name: "big_pickle_choice"; choice: "accept" | "cancel" }
+  | { name: "free_gemini_confirm_shown"; origin: "welcome" | "model" }
+  | { name: "free_gemini_choice"; choice: "accept" | "cancel" }
+  | {
+      name: "free_gemini_register_result"
+      /** Outcome of the consent-gated registration call. Never carries error text. */
+      result: "success" | "rate_limited" | "unavailable" | "network" | "error"
+    }
   | { name: "scan_gate_shown" }
   | { name: "scan_gate_choice"; choice: "scan" | "skip" | "dismissed" }
   | { name: "onboarding_completed" }

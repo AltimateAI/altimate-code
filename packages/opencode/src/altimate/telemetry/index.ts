@@ -788,7 +788,7 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         /** the picker mounts from several paths — without this the event over-counts first runs */
-        trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+        trigger: "first_run" | "connect_command" | "big_pickle_back" | "free_gemini_back" | "prompt_gate"
       }
     | {
         type: "provider_selected"
@@ -797,7 +797,15 @@ export namespace Telemetry {
         /** `search_all` means the user opened the full catalogue; the provider they then chose
          *  arrives as a second event with `via_search`. `other` is any provider outside the
          *  curated five. */
-        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all" | "other"
+        provider:
+          | "altimate_gateway"
+          | "altimate_free"
+          | "anthropic"
+          | "openai"
+          | "google"
+          | "big_pickle"
+          | "search_all"
+          | "other"
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */
@@ -817,6 +825,26 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         choice: "accept" | "cancel"
+      }
+    | {
+        type: "free_gemini_confirm_shown"
+        timestamp: number
+        session_id: string
+        origin: "welcome" | "model"
+      }
+    | {
+        type: "free_gemini_choice"
+        timestamp: number
+        session_id: string
+        choice: "accept" | "cancel"
+      }
+    | {
+        type: "free_gemini_register_result"
+        timestamp: number
+        session_id: string
+        /** Registration outcome after the user accepted. The failure values are the gateway's
+         *  documented rejections plus the two client-side cases; never error text. */
+        result: "success" | "rate_limited" | "unavailable" | "network" | "error"
       }
     | {
         type: "gateway_device_code_issued"
@@ -984,6 +1012,7 @@ export namespace Telemetry {
   // not on this list is reported as `other` with no raw value attached.
   const KNOWN_PROVIDER_IDS = new Set([
     "altimate-backend",
+    "altimate-free",
     "anthropic",
     "openai",
     "google",
@@ -1016,6 +1045,7 @@ export namespace Telemetry {
   // this function exists to enforce.
   const CURATED_PROVIDER_ENUM: Record<string, string> = Object.assign(Object.create(null), {
     "altimate-backend": "altimate_gateway",
+    "altimate-free": "altimate_free",
     anthropic: "anthropic",
     openai: "openai",
     google: "google",
