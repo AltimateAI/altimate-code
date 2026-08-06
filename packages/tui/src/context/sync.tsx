@@ -360,9 +360,10 @@ export const {
           void bootstrap()
           break
         case "permission.replied": {
-          // altimate_change — was inline; shares removePermission with the yolo
+          // altimate_change start — was inline; shares removePermission with the yolo
           // auto-approve path so the removal logic exists in one place.
           removePermission(event.properties.sessionID, event.properties.requestID)
+          // altimate_change end
           break
         }
 
