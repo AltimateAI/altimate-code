@@ -220,6 +220,32 @@ describe("tui sync: yolo auto-approve", () => {
     }
   })
 
+  // Regression: flushPendingPermissions does not remove requests from the store — that
+  // waits for the server's permission.replied event. Toggling off and on again, or two
+  // set() calls, would otherwise reply to the same request twice; the server rejects the
+  // second, autoApprove misreads the rejection as a lost reply, and a prompt reappears
+  // for a request that was already answered.
+  test("enabling twice does not reply to the same request twice", async () => {
+    const { app, emit, sync, replies, tmp } = await setup()
+    try {
+      emit(askEvent(ROOT, "perm_1"))
+      await wait(() => pending(sync, ROOT).length === 1)
+
+      sync.yolo.set(ROOT, true)
+      await wait(() => replies.length === 1)
+      // Second enable while the first reply is still settling.
+      sync.yolo.set(ROOT, true)
+      await Bun.sleep(300)
+
+      expect(replies).toHaveLength(1)
+      // And no phantom prompt got re-inserted.
+      expect(pending(sync, ROOT)).toHaveLength(0)
+    } finally {
+      app.renderer.destroy()
+      await tmp[Symbol.asyncDispose]()
+    }
+  })
+
   test("deleting a session drops its yolo override", async () => {
     const { app, emit, sync, tmp } = await setup()
     try {

@@ -282,6 +282,30 @@ export const {
       )
     }
 
+    // Remove a settled permission request from the store. Idempotent — both the
+    // `permission.replied` event and a successful auto-approve call it.
+    function removePermission(sessionID: string, requestID: string) {
+      const requests = store.permission[sessionID]
+      if (!requests?.length) return
+      const match = search(requests, requestID, (r) => r.id)
+      if (!match.found) return
+      setStore(
+        "permission",
+        sessionID,
+        produce((draft) => {
+          draft.splice(match.index, 1)
+        }),
+      )
+    }
+
+    // Requests currently being auto-approved. A reply is not removed from
+    // store.permission until the server's `permission.replied` event lands, so without
+    // this a second flush (toggle off then on again, or two set() calls) would reply to
+    // the same request twice. The second reply targets an already-settled request, the
+    // server rejects it, and the rejection would be misread as a lost reply — putting a
+    // prompt back on screen for something already answered.
+    const autoApproving = new Set<string>()
+
     // Auto-approve on behalf of the user. MUST fail loudly: the handler does not enqueue
     // the request, so if the reply is lost the server-side Deferred in Permission.ask
     // never settles and the agent hangs with nothing on screen explaining why.
@@ -289,12 +313,23 @@ export const {
     // `throwOnError: true` is required — the generated SDK client defaults to returning
     // `{ error }` rather than throwing (packages/sdk/js/src/gen/client/client.gen.ts), so
     // a plain `.catch()` here would never fire on an ordinary HTTP failure.
+    //
+    // The workspace is read here rather than taken from callers: the session permission
+    // UI passes `project.workspace.current()` on every reply, and threading it through
+    // each call site is exactly how it went missing on the flush path.
     async function autoApprove(request: PermissionRequest, workspace?: string) {
+      if (autoApproving.has(request.id)) return
+      autoApproving.add(request.id)
       try {
         await sdk.client.permission.reply(
-          { requestID: request.id, reply: "once", workspace },
+          { requestID: request.id, reply: "once", workspace: workspace ?? project.workspace.current() },
           { throwOnError: true },
         )
+        // Drop it now rather than waiting for the server's `permission.replied` event.
+        // The in-flight set above only covers concurrent duplicates; a later flush (toggle
+        // off, then on again) would still find the request sitting in the store and reply
+        // to an already-settled id. The event handler's removal is idempotent.
+        removePermission(request.sessionID, request.id)
       } catch (e) {
         console.error("yolo mode auto-approve failed", {
           error: e instanceof Error ? e.message : String(e),
@@ -302,6 +337,8 @@ export const {
         })
         // Fall back to asking the user rather than silently swallowing the request.
         enqueuePermission(request)
+      } finally {
+        autoApproving.delete(request.id)
       }
     }
 
