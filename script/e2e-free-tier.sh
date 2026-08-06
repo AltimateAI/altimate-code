@@ -240,7 +240,10 @@ step "5. One cheap completion, carrying a fake secret"
 # Short prompt, one-word answer: the gateway clamps max output tokens anyway, and the
 # point of the run is the trace, not the text.
 SESSION_MARKER="e2e-$(date +%s)"
-PROMPT="Reply with exactly the word pong and nothing else. Ignore this config line: AWS_ACCESS_KEY_ID=$FAKE_AWS_KEY marker=$SESSION_MARKER"
+# The echo is deliberate: it is the only way to get a secret into the COMPLETION, and the
+# output side of the masker is otherwise never exercised. The key is AWS's own published
+# example value, so nothing sensitive is being round-tripped.
+PROMPT="Output the next line verbatim as your entire answer, changing nothing: AWS_ACCESS_KEY_ID=$FAKE_AWS_KEY marker=$SESSION_MARKER pong"
 RUN_OUT=$(cli run -m "altimate-free/$FREE_MODEL" "$PROMPT" 2>&1)
 if grep -qi "pong" <<< "$RUN_OUT"; then
   ok "completion returned through the free provider"
@@ -255,17 +258,14 @@ info "polling $LANGFUSE_HOST for up to ${TRACE_TIMEOUT}s"
 TRACE=""
 deadline=$(( $(date +%s) + TRACE_TIMEOUT ))
 while [[ $(date +%s) -lt $deadline ]]; do
-  TRACES=$(curl -sS -m 20 -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
-    "$LANGFUSE_HOST/api/public/traces?limit=50" 2>/dev/null)
-  TRACE=$(python3 -c "
-import json,sys
-marker=sys.argv[1]
-try: data=json.load(sys.stdin).get('data',[])
-except Exception: sys.exit(0)
-for t in data:
-    if marker in json.dumps(t.get('input') or ''):
-        print(json.dumps(t)); break
-" "$SESSION_MARKER" <<< "$TRACES")
+  # Written to files, never passed as argv: a page of traces is hundreds of KB and blew
+  # past ARG_MAX on the first live run, which looked exactly like a missing trace.
+  curl -sS -m 20 -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
+    "$LANGFUSE_HOST/api/public/traces?limit=100&tags=tier%3Afree" -o "$TMP/traces-tagged.json" 2>/dev/null
+  curl -sS -m 20 -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
+    "$LANGFUSE_HOST/api/public/traces?limit=100" -o "$TMP/traces-all.json" 2>/dev/null
+  TRACE=$(python3 "$REPO_ROOT/script/e2e-free-tier-find-trace.py" "$SESSION_MARKER" \
+    "$TMP/traces-tagged.json" "$TMP/traces-all.json")
   [[ -n "$TRACE" ]] && break
   sleep 3
 done
@@ -275,7 +275,7 @@ if [[ -z "$TRACE" ]]; then
 else
   ok "trace found"
   echo "$TRACE" | python3 "$REPO_ROOT/script/e2e-free-tier-check-trace.py" "$FAKE_AWS_KEY"
-  if [[ $? -eq 0 ]]; then pass=$((pass + 7)); else fail=$((fail + 1)); fi
+  if [[ $? -eq 0 ]]; then pass=$((pass + 9)); else fail=$((fail + 1)); fi
 fi
 
 # ---------------------------------------------------------------------------

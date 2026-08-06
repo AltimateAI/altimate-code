@@ -64,15 +64,39 @@ def main():
     else:
         bad("policy: tag missing from tags %s" % (tags,))
 
-    blob = json.dumps({"input": trace.get("input"), "output": trace.get("output")})
-    if fake_key in blob:
-        bad("THE FAKE AWS KEY IS STORED IN THE TRACE — redaction did not fire")
+    if any(str(tag) == "redacted:aws_access_key" for tag in tags):
+        ok("tagged redacted:aws_access_key")
     else:
-        ok("the fake AWS key does not appear in the stored trace")
-    if "[REDACTED:aws_access_key]" in blob:
-        ok("typed redaction placeholder present")
+        bad("redacted:aws_access_key missing from tags %s" % (tags,))
+
+    stored_input = json.dumps(trace.get("input"))
+    stored_output = json.dumps(trace.get("output"))
+
+    if fake_key in stored_input:
+        bad("THE FAKE AWS KEY IS STORED IN THE TRACE INPUT — redaction did not fire")
     else:
-        bad("no [REDACTED:aws_access_key] placeholder in the trace")
+        ok("the fake AWS key does not appear in the stored input")
+    if "[REDACTED:aws_access_key]" in stored_input:
+        ok("typed placeholder present in the stored input")
+    else:
+        bad("no [REDACTED:aws_access_key] placeholder in the stored input")
+
+    # Three outcomes, not two, and only one of them is a failure.
+    #
+    # Whether the completion contains the secret at all is the model's choice, so a hard
+    # assertion here would fail intermittently for a reason that has nothing to do with the
+    # gateway — a flaky security test that people learn to re-run is worse than an honest
+    # advisory. The leak itself is still deterministic and still fails: if the raw key is in
+    # the stored output, masking demonstrably did not fire.
+    if fake_key in stored_output:
+        bad("THE FAKE AWS KEY IS STORED IN THE TRACE OUTPUT — output redaction did not fire")
+    elif "[REDACTED:aws_access_key]" in stored_output:
+        ok("typed placeholder present in the stored output")
+    else:
+        print(
+            "  \033[33mNOTE\033[0m the model did not echo the key, so output-side masking was "
+            "not exercised this run (no leak either — the key is absent from the output)"
+        )
 
     return 1 if failures else 0
 

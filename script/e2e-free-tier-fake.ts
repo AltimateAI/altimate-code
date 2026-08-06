@@ -25,6 +25,8 @@ const POLICY_VERSION = "dry-run-1"
 //   redaction  secrets reach the trace unmasked
 //   session    the client session id is dropped (the X-Session-Id regression)
 //   base_url   the issuer hands back a plaintext non-local URL
+//   output_redaction_probe  the model never echoes the secret, so the output-side check
+//                           has nothing to judge and must report INCONCLUSIVE, not PASS
 const BREAK = process.env["FAKE_BREAK"] ?? ""
 
 type Trace = {
@@ -105,6 +107,9 @@ const issuer = Bun.serve({
         .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
         .join("\n")
 
+      const lastLine = prompt.trim().split("\n").pop() ?? ""
+      const echoed = BREAK === "output_redaction_probe" ? "pong" : `${lastLine} pong`
+
       // Recorded AFTER the "provider call", exactly like the real logging hook: the model
       // saw the original text, the trace stores the masked copy.
       traces.unshift({
@@ -113,13 +118,20 @@ const issuer = Bun.serve({
         // An unqualified client value would let one install write into another's trace,
         // hence the namespace.
         sessionId: BREAK === "session" ? `free:${principal}:` : `free:${principal}:${clientSession}`,
-        tags: ["tier:free", `policy:${POLICY_VERSION}`],
+        tags: [
+          "tier:free",
+          `policy:${POLICY_VERSION}`,
+          "cli:dry-run",
+          ...(/AKIA[0-9A-Z]{16}/.test(prompt) && BREAK !== "redaction" ? ["redacted:aws_access_key"] : []),
+        ],
         input: redact(prompt),
-        output: redact("pong"),
+        // Echoes the prompt back so the dry run exercises output masking too, matching what
+        // the live model is asked to do.
+        output: redact(echoed),
       })
 
       const chunks = [
-        { choices: [{ delta: { role: "assistant", content: "pong" }, index: 0 }] },
+        { choices: [{ delta: { role: "assistant", content: echoed }, index: 0 }] },
         { choices: [{ delta: {}, index: 0, finish_reason: "stop" }] },
       ]
       const sse =
