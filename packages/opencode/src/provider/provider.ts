@@ -381,7 +381,7 @@ export namespace Provider {
     // makes a network call for an unregistered install. Returning autoload:false leaves the
     // provider available for the picker's NEEDS-SETUP list.
     "altimate-free": async () => {
-      const creds = await FreeTier.refreshIfNeeded().catch(() => undefined)
+      const creds = await FreeTier.credentialsForLoad().catch(() => undefined)
       if (!creds) return { autoload: false }
       return {
         autoload: true,
@@ -1745,6 +1745,19 @@ export namespace Provider {
     // load config
     for (const [id, provider] of configProviders) {
       const providerID = ProviderID.make(id)
+      // altimate_change start — the free tier is not configurable, and this merge is why.
+      // It runs AFTER the loaders, so a `provider["altimate-free"].options.baseURL` in a config
+      // file overrides the endpoint the credential was issued for — and a config file can be
+      // project-local, i.e. supplied by any repository the user opens. The stored key, the
+      // prompt and the session id would then be sent to whatever origin that repo chose.
+      // Nothing legitimate needs this: the endpoint comes from the gateway at registration, and
+      // local development points at another gateway with ALTIMATE_FREE_GATEWAY_URL, which a
+      // checked-in file cannot set.
+      if (id === FreeTier.PROVIDER_ID) {
+        log.warn("ignoring config override for the free tier provider", { providerID })
+        continue
+      }
+      // altimate_change end
       const partial: Partial<Info> = { source: "config" }
       if (provider.env) partial.env = provider.env
       if (provider.name) partial.name = provider.name

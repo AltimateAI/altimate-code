@@ -164,10 +164,13 @@ describe("registration", () => {
   })
 })
 
-describe("silent rotation", () => {
+describe("provider load", () => {
+  // The invariant the consent design rests on: nothing reaches the gateway except from an
+  // explicit user action. Provider load runs at startup and on every reload, so a network call
+  // from here means the process contacts the gateway before the user has done anything.
   test("an unregistered install never calls the gateway", async () => {
     const gateway = mockGateway(() => ok(REGISTERED))
-    expect(await FreeTier.refreshIfNeeded()).toBeUndefined()
+    expect(await FreeTier.credentialsForLoad()).toBeUndefined()
     expect(gateway.calls).toHaveLength(0)
   })
 
@@ -177,42 +180,34 @@ describe("silent rotation", () => {
 
     spyOn(global, "fetch").mockRestore()
     const gateway = mockGateway(() => ok(REGISTERED))
-    const creds = await FreeTier.refreshIfNeeded()
+    const creds = await FreeTier.credentialsForLoad()
 
     expect(gateway.calls).toHaveLength(0)
     expect(creds?.apiKey).toBe(REGISTERED.api_key)
   })
 
-  test("an expired credential rotates in the background without blocking the caller", async () => {
-    // Provider load calls this on every startup and reload. It must never wait on the gateway.
+  test("an EXPIRED credential is still returned without a network call", async () => {
+    // Previously this kicked off a background registration. "Expired" is not a user action, and a
+    // failing refresh repeated on every reload. Rotation belongs on the 401 path instead.
     mockGateway(() => ok({ ...REGISTERED, expires_at: new Date(Date.now() - 1000).toISOString() }))
     await FreeTier.register()
 
     spyOn(global, "fetch").mockRestore()
-    let release: (() => void) | undefined
-    const gateway = mockGateway(async () => {
-      await new Promise<void>((resolve) => (release = resolve))
-      return ok({ ...REGISTERED, api_key: "sk-free-rotated" })
-    })
+    const gateway = mockGateway(() => ok({ ...REGISTERED, api_key: "sk-free-rotated" }))
+    const creds = await FreeTier.credentialsForLoad()
 
-    const creds = await FreeTier.refreshIfNeeded()
-    // Returned while the gateway request is still hanging — that is the property under test.
+    expect(gateway.calls).toHaveLength(0)
     expect(creds?.apiKey).toBe(REGISTERED.api_key)
-
-    await wait(() => gateway.calls.length === 1)
-    release?.()
-    await wait(async () => (await FreeTier.credentials())?.apiKey === "sk-free-rotated")
   })
 
-  test("an unparseable expiry rotates rather than pinning the credential forever", async () => {
+  test("an unparseable expiry does not trigger a call either", async () => {
     mockGateway(() => ok({ ...REGISTERED, expires_at: "whenever" }))
     await FreeTier.register()
 
     spyOn(global, "fetch").mockRestore()
-    const gateway = mockGateway(() => ok({ ...REGISTERED, api_key: "sk-free-fixed" }))
-    await FreeTier.refreshIfNeeded()
-    await wait(() => gateway.calls.length === 1)
-    await wait(async () => (await FreeTier.credentials())?.apiKey === "sk-free-fixed")
+    const gateway = mockGateway(() => ok(REGISTERED))
+    await FreeTier.credentialsForLoad()
+    expect(gateway.calls).toHaveLength(0)
   })
 
   test("concurrent registrations share one call so keys are not orphaned", async () => {
@@ -221,20 +216,6 @@ describe("silent rotation", () => {
     expect(gateway.calls).toHaveLength(1)
     expect(a.apiKey).toBe(b.apiKey)
     expect(b.apiKey).toBe(c.apiKey)
-  })
-
-  test("a failed rotation keeps the existing credential instead of throwing", async () => {
-    // Provider load calls this; a gateway outage must not make the provider fail to resolve.
-    mockGateway(() => ok({ ...REGISTERED, expires_at: new Date(Date.now() - 1000).toISOString() }))
-    await FreeTier.register()
-
-    spyOn(global, "fetch").mockRestore()
-    mockGateway(() => new Response("", { status: 503 }))
-    const creds = await FreeTier.refreshIfNeeded()
-
-    expect(creds?.apiKey).toBe(REGISTERED.api_key)
-    // The background rejection must not escape as an unhandled rejection either.
-    await Bun.sleep(20)
   })
 })
 
@@ -503,5 +484,117 @@ describe("oversized requests", () => {
     expect(FreeTier.describeRequestTooLarge(JSON.stringify({ error: { code: "context_length_exceeded" } }))).toBeUndefined()
     expect(FreeTier.describeRequestTooLarge("not json")).toBeUndefined()
     expect(FreeTier.describeRequestTooLarge()).toBeUndefined()
+  })
+})
+
+describe("registration idempotency", () => {
+  test("a lost response reuses the same secret instead of minting a second principal", async () => {
+    // The gateway may have committed the registration before the response was lost. Retrying with
+    // a fresh secret would create a second budget principal — a duplicate identity, and a way to
+    // farm grants by interrupting registrations.
+    const first = mockGateway(() => {
+      throw new Error("connection reset after the gateway committed")
+    })
+    await expect(FreeTier.register()).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    const attemptedHash = first.calls[0]?.body["install_secret_hash"]
+
+    spyOn(global, "fetch").mockRestore()
+    const second = mockGateway(() => ok(REGISTERED))
+    const creds = await FreeTier.register()
+
+    expect(second.calls[0]!.body["install_secret_hash"]).toBe(attemptedHash)
+    expect(FreeTier.hashInstallSecret(creds.installSecret)).toBe(String(attemptedHash))
+  })
+
+  test("a pending secret does not make the install look registered", async () => {
+    mockGateway(() => new Response("", { status: 503 }))
+    await expect(FreeTier.register()).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    // A secret with no key is not a credential: the provider must stay unavailable, and the
+    // loader must not treat it as usable.
+    expect(await FreeTier.isRegistered()).toBe(false)
+    expect(await FreeTier.credentialsForLoad()).toBeUndefined()
+  })
+})
+
+describe("registration capability", () => {
+  // Registration mints an identity and spends our budget, so reaching the HTTP server must not be
+  // enough to call it. The capability exists in the launching process's environment, which the
+  // TUI inherits and a network caller does not.
+  const ORIGINAL = process.env["ALTIMATE_FREE_CONSENT_TOKEN"]
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env["ALTIMATE_FREE_CONSENT_TOKEN"]
+    else process.env["ALTIMATE_FREE_CONSENT_TOKEN"] = ORIGINAL
+  })
+
+  test("with no capability in the environment nothing is accepted", () => {
+    // This is the `serve` case: the route is simply unavailable rather than guessable.
+    delete process.env["ALTIMATE_FREE_CONSENT_TOKEN"]
+    expect(FreeTier.consentTokenValid("anything")).toBe(false)
+    expect(FreeTier.consentTokenValid("")).toBe(false)
+    expect(FreeTier.consentTokenValid(undefined)).toBe(false)
+  })
+
+  test("only the exact capability is accepted", () => {
+    const token = FreeTier.mintConsentToken()
+    process.env["ALTIMATE_FREE_CONSENT_TOKEN"] = token
+    expect(FreeTier.consentTokenValid(token)).toBe(true)
+    expect(FreeTier.consentTokenValid(token.slice(0, -1) + "0")).toBe(false)
+    expect(FreeTier.consentTokenValid(token.slice(0, -1))).toBe(false)
+    expect(FreeTier.consentTokenValid(token + "x")).toBe(false)
+    expect(FreeTier.consentTokenValid("")).toBe(false)
+    expect(FreeTier.consentTokenValid(null)).toBe(false)
+  })
+
+  test("the capability is unguessable and per-launch", () => {
+    const a = FreeTier.mintConsentToken()
+    const b = FreeTier.mintConsentToken()
+    expect(a).toMatch(/^[0-9a-f]{64}$/)
+    expect(a).not.toBe(b)
+  })
+})
+
+describe("real gateway 429 bodies", () => {
+  // Captured verbatim from the running gateway, not constructed. The first version of this
+  // handling assumed a Retry-After header and a single flavour of throttle; neither is what
+  // LiteLLM actually sends.
+  const TOKENS_429 = JSON.stringify({
+    error: {
+      message:
+        "Rate limit exceeded for api_key: e4ab7e652480c088469613d7f09fce37d978c5635c2c94fc8fe402c16c1342ac. Limit type: tokens. Current limit: 150000, Remaining: 39505. Limit resets at: 2126-08-06 13:57:48 UTC",
+      type: "throttling_error",
+      param: null,
+      code: "429",
+    },
+  })
+  const REQUESTS_429 = JSON.stringify({
+    error: {
+      message:
+        "Rate limit exceeded for api_key: e4ab7e65. Limit type: requests. Current limit: 10, Remaining: 0. Limit resets at: 2126-08-06 13:57:52 UTC",
+      type: "throttling_error",
+      param: null,
+      code: "429",
+    },
+  })
+
+  test("a token-ceiling throttle advises shortening, not retrying", () => {
+    // Retrying the same oversized request fails identically — the size is the problem.
+    const described = FreeTier.describeRateLimit({ body: TOKENS_429 })
+    expect(described).toContain("per-minute token limit")
+    expect(described).toContain("new session")
+    expect(described).not.toMatch(/Try again in \d+s/)
+  })
+
+  test("a request-rate throttle surfaces the reset time from the BODY, with no Retry-After", () => {
+    // The reset only exists in the message text; the header the first version relied on is absent.
+    const described = FreeTier.describeRateLimit({ body: REQUESTS_429 })
+    expect(described).toContain("Too many requests")
+    expect(described).toMatch(/Try again in \d+s/)
+  })
+
+  test("neither message leaks the key identifier from the gateway's text", () => {
+    // The gateway names the key hash in its message; our wording must not carry it to the user.
+    for (const body of [TOKENS_429, REQUESTS_429]) {
+      expect(FreeTier.describeRateLimit({ body })).not.toContain("e4ab7e65")
+    }
   })
 })

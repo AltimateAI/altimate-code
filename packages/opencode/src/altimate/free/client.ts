@@ -21,6 +21,39 @@ export namespace FreeTier {
   const REFRESH_SKEW_MS = 5 * 60 * 1000
   const REGISTER_TIMEOUT_MS = 15_000
 
+  /**
+   * Env var carrying the per-launch consent capability, and the header that presents it.
+   *
+   * Registration mints an identity and spends our budget, so it must not be callable by anything
+   * that merely reached the HTTP server. The TUI reaches its server through an in-process worker
+   * bridge and inherits this value from the parent's environment; an external HTTP caller does
+   * not. `serve` never sets it, which disables the route there entirely.
+   *
+   * This is a capability, not an authentication boundary: another process running as the same
+   * user can read the environment — but that process can already read auth.json, so this does not
+   * widen anything. What it closes is the gap where ANY reachable caller could mint an identity.
+   */
+  export const CONSENT_TOKEN_ENV = "ALTIMATE_FREE_CONSENT_TOKEN"
+  export const CONSENT_TOKEN_HEADER = "x-altimate-free-consent"
+
+  /** Mint the per-launch capability. Called once by the CLI before the server worker starts. */
+  export function mintConsentToken(): string {
+    return randomBytes(32).toString("hex")
+  }
+
+  /**
+   * Constant-time-ish check of a presented capability. Absent env means the route is disabled,
+   * which is the `serve` case and is deliberate.
+   */
+  export function consentTokenValid(presented: string | undefined | null): boolean {
+    const expected = process.env[CONSENT_TOKEN_ENV]
+    if (!expected || !presented) return false
+    if (presented.length !== expected.length) return false
+    let diff = 0
+    for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ presented.charCodeAt(i)
+    return diff === 0
+  }
+
   export function gatewayUrl(): string {
     const configured = process.env["ALTIMATE_FREE_GATEWAY_URL"]?.trim()
     return (configured || DEFAULT_GATEWAY_URL).replace(/\/+$/, "")
@@ -148,8 +181,23 @@ export namespace FreeTier {
     const detail = typeof parsed?.error?.message === "string" ? parsed.error.message : ""
 
     if (kind === "throttling_error") {
-      const seconds = Number(input.retryAfter)
-      const wait = Number.isFinite(seconds) && seconds > 0 ? ` Try again in ${Math.ceil(seconds)}s.` : " Try again shortly."
+      // Measured against the live gateway rather than assumed: LiteLLM sends no Retry-After here,
+      // it puts the reset in the message ("Limit resets at: 2026-08-06 13:57:48 UTC"), and it has
+      // two sub-flavours that need different advice.
+      const resetIn = secondsUntil(detail.match(/Limit resets at: ([\d-]+ [\d:]+) UTC/)?.[1])
+      const headerSeconds = Number(input.retryAfter)
+      const seconds = resetIn ?? (Number.isFinite(headerSeconds) && headerSeconds > 0 ? headerSeconds : undefined)
+      const wait = seconds ? ` Try again in ${Math.ceil(seconds)}s.` : " Try again shortly."
+
+      // "Limit type: tokens" means this one request exceeded the per-minute token ceiling, so an
+      // immediate identical retry fails identically — the size is the problem, not the timing.
+      // Reported as terminal with advice rather than retryable: the lead's standing instruction is
+      // to prefer an actionable message over a loop when the two cannot be told apart, and a
+      // shorter session is the only thing that reliably clears it. (Compaction would also clear
+      // it, which is the argument for classifying this as overflow instead — flagged, not taken.)
+      if (/Limit type: tokens/.test(detail)) {
+        return `This request is too large for the free model's per-minute token limit. Start a new session or shorten the context, then try again.`
+      }
       return `Too many requests to Gemini Flash (Free) right now.${wait}`
     }
 
@@ -209,6 +257,15 @@ export namespace FreeTier {
     return `This request is too large for Gemini Flash (Free)${numbers}. Start a new session, or switch to another model for this task.`
   }
 
+  /** Seconds from now until a "YYYY-MM-DD HH:MM:SS" UTC stamp, if it is in the future. */
+  function secondsUntil(stamp: string | undefined): number | undefined {
+    if (!stamp) return undefined
+    const at = Date.parse(stamp.replace(" ", "T") + "Z")
+    if (Number.isNaN(at)) return undefined
+    const seconds = (at - Date.now()) / 1000
+    return seconds > 0 ? seconds : undefined
+  }
+
   function describeFailure(status: number): string {
     if (status === 429) return "Too many sign-ups from this network right now. Try again later."
     if (status === 503) return "The free model is temporarily unavailable. Try again later."
@@ -230,9 +287,27 @@ export namespace FreeTier {
 
   let inflight: Promise<Credentials> | undefined
 
+  /**
+   * The install secret we should register with, minting one only if this machine has never had
+   * one. Reads the stored secret even when no key accompanies it, which is what makes a lost
+   * response recoverable.
+   */
+  async function installSecretForRegistration(): Promise<string> {
+    const auth = await Auth.get(PROVIDER_ID).catch(() => undefined)
+    const stored = auth?.type === "api" ? auth.metadata?.["install_secret"] : undefined
+    if (stored) return stored
+    const minted = mintInstallSecret()
+    // Persisted BEFORE the request, deliberately. The gateway derives its budget principal from
+    // this secret's hash, so if it commits a registration and the response is lost — a dropped
+    // connection, a timeout, a crash — the retry has to present the SAME hash. Minting a fresh
+    // one on retry silently creates a second principal with its own grant, which is both a
+    // duplicate identity and a way to farm budget by interrupting registrations.
+    await Auth.set(PROVIDER_ID, { type: "api", key: "", metadata: { install_secret: minted } })
+    return minted
+  }
+
   async function registerOnce(): Promise<Credentials> {
-    const existing = await credentials()
-    const installSecret = existing?.installSecret ?? mintInstallSecret()
+    const installSecret = await installSecretForRegistration()
     const url = `${gatewayUrl()}/register`
 
     let response: Response
@@ -285,21 +360,37 @@ export namespace FreeTier {
   }
 
   /**
-   * The credential to load the provider with.
+   * The credential to load the provider with. Reads, and only reads.
    *
-   * Rotation is started when the credential is at or near expiry but is deliberately NOT awaited:
-   * provider load runs at startup and on every reload, and blocking it on the gateway would put a
-   * remote service on the startup path — a slow or dead gateway would stall the CLI for the
-   * registration timeout, repeatedly. The current credential is returned immediately; if it has
-   * genuinely lapsed, the 401 path in authorizedFetch rotates and retries the request itself.
+   * An earlier version kicked off a background rotation here when the credential looked expired.
+   * That was still a network call originating from provider load, which happens at startup and on
+   * every reload — so a stale credential meant the process contacted the gateway before the user
+   * did anything, and a failing refresh repeated it on each reload. The invariant this design
+   * rests on is that nothing reaches the gateway except from an explicit user action, and
+   * "expired" is not a user action.
+   *
+   * Rotation happens where a request actually needs a working key: the 401 path in
+   * authorizedFetch.
    */
-  export async function refreshIfNeeded(): Promise<Credentials | undefined> {
-    const current = await credentials()
-    if (!current) return undefined
-    if (isExpired(current)) {
-      void register().catch((err) => log.warn("free tier background rotation failed", { error: err }))
+  export async function credentialsForLoad(): Promise<Credentials | undefined> {
+    return credentials()
+  }
+
+  function safeOrigin(value: string): string {
+    try {
+      return new URL(value).origin
+    } catch {
+      return "<unparseable>"
     }
-    return current
+  }
+
+  /** Whether a request URL points at the same origin the credential was issued for. */
+  function sameOrigin(target: string, registered: string): boolean {
+    try {
+      return new URL(target).origin === new URL(registered).origin
+    } catch {
+      return false
+    }
   }
 
   /** A body we can send a second time. Streams cannot be replayed, so a retry would send nothing. */
@@ -313,13 +404,27 @@ export namespace FreeTier {
    * Two jobs, both driven by the fact that keys are short-lived. It stamps the Authorization
    * header from the credential on disk rather than the one captured when the SDK was built, and
    * it re-registers once on a 401 — the gateway can revoke a key before its stated expiry (kill
-   * switch, principal revocation), which the expiry-based rotation in refreshIfNeeded() cannot
+   * switch, principal revocation), which the expiry check alone could never
    * see. Failure is non-fatal: the original 401 is returned and surfaces as a normal provider
    * error.
    */
   export async function authorizedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const current = await credentials()
     if (!current) return fetch(input, init)
+
+    // The key is bound to the origin that issued it. If the request is going anywhere else, the
+    // endpoint was redirected after the credential was loaded — a project-local config override
+    // is the concrete way that happens — and attaching the Authorization header would hand the
+    // key, the prompt and the session id to whoever chose that origin. Send it unauthenticated
+    // instead and let the far end reject it.
+    const target = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+    if (!sameOrigin(target, current.baseURL)) {
+      log.error("free tier request target does not match the registered origin; sending no credential", {
+        expected: safeOrigin(current.baseURL),
+        actual: safeOrigin(target),
+      })
+      return fetch(input, init)
+    }
 
     const send = (apiKey: string) => {
       const headers = new Headers(init?.headers)

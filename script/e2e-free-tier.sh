@@ -193,7 +193,13 @@ step "3. Consent → registration"
 # calls; the keystroke path (default No, nothing sent on cancel, one choice recorded) is
 # covered by packages/tui/test/cli/tui/dialog-free-gemini.test.tsx.
 SERVER_PORT=$(free_port)
-cli serve --port "$SERVER_PORT" > "$TMP/server.log" 2>&1 &
+# The route now requires a per-launch capability that the CLI puts in its own environment and the
+# disclosure dialog presents. `serve` deliberately does not mint one, so the harness plays the part
+# of the consenting client: it mints a capability, hands it to the server it starts, and presents
+# it on the call. A caller that cannot do both — anything reaching the port from outside — is
+# refused, which is the property being preserved.
+CONSENT_TOKEN=$(python3 -c "import secrets;print(secrets.token_hex(32))")
+ALTIMATE_FREE_CONSENT_TOKEN="$CONSENT_TOKEN" cli serve --port "$SERVER_PORT" > "$TMP/server.log" 2>&1 &
 PIDS+=("$!")
 SERVER_UP=0
 for _ in $(seq 1 100); do
@@ -205,8 +211,15 @@ if [[ $SERVER_UP -eq 0 ]]; then
   die "altimate-code server did not come up on :$SERVER_PORT"
 fi
 
-REG=$(curl -sS -m 60 -X POST "http://localhost:$SERVER_PORT/altimate/free/register" \
+# Negative check first: without the capability the route must refuse, even on the loopback port.
+UNAUTH_CODE=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -X POST "http://localhost:$SERVER_PORT/altimate/free/register" \
   -H 'Content-Type: application/json' -d '{}')
+[[ "$UNAUTH_CODE" == "403" ]] \
+  && ok "registration refuses a caller with no consent capability (HTTP 403)" \
+  || bad "expected 403 without a capability, got $UNAUTH_CODE"
+
+REG=$(curl -sS -m 60 -X POST "http://localhost:$SERVER_PORT/altimate/free/register" \
+  -H 'Content-Type: application/json' -H "x-altimate-free-consent: $CONSENT_TOKEN" -d '{}')
 REG_OK=$(echo "$REG" | pyget "['ok']")
 if [[ "$REG_OK" == "True" ]]; then
   ok "registration succeeded through the server route"

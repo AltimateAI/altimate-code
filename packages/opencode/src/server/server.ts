@@ -669,6 +669,15 @@ export namespace Server {
       // of the disclosure dialog, which is what keeps the identifier off the wire until the user
       // has consented.
       .post("/altimate/free/register", async (c) => {
+        // Registration mints an identity and spends our budget. Without this, anything that could
+        // reach the server could mint one — and `serve`/`--port` puts that beyond the local
+        // process. The capability lives in the launching process's environment, which the TUI
+        // inherits and a network caller does not; `serve` never sets it, so the route is simply
+        // unavailable there.
+        if (!FreeTier.consentTokenValid(c.req.header(FreeTier.CONSENT_TOKEN_HEADER))) {
+          log.warn("rejected free tier registration without a consent capability")
+          return c.json({ ok: false, message: "Registration is only available from the interactive UI." }, 403)
+        }
         try {
           await FreeTier.register()
           return c.json({ ok: true })

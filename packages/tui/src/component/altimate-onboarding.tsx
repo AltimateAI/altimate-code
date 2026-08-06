@@ -382,10 +382,16 @@ async function registerFreeTier(sdk: ReturnType<typeof useSDK>): Promise<Registe
   const raw = (sdk.client as unknown as { client?: RawSdkClient }).client
   if (!raw) return { ok: false, result: "error", message: REGISTER_FAILURE_MESSAGE }
   try {
+    // Presents the per-launch capability the CLI put in this process's environment. The route
+    // mints an identity, so it refuses callers that cannot show this — which is every caller
+    // that merely reached the server over the network.
     const response = await raw.post({
       url: "/altimate/free/register",
       body: {},
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-altimate-free-consent": globalThis.process?.env?.["ALTIMATE_FREE_CONSENT_TOKEN"] ?? "",
+      },
     })
     // The route answers 200 with `ok:false` for a rejection, but read the error channel too: a
     // non-2xx from anywhere else in the stack lands there, and reading only `data` would report
