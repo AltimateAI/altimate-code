@@ -12,6 +12,10 @@ import { useKeyboard } from "@opentui/solid"
 import { createDialogProviderOptions } from "./dialog-provider"
 import { DialogModel } from "./dialog-model"
 import { useConnected } from "./use-connected"
+// altimate_change — free-tier registration is an opencode-side action reached over the fork
+// server endpoint; the toast surfaces failures that would otherwise be invisible.
+import { useSDK } from "../context/sdk"
+import { useToast } from "../ui/toast"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 
@@ -103,7 +107,7 @@ export function DialogModelWelcome(props: {
   // declining Big Pickle, and from the prompt gate, so without this every impression would read
   // as a fresh first run. Defaults to the /connect case since that is the only caller that does
   // not pass one explicitly.
-  trigger?: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+  trigger?: "first_run" | "connect_command" | "big_pickle_back" | "free_gemini_back" | "prompt_gate"
 }) {
   const { theme } = useTheme()
   const dialog = useDialog()
@@ -135,6 +139,11 @@ export function DialogModelWelcome(props: {
 
   function chooseBigPickle(): boolean {
     dialog.replace(() => <DialogBigPickleConfirm origin="welcome" />)
+    return true
+  }
+
+  function chooseFreeGemini(): boolean {
+    dialog.replace(() => <DialogFreeGeminiConfirm origin="welcome" />)
     return true
   }
 
@@ -173,6 +182,14 @@ export function DialogModelWelcome(props: {
       tone: "muted",
       providerID: "google",
       activate: () => connectProvider("google"),
+    },
+    {
+      name: "Gemini Flash (Free)",
+      note: "free, no signup · prompts are logged",
+      tone: "warning",
+      providerID: "altimate-free",
+      modelID: "gemini-flash-free",
+      activate: chooseFreeGemini,
     },
     {
       name: "Big Pickle",
@@ -226,10 +243,13 @@ export function DialogModelWelcome(props: {
       })
   }
 
-  // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
-  const COUNT = 6
+  // The last row is the search row (rendered below a divider); everything above it is a provider.
+  // altimate_change — derived rather than hardcoded so adding a provider row (the free Gemini
+  // Flash entry) cannot silently strand the search row outside the keyboard cycle.
+  const searchIndex = createMemo(() => rows().length - 1)
   function move(direction: number) {
-    setSelected((prev) => (prev + direction + COUNT) % COUNT)
+    const count = rows().length
+    setSelected((prev) => (prev + direction + count) % count)
   }
 
   useKeyboard((evt) => {
@@ -246,7 +266,7 @@ export function DialogModelWelcome(props: {
       evt.preventDefault()
       // altimate_change — the "/" shortcut is the same intent as the "Search all providers…"
       // row, so it routes through the same guarded path.
-      activateRow(rows()[5])
+      activateRow(rows()[searchIndex()])
     }
   })
 
@@ -319,14 +339,219 @@ export function DialogModelWelcome(props: {
           <span style={{ fg: theme.textMuted }}> — you can change this anytime with /model</span>
         </text>
         <box gap={0}>
-          <For each={rows().slice(0, 5)}>{(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}</For>
+          <For each={rows().slice(0, searchIndex())}>
+            {(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}
+          </For>
         </box>
         <box border={["top"]} borderColor={theme.border} />
-        <Row row={rows()[5]} index={5} onActivate={activateRow} />
+        <Row row={rows()[searchIndex()]} index={searchIndex()} onActivate={activateRow} />
       </box>
     </box>
   )
 }
+
+// altimate_change start — free Gemini Flash interstitial.
+//
+// The disclosure below is the consent gate for the whole free tier: no install identifier is
+// minted and nothing is sent to the gateway until `yes()` runs, so this text is on screen before
+// the first network call. The wording is fixed — it is the notice users are shown about payload
+// logging — and a test pins it.
+export const FREE_GEMINI_DISCLOSURE =
+  "Free model — requests and responses are logged and may be used to improve Altimate's products and services. Don't send secrets or confidential code. No signup required."
+
+type RawSdkClient = {
+  post(options: {
+    url: string
+    body?: unknown
+    headers?: Record<string, string>
+  }): Promise<{ data?: unknown; error?: unknown }>
+}
+
+type RegisterOutcome =
+  | { ok: true }
+  | { ok: false; result: "rate_limited" | "unavailable" | "network" | "error"; message: string }
+
+const REGISTER_FAILURE_MESSAGE = "Could not set up the free model. Try again, or pick another provider."
+
+/**
+ * Registration runs opencode-side (POST /altimate/free/register) because the install secret and
+ * the credential it returns belong to the process that owns the auth store. The raw client is
+ * used for the same reason prompt auto-enhance does: fork endpoints are not in the generated SDK.
+ */
+async function registerFreeTier(sdk: ReturnType<typeof useSDK>): Promise<RegisterOutcome> {
+  const raw = (sdk.client as unknown as { client?: RawSdkClient }).client
+  if (!raw) return { ok: false, result: "error", message: REGISTER_FAILURE_MESSAGE }
+  try {
+    const response = await raw.post({
+      url: "/altimate/free/register",
+      body: {},
+      headers: { "Content-Type": "application/json" },
+    })
+    const data = response.data as { ok?: unknown; message?: unknown; status?: unknown } | undefined
+    if (data?.ok === true) return { ok: true }
+    const status = typeof data?.status === "number" ? data.status : undefined
+    return {
+      ok: false,
+      result: status === 429 ? "rate_limited" : status === 503 ? "unavailable" : status ? "error" : "network",
+      message: typeof data?.message === "string" ? data.message : REGISTER_FAILURE_MESSAGE,
+    }
+  } catch {
+    return { ok: false, result: "network", message: REGISTER_FAILURE_MESSAGE }
+  }
+}
+
+export function DialogFreeGeminiConfirm(props: {
+  origin: "welcome" | "model"
+  /** Carried so declining returns to the catalogue the user actually came through. */
+  viaSearch?: boolean
+}) {
+  const { theme } = useTheme()
+  const dialog = useDialog()
+  const local = useLocal()
+  const sdk = useSDK()
+  const toast = useToast()
+  const [selected, setSelected] = createSignal(0) // 0 = No (default)
+  const [busy, setBusy] = createSignal(false)
+  const [error, setError] = createSignal<string | null>(null)
+  const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
+  let decided = false
+
+  onMount(() => {
+    if (firstRunActive()) trackOnboarding({ name: "free_gemini_confirm_shown", origin: props.origin })
+  })
+  // Escape and click-away are handled by DialogProvider and never reach the key handler below, so
+  // cleanup is the only place that sees every non-y/n dismissal.
+  onCleanup(() => {
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: "cancel" })
+  })
+
+  function no() {
+    if (decided || busy()) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: "cancel" })
+    dialog.replace(() =>
+      props.origin === "welcome" ? (
+        <DialogModelWelcome trigger="free_gemini_back" />
+      ) : (
+        <DialogModel viaSearch={props.viaSearch} />
+      ),
+    )
+  }
+
+  async function yes() {
+    if (decided || busy()) return
+    // Not `decided` yet: a failed registration leaves the dialog open so the user can retry, and
+    // the cleanup emit must not fire a `cancel` on top of the accept once they do close it.
+    if (firstRunActive()) trackOnboarding({ name: "free_gemini_choice", choice: "accept" })
+    setError(null)
+    setBusy(true)
+    const outcome = await registerFreeTier(sdk)
+    setBusy(false)
+    if (firstRunActive())
+      trackOnboarding({
+        name: "free_gemini_register_result",
+        result: outcome.ok ? "success" : outcome.result,
+      })
+    if (!outcome.ok) {
+      setError(outcome.message)
+      toast.show({ variant: "error", message: outcome.message })
+      return
+    }
+    decided = true
+    // The provider only autoloads once the credential exists, so the running instance has to
+    // re-resolve before the model is selectable.
+    await sdk.client.instance.dispose().catch(() => {})
+    dialog.clear()
+    local.model.set({ providerID: "altimate-free", modelID: "gemini-flash-free" }, { recent: true })
+    markSetupComplete()
+  }
+
+  const options = [
+    { label: "No — pick something else", hint: "(default)", run: no },
+    { label: "Yes — use Gemini Flash (Free)", hint: "", run: () => void yes() },
+  ]
+
+  useKeyboard((evt) => {
+    if (busy()) return
+    if (evt.name === "up" || evt.name === "down") {
+      setSelected((prev) => (prev + 1) % 2)
+      evt.preventDefault()
+      return
+    }
+    if (evt.name === "return") {
+      evt.preventDefault()
+      evt.stopPropagation()
+      options[selected()].run()
+      return
+    }
+    if (evt.name === "y" && !evt.ctrl && !evt.meta) {
+      evt.preventDefault()
+      void yes()
+      return
+    }
+    if (evt.name === "n" && !evt.ctrl && !evt.meta) {
+      evt.preventDefault()
+      no()
+    }
+  })
+
+  const selFg = selectedForeground(theme)
+  const transparent = RGBA.fromInts(0, 0, 0, 0)
+
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <box flexDirection="row" justifyContent="space-between">
+        <text attributes={TextAttributes.BOLD} fg={theme.text}>
+          Gemini Flash (Free)
+        </text>
+        <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+          esc
+        </text>
+      </box>
+      <text fg={theme.textMuted} wrapMode="word" width="100%">
+        {FREE_GEMINI_DISCLOSURE}
+      </text>
+      <Show when={error()}>
+        <text fg={theme.error} wrapMode="word" width="100%">
+          {error()!}
+        </text>
+      </Show>
+      <Show when={busy()}>
+        <text fg={theme.textMuted}>Setting up…</text>
+      </Show>
+      <box>
+        <For each={options}>
+          {(option, index) => (
+            <box flexDirection="row" gap={1} onMouseMove={() => setSelected(index())} onMouseUp={() => option.run()}>
+              <text flexShrink={0} fg={theme.primary}>
+                {selected() === index() ? "›" : " "}
+              </text>
+              <box
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={selected() === index() ? theme.primary : transparent}
+              >
+                <text
+                  fg={selected() === index() ? selFg : theme.text}
+                  attributes={selected() === index() ? TextAttributes.BOLD : undefined}
+                >
+                  {option.label}
+                </text>
+              </box>
+              <Show when={option.hint}>
+                <text fg={theme.textMuted}>{option.hint}</text>
+              </Show>
+            </box>
+          )}
+        </For>
+      </box>
+    </box>
+  )
+}
+// altimate_change end
 
 // Big Pickle interstitial — one confirm, default No. Custom component (not
 // DialogSelect) so the full warning wraps instead of clipping; y/n keys work,

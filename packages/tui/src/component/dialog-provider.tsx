@@ -18,18 +18,18 @@ import { useClipboard } from "../context/clipboard"
 import { useLocal } from "../context/local"
 // altimate_change — mark first-run setup complete once the gateway sign-in succeeds
 // (used by AutoMethod below); flips useReady() so the first-run chat lock lifts.
-import { markSetupComplete, clearFirstRunActive } from "./altimate-onboarding"
+import { markSetupComplete, clearFirstRunActive, DialogFreeGeminiConfirm } from "./altimate-onboarding"
 
 export const PROVIDER_PRIORITY: Record<string, number> = {
   // altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
   // recommended default first; the BYOK providers rank next; OpenCode Zen loses
-  // its "Recommended" tag and drops below. (Big Pickle occupies priority 4, injected
-  // by dialog-model between Google and Zen.)
+  // its "Recommended" tag and drops below. Slot 4 is the free Gemini Flash tier;
+  // Big Pickle is injected by dialog-model just above Zen, i.e. below it.
   "altimate-backend": 0,
   anthropic: 1,
   openai: 2,
   google: 3,
-  // 4 reserved for Big Pickle (see dialog-model)
+  "altimate-free": 4,
   opencode: 5,
   "opencode-go": 6,
   "github-copilot": 7,
@@ -74,11 +74,17 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
       map((provider) => ({
         type: "provider" as const,
         // altimate_change start — brand the gateway entry + relabel priorities
-        title: provider.id === "altimate-backend" ? "Altimate LLM Gateway" : provider.name,
+        title:
+          provider.id === "altimate-backend"
+            ? "Altimate LLM Gateway"
+            : provider.id === "altimate-free"
+              ? "Gemini Flash (Free)"
+              : provider.name,
         value: provider.id,
         providerID: provider.id,
         description: {
           "altimate-backend": "Recommended · best tool-calling · 10M free tokens",
+          "altimate-free": "Gemini Flash — free, no signup",
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
@@ -169,6 +175,15 @@ export function createDialogProviderOptions() {
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
           async onSelect() {
             if (consoleManaged) return
+
+            // altimate_change start — the free tier has no credential to enter. Its disclosure
+            // interstitial IS the setup flow, and it registers only if the user accepts; falling
+            // through would put an API-key prompt in front of a no-signup model.
+            if (providerID === "altimate-free") {
+              dialog.replace(() => <DialogFreeGeminiConfirm origin="model" />)
+              return
+            }
+            // altimate_change end
 
             const methods = sync.data.provider_auth[providerID] ?? [
               {

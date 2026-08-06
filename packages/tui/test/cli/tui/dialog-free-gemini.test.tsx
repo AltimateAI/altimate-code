@@ -1,0 +1,229 @@
+/** @jsxImportSource @opentui/solid */
+// altimate_change — consent gate for the free Gemini Flash tier.
+//
+// The load-bearing property is ORDER: the disclosure is on screen before anything identifying
+// the install reaches the gateway. Registration happens opencode-side over
+// POST /altimate/free/register, so "did we call the gateway" is observable here as "did the TUI
+// hit that endpoint" — and it must not, until the user says yes.
+import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
+import { testRender, useRenderer } from "@opentui/solid"
+import { expect, test } from "bun:test"
+import { onCleanup } from "solid-js"
+import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import { TestTuiContexts } from "../../fixture/tui-environment"
+import { createEventSource, createFetch, directory, json } from "../../fixture/tui-sdk"
+import type { OnboardingTelemetryEvent } from "../../../src/context/onboarding-telemetry"
+
+async function wait(fn: () => boolean, timeout = 2000) {
+  const start = Date.now()
+  while (!fn()) {
+    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
+    await Bun.sleep(10)
+  }
+}
+
+const REGISTER_PATH = "/altimate/free/register"
+
+async function mountConfirm({ register = json({ ok: true }) }: { register?: Response | (() => Response) } = {}) {
+  const [
+    { DialogProvider },
+    { DialogFreeGeminiConfirm, FREE_GEMINI_DISCLOSURE, resetSetupComplete, markFirstRunActive },
+    { OnboardingTelemetryProvider },
+    { ArgsProvider },
+    { KVProvider },
+    { ThemeProvider },
+    { TuiConfigProvider },
+    { ToastProvider },
+    { SDKProvider },
+    { ProjectProvider },
+    { SyncProvider },
+    { LocalProvider },
+    { OpencodeKeymapProvider, registerOpencodeKeymap },
+    { ExitProvider },
+    { RouteProvider },
+  ] = await Promise.all([
+    import("../../../src/ui/dialog"),
+    import("../../../src/component/altimate-onboarding"),
+    import("../../../src/context/onboarding-telemetry"),
+    import("../../../src/context/args"),
+    import("../../../src/context/kv"),
+    import("../../../src/context/theme"),
+    import("../../../src/config"),
+    import("../../../src/ui/toast"),
+    import("../../../src/context/sdk"),
+    import("../../../src/context/project"),
+    import("../../../src/context/sync"),
+    import("../../../src/context/local"),
+    import("../../../src/keymap"),
+    import("../../../src/context/exit"),
+    import("../../../src/context/route"),
+  ])
+
+  resetSetupComplete()
+  markFirstRunActive()
+
+  const events: OnboardingTelemetryEvent[] = []
+  const requests: string[] = []
+
+  const inner = createFetch((url) => {
+    if (url.pathname === REGISTER_PATH) return typeof register === "function" ? register() : register
+    if (url.pathname === "/instance/dispose") return json({})
+    if (url.pathname === "/provider")
+      return json({
+        all: [{ id: "altimate-free", name: "Altimate Free", models: {}, env: [] }],
+        default: {},
+        connected: [],
+      })
+    return undefined
+  })
+  // Wrapped so requests the shared fixture answers itself are recorded too — the assertion that
+  // matters is a negative one, and it has to see every request the dialog made.
+  const fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    requests.push(new URL(input instanceof Request ? input.url : String(input)).pathname)
+    return inner.fetch(input, init)
+  }) as typeof globalThis.fetch
+
+  const source = createEventSource()
+
+  function Harness() {
+    const renderer = useRenderer()
+    const keymap = createDefaultOpenTuiKeymap(renderer)
+    const resolvedConfig = createTuiResolvedConfig({ leader_timeout: 1000 })
+    const off = registerOpencodeKeymap(keymap, renderer, resolvedConfig)
+    onCleanup(off)
+
+    return (
+      <TestTuiContexts>
+        <ExitProvider exit={() => {}}>
+          <OpencodeKeymapProvider keymap={keymap}>
+            <TuiConfigProvider config={resolvedConfig}>
+              <ArgsProvider>
+                <KVProvider>
+                  <ToastProvider>
+                    <RouteProvider>
+                      <SDKProvider url="http://test" directory={directory} fetch={fetch} events={source.source}>
+                        <ProjectProvider>
+                          <SyncProvider>
+                            <ThemeProvider mode="dark">
+                              <LocalProvider>
+                                <OnboardingTelemetryProvider
+                                  track={(e) => {
+                                    events.push(e)
+                                  }}
+                                >
+                                  <DialogProvider>
+                                    <DialogFreeGeminiConfirm origin="welcome" />
+                                  </DialogProvider>
+                                </OnboardingTelemetryProvider>
+                              </LocalProvider>
+                            </ThemeProvider>
+                          </SyncProvider>
+                        </ProjectProvider>
+                      </SDKProvider>
+                    </RouteProvider>
+                  </ToastProvider>
+                </KVProvider>
+              </ArgsProvider>
+            </TuiConfigProvider>
+          </OpencodeKeymapProvider>
+        </ExitProvider>
+      </TestTuiContexts>
+    )
+  }
+
+  const app = await testRender(() => <Harness />, { kittyKeyboard: true })
+  await app.renderOnce()
+  await Bun.sleep(50)
+  await app.renderOnce()
+  return {
+    app,
+    events,
+    requests,
+    disclosure: FREE_GEMINI_DISCLOSURE,
+    registrations: () => requests.filter((p) => p === REGISTER_PATH),
+    async cleanup() {
+      app.renderer.destroy()
+    },
+  }
+}
+
+test("the disclosure text is the exact notice users were promised", async () => {
+  const confirm = await mountConfirm()
+  try {
+    expect(confirm.disclosure).toBe(
+      "Free model — requests and responses are logged and may be used to improve Altimate's products and services. Don't send secrets or confidential code. No signup required.",
+    )
+  } finally {
+    await confirm.cleanup()
+  }
+})
+
+test("the dialog shows the disclosure and defaults to No, with nothing sent to the gateway", async () => {
+  const confirm = await mountConfirm()
+  try {
+    const frame = confirm.app.captureCharFrame()
+    expect(frame).toContain("Gemini Flash (Free)")
+    // Fragments rather than the whole sentence: the notice is word-wrapped across frame lines.
+    expect(frame).toContain("requests and responses are logged")
+    expect(frame).toContain("No signup required.")
+    expect(frame).toContain("No — pick something else")
+    expect(frame).toContain("(default)")
+
+    // The whole point of the consent gate.
+    expect(confirm.registrations()).toHaveLength(0)
+    expect(confirm.events).toEqual([{ name: "free_gemini_confirm_shown", origin: "welcome" }])
+  } finally {
+    await confirm.cleanup()
+  }
+})
+
+test("declining records a cancel and still sends nothing", async () => {
+  const confirm = await mountConfirm()
+  try {
+    confirm.app.mockInput.pressKey("n")
+    await wait(() => confirm.events.some((e) => e.name === "free_gemini_choice"))
+    await Bun.sleep(50)
+
+    expect(confirm.events).toContainEqual({ name: "free_gemini_choice", choice: "cancel" })
+    expect(confirm.registrations()).toHaveLength(0)
+  } finally {
+    await confirm.cleanup()
+  }
+})
+
+test("accepting registers exactly once and records the outcome", async () => {
+  const confirm = await mountConfirm()
+  try {
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.events.some((e) => e.name === "free_gemini_register_result"))
+    await Bun.sleep(50)
+
+    expect(confirm.events).toContainEqual({ name: "free_gemini_choice", choice: "accept" })
+    expect(confirm.events).toContainEqual({ name: "free_gemini_register_result", result: "success" })
+    expect(confirm.registrations()).toHaveLength(1)
+    // The accept path must not also emit the cleanup cancel when the dialog closes.
+    expect(confirm.events.filter((e) => e.name === "free_gemini_choice")).toHaveLength(1)
+  } finally {
+    await confirm.cleanup()
+  }
+})
+
+test("a rejected registration is visible and leaves the dialog open to retry", async () => {
+  const confirm = await mountConfirm({
+    register: () => json({ ok: false, message: "Too many sign-ups", status: 429 }),
+  })
+  try {
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.events.some((e) => e.name === "free_gemini_register_result"))
+    await confirm.app.renderOnce()
+
+    expect(confirm.events).toContainEqual({ name: "free_gemini_register_result", result: "rate_limited" })
+    // Failing silently would leave the user staring at an unchanged dialog.
+    expect(confirm.app.captureCharFrame()).toContain("Too many sign-ups")
+
+    confirm.app.mockInput.pressKey("y")
+    await wait(() => confirm.registrations().length === 2)
+  } finally {
+    await confirm.cleanup()
+  }
+})
