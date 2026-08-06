@@ -1132,10 +1132,11 @@ export function Prompt(props: PromptProps) {
       }
 
       sessionID = res.data.id
-      // altimate_change - yolo mode: bind a welcome-screen choice to the session it was
-      // actually meant for, at the moment of creation. Doing this on route change instead
-      // would also fire when resuming an existing conversation.
+      // altimate_change start — yolo mode: bind a welcome-screen choice to the session it
+      // was actually meant for, at the moment of creation. Doing this on route change
+      // instead would also fire when resuming an existing conversation.
       sync.yolo.adopt(sessionID)
+      // altimate_change end
     }
 
     // altimate_change start — restore auto-enhance-before-submit for normal prompts

@@ -135,10 +135,11 @@ const appBindingCommands = [
   "mcp.list",
   "agent.cycle",
   "agent.cycle.reverse",
-  // altimate_change - yolo mode toggle (ctrl+y). App-scope rather than session-scope so
-  // the shortcut and its hint exist on the welcome screen too, before the first prompt
+  // altimate_change start — yolo mode toggle (ctrl+y). App-scope rather than session-scope
+  // so the shortcut and its hint exist on the welcome screen too, before the first prompt
   // has created a session.
   "session.yolo.toggle",
+  // altimate_change end
   "variant.cycle",
   "variant.list",
   "provider.connect",

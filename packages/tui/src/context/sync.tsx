@@ -142,9 +142,10 @@ export const {
       status: "loading",
       agent: [],
       permission: {},
-      // altimate_change - yolo mode: per-session override map (see type above)
+      // altimate_change start — yolo mode: per-session override map (see type above)
       yolo: {},
       yolo_pending: undefined,
+      // altimate_change end
       question: {},
       command: [],
       provider: [],
@@ -351,8 +352,10 @@ export const {
             void autoApprove(request, workspace)
             break
           }
-          // altimate_change end
+          // Upstream inlined the store insertion here; extracted to enqueuePermission so
+          // the yolo path can fall back to it when an auto-approve reply fails.
           enqueuePermission(request)
+          // altimate_change end
           break
         }
 
@@ -412,16 +415,17 @@ export const {
               }),
             )
           }
-          // altimate_change - yolo mode: drop the override with the session. Harmless
-          // today (ids are unique, so a stale entry cannot be re-matched) but a stale
-          // `true` outliving its session is exactly what turns into a bug if this map
-          // ever gains persistence.
+          // altimate_change start — yolo mode: drop the override with the session.
+          // Harmless today (ids are unique, so a stale entry cannot be re-matched) but a
+          // stale `true` outliving its session is exactly what turns into a bug if this
+          // map ever gains persistence.
           setStore(
             "yolo",
             produce((draft) => {
               delete draft[event.properties.info.id]
             }),
           )
+          // altimate_change end
           break
         }
         case "session.updated": {
