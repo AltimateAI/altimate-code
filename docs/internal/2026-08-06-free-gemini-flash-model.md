@@ -53,6 +53,47 @@ multi-instance limits use `general_settings.coordination_redis` in v1.95.0, not
 a 53-char CI sanity string or a slash-bearing branch name, both of which the issuer's `cli_version`
 grammar rejects — now sanitized client-side (a client that can emit a 53-char version is the defect).
 
+### The cache-prefix finding (biggest result of the build)
+
+Measured against real Vertex, and it is not scoped to the free tier — **it makes every Gemini
+request through altimate-code up to 9.6× cheaper, including for users on their own API keys.**
+
+`SystemPrompt.environment()` (`packages/opencode/src/session/system.ts:71-100`) emits
+`Working directory`, `Workspace root folder`, `Is directory a git repo`, `Platform`, and
+`Today's date`, and `prompt.ts:1181` places it **first** in `input.system` — immediately after the
+static provider prompt and ahead of skills, instructions, and the ~99 tool schemas. Vertex does
+plain prefix matching and stops at the first differing byte, so:
+
+| Scenario | Cached tokens | $/req | Requests/day at $0.25 |
+|---|---:|---:|---:|
+| No hit | 0 | $0.03635 | 7.2 |
+| Cross-user hit, today's layout | 6,142 of ~121,000 (5.1%) | $0.03470 | 7.5 |
+| Full-prefix hit, after moving `<env>` to the tail | 120,804 (99.9%) | $0.00374 | **66.9** |
+
+The 6,142 figure is exactly the static head — proof of the mechanism, not an inference. Cross-user
+caching today is worth **4.6%**: noise. Moving three lines is worth the entire 9.6×.
+
+Two corrections this produced. An earlier "32% hit rate" was measured with a byte-identical payload,
+which silently modelled one user, one machine, one day — the cross-user number was always the one
+that mattered. And LiteLLM bills cached tokens correctly ($0.0038 hit vs $0.0364 miss, reconciling
+to Google's published $0.03/1M cached vs $0.30/1M input), so there is no billing bug: we are not
+over-debiting users.
+
+**Explicit caching works but is dangerous before the prefix is stable.** A cache_control marker got
+121,039 of 121,044 tokens cached, 3/3 requests, guaranteed rather than best-effort. But explicit
+cache storage is $1.00/1M tokens/hour — a fixed **$2.91/day per distinct prefix**. With today's
+per-user prefixes that is one cache per user: 200 users = **$582/day** to save $0.03 a request,
+because the cost scales with users while the saving scales with requests. Sequencing is therefore
+locked: stabilize the prefix → then gateway-injected explicit caching (with a hard cap on live
+caches, storage metered inside the $50/day ceiling, cache identity derived from a prefix hash so a
+release invalidates it automatically, and an alarm on sustained `cached_tokens` drop — a stale cache
+does not error, it silently costs 10×) → then set grant/ceiling/tpm against $0.0037/req.
+
+Open question before building explicit caching: post-fix, every user shares one prefix, so reuse
+frequency rises by roughly the user count and implicit hit rate may climb far above the same-user
+32%. If it lands north of ~80%, explicit caching's marginal value collapses and we should skip it
+along with its permanent operational complexity. Measure before committing.
+
 **Not done, and required before any public deploy:** everything in "Legal gate" below (unchanged and
 still blocking), plus the deploy gates in the gateway README — TLS ingress with a route allowlist and
 a whole-body size cap, >1 worker, Vertex-side quota + GCP Spend Cap Budget as the hard backstop, and
