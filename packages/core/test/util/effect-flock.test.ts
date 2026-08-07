@@ -388,4 +388,65 @@ describe("util.effect-flock", () => {
       }),
     30_000,
   )
+
+  // altimate_change start — release must surface a failed lock removal.
+  //
+  // `forceRemove` ignores every error, which is correct where it breaks ANOTHER process's stale
+  // lock, and wrong on the release path: an EPERM/EBUSY on the final rm left the lock directory
+  // in place while the caller was told the operation succeeded, blocking every other writer until
+  // the 60s stale timeout.
+  it.live(
+    "a lock directory that cannot be removed fails the release instead of reporting success",
+    Effect.gen(function* () {
+      // Root ignores directory permissions, so the removal would succeed and the test prove nothing.
+      if (process.platform === "win32" || process.getuid?.() === 0) return
+
+      const tmp = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "eflock-release-")))
+      const dir = path.join(tmp, "locks")
+      try {
+        const exit = yield* Effect.exit(
+          Effect.scoped(
+            Effect.gen(function* () {
+              const flock = yield* EffectFlock.Service
+              yield* flock.acquire("eflock:release-fail", dir)
+              // Make the lock directory's PARENT read-only so unlinking its contents fails with
+              // EPERM/EACCES. The lock itself is untouched and still perfectly valid.
+              yield* Effect.promise(() => fs.chmod(dir, 0o500))
+            }),
+          ),
+        )
+
+        // Previously this exited successfully with the lock still on disk.
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "").toContain("failed to remove lock directory")
+      } finally {
+        yield* Effect.promise(() => fs.chmod(dir, 0o700).catch(() => {}))
+        yield* Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))
+      }
+    }),
+    30_000,
+  )
+
+  it.live(
+    "a body failure still surfaces when release succeeds",
+    Effect.gen(function* () {
+      const tmp = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "eflock-body-")))
+      const dir = path.join(tmp, "locks")
+      try {
+        const flock = yield* EffectFlock.Service
+        const exit = yield* Effect.exit(
+          flock.withLock(Effect.fail(new Error("body blew up")), "eflock:body-fail", dir),
+        )
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "").toContain("body blew up")
+        // And the lock is gone, so the next writer is not stalled by a failed body.
+        expect(yield* Effect.promise(() => exists(lock(dir, "eflock:body-fail")))).toBe(false)
+      } finally {
+        yield* Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))
+      }
+    }),
+    30_000,
+  )
+  // altimate_change end
 })

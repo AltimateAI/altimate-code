@@ -12,12 +12,33 @@
 // `<state>/locks/<Hash.fast(key)>.lock`, so the same string is the same lock file regardless of
 // which API takes it. That is what lets the two implementations exclude each other.
 //
-// Keyed on the resolved path rather than a bare name so a process pointed at a different data
-// directory (tests, `OPENCODE_TEST_HOME`, an alternate XDG root) takes a different lock instead
-// of serializing against unrelated stores.
+// The key is the CANONICAL physical path, not merely an absolute one. `path.resolve` collapses
+// `..` and relative segments but leaves symlinks and filesystem casing alone, so two processes
+// reaching the same auth.json through a symlinked XDG data dir — or through a case-alias on
+// macOS/Windows — would hash different keys, take different locks, and reopen exactly the
+// lost-credential race the lock exists to close. `canonicalPath` is the same resolver the atomic
+// writer uses to pick its target, so the lock and the write can never disagree about identity.
+//
+// Resolved once at module load and memoised: the key must be stable for the process, and the
+// data directory does not move underneath a running CLI.
 import path from "path"
 import { Global } from "@opencode-ai/core/global"
+import { canonicalPath } from "@opencode-ai/core/util/atomic-write"
 
 export const AUTH_FILE = path.join(Global.Path.data, "auth.json")
 
-export const AUTH_LOCK_KEY = `auth-store:${path.resolve(AUTH_FILE)}`
+let cached: string | undefined
+
+/**
+ * Cross-process lock key for `auth.json`, keyed on its canonical physical path.
+ *
+ * Async because canonicalisation touches the filesystem. Falls back to the resolved-but-not-
+ * canonicalised path if that fails outright — a lock on a slightly-wrong key still serialises
+ * the common case, whereas throwing here would fail every credential write.
+ */
+export async function authLockKey(): Promise<string> {
+  if (cached) return cached
+  const canonical = await canonicalPath(AUTH_FILE).catch(() => path.resolve(AUTH_FILE))
+  cached = `auth-store:${canonical}`
+  return cached
+}

@@ -7,6 +7,45 @@
 // other. Keeping the sequence in one place is the point: two copies of a delicate
 // write/chmod/rename dance drift the moment one of them is fixed.
 import * as NFS from "fs/promises"
+import { dirname, basename, join } from "path"
+
+function errno(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null || !("code" in err)) return undefined
+  const code = (err as { code: unknown }).code
+  return typeof code === "string" ? code : undefined
+}
+
+/**
+ * The canonical physical path for `path`, resolving symlinks and filesystem casing.
+ *
+ * Shared by the atomic writer and the auth store's lock key so both agree on what "the same
+ * file" means. Two processes reaching one `auth.json` through different routes — a symlinked
+ * XDG data dir, a case-aliased path on macOS — must resolve to the same string, or they take
+ * different locks and the lost-credential race reopens.
+ *
+ * ENOENT is the one expected miss: the target does not exist yet (first credential write) or is
+ * a dangling link. Both are handled by canonicalising the PARENT and re-appending the basename,
+ * which still collapses symlinks and casing above the leaf. Every other errno — EACCES on an
+ * unreadable parent, ELOOP on a symlink cycle, EIO — is a real failure and propagates. Treating
+ * those as "no target" is what let the writer replace a valid symlink whose directory was
+ * temporarily unreadable, leaving the actual credential file stale.
+ */
+export async function canonicalPath(path: string): Promise<string> {
+  try {
+    return await NFS.realpath(path)
+  } catch (err) {
+    if (errno(err) !== "ENOENT") throw err
+  }
+  const parent = dirname(path)
+  try {
+    return join(await NFS.realpath(parent), basename(path))
+  } catch (err) {
+    // The parent may not exist either (a store being created from scratch). Anything else is
+    // still a genuine error.
+    if (errno(err) !== "ENOENT") throw err
+    return path
+  }
+}
 
 /**
  * Write `content` to `path` so it is never visible at that path with the wrong permissions.
@@ -32,9 +71,13 @@ export async function writeFileAtomic(
   // Follow a symlink to its target and replace THAT, rather than replacing the link with a
   // regular file. Writing in place used to update the target, so someone who symlinks auth.json
   // into a dotfiles repo or a managed directory keeps working; renaming over the link would
-  // silently strip it and leave the real file stale. A dangling link has no target to resolve
-  // and falls back to replacing the link itself.
-  const target = await NFS.realpath(path).catch(() => path)
+  // silently strip it and leave the real file stale.
+  //
+  // `canonicalPath` falls back ONLY on ENOENT — a first write or a dangling link. An earlier
+  // version swallowed every realpath error, so a valid symlink into a temporarily unreadable
+  // directory (EACCES) or a symlink cycle (ELOOP) looked like "no target": the write appeared to
+  // succeed by replacing the link while the real credential file silently went stale.
+  const target = await canonicalPath(path)
   // Same directory as the target, so the rename cannot cross a filesystem boundary. `wx` refuses
   // to reuse a leftover temp file rather than writing secrets into one we do not own.
   const temp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`

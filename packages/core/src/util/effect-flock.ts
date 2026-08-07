@@ -113,6 +113,31 @@ export namespace EffectFlock {
 
       const forceRemove = (target: string) => fs.remove(target, { recursive: true }).pipe(Effect.ignore)
 
+      // altimate_change start — release must not report success while still holding the lock.
+      //
+      // `forceRemove` ignores every error, which is right where it is used to break ANOTHER
+      // process's stale lock or drop a breaker file: failing to clean up someone else's mess is
+      // not our operation's failure. It is wrong on the release path. An EPERM or EBUSY on the
+      // final rm left the lock directory in place while the caller was told the write succeeded,
+      // and every other writer then blocked until the 60s stale timeout — for an operation that
+      // had already finished.
+      //
+      // Only NotFound counts as already-released. `isPathGone` also folds in `Unknown`, which is
+      // where an EPERM/EBUSY lands, so reusing it here would swallow exactly the case this is
+      // meant to catch. Transient contention is retried briefly first; a persistent failure is
+      // raised as a defect. Release runs inside `Effect.acquireRelease`, so a failure here is
+      // added to the cause rather than replacing it — a body error still surfaces.
+      const releaseRemove = (target: string) =>
+        fs.remove(target, { recursive: true }).pipe(
+          Effect.catchIf(
+            (e) => e.reason._tag === "NotFound",
+            () => Effect.void,
+          ),
+          Effect.retry(Schedule.exponential(20, 2).pipe(Schedule.while((meta) => meta.elapsed < 1_000))),
+          Effect.catch((cause) => Effect.die(new ReleaseError({ detail: "failed to remove lock directory", cause }))),
+        )
+      // altimate_change end
+
       /** Atomic mkdir — returns true if created, false if already exists, dies on other errors. */
       const atomicMkdir = (dir: string) =>
         fs.makeDirectory(dir, { mode: 0o700 }).pipe(
@@ -245,7 +270,8 @@ export namespace EffectFlock {
 
           if (parsed.token !== handle.token) return yield* Effect.die(new ReleaseError({ detail: "token mismatch" }))
 
-          yield* forceRemove(handle.lockDir)
+          // altimate_change — releaseRemove, not forceRemove: see the comment on releaseRemove.
+          yield* releaseRemove(handle.lockDir)
         })
 
       // -- build service --

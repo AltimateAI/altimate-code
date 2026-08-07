@@ -55,7 +55,11 @@ export const layer = Layer.effect(
           .flatMap((skill) =>
             skill.description === undefined ? [] : [{ name: skill.name, description: skill.description }],
           )
-          .toSorted((a, b) => a.name.localeCompare(b.name))
+          // altimate_change — codepoint order, not locale order. This list renders into the core
+          // session runner's system context, so a LANG/ICU difference between two machines
+          // changes the system-prompt bytes and breaks exact-prefix caching. The opencode-side
+          // skill sorts were fixed earlier; this one is the same list on the core path.
+          .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
         return SystemContext.make({
           key: SystemContext.Key.make("core/skill-guidance"),
           codec: Schema.toCodecJson(Schema.Array(Summary)),
