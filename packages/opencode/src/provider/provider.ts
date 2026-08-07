@@ -1161,7 +1161,34 @@ export namespace Provider {
 
     log.info("init")
 
-    const configProviders = Object.entries(config.provider ?? {})
+    // altimate_change start — free-tier config is dropped AT INGESTION, not at each consumer.
+    //
+    // A project-local `opencode.json` is attacker-controlled: any repository the user opens ships
+    // one. For `altimate-free` that config would steer a stored credential — where it is sent
+    // (`options.baseURL`, `headers`), which MODULE receives it (`npm`, `model.provider.npm`, which
+    // `getSDK()` imports, so arbitrary code execution), and which model it is spent on (`models`,
+    // `variants`).
+    //
+    // This reopened twice, each time through a field nobody had denied yet: round 1 closed
+    // `options.baseURL`, and it came back through `npm`. Guarding consumers one at a time loses
+    // that race by construction — while writing this fix a THIRD consumer turned up (the
+    // variants/blacklist merge below) that both earlier guards had missed, and the adversarial
+    // test caught it only because it asserts the whole class rather than the reported field.
+    //
+    // So the denial happens here, once, where config is read. Everything downstream inherits it,
+    // including consumers that do not exist yet. `configFor` covers the one place that indexes
+    // `config.provider` directly instead of iterating this list.
+    //
+    // Nothing legitimate is lost: the endpoint, model and module all come from the gateway at
+    // registration, and local development points at a different gateway via
+    // ALTIMATE_FREE_GATEWAY_URL — process environment, which a checked-in file cannot set.
+    const configProviderEntries = Object.entries(config.provider ?? {})
+    const configProviders = configProviderEntries.filter(([id]) => id !== FreeTier.PROVIDER_ID)
+    if (configProviders.length !== configProviderEntries.length)
+      log.warn("ignoring config for the free tier provider", { providerID: FreeTier.PROVIDER_ID })
+    const configFor = (providerID: string) =>
+      providerID === FreeTier.PROVIDER_ID ? undefined : config.provider?.[providerID]
+    // altimate_change end
 
     // Add GitHub Copilot Enterprise provider that inherits from GitHub Copilot
     if (database["github-copilot"]) {
@@ -1541,6 +1568,32 @@ export namespace Provider {
 
     // extend database from config
     for (const [providerID, provider] of configProviders) {
+      // altimate_change start — the free tier is not configurable, and this is the FIRST place
+      // that has to enforce it. The guard further down (the "load config" loop) runs after the
+      // loaders and only covers env/name/options; this loop builds the whole database entry, so
+      // everything below was reachable from a project-local config file:
+      //
+      //   provider.npm / model.provider.npm   the MODULE getSDK() imports and hands the stored
+      //                                       API key to — arbitrary code execution plus
+      //                                       credential disclosure, no URL involved
+      //   api url / headers / options         where the key and the prompt are sent
+      //   models / variants                   which model id the credential is spent on
+      //
+      // Round 1 closed the baseURL route and round 2 closed nothing here, so the same
+      // vulnerability reopened through `npm`. Denying named fields one at a time loses that race
+      // by construction: the correct unit is the provider id, and the answer is that NO config
+      // input reaches this entry at all. The record is built solely from the gateway's
+      // registration response (see the loader above).
+      //
+      // Nothing legitimate is lost. The endpoint and model come from the gateway at
+      // registration; local development points at a different gateway with
+      // ALTIMATE_FREE_GATEWAY_URL, which is process environment and cannot be set by a
+      // checked-in file.
+      if (providerID === FreeTier.PROVIDER_ID) {
+        log.warn("ignoring config override for the free tier provider", { providerID, stage: "database" })
+        continue
+      }
+      // altimate_change end
       const existing = database[providerID]
       const parsed: Info = {
         id: ProviderID.make(providerID),
@@ -1670,6 +1723,19 @@ export namespace Provider {
       const providerID = ProviderID.make(id)
       if (disabled.has(providerID)) continue
       if (provider.type === "api") {
+        // altimate_change start — an empty key is not a credential, and for the free tier it is
+        // a specific, expected state: the install secret is persisted BEFORE registration so a
+        // lost response can be retried against the same gateway principal, which leaves
+        // `{ key: "", metadata: { install_secret } }` behind whenever registration fails.
+        //
+        // Merging that here created `providers["altimate-free"]`, and once the entry exists the
+        // CUSTOM_LOADERS block below merges it regardless of `autoload`, because its condition
+        // is `result.autoload || providers[providerID]`. The loader's "no, I am not registered"
+        // answer could no longer remove it, so a user whose registration got a 503 saw the free
+        // provider listed as connected after the next restart — and selecting it would send an
+        // empty bearer token.
+        if (!provider.key) continue
+        // altimate_change end
         mergeProvider(providerID, {
           source: "api",
           key: provider.key,
@@ -1772,7 +1838,10 @@ export namespace Provider {
         continue
       }
 
-      const configProvider = config.provider?.[providerID]
+      // altimate_change — configFor, not config.provider: the free tier is denied at ingestion
+      // and this is the one consumer that indexes the map directly. Covers blacklist, whitelist
+      // and the per-model variants merge below.
+      const configProvider = configFor(providerID)
 
       for (const [modelID, model] of Object.entries(provider.models)) {
         model.api.id = model.api.id ?? model.id ?? modelID
