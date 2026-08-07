@@ -5,6 +5,11 @@ import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+// altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
+import { getOrCreateMachineId } from "../util/machine-id"
+import { Config } from "@/config/config"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
+import { Log } from "@/altimate/util/log"
 
 /**
  * Why a failure reason is attached at the rejection site rather than inferred from the message:
@@ -46,6 +51,90 @@ const DEFAULT_WEB_URL = "https://app.myaltimate.com"
 // the token exchange at a local backend when the web has no BACKEND_API_URL to
 // deliver.
 const DEFAULT_API_URL = "https://api.myaltimate.com"
+
+const log = Log.create({ service: "altimate-plugin" })
+
+// Builds a base64url-encoded context blob for correlating this browser auth
+// session with CLI telemetry in PostHog. The machine_id is a random UUID
+// stored at ~/.altimate/machine-id — not tied to hardware, OS, or user identity.
+// After sign-in the frontend registers it as the `cli_machine_id` PostHog
+// super-property so the CLI device is attributed to the authenticated account
+// in aggregate funnel analytics.
+//
+// Privacy note: cli_context is sent in the URL *fragment* (#cli_context=...),
+// not the query string. The browser never transmits a fragment to the server,
+// so the machine_id — though a non-PII crypto.randomUUID() — stays out of
+// app.myaltimate.com's access logs, any fronting CDN/WAF, and the Referer
+// header, while remaining readable by the /register page via location.hash.
+//
+// Frontend decode contract (implemented in monorepo useCliContext.ts /
+// cliContext.ts): the value is base64url (not standard base64); the consumer
+// must catch decode/JSON errors, require `v === 1`, validate that `machine_id`
+// and `cli_version` are strings, treat `cli_version: "local"` as a valid dev
+// build, and treat the payload as untrusted (anyone can craft a URL). An absent
+// `machine_id` means "do not attribute" — it must never be aliased on.
+export async function buildCliContext(machineIdPath?: string): Promise<string> {
+  // altimate_change start — honour both telemetry opt-out gates, mirroring
+  // telemetry/index.ts::doInit:
+  //   1. ALTIMATE_TELEMETRY_DISABLED=true env var (always-works hard opt-out)
+  //   2. config.telemetry.disabled (resolved via the async Config.get())
+  let disabled = process.env.ALTIMATE_TELEMETRY_DISABLED === "true"
+  if (!disabled) {
+    try {
+      const userConfig = (await Config.get()) as any
+      disabled = Boolean(userConfig.telemetry?.disabled)
+    } catch (err) {
+      // Config was unreadable — NOT the normal path. Server routes run inside
+      // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
+      // Config.get() resolves during an ordinary browser authorize(). The known
+      // exception is `altimate auth login <url>`, which deliberately skips
+      // instance bootstrap (ProvidersLoginCommand `instance: (args) => !args.url`);
+      // on that path this fires. Fail CLOSED — omit the durable machine_id rather
+      // than transmit it for a user who may have opted out via config; a missed
+      // correlation beats leaking a stable identifier. Log so a low correlation
+      // rate is traceable here instead of being mistaken for a lost reply.
+      log.warn("cli_context: config unreadable, omitting machine_id (fail-closed)", {
+        code: (err as NodeJS.ErrnoException)?.code,
+      })
+      disabled = true
+    }
+  }
+  let machineId = ""
+  if (!disabled) {
+    // getOrCreateMachineId returns "" on all error conditions (ENOENT excluded —
+    // it mints a new UUID instead) and logs appropriately; no try/catch needed.
+    machineId = getOrCreateMachineId(machineIdPath)
+  }
+  // altimate_change end
+  // altimate_change start — omit machine_id when empty (matches the telemetry
+  // module's `...(machineId && { machine_id })`). An empty value is meaningless
+  // to the frontend super-property registration and must not be sent.
+  const ctx: Record<string, unknown> = { v: 1, cli_version: InstallationVersion }
+  if (machineId) ctx.machine_id = machineId
+  // altimate_change end
+  return Buffer.from(JSON.stringify(ctx)).toString("base64url")
+}
+
+// altimate_change start — exported so tests can assert on the full URL shape
+// without duplicating the construction logic. `machineIdPath` is forwarded to
+// buildCliContext so tests can point at a temp file instead of writing a real
+// id into the runner's $HOME.
+export async function buildAuthorizeUrl(
+  webUrl: string,
+  redirect: string,
+  state: string,
+  machineIdPath?: string,
+): Promise<string> {
+  return (
+    `${webUrl}/register?client=altimate-code` +
+    `&redirect=${encodeURIComponent(redirect)}` +
+    `&state=${encodeURIComponent(state)}` +
+    // Fragment (#), not a query param — keeps the durable machine_id out of
+    // server access logs / Referer. Must stay last, after all query params.
+    `#cli_context=${encodeURIComponent(await buildCliContext(machineIdPath))}`
+  )
+}
+// altimate_change end
 
 // The one-time login_token is POSTed to the callback-supplied API base, so that
 // base must be trusted — otherwise a crafted callback could exfiltrate the token
@@ -341,10 +430,7 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             const redirect = `http://127.0.0.1:${boundPort}/callback`
             // Land on the sign-up page and let the user choose how to authenticate
             // (Google today, more providers later) rather than forcing Google.
-            const authorizeUrl =
-              `${webUrl}/register?client=altimate-code` +
-              `&redirect=${encodeURIComponent(redirect)}` +
-              `&state=${state}`
+            const authorizeUrl = await buildAuthorizeUrl(webUrl, redirect, state)
 
             // Try to open the browser. Failure is silent because the URL is
             // already surfaced elsewhere: the auth dialog in packages/tui/src/
@@ -363,7 +449,8 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // attempted". open() failures are swallowed above (the URL is also printed for the
             // user to paste), so this fires even when no browser actually launched.
             // The URL is never sent — it carries the CSRF `state`.
-            if (OnboardingTelemetry.isFunnelActive()) void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
+            if (OnboardingTelemetry.isFunnelActive())
+              void OnboardingTelemetry.emit({ type: "gateway_device_code_issued" })
 
             // One outcome per attempt. callback() closes over `result` and re-runs its whole body
             // on every invocation, so a repeated call would otherwise re-emit completion/failure

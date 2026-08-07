@@ -39,10 +39,14 @@ export function showWelcomeBannerIfNeeded(): void {
     // Remove marker first to avoid showing twice even if display fails
     fs.unlinkSync(markerPath)
 
-    // altimate_change start — use ~/.altimate/machine-id existence as a proxy for upgrade vs fresh install
-    // Since postinstall.mjs always writes the current version to the marker file, we can't reliably
-    // use installedVersion !== currentVersion for release builds. Instead, if machine-id exists,
-    // they've run the CLI before.
+    // altimate_change start — "upgrade" means the machine-id file already existed before this
+    // launch. Probe existence with existsSync only — do NOT mint here. Minting is left to
+    // Telemetry.doInit() (its job, not the welcome banner's); the first_launch machine_id is
+    // attached at flush time from telemetry module state, so it does not depend on minting here.
+    // NOTE: doInit's early call runs before an Instance is available, so its CONFIG opt-out gate
+    // fails open and it can still mint for a config-only opt-out user. That is a pre-existing
+    // telemetry-init gap (tracked separately), not something this banner can fix — this code just
+    // stops adding a SECOND minting site under an even weaker (env-only) gate.
     const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
     const isUpgrade = fs.existsSync(machineIdPath)
     // altimate_change end
