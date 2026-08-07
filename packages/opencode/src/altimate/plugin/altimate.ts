@@ -83,13 +83,19 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
     try {
       const userConfig = (await Config.get()) as any
       disabled = Boolean(userConfig.telemetry?.disabled)
-    } catch {
-      // Config unreadable here — this plugin can run in the server worker where
-      // Config.get() throws "InstanceRef not provided". Fail CLOSED: omit the
-      // durable machine_id. A missed correlation is preferable to transmitting a
-      // stable cross-session device identifier for a user who may have opted out
-      // via config. (Intentionally stricter than doInit's fail-open, which
-      // governs single events rather than a persistent identifier.)
+    } catch (err) {
+      // Config was unreadable — NOT the normal path. Server routes run inside
+      // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
+      // Config.get() resolves during an ordinary browser authorize(). The known
+      // exception is `altimate auth login <url>`, which deliberately skips
+      // instance bootstrap (ProvidersLoginCommand `instance: (args) => !args.url`);
+      // on that path this fires. Fail CLOSED — omit the durable machine_id rather
+      // than transmit it for a user who may have opted out via config; a missed
+      // correlation beats leaking a stable identifier. Log so a low correlation
+      // rate is traceable here instead of being mistaken for a lost reply.
+      log.warn("cli_context: config unreadable, omitting machine_id (fail-closed)", {
+        code: (err as NodeJS.ErrnoException)?.code,
+      })
       disabled = true
     }
   }

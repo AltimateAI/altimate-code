@@ -40,11 +40,13 @@ export function showWelcomeBannerIfNeeded(): void {
     fs.unlinkSync(markerPath)
 
     // altimate_change start — "upgrade" means the machine-id file already existed before this
-    // launch. Probe existence with existsSync only — do NOT mint here. Minting is owned by
-    // Telemetry.doInit(), which resolves the full opt-out policy (env var AND config) before
-    // creating the file; minting here would duplicate that decision under a weaker gate and
-    // create the id for a config-opted-out user. The first_launch machine_id is attached at
-    // flush time from telemetry module state, so it does not depend on minting here.
+    // launch. Probe existence with existsSync only — do NOT mint here. Minting is left to
+    // Telemetry.doInit() (its job, not the welcome banner's); the first_launch machine_id is
+    // attached at flush time from telemetry module state, so it does not depend on minting here.
+    // NOTE: doInit's early call runs before an Instance is available, so its CONFIG opt-out gate
+    // fails open and it can still mint for a config-only opt-out user. That is a pre-existing
+    // telemetry-init gap (tracked separately), not something this banner can fix — this code just
+    // stops adding a SECOND minting site under an even weaker (env-only) gate.
     const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
     const isUpgrade = fs.existsSync(machineIdPath)
     // altimate_change end

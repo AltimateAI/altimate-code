@@ -17,6 +17,26 @@ const MAX_BYTES = 512
 // RFC 4122 v4 UUID — the only format we mint, so the only format we accept.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
+// Read at most MAX_BYTES through a descriptor so the cap is ENFORCED at read
+// time rather than being advisory: a plain readFileSync would slurp a file that
+// grew or was swapped after an earlier lstat entirely into memory before UUID_RE
+// could reject it. `fstat` on the open descriptor re-confirms a regular file of
+// bounded size — the same file we then read — so both the main path and the
+// EEXIST race re-read (which previously had no check at all) are covered.
+// Returns "" for anything not a bounded regular file; callers treat that as invalid.
+function readCappedUtf8(idPath: string): string {
+  const fd = fs.openSync(idPath, "r")
+  try {
+    const stat = fs.fstatSync(fd)
+    if (!stat.isFile() || stat.size > MAX_BYTES) return ""
+    const buf = Buffer.alloc(MAX_BYTES)
+    const bytesRead = fs.readSync(fd, buf, 0, MAX_BYTES, 0)
+    return buf.toString("utf8", 0, bytesRead).trim()
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 /**
  * Read the machine-id from `~/.altimate/machine-id`, minting a new random UUID
  * with `flag: "wx"` (exclusive create) if the file is absent.
@@ -25,7 +45,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
  *   same UUID — the winner writes, the loser re-reads.
  * - **Regular-file-only**: uses `lstat` and rejects symlinks / non-regular
  *   files rather than following them to an attacker-chosen target.
- * - **Size-capped**: reads at most 512 bytes to avoid multi-MB file attacks.
+ * - **Size-capped**: reads at most 512 bytes through a descriptor (enforced at
+ *   read time, not an advisory pre-check) to avoid multi-MB file reads.
  * - **UUID-validated**: rejects content that does not match RFC 4122 v4 UUID
  *   format (corrupt file, injected content, etc.) and returns `""` with a warn
  *   log so callers can omit the field rather than propagate garbage.
@@ -51,7 +72,7 @@ export function getOrCreateMachineId(machineIdPath?: string): string {
       log.warn("machine-id file exceeds size limit — omitting", { path: idPath, size: stat.size })
       return ""
     }
-    raw = fs.readFileSync(idPath, "utf8").trim()
+    raw = readCappedUtf8(idPath)
   } catch (readErr) {
     const code = (readErr as NodeJS.ErrnoException)?.code
     if (code !== "ENOENT") {
@@ -91,9 +112,9 @@ export function getOrCreateMachineId(machineIdPath?: string): string {
       log.warn("machine-id create failed", { code, path: idPath })
       return ""
     }
-    // Lost the race — read what the winner wrote.
+    // Lost the race — read what the winner wrote (bounded, same as the main read).
     try {
-      const winner = fs.readFileSync(idPath, "utf8").trim()
+      const winner = readCappedUtf8(idPath)
       if (!UUID_RE.test(winner)) {
         log.warn("machine-id written by race winner is non-UUID — omitting", { path: idPath })
         return ""

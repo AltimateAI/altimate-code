@@ -178,7 +178,15 @@ describe("getOrCreateMachineId", () => {
       e.code = "EEXIST"
       throw e
     })
-    const readSpy = spyOn(fs, "readFileSync").mockImplementation(() => winner as never)
+    // The re-read goes through the bounded, descriptor-based readCappedUtf8:
+    // open → fstat (regular file, bounded) → read ≤ MAX_BYTES → close.
+    const openSpy = spyOn(fs, "openSync").mockImplementation(() => 3 as never)
+    const fstatSpy = spyOn(fs, "fstatSync").mockImplementation(
+      () => ({ isFile: () => true, size: winner.length }) as never,
+    )
+    const readSpy = spyOn(fs, "readSync").mockImplementation(((_fd: number, buf: Buffer) =>
+      Buffer.from(winner).copy(buf)) as never)
+    const closeSpy = spyOn(fs, "closeSync").mockImplementation(() => undefined as never)
     try {
       expect(getOrCreateMachineId("/does/not/matter/machine-id")).toBe(winner)
       expect(readSpy).toHaveBeenCalled()
@@ -186,7 +194,10 @@ describe("getOrCreateMachineId", () => {
       lstatSpy.mockRestore()
       mkdirSpy.mockRestore()
       writeSpy.mockRestore()
+      openSpy.mockRestore()
+      fstatSpy.mockRestore()
       readSpy.mockRestore()
+      closeSpy.mockRestore()
     }
   })
 
