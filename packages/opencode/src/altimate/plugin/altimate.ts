@@ -54,37 +54,43 @@ const DEFAULT_API_URL = "https://api.myaltimate.com"
 
 const log = Log.create({ service: "altimate-plugin" })
 
-// altimate_change — getOrCreateMachineId is now in util/machine-id.ts (re-exported
-// from there so existing test imports that reference this module continue to work).
-export { getOrCreateMachineId } from "../util/machine-id"
-
 // Builds a base64url-encoded context blob for correlating this browser auth
 // session with CLI telemetry in PostHog. The machine_id is a random UUID
 // stored at ~/.altimate/machine-id — not tied to hardware, OS, or user identity.
-// After sign-in, the frontend calls posthog.alias(email, machine_id) to associate
-// the device with the authenticated account in product analytics.
+// After sign-in the frontend registers it as the `cli_machine_id` PostHog
+// super-property so the CLI device is attributed to the authenticated account
+// in aggregate funnel analytics.
 //
 // Privacy note: cli_context is sent in the URL *fragment* (#cli_context=...),
 // not the query string. The browser never transmits a fragment to the server,
 // so the machine_id — though a non-PII crypto.randomUUID() — stays out of
 // app.myaltimate.com's access logs, any fronting CDN/WAF, and the Referer
 // header, while remaining readable by the /register page via location.hash.
-// The frontend reads it from the fragment (see useCliContext.ts). The fragment
-// must be the last URL segment, after all query params.
+//
+// Frontend decode contract (implemented in monorepo useCliContext.ts /
+// cliContext.ts): the value is base64url (not standard base64); the consumer
+// must catch decode/JSON errors, require `v === 1`, validate that `machine_id`
+// and `cli_version` are strings, treat `cli_version: "local"` as a valid dev
+// build, and treat the payload as untrusted (anyone can craft a URL). An absent
+// `machine_id` means "do not attribute" — it must never be aliased on.
 export async function buildCliContext(machineIdPath?: string): Promise<string> {
   // altimate_change start — honour both telemetry opt-out gates, mirroring
-  // telemetry/index.ts::doInit exactly:
-  //   1. ALTIMATE_TELEMETRY_DISABLED=true env var (early, always-works escape hatch)
+  // telemetry/index.ts::doInit:
+  //   1. ALTIMATE_TELEMETRY_DISABLED=true env var (always-works hard opt-out)
   //   2. config.telemetry.disabled (resolved via the async Config.get())
-  // Config.get() may throw outside an Instance context; treat a config failure as
-  // "not disabled" (same as doInit) — the env var above is the hard opt-out.
   let disabled = process.env.ALTIMATE_TELEMETRY_DISABLED === "true"
   if (!disabled) {
     try {
       const userConfig = (await Config.get()) as any
       disabled = Boolean(userConfig.telemetry?.disabled)
     } catch {
-      // Config unavailable — proceed with telemetry enabled.
+      // Config unreadable here — this plugin can run in the server worker where
+      // Config.get() throws "InstanceRef not provided". Fail CLOSED: omit the
+      // durable machine_id. A missed correlation is preferable to transmitting a
+      // stable cross-session device identifier for a user who may have opted out
+      // via config. (Intentionally stricter than doInit's fail-open, which
+      // governs single events rather than a persistent identifier.)
+      disabled = true
     }
   }
   let machineId = ""
@@ -94,9 +100,9 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
     machineId = getOrCreateMachineId(machineIdPath)
   }
   // altimate_change end
-  // altimate_change start — omit machine_id key when empty (matches telemetry
-  // module pattern: `...(machineId && { machine_id: machineId })`). Sending ""
-  // is meaningless for posthog.alias() and misleads downstream consumers.
+  // altimate_change start — omit machine_id when empty (matches the telemetry
+  // module's `...(machineId && { machine_id })`). An empty value is meaningless
+  // to the frontend super-property registration and must not be sent.
   const ctx: Record<string, unknown> = { v: 1, cli_version: InstallationVersion }
   if (machineId) ctx.machine_id = machineId
   // altimate_change end
@@ -104,15 +110,22 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
 }
 
 // altimate_change start — exported so tests can assert on the full URL shape
-// without duplicating the construction logic.
-export async function buildAuthorizeUrl(webUrl: string, redirect: string, state: string): Promise<string> {
+// without duplicating the construction logic. `machineIdPath` is forwarded to
+// buildCliContext so tests can point at a temp file instead of writing a real
+// id into the runner's $HOME.
+export async function buildAuthorizeUrl(
+  webUrl: string,
+  redirect: string,
+  state: string,
+  machineIdPath?: string,
+): Promise<string> {
   return (
     `${webUrl}/register?client=altimate-code` +
     `&redirect=${encodeURIComponent(redirect)}` +
-    `&state=${state}` +
+    `&state=${encodeURIComponent(state)}` +
     // Fragment (#), not a query param — keeps the durable machine_id out of
     // server access logs / Referer. Must stay last, after all query params.
-    `#cli_context=${encodeURIComponent(await buildCliContext())}`
+    `#cli_context=${encodeURIComponent(await buildCliContext(machineIdPath))}`
   )
 }
 // altimate_change end

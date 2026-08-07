@@ -6,8 +6,6 @@ import { EOL } from "os"
 // altimate_change start — import Telemetry for first_launch event
 import { Telemetry } from "../altimate/telemetry"
 // altimate_change end
-// altimate_change — import shared machine-id utility so the path is canonical across all call sites
-import { getOrCreateMachineId } from "../altimate/util/machine-id"
 
 const APP_NAME = "altimate-code"
 const MARKER_FILE = ".installed-version"
@@ -42,13 +40,13 @@ export function showWelcomeBannerIfNeeded(): void {
     fs.unlinkSync(markerPath)
 
     // altimate_change start — "upgrade" means the machine-id file already existed before this
-    // launch. Probe existence with existsSync FIRST — do NOT use getOrCreateMachineId() as the
-    // probe, because it mints the file on a fresh install and would then report every new user
-    // as an upgrade. After probing, mint the id (unless telemetry is opted out via env) so
-    // telemetry.doInit() finds it ready — welcome.ts runs before doInit().
+    // launch. Probe existence with existsSync only — do NOT mint here. Minting is owned by
+    // Telemetry.doInit(), which resolves the full opt-out policy (env var AND config) before
+    // creating the file; minting here would duplicate that decision under a weaker gate and
+    // create the id for a config-opted-out user. The first_launch machine_id is attached at
+    // flush time from telemetry module state, so it does not depend on minting here.
     const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
     const isUpgrade = fs.existsSync(machineIdPath)
-    if (process.env.ALTIMATE_TELEMETRY_DISABLED !== "true") getOrCreateMachineId()
     // altimate_change end
 
     // altimate_change start — track first launch for new user counting (privacy-safe: only version + machine_id)

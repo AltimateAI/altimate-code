@@ -75,9 +75,14 @@ export function getOrCreateMachineId(machineIdPath?: string): string {
   // --- Create path (ENOENT) ---
   // `flag: "wx"` is atomic exclusive-create: the OS guarantees only one writer
   // succeeds. The loser re-reads what the winner wrote.
+  //
+  // mkdirSync MUST be inside this try: on a read-only $HOME, a restricted
+  // container, or a full disk it throws (EACCES/EROFS/ENOSPC), and the module's
+  // contract is to return "" on every error — never propagate. The auth path
+  // (buildCliContext) relies on this and no longer wraps the call itself.
   const candidate = randomUUID()
-  fs.mkdirSync(path.dirname(idPath), { recursive: true })
   try {
+    fs.mkdirSync(path.dirname(idPath), { recursive: true })
     fs.writeFileSync(idPath, candidate, { encoding: "utf8", flag: "wx" })
     return candidate
   } catch (writeErr) {

@@ -1,15 +1,43 @@
 // altimate_change — tests for cli_context auth URL parameter
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import * as fs from "fs"
-import * as os from "os"
-import * as path from "path"
-import { buildAuthorizeUrl, buildCliContext, getOrCreateMachineId } from "../../src/altimate/plugin/altimate"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import fs from "fs"
+import path from "path"
+import { buildAuthorizeUrl, buildCliContext } from "../../src/altimate/plugin/altimate"
+import { getOrCreateMachineId } from "../../src/altimate/util/machine-id"
+import { Config } from "../../src/config/config"
+import { tmpdir } from "../fixture/fixture"
+
+const VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
+// buildCliContext resolves the telemetry opt-out via Config.get(), which throws
+// "InstanceRef not provided" in the unit-test context and — by design — fails
+// CLOSED, omitting machine_id. Stub Config.get() to an enabled config so the
+// machine_id path is exercised; individual opt-out tests override the stub.
+function stubConfig(impl: () => Promise<unknown>) {
+  return spyOn(Config, "get").mockImplementation(impl as never)
+}
 
 describe("buildCliContext", () => {
+  let cfg: ReturnType<typeof spyOn>
+  let savedDisabled: string | undefined
+
+  beforeEach(() => {
+    // Clear any real opt-out from the dev's shell so these "telemetry enabled"
+    // tests are not silently broken by an exported ALTIMATE_TELEMETRY_DISABLED.
+    savedDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
+    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    cfg = stubConfig(async () => ({}))
+  })
+  afterEach(() => {
+    cfg.mockRestore()
+    if (savedDisabled === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedDisabled
+  })
+
   test("returns a valid base64url-encoded JSON blob with machine_id", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440000", "utf8")
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
+    fs.writeFileSync(idPath, VALID_UUID, "utf8")
 
     const encoded = await buildCliContext(idPath)
 
@@ -18,43 +46,33 @@ describe("buildCliContext", () => {
 
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
     expect(ctx["v"]).toBe(1)
-    expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440000")
+    expect(ctx["machine_id"]).toBe(VALID_UUID)
     expect(typeof ctx["cli_version"]).toBe("string")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
   test("creates machine_id file when absent and includes it in context", async () => {
-    // getOrCreateMachineId mints a UUID when the file is missing, so machine_id
-    // is always present (as a non-empty string) unless telemetry is disabled.
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-new-"))
-    const nonExistentPath = path.join(tmpDir, "subdir", "machine-id")
+    await using dir = await tmpdir()
+    const nonExistentPath = path.join(dir.path, "subdir", "machine-id")
 
     const encoded = await buildCliContext(nonExistentPath)
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
     expect(ctx["v"]).toBe(1)
-    // machine_id must be present and non-empty (newly minted UUID)
     expect(typeof ctx["machine_id"]).toBe("string")
     expect((ctx["machine_id"] as string).length).toBeGreaterThan(0)
-    // The same id must have been written to disk for telemetry to use
+    // The same id must have been written to disk for telemetry to reuse
     expect(fs.readFileSync(nonExistentPath, "utf8").trim()).toBe(ctx["machine_id"] as string)
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
   test("trims whitespace from machine-id file", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-ws-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    // Many editors/tools write a trailing newline
-    fs.writeFileSync(idPath, "  550e8400-e29b-41d4-a716-446655440001  \n", "utf8")
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
+    fs.writeFileSync(idPath, `  ${VALID_UUID}  \n`, "utf8")
 
     const encoded = await buildCliContext(idPath)
     const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
-    expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440001")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(ctx["machine_id"]).toBe(VALID_UUID)
   })
 
   describe("telemetry opt-out", () => {
@@ -63,132 +81,196 @@ describe("buildCliContext", () => {
     beforeEach(() => {
       savedEnv = process.env.ALTIMATE_TELEMETRY_DISABLED
     })
-
     afterEach(() => {
       if (savedEnv === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
       else process.env.ALTIMATE_TELEMETRY_DISABLED = savedEnv
     })
 
-    test("omits machine_id key when ALTIMATE_TELEMETRY_DISABLED=true", async () => {
+    test("omits machine_id when ALTIMATE_TELEMETRY_DISABLED=true", async () => {
       process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
-
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-disabled-"))
-      const idPath = path.join(tmpDir, "machine-id")
-      fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440004", "utf8")
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
 
       const encoded = await buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
-      // machine_id must be absent when telemetry is disabled
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
       expect(ctx["v"]).toBe(1)
-
-      fs.rmSync(tmpDir, { recursive: true, force: true })
     })
 
-    test("includes machine_id when ALTIMATE_TELEMETRY_DISABLED is not set", async () => {
+    test("omits machine_id when config.telemetry.disabled is set", async () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
-
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-enabled-"))
-      const idPath = path.join(tmpDir, "machine-id")
-      fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440002", "utf8")
+      cfg.mockImplementation((async () => ({ telemetry: { disabled: true } })) as never)
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
 
       const encoded = await buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
-      expect(ctx["machine_id"]).toBe("550e8400-e29b-41d4-a716-446655440002")
+      expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
 
-      fs.rmSync(tmpDir, { recursive: true, force: true })
+    test("omits machine_id when Config.get() throws (fails CLOSED in the worker)", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      cfg.mockImplementation((async () => {
+        throw new Error("InstanceRef not provided")
+      }) as never)
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+
+      const encoded = await buildCliContext(idPath)
+      const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+
+      // Config unreadable → must NOT transmit the durable id.
+      expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
+
+    test("includes machine_id when telemetry is enabled", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+
+      const encoded = await buildCliContext(idPath)
+      const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+
+      expect(ctx["machine_id"]).toBe(VALID_UUID)
     })
   })
 })
 
 describe("getOrCreateMachineId", () => {
-  test("returns existing id when file is present", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440003\n", "utf8")
+  test("returns existing id when file is present", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
+    fs.writeFileSync(idPath, `${VALID_UUID}\n`, "utf8")
 
-    expect(getOrCreateMachineId(idPath)).toBe("550e8400-e29b-41d4-a716-446655440003")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(getOrCreateMachineId(idPath)).toBe(VALID_UUID)
   })
 
-  test("creates a UUID file when absent and returns it", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-create-"))
-    const idPath = path.join(tmpDir, "subdir", "machine-id")
+  test("creates a UUID file when absent and returns it", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "subdir", "machine-id")
 
     const id = getOrCreateMachineId(idPath)
 
-    // Must be a non-empty string that was written to disk
     expect(typeof id).toBe("string")
     expect(id.length).toBeGreaterThan(0)
     expect(fs.readFileSync(idPath, "utf8").trim()).toBe(id)
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test("two concurrent callers with absent file converge on the same id", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-race-"))
-    const idPath = path.join(tmpDir, "machine-id")
+  test("wx EEXIST (lost race) re-reads and returns the winner's id", () => {
+    const winner = "550e8400-e29b-41d4-a716-4466554400ff"
+    // Simulate a real race: the file is absent at lstat (ENOENT → create path),
+    // but a concurrent writer created it before our `wx` write, so writeFileSync
+    // throws EEXIST and we must re-read what the winner wrote.
+    const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+      const e = new Error("nope") as NodeJS.ErrnoException
+      e.code = "ENOENT"
+      throw e
+    })
+    const mkdirSpy = spyOn(fs, "mkdirSync").mockImplementation(() => undefined as never)
+    const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {
+      const e = new Error("exists") as NodeJS.ErrnoException
+      e.code = "EEXIST"
+      throw e
+    })
+    const readSpy = spyOn(fs, "readFileSync").mockImplementation(() => winner as never)
+    try {
+      expect(getOrCreateMachineId("/does/not/matter/machine-id")).toBe(winner)
+      expect(readSpy).toHaveBeenCalled()
+    } finally {
+      lstatSpy.mockRestore()
+      mkdirSpy.mockRestore()
+      writeSpy.mockRestore()
+      readSpy.mockRestore()
+    }
+  })
 
-    // Simulate a race: call getOrCreateMachineId twice before either has written
-    const [id1, id2] = await Promise.all([
-      Promise.resolve(getOrCreateMachineId(idPath)),
-      Promise.resolve(getOrCreateMachineId(idPath)),
-    ])
-
-    expect(id1).toBe(id2)
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+  test("returns '' when mkdir fails (read-only home) instead of throwing", () => {
+    // Regression guard: mkdirSync must be inside the try/catch so a read-only
+    // $HOME / restricted container returns "" rather than propagating and
+    // breaking sign-in via buildCliContext → buildAuthorizeUrl → authorize().
+    const lstatSpy = spyOn(fs, "lstatSync").mockImplementation(() => {
+      const e = new Error("nope") as NodeJS.ErrnoException
+      e.code = "ENOENT"
+      throw e
+    })
+    const mkdirSpy = spyOn(fs, "mkdirSync").mockImplementation(() => {
+      const e = new Error("eacces") as NodeJS.ErrnoException
+      e.code = "EACCES"
+      throw e
+    })
+    try {
+      expect(getOrCreateMachineId("/root/.altimate/machine-id")).toBe("")
+    } finally {
+      lstatSpy.mockRestore()
+      mkdirSpy.mockRestore()
+    }
   })
 })
 
 describe("buildAuthorizeUrl", () => {
-  test("URL contains cli_context param that decodes to valid JSON", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-auth-url-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "550e8400-e29b-41d4-a716-446655440005", "utf8")
+  let cfg: ReturnType<typeof spyOn>
+  let savedDisabled: string | undefined
 
-    // Temporarily override machine-id path via a patched buildCliContext call
-    // by providing a custom machine_id file — buildAuthorizeUrl uses buildCliContext()
-    // internally with no path arg, so test the URL shape via the exported helper.
+  beforeEach(() => {
+    savedDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
+    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    cfg = stubConfig(async () => ({}))
+  })
+  afterEach(() => {
+    cfg.mockRestore()
+    if (savedDisabled === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = savedDisabled
+  })
+
+  test("carries cli_context in the fragment (not the query), decoding to the machine_id", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
+    fs.writeFileSync(idPath, VALID_UUID, "utf8")
+
+    // Forward the temp machine-id path so the test never writes into the real $HOME.
     const url = await buildAuthorizeUrl(
       "https://app.myaltimate.com",
       "http://127.0.0.1:7317/callback",
       "test-state-abc",
+      idPath,
     )
 
-    // cli_context rides in the fragment (#), not the query string
     expect(url).toContain("#cli_context=")
     expect(url).toContain("client=altimate-code")
     expect(url).toContain("state=test-state-abc")
     expect(url).toContain("redirect=")
 
-    // The durable id must NOT be in the query string (it would hit access logs)
     const parsed = new URL(url)
+    // The durable id must NOT be in the query string (it would hit access logs).
     expect(parsed.searchParams.has("cli_context")).toBe(false)
 
-    // Extract and decode cli_context from the fragment
     const encoded = new URLSearchParams(parsed.hash.replace(/^#/, "")).get("cli_context")
     expect(encoded).toBeTruthy()
 
     const ctx = JSON.parse(Buffer.from(encoded!, "base64url").toString("utf8")) as Record<string, unknown>
     expect(ctx["v"]).toBe(1)
     expect(typeof ctx["cli_version"]).toBe("string")
-    // machine_id may or may not be present depending on env, but if present must be a string
-    if (Object.prototype.hasOwnProperty.call(ctx, "machine_id")) {
-      expect(typeof ctx["machine_id"]).toBe("string")
-      expect((ctx["machine_id"] as string).length).toBeGreaterThan(0)
-    }
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    // Non-vacuous: the machine_id we wrote must round-trip through the URL.
+    expect(ctx["machine_id"]).toBe(VALID_UUID)
   })
 
-  test("deleting cli_context line would cause cli_context to be absent — URL integration is guarded", async () => {
-    // This test asserts that buildAuthorizeUrl really does embed cli_context in
-    // the fragment. If the #cli_context=... line were removed, this test fails.
-    const url = await buildAuthorizeUrl("https://app.myaltimate.com", "http://127.0.0.1:7317/callback", "state-xyz")
+  test("removing the #cli_context= line would drop the param — integration is guarded", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
+    fs.writeFileSync(idPath, VALID_UUID, "utf8")
+
+    const url = await buildAuthorizeUrl(
+      "https://app.myaltimate.com",
+      "http://127.0.0.1:7317/callback",
+      "state-xyz",
+      idPath,
+    )
     const parsed = new URL(url)
     expect(new URLSearchParams(parsed.hash.replace(/^#/, "")).has("cli_context")).toBe(true)
     // And never in the query string, where it would be logged.
@@ -196,105 +278,57 @@ describe("buildAuthorizeUrl", () => {
   })
 })
 
-// altimate_change — additional failure mode tests for getOrCreateMachineId (MINOR 8)
+// altimate_change — failure-mode coverage for getOrCreateMachineId
 describe("getOrCreateMachineId — failure modes", () => {
-  test("returns empty string for non-UUID content without throwing", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-invalid-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    // Write garbage that is not a v4 UUID
+  test("returns empty string for non-UUID content without throwing", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
     fs.writeFileSync(idPath, "not-a-uuid-at-all", "utf8")
 
-    const id = getOrCreateMachineId(idPath)
-
-    // Must return empty string (warn logged internally, not thrown)
-    expect(id).toBe("")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(getOrCreateMachineId(idPath)).toBe("")
   })
 
-  test("returns empty string for oversized file without throwing", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-big-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    // Write a file larger than the 512-byte cap
+  test("returns empty string for oversized file without throwing", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
     fs.writeFileSync(idPath, "x".repeat(513), "utf8")
 
-    const id = getOrCreateMachineId(idPath)
-
-    // Must return empty string — oversized content rejected
-    expect(id).toBe("")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(getOrCreateMachineId(idPath)).toBe("")
   })
 
-  test("returns empty string when file has valid UUID format but wrong version", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-v1-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    // v1 UUID (time-based, not version 4) — third group starts with 1, not 4
+  test("returns empty string for a valid UUID of the wrong version", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
+    // v1 UUID (third group starts with 1, not 4)
     fs.writeFileSync(idPath, "550e8400-e29b-11d4-a716-446655440000", "utf8")
 
-    const id = getOrCreateMachineId(idPath)
-
-    // Strict UUID v4 validation rejects this
-    expect(id).toBe("")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(getOrCreateMachineId(idPath)).toBe("")
   })
 
-  test("returns empty string for an empty file without minting over it", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-empty-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    // 0-byte file exists — must NOT be treated as absent (no exclusive-create mint)
+  test("returns empty string for an empty file without minting over it", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
     fs.writeFileSync(idPath, "", "utf8")
 
-    const id = getOrCreateMachineId(idPath)
-
-    // Empty content fails UUID validation → "" (and the file is left untouched)
-    expect(id).toBe("")
+    expect(getOrCreateMachineId(idPath)).toBe("")
     expect(fs.readFileSync(idPath, "utf8")).toBe("")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
   })
 
-  test("returns empty string when the path is a directory", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-dir-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    // A directory at the machine-id path — lstat rejects it as a non-regular file
+  test("returns empty string when the path is a directory", async () => {
+    await using dir = await tmpdir()
+    const idPath = path.join(dir.path, "machine-id")
     fs.mkdirSync(idPath)
 
-    const id = getOrCreateMachineId(idPath)
-
-    expect(id).toBe("")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(getOrCreateMachineId(idPath)).toBe("")
   })
 
-  test("returns empty string when the path is a symlink (not followed)", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-mid-symlink-"))
-    // Target holds a perfectly valid UUID — lstat must still reject the symlink
-    // itself rather than following it to read the target.
-    const targetPath = path.join(tmpDir, "target")
+  test("returns empty string when the path is a symlink (not followed)", async () => {
+    await using dir = await tmpdir()
+    const targetPath = path.join(dir.path, "target")
     fs.writeFileSync(targetPath, "550e8400-e29b-41d4-a716-446655440099", "utf8")
-    const linkPath = path.join(tmpDir, "machine-id")
+    const linkPath = path.join(dir.path, "machine-id")
     fs.symlinkSync(targetPath, linkPath)
 
-    const id = getOrCreateMachineId(linkPath)
-
-    expect(id).toBe("")
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
-  })
-
-  test("buildCliContext omits machine_id when file contains non-UUID content", async () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "altimate-ctx-corrupt-"))
-    const idPath = path.join(tmpDir, "machine-id")
-    fs.writeFileSync(idPath, "not-a-uuid", "utf8")
-
-    const encoded = await buildCliContext(idPath)
-    const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
-
-    // machine_id must be absent — non-UUID content is rejected
-    expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
-
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+    expect(getOrCreateMachineId(linkPath)).toBe("")
   })
 })
