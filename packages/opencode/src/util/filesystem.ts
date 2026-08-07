@@ -14,6 +14,8 @@ import { homedir } from "os"
 import { fileURLToPath } from "url"
 // altimate_change end
 import { Glob } from "./glob"
+// altimate_change — shared atomic writer, same one core's FSUtil uses (see core util/atomic-write.ts)
+import { writeFileAtomic } from "@opencode-ai/core/util/atomic-write"
 
 export namespace Filesystem {
   // Fast sync version for metadata checks
@@ -75,10 +77,16 @@ export namespace Filesystem {
 
   export async function write(p: string, content: string | Buffer | Uint8Array, mode?: number): Promise<void> {
     try {
+      // altimate_change start — a requested mode means the content is sensitive (auth.json is the
+      // only production caller), so route it through the SAME atomic writer core's FSUtil uses
+      // rather than writing in place and chmod'ing after. In-place, the secret lands at its real
+      // path under whatever mode the file already had — open(2) ignores the mode argument for an
+      // existing file — until the chmod completes, or forever if the process dies in between.
+      // That window was closed on the FSUtil path only; this is the other path to the same file.
+      // Mode-less callers keep the plain in-place write: they are not secrets and several rely on
+      // preserving the existing inode.
       if (mode) {
-        await writeFile(p, content, { mode })
-        // altimate_change start — upstream_fix: writeFile { mode } option does not reliably set permissions; explicit chmod ensures correct mode is applied
-        await chmod(p, mode)
+        await writeFileAtomic(p, content, mode)
         // altimate_change end
       } else {
         await writeFile(p, content)
@@ -86,10 +94,10 @@ export namespace Filesystem {
     } catch (e) {
       if (isEnoent(e)) {
         await mkdir(dirname(p), { recursive: true })
+        // altimate_change start — the atomic writer creates its temp file beside the target, so a
+        // missing parent directory fails here too; retry after mkdir exactly as the in-place path does.
         if (mode) {
-          await writeFile(p, content, { mode })
-          // altimate_change start — upstream_fix: writeFile { mode } option does not reliably set permissions; explicit chmod ensures correct mode is applied
-          await chmod(p, mode)
+          await writeFileAtomic(p, content, mode)
           // altimate_change end
         } else {
           await writeFile(p, content)

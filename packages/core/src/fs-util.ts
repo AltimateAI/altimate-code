@@ -6,6 +6,8 @@ import { lookup } from "mime-types"
 import { Context, Effect, FileSystem, Layer, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./util/glob"
+// altimate_change — shared atomic writer (see util/atomic-write.ts)
+import { writeFileAtomic } from "./util/atomic-write"
 import { serviceUse } from "./effect/service-use"
 import { LayerNode } from "./effect/layer-node"
 import { filesystem } from "./effect/layer-node-platform"
@@ -105,32 +107,9 @@ export namespace FSUtil {
           return
         }
         yield* Effect.tryPromise({
-          try: async () => {
-            // Follow a symlink to its target and replace THAT, rather than replacing the link
-            // with a regular file. Writing in place used to update the target, so a user who
-            // symlinks auth.json into a dotfiles repo or a managed directory keeps working;
-            // renaming over the link would silently strip it and leave the real file stale.
-            // A dangling link has no target to resolve, so it falls back to replacing the link.
-            const target = await NFS.realpath(path).catch(() => path)
-            // Same directory as the target, so the rename cannot cross a filesystem boundary.
-            // `wx` refuses to reuse a leftover temp file rather than writing secrets into one
-            // we do not own.
-            const temp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
-            try {
-              await NFS.writeFile(temp, content, { mode, flag: "wx" })
-              // `mode` on open() is masked by the process umask, so the file can land MORE
-              // restrictive than asked — under `umask 0777` it is created 000 and the next
-              // read of auth.json fails permanently. chmod is not masked, so it sets exactly
-              // the requested mode. Done before the rename, so the file is never visible at
-              // its real path with the wrong mode; and the open() mode still bounds the temp
-              // file's permissions in the meantime, since umask can only clear bits.
-              await NFS.chmod(temp, mode)
-              await NFS.rename(temp, target)
-            } catch (err) {
-              await NFS.rm(temp, { force: true }).catch(() => {})
-              throw err
-            }
-          },
+          // Shared with opencode's `Filesystem.write` so both paths to auth.json get the same
+          // guarantees from the same code. See util/atomic-write.ts.
+          try: () => writeFileAtomic(path, content, mode),
           // Effect.promise turns a rejection into a Die, which bypasses this module's typed
           // error channel and every mapError above it — an ENOSPC or EPERM writing credentials
           // would surface as an unrecoverable defect instead of a FileSystemError.

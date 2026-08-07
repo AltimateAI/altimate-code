@@ -27,6 +27,7 @@ import path from "node:path"
 import { Effect, Layer } from "effect"
 import { Auth } from "../../src/auth"
 import * as AuthSvc from "../../src/auth/service"
+import { AUTH_FILE } from "../../src/auth/lock"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
@@ -163,6 +164,76 @@ describe("Atomic writeJson file mode", () => {
       } finally {
         yield* Effect.promise(() => fs.rm(dir, { recursive: true, force: true }))
       }
+    }),
+  )
+})
+
+describe("Auth store writer parity", () => {
+  // `auth/index.ts` and `auth/service.ts` write the same file through different helpers. The
+  // atomic writer was added to close a window where credentials sit at their real path under
+  // whatever mode the file already had — open(2) ignores the mode argument for an EXISTING file,
+  // so the content lands first and the chmod follows. That was closed on the FSUtil path only;
+  // service.ts kept writing in place. Half-closing a credential-exposure window is worse than
+  // leaving it open, because the next reader sees "atomic writer, fixed" and stops looking.
+  //
+  // The observable discriminator is the inode. An atomic replace renames a new file over the
+  // target, so the inode changes; an in-place write keeps it — and keeping it is exactly what
+  // means the secret was written into the pre-existing, possibly loose-moded file.
+  const seedLooseFile = (target: string) =>
+    Effect.promise(async () => {
+      await fs.mkdir(path.dirname(target), { recursive: true })
+      await fs.writeFile(target, JSON.stringify({ seeded: { type: "api", key: "old" } }), { mode: 0o644 })
+      await fs.chmod(target, 0o644)
+      return (await fs.stat(target)).ino
+    })
+
+  it.instance("service.ts replaces auth.json atomically instead of writing into it", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+
+      const service = yield* AuthSvc.AuthService
+      const target = AUTH_FILE
+      const before = yield* seedLooseFile(target)
+
+      yield* service.set("writer-parity", api("secret"))
+
+      const stat = yield* Effect.promise(() => fs.stat(target))
+      // Different inode: the credential arrived by rename, so it never existed at this path
+      // inside the old 0644 file.
+      expect(stat.ino).not.toBe(before)
+      expect(stat.mode & 0o777).toBe(0o600)
+
+      const data = yield* service.all()
+      const entry = data["writer-parity"]
+      expect(entry).toBeDefined()
+      if (entry!.type === "api") expect(entry!.key).toBe("secret")
+
+      // The temp file is renamed, not left behind, on the success path.
+      const stray = (yield* Effect.promise(() => fs.readdir(path.dirname(target)))).filter(
+        (n) => n.startsWith("auth.json.") && n.endsWith(".tmp"),
+      )
+      expect(stray).toEqual([])
+    }),
+  )
+
+  it.instance("both implementations produce the same mode on the same file", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+
+      const auth = yield* Auth.Service
+      const service = yield* AuthSvc.AuthService
+
+      yield* seedLooseFile(AUTH_FILE)
+      yield* service.set("parity-service", api("a"))
+      const afterService = yield* Effect.promise(() => fs.stat(AUTH_FILE))
+
+      yield* seedLooseFile(AUTH_FILE)
+      yield* auth.set("parity-index", api("b"))
+      const afterIndex = yield* Effect.promise(() => fs.stat(AUTH_FILE))
+
+      expect(afterService.mode & 0o777).toBe(0o600)
+      expect(afterIndex.mode & 0o777).toBe(0o600)
+      expect(afterService.mode & 0o777).toBe(afterIndex.mode & 0o777)
     }),
   )
 })
