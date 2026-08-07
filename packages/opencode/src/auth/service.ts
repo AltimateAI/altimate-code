@@ -2,6 +2,9 @@ import path from "path"
 import { Context, Effect, Layer, Record, Result, Schema } from "effect"
 import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
+// altimate_change — shared cross-process lock for auth.json (see auth/lock.ts)
+import { Flock } from "@opencode-ai/core/util/flock"
+import { AUTH_LOCK_KEY } from "./lock"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
@@ -66,27 +69,43 @@ export class AuthService extends Context.Service<AuthService, AuthService.Servic
         return (yield* all())[providerID]
       })
 
+      // altimate_change start — same cross-process store lock as auth/index.ts, same key, so the
+      // two implementations exclude each other rather than only themselves. See auth/lock.ts.
+      // The read happens INSIDE the lock; reading first and locking only the write would leave
+      // the lost-credential window open. Reads stay unlocked (atomic rename makes them safe).
+      const readAll = async () => {
+        const data = await Filesystem.readJson<Record<string, unknown>>(file).catch(() => ({}))
+        return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+      }
+
       const set = Effect.fn("AuthService.set")(function* (key: string, info: Info) {
-        const norm = key.replace(/\/+$/, "")
-        const data = yield* all()
-        if (norm !== key) delete data[key]
-        delete data[norm + "/"]
         yield* Effect.tryPromise({
-          try: () => Filesystem.writeJson(file, { ...data, [norm]: info }, 0o600),
+          try: () =>
+            Flock.withLock(AUTH_LOCK_KEY, async () => {
+              const norm = key.replace(/\/+$/, "")
+              const data = await readAll()
+              if (norm !== key) delete data[key]
+              delete data[norm + "/"]
+              await Filesystem.writeJson(file, { ...data, [norm]: info }, 0o600)
+            }),
           catch: fail("Failed to write auth data"),
         })
       })
 
       const remove = Effect.fn("AuthService.remove")(function* (key: string) {
-        const norm = key.replace(/\/+$/, "")
-        const data = yield* all()
-        delete data[key]
-        delete data[norm]
         yield* Effect.tryPromise({
-          try: () => Filesystem.writeJson(file, data, 0o600),
+          try: () =>
+            Flock.withLock(AUTH_LOCK_KEY, async () => {
+              const norm = key.replace(/\/+$/, "")
+              const data = await readAll()
+              delete data[key]
+              delete data[norm]
+              await Filesystem.writeJson(file, data, 0o600)
+            }),
           catch: fail("Failed to write auth data"),
         })
       })
+      // altimate_change end
 
       return AuthService.of({
         get,
