@@ -92,11 +92,32 @@ export namespace FSUtil {
         })
       })
 
+      // altimate_change start — write, then chmod, leaves the file readable by anyone for the
+      // window in between, and the data is already in it. auth.json goes through here, so every
+      // provider's credentials — not just the free tier's — are briefly world-readable on first
+      // creation under a normal umask. When a mode is requested, write a temp file that has that
+      // mode from the moment it exists and rename it into place; rename is atomic, so a reader
+      // sees either the old file or the new one and never a partial write.
       const writeJson = Effect.fn("FileSystem.writeJson")(function* (path: string, data: unknown, mode?: number) {
         const content = JSON.stringify(data, null, 2)
-        yield* fs.writeFileString(path, content)
-        if (mode) yield* fs.chmod(path, mode)
+        if (!mode) {
+          yield* fs.writeFileString(path, content)
+          return
+        }
+        yield* Effect.promise(async () => {
+          // Same directory, so the rename cannot cross a filesystem boundary. `wx` refuses to
+          // reuse a leftover temp file rather than writing secrets into one we do not own.
+          const temp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+          try {
+            await NFS.writeFile(temp, content, { mode, flag: "wx" })
+            await NFS.rename(temp, path)
+          } catch (err) {
+            await NFS.rm(temp, { force: true }).catch(() => {})
+            throw err
+          }
+        })
       })
+      // altimate_change end
 
       const ensureDir = Effect.fn("FileSystem.ensureDir")(function* (path: string) {
         yield* fs.makeDirectory(path, { recursive: true })

@@ -18,6 +18,7 @@ process.env["OPENCODE_TEST_HOME"] = tmp
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { Auth } = await import("../../src/auth")
+const { Global } = await import("../../src/global")
 
 type FetchCall = { url: string; body: Record<string, unknown> }
 
@@ -596,5 +597,26 @@ describe("real gateway 429 bodies", () => {
     for (const body of [TOKENS_429, REQUESTS_429]) {
       expect(FreeTier.describeRateLimit({ body })).not.toContain("e4ab7e65")
     }
+  })
+})
+
+describe("credential file permissions", () => {
+  test("auth.json is never briefly world-readable while holding a secret", async () => {
+    // writeJson used to write the content and chmod afterwards, so the file existed with the
+    // umask's permissions — containing the install secret and the key — until the chmod landed.
+    // Every provider's credentials go through the same path, not just ours.
+    // Asked of the code rather than reconstructed: the XDG resolution happens at module load and
+    // guessing the path made this assert a directory that never existed.
+    const authPath = path.join(Global.Path.data, "auth.json")
+    fs.rmSync(authPath, { force: true })
+
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+
+    const mode = fs.statSync(authPath).mode & 0o777
+    expect(mode).toBe(0o600)
+    // No temp file left behind by the atomic rename.
+    const strays = fs.readdirSync(path.dirname(authPath)).filter((f) => f.endsWith(".tmp"))
+    expect(strays).toEqual([])
   })
 })

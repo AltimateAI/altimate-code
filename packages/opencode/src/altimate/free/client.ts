@@ -8,6 +8,7 @@ import { randomBytes, createHash } from "node:crypto"
 import { Auth } from "../../auth"
 import { Installation } from "../../installation"
 import { Log } from "../util/log"
+import { Flock } from "@opencode-ai/core/util/flock"
 
 const log = Log.create({ service: "free-tier" })
 
@@ -278,12 +279,26 @@ export namespace FreeTier {
    * Reuses the stored install secret when one exists so re-registration rotates the key against
    * the same budget principal rather than creating a fresh one.
    */
-  export async function register(): Promise<Credentials> {
-    // Concurrent callers share one registration. Without this, a burst of parallel 401s would
-    // each mint a key, and every one but the last would be orphaned on the gateway.
-    if (!inflight) inflight = registerOnce().finally(() => (inflight = undefined))
+  export async function register(input: { supersede?: string } = {}): Promise<Credentials> {
+    // Two layers, because there are two kinds of concurrency here. In-process, a burst of
+    // parallel 401s shares one registration so we do not mint a key per request. Across
+    // processes — two CLIs open on the same machine, which is ordinary — a file lock serializes
+    // the whole read-modify-write, since both would otherwise rotate the same principal and race
+    // each other's writes to the shared auth store, orphaning keys.
+    if (!inflight)
+      inflight = Flock.withLock(LOCK_KEY, async () => {
+        // Re-read inside the lock. `supersede` is the key the caller found rejected, so a stored
+        // key that differs from it means another process already rotated while we waited and we
+        // should adopt theirs. Deliberately NOT an expiry check: a revoked key still looks live,
+        // and treating it as "nothing to do" would leave the 401 unrecoverable.
+        const fresh = await credentials()
+        if (fresh && input.supersede && fresh.apiKey !== input.supersede) return fresh
+        return registerOnce()
+      }).finally(() => (inflight = undefined))
     return inflight
   }
+
+  const LOCK_KEY = "altimate-free-registration"
 
   let inflight: Promise<Credentials> | undefined
 
@@ -442,7 +457,7 @@ export namespace FreeTier {
     if (stored && stored.apiKey !== current.apiKey) return send(stored.apiKey)
 
     log.info("free tier key rejected; re-registering")
-    const rotated = await register().catch((err) => {
+    const rotated = await register({ supersede: current.apiKey }).catch((err) => {
       log.warn("free tier re-registration after 401 failed", { error: err })
       return undefined
     })
