@@ -116,6 +116,31 @@ regardless of variance: ~$0.00187/req, ~133 requests/day at a $0.25 grant. That 
 decision boundary than we had, and it raises explicit caching's value well above the earlier
 break-even estimate.
 
+**A sweep of the stable head found two more prefix-breakers, one fixed and one bigger.** Skills were
+sorted with `localeCompare`, whose default follows the runtime's LANG/ICU data — so two machines
+emitted the same skills in a different order and shared no prefix at all. It needed fixing in *two*
+places (`SystemPrompt.skills()` orders the auto-loaded bodies; `Skill.fmt()` re-sorts independently
+and is the one that reaches the prompt), and correcting either alone accomplishes nothing. Fixed to
+codepoint order.
+
+The bigger one is **not** fixed: `Skill.fmt()` emits `<location>` as an absolute `file://` URL
+carrying the user's home directory and worktree path, first occurring at char **40,850** — *earlier*
+than `<env>` at 58,817. So for cross-user sharing the skill paths, not `<env>`, are the first
+differing byte. Even a user with zero project skills gets a machine-specific path, because built-ins
+resolve to `.../packages/opencode/%3Cbuilt-in%3E` instead of taking the `builtin:` branch that
+already exists on that line. Measured against the 241,285-char static payload:
+
+| | Cacheable head | Share |
+|---|---:|---:|
+| Before the reorder | 13,919 | 5.8% |
+| Today (reorder + codepoint sorts) | 40,850 | 16.9% |
+| If skill locations were machine-independent | 58,817 | 24.4% |
+
+So the reorder did help cross-user sharing (13,919 → 40,850) and the remaining ~7.5 points is one
+fix away — but it is not a pure byte-order change (it alters what the model sees), so it needs the
+same behavioural verification the `<env>` move got. The rest of the head is clean: no dates, epochs,
+UUIDs, tmp paths, ports, or unordered iteration ahead of `<env>`.
+
 Deferred follow-up, flagged not attempted: getting the tool block into a *shared* prefix requires
 `systemInstruction` to be byte-identical across requests, which means moving `<env>`, AGENTS.md and
 memory into `contents` — the exact placement that caused the documented date-echo regression. One
