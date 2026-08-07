@@ -279,7 +279,16 @@ export namespace FreeTier {
    * Reuses the stored install secret when one exists so re-registration rotates the key against
    * the same budget principal rather than creating a fresh one.
    */
-  export async function register(input: { supersede?: string } = {}): Promise<Credentials> {
+  export async function register(
+    input: {
+      supersede?: string
+      // altimate_change — every key the CALLING request has already been rejected on, not just the
+      // one in hand. The adopt branch below hands back whatever the store holds; without this it
+      // can hand back a key the caller has already proven dead, which is the alternating-rotation
+      // case in authorizedFetch. Optional: callers outside the 401 path have no such history.
+      rejected?: ReadonlySet<string>
+    } = {},
+  ): Promise<Credentials> {
     // Two layers, because there are two kinds of concurrency here. In-process, a burst of
     // parallel 401s shares one registration so we do not mint a key per request. Across
     // processes — two CLIs open on the same machine, which is ordinary — a file lock serializes
@@ -302,7 +311,12 @@ export namespace FreeTier {
       // should adopt theirs. Deliberately NOT an expiry check: a revoked key still looks live,
       // and treating it as "nothing to do" would leave the 401 unrecoverable.
       const fresh = await credentials()
-      if (fresh && input.supersede && fresh.apiKey !== input.supersede) return fresh
+      // altimate_change — `!rejected.has(...)`: "differs from the key in hand" is not enough to
+      // call the stored key live. Under rotations in both directions it can be an EARLIER key this
+      // same request was already rejected on, and adopting it spends a recovery pass on a corpse.
+      // Falling through to a real mint is the only thing left that can produce a working key.
+      if (fresh && input.supersede && fresh.apiKey !== input.supersede && !input.rejected?.has(fresh.apiKey))
+        return fresh
       return registerOnce()
     }).finally(() => {
       // Only clear our own entry: a later caller with the same rejected key may already have
@@ -480,25 +494,37 @@ export namespace FreeTier {
     //
     // Bounded rather than "until it works": a 401 can also mean revoked principal or kill switch,
     // which no amount of rotating fixes, and an unbounded loop would hang the request instead of
-    // surfacing an error. Each pass must move to a DIFFERENT key or we stop — that is what makes
-    // termination independent of the bound.
+    // surfacing an error. Each pass must move to a key THIS REQUEST has not already been rejected
+    // on, or we stop — that is what makes termination independent of the bound.
+    //
+    // `rejected` is what the comparison has to be against, not just the immediately previous key.
+    // Comparing to the previous key alone lets rotations alternate us back onto a corpse: A is
+    // rejected, we adopt B, B is rejected, the store meanwhile rotates back to A, and `!== key`
+    // happily accepts A and sends it a second time. Still bounded, but it burns every remaining
+    // pass on keys already proven dead and can return the 401 while a live key exists. A key only
+    // enters the set once we have sent it and seen it fail, so this never refuses a key that might
+    // still work.
+    const rejected = new Set<string>([key])
     for (let attempt = 0; response.status === 401 && attempt < MAX_AUTH_RECOVERY_ATTEMPTS; attempt++) {
       const stored = await credentials()
       let next: string | undefined
-      if (stored && stored.apiKey !== key) {
+      if (stored && !rejected.has(stored.apiKey)) {
         // Someone else already rotated. Use theirs rather than minting another and orphaning it.
         next = stored.apiKey
       } else {
         log.info("free tier key rejected; re-registering", { attempt })
-        next = await register({ supersede: key })
+        next = await register({ supersede: key, rejected })
           .then((rotated) => rotated.apiKey)
           .catch((err) => {
             log.warn("free tier re-registration after 401 failed", { error: err, attempt })
             return undefined
           })
       }
-      if (!next || next === key) return response
+      // A rotation that hands back something we have already been rejected on has nothing left to
+      // offer this request; stop and surface the 401 rather than spending a pass on it.
+      if (!next || rejected.has(next)) return response
       key = next
+      rejected.add(key)
       response = await send(key)
     }
     return response

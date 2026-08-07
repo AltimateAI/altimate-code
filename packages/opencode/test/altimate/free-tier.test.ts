@@ -753,6 +753,58 @@ describe("401 recovery under overlapping rotations", () => {
     expect(minted).toBe(1)
   })
 
+  // The adopt test above proves one pass is not enough. This proves comparing against the
+  // PREVIOUS key is not enough either. Two processes rotating the store in opposite directions
+  // put a key we have already been rejected on back in front of us, and `next !== key` accepts it:
+  // A rejected, adopt B, B rejected, store flips back to A, `A !== B` so we send A again. Bounded,
+  // so no livelock — but every remaining pass goes to a corpse and the caller gets a 401 with a
+  // live key one registration away.
+  test("a key this request already proved dead is never sent again, however the store rotates", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    const A = REGISTERED.api_key
+    const B = "sk-free-B-dead"
+    const LIVE = "sk-free-live"
+
+    const store = async (key: string) =>
+      Auth.set(FreeTier.PROVIDER_ID, {
+        type: "api",
+        key,
+        metadata: { install_secret: "s3cret", base_url: REGISTERED.base_url },
+      })
+
+    let minted = 0
+    const attempts: string[] = []
+    spyOn(global, "fetch").mockImplementation((async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        minted++
+        return ok({ ...REGISTERED, api_key: LIVE })
+      }
+      const header = auth(init) ?? ""
+      attempts.push(header)
+
+      // Alternating rotations: whichever dead key we just sent, the store now holds the other one.
+      // Comparing only against the key in hand therefore always finds a "different" key to adopt,
+      // and never runs out until the bound does.
+      await store(header === `Bearer ${A}` ? B : A)
+
+      return new Response("", { status: header === `Bearer ${LIVE}` ? 200 : 401 })
+    }) as unknown as typeof fetch)
+
+    const response = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+
+    expect(response.status).toBe(200)
+    // The exact sequence. An assertion that the LIVE key was reached eventually would pass against
+    // the buggy version too whenever the bound happens to be generous enough; what discriminates
+    // is that no pass was spent re-sending A.
+    expect(attempts).toEqual([`Bearer ${A}`, `Bearer ${B}`, `Bearer ${LIVE}`])
+    expect(new Set(attempts).size).toBe(attempts.length)
+    expect(minted).toBe(1)
+  })
+
   test("recovery is bounded, and uses every pass, when no key is ever accepted", async () => {
     mockGateway(() => ok(REGISTERED))
     await FreeTier.register()
