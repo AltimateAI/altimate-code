@@ -29,6 +29,7 @@ import { Auth } from "../../src/auth"
 import * as AuthSvc from "../../src/auth/service"
 import { AUTH_FILE } from "../../src/auth/lock"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { writeFileAtomic, canonicalPath } from "@opencode-ai/core/util/atomic-write"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { testEffect } from "../lib/effect"
 
@@ -216,6 +217,30 @@ describe("Auth store writer parity", () => {
     }),
   )
 
+  it.instance("index.ts (the FSUtil path) also replaces auth.json atomically", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+
+      // The sibling assertion for `Auth.Service`. Asserting only the final mode does NOT
+      // discriminate on either path — write-then-chmod also ends at 0600 — so reverting
+      // FSUtil.writeJson to an in-place write left every other FSUtil assertion here green
+      // while reopening the exposure window. The inode is what tells the two apart.
+      const auth = yield* Auth.Service
+      const before = yield* seedLooseFile(AUTH_FILE)
+
+      yield* auth.set("fsutil-atomic", api("secret"))
+
+      const stat = yield* Effect.promise(() => fs.stat(AUTH_FILE))
+      expect(stat.ino).not.toBe(before)
+      expect(stat.mode & 0o777).toBe(0o600)
+
+      const data = yield* auth.all()
+      const entry = data["fsutil-atomic"]
+      expect(entry).toBeDefined()
+      if (entry!.type === "api") expect(entry!.key).toBe("secret")
+    }),
+  )
+
   it.instance("both implementations produce the same mode on the same file", () =>
     Effect.gen(function* () {
       if (process.platform === "win32") return
@@ -234,6 +259,187 @@ describe("Auth store writer parity", () => {
       expect(afterService.mode & 0o777).toBe(0o600)
       expect(afterIndex.mode & 0o777).toBe(0o600)
       expect(afterService.mode & 0o777).toBe(afterIndex.mode & 0o777)
+    }),
+  )
+})
+
+describe("Auth store schema parity", () => {
+  // The two implementations decoded `auth.json` with SEPARATE Info schemas, and they had drifted:
+  // service.ts's `Api` had no `metadata`. Decoding narrows to the declared shape and both
+  // implementations rewrite the WHOLE file, so touching any unrelated provider through
+  // AuthService stripped metadata from every entry. For the free tier that silently removes
+  // `install_secret` — the identity the gateway derives its budget principal from — so the next
+  // registration mints a second principal instead of rotating.
+  const withMetadata = {
+    type: "api" as const,
+    key: "free-key",
+    metadata: { install_secret: "s3cret", base_url: "http://localhost:4000" },
+  }
+
+  it.instance("metadata survives a rewrite triggered by the OTHER implementation", () =>
+    Effect.gen(function* () {
+      const auth = yield* Auth.Service
+      const service = yield* AuthSvc.AuthService
+
+      // Free tier registers through the index.ts path.
+      yield* auth.set("altimate-free", withMetadata)
+
+      // The user then adds an unrelated provider through the service.ts path, which rewrites
+      // every entry. This is the step that used to drop the metadata.
+      yield* service.set("some-other-provider", api("unrelated"))
+
+      for (const read of [yield* auth.all(), yield* service.all()]) {
+        const entry = read["altimate-free"]
+        expect(entry).toBeDefined()
+        expect(entry!.type).toBe("api")
+        if (entry!.type === "api") {
+          expect(entry!.metadata?.["install_secret"]).toBe("s3cret")
+          expect(entry!.metadata?.["base_url"]).toBe("http://localhost:4000")
+        }
+      }
+    }),
+  )
+
+  it.instance("metadata survives a remove triggered by the OTHER implementation", () =>
+    Effect.gen(function* () {
+      const auth = yield* Auth.Service
+      const service = yield* AuthSvc.AuthService
+
+      yield* auth.set("altimate-free-2", withMetadata)
+      yield* auth.set("doomed-provider", api("bye"))
+      yield* service.remove("doomed-provider")
+
+      const entry = (yield* auth.all())["altimate-free-2"]
+      expect(entry).toBeDefined()
+      if (entry!.type === "api") expect(entry!.metadata?.["install_secret"]).toBe("s3cret")
+    }),
+  )
+
+  it.instance("metadata written THROUGH service.ts round-trips intact via BOTH readers", () =>
+    Effect.gen(function* () {
+      const service = yield* AuthSvc.AuthService
+      const auth = yield* Auth.Service
+
+      yield* service.set("altimate-free-3", withMetadata)
+
+      // Reading through index.ts alone does not discriminate: `set` serialises the caller's
+      // object as given, so metadata reaches the file even under the narrow schema — the loss
+      // happens on DECODE. service.all() is the reader that has to see it too.
+      for (const read of [yield* auth.all(), yield* service.all()]) {
+        const entry = read["altimate-free-3"]
+        expect(entry).toBeDefined()
+        if (entry!.type === "api") expect(entry!.metadata?.["base_url"]).toBe("http://localhost:4000")
+      }
+    }),
+  )
+})
+
+describe("canonicalPath and symlink safety", () => {
+  // The writer resolves its target with realpath so it replaces what a symlink POINTS AT.
+  // An earlier version swallowed every realpath error, which meant "cannot resolve" and
+  // "nothing there" were treated identically: a valid symlink whose directory was momentarily
+  // unreadable, or a symlink cycle, looked like a fresh file and got REPLACED — reporting
+  // success while the real credential file silently went stale.
+  it.instance("canonicalPath resolves a symlink to its physical target", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+      const dir = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "canon-")))
+      try {
+        const real = path.join(dir, "real.json")
+        const link = path.join(dir, "link.json")
+        yield* Effect.promise(() => fs.writeFile(real, "{}"))
+        yield* Effect.promise(() => fs.symlink(real, link))
+        const resolved = yield* Effect.promise(() => canonicalPath(link))
+        expect(resolved).toBe(yield* Effect.promise(() => fs.realpath(real)))
+      } finally {
+        yield* Effect.promise(() => fs.rm(dir, { recursive: true, force: true }))
+      }
+    }),
+  )
+
+  it.instance("canonicalPath falls back for an absent target but still canonicalises the parent", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+      const dir = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "canon-absent-")))
+      try {
+        // The parent is reached through a symlink; the leaf does not exist yet. The result must
+        // still collapse the parent symlink, or two processes reaching one store by different
+        // routes would compute different lock keys.
+        const realDir = path.join(dir, "real-dir")
+        const linkDir = path.join(dir, "link-dir")
+        yield* Effect.promise(() => fs.mkdir(realDir))
+        yield* Effect.promise(() => fs.symlink(realDir, linkDir))
+        const resolved = yield* Effect.promise(() => canonicalPath(path.join(linkDir, "absent.json")))
+        const expected = path.join(yield* Effect.promise(() => fs.realpath(realDir)), "absent.json")
+        expect(resolved).toBe(expected)
+      } finally {
+        yield* Effect.promise(() => fs.rm(dir, { recursive: true, force: true }))
+      }
+    }),
+  )
+
+  it.instance("a symlink cycle (ELOOP) is propagated, not treated as a missing file", () =>
+    Effect.gen(function* () {
+      if (process.platform === "win32") return
+      const dir = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "canon-loop-")))
+      try {
+        const a = path.join(dir, "a.json")
+        const b = path.join(dir, "b.json")
+        yield* Effect.promise(() => fs.symlink(b, a))
+        yield* Effect.promise(() => fs.symlink(a, b))
+
+        const outcome = yield* Effect.promise(() =>
+          writeFileAtomic(a, "{}", 0o600).then(
+            () => "wrote" as const,
+            (err) => (err as { code?: string }).code ?? "threw",
+          ),
+        )
+        // Must NOT report success by replacing the link.
+        expect(outcome).not.toBe("wrote")
+        expect(outcome).toBe("ELOOP")
+        // And the cycle is still a cycle — nothing was clobbered.
+        expect((yield* Effect.promise(() => fs.lstat(a))).isSymbolicLink()).toBe(true)
+      } finally {
+        yield* Effect.promise(() => fs.rm(dir, { recursive: true, force: true }))
+      }
+    }),
+  )
+
+  it.instance("a symlink into an unreadable directory is NOT replaced (EACCES)", () =>
+    Effect.gen(function* () {
+      // Running as root defeats permission checks entirely, so the assertion would be vacuous.
+      if (process.platform === "win32" || process.getuid?.() === 0) return
+
+      // The exact shape that swallowing realpath errors got wrong: the LINK lives somewhere
+      // writable, its target lives in a directory that is momentarily unreadable. Treating the
+      // resolve failure as "no target" means the temp file is created next to the link and
+      // renamed OVER it — the write reports success, the symlink is gone, and the real
+      // credential file is left stale. Nothing about that is visible to the caller.
+      const dir = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "canon-eacces-")))
+      const locked = path.join(dir, "locked")
+      const link = path.join(dir, "auth.json")
+      try {
+        yield* Effect.promise(() => fs.mkdir(locked))
+        const real = path.join(locked, "real-auth.json")
+        yield* Effect.promise(() => fs.writeFile(real, JSON.stringify({ credential: "original" }), { mode: 0o600 }))
+        yield* Effect.promise(() => fs.symlink(real, link))
+        yield* Effect.promise(() => fs.chmod(locked, 0o000))
+
+        const outcome = yield* Effect.promise(() =>
+          writeFileAtomic(link, JSON.stringify({ credential: "new" }), 0o600).then(
+            () => "wrote" as const,
+            (err) => (err as { code?: string }).code ?? "threw",
+          ),
+        )
+
+        expect(outcome).not.toBe("wrote")
+        expect(outcome).toBe("EACCES")
+        // The link must survive: replacing it is the silent-staleness bug.
+        expect((yield* Effect.promise(() => fs.lstat(link))).isSymbolicLink()).toBe(true)
+      } finally {
+        yield* Effect.promise(() => fs.chmod(locked, 0o700).catch(() => {}))
+        yield* Effect.promise(() => fs.rm(dir, { recursive: true, force: true }))
+      }
     }),
   )
 })

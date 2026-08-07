@@ -24,12 +24,19 @@ async function wait(fn: () => boolean, timeout = 2000) {
 
 const REGISTER_PATH = "/altimate/free/register"
 
+// altimate_change — `dispose` and `provider` are gateable independently of `register` so a test
+// can dismiss the dialog DURING each awaited step. Gating only registration cannot exercise the
+// post-dispose or post-bootstrap latches: by the time registration resolves the dialog is already
+// gone, the first check returns, and removing the later checks changes nothing.
+type Handler = Response | (() => Response | Promise<Response>)
 async function mountConfirm({
   register = json({ ok: true }),
-}: { register?: Response | (() => Response | Promise<Response>) } = {}) {
+  dispose,
+  provider,
+}: { register?: Handler; dispose?: Handler; provider?: Handler } = {}) {
   const [
     { DialogProvider },
-    { DialogFreeGeminiConfirm, FREE_GEMINI_DISCLOSURE, resetSetupComplete, markFirstRunActive },
+    { DialogFreeGeminiConfirm, FREE_GEMINI_DISCLOSURE, resetSetupComplete, markFirstRunActive, useSetupComplete },
     { OnboardingTelemetryProvider },
     { ArgsProvider },
     { KVProvider },
@@ -69,7 +76,8 @@ async function mountConfirm({
 
   const inner = createFetch((url) => {
     if (url.pathname === REGISTER_PATH) return typeof register === "function" ? register() : register
-    if (url.pathname === "/instance/dispose") return json({})
+    if (url.pathname === "/instance/dispose") return dispose ? (typeof dispose === "function" ? dispose() : dispose) : json({})
+    if (url.pathname === "/provider" && provider) return typeof provider === "function" ? provider() : provider
     if (url.pathname === "/provider")
       return json({
         all: [{ id: "altimate-free", name: "Altimate Free", models: {}, env: [] }],
@@ -143,6 +151,10 @@ async function mountConfirm({
     requests,
     disclosure: FREE_GEMINI_DISCLOSURE,
     registrations: () => requests.filter((p) => p === REGISTER_PATH),
+    // altimate_change — module-level signal, readable outside the component. The success path
+    // ends with markSetupComplete(); it staying false is how a test sees that a dismissed
+    // continuation did NOT run to completion.
+    setupComplete: useSetupComplete(),
     async cleanup() {
       app.renderer.destroy()
     },
@@ -285,5 +297,71 @@ test("a rejected registration is visible and leaves the dialog open to retry", a
     await wait(() => confirm.registrations().length === 2)
   } finally {
     await confirm.cleanup()
+  }
+})
+
+// altimate_change — the accept path awaits THREE things: registration, instance dispose, and
+// sync bootstrap. The pre-existing test dismisses during registration only, which is caught by
+// the first `disposed` check; removing the two later checks leaves it green. These dismiss during
+// each of the later awaits, so each latch has a test that fails without it.
+
+test("escaping during instance dispose stops before bootstrap", async () => {
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  const confirm = await mountConfirm({ dispose: async () => (await gate, json({})) })
+  try {
+    confirm.app.mockInput.pressKey("y")
+    // Registration completed and the dialog is now blocked inside instance.dispose.
+    await wait(() => confirm.requests.filter((p) => p === "/instance/dispose").length === 1)
+
+    const providerCallsBefore = confirm.requests.filter((p) => p === "/provider").length
+    await confirm.cleanup()
+    release!()
+    await Bun.sleep(100)
+
+    // Without the post-dispose latch the continuation proceeds into sync.bootstrap(), which
+    // fetches /provider. Nothing after the dismissal should have reached it.
+    expect(confirm.requests.filter((p) => p === "/provider").length).toBe(providerCallsBefore)
+    expect(confirm.setupComplete()).toBe(false)
+  } finally {
+    release!()
+    confirm.app.renderer.destroy()
+  }
+})
+
+test("escaping during sync bootstrap does not complete setup or switch the model", async () => {
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => (release = resolve))
+  // SyncProvider fetches /provider once at mount too. Blocking that one would stall the mount
+  // before the dialog is interactive, so only the bootstrap-time call is gated.
+  let blockProvider = false
+  const confirm = await mountConfirm({
+    provider: async () => {
+      if (blockProvider) await gate
+      return json({
+        all: [{ id: "altimate-free", name: "Altimate Free", models: { "gemini-flash-free": {} }, env: [] }],
+        default: {},
+        connected: [],
+      })
+    },
+  })
+  try {
+    blockProvider = true
+    confirm.app.mockInput.pressKey("y")
+    // Past registration and past instance.dispose, now blocked inside sync.bootstrap().
+    await wait(() => confirm.requests.filter((p) => p === "/instance/dispose").length === 1)
+    await wait(() => confirm.requests.filter((p) => p === "/provider").length >= 2)
+
+    await confirm.cleanup()
+    release!()
+    await Bun.sleep(150)
+
+    // The provider IS available in this fixture, so without the post-bootstrap latch the
+    // continuation runs to the end: dialog.clear(), local.model.set(), markSetupComplete().
+    // setupComplete staying false is the observable that the continuation stopped.
+    expect(confirm.setupComplete()).toBe(false)
+  } finally {
+    release!()
+    confirm.app.renderer.destroy()
   }
 })

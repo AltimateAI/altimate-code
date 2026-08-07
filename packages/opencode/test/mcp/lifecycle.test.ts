@@ -1302,28 +1302,42 @@ it.instance(
 // making the implementation the model actually got a function of server ordering. First wins
 // now, chosen by the sanitized-then-raw sort, so it depends only on the names.
 it.instance(
-  "resolves sanitized tool-name collisions deterministically (first wins)",
+  "resolves sanitized tool-name collisions to the same winner in EITHER reported order",
   () =>
     MCP.Service.use((mcp: MCPNS.Interface) =>
       Effect.gen(function* () {
-        lastCreatedClientName = "clash"
-        const state = getOrCreateClientState("clash")
-        // Reported last-first on purpose: under the old arrival-order behaviour `do.thing`
-        // would have won because it came second.
-        state.tools = [
-          { name: "do_thing", description: "underscore", inputSchema: { type: "object", properties: {} } },
-          { name: "do.thing", description: "dot", inputSchema: { type: "object", properties: {} } },
-        ]
-        yield* mcp.add("clash", { type: "local", command: ["echo", "test"] })
+        // Asserting one fixed order proves nothing: with `tools/list` returning
+        // [do_thing, do.thing], the OLD last-write-wins behaviour also selects "do.thing",
+        // so the obvious version of this test passes against the bug it targets. The property
+        // that actually distinguishes them is order-INDEPENDENCE — the same winner whichever
+        // order the server reports, which is exactly what a server is free to vary.
+        const dot = { name: "do.thing", description: "dot", inputSchema: { type: "object", properties: {} } }
+        const underscore = {
+          name: "do_thing",
+          description: "underscore",
+          inputSchema: { type: "object", properties: {} },
+        }
+
+        lastCreatedClientName = "clasha"
+        getOrCreateClientState("clasha").tools = [underscore, dot]
+        yield* mcp.add("clasha", { type: "local", command: ["echo", "test"] })
+
+        lastCreatedClientName = "clashb"
+        getOrCreateClientState("clashb").tools = [dot, underscore]
+        yield* mcp.add("clashb", { type: "local", command: ["echo", "test"] })
 
         const tools = yield* mcp.tools()
-        // Exactly one survives, and it is the raw name that sorts first ("do.thing" < "do_thing"
-        // by codepoint, since '.' is 0x2E and '_' is 0x5F).
-        expect(Object.keys(tools)).toEqual(["clash_do_thing"])
-        expect(tools["clash_do_thing"]!.description).toBe("dot")
+
+        // One survivor per server, and the SAME raw name wins in both. Under last-write-wins
+        // clasha would yield "dot" and clashb "underscore", so this fails against the old code.
+        expect(Object.keys(tools).sort()).toEqual(["clasha_do_thing", "clashb_do_thing"])
+        expect(tools["clasha_do_thing"]!.description).toBe("dot")
+        expect(tools["clashb_do_thing"]!.description).toBe("dot")
 
         // Stable across calls rather than alternating.
-        expect(Object.keys(yield* mcp.tools())).toEqual(["clash_do_thing"])
+        const again = yield* mcp.tools()
+        expect(again["clasha_do_thing"]!.description).toBe("dot")
+        expect(again["clashb_do_thing"]!.description).toBe("dot")
       }),
     ),
   { config: { mcp: {} } },

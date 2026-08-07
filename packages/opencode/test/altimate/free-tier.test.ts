@@ -623,3 +623,73 @@ describe("credential file permissions", () => {
     expect(strays).toEqual([])
   })
 })
+
+describe("registration dedupe is keyed on the rejected key", () => {
+  // The in-process share exists so a burst of parallel 401s on ONE key triggers one rotation
+  // rather than one per request. Sharing across DIFFERENT rejected keys is a different thing and
+  // was a bug: the lock body's adopt-vs-rotate decision is computed for whichever caller created
+  // the promise, so a caller rejected on B could join a rotation started for A and be handed
+  // back B — the key it had just proven dead — returning the original 401 without rotating.
+  //
+  // The pre-existing rotation test cannot catch this: it awaits the first request before
+  // starting the second, so the two never overlap, and both carry the same stale key. Restoring
+  // the old process-wide `inflight` promise leaves it green.
+  test("two callers rejected on DIFFERENT keys never get their own rejected key back", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    // Stored key is sk-free-1 (REGISTERED). Caller B is the one whose rejected key matches what
+    // is stored, so under the old shared promise it would be told to keep using it.
+    const storedKey = REGISTERED.api_key
+
+    let minted = 0
+    spyOn(global, "fetch").mockImplementation((async (input: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        minted++
+        return ok({ ...REGISTERED, api_key: `sk-free-rotated-${minted}` })
+      }
+      return new Response("", { status: 200 })
+    }) as unknown as typeof fetch)
+
+    // Overlapping, not sequential. Argument evaluation is left-to-right, so the "sk-other"
+    // caller creates the shared promise under the old code — which then resolves to the stored
+    // key and hands the second caller exactly the key it rejected.
+    const [other, stored] = await Promise.all([
+      FreeTier.register({ supersede: "sk-other-dead" }),
+      FreeTier.register({ supersede: storedKey }),
+    ])
+
+    expect(other.apiKey).not.toBe("sk-other-dead")
+    expect(stored.apiKey).not.toBe(storedKey)
+    // Exactly one of the two had to mint: the caller whose rejected key was the stored one.
+    // The other adopts a live key rather than registering again.
+    expect(minted).toBe(1)
+  })
+
+  test("a burst on the SAME rejected key still shares one registration", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    let minted = 0
+    spyOn(global, "fetch").mockImplementation((async (input: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        minted++
+        return ok({ ...REGISTERED, api_key: "sk-free-shared" })
+      }
+      return new Response("", { status: 200 })
+    }) as unknown as typeof fetch)
+
+    // The property the dedupe exists for, kept intact by keying on `supersede` rather than
+    // removing the share: five simultaneous 401s on one key must not mint five identities.
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => FreeTier.register({ supersede: REGISTERED.api_key })),
+    )
+
+    expect(minted).toBe(1)
+    for (const r of results) expect(r.apiKey).toBe("sk-free-shared")
+  })
+})
