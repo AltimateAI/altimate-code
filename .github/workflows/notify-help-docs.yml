@@ -26,12 +26,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           J="$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls --jq '.[0] // {}')"
-          LOGIN="$(echo "$J" | jq -r '.user.login // ""')"
           echo "num=$(echo "$J" | jq -r '.number // ""')" >> "$GITHUB_OUTPUT"
-          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
+          echo "login=$(echo "$J" | jq -r '.user.login // ""')" >> "$GITHUB_OUTPUT"
           echo "url=$(echo "$J" | jq -r '.html_url // ""')" >> "$GITHUB_OUTPUT"
-          EMAIL=""; [ -n "$LOGIN" ] && EMAIL="$(gh api users/$LOGIN --jq '.email // ""' 2>/dev/null || echo '')"
-          echo "email=$EMAIL" >> "$GITHUB_OUTPUT"
 
       - uses: actions/create-github-app-token@v1
         id: tok
@@ -47,4 +44,4 @@ jobs:
           repository: AltimateAI/help-docs
           event-type: promote-from-product
           client-payload: |
-            {"product":"code","before":"${{ github.event.before }}","after":"${{ github.sha }}","source_pr":"${{ steps.src.outputs.num }}","source_author":"${{ steps.src.outputs.login }}","source_url":"${{ steps.src.outputs.url }}","source_email":"${{ steps.src.outputs.email }}"}
+            {"product":"code","before":"${{ github.event.before }}","after":"${{ github.sha }}","source_pr":"${{ steps.src.outputs.num }}","source_author":"${{ steps.src.outputs.login }}","source_url":"${{ steps.src.outputs.url }}"}
