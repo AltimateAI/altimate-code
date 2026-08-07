@@ -272,15 +272,15 @@ export function Session() {
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(
-    () => dimensions().width - (sidebarVisible() ? SIDEBAR_WIDTH : 0) - PANEL_HORIZONTAL_PADDING,
-  )
-  // Welcome panel's available space — same content-column basis as contentWidth
-  // (narrows with the sidebar whenever open, incl. the dimmed overlay on narrow
-  // terminals) so the panel stays aligned with the messages and both restore
-  // together when it closes. Height reserves the prompt row. Shared arithmetic in
-  // welcome-panel-utils so the tests exercise this exact math.
+  // altimate_change start — WelcomePanel responsive sizing (#1067). panelAvailable is the single
+  // source of the panel's usable size (via welcome-panel-utils, unit-tested); it narrows with the
+  // sidebar whenever open — including the dimmed full-area overlay on narrow terminals — so the
+  // panel and the messages stay aligned and both restore to full width when it closes. contentWidth
+  // (the shared content-column width) derives from it, so the width math has one definition and the
+  // two cannot structurally drift.
   const panelAvailable = createMemo(() => sessionAvailable(dimensions().width, dimensions().height, sidebarVisible()))
+  const contentWidth = createMemo(() => panelAvailable().width)
+  // altimate_change end
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))

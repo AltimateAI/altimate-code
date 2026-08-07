@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import { testRender } from "@opentui/solid"
-import { afterEach, expect, test } from "bun:test"
+import { expect, test } from "bun:test"
 import { resetSetupComplete } from "../../src/component/altimate-onboarding"
 import { WelcomePanel } from "../../src/component/welcome-panel"
 import { TuiConfigProvider } from "../../src/config"
@@ -67,31 +67,37 @@ async function renderPanel(availableWidth: number, availableHeight: number) {
   return { app, frame }
 }
 
-let current: Awaited<ReturnType<typeof testRender>> | undefined
-afterEach(() => {
-  current?.renderer.destroy()
-  current = undefined
-})
+// Own the renderer per test and destroy it in the same test's finally (plus reset
+// onboarding state), so nothing leaks between tests or races under parallel bun test.
+async function withPanel(width: number, height: number, check: (frame: string) => void) {
+  const { app, frame } = await renderPanel(width, height)
+  try {
+    check(frame)
+  } finally {
+    app.renderer.destroy()
+    resetSetupComplete()
+  }
+}
 
 test("full variant renders the wordmark + what-is section at a large available size", async () => {
-  const { app, frame } = await renderPanel(FULL_MIN_WIDTH, FULL_MIN_HEIGHT)
-  current = app
-  // "What is Altimate Code" is unique to the full two-column box.
-  expect(frame).toContain("What is Altimate Code")
+  await withPanel(FULL_MIN_WIDTH, FULL_MIN_HEIGHT, (frame) => {
+    // "What is Altimate Code" is unique to the full two-column box.
+    expect(frame).toContain("What is Altimate Code")
+  })
 })
 
 test("medium variant renders the condensed line (no what-is section) below the full width floor", async () => {
-  const { app, frame } = await renderPanel(FULL_MIN_WIDTH - 1, FULL_MIN_HEIGHT)
-  current = app
-  expect(frame).toContain("Gives your AI real context")
-  expect(frame).not.toContain("What is Altimate Code")
+  await withPanel(FULL_MIN_WIDTH - 1, FULL_MIN_HEIGHT, (frame) => {
+    expect(frame).toContain("Gives your AI real context")
+    expect(frame).not.toContain("What is Altimate Code")
+  })
 })
 
 test("compact variant renders a single line below the medium width floor", async () => {
-  const { app, frame } = await renderPanel(MEDIUM_MIN_WIDTH - 1, FULL_MIN_HEIGHT)
-  current = app
-  // Unconnected → the connect CTA; neither the medium nor full body is present.
-  expect(frame).toContain("Connect your AI model to start")
-  expect(frame).not.toContain("Gives your AI real context")
-  expect(frame).not.toContain("What is Altimate Code")
+  await withPanel(MEDIUM_MIN_WIDTH - 1, FULL_MIN_HEIGHT, (frame) => {
+    // Unconnected → the connect CTA; neither the medium nor full body is present.
+    expect(frame).toContain("Connect your AI model to start")
+    expect(frame).not.toContain("Gives your AI real context")
+    expect(frame).not.toContain("What is Altimate Code")
+  })
 })

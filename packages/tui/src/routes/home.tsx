@@ -68,9 +68,11 @@ export function Home() {
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
     return configured ?? 75
   })
-  // Panel's available space (terminal minus this route's padding + vertical
-  // reserve). Shared arithmetic in welcome-panel-utils so tests exercise it.
+  // altimate_change start — WelcomePanel responsive sizing (#1067): the panel's
+  // available space = terminal minus this route's padding + vertical reserve.
+  // Shared arithmetic in welcome-panel-utils so the tests exercise it.
   const panelAvailable = createMemo(() => homeAvailable(dimensions().width, dimensions().height))
+  // altimate_change end
   let sent = false
 
   onMount(() => {
