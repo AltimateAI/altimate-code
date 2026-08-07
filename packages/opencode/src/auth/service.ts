@@ -4,32 +4,17 @@ import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
 // altimate_change — shared cross-process lock for auth.json (see auth/lock.ts)
 import { Flock } from "@opencode-ai/core/util/flock"
-import { AUTH_LOCK_KEY } from "./lock"
+import { authLockKey } from "./lock"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
-export class Oauth extends Schema.Class<Oauth>("OAuth")({
-  type: Schema.Literal("oauth"),
-  refresh: Schema.String,
-  access: Schema.String,
-  expires: Schema.Number,
-  accountId: Schema.optional(Schema.String),
-  enterpriseUrl: Schema.optional(Schema.String),
-}) {}
-
-export class Api extends Schema.Class<Api>("ApiAuth")({
-  type: Schema.Literal("api"),
-  key: Schema.String,
-}) {}
-
-export class WellKnown extends Schema.Class<WellKnown>("WellKnownAuth")({
-  type: Schema.Literal("wellknown"),
-  key: Schema.String,
-  token: Schema.String,
-}) {}
-
-export const Info = Schema.Union([Oauth, Api, WellKnown])
-export type Info = Schema.Schema.Type<typeof Info>
+// altimate_change start — was a SECOND copy of the credential schema whose `Api` had no
+// `metadata` field. Decoding narrows to the declared shape and this service rewrites the whole
+// file, so a single provider change here stripped `install_secret`/`base_url` from every entry.
+// Same schema as auth/index.ts now, by construction rather than by both files agreeing.
+export { Oauth, Api, WellKnown, Info } from "./schema"
+import { Info } from "./schema"
+// altimate_change end
 
 export class AuthServiceError extends Schema.TaggedErrorClass<AuthServiceError>()("AuthServiceError", {
   message: Schema.String,
@@ -80,8 +65,8 @@ export class AuthService extends Context.Service<AuthService, AuthService.Servic
 
       const set = Effect.fn("AuthService.set")(function* (key: string, info: Info) {
         yield* Effect.tryPromise({
-          try: () =>
-            Flock.withLock(AUTH_LOCK_KEY, async () => {
+          try: async () =>
+            Flock.withLock(await authLockKey(), async () => {
               const norm = key.replace(/\/+$/, "")
               const data = await readAll()
               if (norm !== key) delete data[key]
@@ -94,8 +79,8 @@ export class AuthService extends Context.Service<AuthService, AuthService.Servic
 
       const remove = Effect.fn("AuthService.remove")(function* (key: string) {
         yield* Effect.tryPromise({
-          try: () =>
-            Flock.withLock(AUTH_LOCK_KEY, async () => {
+          try: async () =>
+            Flock.withLock(await authLockKey(), async () => {
               const norm = key.replace(/\/+$/, "")
               const data = await readAll()
               delete data[key]

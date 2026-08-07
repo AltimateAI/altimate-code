@@ -1,7 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import path from "path"
 import { Effect, Layer, Record, Result, Schema, Context } from "effect"
-import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 // altimate_change start — makeRuntime for the restored Promise wrappers (bottom of file)
@@ -9,7 +8,7 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 // altimate_change start — cross-process lock for the shared auth store (see auth/lock.ts)
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
-import { AUTH_LOCK_KEY } from "./lock"
+import { authLockKey } from "./lock"
 // altimate_change end
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
@@ -18,29 +17,13 @@ const file = path.join(Global.Path.data, "auth.json")
 
 const fail = (message: string) => (cause: unknown) => new AuthError({ message, cause })
 
-export class Oauth extends Schema.Class<Oauth>("OAuth")({
-  type: Schema.Literal("oauth"),
-  refresh: Schema.String,
-  access: Schema.String,
-  expires: NonNegativeInt,
-  accountId: Schema.optional(Schema.String),
-  enterpriseUrl: Schema.optional(Schema.String),
-}) {}
-
-export class Api extends Schema.Class<Api>("ApiAuth")({
-  type: Schema.Literal("api"),
-  key: Schema.String,
-  metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
-}) {}
-
-export class WellKnown extends Schema.Class<WellKnown>("WellKnownAuth")({
-  type: Schema.Literal("wellknown"),
-  key: Schema.String,
-  token: Schema.String,
-}) {}
-
-export const Info = Schema.Union([Oauth, Api, WellKnown]).annotate({ discriminator: "type", identifier: "Auth" })
-export type Info = Schema.Schema.Type<typeof Info>
+// altimate_change start — the schema moved to auth/schema.ts so `auth/service.ts` decodes with
+// the SAME one. It had its own copy without `Api.metadata`, and since both implementations
+// rewrite the whole file, writing through that one stripped metadata from every entry. Re-exported
+// here so the public surface (`Auth.Info`, `Auth.Api`, …) is unchanged.
+export { Oauth, Api, WellKnown, Info } from "./schema"
+import { Info } from "./schema"
+// altimate_change end
 
 export class AuthError extends Schema.TaggedErrorClass<AuthError>()("AuthError", {
   message: Schema.String,
@@ -99,7 +82,10 @@ export const layer = Layer.effect(
     // the lock, since a file lock is not re-entrant. For the same reason the bodies below call
     // `all()` directly rather than going through a locked helper.
     const withStoreLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      effect.pipe(flock.withLock(AUTH_LOCK_KEY), Effect.mapError(fail("Failed to lock auth store")))
+      Effect.promise(() => authLockKey()).pipe(
+        Effect.flatMap((key) => effect.pipe(flock.withLock(key))),
+        Effect.mapError(fail("Failed to lock auth store")),
+      )
 
     const set = Effect.fn("Auth.set")(function* (key: string, info: Info) {
       yield* withStoreLock(
