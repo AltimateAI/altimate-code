@@ -89,10 +89,39 @@ caches, storage metered inside the $50/day ceiling, cache identity derived from 
 release invalidates it automatically, and an alarm on sustained `cached_tokens` drop — a stale cache
 does not error, it silently costs 10×) → then set grant/ceiling/tpm against $0.0037/req.
 
-Open question before building explicit caching: post-fix, every user shares one prefix, so reuse
-frequency rises by roughly the user count and implicit hit rate may climb far above the same-user
-32%. If it lands north of ~80%, explicit caching's marginal value collapses and we should skip it
-along with its permanent operational complexity. Measure before committing.
+**RESOLVED 2026-08-07 — the ceiling is structural, and the prefix fix is worth ~1.18×, not 9.6×.**
+Tool declarations serialize **after** `systemInstruction` on the wire, so a difference *anywhere* in
+`systemInstruction` — including its final byte — earns zero credit for the tool block. Measured
+interleaved, 8 attempts each at 12s spacing:
+
+| Payload relationship | Cached | Hits |
+|---|---:|---:|
+| Byte-identical | 122,127 / 122,642 (99.6%) | 7/8 |
+| Differs only at the END of `systemInstruction` | 67,848 (55.3%) — exactly the static head, never one token more | 5/8 |
+
+67,848 recurring identically is a real block boundary, not a lucky draw. Two independent lines agree:
+the client's own captured payload predicted 5.8% cacheable before the fix, and 5.1% was measured.
+
+On this repo's **real** payload the gain is smaller than a synthetic fixture suggests, because tools
+dominate: system prompt 59,163 chars vs tools 182,122 chars, so **~75% of the static payload is
+permanently out of reach of any reordering inside `input.system`**. Cacheable span of
+`systemInstruction` goes 13,919 → 58,817 chars (4.2× on that block), i.e. 5.8% → ~22% of the full
+static payload after the measured 89-94% realization factor — about **$0.01715 → $0.01448/req, a
+15.6% saving (1.18×)**, and only in the cases where `systemInstruction` varies at all (different
+cwd, a new day, a different project, another user). Within one session it was already byte-stable.
+
+So the reordering is real, free, and non-worsening — but it is not the headline. **The remaining
+upside now belongs entirely to explicit caching**, which caches the whole payload including tools
+regardless of variance: ~$0.00187/req, ~133 requests/day at a $0.25 grant. That is a much cleaner
+decision boundary than we had, and it raises explicit caching's value well above the earlier
+break-even estimate.
+
+Deferred follow-up, flagged not attempted: getting the tool block into a *shared* prefix requires
+`systemInstruction` to be byte-identical across requests, which means moving `<env>`, AGENTS.md and
+memory into `contents` — the exact placement that caused the documented date-echo regression. One
+nuance for whoever picks it up: that regression came from appending the date to the **trailing** user
+message every turn; a synthetic **first** user message is a different placement and may not echo —
+but it sits inside the conversation prefix, so it needs its own measurement, not an assumption.
 
 **Not done, and required before any public deploy:** everything in "Legal gate" below (unchanged and
 still blocking), plus the deploy gates in the gateway README — TLS ingress with a route allowlist and
