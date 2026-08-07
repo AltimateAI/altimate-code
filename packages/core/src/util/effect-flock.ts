@@ -270,8 +270,9 @@ export namespace EffectFlock {
 
           if (parsed.token !== handle.token) return yield* Effect.die(new ReleaseError({ detail: "token mismatch" }))
 
-          // altimate_change — releaseRemove, not forceRemove: see the comment on releaseRemove.
+          // altimate_change start — releaseRemove, not forceRemove: see the comment on releaseRemove.
           yield* releaseRemove(handle.lockDir)
+          // altimate_change end
         })
 
       // -- build service --
