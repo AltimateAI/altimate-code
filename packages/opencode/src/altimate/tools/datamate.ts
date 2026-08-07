@@ -8,6 +8,7 @@ import {
   listMcpInConfig,
   resolveConfigPath,
   findAllConfigPaths,
+  readMcpEntryFromDisk,
 } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
@@ -255,14 +256,33 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
             output: `Datamate tools are already available via the '${DATAMATE_KEY}' MCP server (${toolCount} tools active).${staleNote}`,
           }
         }
-        // In config but not connected — reconnect via MCP.connect() so persistMcpEnabled
-        // is called and the enabled:true state survives the next session restart.
-        // Bug-fix: was previously MCP.add() which skips persistMcpEnabled, so a session
-        // that had the server disabled would not re-enable it on the next restart.
-        log.info("handleAdd: reconnecting existing datamate entry", {
+        // In config but not connected — refresh the persisted entry from the current
+        // IDE transport before connecting. MCP.connect() reads the in-memory Config
+        // singleton, so a stale entry (e.g. one persisted without its environment
+        // block) would be respawned broken no matter what the IDE entry says now.
+        // Same pattern as the reload-datamate endpoint: write the fresh entry to
+        // disk, then MCP.add() with the config directly. Writing enabled: true
+        // preserves the re-enable-on-restart behavior MCP.connect()'s
+        // persistMcpEnabled used to provide; other user-managed fields (timeout,
+        // oauth, …) are carried over from the existing entry.
+        log.info("handleAdd: refreshing and reconnecting existing datamate entry", {
           serverName: DATAMATE_KEY,
+          type: mcpConfig.type,
         })
-        await MCP.connect(DATAMATE_KEY)
+        const existing = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
+        const TRANSPORT_FIELDS = new Set(["type", "command", "args", "environment", "url", "updatedAt", "enabled"])
+        const preserved: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(existing ?? {})) {
+          if (!TRANSPORT_FIELDS.has(k)) preserved[k] = v
+        }
+        const refreshed = {
+          ...preserved,
+          ...mcpConfig,
+          enabled: true,
+          ...(transport?.type === "local" && transport.updatedAt ? { updatedAt: transport.updatedAt } : {}),
+        }
+        await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
+        await MCP.add(DATAMATE_KEY, mcpConfig)
       } else {
         // Not in config yet — write to disk then connect. The persisted entry
         // additionally carries the IDE entry's updatedAt (disk-only; the runtime

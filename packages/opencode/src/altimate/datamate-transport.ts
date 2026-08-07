@@ -43,6 +43,26 @@ function extractSpawnEnvironment(raw: unknown): Record<string, string> | undefin
 }
 
 /**
+ * Root directory the boot-time heal should scan from: the containing git
+ * project root when there is one, else the directory itself. Boot-time callers
+ * (TUI worker, `run`) fire the sync before an Instance exists, so they cannot
+ * use `Instance.worktree` — but MCP config is scoped to the project root, and
+ * a session launched from a subdirectory would otherwise scan the subtree and
+ * miss both the IDE config and the persisted entry it needs to repair.
+ */
+export async function resolveDatamateSyncRoot(directory: string): Promise<string> {
+  try {
+    const matches = Filesystem.up({ targets: [".git"], start: directory })
+    const dotgit = await matches.next().then((x) => x.value)
+    await matches.return()
+    if (dotgit) return path.dirname(dotgit)
+  } catch {
+    // fall through to the directory itself
+  }
+  return directory
+}
+
+/**
  * Parse a single mcp.json file and return the servers map, trying each of the
  * known top-level key names in order.
  */

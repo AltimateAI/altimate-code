@@ -5,6 +5,7 @@ import path from "path"
 import {
   readDatamateTransportFromIde,
   syncDatamateUrlFromVscodeMcp,
+  resolveDatamateSyncRoot,
   DATAMATE_KEY,
 } from "../../src/altimate/datamate-transport"
 
@@ -93,6 +94,25 @@ describe("readDatamateTransportFromIde stdio env carry-through", () => {
     if (t?.type === "local") {
       expect(t.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
     }
+  })
+})
+
+describe("resolveDatamateSyncRoot", () => {
+  test("resolves the containing git project root from a subdirectory", async () => {
+    await using tmp = await tmpdir()
+    await mkdir(path.join(tmp.path, ".git"), { recursive: true })
+    await mkdir(path.join(tmp.path, "packages", "deep"), { recursive: true })
+
+    const root = await resolveDatamateSyncRoot(path.join(tmp.path, "packages", "deep"))
+    expect(root).toBe(tmp.path)
+  })
+
+  test("falls back to the directory itself outside a git project", async () => {
+    await using tmp = await tmpdir()
+    await mkdir(path.join(tmp.path, "plain"), { recursive: true })
+
+    const root = await resolveDatamateSyncRoot(path.join(tmp.path, "plain"))
+    expect(root).toBe(path.join(tmp.path, "plain"))
   })
 })
 
