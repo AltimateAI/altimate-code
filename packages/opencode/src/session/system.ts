@@ -107,6 +107,65 @@ export namespace SystemPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — stable→volatile system prompt ordering for exact-prefix caches
+  export interface AssembleInput {
+    /** Auto-loaded skill bodies + the <available_skills> catalogue. */
+    skills?: string
+    /** AGENTS.md / CLAUDE.md, from InstructionPrompt.system(). */
+    instructions: string[]
+    /** Memory + training blocks, from MemoryPrompt.inject(). */
+    knowledge?: string
+    /** <env> block, from environment(). */
+    environment: string[]
+    /** Per-turn reminders hoisted out of the message stream for non-Anthropic models. */
+    hoistedReminders: string[]
+  }
+
+  /**
+   * Order the system prompt segments from most stable to most volatile.
+   *
+   * `session/llm.ts` joins the provider prompt, every segment returned here, and the
+   * per-message system prompt into a SINGLE string, so this order is literally byte
+   * order on the wire. Vertex/Gemini and OpenAI do exact prefix matching and stop at
+   * the first differing byte, so any volatile segment placed early truncates the
+   * shared prefix for everything behind it.
+   *
+   * `environment()` used to be FIRST, right after the provider prompt. It carries the
+   * working directory, worktree, platform and today's date, so the first differing
+   * byte landed roughly 6k tokens in. Measured against Vertex on a ~121k-token
+   * payload: 6,142 tokens cached (5.1%) versus 120,804 (99.9%) on a full-prefix hit.
+   *
+   * The date stays inside the ambient <env> block. Carrying it on the trailing user
+   * message (the pre-v1.17.9 approach, see currentDate() above) made models treat it
+   * as user input and echo it back every turn. Placing <env> late preserves the
+   * ambient framing while getting it out of the head of the prefix.
+   *
+   * Ordering rationale, most stable first:
+   *   skills            bundled set; varies only if the project adds its own skills
+   *                     or an applyPaths glob matches
+   *   instructions      AGENTS.md/CLAUDE.md; changes when the repo changes
+   *   knowledge         memory/training blocks, re-scored as applied counts and
+   *                     recency bonuses shift, so it churns faster than AGENTS.md
+   *   environment       cwd/worktree/platform/date, the fastest-moving of all
+   *   hoistedReminders  per-turn
+   *
+   * Applied to every provider, not scoped to Gemini, because it is provably neutral
+   * for Anthropic: ProviderTransform.applyCaching() puts the cache breakpoint at the
+   * END of the system message and llm.ts collapses the system prompt to one message,
+   * so a single breakpoint covers this entire block. Reordering bytes inside a region
+   * cached as one unit cannot change whether it hits.
+   */
+  export function assemble(input: AssembleInput): string[] {
+    return [
+      ...(input.skills ? [input.skills] : []),
+      ...input.instructions,
+      ...(input.knowledge ? [input.knowledge] : []),
+      ...input.environment,
+      ...input.hoistedReminders,
+    ]
+  }
+  // altimate_change end
+
   export async function skills(agent: Agent.Info) {
     if (PermissionNext.disabled(["skill"], agent.permission).has("skill")) return
 
