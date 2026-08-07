@@ -1,0 +1,34 @@
+name: Notify help-docs (docs changed)
+
+# On a merge that touches docs on the default branch, tell the help-docs hub to
+# promote the change up (product -> help-docs). Requires the shared docs-sync
+# GitHub App: set vars.DOCS_SYNC_APP_ID and secrets.DOCS_SYNC_APP_PRIVATE_KEY.
+# Sync-generated merges carry a [docs-sync] marker and are skipped (no loop).
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/docs/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: ${{ !contains(github.event.head_commit.message, '[docs-sync]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: tok
+        with:
+          app-id: ${{ vars.DOCS_SYNC_APP_ID }}
+          private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
+          owner: AltimateAI
+          repositories: help-docs
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.tok.outputs.token }}
+          repository: AltimateAI/help-docs
+          event-type: promote-from-product
+          client-payload: |
+            {"product":"code","before":"${{ github.event.before }}","after":"${{ github.sha }}"}
