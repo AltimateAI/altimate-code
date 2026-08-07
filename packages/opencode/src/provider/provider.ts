@@ -1838,10 +1838,11 @@ export namespace Provider {
         continue
       }
 
-      // altimate_change — configFor, not config.provider: the free tier is denied at ingestion
-      // and this is the one consumer that indexes the map directly. Covers blacklist, whitelist
-      // and the per-model variants merge below.
+      // altimate_change start — configFor, not config.provider: the free tier is denied at
+      // ingestion and this is the one consumer that indexes the map directly. Covers blacklist,
+      // whitelist and the per-model variants merge below.
       const configProvider = configFor(providerID)
+      // altimate_change end
 
       for (const [modelID, model] of Object.entries(provider.models)) {
         model.api.id = model.api.id ?? model.id ?? modelID
