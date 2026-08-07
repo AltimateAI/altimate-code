@@ -693,3 +693,91 @@ describe("registration dedupe is keyed on the rejected key", () => {
     for (const r of results) expect(r.apiKey).toBe("sk-free-shared")
   })
 })
+
+describe("401 recovery under overlapping rotations", () => {
+  const INFERENCE = "https://free.onealtimate.com/v1/chat/completions"
+
+  function auth(init: RequestInit | undefined): string | null {
+    return new Headers(init?.headers).get("Authorization")
+  }
+
+  // The `!== own rejected key` assertion in the dedupe tests is necessary but not sufficient: it
+  // proves a caller is not handed back the key IT rejected, not that the key it IS handed is
+  // alive. Codex's scenario: stored key is B, caller A adopts B, and the B-rejected caller
+  // rotates to C — A retries B, gets a SECOND 401, and the single-pass version returned that to
+  // the model as a provider error while C sat live in the store.
+  //
+  // Driven through authorizedFetch() rather than register(), because the defect is in the
+  // recovery path, not the dedupe.
+  test("a caller that adopts an already-dead key keeps going and reaches the live one", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    const A = REGISTERED.api_key // what this request starts with
+    const B = "sk-free-B-dead" // what another process rotates to WHILE we are in flight
+    const LIVE = "sk-free-C"
+
+    let minted = 0
+    const attempts: string[] = []
+    spyOn(global, "fetch").mockImplementation((async (input: any, init: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        minted++
+        return ok({ ...REGISTERED, api_key: LIVE })
+      }
+      const header = auth(init)
+      attempts.push(header ?? "")
+
+      // The race, reproduced: while OUR request was in flight another process rotated the store
+      // to B. Our recovery pass therefore ADOPTS B rather than rotating — and B is already dead,
+      // because the caller that produced it has itself been rejected and is rotating to C.
+      if (attempts.length === 1) {
+        await Auth.set(FreeTier.PROVIDER_ID, {
+          type: "api",
+          key: B,
+          metadata: { install_secret: "s3cret", base_url: REGISTERED.base_url },
+        })
+      }
+      return new Response("", { status: header === `Bearer ${LIVE}` ? 200 : 401 })
+    }) as unknown as typeof fetch)
+
+    const response = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+
+    // Single-pass recovery stopped at the adopted key's 401 and handed it to the model, while
+    // the live key sat in the store one pass away.
+    expect(response.status).toBe(200)
+    expect(attempts[0]).toBe(`Bearer ${A}`)
+    expect(attempts[1]).toBe(`Bearer ${B}`)
+    expect(attempts.at(-1)).toBe(`Bearer ${LIVE}`)
+    expect(minted).toBe(1)
+  })
+
+  test("recovery is bounded, and uses every pass, when no key is ever accepted", async () => {
+    mockGateway(() => ok(REGISTERED))
+    await FreeTier.register()
+    spyOn(global, "fetch").mockRestore()
+
+    // A 401 can also mean revoked principal or kill switch, which no rotation fixes. Exact counts
+    // rather than upper bounds: an upper bound alone passes against the single-pass version too,
+    // so it would assert termination without asserting that the loop exists.
+    let minted = 0
+    let inference = 0
+    spyOn(global, "fetch").mockImplementation((async (input: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (url.endsWith("/register")) {
+        minted++
+        return ok({ ...REGISTERED, api_key: `sk-free-never-${minted}` })
+      }
+      inference++
+      return new Response("", { status: 401 })
+    }) as unknown as typeof fetch)
+
+    const response = await FreeTier.authorizedFetch(INFERENCE, { method: "POST", body: "{}" })
+
+    expect(response.status).toBe(401)
+    // MAX_AUTH_RECOVERY_ATTEMPTS recovery passes, each rotating once, plus the initial send.
+    expect(minted).toBe(3)
+    expect(inference).toBe(4)
+  })
+})

@@ -462,21 +462,49 @@ export namespace FreeTier {
       return fetch(input, { ...init, headers })
     }
 
-    const response = await send(current.apiKey)
-    if (response.status !== 401 || !isReplayable(init?.body)) return response
+    let key = current.apiKey
+    let response = await send(key)
+    if (!isReplayable(init?.body)) return response
 
-    // Re-read before registering. Under concurrency another request's rotation may already have
-    // landed while this one was in flight, in which case the fix is to use that key, not to mint
-    // another and orphan it.
-    const stored = await credentials()
-    if (stored && stored.apiKey !== current.apiKey) return send(stored.apiKey)
-
-    log.info("free tier key rejected; re-registering")
-    const rotated = await register({ supersede: current.apiKey }).catch((err) => {
-      log.warn("free tier re-registration after 401 failed", { error: err })
-      return undefined
-    })
-    if (!rotated || rotated.apiKey === current.apiKey) return response
-    return send(rotated.apiKey)
+    // altimate_change start — bounded recovery LOOP, not a single retry.
+    //
+    // A recovery pass does one of two things, and either can lose a race:
+    //   adopt   another request rotated while we were in flight, so we use its key — but that key
+    //           may be the very one a THIRD request has meanwhile proven dead
+    //   rotate  we mint a new key — which a concurrent rotation may already have superseded
+    //
+    // The single-pass version returned the second response unchecked. Concretely: stored key is
+    // B; this caller was rejected on A and adopts B; the B-rejected caller rotates to C; we retry
+    // B, get a second 401, and hand that to the model as a provider error even though C is live
+    // and sitting in the store.
+    //
+    // Bounded rather than "until it works": a 401 can also mean revoked principal or kill switch,
+    // which no amount of rotating fixes, and an unbounded loop would hang the request instead of
+    // surfacing an error. Each pass must move to a DIFFERENT key or we stop — that is what makes
+    // termination independent of the bound.
+    for (let attempt = 0; response.status === 401 && attempt < MAX_AUTH_RECOVERY_ATTEMPTS; attempt++) {
+      const stored = await credentials()
+      let next: string | undefined
+      if (stored && stored.apiKey !== key) {
+        // Someone else already rotated. Use theirs rather than minting another and orphaning it.
+        next = stored.apiKey
+      } else {
+        log.info("free tier key rejected; re-registering", { attempt })
+        next = await register({ supersede: key })
+          .then((rotated) => rotated.apiKey)
+          .catch((err) => {
+            log.warn("free tier re-registration after 401 failed", { error: err, attempt })
+            return undefined
+          })
+      }
+      if (!next || next === key) return response
+      key = next
+      response = await send(key)
+    }
+    return response
+    // altimate_change end
   }
+
+  /** Initial send plus at most this many recovery passes. See authorizedFetch. */
+  const MAX_AUTH_RECOVERY_ATTEMPTS = 3
 }
