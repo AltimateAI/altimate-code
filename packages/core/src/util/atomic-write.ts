@@ -68,16 +68,22 @@ export async function writeFileAtomic(
   content: string | Buffer | Uint8Array,
   mode: number,
 ): Promise<void> {
-  // Follow a symlink to its target and replace THAT, rather than replacing the link with a
-  // regular file. Writing in place used to update the target, so someone who symlinks auth.json
-  // into a dotfiles repo or a managed directory keeps working; renaming over the link would
-  // silently strip it and leave the real file stale.
-  //
-  // `canonicalPath` falls back ONLY on ENOENT — a first write or a dangling link. An earlier
-  // version swallowed every realpath error, so a valid symlink into a temporarily unreadable
-  // directory (EACCES) or a symlink cycle (ELOOP) looked like "no target": the write appeared to
-  // succeed by replacing the link while the real credential file silently went stale.
-  const target = await canonicalPath(path)
+  return writeFileAtomicResolved(await canonicalPath(path), content, mode)
+}
+
+/**
+ * `writeFileAtomic` for a target that has ALREADY been canonicalised.
+ *
+ * Callers that resolve the path themselves — because they also lock on it — must use this. If
+ * they went through `writeFileAtomic` the path would be resolved a SECOND time, and a symlink
+ * retargeted in between would send the bytes somewhere the lock does not cover: locked A, wrote
+ * B. Resolution happens once, at the caller, and the identity it locked is the identity written.
+ */
+export async function writeFileAtomicResolved(
+  target: string,
+  content: string | Buffer | Uint8Array,
+  mode: number,
+): Promise<void> {
   // Same directory as the target, so the rename cannot cross a filesystem boundary. `wx` refuses
   // to reuse a leftover temp file rather than writing secrets into one we do not own.
   const temp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`

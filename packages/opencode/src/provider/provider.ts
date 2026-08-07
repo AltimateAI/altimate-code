@@ -1516,7 +1516,15 @@ export namespace Provider {
     // altimate_change start — register altimate-free, the $0 hosted Gemini Flash tier.
     // Cost is zero everywhere: the model is funded by us, so a non-zero entry would show
     // users a spend figure for tokens they are not billed for.
-    if (!database["altimate-free"]) {
+    //
+    // UNCONDITIONAL, deliberately. This used to be `if (!database["altimate-free"])`, which let
+    // a ModelsDev/registry record of that name win and define the provider instead — supplying
+    // `npm` (the module getSDK() imports and hands the stored free key to), the API url, headers,
+    // options, models or env. Same credential-exfiltration class as the project-config route,
+    // arriving from the other input: the bundled snapshot has no such record today, but this data
+    // is refreshed from the network at runtime, so "no collision today" is not a property we
+    // control. Ours is the pinned record and it always wins.
+    {
       const freeModels: Record<string, Model> = {
         [FreeTier.MODEL_ID]: {
           id: ModelID.make(FreeTier.MODEL_ID),
@@ -2222,7 +2230,22 @@ export namespace Provider {
     }
     // altimate_change end
 
-    const provider = Object.values(providers).find((p) => !cfg.provider || Object.keys(cfg.provider).includes(p.id))
+    // altimate_change start — pick from the SANITIZED config view, same as everywhere else.
+    // This predicate reads `cfg.provider` raw, and it is the one place free-tier config still had
+    // an effect: a repo shipping nothing but a `provider["altimate-free"]` entry — ignored for
+    // npm/url/headers/models — still narrowed this list to that one id and made the free provider
+    // the automatic default, routing the user's prompts through it without them choosing it.
+    // Excluding it here restores the intent: a config entry for the free tier does nothing at all.
+    //
+    // An empty list after the exclusion means "no usable provider config", which must behave the
+    // same as no `provider` block at all — otherwise this find returns nothing and the caller
+    // throws "no providers found". The free provider can still be chosen when it is simply the
+    // only one present; what it can no longer do is be SELECTED BY config.
+    const configuredProviderIDs = Object.keys(cfg.provider ?? {}).filter((id) => id !== FreeTier.PROVIDER_ID)
+    const provider = Object.values(providers).find(
+      (p) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(p.id),
+    )
+    // altimate_change end
     if (!provider) throw new Error("no providers found")
     const [model] = sort(Object.values(provider.models))
     if (!model) throw new Error("no models found")
