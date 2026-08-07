@@ -539,7 +539,10 @@ describe("registration capability", () => {
     const token = FreeTier.mintConsentToken()
     process.env["ALTIMATE_FREE_CONSENT_TOKEN"] = token
     expect(FreeTier.consentTokenValid(token)).toBe(true)
-    expect(FreeTier.consentTokenValid(token.slice(0, -1) + "0")).toBe(false)
+    // altimate_change — the mutated last character has to be guaranteed different. The token is
+    // 64 hex chars, so `slice(0, -1) + "0"` reconstructs the ORIGINAL token whenever it already
+    // ends in "0" — a 1-in-16 flake that fails roughly every fifteenth run.
+    expect(FreeTier.consentTokenValid(token.slice(0, -1) + (token.endsWith("0") ? "1" : "0"))).toBe(false)
     expect(FreeTier.consentTokenValid(token.slice(0, -1))).toBe(false)
     expect(FreeTier.consentTokenValid(token + "x")).toBe(false)
     expect(FreeTier.consentTokenValid("")).toBe(false)
