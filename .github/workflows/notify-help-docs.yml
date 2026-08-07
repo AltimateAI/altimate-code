@@ -15,22 +15,43 @@ permissions:
   contents: read
   pull-requests: read
 
+concurrency:
+  group: notify-help-docs-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   notify:
     if: ${{ !contains(github.event.head_commit.message, '[docs-sync]') }}
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-gke
     steps:
       - name: Resolve merged PR (author for notifications)
         id: src
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          J="$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls --jq '.[0] // {}')"
-          echo "num=$(echo "$J" | jq -r '.number // ""')" >> "$GITHUB_OUTPUT"
-          echo "login=$(echo "$J" | jq -r '.user.login // ""')" >> "$GITHUB_OUTPUT"
-          echo "url=$(echo "$J" | jq -r '.html_url // ""')" >> "$GITHUB_OUTPUT"
+          J="$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls --jq '.[0] // {}' 2>/dev/null || echo '{}')"
+          {
+            echo "num=$(echo "$J" | jq -r '.number // ""')"
+            echo "login=$(echo "$J" | jq -r '.user.login // ""')"
+            echo "url=$(echo "$J" | jq -r '.html_url // ""')"
+          } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/create-github-app-token@v1
+      - name: Build dispatch payload
+        id: payload
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          SRC_PR: ${{ steps.src.outputs.num }}
+          SRC_AUTHOR: ${{ steps.src.outputs.login }}
+          SRC_URL: ${{ steps.src.outputs.url }}
+        run: |
+          JSON="$(jq -cn --arg product code \
+            --arg before "$BEFORE" --arg after "$AFTER" \
+            --arg source_pr "$SRC_PR" --arg source_author "$SRC_AUTHOR" --arg source_url "$SRC_URL" \
+            '{product:$product,before:$before,after:$after,source_pr:$source_pr,source_author:$source_author,source_url:$source_url}')"
+          echo "json=$JSON" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: tok
         with:
           app-id: ${{ vars.DOCS_SYNC_APP_ID }}
@@ -38,10 +59,9 @@ jobs:
           owner: AltimateAI
           repositories: help-docs
 
-      - uses: peter-evans/repository-dispatch@v3
+      - uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         with:
           token: ${{ steps.tok.outputs.token }}
           repository: AltimateAI/help-docs
           event-type: promote-from-product
-          client-payload: |
-            {"product":"code","before":"${{ github.event.before }}","after":"${{ github.sha }}","source_pr":"${{ steps.src.outputs.num }}","source_author":"${{ steps.src.outputs.login }}","source_url":"${{ steps.src.outputs.url }}"}
+          client-payload: ${{ steps.payload.outputs.json }}
