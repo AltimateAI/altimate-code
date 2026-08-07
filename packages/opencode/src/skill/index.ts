@@ -22,6 +22,8 @@ import { Discovery } from "./discovery"
 import { isRecord } from "@/util/record"
 // altimate_change start — upstream_fix: builtin DE-skill loading (dropped by the v1.17.9 rewrite; see make())
 import matter from "gray-matter"
+// altimate_change — shared code-point comparator (see core util/collate.ts)
+import { byCodePoints } from "@opencode-ai/core/util/collate"
 declare const OPENCODE_BUILTIN_SKILLS: { name: string; content: string }[] | undefined
 // altimate_change end
 
@@ -380,7 +382,7 @@ export const layer = Layer.effect(
       // beyond byte-for-byte prompt caching: tool/skill.ts slices the first MAX_DISPLAY_SKILLS
       // off this list, so with more skills than that limit the runtime's LANG or ICU data
       // decides WHICH skills the model is offered, not merely what order they appear in.
-      const list = Object.values(s.skills).toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      const list = Object.values(s.skills).toSorted(byCodePoints((s) => s.name))
       // altimate_change end
       if (!agent) return list
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
@@ -413,7 +415,7 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
         // the first differing byte, so an order that follows the runtime's LANG or ICU data
         // means two machines share no prefix at all. Sorting upstream in SystemPrompt.skills()
         // is not enough on its own — this sort is the one that reaches the prompt.
-        .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+        .toSorted(byCodePoints((s) => s.name))
         // altimate_change end
         .flatMap((skill) => [
           "  <skill>",
@@ -430,7 +432,7 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
     "## Available Skills",
     ...described
       // altimate_change start — codepoint order; this branch is prompt-facing too
-      .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .toSorted(byCodePoints((s) => s.name))
       // altimate_change end
       .map((skill) => `- **${skill.name}**: ${skill.description}`),
   ].join("\n")

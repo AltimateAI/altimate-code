@@ -27,6 +27,8 @@ import { selectSkillsWithLLM } from "../altimate/skill-selector"
 // altimate_change start — Effect Service facade for SystemPrompt.skills (see bottom of namespace)
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change — shared code-point comparator (see core util/collate.ts)
+import { byCodePoints } from "@opencode-ai/core/util/collate"
 // altimate_change end
 // altimate_change end
 
@@ -197,7 +199,7 @@ export namespace SystemPrompt {
     // memory. Exact-prefix caches (Vertex/Gemini) stop at the first differing byte, so a
     // locale-dependent order here does not shrink the shared prefix, it can eliminate it
     // between two users who are otherwise identical. Codepoint order is the same everywhere.
-    filtered = [...filtered].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    filtered = [...filtered].sort(byCodePoints((s) => s.name))
     // altimate_change end
 
     // altimate_change start — auto-load skill bodies for skills marked
