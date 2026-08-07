@@ -8,13 +8,13 @@
 
 Two deliverables, both local-only, nothing pushed:
 
-**`~/codebase/altimate-gateway`** (new repo, `main`, 12 commits) — LiteLLM proxy pinned to
+**`~/codebase/altimate-gateway`** (new repo, `main`, 17 commits) — LiteLLM proxy pinned to
 `ghcr.io/berriai/litellm-database:v1.95.0` serving `vertex_ai/gemini-2.5-flash` (project
 `altimate-models`, global endpoint), a FastAPI **issuer** holding the master key, Postgres, Redis,
 `docker-compose.yml`, policy + redaction hooks, and a runbook README with a *measured* error taxonomy.
 189 unit tests + 13 pinned-image integration tests + a 7-check smoke script.
 
-**`altimate-code` branch `feat/free-gemini-flash`** (worktree `altimate-bigpickle`, ~11 commits) —
+**`altimate-code` branch `feat/free-gemini-flash`** (worktree `altimate-bigpickle`, 19 commits) —
 `altimate-free` provider + read-only loader, `FreeTier` client (install secret, consent-gated
 registration, silent rotation), TUI slot-4 row + disclosure dialog, telemetry funnel, server route,
 docs. Typecheck green, marker check clean, ~32 new tests, plus a 24-assertion E2E harness
@@ -239,6 +239,22 @@ A heavy agent user ≈ 5M input + 300k output tokens/day ≈ **$2.25/day** on ge
 | **1 — Issuer + edge** (~days) | Issuer service beside LiteLLM (principals + short-lived keys + progressive grants); public edge with the two routes, Cloud Armor, deny-by-default request policy; inline kill switch; normalized error taxonomy; spend dashboard | Idempotent principal per install secret; key rotation without budget reset; kill switch kills in-flight tier in <1 min; each limit type returns its distinct, tested error |
 | **2 — Client** (~days) | The 7-file client change; consent-gated registration; telemetry funnel events; beta release (`/release-beta`) | Fresh install → pick free model → confirm disclosure → working session, zero config; nothing sent before consent |
 | **3 — Soak + launch** | Beta soak; watch farming signals (principals/IP, tokens/principal, ASN spread, stockpiling attempts); tune grants; then promote to `latest` and announce | ≥1 week beta with spend within model; abuse-response runbook exercised (kill switch drill) |
+
+## Follow-ups discovered during the build (tracked separately, none blocking)
+
+1. **`run` hangs silently when the first turn errors.** Reproduced on clean `main` with
+   google-vertex and no credentials: no output, never exits, no error rendered (exit 124, 96 bytes).
+   Pre-existing and provider-agnostic. It matters here because a no-signup free tier makes
+   first-turn errors easy to hit (budget exhausted, rate limited, registration failed), so a user's
+   first experience of a failure is a hang. Own change, own tests.
+2. **Capture the real `budget_exceeded` body.** The 429 work proved the value: live bodies
+   contradicted our tests three ways (no `Retry-After` at all, two sub-flavours of
+   `throttling_error`, and the gateway naming the key identifier in its own message). We currently
+   *guess* LiteLLM's wording for the own-allowance vs tier-ceiling split, and that message is what
+   users hit at the end of a good session.
+3. **Grant / global ceiling / `tpm_limit` are deliberately unset.** They must move together —
+   changing one alone just relocates the binding constraint. Set them after the prefix fix lands,
+   against $0.0037/req rather than $0.0363.
 
 ## Open questions
 
