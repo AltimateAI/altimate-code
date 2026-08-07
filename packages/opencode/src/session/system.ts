@@ -140,14 +140,25 @@ export namespace SystemPrompt {
    * as user input and echo it back every turn. Placing <env> late preserves the
    * ambient framing while getting it out of the head of the prefix.
    *
-   * Ordering rationale, most stable first:
+   * Ordering, most stable first — EXCEPT that knowledge stays ahead of instructions:
    *   skills            bundled set; varies only if the project adds its own skills
    *                     or an applyPaths glob matches
-   *   instructions      AGENTS.md/CLAUDE.md; changes when the repo changes
-   *   knowledge         memory/training blocks, re-scored as applied counts and
-   *                     recency bonuses shift, so it churns faster than AGENTS.md
+   *   knowledge         memory/training blocks
+   *   instructions      AGENTS.md/CLAUDE.md
    *   environment       cwd/worktree/platform/date, the fastest-moving of all
    *   hoistedReminders  per-turn
+   *
+   * knowledge/instructions is the one pair NOT ordered by volatility. By churn rate
+   * knowledge belongs after instructions — it is re-scored as applied counts and
+   * recency bonuses shift, so it moves faster than the repo's own files. It is placed
+   * before them anyway because ORDER CARRIES PRECEDENCE here, not just bytes: later
+   * text reads as the more specific, later-arriving instruction. Putting stale learned
+   * rules after AGENTS.md let them outweigh the repository's own instructions on a
+   * conflict, which is a behaviour regression, not a caching trade-off. Repository
+   * instructions must win, so they go last of the two. This costs nothing measurable:
+   * the first byte that differs BETWEEN USERS is already upstream of both (the skills
+   * block emits absolute file:// paths), and within one user both segments are stable
+   * for the life of a session, so their relative order never decides a cache hit.
    *
    * Applied to every provider, not scoped to Gemini, because it is provably neutral
    * for Anthropic: ProviderTransform.applyCaching() puts the cache breakpoint at the
@@ -158,8 +169,8 @@ export namespace SystemPrompt {
   export function assemble(input: AssembleInput): string[] {
     return [
       ...(input.skills ? [input.skills] : []),
-      ...input.instructions,
       ...(input.knowledge ? [input.knowledge] : []),
+      ...input.instructions,
       ...input.environment,
       ...input.hoistedReminders,
     ]

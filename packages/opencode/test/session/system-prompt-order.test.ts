@@ -38,8 +38,17 @@ function assembleAll() {
 }
 
 describe("SystemPrompt.assemble: stable→volatile ordering", () => {
-  test("orders segments skills → instructions → knowledge → environment → reminders", () => {
-    expect(assembleAll()).toEqual([SKILLS, ...INSTRUCTIONS, KNOWLEDGE, ...ENVIRONMENT, ...REMINDERS])
+  test("orders segments skills → knowledge → instructions → environment → reminders", () => {
+    expect(assembleAll()).toEqual([SKILLS, KNOWLEDGE, ...INSTRUCTIONS, ...ENVIRONMENT, ...REMINDERS])
+  })
+
+  test("repository instructions come AFTER learned knowledge so they win conflicts", () => {
+    // Not a caching property — a precedence one. Later text reads as the more specific,
+    // later-arriving instruction, so stale memory placed after AGENTS.md can outweigh the
+    // repository's own rules. Ordering by volatility alone would put knowledge last (it
+    // churns faster than AGENTS.md); correctness overrides that here.
+    const parts = assembleAll()
+    expect(parts.indexOf(KNOWLEDGE)).toBeLessThan(parts.indexOf("AGENTS_MD_SEGMENT"))
   })
 
   test("environment is never first — the regression that truncated the cached prefix", () => {
