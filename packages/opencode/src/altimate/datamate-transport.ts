@@ -1,7 +1,8 @@
 import { readFile } from "fs/promises"
 import path from "path"
 import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
-import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk } from "../mcp/config"
+import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk, findAllConfigPaths } from "../mcp/config"
+import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "@opencode-ai/core/util/glob"
 import { Log } from "@/altimate/util/log"
@@ -204,7 +205,11 @@ export async function readDatamateTransportFromIde(
  * Fire-and-forget friendly: errors are logged but never thrown.
  * Returns the list of MCP server names whose config was updated on disk.
  */
-export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[]> {
+export async function syncDatamateUrlFromVscodeMcp(
+  cwd: string,
+  // Overridable for tests only — the real global config dir is a static xdg path.
+  globalConfigDir: string = Global.Path.config,
+): Promise<string[]> {
   const updated: string[] = []
   try {
     log.info("syncDatamateUrlFromVscodeMcp: start", { cwd })
@@ -246,76 +251,87 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
         : undefined
 
     if (datamateVscode && vscodeUpdatedAt) {
-      const configPath = await resolveConfigPath(cwd)
-      if (await Filesystem.exists(configPath)) {
+      // The entry may live in the project config OR the global one
+      // (`datamate_manager add` supports scope: "global") — a stale global entry
+      // is spawned at session start just the same, so heal every config file
+      // that carries a datamate entry, not only the project's.
+      const healEntryInFile = async (configPath: string): Promise<boolean> => {
         const configText = await Filesystem.readText(configPath)
         const existingTree = parseTree(configText)
         const existingNode = existingTree
           ? findNodeAtLocation(existingTree, ["mcp", DATAMATE_KEY])
           : undefined
+        if (!existingNode) return false
 
-        if (existingNode) {
-          // getNodeValue reconstructs the full entry (a manual children walk reading
-          // `prop.children[1].value` drops array/object fields — jsonc-parser only
-          // populates `Node.value` for primitives).
-          const existingEntry =
-            existingNode.type === "object"
-              ? (getNodeValue(existingNode) as Record<string, unknown>)
-              : {}
-          const existingUpdatedAt =
-            typeof existingEntry["updatedAt"] === "string" ? existingEntry["updatedAt"] : undefined
+        // getNodeValue reconstructs the full entry (a manual children walk reading
+        // `prop.children[1].value` drops array/object fields — jsonc-parser only
+        // populates `Node.value` for primitives).
+        const existingEntry =
+          existingNode.type === "object"
+            ? (getNodeValue(existingNode) as Record<string, unknown>)
+            : {}
+        const existingUpdatedAt =
+          typeof existingEntry["updatedAt"] === "string" ? existingEntry["updatedAt"] : undefined
 
-          if (vscodeUpdatedAt === existingUpdatedAt) {
-            log.info("syncDatamateUrlFromVscodeMcp: datamate entry already up to date", {
-              updatedAt: vscodeUpdatedAt,
-            })
-          } else {
-            // Preserve fields the IDE doesn't manage (enabled, timeout, oauth, …) by
-            // carrying forward everything except the transport-identity fields, which
-            // we re-derive below. IDE config uses "stdio"/"http"/"streamable-http"/"sse";
-            // altimate-code.json uses "local"/"remote".
-            const preserved: Record<string, unknown> = {}
-            for (const [k, v] of Object.entries(existingEntry)) {
-              if (!TRANSPORT_IDENTITY_FIELDS.has(k)) preserved[k] = v
-            }
+        if (vscodeUpdatedAt === existingUpdatedAt) {
+          log.info("syncDatamateUrlFromVscodeMcp: datamate entry already up to date", {
+            configPath,
+            updatedAt: vscodeUpdatedAt,
+          })
+          return false
+        }
 
-            let newEntry: Record<string, unknown>
-            if ("command" in datamateVscode) {
-              const environment = extractSpawnEnvironment(datamateVscode["env"])
-              const cmd =
-                typeof datamateVscode["command"] === "string"
-                  ? (datamateVscode["command"] as string)
-                  : DATAMATE_KEY
-              newEntry = {
-                ...preserved,
-                type: "local",
-                command: [cmd, ...((datamateVscode["args"] as string[]) ?? [])],
-                ...(environment ? { environment } : {}),
-                updatedAt: vscodeUpdatedAt,
-              }
-            } else {
-              // http / streamable-http / sse → remote
-              newEntry = {
-                ...preserved,
-                type: "remote",
-                url: datamateVscode["url"] as string,
-                updatedAt: vscodeUpdatedAt,
-              }
-            }
+        // Preserve fields the IDE doesn't manage (enabled, timeout, oauth, …) by
+        // carrying forward everything except the transport-identity fields, which
+        // we re-derive below. IDE config uses "stdio"/"http"/"streamable-http"/"sse";
+        // altimate-code.json uses "local"/"remote".
+        const preserved: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(existingEntry)) {
+          if (!TRANSPORT_IDENTITY_FIELDS.has(k)) preserved[k] = v
+        }
 
-            await addMcpToConfig(
-              DATAMATE_KEY,
-              newEntry as Parameters<typeof addMcpToConfig>[1],
-              configPath,
-            )
-            log.info("syncDatamateUrlFromVscodeMcp: datamate entry synced", {
-              type: datamateVscode["type"],
-              updatedAt: vscodeUpdatedAt,
-            })
-            updated.push(DATAMATE_KEY)
+        let newEntry: Record<string, unknown>
+        if ("command" in datamateVscode) {
+          const environment = extractSpawnEnvironment(datamateVscode["env"])
+          const cmd =
+            typeof datamateVscode["command"] === "string"
+              ? (datamateVscode["command"] as string)
+              : DATAMATE_KEY
+          newEntry = {
+            ...preserved,
+            type: "local",
+            command: [cmd, ...((datamateVscode["args"] as string[]) ?? [])],
+            ...(environment ? { environment } : {}),
+            updatedAt: vscodeUpdatedAt,
+          }
+        } else {
+          // http / streamable-http / sse → remote
+          newEntry = {
+            ...preserved,
+            type: "remote",
+            url: datamateVscode["url"] as string,
+            updatedAt: vscodeUpdatedAt,
           }
         }
+
+        await addMcpToConfig(
+          DATAMATE_KEY,
+          newEntry as Parameters<typeof addMcpToConfig>[1],
+          configPath,
+        )
+        log.info("syncDatamateUrlFromVscodeMcp: datamate entry synced", {
+          configPath,
+          type: datamateVscode["type"],
+          updatedAt: vscodeUpdatedAt,
+        })
+        return true
       }
+
+      let datamateHealed = false
+      for (const configPath of await findAllConfigPaths(cwd, globalConfigDir)) {
+        if (await healEntryInFile(configPath)) datamateHealed = true
+      }
+      if (datamateHealed) updated.push(DATAMATE_KEY)
     }
 
     // ── All other remote MCP entries: existing URL-comparison logic ──────────

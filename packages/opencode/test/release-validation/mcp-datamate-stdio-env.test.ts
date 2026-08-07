@@ -155,7 +155,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
       updatedAt: "T2",
     })
 
-    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path)
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, path.join(tmp.path, "isolated-global"))
     expect(updated).toContain(DATAMATE_KEY)
 
     const after = JSON.parse(await readFile(configPath, "utf-8"))
@@ -165,5 +165,63 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
     expect(entry.updatedAt).toBe("T2")
     expect(entry.enabled).toBe(true) // non-transport field preserved
+  })
+
+  test("heals a datamate entry living only in the GLOBAL config", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "global-config")
+    await mkdir(globalDir, { recursive: true })
+    const globalConfigPath = path.join(globalDir, "altimate-code.json")
+    await writeFile(
+      globalConfigPath,
+      JSON.stringify(
+        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        null,
+        2,
+      ),
+    )
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["/ext/dist/datamate-cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T3",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toContain(DATAMATE_KEY)
+
+    const after = JSON.parse(await readFile(globalConfigPath, "utf-8"))
+    const entry = after.mcp[DATAMATE_KEY]
+    expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+    expect(entry.updatedAt).toBe("T3")
+    expect(entry.enabled).toBe(true)
+  })
+
+  test("heals project and global entries in one pass", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "global-config")
+    await mkdir(globalDir, { recursive: true })
+    const brokenEntry = { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true }
+    const projectConfigPath = path.join(tmp.path, "altimate-code.json")
+    const globalConfigPath = path.join(globalDir, "altimate-code.json")
+    await writeFile(projectConfigPath, JSON.stringify({ mcp: { [DATAMATE_KEY]: brokenEntry } }, null, 2))
+    await writeFile(globalConfigPath, JSON.stringify({ mcp: { [DATAMATE_KEY]: brokenEntry } }, null, 2))
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["/ext/dist/datamate-cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T4",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toEqual([DATAMATE_KEY]) // reported once, not per file
+
+    for (const p of [projectConfigPath, globalConfigPath]) {
+      const entry = JSON.parse(await readFile(p, "utf-8")).mcp[DATAMATE_KEY]
+      expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+      expect(entry.updatedAt).toBe("T4")
+    }
   })
 })

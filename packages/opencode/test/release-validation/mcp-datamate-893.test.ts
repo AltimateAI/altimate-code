@@ -350,7 +350,7 @@ describe("PR893: syncDatamateUrlFromVscodeMcp updatedAt-based change detection",
     })
     await seedIdeMcp(tmp.path, { url: "http://NEW" }) // no updatedAt
 
-    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path)
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, path.join(tmp.path, "isolated-global"))
     expect(updated).not.toContain(DATAMATE_KEY)
 
     const after = JSON.parse(await readFile(configPath, "utf-8"))
@@ -368,7 +368,7 @@ describe("PR893: syncDatamateUrlFromVscodeMcp updatedAt-based change detection",
     })
     await seedIdeMcp(tmp.path, { url: "http://NEW", updatedAt: "T1" })
 
-    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path)
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, path.join(tmp.path, "isolated-global"))
     expect(updated).not.toContain(DATAMATE_KEY)
 
     const after = JSON.parse(await readFile(configPath, "utf-8"))
@@ -386,7 +386,7 @@ describe("PR893: syncDatamateUrlFromVscodeMcp updatedAt-based change detection",
     })
     await seedIdeMcp(tmp.path, { url: "http://NEW", updatedAt: "T2" })
 
-    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path)
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, path.join(tmp.path, "isolated-global"))
     expect(updated).toContain(DATAMATE_KEY)
 
     const after = JSON.parse(await readFile(configPath, "utf-8"))
