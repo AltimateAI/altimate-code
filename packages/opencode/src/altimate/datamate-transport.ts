@@ -20,7 +20,7 @@ const MCP_SERVERS_KEYS = ["servers", "mcpServers"] as const
 
 
 export type DatamateTransport =
-  | { type: "remote"; url: string }
+  | { type: "remote"; url: string; updatedAt?: string }
   | { type: "local"; command: string[]; environment?: Record<string, string>; updatedAt?: string }
 
 /**
@@ -159,7 +159,11 @@ export async function readDatamateTransportFromIde(
       })
 
       if (typeof entry["url"] === "string") {
-        return { type: "remote", url: entry["url"] }
+        // updatedAt carried for parity with the local branch: the boot-time sync
+        // uses it as its change signal regardless of transport type, and an entry
+        // persisted without it gets one redundant rewrite on the next boot.
+        const updatedAt = typeof entry["updatedAt"] === "string" ? entry["updatedAt"] : undefined
+        return { type: "remote", url: entry["url"], ...(updatedAt ? { updatedAt } : {}) }
       }
 
       // stdio entry — reuse the exact command + args + env the extension

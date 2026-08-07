@@ -281,10 +281,13 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           ...preserved,
           ...mcpConfig,
           enabled: true,
-          ...(transport?.type === "local" && transport.updatedAt ? { updatedAt: transport.updatedAt } : {}),
+          ...(transport?.updatedAt ? { updatedAt: transport.updatedAt } : {}),
         }
         await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
-        await MCP.add(DATAMATE_KEY, mcpConfig)
+        // The live client must get the same merged entry as the disk write — the
+        // bare transport config would drop preserved auth/connection settings
+        // (headers, oauth, timeout) for the session being connected right now.
+        await MCP.add(DATAMATE_KEY, refreshed as Parameters<typeof MCP.add>[1])
       } else {
         // Not in config yet — write to disk then connect. The persisted entry
         // additionally carries the IDE entry's updatedAt (disk-only; the runtime
@@ -297,7 +300,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         const diskEntry = {
           ...mcpConfig,
           enabled: true,
-          ...(transport?.type === "local" && transport.updatedAt ? { updatedAt: transport.updatedAt } : {}),
+          ...(transport?.updatedAt ? { updatedAt: transport.updatedAt } : {}),
         }
         await addMcpToConfig(DATAMATE_KEY, diskEntry as Parameters<typeof addMcpToConfig>[1], configPath)
         await MCP.add(DATAMATE_KEY, mcpConfig)

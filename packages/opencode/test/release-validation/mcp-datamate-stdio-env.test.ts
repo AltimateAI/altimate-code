@@ -64,6 +64,22 @@ describe("readDatamateTransportFromIde stdio env carry-through", () => {
     })
   })
 
+  test("remote entry carries updatedAt for sync parity, bare shape without it", async () => {
+    await using tmp = await tmpdir()
+    await seedIdeStdio(tmp.path, {
+      type: "http",
+      url: "http://localhost:7801/mcp",
+      updatedAt: "2026-08-06T00:00:00.000Z",
+    })
+
+    const t = await readDatamateTransportFromIde(tmp.path)
+    expect(t).toEqual({
+      type: "remote",
+      url: "http://localhost:7801/mcp",
+      updatedAt: "2026-08-06T00:00:00.000Z",
+    })
+  })
+
   test("entry without env keeps the bare local shape (back-compat)", async () => {
     await using tmp = await tmpdir()
     await seedIdeStdio(tmp.path, {
