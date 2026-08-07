@@ -224,7 +224,11 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     const configPath = await resolveConfigPath(isGlobal ? Global.Path.config : projectRoot(), isGlobal)
 
     if (transport !== null) {
-      // IDE/extension mode: check if DATAMATE_KEY is already wired up
+      // IDE/extension mode: check if DATAMATE_KEY is already wired up.
+      // updatedAt is disk-only (the runtime config schema has no such field); the
+      // mcp.json sync uses it to recognize the entry as current instead of
+      // rewriting it on the next boot.
+      const updatedAtField = transport.updatedAt ? { updatedAt: transport.updatedAt } : {}
       const existingNames = await listMcpInConfig(configPath)
       const staleEntries = existingNames.filter(
         (n) => n !== DATAMATE_KEY && n.startsWith("datamate-"),
@@ -281,7 +285,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           ...preserved,
           ...mcpConfig,
           enabled: true,
-          ...(transport?.updatedAt ? { updatedAt: transport.updatedAt } : {}),
+          ...updatedAtField,
         }
         await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
         // The live client must get the same merged entry as the disk write — the
@@ -289,10 +293,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         // (headers, oauth, timeout) for the session being connected right now.
         await MCP.add(DATAMATE_KEY, refreshed as Parameters<typeof MCP.add>[1])
       } else {
-        // Not in config yet — write to disk then connect. The persisted entry
-        // additionally carries the IDE entry's updatedAt (disk-only; the runtime
-        // config schema has no such field) so the mcp.json sync recognizes the
-        // entry as current instead of rewriting it on the next serve boot.
+        // Not in config yet — write to disk then connect.
         log.info("handleAdd: adding new datamate entry", {
           serverName: DATAMATE_KEY,
           type: mcpConfig.type,
@@ -300,7 +301,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         const diskEntry = {
           ...mcpConfig,
           enabled: true,
-          ...(transport?.updatedAt ? { updatedAt: transport.updatedAt } : {}),
+          ...updatedAtField,
         }
         await addMcpToConfig(DATAMATE_KEY, diskEntry as Parameters<typeof addMcpToConfig>[1], configPath)
         await MCP.add(DATAMATE_KEY, mcpConfig)
