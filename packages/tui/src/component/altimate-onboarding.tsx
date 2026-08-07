@@ -434,6 +434,11 @@ export function DialogFreeGeminiConfirm(props: {
   // the eventual dismissal may record a second choice for the same user.
   let decided = false
   let choice = false
+  // altimate_change — `decided` cannot answer "am I still on screen?", because the accept path
+  // sets it itself before awaiting. A continuation resuming after a dismissal would read its own
+  // assignment and conclude it was still live. This latch is set ONLY by cleanup, so it is an
+  // unambiguous "this dialog is gone" that survives every await in yes().
+  let disposed = false
 
   function recordChoice(value: "accept" | "cancel") {
     if (choice) return
@@ -447,6 +452,7 @@ export function DialogFreeGeminiConfirm(props: {
   // Escape and click-away are handled by DialogProvider and never reach the key handler below, so
   // cleanup is the only place that sees every non-y/n dismissal.
   onCleanup(() => {
+    disposed = true
     decided = true
     recordChoice("cancel")
   })
@@ -470,12 +476,16 @@ export function DialogFreeGeminiConfirm(props: {
     setError(null)
     setBusy(true)
     const outcome = await registerFreeTier(sdk)
-    setBusy(false)
     if (firstRunActive())
       trackOnboarding({
         name: "free_gemini_register_result",
         result: outcome.ok ? "success" : outcome.result,
       })
+    // altimate_change — dismissed while the request was in flight. The outcome is still worth
+    // recording above (the registration really did happen), but every line below this point
+    // touches UI this component no longer owns.
+    if (disposed) return
+    setBusy(false)
     if (!outcome.ok) {
       setError(outcome.message)
       toast.show({ variant: "error", message: outcome.message })
@@ -492,7 +502,12 @@ export function DialogFreeGeminiConfirm(props: {
     // against not-yet-refreshed provider state silently fails validation, and the user lands back
     // in chat with the model they had before, having just been told the free tier was set up.
     await sdk.client.instance.dispose().catch(() => {})
+    // altimate_change — rechecked after EACH await, not just once at the top. Escape during
+    // either of these resumes into a dialog the user has already replaced; continuing would
+    // clear whatever they opened next and switch their model behind their back.
+    if (disposed) return
     await sync.bootstrap().catch(() => {})
+    if (disposed) return
     const available = sync.data.provider.some(
       (p) => p.id === "altimate-free" && Object.keys(p.models ?? {}).length > 0,
     )

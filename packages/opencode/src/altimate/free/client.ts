@@ -285,22 +285,37 @@ export namespace FreeTier {
     // processes — two CLIs open on the same machine, which is ordinary — a file lock serializes
     // the whole read-modify-write, since both would otherwise rotate the same principal and race
     // each other's writes to the shared auth store, orphaning keys.
-    if (!inflight)
-      inflight = Flock.withLock(LOCK_KEY, async () => {
-        // Re-read inside the lock. `supersede` is the key the caller found rejected, so a stored
-        // key that differs from it means another process already rotated while we waited and we
-        // should adopt theirs. Deliberately NOT an expiry check: a revoked key still looks live,
-        // and treating it as "nothing to do" would leave the 401 unrecoverable.
-        const fresh = await credentials()
-        if (fresh && input.supersede && fresh.apiKey !== input.supersede) return fresh
-        return registerOnce()
-      }).finally(() => (inflight = undefined))
-    return inflight
+    // Deduplicated by `supersede`, NOT process-wide. The in-process share exists so a burst of
+    // parallel 401s on one key triggers one rotation instead of one per request — and such a
+    // burst is by definition on the SAME key, so keying by it keeps that property intact.
+    //
+    // Sharing across DIFFERENT rejected keys was a bug: the lock body's adopt-vs-rotate decision
+    // is computed against whichever caller created the promise. A caller rejected on key B that
+    // joined a rotation started for key A could be handed back B itself — the very key it had
+    // just proven dead — and would return the original 401 without ever rotating.
+    const dedupeKey = input.supersede ?? ""
+    const existing = inflight.get(dedupeKey)
+    if (existing) return existing
+    const started: Promise<Credentials> = Flock.withLock(LOCK_KEY, async () => {
+      // Re-read inside the lock. `supersede` is the key the caller found rejected, so a stored
+      // key that differs from it means another process already rotated while we waited and we
+      // should adopt theirs. Deliberately NOT an expiry check: a revoked key still looks live,
+      // and treating it as "nothing to do" would leave the 401 unrecoverable.
+      const fresh = await credentials()
+      if (fresh && input.supersede && fresh.apiKey !== input.supersede) return fresh
+      return registerOnce()
+    }).finally(() => {
+      // Only clear our own entry: a later caller with the same rejected key may already have
+      // started a fresh rotation under this dedupeKey.
+      if (inflight.get(dedupeKey) === started) inflight.delete(dedupeKey)
+    })
+    inflight.set(dedupeKey, started)
+    return started
   }
 
   const LOCK_KEY = "altimate-free-registration"
 
-  let inflight: Promise<Credentials> | undefined
+  const inflight = new Map<string, Promise<Credentials>>()
 
   /**
    * The install secret we should register with, minting one only if this machine has never had

@@ -1286,9 +1286,44 @@ it.instance(
         const first = Object.keys(yield* mcp.tools())
         const second = Object.keys(yield* mcp.tools())
         expect(first).toEqual(second)
-        // Server names are sorted; per-server tool order is whatever the server
-        // reported via tools/list and is intentionally left untouched.
-        expect(first).toEqual(["a-server_second", "a-server_first", "b-server_second", "b-server_first"])
+        // Sorted by server name, then by tool name WITHIN each server. The fixtures report
+        // "second" before "first" via tools/list; a server is free to vary that order between
+        // calls, so leaving it untouched would still reshuffle the wire payload.
+        expect(first).toEqual(["a-server_first", "a-server_second", "b-server_first", "b-server_second"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
+
+// altimate_change start — sanitized-name collisions resolve deterministically.
+// `McpCatalog.sanitize` collapses every character outside [A-Za-z0-9_-] to `_`, so `do.thing`
+// and `do_thing` produce the same key. Previously the LAST one to arrive overwrote the first,
+// making the implementation the model actually got a function of server ordering. First wins
+// now, chosen by the sanitized-then-raw sort, so it depends only on the names.
+it.instance(
+  "resolves sanitized tool-name collisions deterministically (first wins)",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "clash"
+        const state = getOrCreateClientState("clash")
+        // Reported last-first on purpose: under the old arrival-order behaviour `do.thing`
+        // would have won because it came second.
+        state.tools = [
+          { name: "do_thing", description: "underscore", inputSchema: { type: "object", properties: {} } },
+          { name: "do.thing", description: "dot", inputSchema: { type: "object", properties: {} } },
+        ]
+        yield* mcp.add("clash", { type: "local", command: ["echo", "test"] })
+
+        const tools = yield* mcp.tools()
+        // Exactly one survives, and it is the raw name that sorts first ("do.thing" < "do_thing"
+        // by codepoint, since '.' is 0x2E and '_' is 0x5F).
+        expect(Object.keys(tools)).toEqual(["clash_do_thing"])
+        expect(tools["clash_do_thing"]!.description).toBe("dot")
+
+        // Stable across calls rather than alternating.
+        expect(Object.keys(yield* mcp.tools())).toEqual(["clash_do_thing"])
       }),
     ),
   { config: { mcp: {} } },
