@@ -1236,3 +1236,61 @@ it.instance(
     ),
   { config: { mcp: {} } },
 )
+
+// ========================================================================
+// altimate_change start — deterministic tool ordering across process restarts
+//
+// `s.clients[key]` is assigned as each server's connection COMPLETES (the
+// `Effect.forEach(..., { concurrency: "unbounded" })` in state), so with 2+ MCP
+// servers the object's natural insertion order is a race. Tool definitions are
+// part of the exact-match prefix that Vertex/Gemini and OpenAI cache, and the
+// record's key order is what reaches the wire, so a reshuffle invalidates the
+// whole cached prefix. tools() now iterates clients in sorted name order.
+// ========================================================================
+
+it.instance(
+  "tools() emits servers in sorted name order regardless of connect order",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Connect in deliberately reverse-alphabetical order: without the sort,
+        // insertion order would put zeta's tools first.
+        for (const name of ["zeta", "middle", "alpha"]) {
+          lastCreatedClientName = name
+          const state = getOrCreateClientState(name)
+          state.tools = [{ name: "run", inputSchema: { type: "object", properties: {} } }]
+          yield* mcp.add(name, { type: "local", command: ["echo", "test"] })
+        }
+
+        expect(Object.keys(yield* mcp.tools())).toEqual(["alpha_run", "middle_run", "zeta_run"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "tools() order is stable across repeated calls",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        for (const name of ["b-server", "a-server"]) {
+          lastCreatedClientName = name
+          const state = getOrCreateClientState(name)
+          state.tools = [
+            { name: "second", inputSchema: { type: "object", properties: {} } },
+            { name: "first", inputSchema: { type: "object", properties: {} } },
+          ]
+          yield* mcp.add(name, { type: "local", command: ["echo", "test"] })
+        }
+
+        const first = Object.keys(yield* mcp.tools())
+        const second = Object.keys(yield* mcp.tools())
+        expect(first).toEqual(second)
+        // Server names are sorted; per-server tool order is whatever the server
+        // reported via tools/list and is intentionally left untouched.
+        expect(first).toEqual(["a-server_second", "a-server_first", "b-server_second", "b-server_first"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end

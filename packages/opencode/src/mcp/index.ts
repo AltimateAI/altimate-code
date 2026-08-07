@@ -1023,7 +1023,15 @@ export const layer = Layer.effect(
       const config = cfg.mcp ?? {}
       const defaultTimeout = cfg.experimental?.mcp_timeout
 
-      for (const [clientName, client] of Object.entries(s.clients)) {
+      // altimate_change start — iterate clients in sorted name order so the emitted tool
+      // record has a stable key order across process restarts. `s.clients[key]` is
+      // assigned as each server's connection COMPLETES (see the `concurrency: "unbounded"`
+      // Effect.forEach in state), so with 2+ MCP servers the natural insertion order is a
+      // race. Tool definitions are part of the exact-match prefix that Vertex/Gemini and
+      // OpenAI cache, and the record's key order is what reaches the wire — a reshuffle
+      // invalidates the entire cached prefix for no reason.
+      for (const [clientName, client] of Object.entries(s.clients).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+        // altimate_change end
         if (s.status[clientName]?.status !== "connected") continue
         const mcpConfig = config[clientName]
         const listed = s.defs[clientName]
