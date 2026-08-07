@@ -15,7 +15,7 @@ import { fileURLToPath } from "url"
 // altimate_change end
 import { Glob } from "./glob"
 // altimate_change — shared atomic writer, same one core's FSUtil uses (see core util/atomic-write.ts)
-import { writeFileAtomic } from "@opencode-ai/core/util/atomic-write"
+import { writeFileAtomic, writeFileAtomicResolved } from "@opencode-ai/core/util/atomic-write"
 
 export namespace Filesystem {
   // Fast sync version for metadata checks
@@ -111,6 +111,24 @@ export namespace Filesystem {
   export async function writeJson(p: string, data: unknown, mode?: number): Promise<void> {
     return write(p, JSON.stringify(data, null, 2), mode)
   }
+
+  // altimate_change start — `writeJson` for a target the caller has ALREADY canonicalised.
+  // The auth store resolves its path once and locks on that resolution; routing its write through
+  // `writeJson` would canonicalise a second time, so a symlink retargeted in between would put the
+  // bytes outside what the lock covers. See core util/atomic-write.ts.
+  export async function writeJsonResolved(target: string, data: unknown, mode: number): Promise<void> {
+    const content = JSON.stringify(data, null, 2)
+    try {
+      await writeFileAtomicResolved(target, content, mode)
+    } catch (e) {
+      // The atomic writer puts its temp file beside the target, so a missing parent fails here
+      // too. Same retry as the resolving path — and still no second canonicalisation.
+      if (!isEnoent(e)) throw e
+      await mkdir(dirname(target), { recursive: true })
+      await writeFileAtomicResolved(target, content, mode)
+    }
+  }
+  // altimate_change end
 
   export async function writeStream(
     p: string,

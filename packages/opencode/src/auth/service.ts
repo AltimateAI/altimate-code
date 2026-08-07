@@ -4,7 +4,7 @@ import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
 // altimate_change — shared cross-process lock for auth.json (see auth/lock.ts)
 import { Flock } from "@opencode-ai/core/util/flock"
-import { resolveAuthTarget } from "./lock"
+import { resolveAuthTarget, isStoreMissing } from "./lock"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
@@ -58,22 +58,31 @@ export class AuthService extends Context.Service<AuthService, AuthService.Servic
       // two implementations exclude each other rather than only themselves. See auth/lock.ts.
       // The read happens INSIDE the lock; reading first and locking only the write would leave
       // the lost-credential window open. Reads stay unlocked (atomic rename makes them safe).
-      const readAll = async () => {
-        const data = await Filesystem.readJson<Record<string, unknown>>(file).catch(() => ({}))
+      //
+      // The mutation read takes the RESOLVED target and only forgives ENOENT. Reading the lexical
+      // path would let it observe a different file from the one the lock covers and the one it is
+      // about to overwrite; and degrading every failure to `{}` — as the unlocked `all()` does,
+      // where a failed read is only a missing answer — turns an EACCES blip or an unparseable file
+      // into an atomic replace that deletes EVERY provider's credentials, not just this one's.
+      const readForMutation = async (target: string) => {
+        const data = await Filesystem.readJson<Record<string, unknown>>(target).catch((err) => {
+          if (isStoreMissing(err)) return {}
+          throw err
+        })
         return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
       }
 
       const set = Effect.fn("AuthService.set")(function* (key: string, info: Info) {
         yield* Effect.tryPromise({
           try: async () => {
-            // Resolved once, used for both the lock and the write — see auth/lock.ts.
+            // Resolved once, used for the read, the lock AND the write — see auth/lock.ts.
             const { target, lockKey } = await resolveAuthTarget()
             await Flock.withLock(lockKey, async () => {
               const norm = key.replace(/\/+$/, "")
-              const data = await readAll()
+              const data = await readForMutation(target)
               if (norm !== key) delete data[key]
               delete data[norm + "/"]
-              await Filesystem.writeJson(target, { ...data, [norm]: info }, 0o600)
+              await Filesystem.writeJsonResolved(target, { ...data, [norm]: info }, 0o600)
             })
           },
           catch: fail("Failed to write auth data"),
@@ -86,10 +95,10 @@ export class AuthService extends Context.Service<AuthService, AuthService.Servic
             const { target, lockKey } = await resolveAuthTarget()
             await Flock.withLock(lockKey, async () => {
               const norm = key.replace(/\/+$/, "")
-              const data = await readAll()
+              const data = await readForMutation(target)
               delete data[key]
               delete data[norm]
-              await Filesystem.writeJson(target, data, 0o600)
+              await Filesystem.writeJsonResolved(target, data, 0o600)
             })
           },
           catch: fail("Failed to write auth data"),

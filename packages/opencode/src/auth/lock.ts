@@ -50,3 +50,34 @@ export async function resolveAuthTarget(): Promise<AuthTarget> {
   const target = await canonicalPath(AUTH_FILE)
   return { target, lockKey: `auth-store:${target}` }
 }
+
+/**
+ * Whether a read failure means "the store does not exist yet" rather than "the read failed".
+ *
+ * Only the first is safe to treat as an empty store. Both mutations do
+ * `read everything → change one key → write everything back`, and the write is an atomic replace,
+ * so a read that degrades to `{}` does not lose the one entry being touched — it deletes EVERY
+ * provider's credentials. An `EACCES` while a directory is momentarily unreadable, an `EIO`, or a
+ * half-written file that fails to parse are all real failures, and the mutation must abort rather
+ * than rewrite the store from an empty snapshot.
+ *
+ * The chain is walked because the errno arrives wrapped differently on each path: node's `readFile`
+ * rejects with `code: "ENOENT"` directly, while Effect's FileSystem raises a `PlatformError` whose
+ * `reason` is the tagged `NotFound` and which carries the original error underneath.
+ */
+export function isStoreMissing(err: unknown): boolean {
+  const seen = new Set<unknown>()
+  let current: unknown = err
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current)
+    const record = current as { code?: unknown; reason?: unknown; cause?: unknown }
+    if (record.code === "ENOENT") return true
+    // `reason` is a tagged value on Effect's PlatformError and a plain string on some adapters.
+    if (record.reason === "NotFound") return true
+    if (typeof record.reason === "object" && record.reason !== null) {
+      if ((record.reason as { _tag?: unknown })._tag === "NotFound") return true
+    }
+    current = record.cause
+  }
+  return false
+}

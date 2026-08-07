@@ -8,7 +8,7 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 // altimate_change start — cross-process lock for the shared auth store (see auth/lock.ts)
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
-import { resolveAuthTarget } from "./lock"
+import { resolveAuthTarget, isStoreMissing } from "./lock"
 // altimate_change end
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
@@ -56,16 +56,57 @@ export const layer = Layer.effect(
     const flock = yield* EffectFlock.Service
     // altimate_change end
 
-    const all = Effect.fn("Auth.all")(function* () {
-      if (process.env.OPENCODE_AUTH_CONTENT) {
-        try {
-          return JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
-        } catch (err) {}
+    // altimate_change start — the env-override and decode steps of `all()` lifted out verbatim so
+    // the mutation read below can reuse them without inheriting `all()`'s error handling, which is
+    // the part the two must NOT share. Behaviour of `all()` is unchanged.
+    const decodeAll = (data: Record<string, unknown>) =>
+      Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+
+    const fromEnv = () => {
+      if (!process.env.OPENCODE_AUTH_CONTENT) return undefined
+      try {
+        return JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
+      } catch (err) {
+        return undefined
       }
+    }
+    // altimate_change end
+
+    const all = Effect.fn("Auth.all")(function* () {
+      // altimate_change start — extracted helpers, same behaviour as the inlined original
+      const env = fromEnv()
+      if (env) return env
 
       const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
-      return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
+      return decodeAll(data)
+      // altimate_change end
     })
+
+    // altimate_change start — the read a MUTATION does, which is not the read `all()` does.
+    //
+    // Two differences, both load-bearing:
+    //
+    //   It reads the RESOLVED target, not the lexical `file`. The mutation locked that target; if
+    //   the read followed the symlink separately it could observe a different file from the one it
+    //   locked and the one it is about to write, and would then write that file's snapshot over
+    //   the locked target.
+    //
+    //   Only ENOENT means "empty store". `all()` degrades every failure to `{}` because a failed
+    //   READ is merely a missing answer — but a mutation follows its read with an atomic replace
+    //   of the whole file, so the same degradation silently deletes EVERY provider's credentials
+    //   on an EACCES blip, an EIO, or a file that fails to parse. Not just the free tier's: one
+    //   unreadable moment during any `set()` wipes the store.
+    const readForMutation = Effect.fn("Auth.readForMutation")(function* (target: string) {
+      const env = fromEnv()
+      if (env) return env
+
+      const data = (yield* fsys.readJson(target).pipe(
+        Effect.catchIf(isStoreMissing, () => Effect.succeed({})),
+        Effect.mapError(fail("Failed to read auth data")),
+      )) as Record<string, unknown>
+      return decodeAll(data)
+    })
+    // altimate_change end
 
     const get = Effect.fn("Auth.get")(function* (providerID: string) {
       return (yield* all())[providerID]
@@ -81,9 +122,11 @@ export const layer = Layer.effect(
     // locking reads would both add contention and deadlock any caller that reads while holding
     // the lock, since a file lock is not re-entrant. For the same reason the bodies below call
     // `all()` directly rather than going through a locked helper.
-    // Resolved ONCE per mutation and used for both the lock and the write, so the two cannot name
-    // different files. `body` receives the resolved physical target and must write to THAT, not to
-    // `file` — see auth/lock.ts for why sharing the resolver function alone was not enough.
+    // Resolved ONCE per mutation and used for the READ, the lock and the WRITE, so no two of them
+    // can name different files. `body` receives the resolved physical target; it must read from
+    // and write to THAT, not to `file`, and the write must go through `writeJsonResolved` so the
+    // path is not canonicalised a second time. See auth/lock.ts for why sharing the resolver
+    // function alone was not enough.
     const withStoreLock = <A, E, R>(body: (target: string) => Effect.Effect<A, E, R>) =>
       Effect.tryPromise({
         try: () => resolveAuthTarget(),
@@ -97,11 +140,11 @@ export const layer = Layer.effect(
       yield* withStoreLock((target) =>
         Effect.gen(function* () {
           const norm = key.replace(/\/+$/, "")
-          const data = yield* all()
+          const data = yield* readForMutation(target)
           if (norm !== key) delete data[key]
           delete data[norm + "/"]
           yield* fsys
-            .writeJson(target, { ...data, [norm]: info }, 0o600)
+            .writeJsonResolved(target, { ...data, [norm]: info }, 0o600)
             .pipe(Effect.mapError(fail("Failed to write auth data")))
         }),
       )
@@ -111,10 +154,10 @@ export const layer = Layer.effect(
       yield* withStoreLock((target) =>
         Effect.gen(function* () {
           const norm = key.replace(/\/+$/, "")
-          const data = yield* all()
+          const data = yield* readForMutation(target)
           delete data[key]
           delete data[norm]
-          yield* fsys.writeJson(target, data, 0o600).pipe(Effect.mapError(fail("Failed to write auth data")))
+          yield* fsys.writeJsonResolved(target, data, 0o600).pipe(Effect.mapError(fail("Failed to write auth data")))
         }),
       )
     })

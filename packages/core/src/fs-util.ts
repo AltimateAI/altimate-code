@@ -7,7 +7,7 @@ import { Context, Effect, FileSystem, Layer, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./util/glob"
 // altimate_change — shared atomic writer (see util/atomic-write.ts)
-import { writeFileAtomic } from "./util/atomic-write"
+import { writeFileAtomic, writeFileAtomicResolved } from "./util/atomic-write"
 import { serviceUse } from "./effect/service-use"
 import { LayerNode } from "./effect/layer-node"
 import { filesystem } from "./effect/layer-node-platform"
@@ -32,6 +32,11 @@ export namespace FSUtil {
     readonly readFileStringSafe: (path: string) => Effect.Effect<string | undefined, Error>
     readonly readJson: (path: string) => Effect.Effect<unknown, Error>
     readonly writeJson: (path: string, data: unknown, mode?: number) => Effect.Effect<void, Error>
+    // altimate_change start — `writeJson` for a path the caller has ALREADY canonicalised; see
+    // util/atomic-write.ts. Callers that lock on a resolved path must not have it resolved a
+    // second time underneath them.
+    readonly writeJsonResolved: (target: string, data: unknown, mode: number) => Effect.Effect<void, Error>
+    // altimate_change end
     readonly ensureDir: (path: string) => Effect.Effect<void, Error>
     readonly writeWithDirs: (path: string, content: string | Uint8Array, mode?: number) => Effect.Effect<void, Error>
     readonly readDirectoryEntries: (path: string) => Effect.Effect<DirEntry[], Error>
@@ -114,6 +119,20 @@ export namespace FSUtil {
           // error channel and every mapError above it — an ENOSPC or EPERM writing credentials
           // would surface as an unrecoverable defect instead of a FileSystemError.
           catch: (cause) => new FileSystemError({ method: "writeJson", cause }),
+        })
+      })
+
+      // The auth store locks on a canonicalised path and must write to THAT path. Going through
+      // `writeJson` would canonicalise a second time, and a symlink retargeted in between would
+      // send the bytes outside what the lock covers — locked A, wrote B.
+      const writeJsonResolved = Effect.fn("FileSystem.writeJsonResolved")(function* (
+        target: string,
+        data: unknown,
+        mode: number,
+      ) {
+        yield* Effect.tryPromise({
+          try: () => writeFileAtomicResolved(target, JSON.stringify(data, null, 2), mode),
+          catch: (cause) => new FileSystemError({ method: "writeJsonResolved", cause }),
         })
       })
       // altimate_change end
@@ -204,6 +223,9 @@ export namespace FSUtil {
         readDirectoryEntries,
         readJson,
         writeJson,
+        // altimate_change start — resolved-target writer for the auth store; see util/atomic-write.ts
+        writeJsonResolved,
+        // altimate_change end
         ensureDir,
         writeWithDirs,
         findUp,
