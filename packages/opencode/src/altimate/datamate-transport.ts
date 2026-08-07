@@ -63,6 +63,21 @@ export async function resolveDatamateSyncRoot(directory: string): Promise<string
 }
 
 /**
+ * Entry fields re-derived from the IDE transport on every sync/refresh — as
+ * opposed to user-managed fields (enabled, timeout, oauth, …), which are
+ * carried forward from the existing entry. Shared with `datamate_manager add`'s
+ * refresh path so the two never disagree on what counts as transport identity.
+ */
+export const TRANSPORT_IDENTITY_FIELDS: ReadonlySet<string> = new Set([
+  "type",
+  "command",
+  "args",
+  "environment",
+  "url",
+  "updatedAt",
+])
+
+/**
  * Parse a single mcp.json file and return the servers map, trying each of the
  * known top-level key names in order.
  */
@@ -255,17 +270,9 @@ export async function syncDatamateUrlFromVscodeMcp(cwd: string): Promise<string[
             // carrying forward everything except the transport-identity fields, which
             // we re-derive below. IDE config uses "stdio"/"http"/"streamable-http"/"sse";
             // altimate-code.json uses "local"/"remote".
-            const TRANSPORT_FIELDS = new Set([
-              "type",
-              "command",
-              "args",
-              "environment",
-              "url",
-              "updatedAt",
-            ])
             const preserved: Record<string, unknown> = {}
             for (const [k, v] of Object.entries(existingEntry)) {
-              if (!TRANSPORT_FIELDS.has(k)) preserved[k] = v
+              if (!TRANSPORT_IDENTITY_FIELDS.has(k)) preserved[k] = v
             }
 
             let newEntry: Record<string, unknown>

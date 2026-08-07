@@ -13,7 +13,7 @@ import {
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
-import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
+import { DATAMATE_KEY, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
 
 const log = Log.create({ service: "datamate" })
 
@@ -270,10 +270,12 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           type: mcpConfig.type,
         })
         const existing = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
-        const TRANSPORT_FIELDS = new Set(["type", "command", "args", "environment", "url", "updatedAt", "enabled"])
+        // enabled joins the shared transport-identity set here because this path
+        // re-derives it too (always written as true below).
+        const replacedFields = new Set([...TRANSPORT_IDENTITY_FIELDS, "enabled"])
         const preserved: Record<string, unknown> = {}
         for (const [k, v] of Object.entries(existing ?? {})) {
-          if (!TRANSPORT_FIELDS.has(k)) preserved[k] = v
+          if (!replacedFields.has(k)) preserved[k] = v
         }
         const refreshed = {
           ...preserved,
