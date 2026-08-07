@@ -26,7 +26,7 @@ import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { Spinner } from "../../component/spinner"
 // altimate_change — shared boot box at the top of the session scrollback
 import { WelcomePanel } from "../../component/welcome-panel"
-import { SESSION_VERTICAL_RESERVE } from "../../component/welcome-panel-utils"
+import { PANEL_HORIZONTAL_PADDING, SIDEBAR_WIDTH, sessionAvailable } from "../../component/welcome-panel-utils"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
@@ -272,7 +272,15 @@ export function Session() {
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(
+    () => dimensions().width - (sidebarVisible() ? SIDEBAR_WIDTH : 0) - PANEL_HORIZONTAL_PADDING,
+  )
+  // Welcome panel's available space — same content-column basis as contentWidth
+  // (narrows with the sidebar whenever open, incl. the dimmed overlay on narrow
+  // terminals) so the panel stays aligned with the messages and both restore
+  // together when it closes. Height reserves the prompt row. Shared arithmetic in
+  // welcome-panel-utils so the tests exercise this exact math.
+  const panelAvailable = createMemo(() => sessionAvailable(dimensions().width, dimensions().height, sidebarVisible()))
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -1187,13 +1195,10 @@ export function Session() {
                   /discover) starts a session. Outside the scrollbox: the bordered panel
                   does not paint reliably inside the scroll viewport. */}
               <box flexShrink={0}>
-                {/* Size to the panel's real space, not the terminal (#1067):
-                    contentWidth already subtracts the sidebar + padding;
-                    -SESSION_VERTICAL_RESERVE leaves room for the prompt. */}
-                <WelcomePanel
-                  availableWidth={contentWidth()}
-                  availableHeight={dimensions().height - SESSION_VERTICAL_RESERVE}
-                />
+                {/* Size to the panel's real space, not the terminal (#1067).
+                    panelAvailable() subtracts the in-flow sidebar + padding and
+                    reserves the prompt row (see the memo above). */}
+                <WelcomePanel availableWidth={panelAvailable().width} availableHeight={panelAvailable().height} />
               </box>
               {/* altimate_change end */}
               <scrollbox
