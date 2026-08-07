@@ -179,8 +179,14 @@ export namespace SystemPrompt {
     } else {
       filtered = list
     }
-    // Sort by name for stable, deterministic output across calls.
-    filtered = [...filtered].sort((a, b) => a.name.localeCompare(b.name))
+    // Sort by name so the block is byte-identical across machines, not merely stable within
+    // one process. `localeCompare` without an explicit locale follows the runtime's default,
+    // so two machines with different LANG or ICU data can order the same skills differently —
+    // and the skills block sits near the head of the system prompt, ahead of instructions and
+    // memory. Exact-prefix caches (Vertex/Gemini) stop at the first differing byte, so a
+    // locale-dependent order here does not shrink the shared prefix, it can eliminate it
+    // between two users who are otherwise identical. Codepoint order is the same everywhere.
+    filtered = [...filtered].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     // altimate_change end
 
     // altimate_change start — auto-load skill bodies for skills marked

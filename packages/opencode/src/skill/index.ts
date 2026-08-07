@@ -401,7 +401,13 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
     return [
       "<available_skills>",
       ...described
-        .toSorted((a, b) => a.name.localeCompare(b.name))
+        // altimate_change start — codepoint order, not locale order. This block renders into
+        // the system prompt ahead of instructions and memory, and exact-prefix caches stop at
+        // the first differing byte, so an order that follows the runtime's LANG or ICU data
+        // means two machines share no prefix at all. Sorting upstream in SystemPrompt.skills()
+        // is not enough on its own — this sort is the one that reaches the prompt.
+        .toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+        // altimate_change end
         .flatMap((skill) => [
           "  <skill>",
           `    <name>${skill.name}</name>`,
