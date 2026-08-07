@@ -8,7 +8,7 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change end
 // altimate_change start — cross-process lock for the shared auth store (see auth/lock.ts)
 import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
-import { authLockKey } from "./lock"
+import { resolveAuthTarget } from "./lock"
 // altimate_change end
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
@@ -81,34 +81,40 @@ export const layer = Layer.effect(
     // locking reads would both add contention and deadlock any caller that reads while holding
     // the lock, since a file lock is not re-entrant. For the same reason the bodies below call
     // `all()` directly rather than going through a locked helper.
-    const withStoreLock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      Effect.promise(() => authLockKey()).pipe(
-        Effect.flatMap((key) => effect.pipe(flock.withLock(key))),
+    // Resolved ONCE per mutation and used for both the lock and the write, so the two cannot name
+    // different files. `body` receives the resolved physical target and must write to THAT, not to
+    // `file` — see auth/lock.ts for why sharing the resolver function alone was not enough.
+    const withStoreLock = <A, E, R>(body: (target: string) => Effect.Effect<A, E, R>) =>
+      Effect.tryPromise({
+        try: () => resolveAuthTarget(),
+        catch: fail("Failed to resolve the auth store path"),
+      }).pipe(
+        Effect.flatMap(({ target, lockKey }) => body(target).pipe(flock.withLock(lockKey))),
         Effect.mapError(fail("Failed to lock auth store")),
       )
 
     const set = Effect.fn("Auth.set")(function* (key: string, info: Info) {
-      yield* withStoreLock(
+      yield* withStoreLock((target) =>
         Effect.gen(function* () {
           const norm = key.replace(/\/+$/, "")
           const data = yield* all()
           if (norm !== key) delete data[key]
           delete data[norm + "/"]
           yield* fsys
-            .writeJson(file, { ...data, [norm]: info }, 0o600)
+            .writeJson(target, { ...data, [norm]: info }, 0o600)
             .pipe(Effect.mapError(fail("Failed to write auth data")))
         }),
       )
     })
 
     const remove = Effect.fn("Auth.remove")(function* (key: string) {
-      yield* withStoreLock(
+      yield* withStoreLock((target) =>
         Effect.gen(function* () {
           const norm = key.replace(/\/+$/, "")
           const data = yield* all()
           delete data[key]
           delete data[norm]
-          yield* fsys.writeJson(file, data, 0o600).pipe(Effect.mapError(fail("Failed to write auth data")))
+          yield* fsys.writeJson(target, data, 0o600).pipe(Effect.mapError(fail("Failed to write auth data")))
         }),
       )
     })

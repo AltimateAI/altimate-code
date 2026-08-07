@@ -4,7 +4,7 @@ import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
 // altimate_change — shared cross-process lock for auth.json (see auth/lock.ts)
 import { Flock } from "@opencode-ai/core/util/flock"
-import { authLockKey } from "./lock"
+import { resolveAuthTarget } from "./lock"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
@@ -65,28 +65,33 @@ export class AuthService extends Context.Service<AuthService, AuthService.Servic
 
       const set = Effect.fn("AuthService.set")(function* (key: string, info: Info) {
         yield* Effect.tryPromise({
-          try: async () =>
-            Flock.withLock(await authLockKey(), async () => {
+          try: async () => {
+            // Resolved once, used for both the lock and the write — see auth/lock.ts.
+            const { target, lockKey } = await resolveAuthTarget()
+            await Flock.withLock(lockKey, async () => {
               const norm = key.replace(/\/+$/, "")
               const data = await readAll()
               if (norm !== key) delete data[key]
               delete data[norm + "/"]
-              await Filesystem.writeJson(file, { ...data, [norm]: info }, 0o600)
-            }),
+              await Filesystem.writeJson(target, { ...data, [norm]: info }, 0o600)
+            })
+          },
           catch: fail("Failed to write auth data"),
         })
       })
 
       const remove = Effect.fn("AuthService.remove")(function* (key: string) {
         yield* Effect.tryPromise({
-          try: async () =>
-            Flock.withLock(await authLockKey(), async () => {
+          try: async () => {
+            const { target, lockKey } = await resolveAuthTarget()
+            await Flock.withLock(lockKey, async () => {
               const norm = key.replace(/\/+$/, "")
               const data = await readAll()
               delete data[key]
               delete data[norm]
-              await Filesystem.writeJson(file, data, 0o600)
-            }),
+              await Filesystem.writeJson(target, data, 0o600)
+            })
+          },
           catch: fail("Failed to write auth data"),
         })
       })

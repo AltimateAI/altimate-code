@@ -428,7 +428,45 @@ describe("util.effect-flock", () => {
   )
 
   it.live(
-    "a body failure still surfaces when release succeeds",
+    "a body failure and a release failure BOTH survive",
+    Effect.gen(function* () {
+      // The release-succeeds case asserted nothing the old ignore-everything code failed: a body
+      // error surfaced fine when cleanup worked. The regression is specifically the COMBINATION —
+      // making release surface its errors meant that when an auth write failed AND the lock
+      // removal then failed, only the ReleaseError came out and the actionable half of the report
+      // was gone.
+      if (process.platform === "win32" || process.getuid?.() === 0) return
+
+      const tmp = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "eflock-both-")))
+      const dir = path.join(tmp, "locks")
+      try {
+        const flock = yield* EffectFlock.Service
+        const exit = yield* Effect.exit(
+          flock.withLock(
+            Effect.gen(function* () {
+              // Break cleanup from inside the body, so both failures are real and simultaneous.
+              yield* Effect.promise(() => fs.chmod(dir, 0o500))
+              return yield* Effect.fail(new Error("body blew up"))
+            }),
+            "eflock:both-fail",
+            dir,
+          ),
+        )
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        const pretty = Exit.isFailure(exit) ? Cause.pretty(exit.cause) : ""
+        expect(pretty).toContain("body blew up")
+        expect(pretty).toContain("failed to remove lock directory")
+      } finally {
+        yield* Effect.promise(() => fs.chmod(dir, 0o700).catch(() => {}))
+        yield* Effect.promise(() => fs.rm(tmp, { recursive: true, force: true }))
+      }
+    }),
+    30_000,
+  )
+
+  it.live(
+    "a body failure surfaces normally when release succeeds",
     Effect.gen(function* () {
       const tmp = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "eflock-body-")))
       const dir = path.join(tmp, "locks")
@@ -448,5 +486,6 @@ describe("util.effect-flock", () => {
     }),
     30_000,
   )
+
   // altimate_change end
 })

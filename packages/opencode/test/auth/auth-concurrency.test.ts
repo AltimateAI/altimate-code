@@ -248,17 +248,22 @@ describe("Auth store writer parity", () => {
       const auth = yield* Auth.Service
       const service = yield* AuthSvc.AuthService
 
-      yield* seedLooseFile(AUTH_FILE)
+      const seededService = yield* seedLooseFile(AUTH_FILE)
       yield* service.set("parity-service", api("a"))
       const afterService = yield* Effect.promise(() => fs.stat(AUTH_FILE))
 
-      yield* seedLooseFile(AUTH_FILE)
+      const seededIndex = yield* seedLooseFile(AUTH_FILE)
       yield* auth.set("parity-index", api("b"))
       const afterIndex = yield* Effect.promise(() => fs.stat(AUTH_FILE))
 
       expect(afterService.mode & 0o777).toBe(0o600)
       expect(afterIndex.mode & 0o777).toBe(0o600)
       expect(afterService.mode & 0o777).toBe(afterIndex.mode & 0o777)
+      // Mode parity alone does not discriminate — write-then-chmod also lands at 0600, so this
+      // assertion passed against the in-place writer it is named for. Both paths must also have
+      // REPLACED the seeded file rather than written into it, which is the inode.
+      expect(afterService.ino).not.toBe(seededService)
+      expect(afterIndex.ino).not.toBe(seededIndex)
     }),
   )
 })
