@@ -32,7 +32,7 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // entry persisted without its env block (e.g. missing ELECTRON_RUN_AS_NODE for an
 // Electron command) was re-spawned broken on every TUI session start with no path to
 // self-repair.
-import { syncDatamateUrlFromVscodeMcp, resolveDatamateSyncRoot } from "@/altimate/datamate-transport"
+import { syncDatamateUrlFromVscodeMcp } from "@/altimate/datamate-transport"
 // altimate_change end
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
@@ -41,17 +41,15 @@ const SHUTDOWN_BUDGET_MS = Telemetry.TUI_SHUTDOWN_BUDGET_MS
 
 Heap.start()
 
-// altimate_change start — datamate entry heal. Scoped to the project root (a session
-// launched from a subdirectory must still find the root IDE config + persisted entry).
-// Everything that reads the config is sequenced AFTER this promise — trace init below,
-// the first in-process request, and Server.listen — because the heal writes
-// altimate-code.json with a non-atomic write, and InstanceRuntime.load/Config.get()
-// would otherwise race it (transiently truncated read) or cache the pre-heal entry,
-// making the first session spawn the broken config anyway.
-// Errors are swallowed: a failed sync must never block the TUI.
-const datamateSyncReady: Promise<unknown> = resolveDatamateSyncRoot(process.cwd())
-  .then((root) => syncDatamateUrlFromVscodeMcp(root))
-  .catch(() => {})
+// altimate_change start — datamate entry heal (the sync resolves the project root
+// itself, so a session launched from a subdirectory still finds the root IDE config
+// + persisted entry). Everything that reads the config is sequenced AFTER this
+// promise — trace init below, the first in-process request, and Server.listen —
+// because the heal writes altimate-code.json with a non-atomic write, and
+// InstanceRuntime.load/Config.get() would otherwise race it (transiently truncated
+// read) or cache the pre-heal entry, making the first session spawn the broken
+// config anyway. Errors are swallowed: a failed sync must never block the TUI.
+const datamateSyncReady: Promise<unknown> = syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
 // altimate_change end
 
 const traceConsumer = new TraceConsumer()

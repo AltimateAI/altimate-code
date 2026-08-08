@@ -212,6 +212,10 @@ export async function syncDatamateUrlFromVscodeMcp(
 ): Promise<string[]> {
   const updated: string[] = []
   try {
+    // Resolve the project root here rather than in each caller: an invocation
+    // from a nested subdirectory must still find the root .vscode/mcp.json and
+    // the root-level config files it needs to repair.
+    cwd = await resolveDatamateSyncRoot(cwd)
     log.info("syncDatamateUrlFromVscodeMcp: start", { cwd })
 
     // Find the first mcp.json that contains a "datamate" entry.
@@ -329,7 +333,17 @@ export async function syncDatamateUrlFromVscodeMcp(
 
       let datamateHealed = false
       for (const configPath of await findAllConfigPaths(cwd, globalConfigDir)) {
-        if (await healEntryInFile(configPath)) datamateHealed = true
+        // Per-file isolation: one malformed config (addMcpToConfig refuses to
+        // rewrite unparseable files by throwing) must not abort the heal for the
+        // remaining project/global files.
+        try {
+          if (await healEntryInFile(configPath)) datamateHealed = true
+        } catch (err) {
+          log.warn("syncDatamateUrlFromVscodeMcp: skipping unhealable config file", {
+            configPath,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
       }
       if (datamateHealed) updated.push(DATAMATE_KEY)
     }

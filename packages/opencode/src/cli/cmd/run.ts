@@ -945,15 +945,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
     // altimate_change start — heal the datamate MCP entry before the session starts,
     // mirroring cli/cmd/serve.ts: an entry persisted without its env block (e.g.
     // missing ELECTRON_RUN_AS_NODE for an Electron command) would otherwise be
-    // re-spawned broken on every run invocation with no path to self-repair.
-    // Scoped to the project root, not cwd — a run from a subdirectory must still
-    // find the root IDE config and the persisted entry it needs to repair.
+    // re-spawned broken on every run invocation with no path to self-repair. The
+    // sync resolves the project root itself, so a run from a subdirectory still
+    // finds the root IDE config and the persisted entry it needs to repair.
     {
-      const { syncDatamateUrlFromVscodeMcp, resolveDatamateSyncRoot } = await import(
-        "../../altimate/datamate-transport"
-      )
-      const root = await resolveDatamateSyncRoot(process.cwd()).catch(() => process.cwd())
-      await syncDatamateUrlFromVscodeMcp(root).catch(() => {})
+      const { syncDatamateUrlFromVscodeMcp } = await import("../../altimate/datamate-transport")
+      await syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
     }
     // altimate_change end
     await bootstrap(process.cwd(), async () => {

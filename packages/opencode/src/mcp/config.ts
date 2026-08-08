@@ -3,10 +3,13 @@ import { modify, applyEdits, parse, parseTree, findNodeAtLocation, getNodeValue,
 import { Filesystem } from "../util/filesystem"
 import type { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 
-// altimate_change start — primary config filename is altimate-code.json; opencode.json
-// is fallback for users with pre-existing upstream installs. New writes land in
-// altimate-code.json (first entry of the list).
-const CONFIG_FILENAMES = ["altimate-code.json", "opencode.json", "opencode.jsonc"]
+// altimate_change start — primary config filename is altimate-code.json; the rest are
+// fallbacks for users with pre-existing installs. The list mirrors every filename the
+// config loader merges (config/config.ts loadFile calls: altimate-code.json/.jsonc,
+// opencode.json/.jsonc, legacy config.json) — an entry in any of them is live config,
+// so lookups/removals/heals must see them all. New writes land in altimate-code.json
+// (first entry of the list).
+const CONFIG_FILENAMES = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc", "config.json"]
 // altimate_change end
 
 export async function resolveConfigPath(baseDir: string, global = false) {

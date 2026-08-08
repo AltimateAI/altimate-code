@@ -35,7 +35,7 @@ import { MCP } from "../mcp"
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
 import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
 import { readMcpEntryFromDisk } from "../mcp/config"
-import { resolveConfigPath } from "../mcp/config"
+import { findAllConfigPaths } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
@@ -688,12 +688,19 @@ export namespace Server {
             log.info("reload-datamate: config updated, reconnecting MCP servers", { updatedNames })
             // Reconnect each updated server using the freshly-written disk entry.
             // Bypass Config.get() (stale singleton) by reading the file directly.
-            const configPath = await resolveConfigPath(directory)
+            // The healed entry may live in any config file the sync covers —
+            // project, project subdirs, or the global config (scope: "global"
+            // adds) — so scan them all instead of only the project path.
+            const configPaths = await findAllConfigPaths(directory, Global.Path.config)
             const currentStatus = await MCP.status()
             for (const name of updatedNames) {
-              const freshEntry = await readMcpEntryFromDisk(name, configPath)
+              let freshEntry: Awaited<ReturnType<typeof readMcpEntryFromDisk>>
+              for (const configPath of configPaths) {
+                freshEntry = await readMcpEntryFromDisk(name, configPath)
+                if (freshEntry) break
+              }
               if (!freshEntry) {
-                log.warn("reload-datamate: fresh config entry not found on disk", { name, configPath })
+                log.warn("reload-datamate: fresh config entry not found on disk", { name, configPaths })
                 continue
               }
               log.info("reload-datamate: reconnecting with fresh config", {
