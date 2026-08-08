@@ -287,6 +287,35 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
   })
 
+  test("legacy config.json is healed in the GLOBAL dir but left alone at project level", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "global-config")
+    await mkdir(globalDir, { recursive: true })
+    const brokenEntry = { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true }
+    // Global legacy config.json IS merged by the config loader → must heal.
+    const globalLegacyPath = path.join(globalDir, "config.json")
+    await writeFile(globalLegacyPath, JSON.stringify({ mcp: { [DATAMATE_KEY]: brokenEntry } }, null, 2))
+    // Project config.json is NOT read by the loader → must not be touched.
+    const projectConfigJsonPath = path.join(tmp.path, "config.json")
+    const unrelated = JSON.stringify({ mcp: { [DATAMATE_KEY]: brokenEntry } }, null, 2)
+    await writeFile(projectConfigJsonPath, unrelated)
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["/ext/dist/datamate-cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T8",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toContain(DATAMATE_KEY)
+
+    const globalEntry = JSON.parse(await readFile(globalLegacyPath, "utf-8")).mcp[DATAMATE_KEY]
+    expect(globalEntry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+    // Byte-identical: the project-level config.json was never rewritten.
+    expect(await readFile(projectConfigJsonPath, "utf-8")).toBe(unrelated)
+  })
+
   test("heals project and global entries in one pass", async () => {
     await using tmp = await tmpdir()
     const globalDir = path.join(tmp.path, "global-config")

@@ -9,7 +9,13 @@ import type { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 // opencode.json/.jsonc, legacy config.json) — an entry in any of them is live config,
 // so lookups/removals/heals must see them all. New writes land in altimate-code.json
 // (first entry of the list).
-const CONFIG_FILENAMES = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc", "config.json"]
+const CONFIG_FILENAMES = ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]
+// The GLOBAL config dir additionally merges the legacy config.json
+// (config/config.ts global load path). The project loader never reads
+// config.json, so it must stay out of project-side candidates — otherwise an
+// unrelated project file named config.json becomes a discovery hit and, worse,
+// a write target for entries the loader would never load.
+const GLOBAL_CONFIG_FILENAMES = [...CONFIG_FILENAMES, "config.json"]
 // altimate_change end
 
 export async function resolveConfigPath(baseDir: string, global = false) {
@@ -23,8 +29,8 @@ export async function resolveConfigPath(baseDir: string, global = false) {
     )
   }
 
-  // Then check root-level configs
-  candidates.push(...CONFIG_FILENAMES.map((f) => path.join(baseDir, f)))
+  // Then check root-level configs (the global dir also accepts legacy config.json)
+  candidates.push(...(global ? GLOBAL_CONFIG_FILENAMES : CONFIG_FILENAMES).map((f) => path.join(baseDir, f)))
 
   for (const candidate of candidates) {
     if (await Filesystem.exists(candidate)) {
@@ -101,7 +107,7 @@ export async function listMcpInConfig(configPath: string): Promise<string[]> {
 export async function findAllConfigPaths(projectDir: string, globalDir: string): Promise<string[]> {
   const paths: string[] = []
   for (const dir of [projectDir, globalDir]) {
-    for (const name of CONFIG_FILENAMES) {
+    for (const name of dir === globalDir ? GLOBAL_CONFIG_FILENAMES : CONFIG_FILENAMES) {
       const p = path.join(dir, name)
       if (await Filesystem.exists(p)) paths.push(p)
     }
