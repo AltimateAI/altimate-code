@@ -185,9 +185,11 @@ function sha256File(absPath: string): string | undefined {
 function isBinaryStaleFromStamp(binaryPath: string): boolean | "no-stamp" {
   const stamp = readBuildStamp(binaryPath)
   if (!stamp) return "no-stamp"
-  // Stamp paths are relative to packages/opencode (= PKG_DIR).
+  // altimate_change — #1052 D10 review-fix (M2): stamp paths are now REPO_ROOT-
+  // relative so entries under packages/tui, packages/core, workspace-root
+  // package.json, bun.lock, etc. resolve correctly without further munging.
   for (const { path: rel, sha256 } of stamp.inputs) {
-    const abs = path.join(PKG_DIR, rel)
+    const abs = path.join(REPO_ROOT, rel)
     const current = sha256File(abs)
     if (current === undefined) return true // input vanished → binary can't reflect current tree
     if (current !== sha256) return true

@@ -541,10 +541,16 @@ for (const item of targets) {
   // are relative to the workspace root (dir = packages/opencode) so the test
   // can resolve them from its own cwd without env plumbing.
   const stampInputs: Array<{ path: string; sha256: string }> = []
+  // altimate_change — #1052 D10 review-fix (M2): resolve inputs relative to
+  // REPO_ROOT (not `dir` = packages/opencode). Workspace-package files live
+  // OUTSIDE packages/opencode; a `dir`-relative path for those would render as
+  // `../tui/src/...` which the smoke-test reader would then have to un-prefix.
+  // REPO_ROOT-relative keeps paths portable and the reader trivial.
+  const _stampRoot = path.resolve(dir, "../..") // repo root
   const addFile = (absPath: string) => {
     try {
       const buf = fs.readFileSync(absPath)
-      const rel = path.relative(dir, absPath)
+      const rel = path.relative(_stampRoot, absPath)
       const hash = createHash("sha256").update(buf).digest("hex")
       stampInputs.push({ path: rel, sha256: hash })
     } catch {
@@ -564,6 +570,12 @@ for (const item of targets) {
   addFile(parserWorker)
   // Per-target altimate-core NAPI prebuild
   addFile(platformNodeSrc)
+  // altimate_change — #1052 D10 review-fix (M2): package.json + bun.lock cover
+  // dependency-version bumps that change what Bun.build embeds. Without these,
+  // `bun install` bumping a bundled dep would leave the stamp reporting fresh.
+  const REPO_ROOT = path.resolve(dir, "../..")
+  addFile(path.join(REPO_ROOT, "package.json"))
+  addFile(path.join(REPO_ROOT, "bun.lock"))
   // src/ + script/ TypeScript tree — hash every file the compiler actually saw
   // (same extension filter build.ts globs for embedding).
   const IGNORED = new Set(["node_modules", ".turbo", ".cache", "dist", "target"])
@@ -588,6 +600,30 @@ for (const item of targets) {
   }
   walk(path.join(dir, "src"))
   walk(path.join(dir, "script"))
+  // altimate_change — #1052 D10 review-fix (M2): also hash every workspace
+  // package's src/ tree. `packages/opencode/src` imports from
+  // `@opencode-ai/{core,tui,util,plugin,sdk,server,cli,...}` and
+  // `@altimateai/{dbt-tools,drivers}` — Bun.build follows these imports and
+  // bundles them into the binary transitively. The original stamp walked only
+  // packages/opencode, so edits under any sibling workspace package would leave
+  // the binary silently stale. Enumerate `packages/*/src` at build time (rather
+  // than hard-coding names) so new packages get covered automatically.
+  const packagesRoot = path.resolve(REPO_ROOT, "packages")
+  try {
+    for (const pkg of fs.readdirSync(packagesRoot, { withFileTypes: true })) {
+      if (!pkg.isDirectory() || pkg.name.startsWith(".")) continue
+      // Skip packages/opencode — already covered by the walks above.
+      if (pkg.name === "opencode") continue
+      const pkgSrc = path.join(packagesRoot, pkg.name, "src")
+      if (fs.existsSync(pkgSrc)) walk(pkgSrc)
+      // Each workspace package.json influences its resolution/exports and could
+      // change what ends up in the binary even when its src/ files are unchanged.
+      const pkgJson = path.join(packagesRoot, pkg.name, "package.json")
+      if (fs.existsSync(pkgJson)) addFile(pkgJson)
+    }
+  } catch {
+    // packages/ missing (unlikely at build time) — skip; addFile() ignores non-existent paths anyway.
+  }
   // Deterministic order so the aggregate hash is stable across build runs.
   stampInputs.sort((a, b) => a.path.localeCompare(b.path))
   const aggregate = createHash("sha256")
