@@ -1,4 +1,4 @@
-// v0.9.5 review — Tech Lead P1.
+// v0.9.5 review — Tech Lead P1 (initial pass) + coderabbit / cubic follow-ups.
 //
 // sample-setup.ts::redactPaths has a docstring listing three specific bugs the
 // implementation was written to fix (regex swallowing surrounding sentence,
@@ -12,12 +12,19 @@
 // silent-zero bug (typo in the extension filter, wrong subdirectory name)
 // would misreport onboarding activity. The fixture below builds a real dir tree
 // per test and asserts the count.
+//
+// Fixture ownership note (bot-review follow-up, coderabbit + cubic):
+// countSampleContents originally shared one `mkdtempSync` at module scope with
+// afterAll cleanup. That leaks if the suite is filtered (only redactPaths tests
+// selected) or if a `beforeAll` throws before `afterAll` registers. Switched to
+// the repo's `await using tmp = await tmpdir()` pattern so each test owns its
+// fixture and cleanup is bound to the test scope.
 
-import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import fs from "fs"
-import os from "os"
 import path from "path"
 
+import { tmpdir } from "../fixture/fixture"
 import { redactPaths, countSampleContents } from "../../src/altimate/tools/sample-setup"
 
 describe("redactPaths", () => {
@@ -87,11 +94,35 @@ describe("redactPaths", () => {
     expect(out).toBe("failed at <path>")
   })
 
+  test("path segment terminates at the first whitespace, so a path containing a space leaks the tail", () => {
+    // codex-review gap: the greedy pattern stops at the first `\s`, so a real
+    // CWD like `/Users/alice/My Documents/dbt` gets split — only `/Users/alice/My`
+    // is redacted; `Documents/dbt` is left in the output.
+    //
+    // The `extra` list is what production callers use to close this gap (they
+    // pass the exact CWD to `redactPaths(msg, [cwd])`), so this test also
+    // asserts the compensating behavior — with the CWD known-value, the whole
+    // path collapses cleanly.
+    const cwd = "/Users/alice/My Documents/dbt"
+    const raw = redactPaths(`failed at ${cwd}/models/foo.sql`)
+    // Documented limitation of the pattern-only pass: the greedy path pattern
+    // terminates at the first whitespace, so `/Users/alice/My` and
+    // `/dbt/models/foo.sql` each redact cleanly but the middle segment
+    // `Documents` sits between two `<path>` markers.
+    expect(raw).toContain("Documents")
+    expect(raw).not.toBe("failed at <path>")
+    // With the CWD passed as a known value the whole path collapses cleanly:
+    const guarded = redactPaths(`failed at ${cwd}/models/foo.sql`, [cwd])
+    expect(guarded).toBe("failed at <path>")
+    expect(guarded).not.toContain("Documents")
+    expect(guarded).not.toContain("alice")
+  })
+
   test("collapses adjacent <path> segments so double-redaction reads clean", () => {
     // The known-value pass replaces os.homedir() etc first; the greedy pattern
     // then may match the "<path>" tail and re-redact. The collapse rule keeps
     // the output from becoming "<path><path><path>".
-    const home = os.homedir()
+    const home = require("os").homedir()
     const out = redactPaths(`failed at ${home}/dbt/models/foo.sql`)
     expect(out).toBe("failed at <path>")
     expect(out).not.toMatch(/<path><path>/)
@@ -115,57 +146,50 @@ describe("redactPaths", () => {
   })
 })
 
+// Shared helper — each test uses its own tmp dir via `await using`, so cleanup
+// is scoped to the test itself (bot-review follow-up).
+async function seedSampleTree(dir: string) {
+  fs.mkdirSync(path.join(dir, "models", "staging"), { recursive: true })
+  fs.mkdirSync(path.join(dir, "models", "marts", "core"), { recursive: true })
+  fs.mkdirSync(path.join(dir, "seeds"), { recursive: true })
+
+  fs.writeFileSync(path.join(dir, "models", "top.sql"), "select 1")
+  fs.writeFileSync(path.join(dir, "models", "staging", "stg_orders.sql"), "select 1")
+  fs.writeFileSync(path.join(dir, "models", "staging", "stg_users.sql"), "select 1")
+  fs.writeFileSync(path.join(dir, "models", "marts", "core", "dim_customers.sql"), "select 1")
+
+  // Non-.sql alongside .sql, must NOT be counted.
+  fs.writeFileSync(path.join(dir, "models", "readme.md"), "hi")
+  fs.writeFileSync(path.join(dir, "models", "schema.yml"), "version: 2")
+
+  fs.writeFileSync(path.join(dir, "seeds", "country_codes.csv"), "code,name\n")
+  fs.writeFileSync(path.join(dir, "seeds", "regions.csv"), "id,name\n")
+  // Non-.csv seed — not counted.
+  fs.writeFileSync(path.join(dir, "seeds", "notes.md"), "hi")
+}
+
 describe("countSampleContents", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sample-setup-helpers-"))
-
-  beforeAll(() => {
-    // Real dir tree. Not mocked — the helper does synchronous fs.readdirSync,
-    // and a mocked fs would drift out of shape from what the caller sees.
-    fs.mkdirSync(path.join(root, "models", "staging"), { recursive: true })
-    fs.mkdirSync(path.join(root, "models", "marts", "core"), { recursive: true })
-    fs.mkdirSync(path.join(root, "seeds"), { recursive: true })
-
-    fs.writeFileSync(path.join(root, "models", "top.sql"), "select 1")
-    fs.writeFileSync(path.join(root, "models", "staging", "stg_orders.sql"), "select 1")
-    fs.writeFileSync(path.join(root, "models", "staging", "stg_users.sql"), "select 1")
-    fs.writeFileSync(path.join(root, "models", "marts", "core", "dim_customers.sql"), "select 1")
-
-    // Non-.sql alongside .sql, must NOT be counted.
-    fs.writeFileSync(path.join(root, "models", "readme.md"), "hi")
-    fs.writeFileSync(path.join(root, "models", "schema.yml"), "version: 2")
-
-    fs.writeFileSync(path.join(root, "seeds", "country_codes.csv"), "code,name\n")
-    fs.writeFileSync(path.join(root, "seeds", "regions.csv"), "id,name\n")
-    // Non-.csv seed — not counted.
-    fs.writeFileSync(path.join(root, "seeds", "notes.md"), "hi")
+  test("counts .sql files recursively under models/", async () => {
+    await using tmp = await tmpdir()
+    await seedSampleTree(tmp.path)
+    expect(countSampleContents(tmp.path).models).toBe(4)
   })
 
-  afterAll(() => {
-    fs.rmSync(root, { recursive: true, force: true })
+  test("counts .csv files under seeds/ (top level; matches production sample layout)", async () => {
+    await using tmp = await tmpdir()
+    await seedSampleTree(tmp.path)
+    expect(countSampleContents(tmp.path).tables).toBe(2)
   })
 
-  test("counts .sql files recursively under models/", () => {
-    const { models } = countSampleContents(root)
-    expect(models).toBe(4)
+  test("returns zeros when the sample dir is missing the expected subdirs", async () => {
+    await using tmp = await tmpdir()
+    expect(countSampleContents(tmp.path)).toEqual({ models: 0, tables: 0 })
   })
 
-  test("counts .csv files under seeds/ (top level; matches production sample layout)", () => {
-    const { tables } = countSampleContents(root)
-    expect(tables).toBe(2)
-  })
-
-  test("returns zeros when the sample dir is missing the expected subdirs", () => {
-    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "sample-setup-empty-"))
-    try {
-      expect(countSampleContents(empty)).toEqual({ models: 0, tables: 0 })
-    } finally {
-      fs.rmSync(empty, { recursive: true, force: true })
-    }
-  })
-
-  test("returns zeros when the sample dir does not exist at all", () => {
+  test("returns zeros when the sample dir does not exist at all", async () => {
     // countFilesWithExtension swallows the readdirSync error and returns 0 —
     // this is the graceful-degradation shape the telemetry event depends on.
-    expect(countSampleContents(path.join(root, "does-not-exist"))).toEqual({ models: 0, tables: 0 })
+    await using tmp = await tmpdir()
+    expect(countSampleContents(path.join(tmp.path, "does-not-exist"))).toEqual({ models: 0, tables: 0 })
   })
 })
