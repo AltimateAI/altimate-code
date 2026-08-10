@@ -172,12 +172,14 @@ describe("v0.9.5 — sample-setup helpers adversarial", () => {
     expect(redactPaths("")).toBe("")
   })
 
-  test("redactPaths handles a 100KB message in reasonable time (< 1s)", () => {
-    const msg = ("normal text here " + "/Users/alice/x/y/z ".repeat(1000)).slice(0, 100_000)
-    const start = performance.now()
+  test("redactPaths handles a 100KB message without leaking paths or degenerating markers", () => {
+    // Coderabbit review on PR #1088: previous version used `repeat(1000)` which is
+    // ~20 KB not 100 KB, and a `performance.now()` wall-clock assertion which is
+    // flaky under host load / parallel test runners. Build exactly 100,000 chars
+    // deterministically and assert only the redaction shape.
+    const segment = "normal text here /Users/alice/x/y/z "
+    const msg = segment.repeat(Math.ceil(100_000 / segment.length)).slice(0, 100_000)
     const out = redactPaths(msg)
-    const elapsed = performance.now() - start
-    expect(elapsed).toBeLessThan(1000)
     expect(out).not.toContain("/Users/alice")
     // Should not have degenerated to `<path><path><path>...`
     expect(out).not.toMatch(/<path><path>/)
@@ -214,14 +216,22 @@ describe("v0.9.5 — sample-setup helpers adversarial", () => {
     try {
       fs.mkdirSync(path.join(root, "models"))
       // Create a symlink pointing back to models — a real loop.
+      // Coderabbit review on PR #1088: bare `catch` used to swallow every symlink
+      // setup failure into a passing test, and `toBeGreaterThanOrEqual(0)` was
+      // trivially true for any non-negative count. Narrow the skip to the one
+      // known-unsupported-symlink error class (EPERM on Windows without
+      // dev-mode); re-throw anything else so a real filesystem regression
+      // doesn't hide behind the skip. Assert exact `models === 0` — the loop
+      // link resolves to a directory but has no `.sql` inside; anything nonzero
+      // would mean the helper is following the loop.
       try {
         fs.symlinkSync(path.join(root, "models"), path.join(root, "models", "loop"))
-      } catch {
-        // Some CI runners disallow symlinks (Windows without dev-mode). Skip.
-        return
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EPERM") return
+        throw error
       }
       const counts = countSampleContents(root)
-      expect(counts.models).toBeGreaterThanOrEqual(0)
+      expect(counts.models).toBe(0)
       expect(counts.tables).toBe(0)
     } finally {
       fs.rmSync(root, { recursive: true, force: true })

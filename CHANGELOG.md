@@ -22,7 +22,7 @@ Windows `grep` back for the ~16% of Windows users it silently broke since v0.9.2
 ### Changed
 
 - **`cli_context` on the sign-in URL for PostHog session correlation.** After successful sign-in, the frontend registers the CLI machine-id as the `cli_machine_id` PostHog super-property so CLI activity is attributed to the authenticated account in aggregate funnel analytics. The value travels in the URL *fragment* (`#cli_context=…`, not a query string) so the durable identifier stays out of server access logs, CDN/WAF, and the `Referer` header — the frontend reads it via `location.hash`. (#1068)
-- **First-run onboarding and review feature usage now emit funnel telemetry.** New event types: `activation_menu_shown`, `activation_job_selected`, `first_prompt_sent`, `environment_scan_completed`, plus review-lane latency and outcome events. All existing opt-out mechanisms (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`, `telemetry.disabled` in config) gate every new event; full list in `docs/reference/telemetry.md`. (#1049, #1064)
+- **First-run onboarding and review feature usage now emit funnel telemetry.** New event types: `activation_menu_shown`, `activation_job_selected`, `first_prompt_sent`, `environment_scan_completed`, plus review-lane latency and outcome events. All existing opt-out mechanisms (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`, `telemetry.disabled` in config) gate every new event; full list in `docs/docs/reference/telemetry.md`. (#1049, #1064)
 - **UTM parameters on outbound `altimate.ai` marketing links.** Non-functional; helps attribute web traffic back to the CLI. (#1063)
 
 ## [0.9.4] - 2026-07-31
