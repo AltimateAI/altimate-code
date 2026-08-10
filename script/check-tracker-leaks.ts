@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 /**
  * Scans the local diff, branch name, and commit messages against `origin/main`
- * for internal-tracker references that must not land on this public repo:
- *
- *   - Bare Jira keys of the form `AI-<digits>` (project prefix).
- *   - The internal Atlassian instance host `altimateai.atlassian.net`.
+ * for internal-tracker references that must not land on this public repo.
+ * The exact patterns live in the `RULES` array below — read there for what
+ * gets flagged.
  *
  * Exits 1 on any hit with a clear, per-source report. Exits 0 clean.
  *
@@ -23,24 +22,23 @@
 
 import { $ } from "bun"
 
-// altimate_change — #1052 D8 review-fix (M1): drop the trailing word-boundary
-// from the Jira-key regex so the guard catches suffix-adjacent leaks like
-// `AI-1234foo`, `AI-1234_bar`, `feature/AI-1234_bug`.
+// altimate_change — #1052 D8 review-fix: drop the trailing word-boundary from
+// the Jira-key regex so the guard catches suffix-adjacent leaks (letter,
+// underscore, or another word char immediately after the digits). The
+// original required a trailing `\b`, which fails when a word char follows —
+// exactly the class of typo and paste-through the scrubber exists to prevent.
 //
-// The original `\bAI-\d+\b` required `\b` after the digits, which fails when a
-// word char (letter, digit, underscore) follows — exactly the class the guard
-// must catch. Naïve fixes (negative lookahead like `(?![a-zA-Z0-9_])`) don't
-// help: the regex engine backtracks `\d+`, but every backtrack position still
-// has a digit as the "next char" and the lookahead keeps failing. The correct
-// fix is no trailing boundary at all — just `\bAI-\d+` — which matches greedily
-// through the digits, stops when a non-digit appears, and reports the `AI-<n>`
-// prefix regardless of what follows.
+// Naïve fixes (negative lookahead like `(?![a-zA-Z0-9_])`) don't help: the
+// regex engine backtracks the digit run, but every position still has a digit
+// as the "next char" so the lookahead keeps failing. The correct fix is no
+// trailing boundary at all — the pattern matches greedily through the digits,
+// stops at the first non-digit, and reports the prefix regardless of what
+// follows.
 //
-// Caveat: `handleAI-1234thing` still escapes because there's no `\b` at the
-// start of `AI` (both `e` and `A` are word chars). Camel-cased pastes with no
-// separator before `AI` remain a known blind spot — accept it; the realistic
-// leak surface is branch names, commit messages, comments, and doc text where
-// `AI-…` is delimited by whitespace, punctuation, or a path separator.
+// Caveat: pastes with no separator before the prefix (no leading `\b`) are
+// not caught. Camel-cased inputs remain a known blind spot — accepted; the
+// realistic leak surface is branches, commits, comments, and doc text where
+// the reference is delimited by whitespace, punctuation, or a path separator.
 export const RULES = [
   {
     name: "Jira ticket key (AI-<digits>)",
@@ -111,8 +109,9 @@ async function main() {
     const messages = await shOK(`git log ${mergeBase}..HEAD --format=%B%x00`)
     scanText(messages, `${ahead} commit message(s) ahead of ${base}`, hits)
 
-    // 3. Added lines in the pushed diff. `--unified=0` narrows context; grep for
-    //    added lines keeps the check focused on new content, not unmodified surroundings.
+    // 3. Added lines in the pushed diff. `--unified=0` narrows context; grep
+    //    for added lines keeps the check focused on new content, not
+    //    unmodified surroundings.
     const diff = await shOK(`git diff --unified=0 ${mergeBase}...HEAD`)
     const added = diff
       .split("\n")

@@ -19,6 +19,6 @@ if (process.versions.bun !== expectedBunVersion) {
 '
 bun typecheck
 # altimate_change — #1052 D8: scan pushed content for internal-tracker refs
-# (Jira keys, altimateai.atlassian.net). Silent on clean; exits 1 on hit.
-# Bypass with SKIP_TRACKER_CHECK=1 for genuine emergencies.
+# (see RULES in the script for the specific patterns). Silent on clean;
+# exits 1 on hit. Bypass with SKIP_TRACKER_CHECK=1 for genuine emergencies.
 bun script/check-tracker-leaks.ts
