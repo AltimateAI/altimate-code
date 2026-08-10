@@ -29,18 +29,21 @@ import { buildCliContext, buildAuthorizeUrl } from "../../src/altimate/plugin/al
 // 1. Telemetry opt-out — `Flag.truthyEnv` on hostile / oversized env values
 // -----------------------------------------------------------------------------
 
-const OPT_OUT_VAR = "ALTIMATE_TELEMETRY_DISABLED"
-let optOutSnapshot: string | undefined
-
-beforeEach(() => {
-  optOutSnapshot = process.env[OPT_OUT_VAR]
-})
-afterEach(() => {
-  if (optOutSnapshot === undefined) delete process.env[OPT_OUT_VAR]
-  else process.env[OPT_OUT_VAR] = optOutSnapshot
-})
-
 describe("v0.9.5 — Flag.truthyEnv adversarial", () => {
+  // Kilo review on PR #1088: env-var snapshot/restore hooks were previously
+  // file-scoped, so they ran for every test in this file even though only the
+  // tests in this describe block ever touch `ALTIMATE_TELEMETRY_DISABLED`.
+  // Scoping them here matches usage.
+  const OPT_OUT_VAR = "ALTIMATE_TELEMETRY_DISABLED"
+  let optOutSnapshot: string | undefined
+  beforeEach(() => {
+    optOutSnapshot = process.env[OPT_OUT_VAR]
+  })
+  afterEach(() => {
+    if (optOutSnapshot === undefined) delete process.env[OPT_OUT_VAR]
+    else process.env[OPT_OUT_VAR] = optOutSnapshot
+  })
+
   test("very long value (32KB) — must not enable, must not throw", () => {
     // A 32KB env value should be rejected as a non-truthy string, not crash the
     // parser. Real users don't hit this, but a shell injection into the env
