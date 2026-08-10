@@ -126,6 +126,24 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 When telemetry is disabled, no events are sent and no network requests are made to the telemetry endpoint.
 
+### Test runs are excluded
+
+Test runners never reach the default telemetry endpoint. Telemetry is suppressed when `NODE_ENV=test`,
+`BUN_TEST`, `VITEST`, or `JEST_WORKER_ID` is present. This exists because test processes regenerate
+their machine ID on every run, so without the exclusion they dominate install and active-machine counts.
+
+Running in CI is **not** excluded — that is ordinary product usage (for example
+[altimate-code-actions](https://github.com/AltimateAI/altimate-code-actions) wraps this CLI), so
+`CI` and `GITHUB_ACTIONS` on their own do not suppress anything.
+
+Two escape hatches exist for reporting from a test run deliberately:
+
+- Set `APPLICATIONINSIGHTS_CONNECTION_STRING` to your own endpoint — an explicitly-configured sink
+  is always honoured, which is how the project's own telemetry tests work.
+- Set `ALTIMATE_TELEMETRY_FORCE=true` to use the default endpoint anyway.
+
+`ALTIMATE_TELEMETRY_DISABLED` and the config opt-out take precedence over both.
+
 ## Privacy
 
 We take your privacy seriously. Altimate Code telemetry **never** collects:
@@ -148,6 +166,10 @@ Altimate Code uses two types of anonymous identifiers for analytics, depending o
 - **Logged-in users (OAuth):** Your email address is SHA-256 hashed before sending. The raw email is never transmitted.
 
 Both identifiers are only sent when telemetry is enabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
+
+### CLI Authentication Flow
+
+When you sign in using the CLI browser auth flow (`altimate auth login`), the anonymous machine ID (a random UUID persisted at `~/.altimate/machine-id` — a device/installation identifier, reused across sessions) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is not used for advertising or cross-site tracking. Your telemetry opt-out suppresses this: when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true` **or** the `telemetry.disabled` config option — the machine ID is omitted from the authorization URL entirely. The machine ID is associated with your account in PostHog for this funnel analysis, separate from the Azure Application Insights pipeline used for other CLI telemetry events.
 
 ### Data Retention
 

@@ -39,10 +39,20 @@ export function showWelcomeBannerIfNeeded(): void {
     // Remove marker first to avoid showing twice even if display fails
     fs.unlinkSync(markerPath)
 
-    // altimate_change start — use ~/.altimate/machine-id existence as a proxy for upgrade vs fresh install
-    // Since postinstall.mjs always writes the current version to the marker file, we can't reliably
-    // use installedVersion !== currentVersion for release builds. Instead, if machine-id exists,
-    // they've run the CLI before.
+    // altimate_change start — "upgrade" means the machine-id file already existed before this
+    // launch. Probe existence with existsSync only — do NOT mint here. Minting is left to
+    // Telemetry.doInit() (its job, not the welcome banner's); the first_launch machine_id is
+    // attached at flush time from telemetry module state, so it does not depend on minting here.
+    //
+    // FIXME(telemetry-init-config-opt-out): doInit() may run before Instance.provide() has made
+    // Config.get() resolvable (see the try/catch around Config.get in telemetry/index.ts::doInit
+    // — the catch branch proceeds with telemetry enabled). A user who opted out via the
+    // `telemetry.disabled` config key — with no env var set — can therefore still get a
+    // machine-id minted on first launch. The env-var opt-out (ALTIMATE_TELEMETRY_DISABLED /
+    // OPENCODE_DISABLE_TELEMETRY) is unaffected — that check does not need Instance context.
+    // Pre-existing (not introduced by this release); calling it out explicitly here rather than
+    // leaving the earlier "(tracked separately)" wording, which claimed a tracking issue that
+    // does not currently exist.
     const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
     const isUpgrade = fs.existsSync(machineIdPath)
     // altimate_change end

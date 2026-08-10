@@ -3,6 +3,8 @@ import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
+// altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
+import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 import { createHash, randomUUID } from "crypto"
 import fs from "fs"
 import path from "path"
@@ -44,6 +46,23 @@ const log = Log.create({ service: "telemetry" })
  *   | summarize count() by err
  */
 // altimate_change end
+
+/** True when a test runner is driving the process rather than a real user session.
+ *
+ *  Deliberately keyed on test runners, NOT on CI. Running in CI is legitimate product usage —
+ *  `altimate-code-actions` wraps this CLI and every invocation sets `CI`/`GITHUB_ACTIONS` — so
+ *  gating on those would make a shipped product surface invisible. The polluting population was
+ *  our own suites (`provider_id="test"`, `cli_version="local"`), all of which run under a test
+ *  runner. `bun test` sets NODE_ENV=test, which covers both CI and developer machines.
+ *
+ *  Set `ALTIMATE_TELEMETRY_FORCE=true` to opt back in, or point
+ *  APPLICATIONINSIGHTS_CONNECTION_STRING at your own sink — an explicit sink is always honoured.
+ */
+function isAutomatedRun(): boolean {
+  if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return false
+  if (process.env.NODE_ENV === "test") return true
+  return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
+}
 
 export namespace Telemetry {
   const FLUSH_INTERVAL_MS = 5_000
@@ -1664,7 +1683,10 @@ export namespace Telemetry {
 
   async function doInit() {
     try {
-      if (process.env.ALTIMATE_TELEMETRY_DISABLED === "true") {
+      // altimate_change — accept "true"/"TRUE"/"1" (case-insensitive) via truthyEnv,
+      // and honor the OPENCODE_DISABLE_TELEMETRY fallback promised by v0.9.4's CHANGELOG
+      // (previously only wired in test fixtures, silent no-op in product).
+      if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
         buffer = []
         return
       }
@@ -1680,8 +1702,19 @@ export namespace Telemetry {
       } catch {
         // Config unavailable — proceed with telemetry enabled
       }
-      // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key
-      const connectionString = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING ?? DEFAULT_CONNECTION_STRING
+      // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
+      // The baked-in key is refused under a test runner so suites never ship to the production
+      // resource. Note this deliberately does NOT key on CI — see isAutomatedRun.
+      // Telemetry's own tests set APPLICATIONINSIGHTS_CONNECTION_STRING explicitly and are unaffected —
+      // only the implicit production sink is withheld. 1,020 of 3,135 machine ids in a 14-day window
+      // were test processes, which regenerate their machine id every run — inflating every install
+      // and active-machine metric by ~33%.
+      const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      if (!explicit && isAutomatedRun()) {
+        buffer = []
+        return
+      }
+      const connectionString = explicit ?? DEFAULT_CONNECTION_STRING
       const cfg = parseConnectionString(connectionString)
       if (!cfg) {
         buffer = []
@@ -1698,31 +1731,10 @@ export namespace Telemetry {
       } catch {
         // Account unavailable — proceed without user ID
       }
-      try {
-        const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
-        try {
-          machineId = fs.readFileSync(machineIdPath, "utf8").trim()
-        } catch {
-          // altimate_change start — create exclusively so two threads cannot mint different ids.
-          // The TUI main thread and the server worker each initialise their own copy of this
-          // module, and on a genuinely new install both can find the file missing at the same
-          // moment. With a plain write, the loser's value overwrites the winner's while both keep
-          // their own in memory, so a single first run reports two machine_ids — breaking the
-          // fallback identity exactly on the run that matters most. `wx` makes one of them fail,
-          // and the loser re-reads what the winner wrote.
-          const candidate = randomUUID()
-          fs.mkdirSync(path.dirname(machineIdPath), { recursive: true })
-          try {
-            fs.writeFileSync(machineIdPath, candidate, { encoding: "utf8", flag: "wx" })
-            machineId = candidate
-          } catch {
-            machineId = fs.readFileSync(machineIdPath, "utf8").trim()
-          }
-          // altimate_change end
-        }
-      } catch {
-        // Machine ID unavailable — proceed without it
-      }
+      // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
+      // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
+      // logs + returns ""). No try/catch needed — all paths are handled inside.
+      machineId = getOrCreateMachineId()
       enabled = true
       log.info("telemetry initialized", { mode: "appinsights" })
       // altimate_change — clear any existing interval before installing a new one. doInit() can

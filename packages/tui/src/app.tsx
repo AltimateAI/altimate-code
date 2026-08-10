@@ -65,6 +65,8 @@ import { DialogStatus } from "./component/dialog-status"
 import { DialogThemeList } from "./component/dialog-theme-list"
 import { DialogHelp } from "./ui/dialog-help"
 import { DialogAgent } from "./component/dialog-agent"
+// altimate_change - yolo mode confirmation gate
+import { DialogYoloConfirm } from "./component/dialog-yolo-confirm"
 import { DialogSessionList } from "./component/dialog-session-list"
 import { DialogWorkspaceList } from "./component/dialog-workspace-list"
 import { DialogConsoleOrg } from "./component/dialog-console-org"
@@ -133,6 +135,11 @@ const appBindingCommands = [
   "mcp.list",
   "agent.cycle",
   "agent.cycle.reverse",
+  // altimate_change start — yolo mode toggle (ctrl+y). App-scope rather than session-scope
+  // so the shortcut and its hint exist on the welcome screen too, before the first prompt
+  // has created a session.
+  "session.yolo.toggle",
+  // altimate_change end
   "variant.cycle",
   "variant.list",
   "provider.connect",
@@ -865,6 +872,46 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           local.agent.move(1)
         },
       },
+      // altimate_change start - yolo mode: ctrl+y toggle. Enabling is gated behind an
+      // explicit Yes/No; disabling is immediate, so turning a dangerous mode off is never
+      // harder than leaving it on. Applies to the current session only (or, on the
+      // welcome screen, to the session about to be created).
+      {
+        name: "session.yolo.toggle",
+        title: "Toggle YOLO mode",
+        category: "Session",
+        slashName: "yolo",
+        run: () => {
+          const currentSessionID = () => (route.data.type === "session" ? route.data.sessionID : undefined)
+          const sessionID = currentSessionID()
+          if (sync.yolo.enabled(sessionID)) {
+            sync.yolo.set(sessionID, false)
+            toast.show({ message: "YOLO mode off — the agent will ask before acting", variant: "info" })
+            return
+          }
+          dialog.replace(() => (
+            <DialogYoloConfirm
+              onChoose={(enable) => {
+                if (!enable) return
+                // The route can change while the confirmation is open — session.quick_switch.N
+                // is registered without a mode so it stays live during a modal, and session
+                // deletion auto-navigates home. Applying the captured id then would enable
+                // YOLO on a session the user is no longer looking at.
+                if (currentSessionID() !== sessionID) {
+                  toast.show({
+                    message: "Session changed while confirming — YOLO mode not enabled",
+                    variant: "info",
+                  })
+                  return
+                }
+                sync.yolo.set(sessionID, true)
+                toast.show({ message: "YOLO mode on for this session", variant: "warning" })
+              }}
+            />
+          ))
+        },
+      },
+      // altimate_change end
       {
         name: "variant.cycle",
         title: "Variant cycle",
