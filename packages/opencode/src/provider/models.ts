@@ -129,11 +129,27 @@ export namespace ModelsDev {
       // running with OPENCODE_DISABLE_MODELS_FETCH=1). Pre-D14 this rarely
       // fired because the eager refresh usually warmed the disk cache; post-D14
       // more first-calls fall through to fetch, so more chances to hit the crash.
+      //
+      // Bot-review follow-up: a 2xx can still carry HTML or truncated JSON
+      // (proxies, load-balancer error pages that respond 200, mid-stream
+      // truncation). Try to parse first; only cache + return on success. On
+      // parse failure, log and return empty — same graceful-degradation path
+      // as the non-2xx branch, and we don't poison the disk cache with junk.
       if (!result2.ok) return {}
+      let parsed: Record<string, unknown>
+      try {
+        parsed = JSON.parse(result2.text)
+      } catch (e) {
+        log.error("models.dev returned non-JSON body; not caching", {
+          error: e,
+          firstBytes: result2.text.slice(0, 120),
+        })
+        return {}
+      }
       await Filesystem.write(filepath, result2.text).catch((e) => {
         log.error("Failed to write models cache", { error: e })
       })
-      return JSON.parse(result2.text)
+      return parsed
     })
   })
 

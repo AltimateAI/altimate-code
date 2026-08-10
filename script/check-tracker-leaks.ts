@@ -60,13 +60,36 @@ type Hit = {
   remediation: string
 }
 
-async function shOK(cmd: string): Promise<string> {
-  try {
-    const r = await $`sh -c ${cmd}`.quiet()
-    return r.text().trim()
-  } catch {
+// altimate_change — bot-review fix: replace the `sh -c ${cmd}` helper.
+// Two problems it had:
+//   (a) `sh -c ${cmd}` collapsed the whole command string into one shell arg,
+//       which the shell then re-parsed — so a caller-supplied value (e.g.
+//       `--base=$(rm -rf ~)`) would execute as shell. Cubic P1.
+//   (b) `catch { return "" }` swallowed real errors (missing ref, corrupted
+//       repo). A failed git command would look identical to a clean scan.
+//
+// `git` is invoked directly via Bun.$ (no shell). Args are passed through the
+// tagged-template interpolation which quotes each interpolation as a single
+// argv element — no shell parsing anywhere. `.nothrow()` lets us inspect the
+// exit code instead of catching an exception. `exitOnFailure` distinguishes
+// "expected empty result" (mergeBase against a diverged history) from
+// "unexpected failure" (git binary missing, corrupt index) so the latter
+// fails loud rather than reporting the branch as clean.
+async function git(
+  args: string[],
+  opts: { failOnError?: boolean } = { failOnError: true },
+): Promise<string> {
+  const r = await $`git ${args}`.quiet().nothrow()
+  if (r.exitCode !== 0) {
+    if (opts.failOnError) {
+      process.stderr.write(
+        `\ntracker-leak check: \`git ${args.join(" ")}\` exited ${r.exitCode}\n${r.stderr.toString().trim()}\n\n`,
+      )
+      process.exit(2)
+    }
     return ""
   }
+  return r.text().trim()
 }
 
 function scanText(text: string, source: string, hits: Hit[]) {
@@ -90,15 +113,25 @@ async function main() {
   const baseArg = args.find((a) => a.startsWith("--base="))
   const base = baseArg ? baseArg.slice("--base=".length) : "origin/main"
 
-  const branch = await shOK("git rev-parse --abbrev-ref HEAD")
-  const mergeBase = await shOK(`git merge-base HEAD ${base}`)
+  // altimate_change — bot-review fix: validate --base looks like a git ref
+  // (defense in depth on top of the shell-safe git wrapper). Refs allow
+  // alnum + `/_.@{}~^-`, so a value containing `$`, backticks, spaces, etc.
+  // is definitely not a ref and should be rejected loudly.
+  if (!/^[A-Za-z0-9/_.@{}~^-]+$/.test(base)) {
+    process.stderr.write(`tracker-leak check: refusing suspicious --base value: ${JSON.stringify(base)}\n`)
+    process.exit(2)
+  }
+
+  const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"])
+  // merge-base can legitimately return empty (no shared history) — don't fail loud on that.
+  const mergeBase = await git(["merge-base", "HEAD", base], { failOnError: false })
   if (!mergeBase) {
     // No shared history with base — either brand-new repo or base doesn't exist locally.
     // Silent success: nothing to check.
     return
   }
 
-  const ahead = Number(await shOK(`git rev-list --count ${mergeBase}..HEAD`))
+  const ahead = Number(await git(["rev-list", "--count", `${mergeBase}..HEAD`]))
   const hits: Hit[] = []
 
   // 1. Branch name
@@ -106,16 +139,22 @@ async function main() {
 
   if (ahead > 0) {
     // 2. Commit messages of local commits
-    const messages = await shOK(`git log ${mergeBase}..HEAD --format=%B%x00`)
+    const messages = await git(["log", `${mergeBase}..HEAD`, "--format=%B%x00"])
     scanText(messages, `${ahead} commit message(s) ahead of ${base}`, hits)
 
-    // 3. Added lines in the pushed diff. `--unified=0` narrows context; grep
-    //    for added lines keeps the check focused on new content, not
-    //    unmodified surroundings.
-    const diff = await shOK(`git diff --unified=0 ${mergeBase}...HEAD`)
+    // 3. Added lines in the pushed diff. `--unified=0` narrows context; only
+    //    real content additions count. Every diff line starting with `+`
+    //    that is NOT the `+++ b/path` file-header line is added content —
+    //    filtering by `!startsWith("+++")` also drops legitimate content
+    //    lines beginning with `++` (an added line whose text starts with
+    //    two plus signs renders as `+++...` in unified-diff). The safe
+    //    filter matches the file header exactly: `+++ ` (with the trailing
+    //    space or tab), so content lines whose first non-plus is anything
+    //    else — including tracker-shaped strings — still get scanned.
+    const diff = await git(["diff", "--unified=0", `${mergeBase}...HEAD`])
     const added = diff
       .split("\n")
-      .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+      .filter((l) => l.startsWith("+") && !l.startsWith("+++ ") && !l.startsWith("+++\t"))
       .join("\n")
     scanText(added, `${ahead}-commit diff vs ${base} (added lines)`, hits)
   }

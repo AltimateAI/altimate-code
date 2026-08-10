@@ -538,19 +538,14 @@ for (const item of targets) {
   //
   // Stamp format: JSON with one entry per input, sha256 of file content. Read
   // side rehashes each listed path and compares; any mismatch → stale. Paths
-  // are relative to the workspace root (dir = packages/opencode) so the test
-  // can resolve them from its own cwd without env plumbing.
+  // are REPO_ROOT-relative so entries under packages/tui, packages/core, the
+  // workspace-root package.json, bun.lock, etc. resolve without munging.
+  const REPO_ROOT = path.resolve(dir, "../..")
   const stampInputs: Array<{ path: string; sha256: string }> = []
-  // altimate_change — #1052 D10 review-fix (M2): resolve inputs relative to
-  // REPO_ROOT (not `dir` = packages/opencode). Workspace-package files live
-  // OUTSIDE packages/opencode; a `dir`-relative path for those would render as
-  // `../tui/src/...` which the smoke-test reader would then have to un-prefix.
-  // REPO_ROOT-relative keeps paths portable and the reader trivial.
-  const _stampRoot = path.resolve(dir, "../..") // repo root
   const addFile = (absPath: string) => {
     try {
       const buf = fs.readFileSync(absPath)
-      const rel = path.relative(_stampRoot, absPath)
+      const rel = path.relative(REPO_ROOT, absPath)
       const hash = createHash("sha256").update(buf).digest("hex")
       stampInputs.push({ path: rel, sha256: hash })
     } catch {
@@ -573,9 +568,12 @@ for (const item of targets) {
   // altimate_change — #1052 D10 review-fix (M2): package.json + bun.lock cover
   // dependency-version bumps that change what Bun.build embeds. Without these,
   // `bun install` bumping a bundled dep would leave the stamp reporting fresh.
-  const REPO_ROOT = path.resolve(dir, "../..")
+  // Include per-package package.json in the workspace walk below.
   addFile(path.join(REPO_ROOT, "package.json"))
   addFile(path.join(REPO_ROOT, "bun.lock"))
+  // Also include tsconfig files that affect compiled output shape
+  // (bot review: tsconfig changes can flip target/moduleResolution).
+  addFile(path.join(dir, "tsconfig.json"))
   // src/ + script/ TypeScript tree — hash every file the compiler actually saw
   // (same extension filter build.ts globs for embedding).
   const IGNORED = new Set(["node_modules", ".turbo", ".cache", "dist", "target"])
