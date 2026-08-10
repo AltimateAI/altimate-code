@@ -97,6 +97,8 @@ import { tuiHandlers } from "./handlers/tui"
 import { handlers } from "@opencode-ai/server/handlers"
 import { schemaErrorLayer as v2SchemaErrorLayer } from "@opencode-ai/server/middleware/schema-error"
 import { workspaceHandlers } from "./handlers/workspace"
+// altimate_change — WorkspaceLink feature (docs/workspace-plan/CONTRACT.md)
+import { workspaceLinkHandlers } from "./handlers/workspace-link"
 import { instanceContextLayer } from "./middleware/instance-context"
 import { workspaceRoutingLayer } from "./middleware/workspace-routing"
 import { disposeMiddleware } from "./lifecycle"
@@ -159,6 +161,8 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     syncHandlers,
     tuiHandlers,
     workspaceHandlers,
+    // altimate_change — WorkspaceLink feature (docs/workspace-plan/CONTRACT.md)
+    workspaceLinkHandlers,
   ]),
 )
 

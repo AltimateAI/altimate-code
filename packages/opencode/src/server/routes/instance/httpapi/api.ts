@@ -21,6 +21,8 @@ import { SessionApi } from "./groups/session"
 import { SyncApi } from "./groups/sync"
 import { TuiApi } from "./groups/tui"
 import { WorkspaceApi } from "./groups/workspace"
+// altimate_change — WorkspaceLink feature (docs/workspace-plan/CONTRACT.md), Path B route group
+import { WorkspaceLinkHttpApi } from "./groups/workspace-link"
 import { Api } from "@opencode-ai/server/api"
 // GlobalEventSchema snapshots the registry after event-producing groups register their variants.
 import { GlobalApi } from "./groups/global"
@@ -64,6 +66,8 @@ export const InstanceHttpApi = HttpApi.make("opencode-instance")
   .addHttpApi(SyncApi)
   .addHttpApi(TuiApi)
   .addHttpApi(WorkspaceApi)
+  // altimate_change — WorkspaceLink feature (docs/workspace-plan/CONTRACT.md)
+  .addHttpApi(WorkspaceLinkHttpApi)
   .middleware(SchemaErrorMiddleware)
 
 export const OpenCodeHttpApi = HttpApi.make("opencode")

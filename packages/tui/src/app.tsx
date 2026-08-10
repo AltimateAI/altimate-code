@@ -48,6 +48,8 @@ import {
 // altimate_change end
 // altimate_change — Part 2 scan gate (fires once when Part 1 first completes)
 import { DialogScanGate } from "./component/dialog-scan-gate"
+// altimate_change — WorkspaceLink feature, Path B trigger (docs/workspace-plan/CONTRACT.md §3)
+import { DialogWorkspaceLink, type WorkspaceLinkOfferSummary } from "./component/dialog-workspace-link"
 import { ErrorComponent } from "./component/error-component"
 import { PluginRouteMissing } from "./component/plugin-route-missing"
 import { ProjectProvider, useProject } from "./context/project"
@@ -1228,6 +1230,28 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       sessionID: evt.properties.sessionID,
     })
   })
+
+  // altimate_change start — WorkspaceLink feature, Path B trigger
+  // (docs/workspace-plan/CONTRACT.md §3). Published from the project_scan tool.execute.after
+  // hook (altimate/plugin/onboarding-telemetry.ts) once a scan completes, behind
+  // Flag.ALTIMATE_WORKSPACE_LINK — nothing further to gate here, the publish side already
+  // checked it. Uses event.subscribe (untyped) rather than event.on(), because the generated
+  // SDK's Event union (packages/sdk/js/src/v2/gen/types.gen.ts) predates this event type and
+  // regenerating it is out of scope for this POC — the runtime payload itself is unaffected
+  // (server/routes/instance/httpapi/groups/global.ts builds its event schema dynamically from
+  // EventV2.registry, not from the generated OpenAPI types), only event.on()'s compile-time
+  // literal-union check would reject the new type string.
+  event.subscribe((raw, { workspace }) => {
+    const evt = raw as unknown as { type: string; properties?: WorkspaceLinkOfferSummary }
+    if (evt.type !== "tui.workspacelink.offer") return
+    if (workspace !== project.workspace.current()) return
+    dialog.replace(() => (
+      <DialogWorkspaceLink
+        summary={evt.properties ?? { name: null, adapter: null, gitRemote: null, modelCount: null, hasWarehouse: false }}
+      />
+    ))
+  })
+  // altimate_change end
 
   event.on("session.deleted", (evt) => {
     if (route.data.type === "session" && route.data.sessionID === evt.properties.info.id) {

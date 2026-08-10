@@ -113,6 +113,12 @@ export const TuiThreadCommand = cmd({
       .option("agent", {
         type: "string",
         describe: "agent to use",
+      })
+      // altimate_change — checkpoint 8d. Resolved same-directory-only against
+      // workspace-link.json (RETURN-LEG.md decision 4) — see altimate/workspace-link/resolve.ts.
+      .option("workspace", {
+        type: "string",
+        describe: "attach this session to a linked workspace, by name",
       }),
   handler: async (args) => {
     const unguard = win32InstallCtrlCGuard()
@@ -135,6 +141,20 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
+
+      // altimate_change start — checkpoint 8d: the --workspace flag / cwd resolution / launch-
+      // time drift check. MUST run before the worker starts (needs stdin/stdout for its native
+      // prompts) and MUST NOT ever block launch — a failure here (backend unreachable, a
+      // malformed local state file, etc.) is logged and swallowed, never fatal to starting the
+      // TUI. Sets altimate/workspace-link/session-context.ts's in-memory singleton as a side
+      // effect; nothing else here depends on its result.
+      try {
+        const { resolveWorkspaceForLaunch } = await import("@/altimate/workspace-link/resolve")
+        await resolveWorkspaceForLaunch(cwd, args.workspace)
+      } catch (err) {
+        UI.error(`workspace resolution failed (continuing without a workspace): ${err instanceof Error ? err.message : String(err)}`)
+      }
+      // altimate_change end
 
       // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
       // Worker does not see runtime mutations to process.env, so without this the worker mints its

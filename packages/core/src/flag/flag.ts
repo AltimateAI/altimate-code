@@ -117,4 +117,12 @@ export const Flag = {
     return oc === "true" || oc === "1"
   },
   // altimate_change end
+  // altimate_change start — WorkspaceLink feature (docs/workspace-plan/CONTRACT.md §3). Gates
+  // Path A's session-link seam, Path B's native dialog, and the `altimate link` command.
+  // Deliberately not named anything containing "WORKSPACES" — that's the pre-existing,
+  // unrelated `OPENCODE_EXPERIMENTAL_WORKSPACES` local git-worktree flag above.
+  get ALTIMATE_WORKSPACE_LINK() {
+    return altTruthy("ALTIMATE_WORKSPACE_LINK", "OPENCODE_WORKSPACE_LINK")
+  },
+  // altimate_change end
 }

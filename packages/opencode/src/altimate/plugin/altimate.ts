@@ -10,6 +10,18 @@ import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
+// altimate_change start — WorkspaceLink Path A (docs/workspace-plan/CONTRACT.md §3)
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { buildProjectHint } from "../workspace-link/detect"
+import {
+  WorkspaceLinkApi,
+  WorkspaceLinkInsufficientScopeError,
+  WorkspaceLinkNotConfiguredError,
+} from "../workspace-link/api-client"
+import { pollUntilResolved } from "../workspace-link/poll-loop"
+import { recordApproved } from "../workspace-link/state"
+import type { WorkspaceLinkProjectHint } from "../workspace-link/types"
+// altimate_change end
 
 /**
  * Why a failure reason is attached at the rejection site rather than inferred from the message:
@@ -389,7 +401,123 @@ function registerPending(state: string, timeoutMs = 15 * 60 * 1000): Promise<Cal
   })
 }
 
-export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
+// altimate_change start — WorkspaceLink Path A (docs/workspace-plan/CONTRACT.md §3).
+//
+// Seam: right after AltimateApi.saveCredentials(...) below — creds.api_url, creds.instance,
+// and the just-exchanged authToken are already plain local variables in scope here, and this
+// is a same-file, same-client addition (no new plumbing needed to reach them). Gated on
+// Flag.ALTIMATE_WORKSPACE_LINK: when off, none of this runs and onboarding behaves exactly as
+// it does today.
+//
+// Ordering caveat (CONTRACT.md §3): by the time this callback fires, the environment scan
+// (Part 2) has NOT run yet — markSetupComplete()/setConnected(true) in the TUI's AutoMethod
+// trigger the scan-gate effect, and that happens after this callback returns. So the project
+// hint sent here is built from the cheap, non-LLM local detectors only (buildProjectHint —
+// detectGit/detectDbtProject), never the full project_scan tool.
+interface WorkspaceLinkPathACreated {
+  linkId: string
+  pollToken: string
+  expiresIn: number
+  interval: number
+  // checkpoint 8d: threaded through to pollAndNotifyPathA so its recordApproved call can store
+  // the same (detectedRemote, detectedProjectName) pair Path B's link.ts stores — the launch-
+  // time drift check's stable reference point, independent of whichever hint object built it.
+  hint: WorkspaceLinkProjectHint
+}
+
+async function createWorkspaceLinkPathA(params: {
+  apiUrl: string
+  instance: string
+  authToken: string
+  directory: string
+}): Promise<WorkspaceLinkPathACreated> {
+  const hint = await buildProjectHint(params.directory)
+  const payload = {
+    client: "altimate-code",
+    client_version: InstallationVersion,
+    project: hint,
+  }
+  try {
+    const session = await WorkspaceLinkApi.createSessionLink(payload, {
+      authToken: params.authToken,
+      instance: params.instance,
+      apiUrl: params.apiUrl,
+    })
+    return { linkId: session.link_id, pollToken: session.poll_token, expiresIn: session.expires_in, interval: session.interval, hint }
+  } catch (err) {
+    // ASSUMPTION A2 (CONTRACT.md §1.2/§4): the gateway auth_token may be scoped narrowly to
+    // "make LLM completions for instance X" with no accountable end-user identity claim. When
+    // the backend signals exactly that (403 insufficient_scope), transparently degrade to the
+    // Path B device flow instead of surfacing a bare failure — same project hint, unauthenticated
+    // endpoint. The resulting verification_uri is logged for the user to complete manually,
+    // since there's no open dialog left to route it through at this point in the flow (the
+    // "Connected!" success UI has already been shown by the time the background poll below
+    // would otherwise resolve). checkpoint 8k: no more code to read aloud — the link resolves
+    // directly to the consent card.
+    if (err instanceof WorkspaceLinkInsufficientScopeError) {
+      const device = await WorkspaceLinkApi.createDeviceLink(payload)
+      console.error(
+        `[altimate] workspace link: your sign-in isn't linked to an account yet, so this needs one extra step. ` +
+          `Go to ${device.verification_uri} to finish linking this project ` +
+          `(expires in ${Math.round(device.expires_in / 60)} min).`,
+      )
+      return {
+        linkId: device.link_id,
+        pollToken: device.poll_token,
+        expiresIn: device.expires_in,
+        interval: device.interval,
+        hint,
+      }
+    }
+    throw err
+  }
+}
+
+/** Detached: awaited by nothing in callback(). The browser-side workspace approval wizard may
+ * take far longer than the 5-second "Connected!" auto-close this callback's caller drives, so
+ * the poll must survive past both. Resolution notification (deliverate choice, documented in
+ * the implementation report): logged via console.error — the same server-side-log channel this
+ * plugin already uses for gateway-auth failures (see the catch block below) — PLUS, for an
+ * approved outcome only, persisted into the local WorkspaceLink binding (workspace-link/state.ts)
+ * so a later `altimate link` invocation or `altimate link status` can discover it. Declined/
+ * expired outcomes are logged only, never persisted — CONTRACT.md §2 "decline persists nothing...
+ * the CLI, symmetrically, writes no local workspace_id binding on decline." Wiring a brand-new
+ * cross-package TUI toast for this specific background event (the auth dialog is long gone by
+ * the time it resolves) was judged disproportionate for this pass — see the implementation report. */
+async function pollAndNotifyPathA(created: WorkspaceLinkPathACreated, projectId: string): Promise<void> {
+  try {
+    const result = await pollUntilResolved(created)
+    if (result.status === "approved") {
+      console.error(
+        `[altimate] workspace link approved by ${result.approved_by}: workspace "${result.workspace.name}" ` +
+          `is now linked to this project. Manage it at ${result.workspace.manage_url}.`,
+      )
+      await recordApproved(projectId, {
+        linkId: created.linkId,
+        workspaceId: result.workspace.id,
+        workspaceName: result.workspace.name,
+        workspaceSlug: result.workspace.slug,
+        manageUrl: result.workspace.manage_url,
+        approvedBy: result.approved_by,
+        linkedAt: Date.now(),
+        token: result.workspace.token,
+        detectedRemote: created.hint.remote ?? null,
+        detectedProjectName: created.hint.name ?? null,
+      }).catch(() => {})
+      return
+    }
+    if (result.status === "declined") {
+      console.error("[altimate] workspace link: nothing was shared — no workspace was created.")
+      return
+    }
+    console.error("[altimate] workspace link expired before it was approved or declined.")
+  } catch (err) {
+    console.error("[altimate] workspace-link poll failed:", err instanceof Error ? err.message : err)
+  }
+}
+// altimate_change end
+
+export async function AltimateAuthPlugin(input: PluginInput): Promise<Hooks> {
   return {
     auth: {
       provider: "altimate-backend",
@@ -488,6 +616,32 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                     altimateInstanceName: creds.instance,
                     altimateApiKey: authToken,
                   })
+                  // altimate_change start — WorkspaceLink Path A (docs/workspace-plan/CONTRACT.md §3).
+                  // Awaited: only the creation call (buildProjectHint is local; the POST is a
+                  // single request bounded by api-client.ts's own 15s timeout) — never the poll,
+                  // which is kicked off detached via `void` immediately below. A failure here
+                  // (including the not-yet-configured mock backend, WorkspaceLinkNotConfiguredError)
+                  // must never fail gateway sign-in, which is why this whole block is try/caught
+                  // separately from the auth flow's own try/catch.
+                  if (Flag.ALTIMATE_WORKSPACE_LINK) {
+                    try {
+                      const created = await createWorkspaceLinkPathA({
+                        apiUrl: creds.api_url,
+                        instance: creds.instance,
+                        authToken,
+                        directory: input.directory,
+                      })
+                      void pollAndNotifyPathA(created, input.project.id)
+                    } catch (linkErr) {
+                      if (!(linkErr instanceof WorkspaceLinkNotConfiguredError)) {
+                        console.error(
+                          "[altimate] workspace-link creation failed:",
+                          linkErr instanceof Error ? linkErr.message : linkErr,
+                        )
+                      }
+                    }
+                  }
+                  // altimate_change end
                   // altimate_change start — onboarding funnel: auth succeeded and the instance
                   // is live. The instance name is the customer's tenant identifier and is never
                   // sent. time_to_connect_ms runs from the start of authorize() — before the
