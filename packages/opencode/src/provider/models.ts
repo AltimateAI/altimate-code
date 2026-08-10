@@ -121,11 +121,18 @@ export namespace ModelsDev {
       const result = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
       if (result) return result
       const result2 = await fetchApi()
-      if (result2.ok) {
-        await Filesystem.write(filepath, result2.text).catch((e) => {
-          log.error("Failed to write models cache", { error: e })
-        })
-      }
+      // altimate_change — #1052 D14 review-fix (M3): fetchApi returning a non-2xx
+      // (e.g. 5xx with an HTML error body) previously fell through to
+      // `JSON.parse(<HTML>)` and crashed with SyntaxError. Return an empty
+      // catalog instead — callers already tolerate empty results (Provider.state
+      // just yields no models.dev-derived providers, which is the same UX as
+      // running with OPENCODE_DISABLE_MODELS_FETCH=1). Pre-D14 this rarely
+      // fired because the eager refresh usually warmed the disk cache; post-D14
+      // more first-calls fall through to fetch, so more chances to hit the crash.
+      if (!result2.ok) return {}
+      await Filesystem.write(filepath, result2.text).catch((e) => {
+        log.error("Failed to write models cache", { error: e })
+      })
       return JSON.parse(result2.text)
     })
   })
@@ -164,19 +171,24 @@ if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-c
   //
   // Callers that need model data use `ModelsDev.Data()`, which resolves in this
   // priority order: (1) local disk cache, (2) bundled snapshot at
-  // `models-snapshot.ts` (always embedded in release binaries, regenerated at
-  // each build), (3) `Flock.withLock(...) → fetchApi()` only when both are
-  // absent. The bundled snapshot means release-binary users always have model
-  // metadata even on a cold-start with no network. Long-running processes
-  // (TUI, serve) still receive updates via the hourly `setInterval` below
-  // (`.unref()`'d so it never blocks exit). Short-lived commands rely on the
-  // snapshot's release-time freshness.
+  // `models-snapshot.ts` (embedded in release binaries — regenerated at each
+  // build; dev-mode builds without the snapshot fall through to fetch), (3)
+  // `Flock.withLock(...) → fetchApi()` only when both are absent. Release
+  // binaries therefore have release-time model metadata even on a cold-start
+  // with no network. Long-running processes (TUI, serve) still receive updates
+  // via the hourly `setInterval` below (`.unref()`'d so it never blocks exit).
   //
-  // Trade-off: models added to models.dev between releases do not appear in
-  // short-lived commands until the next release rebuild. Bounded by the release
-  // cadence (~weekly). Users needing bleeding-edge model metadata can run
-  // `altimate-code auth login` or open the TUI, both of which trigger the
-  // hourly interval on start-up rebase.
+  // Trade-off: without an eager fetch, models added to models.dev between
+  // releases would not appear until the hourly interval below fires. The
+  // fire-and-forget refresh() below narrows that window without holding the
+  // event loop — a microtask can't itself keep Bun alive, and if the fetch it
+  // schedules is still in flight at process-exit, the snapshot covers callers
+  // on the next run. The load-bearing part of the D14 fix (removing the
+  // setTimeout(...,0)-wrapped fetch that kept the loop alive) is preserved.
+  //
+  // If this reintroduces the unshare-net hang on CI, drop the Promise.then
+  // line — the snapshot alone still keeps release binaries functional offline.
+  Promise.resolve().then(() => ModelsDev.refresh().catch(() => {}))
   setInterval(async () => {
     await ModelsDev.refresh()
   }, 60 * 60 * 1000).unref()
