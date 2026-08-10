@@ -1,0 +1,171 @@
+// v0.9.5 review — Tech Lead P1.
+//
+// sample-setup.ts::redactPaths has a docstring listing three specific bugs the
+// implementation was written to fix (regex swallowing surrounding sentence,
+// `/root/…` prefix leaking, José/O'Connor surnames leaking on the first pass).
+// None of them had test coverage this release. This file asserts the fixes so a
+// future edit to the regex or the known-value substitution loop can't silently
+// re-introduce them.
+//
+// countSampleContents is a tiny counting helper — but it's called on every
+// sample_setup invocation and its output feeds a telemetry event, so a
+// silent-zero bug (typo in the extension filter, wrong subdirectory name)
+// would misreport onboarding activity. The fixture below builds a real dir tree
+// per test and asserts the count.
+
+import { describe, expect, test, beforeAll, afterAll } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
+
+import { redactPaths, countSampleContents } from "../../src/altimate/tools/sample-setup"
+
+describe("redactPaths", () => {
+  test("redacts an absolute POSIX path", () => {
+    const out = redactPaths("failed at /usr/local/bin/dbt")
+    expect(out).toBe("failed at <path>")
+  })
+
+  test("redacts a Windows drive path", () => {
+    const out = redactPaths("failed at C:\\Users\\alice\\dbt.exe")
+    // Windows paths pattern matches `C:\` opener and consumes until whitespace/quote.
+    expect(out).toBe("failed at <path>")
+    expect(out).not.toContain("Users")
+    expect(out).not.toContain("alice")
+  })
+
+  test("redacts a home-relative path (~/)", () => {
+    // Note: `~/.altimate/…` is redacted by the POSIX-`/` pattern first, which
+    // starts at the leading slash and leaves the `~` as a harmless prefix.
+    // What the assertion cares about is that no path segment leaks — the exact
+    // shape of the redaction marker is secondary.
+    const out = redactPaths("cannot read ~/.altimate/machine-id")
+    expect(out).not.toContain(".altimate")
+    expect(out).not.toContain("machine-id")
+    expect(out).toContain("<path>")
+  })
+
+  test("redacts a bare tilde-only path (~/x with no preceding slash)", () => {
+    // The dedicated `~\/…` pattern is what catches this shape — the POSIX-`/`
+    // one starts inside the path and can leave a `~` behind.
+    const input = "opening ~/opt/dbt for read"
+    const out = redactPaths(input)
+    expect(out).not.toContain("opt/dbt")
+    expect(out).toContain("<path>")
+  })
+
+  test("terminates at whitespace, does NOT swallow the surrounding sentence", () => {
+    // The docstring calls out this exact class of bug: an early implementation
+    // used a character class that included `.`, so the regex would consume the
+    // rest of the sentence past the path. Reader ends up with just "<path>".
+    const input = "Underlying error: /Users/alice/projects/dbt-demo failed to compile"
+    const out = redactPaths(input)
+    expect(out).toContain("failed to compile")
+    expect(out).toContain("Underlying error:")
+    expect(out).not.toContain("/Users")
+  })
+
+  test("terminates at a double-quote", () => {
+    const out = redactPaths('opening "/Users/alice/dbt_project.yml" for read')
+    expect(out).toContain("for read")
+    expect(out).not.toContain("alice")
+  })
+
+  test("handles a path containing an apostrophe (O'Connor)", () => {
+    // Docstring bug: an early character class excluded `'`, so the regex would
+    // stop at the apostrophe and leak the substring after it. Now apostrophes
+    // are permitted inside the redacted run.
+    const out = redactPaths("failed at /Users/O'Connor/projects/x")
+    expect(out).not.toContain("O'Connor")
+    expect(out).not.toContain("Connor")
+    expect(out).toBe("failed at <path>")
+  })
+
+  test("handles a path containing an accented character (José)", () => {
+    const out = redactPaths("failed at /Users/José/dbt")
+    expect(out).not.toContain("José")
+    expect(out).toBe("failed at <path>")
+  })
+
+  test("collapses adjacent <path> segments so double-redaction reads clean", () => {
+    // The known-value pass replaces os.homedir() etc first; the greedy pattern
+    // then may match the "<path>" tail and re-redact. The collapse rule keeps
+    // the output from becoming "<path><path><path>".
+    const home = os.homedir()
+    const out = redactPaths(`failed at ${home}/dbt/models/foo.sql`)
+    expect(out).toBe("failed at <path>")
+    expect(out).not.toMatch(/<path><path>/)
+  })
+
+  test("passes short/empty known values without exploding", () => {
+    // Guard for `known.length < 2` — empty string or single-char known values
+    // used to `split("")` and shatter every character. The guard keeps them out
+    // of the substitution loop.
+    const out = redactPaths("hello world", ["", "a", undefined])
+    expect(out).toBe("hello world")
+  })
+
+  test("substitutes user-supplied extras", () => {
+    const out = redactPaths("clone failed at /tmp/checkout-xyz", ["/tmp/checkout-xyz"])
+    expect(out).toBe("clone failed at <path>")
+  })
+
+  test("returns the message unchanged when nothing path-shaped is present", () => {
+    expect(redactPaths("dbt run completed in 3s")).toBe("dbt run completed in 3s")
+  })
+})
+
+describe("countSampleContents", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sample-setup-helpers-"))
+
+  beforeAll(() => {
+    // Real dir tree. Not mocked — the helper does synchronous fs.readdirSync,
+    // and a mocked fs would drift out of shape from what the caller sees.
+    fs.mkdirSync(path.join(root, "models", "staging"), { recursive: true })
+    fs.mkdirSync(path.join(root, "models", "marts", "core"), { recursive: true })
+    fs.mkdirSync(path.join(root, "seeds"), { recursive: true })
+
+    fs.writeFileSync(path.join(root, "models", "top.sql"), "select 1")
+    fs.writeFileSync(path.join(root, "models", "staging", "stg_orders.sql"), "select 1")
+    fs.writeFileSync(path.join(root, "models", "staging", "stg_users.sql"), "select 1")
+    fs.writeFileSync(path.join(root, "models", "marts", "core", "dim_customers.sql"), "select 1")
+
+    // Non-.sql alongside .sql, must NOT be counted.
+    fs.writeFileSync(path.join(root, "models", "readme.md"), "hi")
+    fs.writeFileSync(path.join(root, "models", "schema.yml"), "version: 2")
+
+    fs.writeFileSync(path.join(root, "seeds", "country_codes.csv"), "code,name\n")
+    fs.writeFileSync(path.join(root, "seeds", "regions.csv"), "id,name\n")
+    // Non-.csv seed — not counted.
+    fs.writeFileSync(path.join(root, "seeds", "notes.md"), "hi")
+  })
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+
+  test("counts .sql files recursively under models/", () => {
+    const { models } = countSampleContents(root)
+    expect(models).toBe(4)
+  })
+
+  test("counts .csv files under seeds/ (top level; matches production sample layout)", () => {
+    const { tables } = countSampleContents(root)
+    expect(tables).toBe(2)
+  })
+
+  test("returns zeros when the sample dir is missing the expected subdirs", () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "sample-setup-empty-"))
+    try {
+      expect(countSampleContents(empty)).toEqual({ models: 0, tables: 0 })
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true })
+    }
+  })
+
+  test("returns zeros when the sample dir does not exist at all", () => {
+    // countFilesWithExtension swallows the readdirSync error and returns 0 —
+    // this is the graceful-degradation shape the telemetry event depends on.
+    expect(countSampleContents(path.join(root, "does-not-exist"))).toEqual({ models: 0, tables: 0 })
+  })
+})
