@@ -50,11 +50,9 @@ describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
       "prototype key %j must NOT be treated as a curated match",
       (key) => {
         const result = Telemetry.classifyProvider(key)
-        // The one guarantee this test cares about: the result is not one of the
-        // curated enum values. What it collapses to (usually "other" without an id)
-        // is fine — the defect being guarded against is exactly the shipping of a
-        // prototype method as a curated enum.
-        expect(["altimate_gateway", "anthropic", "openai", "google", "big_pickle"]).not.toContain(result.provider)
+        // The guarantee: a prototype key must not resolve to any curated enum.
+        // `toBe("other")` implies it's none of `altimate_gateway|anthropic|openai|google|big_pickle`,
+        // so no separate `not.toContain` guard is needed.
         expect(result.provider).toBe("other")
       },
     )
