@@ -39,6 +39,7 @@ export function toToolKind(toolName: string): ToolKind {
   const tool = toolName.toLocaleLowerCase()
 
   switch (tool) {
+    case "terminal":
     case "bash":
     case "shell":
       return "execute"
@@ -74,6 +75,7 @@ export function toLocations(toolName: string, input: ToolInput, cwd?: string): T
   const tool = toolName.toLocaleLowerCase()
 
   switch (tool) {
+    case "terminal":
     case "bash":
     case "shell": {
       const workdir = shellWorkdir(input, cwd)
@@ -296,7 +298,7 @@ function shellCommand(input: ToolInput) {
 
 function isShell(toolName: string) {
   const tool = toolName.toLocaleLowerCase()
-  return tool === "terminal" || tool === "shell"
+  return tool === "terminal" || tool === "shell" || tool === "bash"
 }
 
 export const mapToolKind = toToolKind

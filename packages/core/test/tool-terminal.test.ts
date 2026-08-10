@@ -265,7 +265,7 @@ describe("TerminalTool", () => {
     ),
   )
 
-  it.live("does not execute after external-directory or bash denial", () =>
+  it.live("does not execute after external-directory or terminal denial", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
       ([active, outside]) =>
@@ -279,7 +279,7 @@ describe("TerminalTool", () => {
           expect(runs).toEqual([])
 
           reset()
-          denyAction = "bash"
+          denyAction = "terminal"
           yield* withTool(active.path, (registry) => executeTool(registry, call({ command: "pwd" })))
           expect(assertions.map((item) => item.action)).toEqual(["terminal"])
           expect(runs).toEqual([])

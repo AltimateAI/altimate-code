@@ -79,22 +79,42 @@ const list = () =>
 
 // fromConfig tests
 
-test("fromConfig - string value becomes wildcard rule", () => {
+test("fromConfig - legacy bash only maps to terminal", () => {
   const result = Permission.fromConfig({ bash: "allow" })
   expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
 })
 
+test("fromConfig - terminal only works", () => {
+  const result = Permission.fromConfig({ terminal: "allow" })
+  expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
+})
+
+test("fromConfig - terminal wins over bash", () => {
+  const result = Permission.fromConfig({ bash: "deny", terminal: "allow" })
+  expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
+})
+
 test("fromConfig - object value converts to rules array", () => {
-  const result = Permission.fromConfig({ bash: { "*": "allow", rm: "deny" } })
+  const result = Permission.fromConfig({ terminal: { "*": "allow", rm: "deny" } })
   expect(result).toEqual([
     { permission: "terminal", pattern: "*", action: "allow" },
     { permission: "terminal", pattern: "rm", action: "deny" },
   ])
 })
 
+test("fromConfig - legacy bash deny rules still deny terminal", () => {
+  const ruleset = Permission.fromConfig({ bash: "deny" })
+  expect(Permission.evaluate("terminal", "ls", ruleset).action).toBe("deny")
+})
+
+test("fromConfig - legacy bash allow rules still allow terminal", () => {
+  const ruleset = Permission.fromConfig({ bash: "allow" })
+  expect(Permission.evaluate("terminal", "ls", ruleset).action).toBe("allow")
+})
+
 test("fromConfig - mixed string and object values", () => {
   const result = Permission.fromConfig({
-    bash: { "*": "allow", rm: "deny" },
+    terminal: { "*": "allow", rm: "deny" },
     edit: "allow",
     webfetch: "ask",
   })
@@ -136,8 +156,8 @@ test("fromConfig - does not expand tilde in middle of path", () => {
 // entries even when a wildcard appears after a specific permission.
 
 test("fromConfig - preserves top-level config key order", () => {
-  const wildcardFirst = Permission.fromConfig({ "*": "deny", bash: "allow" })
-  const specificFirst = Permission.fromConfig({ bash: "allow", "*": "deny" })
+  const wildcardFirst = Permission.fromConfig({ "*": "deny", terminal: "allow" })
+  const specificFirst = Permission.fromConfig({ terminal: "allow", "*": "deny" })
 
   expect(wildcardFirst.map((r) => r.permission)).toEqual(["*", "terminal"])
   expect(specificFirst.map((r) => r.permission)).toEqual(["terminal", "*"])

@@ -462,7 +462,7 @@ function syncText(data: SessionData, partID: string, next: string) {
 // verbatim at the start of their next text part. We save both the raw and
 // trimmed forms so stripEcho() can match either.
 function stashEcho(data: SessionData, part: ToolPart) {
-  if (part.tool !== "terminal") {
+  if (part.tool !== "terminal" && part.tool !== "bash") {
     return
   }
 
@@ -659,7 +659,7 @@ function claimShell(data: SessionData, callID: string, source: ShellCall["source
 }
 
 function terminalCommand(part: ToolPart): string | undefined {
-  if (part.tool !== "terminal") {
+  if (part.tool !== "terminal" && part.tool !== "bash") {
     return undefined
   }
 

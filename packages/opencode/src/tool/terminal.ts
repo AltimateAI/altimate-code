@@ -2,7 +2,7 @@ import z from "zod"
 import { spawn } from "child_process"
 import { Tool } from "./tool"
 import path from "path"
-import DESCRIPTION from "./bash.txt"
+import DESCRIPTION from "./terminal.txt"
 import { Log } from "../util/log"
 import { Instance } from "../project/instance"
 import { lazy } from "@/util/lazy"
@@ -22,7 +22,7 @@ import { Global } from "@/global"
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
 
-export const log = Log.create({ service: "bash-tool" })
+export const log = Log.create({ service: "terminal-tool" })
 
 const resolveWasm = (asset: string) => {
   if (asset.startsWith("file://")) return fileURLToPath(asset)
@@ -300,7 +300,7 @@ export const TerminalTool = Tool.define("terminal", async () => {
       const resultMetadata: string[] = []
 
       if (timedOut) {
-        resultMetadata.push(`bash tool terminated command after exceeding timeout ${timeout} ms`)
+        resultMetadata.push(`terminal tool terminated command after exceeding timeout ${timeout} ms`)
       }
 
       if (aborted) {

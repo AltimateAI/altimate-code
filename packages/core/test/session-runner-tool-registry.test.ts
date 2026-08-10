@@ -58,7 +58,7 @@ describe("ToolRegistry", () => {
       const service = yield* ToolRegistry.Service
       yield* service.register({
         question: make(),
-        bash: make(),
+        terminal: make(),
         edit: make("edit"),
         write: make("edit"),
         apply_patch: make("edit"),

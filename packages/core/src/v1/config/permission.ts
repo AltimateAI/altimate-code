@@ -41,7 +41,10 @@ const InputSchema = Schema.Union([Action, InputObject])
 const normalizeInput = (input: Schema.Schema.Type<typeof InputSchema>): Schema.Schema.Type<typeof InputObject> => {
   if (typeof input === "string") return { "*": input }
   const result = { ...input }
-  if (result.terminal !== undefined && result.bash !== undefined) {
+  if (result.bash !== undefined) {
+    if (result.terminal === undefined) {
+      result.terminal = result.bash
+    }
     delete (result as any).bash
   }
   return result
