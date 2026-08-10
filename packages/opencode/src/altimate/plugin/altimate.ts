@@ -8,6 +8,7 @@ import * as OnboardingTelemetry from "../telemetry/onboarding"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
+import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
 
@@ -76,9 +77,11 @@ const log = Log.create({ service: "altimate-plugin" })
 export async function buildCliContext(machineIdPath?: string): Promise<string> {
   // altimate_change start — honour both telemetry opt-out gates, mirroring
   // telemetry/index.ts::doInit:
-  //   1. ALTIMATE_TELEMETRY_DISABLED=true env var (always-works hard opt-out)
+  //   1. ALTIMATE_TELEMETRY_DISABLED / OPENCODE_DISABLE_TELEMETRY env vars
+  //      ("true"/"TRUE"/"1", case-insensitive — see Flag.truthyEnv)
   //   2. config.telemetry.disabled (resolved via the async Config.get())
-  let disabled = process.env.ALTIMATE_TELEMETRY_DISABLED === "true"
+  let disabled =
+    Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")
   if (!disabled) {
     try {
       const userConfig = (await Config.get()) as any

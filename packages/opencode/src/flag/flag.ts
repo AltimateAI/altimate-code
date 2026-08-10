@@ -19,6 +19,15 @@ function altEnv(altKey: string, openKey: string) {
 // altimate_change end
 
 export namespace Flag {
+  // altimate_change start — runtime-evaluated env-truthy helper for callers that need
+  // current process.env state. Module-level Flag.* constants freeze their value at
+  // import time; that's the wrong semantics for gates the caller re-reads on each
+  // invocation (e.g. telemetry.doInit()). Accepts "true" / "TRUE" / "1" — case-insensitive
+  // — so one convention covers every telemetry/onboarding opt-out env var.
+  export function truthyEnv(key: string): boolean {
+    return truthy(key)
+  }
+  // altimate_change end
   // altimate_change start - ALTIMATE_CLI_CLIENT flag with OPENCODE_CLIENT fallback
   export declare const ALTIMATE_CLI_CLIENT: string
   // altimate_change end

@@ -1683,7 +1683,10 @@ export namespace Telemetry {
 
   async function doInit() {
     try {
-      if (process.env.ALTIMATE_TELEMETRY_DISABLED === "true") {
+      // altimate_change — accept "true"/"TRUE"/"1" (case-insensitive) via truthyEnv,
+      // and honor the OPENCODE_DISABLE_TELEMETRY fallback promised by v0.9.4's CHANGELOG
+      // (previously only wired in test fixtures, silent no-op in product).
+      if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
         buffer = []
         return
       }
