@@ -6,6 +6,8 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { createRequire } from "node:module"
 import solidPlugin from "@opentui/solid/bun-plugin"
+// altimate_change — #1052 D10: sha256 for the per-target build-inputs stamp.
+import { createHash } from "node:crypto"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -523,6 +525,88 @@ for (const item of targets) {
       2,
     ),
   )
+
+  // altimate_change start — #1052 D10: emit a build-inputs stamp so the
+  // smoke-test staleness guard can compare against ALL binary-embedded inputs,
+  // not just src/ + script/ mtimes.
+  //
+  // The previous guard (m5) walked src/ + script/ for the newest mtime — good
+  // for the common case but blind to changes in CHANGELOG.md, migrations,
+  // bundled skills, the models.dev snapshot, the parser worker, and the
+  // per-platform altimate-core prebuild. Editing any of those without touching
+  // a .ts file would leave the guard silent and the binary silently stale.
+  //
+  // Stamp format: JSON with one entry per input, sha256 of file content. Read
+  // side rehashes each listed path and compares; any mismatch → stale. Paths
+  // are relative to the workspace root (dir = packages/opencode) so the test
+  // can resolve them from its own cwd without env plumbing.
+  const stampInputs: Array<{ path: string; sha256: string }> = []
+  const addFile = (absPath: string) => {
+    try {
+      const buf = fs.readFileSync(absPath)
+      const rel = path.relative(dir, absPath)
+      const hash = createHash("sha256").update(buf).digest("hex")
+      stampInputs.push({ path: rel, sha256: hash })
+    } catch {
+      // Missing file: silently skip. The stamp only covers what actually
+      // shipped; a file the build didn't need doesn't invalidate the guard.
+    }
+  }
+  // CHANGELOG.md
+  addFile(changelogPath)
+  // Migrations
+  for (const m of migrationDirs) addFile(path.join(dir, "migration", m, "migration.sql"))
+  // Skills bundled via .opencode/skills/
+  for (const entry of skillEntries) addFile(path.join(skillsRoot, entry.name, "SKILL.md"))
+  // Generated models snapshot (build.ts rewrote it before we got here)
+  addFile(path.join(dir, "src/provider/models-snapshot.ts"))
+  // opentui parser worker
+  addFile(parserWorker)
+  // Per-target altimate-core NAPI prebuild
+  addFile(platformNodeSrc)
+  // src/ + script/ TypeScript tree — hash every file the compiler actually saw
+  // (same extension filter build.ts globs for embedding).
+  const IGNORED = new Set(["node_modules", ".turbo", ".cache", "dist", "target"])
+  const walk = (root: string): void => {
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue
+      if (IGNORED.has(entry.name)) continue
+      const full = path.join(root, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!/\.(tsx?|json|txt|md)$/.test(entry.name)) continue
+      addFile(full)
+    }
+  }
+  walk(path.join(dir, "src"))
+  walk(path.join(dir, "script"))
+  // Deterministic order so the aggregate hash is stable across build runs.
+  stampInputs.sort((a, b) => a.path.localeCompare(b.path))
+  const aggregate = createHash("sha256")
+    .update(stampInputs.map((i) => `${i.path}\t${i.sha256}`).join("\n"))
+    .digest("hex")
+  await Bun.file(`dist/${name}/bin/build-inputs.json`).write(
+    JSON.stringify(
+      {
+        target: name,
+        version: Script.version,
+        aggregate,
+        inputs: stampInputs,
+      },
+      null,
+      2,
+    ),
+  )
+  // altimate_change end
+
   binaries[name] = Script.version
 }
 
