@@ -1,31 +1,44 @@
 name: Notify help-docs (docs changed)
 
-# On a merge that touches docs on the default branch, tell the help-docs hub to
-# promote the change up (product -> help-docs) as a review PR. Requires the
-# shared docs-sync GitHub App: vars.DOCS_SYNC_APP_ID +
-# secrets.DOCS_SYNC_APP_PRIVATE_KEY. Sync-generated merges carry a [docs-sync]
-# marker and are skipped, so this never loops.
+# When a push to the default branch changes published docs, tell the help-docs
+# hub to promote the change up (product -> help-docs) as a review PR. Requires
+# the shared docs-sync GitHub App as repo secrets: DOCS_SYNC_APP_ID and
+# DOCS_SYNC_APP_PRIVATE_KEY — if either is unset the job skips (no red run).
+# The loop guard checks every commit in the push for the [docs-sync] marker, so
+# it holds across squash, rebase, and merge-commit strategies.
 
 on:
   push:
     branches: [main]
     paths: ["docs/docs/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read
   pull-requests: read
 
-concurrency:
-  group: notify-help-docs-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   notify:
-    if: ${{ !contains(github.event.head_commit.message, '[docs-sync]') }}
-    runs-on: arc-runner-gke
+    if: ${{ !contains(toJSON(github.event.commits.*.message), '[docs-sync]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Check docs-sync App is configured
+        id: config
+        env:
+          APP_ID: ${{ secrets.DOCS_SYNC_APP_ID }}
+          APP_KEY: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::docs-sync App not configured — skipping dispatch."
+          fi
+
       - name: Resolve merged PR (author for notifications)
         id: src
+        if: steps.config.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -38,6 +51,7 @@ jobs:
 
       - name: Build dispatch payload
         id: payload
+        if: steps.config.outputs.enabled == 'true'
         env:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
@@ -53,13 +67,15 @@ jobs:
 
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: tok
+        if: steps.config.outputs.enabled == 'true'
         with:
-          app-id: ${{ vars.DOCS_SYNC_APP_ID }}
+          app-id: ${{ secrets.DOCS_SYNC_APP_ID }}
           private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
           owner: AltimateAI
           repositories: help-docs
 
       - uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
+        if: steps.config.outputs.enabled == 'true'
         with:
           token: ${{ steps.tok.outputs.token }}
           repository: AltimateAI/help-docs
