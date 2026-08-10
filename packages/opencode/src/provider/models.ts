@@ -152,18 +152,33 @@ export namespace ModelsDev {
 }
 
 if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-  // altimate_change start — upstream_fix: bridge merge removed the setTimeout(...,0)
-  // wrapper. Defer the initial refresh past the current microtask so that
-  // Installation.USER_AGENT (used inside refresh()) is fully initialized — we hit
-  // a circular-dep issue on cold start without this. See altimate commit 980efaab64.
-  setTimeout(() => {
-    ModelsDev.refresh()
-    setInterval(
-      async () => {
-        await ModelsDev.refresh()
-      },
-      60 * 1000 * 60,
-    ).unref()
-  }, 0)
+  // altimate_change start — #1052 D14: drop the eager import-time ModelsDev.refresh().
+  //
+  // The previous `setTimeout(() => ModelsDev.refresh(), 0)` fired a fetch to
+  // https://models.dev/api.json at module import. Its `AbortSignal.timeout(10000)`
+  // cannot cancel a synchronous `getaddrinfo()` — under Linux `unshare --net`
+  // (Verdaccio sanity Phase 3 [10/10] on Ubuntu CI runners) the DNS call blocked
+  // long enough that the pending fetch held the event loop past command
+  // completion and SIGTERM landed before any bytes flushed. That blocked the
+  // v0.9.4 release.
+  //
+  // Callers that need model data use `ModelsDev.Data()`, which resolves in this
+  // priority order: (1) local disk cache, (2) bundled snapshot at
+  // `models-snapshot.ts` (always embedded in release binaries, regenerated at
+  // each build), (3) `Flock.withLock(...) → fetchApi()` only when both are
+  // absent. The bundled snapshot means release-binary users always have model
+  // metadata even on a cold-start with no network. Long-running processes
+  // (TUI, serve) still receive updates via the hourly `setInterval` below
+  // (`.unref()`'d so it never blocks exit). Short-lived commands rely on the
+  // snapshot's release-time freshness.
+  //
+  // Trade-off: models added to models.dev between releases do not appear in
+  // short-lived commands until the next release rebuild. Bounded by the release
+  // cadence (~weekly). Users needing bleeding-edge model metadata can run
+  // `altimate-code auth login` or open the TUI, both of which trigger the
+  // hourly interval on start-up rebase.
+  setInterval(async () => {
+    await ModelsDev.refresh()
+  }, 60 * 60 * 1000).unref()
   // altimate_change end
 }
