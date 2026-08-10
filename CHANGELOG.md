@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-08-10
+
+Windows `grep` back for the ~16% of Windows users it silently broke since v0.9.2, plus a mid-session YOLO toggle and a welcome panel that stops eating half of narrow terminals.
+
+### Added
+
+- **`Ctrl+Y` toggles YOLO mode mid-session.** Previously YOLO was launch-time only — you either started the CLI with `--yolo` / `ALTIMATE_CLI_YOLO=true` or opened a new one. Now you can flip it on or off from inside the TUI. Enabling requires a one-tap confirmation; disabling is instant. The toggle is **session and subagent scoped and lives in memory only** — restart the CLI and it defaults back to whatever `--yolo`, `ALTIMATE_CLI_YOLO`, or `OPENCODE_YOLO` was at launch. Explicit `deny` rules stay enforced (`DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` remain blocked even with the toggle on). Heads-up: `Ctrl+Y` is `readline`'s "yank" keystroke in some shells — the toggle defaults to "No" on the confirmation, so a stray keypress can't do anything dangerous. (#1078)
+
+### Fixed
+
+- **Windows `grep` for the ~16% of Windows users it was silently broken for.** Since v0.9.2, ripgrep extraction shelled out to `powershell.exe` for the download's zip, and 99 of 617 Windows machines in a 14-day telemetry window couldn't complete the extraction — the tool failed silently on `grep` / `glob` from that point on. Extraction is now in-process via `@zip.js/zip.js` (`checkSignature: true`, exact-pinned) with atomic staged-then-renamed installs, no PowerShell dependency at all. Landed with a real Windows CI job (`windows-ripgrep-e2e`) that runs with PowerShell stripped from `PATH`, so this class of regression can't come back silently. (#1074, closes #1072)
+- **Welcome panel no longer eats 40% of narrow or short terminals.** On anything smaller than ~110 cols wide or ~44 rows tall the panel now scales through three responsive tiers instead of holding the full desktop-sized dimensions. Landed in two rounds — the first added the breakpoint function; the second corrected the width measurement so the `full` tier no longer fired at ~84 usable cols. (#1067, #1069, #1071)
+- **Telemetry opt-out honors `=1` and case-insensitive `true`, and finally wires up `OPENCODE_DISABLE_TELEMETRY`.** `ALTIMATE_TELEMETRY_DISABLED=1` and `=TRUE` used to be silently ignored (only `=true` worked). The v0.9.4 CHANGELOG advertised `OPENCODE_DISABLE_TELEMETRY=1` as an opt-out env var but that name was wired into test fixtures only, never checked in product — users who set it based on the release notes were not opted out. Both env vars now route through a shared helper that accepts `"true"` / `"TRUE"` / `"1"`. If you set either one and expected it to work, this release makes it actually work. (#1086)
+
+### Changed
+
+- **`cli_context` on the sign-in URL for PostHog session correlation.** After successful sign-in, the frontend registers the CLI machine-id as the `cli_machine_id` PostHog super-property so CLI activity is attributed to the authenticated account in aggregate funnel analytics. The value travels in the URL *fragment* (`#cli_context=…`, not a query string) so the durable identifier stays out of server access logs, CDN/WAF, and the `Referer` header — the frontend reads it via `location.hash`. (#1068)
+- **First-run onboarding and review feature usage now emit funnel telemetry.** New event types: `activation_menu_shown`, `activation_job_selected`, `first_prompt_sent`, `environment_scan_completed`, plus review-lane latency and outcome events. All existing opt-out mechanisms (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`, `telemetry.disabled` in config) gate every new event; full list in `docs/docs/reference/telemetry.md`. (#1049, #1064)
+- **UTM parameters on outbound `altimate.ai` marketing links.** Non-functional; helps attribute web traffic back to the CLI. (#1063)
+
 ## [0.9.4] - 2026-07-31
 
 Onboarding UX + first-run OAuth reliability. Ships the CLI's first-run scan + activation menu (Altimate LLM Gateway top of picker; bundled jaffle-shop DuckDB sample for users with no warehouse yet), then hardens the sign-in flow that path leads into.
