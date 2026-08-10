@@ -61,6 +61,7 @@ Override it in your config:
 | Leader + `k` | Keybind list |
 | Leader + `e` | Open editor |
 | Leader + `q` | Quit |
+| `Ctrl+Y` | Toggle YOLO mode for this session (confirms when enabling; instant when disabling) |
 
 ### Input Editing
 
@@ -114,7 +115,7 @@ All configurable keybind identifiers:
 
 ### Session
 
-`session_export`, `session_new`, `session_list`, `session_timeline`, `session_fork`, `session_rename`, `session_delete`, `session_child_cycle`, `session_parent`, `session_share`, `session_unshare`, `session_interrupt`, `session_compact`
+`session_export`, `session_new`, `session_list`, `session_timeline`, `session_fork`, `session_rename`, `session_delete`, `session_child_cycle`, `session_parent`, `session_share`, `session_unshare`, `session_interrupt`, `session_compact`, `session_yolo_toggle`
 
 ### Messages
 
