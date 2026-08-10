@@ -40,12 +40,15 @@ const InputSchema = Schema.Union([Action, InputObject])
 
 const normalizeInput = (input: Schema.Schema.Type<typeof InputSchema>): Schema.Schema.Type<typeof InputObject> => {
   if (typeof input === "string") return { "*": input }
-  const result = { ...input }
-  if (result.bash !== undefined) {
-    if (result.terminal === undefined) {
-      result.terminal = result.bash
+  const result: any = {}
+  for (const [key, value] of globalThis.Object.entries(input)) {
+    if (key === "bash") {
+      if (!("terminal" in input)) {
+        result.terminal = value
+      }
+    } else {
+      result[key] = value
     }
-    delete (result as any).bash
   }
   return result
 }

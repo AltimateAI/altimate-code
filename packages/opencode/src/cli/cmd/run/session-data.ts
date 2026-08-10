@@ -925,7 +925,7 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
 
     if (part.type === "tool") {
       const view = syncPermission(data, part) ?? syncQuestion(data, part)
-      if (part.tool === "terminal" && part.callID) {
+      if ((part.tool === "terminal" || part.tool === "bash") && part.callID) {
         if (claimShell(data, part.callID, "tool", terminalCommand(part)).source === "shell") {
           return out(data, commits, view)
         }

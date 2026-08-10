@@ -234,6 +234,31 @@ describe("run session data", () => {
     })
   })
 
+  test("claims legacy bash shell tools without duplicating entries", () => {
+    let data = createSessionData()
+    data = reduce(data, tool({
+      id: "tool-bash-1",
+      messageID: "msg-1",
+      tool: "bash",
+      callID: "call-1",
+      state: { status: "running", input: { command: "ls" } }
+    })).data
+
+    expect(data.tools.has("tool-bash-1")).toBe(true)
+
+    const shellStarted = reduce(data, {
+      type: "session.next.shell.started",
+      properties: {
+        sessionID: "session-1",
+        callID: "call-1",
+        command: "ls",
+      }
+    })
+    data = shellStarted.data
+
+    expect(data.shell.has("call-1")).toBe(true)
+  })
+
   test("refreshes the active permission view when tool input arrives later", () => {
     const data = reduce(createSessionData(), {
       type: "permission.asked",

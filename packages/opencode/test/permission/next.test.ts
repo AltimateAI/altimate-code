@@ -94,6 +94,22 @@ test("fromConfig - terminal wins over bash", () => {
   expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
 })
 
+test("fromConfig - migration preserves bash order before wildcard", () => {
+  const result = Permission.fromConfig({ bash: "allow", "*": "deny" })
+  expect(result).toEqual([
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "*", pattern: "*", action: "deny" }
+  ])
+})
+
+test("fromConfig - migration preserves bash order after wildcard", () => {
+  const result = Permission.fromConfig({ "*": "deny", bash: "allow" })
+  expect(result).toEqual([
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" }
+  ])
+})
+
 test("fromConfig - object value converts to rules array", () => {
   const result = Permission.fromConfig({ terminal: { "*": "allow", rm: "deny" } })
   expect(result).toEqual([
