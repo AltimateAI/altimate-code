@@ -43,10 +43,16 @@ export function showWelcomeBannerIfNeeded(): void {
     // launch. Probe existence with existsSync only — do NOT mint here. Minting is left to
     // Telemetry.doInit() (its job, not the welcome banner's); the first_launch machine_id is
     // attached at flush time from telemetry module state, so it does not depend on minting here.
-    // NOTE: doInit's early call runs before an Instance is available, so its CONFIG opt-out gate
-    // fails open and it can still mint for a config-only opt-out user. That is a pre-existing
-    // telemetry-init gap (tracked separately), not something this banner can fix — this code just
-    // stops adding a SECOND minting site under an even weaker (env-only) gate.
+    //
+    // FIXME(telemetry-init-config-opt-out): doInit() may run before Instance.provide() has made
+    // Config.get() resolvable (see the try/catch around Config.get in telemetry/index.ts::doInit
+    // — the catch branch proceeds with telemetry enabled). A user who opted out via the
+    // `telemetry.disabled` config key — with no env var set — can therefore still get a
+    // machine-id minted on first launch. The env-var opt-out (ALTIMATE_TELEMETRY_DISABLED /
+    // OPENCODE_DISABLE_TELEMETRY) is unaffected — that check does not need Instance context.
+    // Pre-existing (not introduced by this release); calling it out explicitly here rather than
+    // leaving the earlier "(tracked separately)" wording, which claimed a tracking issue that
+    // does not currently exist.
     const machineIdPath = path.join(os.homedir(), ".altimate", "machine-id")
     const isUpgrade = fs.existsSync(machineIdPath)
     // altimate_change end
