@@ -132,6 +132,60 @@ describe("resolveDatamateSyncRoot", () => {
   })
 })
 
+describe("blanked {} datamate entries (non-active-IDE tombstones)", () => {
+  test("readDatamateTransportFromIde skips a blanked entry that sorts first", async () => {
+    await using tmp = await tmpdir()
+    // .cursor sorts before .vscode; the extension blanks datamate to {} in
+    // non-active-IDE files.
+    await mkdir(path.join(tmp.path, ".cursor"), { recursive: true })
+    await writeFile(path.join(tmp.path, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: { [DATAMATE_KEY]: {} } }))
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["/ext/dist/datamate-cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T9",
+    })
+
+    const t = await readDatamateTransportFromIde(tmp.path)
+    expect(t?.type).toBe("local")
+    if (t?.type === "local") {
+      expect(t.command[0]).toBe("/path/to/electron")
+      expect(t.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+    }
+  })
+
+  test("sync source selection skips a blanked entry that sorts first", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    await mkdir(path.join(tmp.path, ".cursor"), { recursive: true })
+    await writeFile(path.join(tmp.path, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: { [DATAMATE_KEY]: {} } }))
+    const configPath = path.join(tmp.path, "altimate-code.json")
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        null,
+        2,
+      ),
+    )
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["/ext/dist/datamate-cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T10",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toContain(DATAMATE_KEY)
+
+    const entry = JSON.parse(await readFile(configPath, "utf-8")).mcp[DATAMATE_KEY]
+    expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+    expect(entry.updatedAt).toBe("T10")
+  })
+})
+
 describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
   test("synced local entry strips ALTIMATE_EXTENSION_RPC but keeps ELECTRON_RUN_AS_NODE", async () => {
     await using tmp = await tmpdir()
