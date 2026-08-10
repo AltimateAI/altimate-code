@@ -24,6 +24,8 @@ import { Deferred, Duration, Effect, Layer, Queue, Scope, Stream } from "effect"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcess } from "effect/unstable/process"
 import path from "node:path"
+// altimate_change — #1052 D11: fsPromises for the pre-retry DB scrub.
+import * as fsPromises from "node:fs/promises"
 import { TestLLMServer } from "./llm-server"
 import { testProviderConfig } from "./test-provider"
 import { it } from "./effect"
@@ -293,6 +295,16 @@ export function withCliFixture<A, E>(
       // 60s spawn on top of the first (CodeRabbit v0.9.4 review finding).
       // Cap the retry at max(remaining, 15s) — enough for a warm-cache spawn
       // + cold-SQLite open without granting an unbounded second window.
+      //
+      // Before retrying, clean the SQLite state the first attempt may have
+      // written before hitting the lock (#1052 D11). `opencode run` writes
+      // session + tracing state at boot; if the first attempt got as far as
+      // opening the DB and taking a partial write before the WAL checkpoint
+      // collision, a naive retry would either see the partial state or
+      // double-write. Nuke the DB files (they live under this fixture's
+      // isolated XDG_DATA_HOME) so the second attempt starts from a clean
+      // slate. Other fixture state (config, home files) is preserved so
+      // tests that inject setup into `home` still see it.
       return Effect.gen(function* () {
         const startedAt = Date.now()
         const originalTimeoutMs = opts?.timeoutMs ?? 60_000
@@ -307,6 +319,21 @@ export function withCliFixture<A, E>(
           `[cli-process] child hit \`database is locked\` on first attempt (exit=${first.exitCode}); retrying once. ` +
             `If you see this often, the SQLite WAL/checkpoint contention has moved from transient to systematic.`,
         )
+        // Scrub SQLite state so the retry is idempotent (see block comment above).
+        // The DB path pattern matches the CLI's own file layout under XDG_DATA_HOME.
+        yield* Effect.promise(async () => {
+          const dbDir = path.join(home, ".local/share/altimate-code")
+          try {
+            const entries = await fsPromises.readdir(dbDir)
+            await Promise.all(
+              entries
+                .filter((e) => /^opencode.*\.db(-wal|-shm)?$/.test(e))
+                .map((e) => fsPromises.rm(path.join(dbDir, e), { force: true })),
+            )
+          } catch {
+            // Directory absent or unreadable — nothing to clean. Retry proceeds.
+          }
+        })
         const elapsed = Date.now() - startedAt
         const remaining = Math.max(originalTimeoutMs - elapsed, 15_000)
         const second = yield* spawn(argv, { ...opts, timeoutMs: remaining })
