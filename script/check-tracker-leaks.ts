@@ -23,10 +23,28 @@
 
 import { $ } from "bun"
 
-const RULES = [
+// altimate_change — #1052 D8 review-fix (M1): drop the trailing word-boundary
+// from the Jira-key regex so the guard catches suffix-adjacent leaks like
+// `AI-1234foo`, `AI-1234_bar`, `feature/AI-1234_bug`.
+//
+// The original `\bAI-\d+\b` required `\b` after the digits, which fails when a
+// word char (letter, digit, underscore) follows — exactly the class the guard
+// must catch. Naïve fixes (negative lookahead like `(?![a-zA-Z0-9_])`) don't
+// help: the regex engine backtracks `\d+`, but every backtrack position still
+// has a digit as the "next char" and the lookahead keeps failing. The correct
+// fix is no trailing boundary at all — just `\bAI-\d+` — which matches greedily
+// through the digits, stops when a non-digit appears, and reports the `AI-<n>`
+// prefix regardless of what follows.
+//
+// Caveat: `handleAI-1234thing` still escapes because there's no `\b` at the
+// start of `AI` (both `e` and `A` are word chars). Camel-cased pastes with no
+// separator before `AI` remain a known blind spot — accept it; the realistic
+// leak surface is branch names, commit messages, comments, and doc text where
+// `AI-…` is delimited by whitespace, punctuation, or a path separator.
+export const RULES = [
   {
     name: "Jira ticket key (AI-<digits>)",
-    pattern: /\bAI-\d+\b/g,
+    pattern: /\bAI-\d+/g,
     remediation: "Rename branch / rewrite commit / delete text. Track work via GitHub issues on AltimateAI/altimate-code.",
   },
   {
@@ -130,8 +148,14 @@ async function main() {
   process.exit(1)
 }
 
-if (process.env.SKIP_TRACKER_CHECK === "1") {
-  process.stderr.write("tracker-leak check skipped via SKIP_TRACKER_CHECK=1\n")
-} else {
-  await main()
+// altimate_change — #1052 D8 review-fix (M6 companion): gate side-effectful
+// main() so RULES can be imported by the self-test file without triggering a
+// scanner run at test-collection time. Bun sets `import.meta.main = true` only
+// when this file is the entrypoint.
+if (import.meta.main) {
+  if (process.env.SKIP_TRACKER_CHECK === "1") {
+    process.stderr.write("tracker-leak check skipped via SKIP_TRACKER_CHECK=1\n")
+  } else {
+    await main()
+  }
 }
