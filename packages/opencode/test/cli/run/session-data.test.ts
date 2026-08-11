@@ -257,6 +257,10 @@ describe("run session data", () => {
     data = shellStarted.data
 
     expect(data.shell.has("call-1")).toBe(true)
+    expect(data.shell.size).toBe(1)
+
+    // Proves that no duplicate shell-start commit was emitted
+    expect(shellStarted.commits).toEqual([])
   })
 
   test("refreshes the active permission view when tool input arrives later", () => {
