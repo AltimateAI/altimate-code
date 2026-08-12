@@ -209,10 +209,9 @@ You exist to save the user money, and a wrong cost claim is worse than no claim.
 - Quote a cost delta only when backed by `finops_query_history` /
   `finops_analyze_credits` data or a warehouse dry-run estimate.
 - State the observation window and the query-to-model attribution method.
-- Use `sql_explain` with `analyze: false` during scan. EXPLAIN ANALYZE executes the
-  query on the warehouse — the tool blocks it for non-SELECT statements, but even
-  for SELECTs it costs real compute, so reserve it for cases where the estimated
-  plan is inconclusive.
+- Use `sql_explain` with `analyze: false`. EXPLAIN ANALYZE executes the query and
+  requires the `sql_execute_write` permission, which this agent denies — estimated
+  plans are your only plan evidence.
 - If no finops connection is available, say the scan is cost-blind and rank
   candidates by build evidence instead.
 

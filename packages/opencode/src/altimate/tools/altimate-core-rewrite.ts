@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import type { LegacyResult } from "../tool-zod-compat"
 import { Dispatcher } from "../native"
+import { guardSchemaPath } from "./schema-path-guard"
 
 export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
   description:
@@ -24,8 +25,11 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
         "SQL dialect hint for the equivalence verification (e.g. snowflake, bigquery) — dialect-specific syntax is otherwise undecidable",
       ),
   }),
-  async execute(args): Promise<LegacyResult> {
+  async execute(args, ctx): Promise<LegacyResult> {
     try {
+      // Gate the schema file path once; the gated resolved path then flows to
+      // both the rewrite call and the equivalence sub-calls in verifyRewrites.
+      args = { ...args, schema_path: await guardSchemaPath(ctx, args.schema_path) }
       const result = (await Dispatcher.call("altimate_core.rewrite", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",

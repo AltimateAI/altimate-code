@@ -429,7 +429,10 @@ export const layer = Layer.effect(
                 lineage_check: "allow",
                 schema_inspect: "allow",
                 schema_search: "allow",
-                schema_index: "allow",
+                // schema_index crawls the warehouse and REWRITES the persistent
+                // global schema cache (~/.altimate-code/schema-cache.db) — a
+                // mutation the read-only scan must not run unprompted.
+                schema_index: "ask",
                 schema_cache_status: "allow",
                 warehouse_list: "allow",
                 warehouse_test: "allow",

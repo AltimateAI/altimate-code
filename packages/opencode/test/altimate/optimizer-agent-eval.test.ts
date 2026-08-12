@@ -65,7 +65,11 @@ const PLANTED: Array<{ id: string; models: string[]; signals: string[] }> = [
 // A signal match is rejected when negation wording immediately precedes it —
 // "fct_events_daily is NOT an incremental candidate" must not score as a hit.
 // Heuristic, not NLU: it inspects the 60 chars before the signal for a negator.
-const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|rather than|instead of)\b[^.;\n]{0,50}$/i
+// Clause-bounded: a comma, sentence end, or newline between the negator and the
+// signal breaks the association ("not a temp table, uses ORDER BY" still scores
+// the ORDER BY hit), and the window is tight (40 chars) to avoid discarding
+// positive reports whose explanation merely contains a negator.
+const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|rather than|instead of)\b[^.;,\n]{0,40}$/i
 
 function found(transcript: string, item: (typeof PLANTED)[number]): boolean {
   const t = transcript.toLowerCase()
@@ -103,7 +107,9 @@ describeIf("optimizer live eval — planted-project scan", () => {
       // Fresh copy so the eval can never dirty the checked-in fixture. `await
       // using` disposes the tmpdir on success, assertion failure, and error.
       await using tmp = await tmpdir()
-      const workdir = tmp.path
+      const workdir = path.join(tmp.path, "project")
+      const isolatedHome = path.join(tmp.path, "home")
+      await fs.mkdir(isolatedHome, { recursive: true })
       await fs.cp(FIXTURE, workdir, { recursive: true })
       const before = await snapshotTree(workdir)
 
@@ -119,7 +125,24 @@ describeIf("optimizer live eval — planted-project scan", () => {
           cwd: workdir,
           encoding: "utf8",
           timeout: 540_000,
-          env: { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "true" },
+          // Isolated environment: fresh HOME/XDG so the subprocess cannot load
+          // the developer's real warehouse connections, permissive overrides,
+          // or custom agents — the optimizer prompt calls finops tools, and a
+          // fixture eval must never query a production warehouse. Model API
+          // keys are passed through explicitly; nothing else ALTIMATE_* is.
+          env: {
+            PATH: process.env["PATH"] ?? "",
+            HOME: isolatedHome,
+            XDG_CONFIG_HOME: path.join(isolatedHome, ".config"),
+            XDG_DATA_HOME: path.join(isolatedHome, ".local/share"),
+            XDG_CACHE_HOME: path.join(isolatedHome, ".cache"),
+            ...Object.fromEntries(
+              ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY"]
+                .filter((k) => process.env[k])
+                .map((k) => [k, process.env[k] as string]),
+            ),
+            ALTIMATE_TELEMETRY_DISABLED: "true",
+          },
         },
       )
       const transcript = `${run.stdout ?? ""}\n${run.stderr ?? ""}`

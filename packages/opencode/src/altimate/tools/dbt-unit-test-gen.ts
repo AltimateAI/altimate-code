@@ -3,6 +3,7 @@ import z from "zod"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { Instance } from "../../project/instance"
 import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 import type { DbtUnitTestGenResult } from "../native/types"
 
@@ -28,10 +29,14 @@ export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
   async execute(args, ctx) {
     try {
       // Manifest paths outside the project require the external_directory gate,
-      // same as file reads.
-      await assertExternalDirectoryLegacy(ctx as any, path.resolve(args.manifest_path), { kind: "file" })
+      // same as file reads. Relative paths resolve against the PROJECT directory
+      // (mirrors read.ts), and the SAME resolved path is what gets read.
+      const resolved = path.isAbsolute(args.manifest_path)
+        ? args.manifest_path
+        : path.resolve(Instance.directory, args.manifest_path)
+      await assertExternalDirectoryLegacy(ctx as any, resolved, { kind: "file" })
       const result = await Dispatcher.call("dbt.unit_test_gen", {
-        manifest_path: args.manifest_path,
+        manifest_path: resolved,
         model: args.model,
         dialect: args.dialect,
         max_scenarios: args.max_scenarios,

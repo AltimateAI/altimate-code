@@ -2,6 +2,7 @@ import z from "zod"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { Instance } from "../../project/instance"
 import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 import type { DbtManifestResult } from "../native/types"
 
@@ -15,9 +16,12 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
     try {
       // A manifest path outside the project must go through the same
       // external_directory permission gate as file reads — otherwise this tool
-      // silently reads sibling/private projects' model inventories.
-      await assertExternalDirectoryLegacy(ctx as any, path.resolve(args.path), { kind: "file" })
-      const result = await Dispatcher.call("dbt.manifest", { path: args.path })
+      // silently reads sibling/private projects' model inventories. Relative
+      // paths resolve against the PROJECT directory (mirrors read.ts), not the
+      // process cwd, and the SAME resolved path is what gets read.
+      const resolved = path.isAbsolute(args.path) ? args.path : path.resolve(Instance.directory, args.path)
+      await assertExternalDirectoryLegacy(ctx as any, resolved, { kind: "file" })
+      const result = await Dispatcher.call("dbt.manifest", { path: resolved })
 
       return {
         title: `Manifest: ${result.model_count ?? 0} models, ${result.source_count ?? 0} sources`,

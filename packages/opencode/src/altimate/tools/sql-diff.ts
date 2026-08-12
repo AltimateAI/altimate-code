@@ -47,13 +47,16 @@ export const SqlDiffTool = Tool.define("sql_diff", {
       // passed a schema object. And `equivalent` is only trustworthy when the
       // engine says `decidable: true`; an undecidable result is unproven, never
       // "equivalent".
+      // decidable !== true means the engine ABSTAINED (parse/plan failure) —
+      // that is UNDECIDABLE regardless of what `equivalent` says; only a
+      // decidable false is a genuine "not proven" refutation.
       const equivalenceLine =
         result.equivalence_assessed !== true
           ? "Semantic equivalence: not assessed (pass schema_context to enable)"
-          : result.equivalent === true && result.decidable === true
-            ? `Semantic equivalence: equivalent (confidence ${result.equivalence_confidence ?? "unknown"})`
-            : result.equivalent === true && result.decidable !== true
-              ? "Semantic equivalence: UNDECIDABLE — the engine could not prove it; treat as unproven"
+          : result.decidable !== true
+            ? "Semantic equivalence: UNDECIDABLE — the engine could not decide; treat as unproven"
+            : result.equivalent === true
+              ? `Semantic equivalence: equivalent (confidence ${result.equivalence_confidence ?? "unknown"})`
               : "Semantic equivalence: not proven"
       // Consumers gating on metadata.equivalent must never see `true` unless
       // the engine both ran AND decided — an undecidable true is not a proof.

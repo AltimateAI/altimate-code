@@ -82,16 +82,38 @@ describe("dbt reader tools enforce external_directory", () => {
     })
   })
 
-  test("in-project manifest paths pass without an ask", async () => {
+  test("in-project manifest paths pass without an ask — all three tools", async () => {
     mockHandlers()
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const inside = path.join(tmp.path, "target", "manifest.json")
+        for (const [tool, args] of [
+          [DbtManifestTool, { path: inside }],
+          [DbtLineageTool, { manifest_path: inside, model: "m" }],
+          [DbtUnitTestGenTool, { manifest_path: inside, model: "m" }],
+        ] as const) {
+          const { ctx, asks } = makeCtx()
+          const t = await initTool(tool as any)
+          await t.execute(args as any, ctx)
+          expect(asks).toEqual([])
+        }
+      },
+    })
+  })
+
+  test("relative paths resolve against the PROJECT directory, not process cwd", async () => {
+    mockHandlers()
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // "target/manifest.json" must be treated as inside the project (no ask)
+        // regardless of what the process cwd happens to be.
         const { ctx, asks } = makeCtx()
         const t = await initTool(DbtManifestTool)
-        await t.execute({ path: inside } as any, ctx)
+        await t.execute({ path: path.join("target", "manifest.json") } as any, ctx)
         expect(asks).toEqual([])
       },
     })

@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardSchemaPath } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
@@ -16,7 +17,7 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
     try {
       const result = await Dispatcher.call("altimate_core.check", {
         sql: args.sql,
-        schema_path: args.schema_path ?? "",
+        schema_path: (await guardSchemaPath(ctx, args.schema_path)) ?? "",
         schema_context: args.schema_context,
       })
       const data = (result.data ?? {}) as Record<string, any>

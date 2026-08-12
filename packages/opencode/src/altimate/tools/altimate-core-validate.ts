@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardSchemaPath } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
@@ -11,12 +12,12 @@ export const AltimateCoreValidateTool = Tool.define("altimate_core_validate", {
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
   }),
-  async execute(args, _ctx) {
+  async execute(args, ctx) {
     const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
     try {
       const result = await Dispatcher.call("altimate_core.validate", {
         sql: args.sql,
-        schema_path: args.schema_path ?? "",
+        schema_path: (await guardSchemaPath(ctx, args.schema_path)) ?? "",
         schema_context: args.schema_context,
       })
       const data = (result.data ?? {}) as Record<string, any>

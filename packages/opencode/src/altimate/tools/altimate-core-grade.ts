@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardSchemaPath } from "./schema-path-guard"
 
 export const AltimateCoreGradeTool = Tool.define("altimate_core_grade", {
   description:
@@ -14,7 +15,7 @@ export const AltimateCoreGradeTool = Tool.define("altimate_core_grade", {
     try {
       const result = await Dispatcher.call("altimate_core.grade", {
         sql: args.sql,
-        schema_path: args.schema_path ?? "",
+        schema_path: (await guardSchemaPath(ctx, args.schema_path)) ?? "",
         schema_context: args.schema_context,
       })
       const data = (result.data ?? {}) as Record<string, any>

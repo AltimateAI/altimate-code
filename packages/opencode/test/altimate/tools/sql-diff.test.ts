@@ -147,6 +147,21 @@ describe("SqlDiffTool", () => {
     expect(r.metadata.decidable).toBe(false)
   })
 
+  test("equivalent:false with decidable:false is also UNDECIDABLE — abstention is not refutation", async () => {
+    mockDiff({
+      success: true,
+      diff: "- a\n+ b",
+      equivalence_assessed: true,
+      equivalent: false,
+      decidable: false,
+      equivalence_confidence: 0,
+      differences: [],
+    })
+    const r = await runTool("select a from t", "select b from t", { schema_context: SCHEMA })
+    expect(String(r.output)).toContain("UNDECIDABLE")
+    expect(String(r.output)).not.toContain("not proven")
+  })
+
   test("assessed but unproven equivalence is presented as 'not proven'", async () => {
     mockDiff({
       success: true,

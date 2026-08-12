@@ -209,7 +209,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         "Run EXPLAIN ANALYZE (actually executes the query, slower but more accurate). Not supported by Snowflake.",
       ),
   }),
-  async execute(args, _ctx) {
+  async execute(args, ctx) {
     // Pre-flight validation — reject bad input before hitting the warehouse
     // so we return an actionable message instead of a verbatim DB error.
     const sqlError = validateSqlInput(args.sql)
@@ -252,6 +252,35 @@ export const SqlExplainTool = Tool.define("sql_explain", {
           error_class: "analyze_safety",
         },
         output: `Blocked: ${analyzeError}`,
+      }
+    }
+    // The lexer guard above is text-level hygiene, but text analysis cannot
+    // prove a SELECT side-effect-free (dblink_exec, arbitrary UDFs). EXPLAIN
+    // ANALYZE executes the statement, so it additionally requires the
+    // sql_execute_write permission: agents that deny warehouse writes
+    // (analyst/reviewer/dbt-optimizer) cannot run it at all, and write-capable
+    // agents prompt per their config.
+    if (args.analyze) {
+      try {
+        await (ctx as any).ask({
+          permission: "sql_execute_write",
+          patterns: [args.sql],
+          metadata: { reason: "EXPLAIN ANALYZE executes the statement on the warehouse" },
+        })
+      } catch {
+        const denied =
+          "EXPLAIN ANALYZE executes the statement, which requires the sql_execute_write permission — denied for this agent. Re-run with analyze:false for an estimated plan."
+        return {
+          title: "Explain: ANALYZE BLOCKED",
+          metadata: {
+            success: false,
+            analyzed: false,
+            warehouse_type: "unknown",
+            error: denied,
+            error_class: "analyze_safety",
+          },
+          output: `Blocked: ${denied}`,
+        }
       }
     }
 

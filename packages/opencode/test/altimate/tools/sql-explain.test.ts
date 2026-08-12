@@ -592,4 +592,41 @@ describe("SqlExplainTool.execute", () => {
     expect(result.title).toContain("ERROR")
     expect(String(result.output)).toContain("dispatcher exploded")
   })
+
+  test("analyze:true requires the sql_execute_write permission — denied agents are blocked", async () => {
+    // A write-denied agent (analyst/reviewer/dbt-optimizer) rejects the ask;
+    // the tool must block BEFORE the dispatcher executes anything. Text-level
+    // lexing cannot prove a SELECT side-effect-free (dblink_exec, UDFs), so
+    // the permission gate is the enforced boundary.
+    const spy = spyOn(Dispatcher, "call")
+    const denyCtx = {
+      ...ctx,
+      ask: async (req: any) => {
+        expect(req.permission).toBe("sql_execute_write")
+        throw new Error("denied")
+      },
+    }
+    const tool = await initTool(SqlExplainTool)
+    const result = await tool.execute({ sql: "SELECT dblink_exec('c', 'x') FROM t", analyze: true }, denyCtx as any)
+    expect(result.title).toContain("ANALYZE BLOCKED")
+    expect(String(result.output)).toContain("sql_execute_write")
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  test("analyze:true proceeds when the sql_execute_write ask is approved", async () => {
+    mockDispatcher({ success: true, analyzed: true, warehouse_type: "postgres", plan_text: "Seq Scan" })
+    const asks: any[] = []
+    const allowCtx = {
+      ...ctx,
+      ask: async (req: any) => {
+        asks.push(req)
+      },
+    }
+    const tool = await initTool(SqlExplainTool)
+    const result = await tool.execute({ sql: "SELECT id FROM users", analyze: true }, allowCtx as any)
+    expect(asks.some((a) => a.permission === "sql_execute_write")).toBe(true)
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.analyzed).toBe(true)
+  })
 })

@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardSchemaPath } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalence", {
@@ -33,7 +34,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
       const result = await Dispatcher.call("altimate_core.equivalence", {
         sql1: args.sql1,
         sql2: args.sql2,
-        schema_path: args.schema_path ?? "",
+        schema_path: (await guardSchemaPath(ctx, args.schema_path)) ?? "",
         schema_context: args.schema_context,
         dialect: args.dialect,
       })
