@@ -8,6 +8,8 @@ Agents define different AI personas with specific models, prompts, permissions, 
 |-------|------------|-------------|
 | `builder` | Create and modify dbt models, SQL pipelines, and data transformations | Full read/write. SQL mutations prompt for approval. |
 | `analyst` | Explore data, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes denied. Safe bash commands auto-allowed. |
+| `reviewer` | dbt PR review — runs the deterministic verdict engine and posts a signed verdict | Read-only. Edits denied; every bash command prompts. See [dbt PR Review](../usage/dbt-pr-review.md). |
+| `dbt-optimizer` | Scan a dbt project for fixable issues (materialization, SQL, DAG, tests) and propose fixes with cost/impact evidence | Read + approval-gated writes. Edits and bash prompt; the direct SQL write tool is denied non-overridably. See [Agent Modes](../data-engineering/agent-modes.md#dbt-optimizer). |
 | `plan` | Plan before acting — restricted to planning files only | Minimal — no edits, no bash, no SQL |
 
 ### Builder
@@ -26,6 +28,14 @@ Truly read-only mode for safe data exploration:
 
 !!! tip
     Use `analyst` when exploring data to ensure no accidental writes. Switch to `builder` when you're ready to create or modify models.
+
+### Reviewer
+
+Read-only dbt PR reviewer. Runs the `dbt_pr_review` verdict engine (column lineage, query equivalence, PII, grade) and presents the signed verdict. Edits and SQL writes are denied; every bash command prompts for approval. Full details: [dbt PR Review](../usage/dbt-pr-review.md).
+
+### dbt-Optimizer
+
+Scans a dbt project for fixable issues and proposes fixes with cost and impact reporting, in four phases: read-only scan → user selects candidates → verified fixes → impact report/PR. File edits and bash prompt for approval; the direct SQL write tool is denied non-overridably; dbt builds run only as user-approved commands against a dev target. Full details: [Agent Modes → dbt-Optimizer](../data-engineering/agent-modes.md#dbt-optimizer).
 
 ### Plan
 
