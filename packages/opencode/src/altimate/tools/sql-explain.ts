@@ -273,6 +273,9 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         await (ctx as any).ask({
           permission: "sql_execute_write",
           patterns: [args.sql],
+          // "Always allow" applies to future EXPLAIN ANALYZE runs broadly —
+          // same convention as sql_execute's write path.
+          always: ["*"],
           metadata: { reason: "EXPLAIN ANALYZE executes the statement on the warehouse" },
         })
       } catch {
