@@ -1244,6 +1244,14 @@ export const BridgeMethods = {
     params: { base_sql: string; head_sql: string }
     result: AltimateCoreResult
   },
+  "altimate_core.dbt_project_health": {} as {
+    params: { project_dir: string; config_json?: string; catalog_path?: string }
+    result: AltimateCoreResult
+  },
+  "altimate_core.dbt_health_infer_config": {} as {
+    params: { project_dir: string }
+    result: AltimateCoreResult
+  },
   // altimate_change end
   // --- altimate-core Phase 1 (P0) ---
   "altimate_core.fix": {} as { params: AltimateCoreFixParams; result: AltimateCoreResult },

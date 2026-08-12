@@ -40,6 +40,8 @@ export * from "./tools/altimate-core-validate"
 export * from "./tools/dbt-lineage"
 export * from "./tools/dbt-manifest"
 export * from "./tools/dbt-profiles"
+export * from "./tools/dbt-project-health"
+export * from "./tools/dbt-health-config"
 
 export * from "./tools/finops-analyze-credits"
 export * from "./tools/finops-expensive-queries"
