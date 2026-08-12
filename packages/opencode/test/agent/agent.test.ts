@@ -53,9 +53,10 @@ it.instance("returns default native agents when no config", () =>
   Effect.gen(function* () {
     const agents = yield* load((svc) => svc.list())
     const names = agents.map((a) => a.name)
-    // altimate fork replaces upstream single "build" agent with builder/analyst/reviewer
+    // altimate fork replaces upstream single "build" agent with builder/analyst/reviewer/optimizer
     expect(names).toContain("builder")
     expect(names).toContain("analyst")
+    expect(names).toContain("dbt-optimizer")
     expect(names).toContain("plan")
     expect(names).toContain("general")
     expect(names).toContain("explore")
@@ -103,6 +104,74 @@ it.instance("reviewer agent is read-only but usable outside the project (#978)",
   }),
 )
 
+it.instance("optimizer agent scans read-only and prompts on writes", () =>
+  Effect.gen(function* () {
+    const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+    expect(optimizer).toBeDefined()
+    expect(optimizer?.mode).toBe("primary")
+    expect(optimizer?.native).toBe(true)
+    // Scan phase: read-only project + analysis tools allowed
+    expect(evalPerm(optimizer, "read")).toBe("allow")
+    expect(evalPerm(optimizer, "grep")).toBe("allow")
+    expect(evalPerm(optimizer, "glob")).toBe("allow")
+    expect(evalPerm(optimizer, "sql_analyze")).toBe("allow")
+    expect(evalPerm(optimizer, "finops_expensive_queries")).toBe("allow")
+    expect(evalPerm(optimizer, "dbt_manifest")).toBe("allow")
+    expect(evalPerm(optimizer, "altimate_core_equivalence")).toBe("allow")
+    // Paths outside the project prompt instead of hard-failing on the "*" deny
+    expect(Permission.evaluate("external_directory", "/some/sibling/repo", optimizer!.permission).action).toBe("ask")
+    // Fix phase: every file change and shell command prompts
+    expect(evalPerm(optimizer, "edit")).toBe("ask")
+    expect(Permission.evaluate("bash", "git checkout -b fix/foo", optimizer!.permission).action).toBe("ask")
+    // Warehouse writes and destructive DDL are denied outright
+    expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+    expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+    // Unknown tools fall through to the "*" deny
+    expect(evalPerm(optimizer, "some_unknown_tool")).toBe("deny")
+  }),
+)
+
+it.instance(
+  "optimizer sql_execute_write deny survives a permissive user config",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // The user's global "*": "allow" opens up edit/bash, but the warehouse-write
+      // invariant is re-applied after the user config merge and must hold.
+      expect(evalPerm(optimizer, "edit")).toBe("allow")
+      expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+      expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+    }),
+  {
+    config: {
+      permission: { "*": "allow" },
+    },
+  },
+)
+
+it.instance(
+  "optimizer sql_execute_write deny survives a PER-AGENT permission override",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // agent."dbt-optimizer".permission is merged after the native definition
+      // (last-match-wins), so the warehouse-write invariant must be re-applied
+      // after per-agent overrides too — not just after global cfg.permission.
+      expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+      // The rest of the per-agent override still applies
+      expect(evalPerm(optimizer, "edit")).toBe("allow")
+    }),
+  {
+    config: {
+      agent: {
+        "dbt-optimizer": {
+          permission: { sql_execute_write: "allow", edit: "allow" },
+        },
+      },
+    },
+  },
+)
+
 it.instance("sensitive_write guard actually fires (not neutralized by *: allow)", () =>
   Effect.gen(function* () {
     // The #209 sensitive-write guard asks for the "sensitive_write" permission. It must NOT
@@ -114,6 +183,8 @@ it.instance("sensitive_write guard actually fires (not neutralized by *: allow)"
     expect(evalPerm(analyst, "sensitive_write")).toBe("deny")
     const reviewer = yield* load((svc) => svc.get("reviewer"))
     expect(evalPerm(reviewer, "sensitive_write")).toBe("deny")
+    const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+    expect(evalPerm(optimizer, "sensitive_write")).toBe("deny")
   }),
 )
 
@@ -780,7 +851,7 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      // altimate fork: builder/analyst/reviewer are the primary agents before plan;
+      // altimate fork: builder/analyst/reviewer/optimizer are the primary agents before plan;
       // disabling them all leaves plan as the next visible primary agent
       expect(agent).toBe("plan")
     }),
@@ -790,6 +861,7 @@ it.instance(
         builder: { disable: true },
         analyst: { disable: true },
         reviewer: { disable: true },
+        "dbt-optimizer": { disable: true },
       },
     },
   },
@@ -800,11 +872,12 @@ it.instance(
   () => expectDefaultAgentError("no primary visible agent found"),
   {
     config: {
-      // altimate fork: builder/analyst/reviewer/plan are all primary agents
+      // altimate fork: builder/analyst/reviewer/optimizer/plan are all primary agents
       agent: {
         builder: { disable: true },
         analyst: { disable: true },
         reviewer: { disable: true },
+        "dbt-optimizer": { disable: true },
         plan: { disable: true },
       },
     },

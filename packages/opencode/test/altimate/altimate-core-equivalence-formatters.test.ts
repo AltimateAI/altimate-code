@@ -72,6 +72,13 @@ describe("formatEquivalence", () => {
     expect(formatEquivalence(data)).toContain("Queries produce different results.")
   })
 
+  test("decidable:false is reported as UNDECIDABLE, even when equivalent is true", () => {
+    const data = { equivalent: true, decidable: false }
+    const output = formatEquivalence(data)
+    expect(output).toContain("UNDECIDABLE")
+    expect(output).not.toContain("Queries are semantically equivalent.")
+  })
+
   test("lists differences with description field", () => {
     const data = {
       equivalent: false,

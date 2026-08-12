@@ -123,7 +123,11 @@ async function verifyRewrites(
         schema_context: args.schema_context,
       })) as { error?: string; data?: Record<string, any> } | null
       const ed = (eq?.data ?? {}) as Record<string, any>
-      if (ed.equivalent === true) {
+      // The gate requires BOTH `equivalent === true` AND a decidable result. The
+      // engine can return { equivalent: true, decidable: false } when its heuristic
+      // comparator could not actually decide — that is an unproven rewrite, and
+      // reporting it as verified would be a false safety claim.
+      if (ed.equivalent === true && ed.decidable !== false) {
         verified.push({ sql: c.sql, rule: c.rule, confidence: ed.confidence })
       } else {
         // Derive a specific reason. The gate stays strict (only `=== true` verifies);
@@ -132,6 +136,8 @@ async function verifyRewrites(
         let reason: string
         if (eq?.error ?? ed.error) {
           reason = String(eq?.error ?? ed.error)
+        } else if (ed.equivalent === true && ed.decidable === false) {
+          reason = "equivalence undecidable — the engine could not prove the rewrite; validate with a data-diff"
         } else if (!("equivalent" in ed)) {
           reason = "missing 'equivalent' field in equivalence response"
         } else if (typeof ed.equivalent !== "boolean") {

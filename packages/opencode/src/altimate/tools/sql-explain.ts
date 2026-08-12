@@ -71,6 +71,41 @@ function validateWarehouseName(warehouse: string | undefined): string | null {
   return null
 }
 
+/**
+ * Guard EXPLAIN ANALYZE — on PostgreSQL, MySQL, DuckDB, and Trino it actually
+ * executes the statement. A DML statement under `analyze: true` would mutate
+ * data while bypassing the `sql_execute_write` permission, so analyze mode is
+ * restricted to plain read-only statements. String literals and comments are
+ * stripped before keyword matching; false positives just fall back to the
+ * estimated plan (`analyze: false`), which is always safe.
+ *
+ * Returns an error string, or `null` when the SQL is safe to analyze.
+ */
+function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): string | null {
+  if (!analyze) return null
+  const stripped = sql
+    .replace(/--[^\n]*/g, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .trim()
+  const readOnlyStart = /^(select|with|show|describe|desc|values|table)\b/i.test(stripped)
+  // Data-modifying CTEs (`WITH x AS (...) INSERT INTO ...`) and similar mean a
+  // read-only prefix is not enough — reject write keywords anywhere.
+  // `into` covers PostgreSQL `SELECT ... INTO new_table`, which creates a table
+  // despite starting as a SELECT.
+  const hasWriteKeyword =
+    /\b(insert|update|delete|merge|truncate|drop|alter|create|replace|grant|revoke|copy|call|vacuum|set|into)\b/i.test(
+      stripped,
+    )
+  if (!readOnlyStart || hasWriteKeyword) {
+    return (
+      "analyze:true runs EXPLAIN ANALYZE, which actually executes the statement — it is only allowed for plain SELECT queries. " +
+      "Re-run with analyze:false for an estimated plan."
+    )
+  }
+  return null
+}
+
 export const SqlExplainTool = Tool.define("sql_explain", {
   description:
     "Run EXPLAIN on a SQL query to get the execution plan. Shows how the database engine will process the query — useful for diagnosing slow queries, identifying full table scans, and understanding join strategies. Requires a warehouse connection. IMPORTANT: inline all values into the SQL text — parameterized queries with `?`, `:name`, or `$1` placeholders are not supported.",
@@ -123,6 +158,20 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         output: `Invalid input: ${warehouseError}`,
       }
     }
+    const analyzeError = validateAnalyzeSafety(args.sql, args.analyze)
+    if (analyzeError) {
+      return {
+        title: "Explain: ANALYZE BLOCKED",
+        metadata: {
+          success: false,
+          analyzed: false,
+          warehouse_type: "unknown",
+          error: analyzeError,
+          error_class: "analyze_safety",
+        },
+        output: `Blocked: ${analyzeError}`,
+      }
+    }
 
     try {
       const result = await Dispatcher.call("sql.explain", {
@@ -169,6 +218,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
 export const _sqlExplainInternal = {
   validateSqlInput,
   validateWarehouseName,
+  validateAnalyzeSafety,
 }
 
 function formatPlan(result: SqlExplainResult): string {

@@ -116,6 +116,54 @@ describe("validateSqlInput", () => {
   })
 })
 
+describe("validateAnalyzeSafety", () => {
+  const { validateAnalyzeSafety } = toolInternals
+
+  test("analyze:false is always allowed", () => {
+    expect(validateAnalyzeSafety("DELETE FROM users", false)).toBeNull()
+    expect(validateAnalyzeSafety("DELETE FROM users", undefined)).toBeNull()
+  })
+
+  test("analyze:true allows a plain SELECT", () => {
+    expect(validateAnalyzeSafety("SELECT id FROM users WHERE id = 42", true)).toBeNull()
+  })
+
+  test("analyze:true allows a read-only CTE", () => {
+    expect(validateAnalyzeSafety("WITH x AS (SELECT 1 AS a) SELECT a FROM x", true)).toBeNull()
+  })
+
+  test("analyze:true blocks DML", () => {
+    expect(validateAnalyzeSafety("DELETE FROM users WHERE id = 1", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("UPDATE users SET name = 'x'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("INSERT INTO t SELECT * FROM s", true)).not.toBeNull()
+  })
+
+  test("analyze:true blocks a data-modifying CTE", () => {
+    expect(validateAnalyzeSafety("WITH moved AS (DELETE FROM t RETURNING *) SELECT * FROM moved", true)).not.toBeNull()
+  })
+
+  test("analyze:true blocks SELECT INTO (write-capable SELECT)", () => {
+    expect(validateAnalyzeSafety("SELECT * INTO new_table FROM users", true)).not.toBeNull()
+  })
+
+  test("analyze:true blocks DDL", () => {
+    expect(validateAnalyzeSafety("DROP TABLE users", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("CREATE TABLE t AS SELECT 1", true)).not.toBeNull()
+  })
+
+  test("write keywords inside string literals do not block a SELECT", () => {
+    expect(validateAnalyzeSafety("SELECT * FROM audit WHERE action = 'delete'", true)).toBeNull()
+  })
+
+  test("write keywords inside comments do not block a SELECT", () => {
+    expect(validateAnalyzeSafety("SELECT id FROM t -- drop old rows later", true)).toBeNull()
+  })
+
+  test("column names containing write keywords do not block (word boundaries)", () => {
+    expect(validateAnalyzeSafety("SELECT updated_at, is_deleted FROM t", true)).toBeNull()
+  })
+})
+
 describe("validateWarehouseName", () => {
   const { validateWarehouseName } = toolInternals
 

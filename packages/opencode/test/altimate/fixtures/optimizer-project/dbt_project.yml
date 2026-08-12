@@ -1,0 +1,10 @@
+name: optimizer_fixture
+version: "1.0.0"
+profile: optimizer_fixture
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+
+models:
+  optimizer_fixture:
+    +materialized: table

@@ -43,11 +43,18 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
         }
       }
       // altimate_change end
+      // The engine reports `decidable: false` when its comparator could not
+      // actually decide. Surface that as UNDECIDABLE — presenting it as
+      // EQUIVALENT or DIFFERENT would be a false verdict either way.
+      const undecidable = data.decidable === false
       return {
-        title: isRealFailure ? "Equivalence: ERROR" : `Equivalence: ${data.equivalent ? "EQUIVALENT" : "DIFFERENT"}`,
+        title: isRealFailure
+          ? "Equivalence: ERROR"
+          : `Equivalence: ${undecidable ? "UNDECIDABLE" : data.equivalent ? "EQUIVALENT" : "DIFFERENT"}`,
         metadata: {
           success: !isRealFailure,
           equivalent: data.equivalent,
+          ...(undecidable && { decidable: false }),
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
@@ -78,7 +85,13 @@ export function extractEquivalenceErrors(data: Record<string, any>): string | un
 export function formatEquivalence(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
   const lines: string[] = []
-  lines.push(data.equivalent ? "Queries are semantically equivalent." : "Queries produce different results.")
+  if (data.decidable === false) {
+    lines.push(
+      "Equivalence is UNDECIDABLE — the engine could not prove or refute equivalence. Treat the queries as unproven and validate with a data-diff.",
+    )
+  } else {
+    lines.push(data.equivalent ? "Queries are semantically equivalent." : "Queries produce different results.")
+  }
   if (data.differences?.length) {
     lines.push("\nDifferences:")
     for (const d of data.differences) {
