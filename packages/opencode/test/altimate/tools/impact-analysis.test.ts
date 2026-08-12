@@ -229,3 +229,29 @@ describe("findDownstream: unique_id traversal (package-qualified name collisions
     expect(findDownstream("stg", models).map((m) => m.name)).toEqual(["mart"])
   })
 })
+
+describe("findDownstream: BFS depth semantics (multi-seed)", () => {
+  test("shortest distance from ANY seed wins — direct dependents are never labeled transitive", () => {
+    // X depends directly on the pkg_b seed AND transitively on the pkg_a seed.
+    // A DFS with shared visited could reach X first via the long pkg_a chain
+    // (depth 2) depending on manifest order; BFS must report depth 1.
+    const models = [
+      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+      { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
+      { name: "mid", unique_id: "model.pkg_a.mid", depends_on: ["model.pkg_a.orders"] },
+      { name: "x", unique_id: "model.pkg_a.x", depends_on: ["model.pkg_a.mid", "model.pkg_b.orders"] },
+    ]
+    const result = findDownstream("orders", models)
+    const x = result.find((m) => m.name === "x")
+    expect(x?.depth).toBe(1)
+  })
+
+  test("results carry unique_id for collision-safe downstream accounting", () => {
+    const models = [
+      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+      { name: "rpt", unique_id: "model.pkg_a.rpt", depends_on: ["model.pkg_a.orders"] },
+    ]
+    const result = findDownstream("orders", models)
+    expect(result[0].unique_id).toBe("model.pkg_a.rpt")
+  })
+})

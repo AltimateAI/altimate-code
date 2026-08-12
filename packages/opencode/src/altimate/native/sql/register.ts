@@ -354,28 +354,61 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.diff", async (params) => {
     try {
-      const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
-
       const sqlA = params.original ?? params.sql_a
       const sqlB = params.modified ?? params.sql_b
 
-      // `|| undefined`: coerce a default empty-string dialect to "no hint" — the
-      // engine throws on an unknown dialect "".
-      const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema, params.dialect || undefined) : null
-      const compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
-
-      // Simple line-based diff
+      // LCS-based line diff: index-aligned comparison reports every line after
+      // a single top-of-file insertion as a replacement, inflating the change
+      // count from 1 to the file length. DP is O(n*m); beyond the cap fall
+      // back to index alignment (SQL models are far below it in practice).
       const linesA = sqlA.split("\n")
       const linesB = sqlB.split("\n")
       const diffLines: string[] = []
-      const maxLen = Math.max(linesA.length, linesB.length)
-      for (let i = 0; i < maxLen; i++) {
-        const a = linesA[i] ?? ""
-        const b = linesB[i] ?? ""
-        if (a !== b) {
-          if (a) diffLines.push(`- ${a}`)
-          if (b) diffLines.push(`+ ${b}`)
+      if (linesA.length * linesB.length <= 1_000_000) {
+        const n = linesA.length
+        const m = linesB.length
+        const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0))
+        for (let i = n - 1; i >= 0; i--)
+          for (let j = m - 1; j >= 0; j--)
+            lcs[i][j] = linesA[i] === linesB[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+        let i = 0
+        let j = 0
+        while (i < n && j < m) {
+          if (linesA[i] === linesB[j]) {
+            i++
+            j++
+          } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+            diffLines.push(`- ${linesA[i++]}`)
+          } else {
+            diffLines.push(`+ ${linesB[j++]}`)
+          }
         }
+        while (i < n) diffLines.push(`- ${linesA[i++]}`)
+        while (j < m) diffLines.push(`+ ${linesB[j++]}`)
+      } else {
+        const maxLen = Math.max(linesA.length, linesB.length)
+        for (let i = 0; i < maxLen; i++) {
+          const a = linesA[i] ?? ""
+          const b = linesB[i] ?? ""
+          if (a !== b) {
+            if (a) diffLines.push(`- ${a}`)
+            if (b) diffLines.push(`+ ${b}`)
+          }
+        }
+      }
+
+      // Equivalence is checked in its OWN try/catch: a schema-resolution or
+      // engine failure must not erase the text diff, which is independently
+      // computable — it just downgrades the result to "not assessed".
+      let compare: Record<string, any> | null = null
+      try {
+        const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
+        // `|| undefined`: coerce a default empty-string dialect to "no hint" — the
+        // engine throws on an unknown dialect "".
+        const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema, params.dialect || undefined) : null
+        compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
+      } catch {
+        compare = null
       }
 
       return {

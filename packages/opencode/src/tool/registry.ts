@@ -546,6 +546,12 @@ export namespace ToolRegistry {
         // the tool exposed and defer to its own finer-grained asks.
         .filter((t) => {
           if (!agent?.permission?.length) return true
+          // The `invalid` tool is internal repair machinery, not a capability:
+          // session/llm.ts renames unknown/malformed tool calls to it so the
+          // model receives a structured validation error. Filtering it under a
+          // deny-by-default agent would turn every repaired call into a hard
+          // failure that can end the turn.
+          if (t.id === "invalid") return true
           return !Permission.disabled([t.id], agent.permission).has(t.id)
         })
         // altimate_change end
