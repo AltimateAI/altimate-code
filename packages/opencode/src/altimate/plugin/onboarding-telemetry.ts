@@ -12,6 +12,16 @@
 // session loop.
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+// altimate_change start — AI-8398 workspaces trigger. Reaches into the same
+// EventV2 bridge the server/routes/tui.ts uses to publish TuiEvent.CommandExecute
+// so the workspace TuiPlugin (packages/opencode/src/plugin/tui/altimate/workspace.tsx)
+// runs its post-scan flow. Feature-flagged via Flag.ALTIMATE_WORKSPACE.
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { AltimateApi } from "@/altimate/api/client"
+import { AppRuntime } from "@/effect/app-runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { TuiEvent } from "@/server/tui-event"
+// altimate_change end
 
 const ONBOARD_CONNECT = "onboard-connect"
 
@@ -134,6 +144,28 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
           },
           input.sessionID,
         )
+        // altimate_change start — AI-8398 workspaces post-scan prompt trigger.
+        // Fires the TUI plugin's altimate.workspace.postScan command once the scan
+        // completes AND the CLI has real Altimate credentials (BYOK users skip this
+        // path entirely — no place to send them). All the state (Skip latch, cache,
+        // server pre-check) is plugin-side so the trigger stays a fire-and-forget
+        // signal here; a retry would just re-enter the plugin's idempotent runFlow.
+        if (Flag.ALTIMATE_WORKSPACE && (await AltimateApi.isConfigured().catch(() => false))) {
+          void AppRuntime.runPromise(
+            EventV2Bridge.Service.use((events) =>
+              events.publish(TuiEvent.CommandExecute, {
+                command: "altimate.workspace.postScan",
+              }),
+            ),
+          ).catch((err) => {
+            // Never block onboarding on a publish failure — worst case the
+            // user picks up the workspace on their next launch or via the
+            // /altimate.workspace.link palette command.
+            // eslint-disable-next-line no-console
+            console.error("[altimate-workspace] postScan trigger failed:", err)
+          })
+        }
+        // altimate_change end
         return
       }
 

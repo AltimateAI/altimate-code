@@ -63,6 +63,14 @@ export const Flag = {
   OPENCODE_WORKSPACE_ID: process.env["OPENCODE_WORKSPACE_ID"],
   OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
 
+  // altimate_change start — pilot flag for the Workspaces feature (post-scan prompt +
+  // altimate link subcommand). Read as a getter so tests and the runtime `--` middleware
+  // can flip it between plugin activation and command execution.
+  get ALTIMATE_WORKSPACE() {
+    return enabledByExperimental("ALTIMATE_WORKSPACE")
+  },
+  // altimate_change end
+
   // Evaluated at access time (not module load) because tests, the CLI, and
   // external tooling set these env vars at runtime.
   get OPENCODE_DISABLE_PROJECT_CONFIG() {

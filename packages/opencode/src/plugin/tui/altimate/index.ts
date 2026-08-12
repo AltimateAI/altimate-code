@@ -13,6 +13,7 @@ import ProviderCredentials from "./provider-credentials"
 import PromptEnhance from "./prompt-enhance"
 import SkillOps from "./skill-ops"
 import TraceViewer from "./trace-viewer"
+import Workspace from "./workspace"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
 // (see the ADR re-home plan). Each lives in its own file under this directory and default-exports
@@ -21,7 +22,8 @@ import TraceViewer from "./trace-viewer"
 //   import SkillOps from "./skill-ops"
 //   import PromptEnhance from "./prompt-enhance"
 //   import TraceViewer from "./trace-viewer"
+//   import Workspace from "./workspace"
 export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimentalEventSystem">): BuiltinTuiPlugin[] {
-  return [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer]
+  return [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer, Workspace]
 }
 // altimate_change end

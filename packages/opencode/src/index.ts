@@ -44,6 +44,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — link: workspace-binding subcommand
+import { LinkCommand } from "./cli/cmd/link"
+// altimate_change end
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
@@ -169,6 +172,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
+  // altimate_change end
+  // altimate_change start — link: workspace-binding subcommand
+  .command(LinkCommand)
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command
