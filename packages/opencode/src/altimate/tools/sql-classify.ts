@@ -52,11 +52,22 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
 }
 
 /**
+ * Side-effecting functions that mutate warehouse state from inside a
+ * read-shaped SELECT. AST statement categories cannot see these — a
+ * `SELECT dblink_exec(...)` or `SELECT nextval(...)` parses as a read — so
+ * they are matched textually and escalate the classification to "write",
+ * routing the statement through the sql_execute_write permission. Word
+ * boundary + `(` keeps column names like `nextval_cache` unaffected.
+ */
+const SIDE_EFFECT_FUNCTIONS = /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend)\s*\(/i
+
+/**
  * Classify a SQL string as "read" or "write" using AST parsing.
  * If ANY statement is a write, returns "write".
  */
 export function classify(sql: string): "read" | "write" {
   if (!sql || typeof sql !== "string") return "read"
+  if (SIDE_EFFECT_FUNCTIONS.test(sql)) return "write"
   if (!getStatementTypes) return classifyFallback(sql).queryType
   try {
     const result = getStatementTypes(sql)
@@ -81,10 +92,14 @@ export function classifyMulti(sql: string): "read" | "write" {
  */
 export function classifyAndCheck(sql: string): { queryType: "read" | "write"; blocked: boolean } {
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
-  if (!getStatementTypes) return classifyFallback(sql)
+  const sideEffect = SIDE_EFFECT_FUNCTIONS.test(sql)
+  if (!getStatementTypes) {
+    const fb = classifyFallback(sql)
+    return sideEffect ? { ...fb, queryType: "write" } : fb
+  }
   try {
     const result = getStatementTypes(sql)
-    if (!result?.statements?.length) return { queryType: "read", blocked: false }
+    if (!result?.statements?.length) return { queryType: sideEffect ? "write" : "read", blocked: false }
 
     const blocked = result.statements.some(
       (s: { statement_type: string }) =>
@@ -92,10 +107,12 @@ export function classifyAndCheck(sql: string): { queryType: "read" | "write"; bl
     )
 
     const categories = result.categories ?? []
-    const queryType = categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
+    const queryType =
+      sideEffect || categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
     return { queryType: queryType as "read" | "write", blocked }
   } catch {
-    return classifyFallback(sql)
+    const fb = classifyFallback(sql)
+    return sideEffect ? { ...fb, queryType: "write" } : fb
   }
 }
 

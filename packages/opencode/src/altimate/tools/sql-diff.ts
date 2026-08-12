@@ -48,8 +48,8 @@ export const SqlDiffTool = Tool.define("sql_diff", {
       // engine says `decidable: true`; an undecidable result is unproven, never
       // "equivalent".
       // decidable !== true means the engine ABSTAINED (parse/plan failure) —
-      // that is UNDECIDABLE regardless of what `equivalent` says; only a
-      // decidable false is a genuine "not proven" refutation.
+      // that is UNDECIDABLE regardless of what `equivalent` says; "not proven"
+      // is only claimed when the engine decidably adjudicates equivalent=false.
       const equivalenceLine =
         result.equivalence_assessed !== true
           ? "Semantic equivalence: not assessed (pass schema_context to enable)"

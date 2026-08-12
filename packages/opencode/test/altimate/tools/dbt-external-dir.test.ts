@@ -87,7 +87,7 @@ describe("dbt reader tools enforce external_directory", () => {
     })
   })
 
-  test("in-project manifest paths pass without an ask — all three tools", async () => {
+  test("in-project manifest paths pass without an ask — all four tools", async () => {
     mockHandlers()
     await using tmp = await tmpdir()
     await Instance.provide({
@@ -116,11 +116,19 @@ describe("dbt reader tools enforce external_directory", () => {
       directory: tmp.path,
       fn: async () => {
         // "target/manifest.json" must be treated as inside the project (no ask)
-        // regardless of what the process cwd happens to be.
-        const { ctx, asks } = makeCtx()
-        const t = await initTool(DbtManifestTool)
-        await t.execute({ path: path.join("target", "manifest.json") } as any, ctx)
-        expect(asks).toEqual([])
+        // regardless of what the process cwd happens to be — for every reader.
+        const rel = path.join("target", "manifest.json")
+        for (const [tool, args] of [
+          [DbtManifestTool, { path: rel }],
+          [DbtLineageTool, { manifest_path: rel, model: "m" }],
+          [DbtUnitTestGenTool, { manifest_path: rel, model: "m" }],
+          [ImpactAnalysisTool, { manifest_path: rel, model: "m", change_type: "modify" }],
+        ] as const) {
+          const { ctx, asks } = makeCtx()
+          const t = await initTool(tool as any)
+          await t.execute(args as any, ctx)
+          expect(asks).toEqual([])
+        }
       },
     })
   })

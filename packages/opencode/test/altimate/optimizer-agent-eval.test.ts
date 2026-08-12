@@ -142,7 +142,26 @@ describeIf("optimizer live eval — planted-project scan", () => {
             XDG_DATA_HOME: path.join(isolatedHome, ".local/share"),
             XDG_CACHE_HOME: path.join(isolatedHome, ".cache"),
             ...Object.fromEntries(
-              ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_API_KEY"]
+              [
+                // Model/provider credentials
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY",
+                "GOOGLE_API_KEY",
+                "GROQ_API_KEY",
+                "MISTRAL_API_KEY",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+                "AWS_REGION",
+                // Corporate proxy / TLS interception support — without these
+                // the eval fails with an opaque network error behind a proxy.
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "NO_PROXY",
+                "SSL_CERT_FILE",
+                "NODE_EXTRA_CA_CERTS",
+              ]
                 .filter((k) => process.env[k])
                 .map((k) => [k, process.env[k] as string]),
             ),

@@ -273,12 +273,18 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         await (ctx as any).ask({
           permission: "sql_execute_write",
           patterns: [args.sql],
-          // "Always allow" applies to future EXPLAIN ANALYZE runs broadly —
-          // same convention as sql_execute's write path.
-          always: ["*"],
+          // No "always" grant: approving one EXPLAIN ANALYZE must not silently
+          // authorize arbitrary future warehouse writes in the session, since
+          // sql_execute_write is shared with the real write path.
+          always: [],
           metadata: { reason: "EXPLAIN ANALYZE executes the statement on the warehouse" },
         })
-      } catch {
+      } catch (e) {
+        // Config-level denial gets a friendly fallback result; an interactive
+        // user REJECTION (or correction) must propagate so the session keeps
+        // its blocked-tool semantics instead of reading like a soft failure.
+        const name = e instanceof Error ? e.constructor.name : ""
+        if (name === "RejectedError" || name === "CorrectedError") throw e
         const denied =
           "EXPLAIN ANALYZE executes the statement, which requires the sql_execute_write permission — denied for this agent. Re-run with analyze:false for an estimated plan."
         return {

@@ -3,11 +3,9 @@
 // Combines dbt manifest parsing with column-level lineage to show downstream
 // impact of model/column changes across the entire DAG.
 import z from "zod"
-import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { Instance } from "../../project/instance"
-import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
+import { guardExternalFile } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
@@ -37,10 +35,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       // Manifest paths outside the project require the external_directory gate,
       // same as the other dbt readers. Relative paths resolve against the
       // PROJECT directory (mirrors read.ts), and the gated path is what's read.
-      const manifestPath = path.isAbsolute(args.manifest_path)
-        ? args.manifest_path
-        : path.resolve(Instance.directory, args.manifest_path)
-      await assertExternalDirectoryLegacy(ctx as any, manifestPath, { kind: "file" })
+      const manifestPath = (await guardExternalFile(ctx, args.manifest_path)) ?? args.manifest_path
       // Step 1: Parse the dbt manifest to get the full DAG
       const manifest = await Dispatcher.call("dbt.manifest", { path: manifestPath })
 

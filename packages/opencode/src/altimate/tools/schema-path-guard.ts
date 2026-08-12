@@ -3,18 +3,41 @@ import { Instance } from "../../project/instance"
 import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 
 /**
- * Gate a schema_path (or any file-path argument) through the external_directory
+ * Gate a file/directory path argument through the external_directory
  * permission, resolving relative paths against the PROJECT directory (mirrors
  * read.ts — never the process cwd). Returns the resolved path so the caller
- * reads exactly what was gated. Passes empty/undefined through untouched.
+ * reads exactly what was gated.
  *
- * Path-taking analysis tools must all use this: without it, a read-scoped
- * agent steered by untrusted project content could feed absolute sibling or
- * private paths to the engine and exfiltrate schema/DDL without a prompt.
+ * Path-taking analysis tools must all use this single helper (dbt readers,
+ * impact_analysis, and the schema_path-taking core wrappers): without it, a
+ * read-scoped agent steered by untrusted project content could feed absolute
+ * sibling or private paths to the engine and exfiltrate schema/DDL without a
+ * prompt.
+ *
+ * Outside an Instance context (direct invocation in unit tests, standalone
+ * scripts) there is no project boundary or permission session to consult —
+ * the path is returned resolved against cwd and ungated, preserving the
+ * pre-existing context-free behavior. Real agent sessions always run inside
+ * Instance.provide, so the gate is always active where it matters.
  */
-export async function guardSchemaPath(ctx: unknown, p: string | undefined): Promise<string | undefined> {
+export async function guardExternalFile(
+  ctx: unknown,
+  p: string | undefined,
+  kind: "file" | "directory" = "file",
+): Promise<string | undefined> {
   if (!p) return p
-  const resolved = path.isAbsolute(p) ? p : path.resolve(Instance.directory, p)
-  await assertExternalDirectoryLegacy(ctx as any, resolved, { kind: "file" })
+  let base: string
+  try {
+    base = Instance.directory
+  } catch {
+    return path.resolve(p)
+  }
+  const resolved = path.isAbsolute(p) ? p : path.resolve(base, p)
+  await assertExternalDirectoryLegacy(ctx as any, resolved, { kind })
   return resolved
+}
+
+/** Back-compat alias used by the schema_path-taking core wrappers. */
+export async function guardSchemaPath(ctx: unknown, p: string | undefined): Promise<string | undefined> {
+  return guardExternalFile(ctx, p, "file")
 }

@@ -18,6 +18,9 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import type { Agent } from "../agent/agent"
+// altimate_change start — Wildcard for permission-aware tool exposure
+import { Wildcard } from "../util/wildcard"
+// altimate_change end
 import { Tool } from "./tool"
 import { Instance } from "../project/instance"
 // altimate_change start — restore Instance ALS for the Effect Service facade
@@ -532,6 +535,20 @@ export namespace ToolRegistry {
     // altimate_change end
     const result = await Promise.all(
       tools
+        // altimate_change start — permission-aware exposure. Built-in registry
+        // tools are executed WITHOUT a generic tool-name permission gate (only
+        // the MCP loop asks per tool id), so an agent's `"*": "deny"` allowlist
+        // would otherwise not stop a denied built-in from being invoked. Drop a
+        // tool when the agent's ruleset matches its id and every matching rule
+        // is "deny"; any allow/ask rule keeps it exposed, relying on the tool's
+        // own finer-grained asks (bash/edit/sql_execute_write/...).
+        .filter((t) => {
+          if (!agent?.permission?.length) return true
+          const matching = agent.permission.filter((r) => Wildcard.match(t.id, r.permission))
+          if (matching.length === 0) return true
+          return matching.some((r) => r.action !== "deny")
+        })
+        // altimate_change end
         .filter((t) => {
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {

@@ -27,6 +27,10 @@ export const TrainingRemoveTool = Tool.define("training_remove", {
   }),
   async execute(args, ctx) {
     try {
+      // Deleting persistent training must prompt for agents that configure
+      // training_remove as ask/deny — built-in tools get no generic tool-name
+      // gate at execution, so the ask lives here.
+      await (ctx as any).ask({ permission: "training_remove", patterns: ["*"], always: ["*"], metadata: {} })
       // Get the entry first so we can show what was removed
       const entry = await TrainingStore.get(args.scope, args.kind, args.name)
 

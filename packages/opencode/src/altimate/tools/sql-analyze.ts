@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardSchemaPath } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 import type { SqlAnalyzeResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
@@ -30,7 +31,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
       const rawResult = (await Dispatcher.call("sql.analyze", {
         sql: args.sql,
         dialect: args.dialect,
-        schema_path: args.schema_path,
+        schema_path: await guardSchemaPath(ctx, args.schema_path),
         schema_context: args.schema_context,
       })) as unknown
 
