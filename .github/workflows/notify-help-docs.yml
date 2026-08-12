@@ -64,7 +64,7 @@ jobs:
             '{product:$product,before:$before,after:$after,source_pr:$source_pr,source_author:$source_author,source_url:$source_url}')"
           echo "json=$JSON" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         id: tok
         if: steps.config.outputs.enabled == 'true'
         with:
@@ -72,6 +72,7 @@ jobs:
           private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
           owner: AltimateAI
           repositories: help-docs
+          permission-contents: write
 
       - uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
         if: steps.config.outputs.enabled == 'true'
