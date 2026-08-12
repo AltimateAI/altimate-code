@@ -222,10 +222,11 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         // legacy array shape is kept as a fallback. Each entry names the
         // SOURCE column; query_targets carries the exposed OUTPUT aliases
         // (e.g. `SELECT email AS contact` → column "email", targets ["contact"]).
-        ...asArray<any>((data.pii as any)?.pii_columns ?? data.pii).flatMap((p: any) => [
-          piiColumnOf(p),
-          ...(Array.isArray(p?.query_targets) ? p.query_targets : []),
-        ]),
+        // Prefer the aliases when present — the source name is not in the
+        // model output, so reporting it would flag a column that isn't there.
+        ...asArray<any>((data.pii as any)?.pii_columns ?? data.pii).flatMap((p: any) =>
+          Array.isArray(p?.query_targets) && p.query_targets.length ? p.query_targets : [piiColumnOf(p)],
+        ),
         ...rawIssues
           .filter((i: any) => /pii|sensitive/i.test(String(i.category ?? i.rule ?? i.code ?? i.kind ?? "")))
           .map(piiColumnOf),

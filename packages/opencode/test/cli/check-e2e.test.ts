@@ -782,6 +782,31 @@ describe("check command E2E", () => {
     expect(j.results.grade.score).toBe(0.72)
   })
 
+  test("grade check surfaces validation/safety findings when lint is clean", async () => {
+    // EvalResult can carry validation errors or safety threats with zero lint
+    // findings — the grade check must not present an empty (passing) list.
+    const file = await writeSql(tmpDir.dir, "grade-nested.sql", "SELECT zzz FROM t;")
+    setDispatcherResponse("altimate_core.grade", () => ({
+      success: true,
+      data: {
+        overall_grade: "D",
+        scores: { overall: 0.4 },
+        lint: { clean: true, findings: [] },
+        validation: { valid: false, errors: [{ code: "E002", message: "Column 'zzz' not found" }] },
+        safety: { safe: false, threats: [{ rule: "tautology_attack", severity: "high", message: "OR 1=1 detected" }] },
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.grade.findings.length).toBe(2)
+    const rules = j.results.grade.findings.map((f: any) => f.rule)
+    expect(rules).toContain("validate")
+    expect(rules).toContain("tautology_attack")
+    expect(j.results.grade.findings.some((f: any) => f.severity === "error")).toBe(true)
+  })
+
   test("grade check fails closed on engine failure envelope", async () => {
     // Native handlers report failures via {success:false}, not by throwing —
     // a failed grade run must not pass silently with zero findings.

@@ -289,12 +289,28 @@ async function runGrade(
     }
     // Engine EvalResult: { explain, lint, overall_grade, safety, scores, sql,
     // total_time_ms, validation } — the grade is `overall_grade`, the numeric
-    // score is `scores.overall`, and actionable findings live in `lint.findings`.
+    // score is `scores.overall`. Findings come from ALL nested sections:
+    // lint.findings, validation.errors, and safety.threats — a failing grade
+    // with clean lint must not produce an empty (passing) finding list.
     const lint = result.data.lint as Record<string, unknown> | undefined
+    const validation = result.data.validation as Record<string, unknown> | undefined
+    const safety = result.data.safety as Record<string, unknown> | undefined
+    const nested = [
+      ...((lint?.findings as Array<Record<string, unknown>> | undefined) ?? []),
+      ...(((validation?.errors as Array<Record<string, unknown>> | undefined) ?? []).map((e) => ({
+        ...e,
+        rule: "validate",
+        severity: "error",
+      })) as Array<Record<string, unknown>>),
+      ...(((safety?.threats as Array<Record<string, unknown>> | undefined) ?? []).map((t) => ({
+        ...t,
+        rule: (t.rule as string) ?? "safety",
+      })) as Array<Record<string, unknown>>),
+    ]
     const issues = (result.data.issues ??
       result.data.findings ??
       result.data.recommendations ??
-      lint?.findings ??
+      (nested.length ? nested : undefined) ??
       []) as Array<Record<string, unknown>>
     const findings = issues.map((f) => ({
       file,
