@@ -1,8 +1,15 @@
 /**
  * Tests for SqlDiffTool — the wrapper must read the native handler's ACTUAL
- * contract ({ success, diff, equivalent, equivalence_confidence, differences }).
- * A previous version read fields the handler never returns (has_changes /
- * unified_diff / similarity), so every comparison reported "identical".
+ * contract ({ success, diff, equivalence_assessed, equivalent, decidable,
+ * equivalence_confidence, differences }). A previous version read fields the
+ * handler never returns (has_changes/unified_diff/similarity), so every
+ * comparison reported "identical".
+ *
+ * Equivalence honesty invariants:
+ *  - "not assessed" comes from the HANDLER's equivalence_assessed flag (the
+ *    check only runs when the schema actually resolves), never from guessing.
+ *  - "equivalent" requires equivalent === true AND decidable === true; an
+ *    undecidable result reads UNDECIDABLE and metadata.equivalent stays false.
  */
 import { describe, test, expect, beforeEach } from "bun:test"
 import { initTool } from "../tool-fixture"
@@ -34,6 +41,8 @@ async function runTool(original: string, modified: string, extra: Record<string,
   return tool.execute({ original, modified, context_lines: 3, ...extra }, ctx)
 }
 
+const SCHEMA = { t: { a: "INTEGER", b: "INTEGER" } }
+
 describe("SqlDiffTool", () => {
   beforeEach(() => Dispatcher.reset())
 
@@ -41,11 +50,13 @@ describe("SqlDiffTool", () => {
     mockDiff({
       success: true,
       diff: "- select 1\n+ select 2",
+      equivalence_assessed: true,
       equivalent: false,
+      decidable: true,
       equivalence_confidence: 0,
       differences: [{ description: "literal differs" }],
     })
-    const r = await runTool("select 1", "select 2")
+    const r = await runTool("select 1", "select 2", { schema_context: SCHEMA })
     expect(r.metadata.has_changes).toBe(true)
     expect(r.metadata.change_count).toBe(2)
     expect(String(r.output)).toContain("+ select 2")
@@ -54,46 +65,100 @@ describe("SqlDiffTool", () => {
   })
 
   test("identical queries report no text changes", async () => {
-    mockDiff({ success: true, diff: "", equivalent: true, equivalence_confidence: 1, differences: [] })
-    const r = await runTool("select 1", "select 1")
+    mockDiff({
+      success: true,
+      diff: "",
+      equivalence_assessed: true,
+      equivalent: true,
+      decidable: true,
+      equivalence_confidence: 1,
+      differences: [],
+    })
+    const r = await runTool("select 1", "select 1", { schema_context: SCHEMA })
     expect(r.metadata.has_changes).toBe(false)
     expect(String(r.output)).toContain("textually identical")
   })
 
   test("handler failure surfaces the error instead of 'no changes'", async () => {
-    mockDiff({ success: false, diff: "", equivalent: false, differences: [], error: "engine unavailable" })
+    mockDiff({
+      success: false,
+      diff: "",
+      equivalence_assessed: false,
+      equivalent: false,
+      decidable: false,
+      differences: [],
+      error: "engine unavailable",
+    })
     const r = await runTool("select 1", "select 2")
     expect(r.title).toBe("Diff: ERROR")
     expect(String(r.output)).toContain("engine unavailable")
   })
 
-  test("without schema, equivalence is reported as NOT ASSESSED, never 'not proven'", async () => {
-    // The native handler skips the equivalence check entirely when no schema is
-    // supplied, so `equivalent: false` there means "did not run", not "failed".
-    mockDiff({ success: true, diff: "- a\n+ b", equivalent: false, equivalence_confidence: 0, differences: [] })
-    const r = await runTool("select a from t", "select b from t")
-    expect(String(r.output)).toContain("not assessed")
-    expect(String(r.output)).not.toContain("not proven")
-  })
-
-  test("schema_context and dialect are forwarded to the native handler", async () => {
-    const schema = { t: { a: "INTEGER", b: "INTEGER" } }
-    mockDiff({ success: true, diff: "- a\n+ b", equivalent: true, equivalence_confidence: 0.9, differences: [] })
-    const r = await runTool("select a from t", "select b from t", { schema_context: schema, dialect: "duckdb" })
-    expect(lastParams?.schema_context).toEqual(schema)
-    expect(lastParams?.dialect).toBe("duckdb")
-    expect(String(r.output)).toContain("equivalent (confidence 0.9)")
-  })
-
-  test("with schema, unproven equivalence is presented as 'not proven'", async () => {
+  test("unassessed equivalence reads NOT ASSESSED — driven by the handler flag", async () => {
+    // Handler could not resolve the schema (or none was passed) -> the check
+    // never ran; `equivalent: false` there means "did not run", not "failed".
     mockDiff({
       success: true,
       diff: "- a\n+ b",
+      equivalence_assessed: false,
       equivalent: false,
+      decidable: false,
+      equivalence_confidence: 0,
+      differences: [],
+    })
+    const r = await runTool("select a from t", "select b from t")
+    expect(String(r.output)).toContain("not assessed")
+    expect(String(r.output)).not.toContain("not proven")
+    expect(r.metadata.equivalence_assessed).toBe(false)
+    expect(r.metadata.equivalent).toBe(false)
+  })
+
+  test("schema_context and dialect are forwarded to the native handler", async () => {
+    mockDiff({
+      success: true,
+      diff: "- a\n+ b",
+      equivalence_assessed: true,
+      equivalent: true,
+      decidable: true,
+      equivalence_confidence: 0.9,
+      differences: [],
+    })
+    const r = await runTool("select a from t", "select b from t", { schema_context: SCHEMA, dialect: "duckdb" })
+    expect(lastParams?.schema_context).toEqual(SCHEMA)
+    expect(lastParams?.dialect).toBe("duckdb")
+    expect(String(r.output)).toContain("equivalent (confidence 0.9)")
+    expect(r.metadata.equivalent).toBe(true)
+  })
+
+  test("equivalent:true with decidable:false reads UNDECIDABLE and metadata.equivalent stays false", async () => {
+    mockDiff({
+      success: true,
+      diff: "- a\n+ b",
+      equivalence_assessed: true,
+      equivalent: true,
+      decidable: false,
+      equivalence_confidence: 0.9,
+      differences: [],
+    })
+    const r = await runTool("select a from t", "select b from t", { schema_context: SCHEMA })
+    expect(String(r.output)).toContain("UNDECIDABLE")
+    expect(String(r.output)).not.toContain("Semantic equivalence: equivalent")
+    expect(r.metadata.equivalent).toBe(false)
+    expect(r.metadata.decidable).toBe(false)
+  })
+
+  test("assessed but unproven equivalence is presented as 'not proven'", async () => {
+    mockDiff({
+      success: true,
+      diff: "- a\n+ b",
+      equivalence_assessed: true,
+      equivalent: false,
+      decidable: true,
       equivalence_confidence: 0.4,
       differences: [],
     })
-    const r = await runTool("select a from t", "select b from t", { schema_context: { t: { a: "INTEGER" } } })
+    const r = await runTool("select a from t", "select b from t", { schema_context: SCHEMA })
     expect(String(r.output)).toContain("not proven")
+    expect(r.metadata.equivalent).toBe(false)
   })
 })

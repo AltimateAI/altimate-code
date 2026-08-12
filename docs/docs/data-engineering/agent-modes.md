@@ -210,7 +210,7 @@ The optimizer works in four explicit phases and never skips ahead:
 
 ### Example: Scan a project
 
-```
+```text
 You: Scan this dbt project for optimization candidates
 
 dbt-Optimizer: Building the evidence base (manifest + query history)...
@@ -240,7 +240,7 @@ Which candidates should I fix?
 
 - File edits and shell commands **prompt for approval** by default.
 - The direct SQL write tool (`sql_execute_write`) is **denied non-overridably** — no global or per-agent config can enable it.
-- dbt builds mutate the warehouse, so they run only as user-approved shell commands against a **dev target**, model-by-model (`altimate-dbt compile --model` / `build --model`); a full project build requires explicit approval.
+- dbt builds mutate the warehouse, so they run only as user-approved shell commands, model-by-model (`altimate-dbt compile --model` / `build --model`); a full project build requires explicit approval. The agent is instructed to confirm the active target is a dev/CI target before building, but the runtime does not validate the target — review the command's target before approving, and keep production credentials out of your default target.
 - Destructive DDL (`DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE`) stays hard-blocked like every agent.
 
 ### Coming from builder
@@ -253,11 +253,11 @@ Builder's self-review points you here: when it notices optimizer-shaped issues d
 
 All SQL queries are classified before execution using AST-based parsing:
 
-| Query Type | Builder | Analyst |
-|-----------|---------|---------|
-| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed |
-| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied |
-| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked |
+| Query Type | Builder | Analyst | Reviewer | dbt-Optimizer |
+|-----------|---------|---------|----------|---------------|
+| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed | Allowed | Allowed |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied | Denied | Denied (non-overridable) |
+| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked | Blocked | Blocked |
 
 The classifier detects write operations including: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `COPY INTO`, `CALL`, `EXEC`, `EXECUTE IMMEDIATE`, `BEGIN`, `DECLARE`, `REPLACE`, `UPSERT`, `RENAME`.
 

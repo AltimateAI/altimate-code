@@ -381,7 +381,15 @@ export function registerAllSql(): void {
       return {
         success: true,
         diff: diffLines.join("\n"),
+        // `equivalence_assessed` reflects whether the check actually RAN — i.e.
+        // the schema resolved, not merely that a schema_context object was
+        // passed. Callers must not present `equivalent: false` as "not proven"
+        // when the check never executed.
+        equivalence_assessed: compare !== null,
         equivalent: compare?.equivalent ?? false,
+        // The engine abstains with decidable:false; propagate it so callers can
+        // distinguish "proven" from "engine could not decide".
+        decidable: compare?.decidable ?? false,
         equivalence_confidence: compare?.confidence ?? 0,
         differences: compare?.differences ?? [],
       }
@@ -389,7 +397,9 @@ export function registerAllSql(): void {
       return {
         success: false,
         diff: "",
+        equivalence_assessed: false,
         equivalent: false,
+        decidable: false,
         equivalence_confidence: 0,
         differences: [],
         error: String(e),

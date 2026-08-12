@@ -42,9 +42,12 @@ impact types — never blend them into one number.
 
 **Lane 1 — Materialization & incremental processing** (highest ROI, check first)
 - Full-rebuild `table` models over append/update data: the top real-world win.
-  Preconditions to verify ALL before proposing incremental: a reliable `unique_key`,
-  a monotonic cursor column (`updated_at`/`loaded_at`), and a changed-row ratio well
-  below 1. Recommend a specific strategy, not just `materialized: incremental` —
+  Preconditions to verify before proposing incremental: a reliable `unique_key` and
+  a monotonic cursor column (`updated_at`/`loaded_at`) — always; plus a changed-row
+  ratio well below 1 when query history is available. Without history, the
+  statically-evident case (full rebuild + cursor) is still a valid candidate —
+  propose it cost-blind at reduced confidence, never as a verified cost win.
+  Recommend a specific strategy, not just `materialized: incremental` —
   `append` (no dedup) vs `merge` (needs a usable key) vs `delete+insert` vs
   `insert_overwrite` (whole-partition replacement only) vs `microbatch` (dbt 1.9+,
   large time-series with independent bounded batches). Note residual risks in the
@@ -162,7 +165,9 @@ similar CTEs are NOT a candidate — false positives destroy trust in the report
   rewrites, DISTINCT removal, partitioning/clustering/sort keys, test scope changes,
   snapshot/retention policy, hook removal, dead-model deletion.
 - For every SQL rewrite, verify semantics: use `altimate_core_rewrite` with
-  equivalence verification (or `altimate_core_equivalence` on before/after SQL).
+  equivalence verification (or `altimate_core_equivalence` on before/after SQL),
+  and pass the project's warehouse `dialect` — dialect-specific compiled SQL
+  (e.g. Snowflake `col:field`) is undecidable without the hint.
   If equivalence is UNDECIDABLE, say so plainly — present the fix as "unproven,
   recommend a data-diff before merge" — never claim it is safe.
 - For materialization changes, run `impact_analysis` / `dbt_lineage` to confirm the

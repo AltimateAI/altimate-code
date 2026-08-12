@@ -81,25 +81,89 @@ function validateWarehouseName(warehouse: string | undefined): string | null {
  *
  * Returns an error string, or `null` when the SQL is safe to analyze.
  */
+/**
+ * Single left-to-right lexer pass that masks string literals and comments.
+ *
+ * Regex-based masking is order-dependent and defeatable by alternating quote
+ * and comment markers (`SELECT '/*'; DELETE ...; SELECT '*​/'` beats
+ * comments-first; `SELECT /*'*​/ ; DELETE ...; /*'*​/` beats strings-first).
+ * A lexer has no ordering: at every position exactly one state decides how the
+ * next character is consumed, so markers inside literals/comments can never
+ * hide code and quotes inside comments can never open a phantom string.
+ *
+ * Handles: 'single' (with '' escape), "double" (with "" escape), -- line
+ * comments, block comments, and PostgreSQL dollar-quotes with identifier-rule
+ * tags ($$, $tag1$ — digits allowed after the first char). Backslash escapes
+ * are treated as ordinary characters (safe direction: `\'` ends the string
+ * early, leaving MORE text visible to the keyword scan, never less).
+ *
+ * Returns the SQL with literal/comment contents removed, or null when a
+ * construct is unterminated (fail closed).
+ */
+function maskLiteralsAndComments(sql: string): string | null {
+  let out = ""
+  let i = 0
+  const n = sql.length
+  while (i < n) {
+    const c = sql[i]
+    const next = i + 1 < n ? sql[i + 1] : ""
+    if (c === "'") {
+      out += "''"
+      i++
+      for (;;) {
+        if (i >= n) return null
+        if (sql[i] === "'" && sql[i + 1] === "'") i += 2
+        else if (sql[i] === "'") break
+        else i++
+      }
+      i++
+    } else if (c === '"') {
+      out += '""'
+      i++
+      for (;;) {
+        if (i >= n) return null
+        if (sql[i] === '"' && sql[i + 1] === '"') i += 2
+        else if (sql[i] === '"') break
+        else i++
+      }
+      i++
+    } else if (c === "-" && next === "-") {
+      const nl = sql.indexOf("\n", i)
+      out += " "
+      if (nl === -1) break
+      i = nl
+    } else if (c === "/" && next === "*") {
+      const end = sql.indexOf("*/", i + 2)
+      if (end === -1) return null
+      out += " "
+      i = end + 2
+    } else if (c === "$") {
+      const tag = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i))
+      if (tag) {
+        const close = sql.indexOf(tag[0], i + tag[0].length)
+        if (close === -1) return null
+        out += "''"
+        i = close + tag[0].length
+      } else {
+        out += c
+        i++
+      }
+    } else {
+      out += c
+      i++
+    }
+  }
+  return out
+}
+
 function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): string | null {
   if (!analyze) return null
   const blocked =
     "analyze:true runs EXPLAIN ANALYZE, which actually executes the statement — it is only allowed for a single plain SELECT query. " +
     "Re-run with analyze:false for an estimated plan."
-  // Dollar-quoted strings (PostgreSQL $tag$...$tag$) can hide arbitrary text from
-  // the masking below; fail closed rather than tokenize them.
-  if (/\$[a-zA-Z_]*\$/.test(sql)) return blocked
-  // Mask string literals BEFORE removing comments. Comments-first is bypassable:
-  // in `SELECT '/*'; DELETE FROM t; SELECT '*/'` the comment regex would swallow
-  // the DELETE because the `/*` and `*/` live inside string literals. Masking
-  // errs toward false positives (a mangled comment can only ADD leftover text),
-  // which fails closed — the caller just falls back to analyze:false.
-  const stripped = sql
-    .replace(/'(?:[^']|'')*'/g, "''")
-    .replace(/"(?:[^"]|"")*"/g, '""')
-    .replace(/--[^\n]*/g, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .trim()
+  const masked = maskLiteralsAndComments(sql)
+  if (masked === null) return blocked
+  const stripped = masked.trim()
   // Exactly one executable statement: any semicolon other than a trailing one
   // means a multi-statement payload.
   if (stripped.replace(/;\s*$/, "").includes(";")) return blocked
@@ -107,12 +171,20 @@ function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): strin
   // Data-modifying CTEs (`WITH x AS (...) INSERT INTO ...`) and similar mean a
   // read-only prefix is not enough — reject write keywords anywhere.
   // `into` covers PostgreSQL `SELECT ... INTO new_table`, which creates a table
-  // despite starting as a SELECT.
-  const hasWriteKeyword =
-    /\b(insert|update|delete|merge|truncate|drop|alter|create|replace|grant|revoke|copy|call|vacuum|set|into)\b/i.test(
-      stripped,
-    )
-  if (!readOnlyStart || hasWriteKeyword) return blocked
+  // despite starting as a SELECT. `nextval`/`setval` are sequence-mutating
+  // functions that hide inside a read-shaped SELECT.
+  // A keyword immediately followed by `(` is the read-only FUNCTION form
+  // (REPLACE(str,..), COPY(x)) — statement forms (CALL proc(..), COPY table,
+  // INSERT INTO ..) never abut `(` — so it is exempted to avoid blocking
+  // legitimate analysis. This guard is best-effort against write STATEMENTS;
+  // arbitrary side-effecting UDFs cannot be proven safe from text alone.
+  const alwaysWrite =
+    /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into|nextval|setval)\b/i
+  // replace/copy/call/set double as read-only functions (REPLACE(str,..)); the
+  // function form abuts `(`, the statement form (CALL proc(..), COPY t FROM,
+  // SET x=1) never does — so only the non-`(` form counts as a write.
+  const statementFormOnly = /\b(replace|copy|call|set)\b(?!\s*\()/i
+  if (!readOnlyStart || alwaysWrite.test(stripped) || statementFormOnly.test(stripped)) return blocked
   return null
 }
 

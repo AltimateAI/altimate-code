@@ -383,7 +383,7 @@ export const layer = Layer.effect(
           "dbt-optimizer": {
             name: "dbt-optimizer",
             description:
-              "Scan a dbt project for fixable issues — performance, materialization, repeated logic, missing tests/docs — and propose targeted fixes with cost and impact reporting. File edits and shell commands prompt for approval; the direct SQL write tool is denied non-overridably, and dbt builds against a dev target run only as user-approved shell commands.",
+              "Scan a dbt project for fixable issues — performance, materialization, repeated logic, missing tests/docs — and propose targeted fixes with cost and impact reporting. File edits and shell commands prompt for approval by default (explicit user config can relax them); the direct SQL write tool is denied non-overridably, and dbt builds run only as user-approved shell commands (the agent confirms a dev target before building).",
             prompt: PROMPT_OPTIMIZER,
             options: {},
             permission: Permission.merge(
@@ -444,10 +444,13 @@ export const layer = Layer.effect(
                 bash: "ask",
                 // Warehouse writes never
                 sql_execute_write: "deny",
-                // Training
-                training_save: "allow",
+                // Training: list freely, but mutations prompt — training writes
+                // persistent memory outside the edit permission, so an injected
+                // instruction in scanned SQL/YAML must not be able to silently
+                // poison future sessions during the read-only scan.
+                training_save: "ask",
                 training_list: "allow",
-                training_remove: "allow",
+                training_remove: "ask",
               }),
               // Merge user config, THEN re-apply the warehouse-write invariant so a
               // permissive global config (e.g. `"*": "allow"`) can't turn the scan

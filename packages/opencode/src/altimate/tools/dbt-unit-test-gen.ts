@@ -1,7 +1,9 @@
 // altimate_change start — dbt unit test generation tool
 import z from "zod"
+import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 import type { DbtUnitTestGenResult } from "../native/types"
 
 export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
@@ -25,6 +27,9 @@ export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
   }),
   async execute(args, ctx) {
     try {
+      // Manifest paths outside the project require the external_directory gate,
+      // same as file reads.
+      await assertExternalDirectoryLegacy(ctx as any, path.resolve(args.manifest_path), { kind: "file" })
       const result = await Dispatcher.call("dbt.unit_test_gen", {
         manifest_path: args.manifest_path,
         model: args.model,

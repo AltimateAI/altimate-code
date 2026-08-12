@@ -17,6 +17,12 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
       .describe(
         "If true, verify each rewrite is semantically equivalent to the original before recommending it (requires a schema).",
       ),
+    dialect: z
+      .string()
+      .optional()
+      .describe(
+        "SQL dialect hint for the equivalence verification (e.g. snowflake, bigquery) — dialect-specific syntax is otherwise undecidable",
+      ),
   }),
   async execute(args): Promise<LegacyResult> {
     try {
@@ -72,7 +78,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
  * apply without changing results.
  */
 async function verifyRewrites(
-  args: { sql: string; schema_path?: string; schema_context?: Record<string, any> },
+  args: { sql: string; schema_path?: string; schema_context?: Record<string, any>; dialect?: string },
   data: Record<string, any>,
 ) {
   const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
@@ -121,6 +127,7 @@ async function verifyRewrites(
         sql2: c.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
+        dialect: args.dialect,
       })) as { error?: string; data?: Record<string, any> } | null
       const ed = (eq?.data ?? {}) as Record<string, any>
       // The gate requires BOTH `equivalent === true` AND `decidable === true`.

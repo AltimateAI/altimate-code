@@ -1,6 +1,8 @@
 import z from "zod"
+import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 import type { DbtLineageResult } from "../native/types"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
@@ -13,6 +15,9 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
   }),
   async execute(args, ctx) {
     try {
+      // Manifest paths outside the project require the external_directory gate,
+      // same as file reads — no silent cross-project lineage extraction.
+      await assertExternalDirectoryLegacy(ctx as any, path.resolve(args.manifest_path), { kind: "file" })
       const result = await Dispatcher.call("dbt.lineage", {
         manifest_path: args.manifest_path,
         model: args.model,

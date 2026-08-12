@@ -11,6 +11,12 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
     sql2: z.string().describe("Second SQL query"),
     schema_path: z.string().optional().describe("Path to YAML/JSON schema file"),
     schema_context: z.record(z.string(), z.any()).optional().describe("Inline schema definition"),
+    dialect: z
+      .string()
+      .optional()
+      .describe(
+        "SQL dialect hint (e.g. snowflake, bigquery) — dialect-specific syntax like Snowflake col:field parses only with the hint and is otherwise undecidable",
+      ),
   }),
   async execute(args, ctx) {
     const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
@@ -29,6 +35,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
         sql2: args.sql2,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
+        dialect: args.dialect,
       })
       const data = (result.data ?? {}) as Record<string, any>
       const error = result.error ?? data.error ?? extractEquivalenceErrors(data)
@@ -53,7 +60,9 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
           : `Equivalence: ${undecidable ? "UNDECIDABLE" : data.equivalent ? "EQUIVALENT" : "DIFFERENT"}`,
         metadata: {
           success: !isRealFailure,
-          equivalent: data.equivalent,
+          // Never `true` when the engine abstained — a consumer gating only on
+          // metadata.equivalent must not read an undecidable result as proof.
+          equivalent: undecidable ? false : data.equivalent,
           ...(undecidable && { decidable: false }),
           has_schema: hasSchema,
           ...(error && { error }),

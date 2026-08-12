@@ -731,13 +731,16 @@ export interface SqlDiffParams {
 }
 
 export interface SqlDiffResult {
-  has_changes: boolean
-  unified_diff: string
-  additions: number
-  deletions: number
-  change_count: number
-  similarity: number
-  changes: Record<string, unknown>[]
+  success: boolean
+  diff: string
+  /** True when the equivalence check actually ran (schema RESOLVED, not merely passed). */
+  equivalence_assessed: boolean
+  equivalent: boolean
+  /** Engine decidability — `equivalent` is trustworthy only when this is true. */
+  decidable: boolean
+  equivalence_confidence: number
+  differences: Record<string, unknown>[]
+  error?: string
 }
 
 // --- SQL Rewrite ---

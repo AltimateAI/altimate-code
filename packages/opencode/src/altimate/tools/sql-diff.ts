@@ -17,12 +17,11 @@ export const SqlDiffTool = Tool.define("sql_diff", {
   }),
   async execute(args, ctx) {
     try {
-      // Native handler contract (sql/register.ts): { success, diff, equivalent,
-      // equivalence_confidence, differences, error? }. The previous wrapper read
-      // fields the handler never returns (has_changes/unified_diff/similarity),
-      // so every comparison fell into the "no changes" branch. The handler only
-      // runs the equivalence check when schema_context is present.
-      const hasSchema = !!(args.schema_context && Object.keys(args.schema_context).length > 0)
+      // Native handler contract (sql/register.ts): { success, diff,
+      // equivalence_assessed, equivalent, decidable, equivalence_confidence,
+      // differences, error? }. The previous wrapper read fields the handler
+      // never returns (has_changes/unified_diff/similarity), so every
+      // comparison fell into the "no changes" branch.
       const result = (await Dispatcher.call("sql.diff", {
         original: args.original,
         modified: args.modified,
@@ -43,18 +42,33 @@ export const SqlDiffTool = Tool.define("sql_diff", {
       const diffText = typeof result.diff === "string" ? result.diff : ""
       const changeCount = diffText.length ? diffText.split("\n").filter((l) => /^[+-]/.test(l)).length : 0
       const differences: any[] = Array.isArray(result.differences) ? result.differences : []
-      // Without a schema the handler never runs the equivalence check — saying
-      // "not proven" there would misrepresent an unassessed comparison.
-      const equivalenceLine = !hasSchema
-        ? "Semantic equivalence: not assessed (pass schema_context to enable)"
-        : result.equivalent === true
-          ? `Semantic equivalence: equivalent (confidence ${result.equivalence_confidence ?? "unknown"})`
-          : "Semantic equivalence: not proven"
+      // Assessment state comes from the HANDLER (it knows whether the schema
+      // actually resolved and the check ran) — not from whether the caller
+      // passed a schema object. And `equivalent` is only trustworthy when the
+      // engine says `decidable: true`; an undecidable result is unproven, never
+      // "equivalent".
+      const equivalenceLine =
+        result.equivalence_assessed !== true
+          ? "Semantic equivalence: not assessed (pass schema_context to enable)"
+          : result.equivalent === true && result.decidable === true
+            ? `Semantic equivalence: equivalent (confidence ${result.equivalence_confidence ?? "unknown"})`
+            : result.equivalent === true && result.decidable !== true
+              ? "Semantic equivalence: UNDECIDABLE — the engine could not prove it; treat as unproven"
+              : "Semantic equivalence: not proven"
+      // Consumers gating on metadata.equivalent must never see `true` unless
+      // the engine both ran AND decided — an undecidable true is not a proof.
+      const provenEquivalent =
+        result.equivalence_assessed === true && result.equivalent === true && result.decidable === true
+      const equivMeta = {
+        equivalence_assessed: result.equivalence_assessed === true,
+        equivalent: provenEquivalent,
+        decidable: result.decidable === true,
+      }
 
       if (!changeCount) {
         return {
           title: "Diff: no text changes",
-          metadata: { has_changes: false, change_count: 0, equivalent: result.equivalent },
+          metadata: { has_changes: false, change_count: 0, ...equivMeta },
           output: `The two SQL queries are textually identical.\n${equivalenceLine}`,
         }
       }
@@ -71,7 +85,7 @@ export const SqlDiffTool = Tool.define("sql_diff", {
 
       return {
         title: `Diff: ${changeCount} changed line${changeCount !== 1 ? "s" : ""}`,
-        metadata: { has_changes: true, change_count: changeCount, equivalent: result.equivalent },
+        metadata: { has_changes: true, change_count: changeCount, ...equivMeta },
         output: lines.join("\n"),
       }
     } catch (e) {

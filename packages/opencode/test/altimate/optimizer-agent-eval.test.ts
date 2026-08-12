@@ -62,13 +62,23 @@ const PLANTED: Array<{ id: string; models: string[]; signals: string[] }> = [
   },
 ]
 
+// A signal match is rejected when negation wording immediately precedes it —
+// "fct_events_daily is NOT an incremental candidate" must not score as a hit.
+// Heuristic, not NLU: it inspects the 60 chars before the signal for a negator.
+const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|rather than|instead of)\b[^.;\n]{0,50}$/i
+
 function found(transcript: string, item: (typeof PLANTED)[number]): boolean {
   const t = transcript.toLowerCase()
   for (const m of item.models) {
     let idx = t.indexOf(m.toLowerCase())
     while (idx >= 0) {
       const window = t.slice(Math.max(0, idx - 400), idx + m.length + 400)
-      if (item.signals.some((s) => new RegExp(s, "i").test(window))) return true
+      for (const s of item.signals) {
+        const match = new RegExp(s, "i").exec(window)
+        if (!match) continue
+        const preceding = window.slice(Math.max(0, match.index - 60), match.index)
+        if (!NEGATION.test(preceding)) return true
+      }
       idx = t.indexOf(m.toLowerCase(), idx + 1)
     }
   }

@@ -167,9 +167,50 @@ describe("validateAnalyzeSafety", () => {
     expect(validateAnalyzeSafety("SELECT id FROM users;", true)).toBeNull()
   })
 
-  test("dollar-quoted strings fail closed", () => {
+  test("dollar-quotes are lexed, not bypassable — including digit tags", () => {
+    // Content inside dollar-quotes is masked; the smuggled DELETE is caught by
+    // the multi-statement check regardless.
     expect(validateAnalyzeSafety("SELECT $$/*$$; DELETE FROM t; SELECT $$*/$$", true)).not.toBeNull()
-    expect(validateAnalyzeSafety("SELECT $tag$x$tag$", true)).not.toBeNull()
+    // Digit-bearing tags follow identifier rules and must be recognized too.
+    expect(validateAnalyzeSafety("SELECT $tag1$/*$tag1$; DELETE FROM t; SELECT $tag1$*/$tag1$", true)).not.toBeNull()
+    // A benign dollar-quoted literal in a single SELECT is fine.
+    expect(validateAnalyzeSafety("SELECT $tag$hello world$tag$", true)).toBeNull()
+    // Unterminated dollar-quote fails closed.
+    expect(validateAnalyzeSafety("SELECT $$never closed", true)).not.toBeNull()
+  })
+
+  test("quotes inside comments cannot swallow real code (inverse strip-order bypass)", () => {
+    // With regex masking, strings-first turns /*'*/ ... /*'*/ into one giant
+    // "string literal" that swallows the DELETE. The lexer consumes the comment
+    // first at its position, so the DELETE stays visible and is blocked.
+    expect(validateAnalyzeSafety("SELECT /*'*/ ; DELETE FROM t /*'*/", true)).not.toBeNull()
+    // Benign apostrophe inside a comment does not block a single SELECT.
+    expect(validateAnalyzeSafety("SELECT id FROM t /* don't scan much */", true)).toBeNull()
+  })
+
+  test("line comment containing a quote does not hide following statements", () => {
+    expect(validateAnalyzeSafety("SELECT '--'; DELETE FROM users", true)).not.toBeNull()
+  })
+
+  test("unterminated string or block comment fails closed", () => {
+    expect(validateAnalyzeSafety("SELECT 'unterminated", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT 1 /* unterminated", true)).not.toBeNull()
+  })
+
+  test("read-only function forms of dual-use keywords are allowed", () => {
+    expect(validateAnalyzeSafety("SELECT REPLACE(name, 'a', 'b') FROM t", true)).toBeNull()
+    expect(validateAnalyzeSafety("SELECT replace (name, 'a', 'b') FROM t", true)).toBeNull()
+  })
+
+  test("statement forms of dual-use keywords stay blocked", () => {
+    expect(validateAnalyzeSafety("CALL my_proc(1)", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("COPY t FROM 's3://bucket'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SET search_path TO public", true)).not.toBeNull()
+  })
+
+  test("sequence-mutating functions are blocked even in function form", () => {
+    expect(validateAnalyzeSafety("SELECT nextval('public.id_seq')", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT setval('public.id_seq', 100)", true)).not.toBeNull()
   })
 
   test("write keywords inside comments do not block a SELECT", () => {
