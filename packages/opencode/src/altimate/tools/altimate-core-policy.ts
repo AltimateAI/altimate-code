@@ -58,7 +58,16 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
 
 function formatPolicy(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (data.allowed ?? data.pass) return "SQL passes all policy checks."
+  if (data.allowed ?? data.pass) {
+    // allowed:true can still carry warnings — surface them with the pass.
+    const warnings = (data.warnings ?? []) as any[]
+    if (!warnings.length) return "SQL passes all policy checks."
+    const lines = ["SQL passes all policy checks, with warnings:\n"]
+    for (const w of warnings) {
+      lines.push(`  [warning] ${w.rule ?? "policy"}: ${w.message ?? ""}`)
+    }
+    return lines.join("\n")
+  }
   const lines = ["Policy violations:\n"]
   for (const v of data.violations ?? []) {
     lines.push(`  [${v.severity ?? "error"}] ${v.rule}: ${v.message}`)

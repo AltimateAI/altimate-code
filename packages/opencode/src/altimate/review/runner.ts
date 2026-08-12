@@ -219,12 +219,17 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // `issues` drop those fields, so mapping over them would always miss.
       const piiColumns = [
         // data.pii is the engine PiiQueryResult ({ pii_columns, … }); the
-        // legacy array shape is kept as a fallback.
-        ...asArray<any>((data.pii as any)?.pii_columns ?? data.pii).map(piiColumnOf),
+        // legacy array shape is kept as a fallback. Each entry names the
+        // SOURCE column; query_targets carries the exposed OUTPUT aliases
+        // (e.g. `SELECT email AS contact` → column "email", targets ["contact"]).
+        ...asArray<any>((data.pii as any)?.pii_columns ?? data.pii).flatMap((p: any) => [
+          piiColumnOf(p),
+          ...(Array.isArray(p?.query_targets) ? p.query_targets : []),
+        ]),
         ...rawIssues
           .filter((i: any) => /pii|sensitive/i.test(String(i.category ?? i.rule ?? i.code ?? i.kind ?? "")))
           .map(piiColumnOf),
-      ].filter((c): c is string => !!c)
+      ].filter((c): c is string => typeof c === "string" && !!c)
       // ran=true: the core parsed and analyzed the SQL (even if zero issues).
       // This lets the orchestrator defer structural checks to the AST lint.
       out = { issues, piiColumns: [...new Set(piiColumns)], ran: true }

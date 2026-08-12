@@ -498,3 +498,80 @@ describe("extractors handle empty message fields", () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// schema_detect_pii — fail-closed on incomplete scans (round-4 review)
+// ---------------------------------------------------------------------------
+describe("schema_detect_pii fail-closed", () => {
+  beforeEach(() => Dispatcher.reset())
+
+  test("success:false scan renders ERROR, never 'no findings'", async () => {
+    // detectPii reports success:false when any column classification failed.
+    // The tool previously branched only on finding_count, so a failed scan
+    // with zero findings rendered as a clean "no findings" verdict.
+    Dispatcher.register("schema.detect_pii" as any, async () => ({
+      success: false,
+      findings: [],
+      finding_count: 0,
+      columns_scanned: 42,
+      by_category: {},
+      tables_with_pii: 0,
+    }))
+
+    const { SchemaDetectPiiTool } = await import("../../src/altimate/tools/schema-detect-pii")
+    const tool = await initTool(SchemaDetectPiiTool)
+    const result = await tool.execute({}, stubCtx())
+
+    expect(result.title).toBe("PII Scan: ERROR")
+    expect(result.metadata.success).toBe(false)
+    expect(String(result.output)).toContain("incomplete")
+    expect(String(result.output)).not.toContain("No PII detected")
+  })
+
+  test("partial findings from a failed scan are still shown alongside the error", async () => {
+    Dispatcher.register("schema.detect_pii" as any, async () => ({
+      success: false,
+      findings: [
+        { warehouse: "wh", schema: "s", table: "users", column: "email", pii_category: "Email", confidence: "high" },
+      ],
+      finding_count: 1,
+      columns_scanned: 42,
+      by_category: { Email: 1 },
+      tables_with_pii: 1,
+    }))
+
+    const { SchemaDetectPiiTool } = await import("../../src/altimate/tools/schema-detect-pii")
+    const tool = await initTool(SchemaDetectPiiTool)
+    const result = await tool.execute({}, stubCtx())
+
+    expect(result.title).toBe("PII Scan: ERROR")
+    expect(String(result.output)).toContain("wh.s.users.email")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// altimate_core_policy — warnings surface with a pass (round-4 review)
+// ---------------------------------------------------------------------------
+describe("altimate_core_policy warnings on pass", () => {
+  beforeEach(() => Dispatcher.reset())
+
+  test("allowed:true with warnings renders the warnings, not a bare pass", async () => {
+    Dispatcher.register("altimate_core.policy" as any, async () => ({
+      success: true,
+      data: {
+        allowed: true,
+        violations: [],
+        warnings: [{ rule: "row_estimate", category: "cost_control", message: "Query may scan a large table" }],
+        policies_evaluated: 2,
+      },
+    }))
+
+    const { AltimateCorePolicyTool } = await import("../../src/altimate/tools/altimate-core-policy")
+    const tool = await initTool(AltimateCorePolicyTool)
+    const result = await tool.execute({ sql: "SELECT 1", policy_json: "{}" }, stubCtx())
+
+    expect(result.title).toBe("Policy: PASS")
+    expect(String(result.output)).toContain("row_estimate")
+    expect(String(result.output)).toContain("Query may scan a large table")
+  })
+})

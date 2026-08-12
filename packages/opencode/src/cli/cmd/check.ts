@@ -526,8 +526,9 @@ export const CheckCommand = cmd({
     if (results.grade) {
       const graded = Object.entries(gradesByFile)
       if (graded.length) results.grade.grades = gradesByFile
-      // Keep the flat grade/score fields for the common single-file invocation.
-      if (graded.length === 1) {
+      // Flat grade/score only for single-file INVOCATIONS — gating on how many
+      // grades survived would misattribute when one of several files errored.
+      if (files.length === 1 && graded.length === 1) {
         const [, only] = graded[0]
         if (only.grade) results.grade.grade = only.grade
         if (only.score != null) results.grade.score = only.score
