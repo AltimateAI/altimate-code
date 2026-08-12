@@ -1,11 +1,11 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { classificationToString, piiColumnsFromReport } from "../native/engine-coerce"
+import { EngineCoerce } from "../native/engine-coerce"
 
 /** Engine PiiReport lists EVERY column; classification "None" means not PII. */
 function realPiiColumns(data: Record<string, any>): any[] {
-  if (Array.isArray(data.columns)) return piiColumnsFromReport(data)
+  if (Array.isArray(data.columns)) return EngineCoerce.piiColumnsFromReport(data)
   // Legacy fallback shape.
   return ((data.findings ?? []) as any[]).filter((c) => c.classification !== "None")
 }
@@ -54,7 +54,7 @@ function formatClassifyPii(data: Record<string, any>): string {
   lines.push("")
   lines.push("PII columns found:")
   for (const f of piiColumns) {
-    const classification = classificationToString(f.classification ?? f.category)
+    const classification = EngineCoerce.classificationToString(f.classification ?? f.category)
     const confidence = f.confidence ?? "high"
     const table = f.table ?? "unknown"
     const column = f.column ?? "unknown"

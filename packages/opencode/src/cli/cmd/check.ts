@@ -192,6 +192,12 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
     if (!result.success) {
       return [dispatcherErrorFinding("pii", file, result.error ?? "altimate_core.query_pii failed")]
     }
+    // The engine reports unparseable SQL via data.parse_error with an empty
+    // pii_columns list — an abstention. Returning no findings would let
+    // `--fail-on` PASS a file whose PII analysis never ran.
+    if (result.data.parse_error) {
+      return [dispatcherErrorFinding("pii", file, `PII analysis skipped: ${result.data.parse_error}`)]
+    }
     // Engine shape (PiiColumnAccess): table, column, classification,
     // query_targets, suggested_masking. `column` is the column NAME — not a
     // position — so it must not populate the numeric location field.
@@ -442,8 +448,9 @@ export const CheckCommand = cmd({
     // 5. Run checks on all files in batches of 10
     const BATCH_SIZE = 10
     const allResults: Record<string, Finding[]> = {}
-    let gradeValue: string | undefined
-    let gradeScore: number | undefined
+    // Per-file grades — concurrent batch promises must not race on a single
+    // shared grade (multi-file runs used to keep whichever file finished last).
+    const gradesByFile: Record<string, { grade?: string; score?: number }> = {}
     for (const check of checks) {
       allResults[check] = []
     }
@@ -486,8 +493,9 @@ export const CheckCommand = cmd({
             case "grade": {
               const gradeResult = await runGrade(sql, relFile, schemaPath)
               findings = gradeResult.findings
-              if (gradeResult.grade) gradeValue = gradeResult.grade
-              if (gradeResult.score != null) gradeScore = gradeResult.score
+              if (gradeResult.grade || gradeResult.score != null) {
+                gradesByFile[relFile] = { grade: gradeResult.grade, score: gradeResult.score }
+              }
               break
             }
           }
@@ -516,8 +524,14 @@ export const CheckCommand = cmd({
 
     // 8. Attach grade metadata if available
     if (results.grade) {
-      if (gradeValue) results.grade.grade = gradeValue
-      if (gradeScore != null) results.grade.score = gradeScore
+      const graded = Object.entries(gradesByFile)
+      if (graded.length) results.grade.grades = gradesByFile
+      // Keep the flat grade/score fields for the common single-file invocation.
+      if (graded.length === 1) {
+        const [, only] = graded[0]
+        if (only.grade) results.grade.grade = only.grade
+        if (only.score != null) results.grade.score = only.score
+      }
     }
 
     // 9. Build output using the helper

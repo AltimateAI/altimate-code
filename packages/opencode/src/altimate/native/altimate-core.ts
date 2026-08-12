@@ -9,7 +9,7 @@
  */
 
 import * as core from "@altimateai/altimate-core"
-import { dialectHint } from "./engine-coerce"
+import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
 import { schemaOrEmpty, resolveSchema } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
@@ -185,11 +185,13 @@ export function registerAll(): void {
       // PII exposure for the composite check — the tool has always rendered a
       // PII section; previously nothing populated it. Additive: a PII failure
       // must not fail the whole composite.
-      let pii: Record<string, unknown> = {}
+      let pii: Record<string, unknown>
       try {
         pii = toData(core.checkQueryPii(params.sql, schema))
-      } catch {
-        // validation/lint above already report unparseable SQL
+      } catch (e) {
+        // Mark as an abstention — an empty object would render "No PII
+        // detected", a false-clean verdict.
+        pii = { parse_error: String(e) }
       }
       const data: Record<string, unknown> = {
         validation: toData(validation),
@@ -337,7 +339,7 @@ export function registerAll(): void {
       // altimate-core@0.5.1. dialectHint coerces "" (the ReviewConfig default)
       // to undefined: the engine throws on an unknown dialect "", and "" must
       // mean auto-detect, not a real dialect.
-      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, dialectHint(params.dialect))
+      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, EngineCoerce.dialectHint(params.dialect))
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -350,7 +352,7 @@ export function registerAll(): void {
     try {
       // Build schema from old_ddl, analyze new_ddl against it. dialectHint
       // coerces "" to auto-detect (the engine throws on an unknown dialect "").
-      const schema = core.Schema.fromDdl(params.old_ddl, dialectHint(params.dialect))
+      const schema = core.Schema.fromDdl(params.old_ddl, EngineCoerce.dialectHint(params.dialect))
       const raw = core.analyzeMigration(params.new_ddl, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -444,7 +446,7 @@ export function registerAll(): void {
   register("altimate_core.column_lineage", async (params) => {
     try {
       const schema = resolveSchema(params.schema_path, params.schema_context)
-      const raw = core.columnLineage(params.sql, dialectHint(params.dialect), schema ?? undefined)
+      const raw = core.columnLineage(params.sql, EngineCoerce.dialectHint(params.dialect), schema ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -465,7 +467,7 @@ export function registerAll(): void {
   // 22. altimate_core.format
   register("altimate_core.format", async (params) => {
     try {
-      const raw = core.formatSql(params.sql, dialectHint(params.dialect))
+      const raw = core.formatSql(params.sql, EngineCoerce.dialectHint(params.dialect))
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -476,7 +478,7 @@ export function registerAll(): void {
   // 23. altimate_core.metadata
   register("altimate_core.metadata", async (params) => {
     try {
-      const raw = core.extractMetadata(params.sql, dialectHint(params.dialect))
+      const raw = core.extractMetadata(params.sql, EngineCoerce.dialectHint(params.dialect))
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -486,7 +488,7 @@ export function registerAll(): void {
   // 24. altimate_core.compare
   register("altimate_core.compare", async (params) => {
     try {
-      const raw = core.compareQueries(params.left_sql, params.right_sql, dialectHint(params.dialect))
+      const raw = core.compareQueries(params.left_sql, params.right_sql, EngineCoerce.dialectHint(params.dialect))
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -540,7 +542,7 @@ export function registerAll(): void {
   // 29. altimate_core.import_ddl — returns Schema, must serialize
   register("altimate_core.import_ddl", async (params) => {
     try {
-      const schema = core.importDdl(params.ddl, dialectHint(params.dialect))
+      const schema = core.importDdl(params.ddl, EngineCoerce.dialectHint(params.dialect))
       const jsonObj = schema.toJson()
       return ok(true, { success: true, schema: toData(jsonObj) })
     } catch (e) {

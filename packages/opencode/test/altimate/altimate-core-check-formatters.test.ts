@@ -26,6 +26,18 @@ describe("formatCheckTitle", () => {
     expect(result).toContain("PII detected")
   })
 
+  test("reports 'PII check skipped' (not PASS) when the PII check abstained", () => {
+    const data = {
+      validation: { valid: true },
+      lint: { clean: true, findings: [] },
+      safety: { safe: true },
+      pii: { accesses_pii: false, pii_columns: [], parse_error: "Syntax error" },
+    }
+    const result = formatCheckTitle(data)
+    expect(result).toContain("PII check skipped")
+    expect(result).not.toBe("PASS")
+  })
+
   test("treats missing sections as failures (undefined is falsy)", () => {
     // When data is empty, !undefined is true, so each section looks like a failure
     const data = {} as Record<string, any>

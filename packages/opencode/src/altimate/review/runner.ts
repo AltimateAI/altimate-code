@@ -1,5 +1,5 @@
 import { Dispatcher } from "../native"
-import { classificationToString } from "../native/engine-coerce"
+import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
@@ -56,16 +56,6 @@ function mergePrimaryKeys(
 /** Extract a column name from a PII-flavored check issue, best-effort. */
 function piiColumnOf(issue: any): string | undefined {
   return issue?.column ?? issue?.target ?? issue?.name ?? undefined
-}
-
-/** The engine returns a numeric confidence (0..1); map it to a band. */
-function bandConfidence(c: unknown): "high" | "medium" | "low" {
-  if (typeof c === "string") {
-    const s = c.toLowerCase()
-    if (s === "high" || s === "medium" || s === "low") return s
-  }
-  const n = typeof c === "number" ? c : 0.5
-  return n >= 0.8 ? "high" : n >= 0.5 ? "medium" : "low"
 }
 
 /**
@@ -404,7 +394,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           .map((c) => ({
             column: String(c.column ?? ""),
             // classification can be { Custom: string } — String() would emit "[object Object]"
-            classification: classificationToString(c.classification, ""),
+            classification: EngineCoerce.classificationToString(c.classification, ""),
             confidence: typeof c.confidence === "number" ? c.confidence : 0,
             masking: c.suggested_masking ?? undefined,
           }))
@@ -512,7 +502,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           decided: true,
           equivalent,
           differences: diffs.map((d) => d?.description ?? String(d)),
-          confidence: bandConfidence(data.confidence),
+          confidence: EngineCoerce.bandConfidence(data.confidence),
         }
       } catch {
         return { decided: false }

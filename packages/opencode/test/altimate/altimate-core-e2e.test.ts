@@ -1187,6 +1187,9 @@ describeIf("consumer contract sync (round 2)", () => {
       const { Dispatcher } = await import("../../src/altimate/native")
       const raw = await Dispatcher.call("altimate_core.classify_pii", { schema_context: SCHEMA })
       const piiCount = (raw.data as any).pii_count
+      // customers.email must classify as PII — a zero count would make this
+      // test pass without exercising the None-filter it guards.
+      expect(piiCount).toBeGreaterThan(0)
       expect(result.metadata.finding_count).toBe(piiCount)
       expect(result.output).not.toContain(": None")
     })

@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { classificationToString } from "../native/engine-coerce"
+import { EngineCoerce } from "../native/engine-coerce"
 
 export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
   description:
@@ -30,7 +30,9 @@ export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
         : `Query PII: ${exposureCount === 0 ? "CLEAN" : `${exposureCount} exposure(s)`}`
       return {
         title,
-        metadata: { success: result.success, exposure_count: exposureCount, ...(error && { error }) },
+        // An abstention (parse_error) is a soft failure — telemetry classifies
+        // on metadata.success === false, so it must not report success.
+        metadata: { success: result.success && !error, exposure_count: exposureCount, ...(error && { error }) },
         output: error ? `Error: ${error}` : formatQueryPii(data),
       }
     } catch (e) {
@@ -52,7 +54,7 @@ function formatQueryPii(data: Record<string, any>): string {
   if (data.risk_level) lines.push(`Risk level: ${data.risk_level}`)
   lines.push("PII exposure detected:\n")
   for (const e of piiCols) {
-    const classification = classificationToString(e.classification ?? e.category)
+    const classification = EngineCoerce.classificationToString(e.classification ?? e.category)
     const table = e.table ?? "unknown"
     const column = e.column ?? "unknown"
     lines.push(`  ${table}.${column}: ${classification}`)

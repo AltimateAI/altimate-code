@@ -33,10 +33,14 @@ describe("piiColumnsFromReport (real engine PiiReport shape)", () => {
     expect(pii.some((c) => c.classification === "None")).toBe(false)
   })
 
-  test("returns empty for empty/malformed reports", () => {
-    expect(piiColumnsFromReport(undefined)).toEqual([])
-    expect(piiColumnsFromReport({})).toEqual([])
-    expect(piiColumnsFromReport({ findings: [{ category: "email" }] })).toEqual([])
+  test("fails closed on malformed reports (missing/non-array columns)", () => {
+    // A PiiReport always carries a columns array — anything else is malformed
+    // and must throw rather than silently yield zero findings.
+    expect(() => piiColumnsFromReport(undefined)).toThrow("malformed PiiReport")
+    expect(() => piiColumnsFromReport({})).toThrow("malformed PiiReport")
+    expect(() => piiColumnsFromReport({ columns: "not-an-array" })).toThrow("malformed PiiReport")
+    expect(() => piiColumnsFromReport({ findings: [{ category: "email" }] })).toThrow("malformed PiiReport")
+    expect(piiColumnsFromReport({ columns: [] })).toEqual([])
   })
 })
 
@@ -47,12 +51,16 @@ describe("piiColumnsFromReport (real engine PiiReport shape)", () => {
  * findings for every scan (latent since the Python-engine elimination).
  */
 describe("schema.detect_pii DuckDB e2e", () => {
+  let priorTelemetry: string | undefined
+
   beforeAll(() => {
+    priorTelemetry = process.env.ALTIMATE_TELEMETRY_DISABLED
     process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
   })
 
   afterAll(() => {
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    if (priorTelemetry === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    else process.env.ALTIMATE_TELEMETRY_DISABLED = priorTelemetry
     Registry.reset()
   })
 
@@ -63,7 +71,13 @@ describe("schema.detect_pii DuckDB e2e", () => {
 
     await conn.execute("CREATE TABLE users (id INTEGER, email VARCHAR, note VARCHAR)")
 
-    const result = await detectPii({ warehouse: "duck_pii_e2e" })
+    let result: Awaited<ReturnType<typeof detectPii>>
+    try {
+      result = await detectPii({ warehouse: "duck_pii_e2e" })
+    } finally {
+      // Registry.reset() clears the cache without closing connectors.
+      await conn.close()
+    }
 
     expect(result.success).toBe(true)
     expect(result.finding_count).toBeGreaterThan(0)

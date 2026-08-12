@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { classificationToString } from "../native/engine-coerce"
+import { EngineCoerce } from "../native/engine-coerce"
 import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
@@ -63,7 +63,8 @@ export function formatCheckTitle(data: Record<string, any>): string {
   if (!data.validation?.valid) parts.push("validation errors")
   if (!data.lint?.clean) parts.push(`${data.lint?.findings?.length ?? 0} lint findings`)
   if (!data.safety?.safe) parts.push("safety threats")
-  if (data.pii?.pii_columns?.length || data.pii?.findings?.length) parts.push("PII detected")
+  if (data.pii?.parse_error) parts.push("PII check skipped")
+  else if (data.pii?.pii_columns?.length || data.pii?.findings?.length) parts.push("PII detected")
   return parts.length ? parts.join(", ") : "PASS"
 }
 
@@ -108,7 +109,7 @@ export function formatCheck(data: Record<string, any>): string {
     lines.push("No PII detected.")
   } else {
     for (const p of piiCols) {
-      const cls = classificationToString(p.classification ?? p.category)
+      const cls = EngineCoerce.classificationToString(p.classification ?? p.category)
       const where = [p.table, p.column ?? "unknown"].filter(Boolean).join(".")
       const via = Array.isArray(p.query_targets) && p.query_targets.length ? ` exposed via: ${p.query_targets.join(", ")}` : ""
       lines.push(`  ${where}: ${cls}${via}${p.suggested_masking ? ` (masking: ${p.suggested_masking})` : ""}`)

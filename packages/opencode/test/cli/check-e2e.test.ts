@@ -674,6 +674,50 @@ describe("check command E2E", () => {
     expect(j.results.pii.findings[1].suggestion).toBeUndefined()
   })
 
+  test("pii check fails when the engine abstains via parse_error", async () => {
+    // Unparseable SQL: engine returns success + parse_error + empty pii_columns.
+    // No findings would let --fail-on PASS a file whose PII analysis never ran.
+    const file = await writeSql(tmpDir.dir, "pii-abstain.sql", "SELECT FROM;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: true,
+      data: { accesses_pii: false, parse_error: "Syntax error: Expected: identifier", pii_columns: [] },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(1)
+    expect(j.results.pii.findings[0].severity).toBe("error")
+    expect(j.results.pii.findings[0].message).toContain("PII analysis skipped")
+  })
+
+  test("grade check keeps per-file grades on multi-file runs", async () => {
+    const fileA = await writeSql(tmpDir.dir, "grade-a.sql", "SELECT 1;")
+    const fileB = await writeSql(tmpDir.dir, "grade-b.sql", "SELECT * FROM t;")
+    let call = 0
+    setDispatcherResponse("altimate_core.grade", () => {
+      call++
+      return {
+        success: true,
+        data: {
+          overall_grade: call === 1 ? "A" : "C",
+          scores: { overall: call === 1 ? 0.95 : 0.7 },
+          lint: { clean: true, findings: [] },
+        },
+      }
+    })
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [fileA, fileB], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    const grades = j.results.grade.grades as Record<string, { grade: string; score: number }>
+    expect(Object.keys(grades)).toHaveLength(2)
+    expect(new Set(Object.values(grades).map((g) => g.grade))).toEqual(new Set(["A", "C"]))
+    // Flat grade/score only meaningful for single-file runs — must not pick a
+    // racy winner across files.
+    expect(j.results.grade.grade).toBeUndefined()
+  })
+
   test("pii check reports PII columns", async () => {
     const file = await writeSql(tmpDir.dir, "pii.sql", "SELECT email, ssn FROM customers;")
     setDispatcherResponse("altimate_core.query_pii", () => ({
