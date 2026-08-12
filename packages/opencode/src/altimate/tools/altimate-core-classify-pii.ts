@@ -2,11 +2,13 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import { classificationToString } from "../native/engine-coerce"
+import { piiColumnsFromReport } from "../native/schema/pii-detector"
 
 /** Engine PiiReport lists EVERY column; classification "None" means not PII. */
 function realPiiColumns(data: Record<string, any>): any[] {
-  const columns = (data.columns ?? data.findings ?? []) as any[]
-  return columns.filter((c) => c.classification !== "None")
+  if (Array.isArray(data.columns)) return piiColumnsFromReport(data)
+  // Legacy fallback shape.
+  return ((data.findings ?? []) as any[]).filter((c) => c.classification !== "None")
 }
 
 export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_pii", {

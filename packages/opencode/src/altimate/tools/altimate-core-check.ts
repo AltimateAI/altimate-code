@@ -99,15 +99,19 @@ export function formatCheck(data: Record<string, any>): string {
   }
 
   lines.push("\n=== PII ===")
-  // Engine PiiQueryResult: { accesses_pii, pii_columns, risk_level, … }
+  // Engine PiiQueryResult: { accesses_pii, pii_columns, risk_level, parse_error? }
   const piiCols = (data.pii?.pii_columns ?? data.pii?.findings ?? []) as any[]
-  if (!piiCols.length) {
+  if (data.pii?.parse_error) {
+    // Abstention, not a clean verdict — the engine could not parse the query.
+    lines.push(`PII check skipped: ${data.pii.parse_error}`)
+  } else if (!piiCols.length) {
     lines.push("No PII detected.")
   } else {
     for (const p of piiCols) {
       const cls = classificationToString(p.classification ?? p.category)
       const where = [p.table, p.column ?? "unknown"].filter(Boolean).join(".")
-      lines.push(`  ${where}: ${cls}${p.suggested_masking ? ` (masking: ${p.suggested_masking})` : ""}`)
+      const via = Array.isArray(p.query_targets) && p.query_targets.length ? ` exposed via: ${p.query_targets.join(", ")}` : ""
+      lines.push(`  ${where}: ${cls}${via}${p.suggested_masking ? ` (masking: ${p.suggested_masking})` : ""}`)
     }
   }
 

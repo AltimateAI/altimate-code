@@ -4,7 +4,7 @@
  */
 
 import * as core from "@altimateai/altimate-core"
-import { classificationToString } from "../engine-coerce"
+import { bandConfidence, classificationToString } from "../engine-coerce"
 import { getCache } from "./cache"
 import * as Registry from "../connections/registry"
 import type {
@@ -97,7 +97,7 @@ export async function detectPii(params: PiiDetectParams): Promise<PiiDetectResul
             column: col.name,
             data_type: col.data_type,
             pii_category: classificationToString(piiCol.classification, "UNKNOWN"),
-            confidence: piiCol.confidence ?? "medium",
+            confidence: bandConfidence(piiCol.confidence),
           })
           tablesWithPii.add(`${col.warehouse}.${col.schema_name}.${col.table}`)
         }
@@ -190,7 +190,7 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
               column: piiCol.column || "",
               data_type: columns.find((c) => c.name === piiCol.column)?.data_type,
               pii_category: classificationToString(piiCol.classification, "UNKNOWN"),
-              confidence: piiCol.confidence ?? "medium",
+              confidence: bandConfidence(piiCol.confidence),
             })
             tablesWithPii.add(`${params.warehouse}.${schemaName}.${tableInfo.name}`)
           }

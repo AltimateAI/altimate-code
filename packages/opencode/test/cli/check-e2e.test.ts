@@ -624,8 +624,8 @@ describe("check command E2E", () => {
     const j = parseJson(r.stdout)
     expect(j.results.safety.findings).toHaveLength(1)
     expect(j.results.safety.findings[0].rule).toBe("unbalanced_quote")
-    // ThreatFinding.location is [byteOffset, byteLength] — rendered as an offset range.
-    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (chars 37-44)")
+    // ThreatFinding.location is [byteOffset, byteLength] — rendered as a byte range.
+    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (bytes 37-44)")
     expect(j.results.safety.findings[0].suggestion).toBe("Quote count is odd within a single statement")
     // Engine severity "high" must normalize to error, not degrade to info —
     // otherwise --fail-on/--severity filters silently pass high-risk injections.

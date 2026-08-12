@@ -1242,15 +1242,25 @@ describeIf("consumer contract sync (round 2)", () => {
   })
 
   describe("failure output consistency (title and body must agree)", () => {
-    test("classify-pii engine error renders Error output, not 'No PII columns detected'", async () => {
+    test("classify-pii engine error renders ERROR title and Error output", async () => {
       const { initTool } = await import("./tool-fixture")
       const { AltimateCoreClassifyPiiTool } = await import("../../src/altimate/tools/altimate-core-classify-pii")
       const tool = await initTool(AltimateCoreClassifyPiiTool)
-      // Nonexistent schema_path → engine failure envelope
-      const result = await tool.execute({ schema_path: "/nonexistent/schema.json" }, toolCtx())
-      if (result.title === "PII Classification: ERROR") {
+      // Malformed schema file → deterministic engine failure envelope
+      // (a nonexistent path would silently fall back to an empty schema).
+      const fs = await import("fs/promises")
+      const os = await import("os")
+      const path = await import("path")
+      const badSchema = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pii-err-")), "schema.json")
+      await fs.writeFile(badSchema, "not json{{{")
+      try {
+        const result = await tool.execute({ schema_path: badSchema }, toolCtx())
+        expect(result.title).toBe("PII Classification: ERROR")
+        expect(result.metadata.success).toBe(false)
         expect(result.output).toContain("Error")
         expect(result.output).not.toContain("No PII columns detected")
+      } finally {
+        await fs.rm(path.dirname(badSchema), { recursive: true, force: true })
       }
     })
 
@@ -1279,7 +1289,20 @@ describeIf("consumer contract sync (round 2)", () => {
       )
       expect(result.output).toContain("=== PII ===")
       expect(result.output).toContain("customers.email")
+      expect(result.output).toContain("exposed via: contact")
       expect(result.output).not.toContain("No PII detected")
+    })
+
+    test("check tool PII section reports abstention for unparseable SQL, not a clean verdict", async () => {
+      const { formatCheck } = await import("../../src/altimate/tools/altimate-core-check")
+      const output = formatCheck({
+        validation: { valid: false, errors: [{ message: "syntax" }] },
+        lint: { clean: true },
+        safety: { safe: true },
+        pii: { accesses_pii: false, pii_columns: [], parse_error: "Syntax error: Expected: identifier" },
+      })
+      expect(output).toContain("PII check skipped")
+      expect(output).not.toContain("No PII detected")
     })
   })
 

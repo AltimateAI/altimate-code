@@ -72,7 +72,8 @@ async function runValidate(sql: string, file: string, schemaPath?: string): Prom
       return errors.map((f) => {
         // Engine ValidationError: { code, kind, message, location: {line, column} | null, suggestions }
         const location = f.location as { line?: number; column?: number } | null | undefined
-        const suggestions = f.suggestions as Array<Record<string, unknown>> | undefined
+        const s0 = (f.suggestions as unknown[] | undefined)?.[0]
+        const engineSuggestion = typeof s0 === "string" ? s0 : ((s0 as Record<string, unknown> | undefined)?.message as string | undefined)
         return {
           file,
           line: (location?.line ?? f.line) as number | undefined,
@@ -81,7 +82,7 @@ async function runValidate(sql: string, file: string, schemaPath?: string): Prom
           rule: "validate",
           severity: "error" as const,
           message: (f.message ?? f.description ?? "") as string,
-          suggestion: (f.suggestion ?? suggestions?.[0]?.message) as string | undefined,
+          suggestion: (f.suggestion ?? engineSuggestion) as string | undefined,
         }
       })
     }
@@ -111,9 +112,10 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
       []) as Array<Record<string, unknown>>
     if (issues.length > 0) {
       return issues.map((f) => {
-        // ThreatFinding.location is [byteOffset, byteLength], not [start, end].
+        // ThreatFinding.location is [byteOffset, byteLength] — label as bytes,
+        // since byte offsets diverge from character indexes on multibyte SQL.
         const loc = f.location as [number, number] | undefined
-        const at = Array.isArray(loc) ? ` (chars ${loc[0]}-${loc[0] + loc[1]})` : ""
+        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + loc[1]})` : ""
         return {
           file,
           line: f.line as number | undefined,

@@ -21,3 +21,15 @@ export function classificationToString(c: unknown, fallback = "PII"): string {
 export function dialectHint(dialect: string | undefined | null): string | undefined {
   return dialect || undefined
 }
+
+/** Map the engine's numeric confidence (0..1) to a string band. */
+export function bandConfidence(c: unknown): "high" | "medium" | "low" {
+  if (typeof c === "string") {
+    const s = c.toLowerCase()
+    if (s === "high" || s === "medium" || s === "low") return s
+  }
+  const n = typeof c === "number" ? c : NaN
+  if (n >= 0.8) return "high"
+  if (n >= 0.5) return "medium"
+  return "low"
+}

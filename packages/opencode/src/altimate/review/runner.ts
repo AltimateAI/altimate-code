@@ -228,7 +228,9 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // RAW issues (which still carry column/target/name) — the normalized
       // `issues` drop those fields, so mapping over them would always miss.
       const piiColumns = [
-        ...asArray<any>(data.pii).map(piiColumnOf),
+        // data.pii is the engine PiiQueryResult ({ pii_columns, … }); the
+        // legacy array shape is kept as a fallback.
+        ...asArray<any>((data.pii as any)?.pii_columns ?? data.pii).map(piiColumnOf),
         ...rawIssues
           .filter((i: any) => /pii|sensitive/i.test(String(i.category ?? i.rule ?? i.code ?? i.kind ?? "")))
           .map(piiColumnOf),
