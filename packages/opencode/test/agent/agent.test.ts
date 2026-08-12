@@ -198,6 +198,48 @@ it.instance(
   },
 )
 
+it.instance(
+  "dbt-optimizer tool exposure: denied mutators disabled, edit-mapped and pattern-scoped tools kept",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // Registry exposure uses Permission.disabled (last-match-wins + the
+      // edit/write/apply_patch -> "edit" remap). The defaults' leading
+      // "*": "allow" must NOT keep denied mutators exposed, and the edit
+      // remap must NOT drop the write tool despite the "*" deny.
+      const disabled = Permission.disabled(
+        ["warehouse_remove", "warehouse_add", "task", "write", "apply_patch", "edit", "read", "bash", "sql_analyze"],
+        optimizer!.permission,
+      )
+      expect(disabled.has("warehouse_remove")).toBe(true)
+      expect(disabled.has("warehouse_add")).toBe(true)
+      expect(disabled.has("task")).toBe(true)
+      expect(disabled.has("write")).toBe(false)
+      expect(disabled.has("apply_patch")).toBe(false)
+      expect(disabled.has("edit")).toBe(false)
+      expect(disabled.has("read")).toBe(false)
+      expect(disabled.has("bash")).toBe(false)
+      expect(disabled.has("sql_analyze")).toBe(false)
+    }),
+)
+
+it.instance(
+  "analyst tool exposure: pattern-scoped bash stays exposed, write tools disabled",
+  () =>
+    Effect.gen(function* () {
+      const analyst = yield* load((svc) => svc.get("analyst"))
+      const disabled = Permission.disabled(["bash", "write", "edit", "warehouse_remove", "sql_execute"], analyst!.permission)
+      // bash has pattern-specific allows ("ls *", ...) — its last matching
+      // rule is not a wildcard deny, so the tool remains exposed and its own
+      // per-command asks govern.
+      expect(disabled.has("bash")).toBe(false)
+      expect(disabled.has("write")).toBe(true)
+      expect(disabled.has("edit")).toBe(true)
+      expect(disabled.has("warehouse_remove")).toBe(true)
+      expect(disabled.has("sql_execute")).toBe(false)
+    }),
+)
+
 it.instance("sensitive_write guard actually fires (not neutralized by *: allow)", () =>
   Effect.gen(function* () {
     // The #209 sensitive-write guard asks for the "sensitive_write" permission. It must NOT

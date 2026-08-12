@@ -1,9 +1,7 @@
 import z from "zod"
-import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { Instance } from "../../project/instance"
-import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
+import { guardExternalFile } from "./schema-path-guard"
 
 export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
   description: "Parse a dbt project directory. Extracts models, sources, tests, and project structure for analysis.",
@@ -13,12 +11,10 @@ export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
   async execute(args, ctx) {
     try {
       // A project dir outside the workspace goes through the external_directory
-      // gate, like every other path-taking read. Relative paths resolve against
-      // the project directory (mirrors read.ts), never the process cwd.
-      const resolved = path.isAbsolute(args.project_dir)
-        ? args.project_dir
-        : path.resolve(Instance.directory, args.project_dir)
-      await assertExternalDirectoryLegacy(ctx as any, resolved, { kind: "directory" })
+      // gate, like every other path-taking read. guardExternalFile resolves
+      // relative paths against the project directory and degrades gracefully
+      // outside an Instance context (direct/test invocation).
+      const resolved = (await guardExternalFile(ctx, args.project_dir, "directory")) ?? args.project_dir
       const result = await Dispatcher.call("altimate_core.parse_dbt", {
         project_dir: resolved,
       })

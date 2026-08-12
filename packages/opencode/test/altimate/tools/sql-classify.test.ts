@@ -293,3 +293,34 @@ describe("computeSqlFingerprint", () => {
     expect(result === null || typeof result === "object").toBe(true)
   })
 })
+
+describe("side-effecting function escalation (masked)", () => {
+  test("read-shaped SELECT calling a side-effecting function classifies as write", () => {
+    expect(classify("SELECT nextval('public.id_seq')")).toBe("write")
+    expect(classify("SELECT dblink_exec('conn', 'DELETE FROM users')")).toBe("write")
+    expect(classify("SELECT pg_terminate_backend(123)")).toBe("write")
+  })
+
+  test("a block comment between function name and paren cannot hide the call", () => {
+    expect(classify("SELECT dblink_exec/**/('conn', 'DELETE FROM users')")).toBe("write")
+    expect(classify("SELECT nextval /* gap */ ('public.id_seq')")).toBe("write")
+  })
+
+  test("function names inside string literals or comments do NOT escalate", () => {
+    expect(classify("SELECT * FROM audit WHERE note = 'called dblink_exec(x)'")).toBe("read")
+    expect(classify("SELECT id FROM t -- uses nextval(seq) upstream")).toBe("read")
+  })
+
+  test("column names containing the function name do NOT escalate", () => {
+    expect(classify("SELECT nextval_cache FROM t")).toBe("read")
+  })
+
+  test("unlexable SQL fails closed as write", () => {
+    expect(classify("SELECT 'unterminated")).toBe("write")
+  })
+
+  test("classifyAndCheck escalates side-effecting reads too", () => {
+    expect(classifyAndCheck("SELECT setval('s', 10)").queryType).toBe("write")
+    expect(classifyAndCheck("SELECT id FROM users").queryType).toBe("read")
+  })
+})

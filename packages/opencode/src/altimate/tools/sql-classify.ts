@@ -4,6 +4,8 @@
 // Handles CTEs, string literals, procedural blocks, all dialects correctly.
 // Falls back to regex-based heuristics if the napi binary fails to load.
 
+import { maskLiteralsAndComments } from "./sql-text-mask"
+
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
 let extractMetadata: ((sql: string) => any) | null = null
@@ -55,11 +57,24 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
  * Side-effecting functions that mutate warehouse state from inside a
  * read-shaped SELECT. AST statement categories cannot see these — a
  * `SELECT dblink_exec(...)` or `SELECT nextval(...)` parses as a read — so
- * they are matched textually and escalate the classification to "write",
- * routing the statement through the sql_execute_write permission. Word
- * boundary + `(` keeps column names like `nextval_cache` unaffected.
+ * they are matched against MASKED SQL (string literals and comments removed
+ * by a single-pass lexer) and escalate the classification to "write", routing
+ * the statement through the sql_execute_write permission.
+ *
+ * Masking first is load-bearing in both directions: a block comment wedged
+ * between the function name and the open paren collapses so the call is
+ * still detected, and the names appearing inside string literals or comments
+ * no longer false-positive. Word boundary + `(` keeps column names like
+ * `nextval_cache` unaffected. An unlexable statement (unterminated construct,
+ * backslash-escape ambiguity) fails closed as a write.
  */
 const SIDE_EFFECT_FUNCTIONS = /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend)\s*\(/i
+
+function hasSideEffectFunction(sql: string): boolean {
+  const masked = maskLiteralsAndComments(sql)
+  if (masked === null) return true
+  return SIDE_EFFECT_FUNCTIONS.test(masked)
+}
 
 /**
  * Classify a SQL string as "read" or "write" using AST parsing.
@@ -67,7 +82,7 @@ const SIDE_EFFECT_FUNCTIONS = /\b(nextval|setval|dblink_exec|dblink|pg_terminate
  */
 export function classify(sql: string): "read" | "write" {
   if (!sql || typeof sql !== "string") return "read"
-  if (SIDE_EFFECT_FUNCTIONS.test(sql)) return "write"
+  if (hasSideEffectFunction(sql)) return "write"
   if (!getStatementTypes) return classifyFallback(sql).queryType
   try {
     const result = getStatementTypes(sql)
@@ -92,7 +107,7 @@ export function classifyMulti(sql: string): "read" | "write" {
  */
 export function classifyAndCheck(sql: string): { queryType: "read" | "write"; blocked: boolean } {
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
-  const sideEffect = SIDE_EFFECT_FUNCTIONS.test(sql)
+  const sideEffect = hasSideEffectFunction(sql)
   if (!getStatementTypes) {
     const fb = classifyFallback(sql)
     return sideEffect ? { ...fb, queryType: "write" } : fb

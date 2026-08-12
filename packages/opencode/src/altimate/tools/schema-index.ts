@@ -13,12 +13,13 @@ export const SchemaIndexTool = Tool.define("schema_index", {
     warehouse: z.string().describe("Warehouse connection name from connections.json"),
   }),
   async execute(args, ctx) {
+    // Indexing crawls the warehouse and REWRITES the persistent global schema
+    // cache — a mutation. Built-in tools get no generic tool-name gate at
+    // execution, so the ask lives here — OUTSIDE the try so rejection/denial
+    // propagates with the framework's blocked-call semantics (mirrors
+    // sql-execute).
+    await (ctx as any).ask({ permission: "schema_index", patterns: [args.warehouse], always: ["*"], metadata: {} })
     try {
-      // Indexing crawls the warehouse and REWRITES the persistent global schema
-      // cache — a mutation. Built-in tools get no generic tool-name gate at
-      // execution, so agents that configure schema_index as ask/deny (e.g. the
-      // dbt-optimizer scan) are enforced here.
-      await (ctx as any).ask({ permission: "schema_index", patterns: [args.warehouse], always: ["*"], metadata: {} })
       const result = await Dispatcher.call("schema.index", {
         warehouse: args.warehouse,
       })

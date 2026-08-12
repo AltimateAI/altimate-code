@@ -150,10 +150,9 @@ describeIf("optimizer live eval — planted-project scan", () => {
                 "GOOGLE_API_KEY",
                 "GROQ_API_KEY",
                 "MISTRAL_API_KEY",
-                "AWS_ACCESS_KEY_ID",
-                "AWS_SECRET_ACCESS_KEY",
-                "AWS_SESSION_TOKEN",
-                "AWS_REGION",
+                // NOTE: AWS_* is deliberately NOT passed through — those double
+                // as warehouse credentials, contradicting the isolation goal.
+                // Bedrock-model users can extend this list locally.
                 // Corporate proxy / TLS interception support — without these
                 // the eval fails with an opaque network error behind a proxy.
                 "HTTP_PROXY",
