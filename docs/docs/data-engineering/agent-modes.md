@@ -255,9 +255,11 @@ All SQL queries are classified before execution using AST-based parsing:
 
 | Query Type | Builder | Analyst | Reviewer | dbt-Optimizer |
 |-----------|---------|---------|----------|---------------|
-| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed | Allowed | Allowed |
-| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied | Denied | Denied (non-overridable) |
-| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked | Blocked | Blocked |
+| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed | — | Allowed |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied | — | Denied (non-overridable) |
+| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked | — | Blocked |
+
+The Reviewer has no direct SQL execution tools at all — it works through the `dbt_pr_review` verdict engine and read-only analysis tools; see [dbt PR Review](../usage/dbt-pr-review.md).
 
 The classifier detects write operations including: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `COPY INTO`, `CALL`, `EXEC`, `EXECUTE IMMEDIATE`, `BEGIN`, `DECLARE`, `REPLACE`, `UPSERT`, `RENAME`.
 

@@ -14,7 +14,9 @@ export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
       // gate, like every other path-taking read. guardExternalFile resolves
       // relative paths against the project directory and degrades gracefully
       // outside an Instance context (direct/test invocation).
-      const resolved = (await guardExternalFile(ctx, args.project_dir, "directory")) ?? args.project_dir
+      // Empty input means "the current project" — normalize before the guard
+      // so the parser never receives an empty path.
+      const resolved = (await guardExternalFile(ctx, args.project_dir || ".", "directory")) ?? "."
       const result = await Dispatcher.call("altimate_core.parse_dbt", {
         project_dir: resolved,
       })

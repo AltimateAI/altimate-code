@@ -39,9 +39,12 @@ const HARD_DENY_PATTERN =
  * Handles multi-statement SQL by splitting on semicolons and checking each statement.
  */
 function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: boolean } {
-  const cleaned = sql
-    .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
-    .replace(/--[^\n]*/g, "")          // line comments
+  // Use the single-pass lexer, NOT ordered regexes: comments-first stripping
+  // is bypassable via comment markers inside string literals (e.g.
+  // `SELECT '--' LIMIT 1; DELETE FROM users` would reduce to `SELECT '`).
+  // Unlexable SQL fails closed as a write.
+  const cleaned = maskLiteralsAndComments(sql)
+  if (cleaned === null) return { queryType: "write", blocked: false }
   const statements = cleaned.split(";").map(s => s.trim()).filter(Boolean)
   if (statements.length === 0) return { queryType: "read", blocked: false }
   let queryType: "read" | "write" = "read"
@@ -68,7 +71,8 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
  * `nextval_cache` unaffected. An unlexable statement (unterminated construct,
  * backslash-escape ambiguity) fails closed as a write.
  */
-const SIDE_EFFECT_FUNCTIONS = /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend)\s*\(/i
+const SIDE_EFFECT_FUNCTIONS =
+  /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)\s*\(/i
 
 function hasSideEffectFunction(sql: string): boolean {
   const masked = maskLiteralsAndComments(sql)
@@ -77,11 +81,23 @@ function hasSideEffectFunction(sql: string): boolean {
 }
 
 /**
+ * Normalize CR / CRLF to LF before any classification. The AST engine and the
+ * fallback both treat `--` comments as running to the next LF; a CR-only line
+ * ending would otherwise let a comment visually "end" while the classifier
+ * still considers everything after it commented out — hiding a following
+ * statement from write detection.
+ */
+function normalizeNewlines(sql: string): string {
+  return sql.replace(/\r\n?/g, "\n")
+}
+
+/**
  * Classify a SQL string as "read" or "write" using AST parsing.
  * If ANY statement is a write, returns "write".
  */
-export function classify(sql: string): "read" | "write" {
-  if (!sql || typeof sql !== "string") return "read"
+export function classify(rawSql: string): "read" | "write" {
+  if (!rawSql || typeof rawSql !== "string") return "read"
+  const sql = normalizeNewlines(rawSql)
   if (hasSideEffectFunction(sql)) return "write"
   if (!getStatementTypes) return classifyFallback(sql).queryType
   try {
@@ -105,8 +121,9 @@ export function classifyMulti(sql: string): "read" | "write" {
  * Single-pass: classify and check for hard-denied statement types.
  * Returns both the overall query type and whether a hard-deny pattern was found.
  */
-export function classifyAndCheck(sql: string): { queryType: "read" | "write"; blocked: boolean } {
-  if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
+export function classifyAndCheck(rawSql: string): { queryType: "read" | "write"; blocked: boolean } {
+  if (!rawSql || typeof rawSql !== "string") return { queryType: "read", blocked: false }
+  const sql = normalizeNewlines(rawSql)
   const sideEffect = hasSideEffectFunction(sql)
   if (!getStatementTypes) {
     const fb = classifyFallback(sql)

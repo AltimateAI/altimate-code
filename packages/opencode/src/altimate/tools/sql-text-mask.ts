@@ -47,7 +47,11 @@ export function maskLiteralsAndComments(sql: string): string | null {
       }
       i++
     } else if (c === "-" && next === "-") {
-      const nl = sql.indexOf("\n", i)
+      // Line comments end at \n OR \r — CR-only line endings must not extend
+      // the comment to EOF and hide later statements.
+      const lf = sql.indexOf("\n", i)
+      const cr = sql.indexOf("\r", i)
+      const nl = lf === -1 ? cr : cr === -1 ? lf : Math.min(lf, cr)
       out += " "
       if (nl === -1) break
       i = nl
@@ -56,7 +60,9 @@ export function maskLiteralsAndComments(sql: string): string | null {
       if (end === -1) return null
       out += " "
       i = end + 2
-    } else if (c === "$") {
+    } else if (c === "$" && !(i > 0 && /[A-Za-z0-9_]/.test(sql[i - 1]))) {
+      // A dollar-quote must start at a token boundary: PostgreSQL permits `$`
+      // inside unquoted identifiers (foo$bar), which are not quote openers.
       const tag = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i))
       if (tag) {
         const close = sql.indexOf(tag[0], i + tag[0].length)

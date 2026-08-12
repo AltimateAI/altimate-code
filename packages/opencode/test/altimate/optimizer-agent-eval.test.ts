@@ -118,10 +118,17 @@ describeIf("optimizer live eval — planted-project scan", () => {
       await fs.cp(FIXTURE, workdir, { recursive: true })
       const before = await snapshotTree(workdir)
 
+      // Pin the model: the isolated HOME removes any configured default, so
+      // without --model the CLI would pick whichever provider enumerates
+      // first from the forwarded API keys — making results depend on ambient
+      // credential order rather than a known model.
+      const model = process.env["OPTIMIZER_EVAL_MODEL"] ?? "anthropic/claude-sonnet-4-5"
       const run = spawnSync(
         CLI!,
         [
           "run",
+          "--model",
+          model,
           "--agent",
           "dbt-optimizer",
           "Scan this dbt project for optimization candidates. Do NOT fix anything yet — scan only.",

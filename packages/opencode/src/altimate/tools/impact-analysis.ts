@@ -169,17 +169,26 @@ export interface DownstreamModel {
 
 export function findDownstream(
   targetName: string,
-  models: Array<{ name: string; depends_on: string[]; materialized?: string }>,
+  models: Array<{ name: string; depends_on: string[]; materialized?: string; unique_id?: string }>,
 ): DownstreamModel[] {
+  // Traverse by dbt unique_id so package-qualified models sharing a `name`
+  // (model.pkg_a.orders vs model.pkg_b.orders) are never conflated — names are
+  // resolved only for display. Models without a unique_id (minimal fixtures,
+  // older manifests) fall back to name-suffix matching for their edges.
+  const uid = (m: { name: string; unique_id?: string }) => m.unique_id ?? `name:${m.name}`
   const results: DownstreamModel[] = []
   const visited = new Set<string>()
 
-  function walk(name: string, depth: number, path: string[]) {
+  const dependsOn = (model: { depends_on: string[] }, parent: { name: string; unique_id?: string }) =>
+    model.depends_on.some((d) =>
+      parent.unique_id ? d === parent.unique_id : d.split(".").pop() === parent.name,
+    )
+
+  function walk(parent: { name: string; unique_id?: string }, depth: number, path: string[]) {
     for (const model of models) {
-      if (visited.has(model.name)) continue
-      const deps = model.depends_on.map((d) => d.split(".").pop())
-      if (deps.includes(name)) {
-        visited.add(model.name)
+      if (visited.has(uid(model))) continue
+      if (dependsOn(model, parent)) {
+        visited.add(uid(model))
         const newPath = [...path, model.name]
         results.push({
           name: model.name,
@@ -187,12 +196,22 @@ export function findDownstream(
           materialized: model.materialized,
           path: newPath,
         })
-        walk(model.name, depth + 1, newPath)
+        walk(model, depth + 1, newPath)
       }
     }
   }
 
-  walk(targetName, 1, [targetName])
+  // Entry by name (the tool's public argument) or exact unique_id; multiple
+  // same-named targets each seed the traversal.
+  const targets = models.filter((m) => m.name === targetName || m.unique_id === targetName)
+  if (targets.length === 0) {
+    walk({ name: targetName }, 1, [targetName])
+  } else {
+    for (const t of targets) {
+      visited.add(uid(t))
+      walk(t, 1, [targetName])
+    }
+  }
   return results
 }
 

@@ -324,3 +324,26 @@ describe("side-effecting function escalation (masked)", () => {
     expect(classifyAndCheck("SELECT id FROM users").queryType).toBe("read")
   })
 })
+
+describe("mask edge cases (round-7 review)", () => {
+  test("CR-only line endings do not extend a line comment over later statements", () => {
+    expect(classify("SELECT 1; -- note\rDELETE FROM users")).toBe("write")
+    expect(classifyAndCheck("SELECT 1; -- note\rDELETE FROM users").queryType).toBe("write")
+  })
+
+  test("dollar signs inside identifiers are not dollar-quote openers", () => {
+    expect(classify("SELECT foo$bar$ FROM t")).toBe("read")
+    expect(classify("SELECT col FROM tbl$x WHERE id = 1")).toBe("read")
+  })
+
+  test("comment markers inside strings cannot hide writes from the fallback classifier", () => {
+    // classifyFallback path: masked lexing means the '--' literal cannot
+    // swallow the DELETE.
+    expect(classifyAndCheck("SELECT '--' LIMIT 1; DELETE FROM users").queryType).toBe("write")
+  })
+
+  test("large-object mutators escalate to write", () => {
+    expect(classify("SELECT lo_import('/etc/passwd')")).toBe("write")
+    expect(classify("SELECT lo_unlink(12345)")).toBe("write")
+  })
+})
