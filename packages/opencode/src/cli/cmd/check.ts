@@ -97,7 +97,10 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
   try {
     const result = await Dispatcher.call("altimate_core.safety", { sql })
     if (result.success && result.data.safe !== false) return []
-    const issues = (result.data.issues ?? result.data.findings ?? []) as Array<Record<string, unknown>>
+    const issues = (result.data.threats ??
+      result.data.issues ??
+      result.data.findings ??
+      []) as Array<Record<string, unknown>>
     if (issues.length > 0) {
       return issues.map((f) => ({
         file,
@@ -107,7 +110,7 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
         rule: (f.rule ?? f.category ?? "safety") as string,
         severity: normalizeSeverity(f.severity as string),
         message: (f.message ?? f.description ?? "") as string,
-        suggestion: f.suggestion as string | undefined,
+        suggestion: (f.suggestion ?? f.detail) as string | undefined,
       }))
     }
     if (!result.success || result.data.safe === false) {
@@ -174,17 +177,29 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
     if (!result.success) {
       return [dispatcherErrorFinding("pii", file, result.error ?? "altimate_core.query_pii failed")]
     }
+    // Engine shape (PiiColumnAccess): table, column, classification,
+    // query_targets, suggested_masking. `column` is the column NAME — not a
+    // position — so it must not populate the numeric location field.
     const piiFindings = (result.data.pii_columns ?? result.data.findings ?? []) as Array<Record<string, unknown>>
-    return piiFindings.map((f) => ({
-      file,
-      line: f.line as number | undefined,
-      column: f.column as number | undefined,
-      code: f.code as string | undefined,
-      rule: (f.category ?? f.pii_type ?? "pii") as string,
-      severity: "warning" as const,
-      message: (f.message ?? f.description ?? `PII detected: ${f.column_name ?? f.name ?? "unknown"}`) as string,
-      suggestion: f.suggestion as string | undefined,
-    }))
+    return piiFindings.map((f) => {
+      const qualified = [f.table, f.column].filter(Boolean).join(".")
+      const targets = Array.isArray(f.query_targets) && f.query_targets.length ? ` (exposed via: ${(f.query_targets as string[]).join(", ")})` : ""
+      // Classification is a string OR { Custom: string }.
+      const classification = f.classification as string | { Custom: string } | undefined
+      const rule =
+        typeof classification === "string"
+          ? classification
+          : (classification?.Custom ?? (f.category as string) ?? (f.pii_type as string) ?? "pii")
+      return {
+        file,
+        line: f.line as number | undefined,
+        code: f.code as string | undefined,
+        rule,
+        severity: "warning" as const,
+        message: (f.message ?? f.description ?? `PII detected: ${qualified || "unknown"}${targets}`) as string,
+        suggestion: (f.suggestion ?? f.suggested_masking) as string | undefined,
+      }
+    })
   } catch (e) {
     console.error(`[pii] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)
     return [dispatcherErrorFinding("pii", file, e)]

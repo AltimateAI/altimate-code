@@ -18,12 +18,21 @@ export const AltimateCoreMigrationTool = Tool.define("altimate_core_migration", 
         dialect: args.dialect ?? "",
       })
       const data = (result.data ?? {}) as Record<string, any>
-      const riskCount = data.risks?.length ?? 0
+      // Engine shape (MigrationResult): findings[], safe, overall_risk.
+      // Informational findings carry risk "safe" — only count real risks.
+      const findings = (data.findings ?? data.risks ?? []) as Array<Record<string, any>>
+      const riskCount = findings.filter((f) => (f.risk ?? f.severity ?? "risk") !== "safe").length
       const error = result.error ?? data.error
+      // Never render SAFE when the engine call itself failed.
+      const title = error
+        ? "Migration: ERROR"
+        : data.safe === false || riskCount > 0
+          ? `Migration: ${(data.overall_risk ?? "risk").toString().toUpperCase()} — ${riskCount} risk(s)`
+          : "Migration: SAFE"
       return {
-        title: `Migration: ${riskCount === 0 ? "SAFE" : `${riskCount} risk(s)`}`,
+        title,
         metadata: { success: result.success, risk_count: riskCount, ...(error && { error }) },
-        output: formatMigration(data),
+        output: formatMigration(data, error),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -36,13 +45,17 @@ export const AltimateCoreMigrationTool = Tool.define("altimate_core_migration", 
   },
 })
 
-function formatMigration(data: Record<string, any>): string {
-  if (data.error) return `Error: ${data.error}`
-  if (!data.risks?.length) return "Migration appears safe. No risks detected."
-  const lines = ["Migration risks:\n"]
-  for (const r of data.risks) {
-    lines.push(`  [${r.severity ?? "warning"}] ${r.type}: ${r.message}`)
-    if (r.recommendation) lines.push(`    Recommendation: ${r.recommendation}`)
+function formatMigration(data: Record<string, any>, error?: string): string {
+  if (error ?? data.error) return `Error: ${error ?? data.error}`
+  const findings = data.findings ?? data.risks ?? []
+  if (!findings.length && data.safe !== false) return "Migration appears safe. No risks detected."
+  const lines: string[] = []
+  if (data.overall_risk) lines.push(`Overall risk: ${data.overall_risk}`)
+  lines.push("Migration findings:\n")
+  for (const r of findings) {
+    lines.push(`  [${r.risk ?? r.severity ?? "warning"}] ${r.operation ?? r.type ?? "operation"}: ${r.message ?? ""}`)
+    if (r.mitigation ?? r.recommendation) lines.push(`    Mitigation: ${r.mitigation ?? r.recommendation}`)
+    if (r.rollback_sql) lines.push(`    Rollback: ${r.rollback_sql}`)
   }
   return lines.join("\n")
 }

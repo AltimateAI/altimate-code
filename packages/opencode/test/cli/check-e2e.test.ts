@@ -593,6 +593,82 @@ describe("check command E2E", () => {
     expect(j.results.safety.findings[0].rule).toBe("sql-injection")
   })
 
+  test("safety check surfaces engine ThreatFinding shape (threats/rule/message/detail)", async () => {
+    // Real core@0.7.0 scanSql shape: threats[], each { rule, severity, message, detail }.
+    // Regression guard: the consumer previously only read issues/findings, so
+    // real threats (e.g. the 0.6.0 unbalanced_quote rule) rendered as a generic warning.
+    const file = await writeSql(tmpDir.dir, "breakout.sql", "SELECT * FROM users WHERE name = 'x' OR 1=1 --';")
+    setDispatcherResponse("altimate_core.safety", () => ({
+      success: true,
+      data: {
+        safe: false,
+        risk_score: 0.9,
+        statement_count: 1,
+        statement_types: ["SELECT"],
+        threats: [
+          {
+            rule: "unbalanced_quote",
+            severity: "high",
+            message: "Unbalanced quote suggests injection breakout",
+            detail: "Quote count is odd within a single statement",
+            matched_pattern: "' OR 1=1 --",
+          },
+        ],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.safety.findings).toHaveLength(1)
+    expect(j.results.safety.findings[0].rule).toBe("unbalanced_quote")
+    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout")
+    expect(j.results.safety.findings[0].suggestion).toBe("Quote count is odd within a single statement")
+    // Engine severity "high" must normalize to error, not degrade to info —
+    // otherwise --fail-on/--severity filters silently pass high-risk injections.
+    expect(j.results.safety.findings[0].severity).toBe("error")
+  })
+
+  test("pii check surfaces engine PiiColumnAccess shape (classification/query_targets/masking)", async () => {
+    // Real core@0.7.0 query_pii shape: pii_columns[], each
+    // { table, column, classification, query_targets, suggested_masking }.
+    const file = await writeSql(tmpDir.dir, "pii-real.sql", "SELECT email AS contact FROM customers;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: true,
+      data: {
+        accesses_pii: true,
+        risk_level: "Medium",
+        pii_columns: [
+          {
+            table: "customers",
+            column: "email",
+            classification: "Email",
+            query_targets: ["contact"],
+            suggested_masking: "'***MASKED***'",
+          },
+          {
+            table: "customers",
+            column: "employee_ref",
+            // PiiClassification can be { Custom: string }, not just a string.
+            classification: { Custom: "EmployeeId" },
+            query_targets: [],
+            suggested_masking: null,
+          },
+        ],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(2)
+    expect(j.results.pii.findings[0].rule).toBe("Email")
+    expect(j.results.pii.findings[0].message).toContain("customers.email")
+    expect(j.results.pii.findings[0].message).toContain("exposed via: contact")
+    expect(j.results.pii.findings[0].suggestion).toBe("'***MASKED***'")
+    expect(j.results.pii.findings[1].rule).toBe("EmployeeId")
+  })
+
   test("pii check reports PII columns", async () => {
     const file = await writeSql(tmpDir.dir, "pii.sql", "SELECT email, ssn FROM customers;")
     setDispatcherResponse("altimate_core.query_pii", () => ({

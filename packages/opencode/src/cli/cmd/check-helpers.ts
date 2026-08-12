@@ -52,8 +52,10 @@ export const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pi
 export function normalizeSeverity(s?: string | unknown): Severity {
   if (!s || typeof s !== "string") return "warning"
   const lower = s.toLowerCase()
-  if (lower === "error" || lower === "fatal" || lower === "critical") return "error"
-  if (lower === "warning" || lower === "warn") return "warning"
+  // Engine safety severities are low|medium|high|critical — high-risk threats
+  // must not degrade to info or --fail-on/--severity filters silently pass.
+  if (lower === "error" || lower === "fatal" || lower === "critical" || lower === "high") return "error"
+  if (lower === "warning" || lower === "warn" || lower === "medium") return "warning"
   return "info"
 }
 

@@ -30,7 +30,7 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
         findings.push({ category: f.rule ?? "lint" })
       }
       for (const t of data.safety?.threats ?? []) {
-        findings.push({ category: t.type ?? "safety_threat" })
+        findings.push({ category: t.rule ?? t.type ?? "safety_threat" })
       }
       for (const p of data.pii?.findings ?? []) {
         findings.push({ category: "pii_detected" })
@@ -93,7 +93,7 @@ export function formatCheck(data: Record<string, any>): string {
     lines.push("Safe — no threats.")
   } else {
     for (const t of data.safety?.threats ?? []) {
-      lines.push(`  [${t.severity ?? "warning"}] ${t.type ?? "safety"}: ${t.description ?? ""}`)
+      lines.push(`  [${t.severity ?? "warning"}] ${t.rule ?? t.type ?? "safety"}: ${t.message ?? t.description ?? ""}`)
     }
   }
 

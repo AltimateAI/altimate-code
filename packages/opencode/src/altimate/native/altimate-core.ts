@@ -337,8 +337,10 @@ export function registerAll(): void {
   // 12. altimate_core.migration
   register("altimate_core.migration", async (params) => {
     try {
-      // Build schema from old_ddl, analyze new_ddl against it
-      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect ?? undefined)
+      // Build schema from old_ddl, analyze new_ddl against it.
+      // `|| undefined` (not `??`): "" must mean auto-detect — the engine
+      // throws on an unknown dialect "" (same coercion as equivalence above).
+      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect || undefined)
       const raw = core.analyzeMigration(params.new_ddl, schema)
       const data = toData(raw)
       return ok(true, data)

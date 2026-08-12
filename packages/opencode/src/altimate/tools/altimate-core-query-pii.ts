@@ -45,10 +45,13 @@ function formatQueryPii(data: Record<string, any>): string {
   if (data.risk_level) lines.push(`Risk level: ${data.risk_level}`)
   lines.push("PII exposure detected:\n")
   for (const e of piiCols) {
-    const classification = e.classification ?? e.category ?? "PII"
+    // Classification is a string OR { Custom: string }.
+    const raw = e.classification ?? e.category ?? "PII"
+    const classification = typeof raw === "string" ? raw : (raw?.Custom ?? "PII")
     const table = e.table ?? "unknown"
     const column = e.column ?? "unknown"
     lines.push(`  ${table}.${column}: ${classification}`)
+    if (e.query_targets?.length) lines.push(`    Exposed via: ${e.query_targets.join(", ")}`)
     if (e.suggested_masking) lines.push(`    Masking: ${e.suggested_masking}`)
   }
   if (data.suggested_alternatives?.length) {

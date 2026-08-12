@@ -376,7 +376,11 @@ describeIf("altimate-core E2E", () => {
     })
 
     test("explicit columns grade >= SELECT *", async () => {
-      const r1 = await D.call("altimate_core.grade", { sql: SQL.simple, schema_context: ECOMMERCE_FLAT })
+      // Same table + same rows, differing ONLY in star vs explicit projection —
+      // otherwise complexity subscores (filters, table count) dominate the
+      // style penalty for SELECT * and the comparison is meaningless.
+      const explicitSql = "SELECT order_id, customer_id, order_date, status, amount FROM orders"
+      const r1 = await D.call("altimate_core.grade", { sql: explicitSql, schema_context: ECOMMERCE_FLAT })
       const r2 = await D.call("altimate_core.grade", { sql: SQL.selectStar, schema_context: ECOMMERCE_FLAT })
       expect((r1.data as any).scores.overall).toBeGreaterThanOrEqual((r2.data as any).scores.overall)
     })
@@ -719,13 +723,62 @@ describeIf("altimate-core E2E", () => {
 
   describe("altimate_core.migration", () => {
     test("adding nullable column is safe", async () => {
-      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "CREATE TABLE t (id INT, name VARCHAR);" })
-      expect(r).toBeDefined()
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR" })
+      const d = r.data as any
+      expect(r.success).toBe(true)
+      expect(d.safe).toBe(true)
+      expect(d.overall_risk).toBe("safe")
     })
 
-    test("dropping column detected", async () => {
-      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT, name VARCHAR);", new_ddl: "CREATE TABLE t (id INT);" })
-      expect(r).toBeDefined()
+    test("dropping column detected as destructive", async () => {
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT, name VARCHAR);", new_ddl: "ALTER TABLE t DROP COLUMN name" })
+      const d = r.data as any
+      expect(r.success).toBe(true)
+      expect(d.safe).toBe(false)
+      expect(d.overall_risk).toBe("destructive")
+      expect((d.findings ?? []).some((f: any) => f.risk === "destructive")).toBe(true)
+    })
+
+    test("DELETE without WHERE is destructive (core@0.6.0 behavior)", async () => {
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "DELETE FROM t" })
+      expect((r.data as any).safe).toBe(false)
+    })
+
+    test("empty dialect is coerced to auto-detect (does NOT error)", async () => {
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR", dialect: "" })
+      expect(r.success).toBe(true)
+    })
+
+    test("migration tool never renders SAFE on destructive change or engine error", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreMigrationTool } = await import("../../src/altimate/tools/altimate-core-migration")
+      const tool = await initTool(AltimateCoreMigrationTool)
+      const ctx = {
+        sessionID: "test",
+        messageID: "test",
+        agent: "test",
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => {},
+      } as any
+      const destructive = await tool.execute(
+        { old_ddl: "CREATE TABLE t (id INT, name VARCHAR);", new_ddl: "ALTER TABLE t DROP COLUMN name" },
+        ctx,
+      )
+      expect(destructive.title).not.toContain("SAFE")
+      expect(destructive.title).toContain("DESTRUCTIVE")
+      expect(destructive.output).toContain("DROP COLUMN t.name")
+      const safe = await tool.execute(
+        { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR" },
+        ctx,
+      )
+      expect(safe.title).toBe("Migration: SAFE")
+      const errored = await tool.execute(
+        { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR", dialect: "not-a-real-dialect" },
+        ctx,
+      )
+      expect(errored.title).toBe("Migration: ERROR")
+      expect(errored.output).toContain("Error")
     })
   })
 
@@ -785,9 +838,40 @@ describeIf("altimate-core E2E", () => {
       expect((d.pii_columns ?? []).length).toBeGreaterThan(0)
     })
 
+    test("query_pii reports query_targets for aliased PII output (core@0.7.0 contract)", async () => {
+      const r = await D.call("altimate_core.query_pii", {
+        sql: "SELECT email AS contact FROM customers",
+        schema_context: ECOMMERCE_FLAT,
+      })
+      const d = r.data as any
+      expect(d.accesses_pii).toBe(true)
+      const emailCol = (d.pii_columns ?? []).find((c: any) => c.column === "email")
+      expect(emailCol).toBeDefined()
+      expect(emailCol.query_targets).toContain("contact")
+    })
+
     test("query_pii clean for non-PII columns", async () => {
       const r = await D.call("altimate_core.query_pii", { sql: "SELECT customer_id FROM customers", schema_context: ECOMMERCE_FLAT })
       expect((r.data as any).accesses_pii).toBe(false)
+    })
+
+    test("query_pii tool renders query_targets as 'Exposed via'", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreQueryPiiTool } = await import("../../src/altimate/tools/altimate-core-query-pii")
+      const tool = await initTool(AltimateCoreQueryPiiTool)
+      const result = await tool.execute(
+        { sql: "SELECT email AS contact FROM customers", schema_context: ECOMMERCE_FLAT },
+        {
+          sessionID: "test",
+          messageID: "test",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        } as any,
+      )
+      expect(result.output).toContain("customers.email")
+      expect(result.output).toContain("Exposed via: contact")
     })
   })
 
@@ -823,6 +907,51 @@ describeIf("altimate-core E2E", () => {
         schema_context: ECOMMERCE_FLAT,
       })
       expect(r.success).toBe(true)
+    })
+
+    test("track-lineage tool surfaces edges from queries[].edges (engine shape)", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreTrackLineageTool } = await import("../../src/altimate/tools/altimate-core-track-lineage")
+      const tool = await initTool(AltimateCoreTrackLineageTool)
+      const result = await tool.execute(
+        {
+          queries: [
+            "CREATE TABLE staging AS SELECT customer_id, first_name FROM customers",
+            "CREATE TABLE summary AS SELECT customer_id, COUNT(*) AS cnt FROM staging GROUP BY customer_id",
+          ],
+          schema_context: ECOMMERCE_FLAT,
+        },
+        {
+          sessionID: "test",
+          messageID: "test",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        } as any,
+      )
+      expect(result.metadata.edge_count).toBeGreaterThan(0)
+      expect(result.output).toContain("customers.customer_id")
+      expect(result.output).not.toContain("No lineage edges found")
+    })
+
+    test("track-lineage tool renders ERROR (not '0 edges') when the engine call fails", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreTrackLineageTool } = await import("../../src/altimate/tools/altimate-core-track-lineage")
+      const tool = await initTool(AltimateCoreTrackLineageTool)
+      const result = await tool.execute(
+        { queries: ["SELECT FROM"], schema_context: ECOMMERCE_FLAT },
+        {
+          sessionID: "test",
+          messageID: "test",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        } as any,
+      )
+      expect(result.title).toBe("Track Lineage: ERROR")
+      expect(result.output).not.toContain("No lineage edges found")
     })
   })
 
