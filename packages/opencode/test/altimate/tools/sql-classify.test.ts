@@ -347,3 +347,15 @@ describe("mask edge cases (round-7 review)", () => {
     expect(classify("SELECT lo_unlink(12345)")).toBe("write")
   })
 })
+
+describe("quoted-identifier side-effect calls", () => {
+  test("double-quoted function identifiers cannot bypass write escalation", () => {
+    expect(classify('SELECT "lo_import"(\'/tmp/x\')')).toBe("write")
+    expect(classify('SELECT "nextval" (\'public.id_seq\')')).toBe("write")
+  })
+
+  test("quoted identifiers that are not side-effect calls stay reads", () => {
+    expect(classify('SELECT "nextval_cache" FROM t')).toBe("read")
+    expect(classify('SELECT "order" FROM t')).toBe("read")
+  })
+})

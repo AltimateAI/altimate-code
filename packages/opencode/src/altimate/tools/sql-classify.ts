@@ -74,7 +74,15 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
 const SIDE_EFFECT_FUNCTIONS =
   /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)\s*\(/i
 
+// Quoted-identifier call form: `SELECT "lo_import"('/tmp/x')` is a valid
+// PostgreSQL invocation, but the masker replaces "..." content with "" —
+// hiding the name. Checked against the RAW (normalized) SQL; a match inside a
+// string literal false-positives toward "write", which only costs a prompt.
+const QUOTED_SIDE_EFFECT =
+  /"(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)"\s*\(/i
+
 function hasSideEffectFunction(sql: string): boolean {
+  if (QUOTED_SIDE_EFFECT.test(sql)) return true
   const masked = maskLiteralsAndComments(sql)
   if (masked === null) return true
   return SIDE_EFFECT_FUNCTIONS.test(masked)
