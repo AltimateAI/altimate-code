@@ -5,7 +5,7 @@
  * read-scoped agent (e.g. dbt-optimizer) could silently extract model
  * inventories or lineage from sibling/private projects.
  */
-import { describe, test, expect, beforeEach } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import path from "path"
 import os from "os"
 import { initTool } from "../tool-fixture"
@@ -61,6 +61,9 @@ const OUTSIDE = path.join(os.tmpdir(), "definitely-not-the-project", "target", "
 
 describe("dbt reader tools enforce external_directory", () => {
   beforeEach(() => Dispatcher.reset())
+  // The dispatcher registry is module-global: without teardown the mock
+  // dbt.* handlers would leak into later test files in the same process.
+  afterEach(() => Dispatcher.reset())
 
   test("out-of-project manifest paths trigger the external_directory ask", async () => {
     mockHandlers()

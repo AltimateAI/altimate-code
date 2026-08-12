@@ -69,7 +69,7 @@ const PLANTED: Array<{ id: string; models: string[]; signals: string[] }> = [
 // signal breaks the association ("not a temp table, uses ORDER BY" still scores
 // the ORDER BY hit), and the window is tight (40 chars) to avoid discarding
 // positive reports whose explanation merely contains a negator.
-const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|rather than|instead of)\b[^.;,\n]{0,40}$/i
+const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|rather than|instead of)\b[^.;,!?\n]{0,40}$/i
 
 function found(transcript: string, item: (typeof PLANTED)[number]): boolean {
   const t = transcript.toLowerCase()
@@ -78,10 +78,15 @@ function found(transcript: string, item: (typeof PLANTED)[number]): boolean {
     while (idx >= 0) {
       const window = t.slice(Math.max(0, idx - 400), idx + m.length + 400)
       for (const s of item.signals) {
-        const match = new RegExp(s, "i").exec(window)
-        if (!match) continue
-        const preceding = window.slice(Math.max(0, match.index - 60), match.index)
-        if (!NEGATION.test(preceding)) return true
+        // Global flag: a negated FIRST occurrence must not hide a later
+        // positive occurrence of the same signal in the window.
+        const re = new RegExp(s, "gi")
+        let match: RegExpExecArray | null
+        while ((match = re.exec(window)) !== null) {
+          const preceding = window.slice(Math.max(0, match.index - 60), match.index)
+          if (!NEGATION.test(preceding)) return true
+          if (re.lastIndex === match.index) re.lastIndex++
+        }
       }
       idx = t.indexOf(m.toLowerCase(), idx + 1)
     }
