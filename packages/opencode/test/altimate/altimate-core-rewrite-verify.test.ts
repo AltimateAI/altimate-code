@@ -85,6 +85,18 @@ describe("verified-optimize — gate logic (mocked engine)", () => {
     expect(String(r.output)).toContain("undecidable")
   })
 
+  test("equivalent:false with decidable:false also reads undecidable — abstention is not refutation", async () => {
+    mockRewriteAndEquivalence(REWRITE, {
+      equivalent: false,
+      decidable: false,
+      differences: [{ description: "parse failed" }],
+    })
+    const r = await runTool({ sql: ORIGINAL, schema_context: SCHEMA })
+    expect(r.metadata.verified_count).toBe(0)
+    expect(r.metadata.unverified_count).toBe(1)
+    expect(String(r.output)).toContain("undecidable")
+  })
+
   test("not-equivalent rewrite is UNVERIFIED with a reason", async () => {
     mockRewriteAndEquivalence(REWRITE, {
       equivalent: false,

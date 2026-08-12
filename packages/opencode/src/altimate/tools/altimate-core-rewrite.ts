@@ -149,7 +149,9 @@ async function verifyRewrites(
         let reason: string
         if (eq?.error ?? ed.error) {
           reason = String(eq?.error ?? ed.error)
-        } else if (ed.equivalent === true && ed.decidable === false) {
+        } else if (ed.decidable === false) {
+          // Abstention is independent of the `equivalent` value — a parse or
+          // planning failure must read UNDECIDABLE, not "not proven".
           reason = "equivalence undecidable — the engine could not prove the rewrite; validate with a data-diff"
         } else if (ed.equivalent === true && ed.decidable !== true) {
           reason = "missing or invalid 'decidable' field in equivalence response"

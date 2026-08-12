@@ -15,6 +15,7 @@ import { tmpdir } from "../../fixture/fixture"
 import { DbtManifestTool } from "../../../src/altimate/tools/dbt-manifest"
 import { DbtLineageTool } from "../../../src/altimate/tools/dbt-lineage"
 import { DbtUnitTestGenTool } from "../../../src/altimate/tools/dbt-unit-test-gen"
+import { ImpactAnalysisTool } from "../../../src/altimate/tools/impact-analysis"
 import { SessionID, MessageID } from "../../../src/session/schema"
 
 function makeCtx() {
@@ -75,6 +76,7 @@ describe("dbt reader tools enforce external_directory", () => {
           [DbtManifestTool, { path: OUTSIDE }],
           [DbtLineageTool, { manifest_path: OUTSIDE, model: "m" }],
           [DbtUnitTestGenTool, { manifest_path: OUTSIDE, model: "m" }],
+          [ImpactAnalysisTool, { manifest_path: OUTSIDE, model: "m", change_type: "modify" }],
         ] as const) {
           const { ctx, asks } = makeCtx()
           const t = await initTool(tool as any)
@@ -96,6 +98,7 @@ describe("dbt reader tools enforce external_directory", () => {
           [DbtManifestTool, { path: inside }],
           [DbtLineageTool, { manifest_path: inside, model: "m" }],
           [DbtUnitTestGenTool, { manifest_path: inside, model: "m" }],
+          [ImpactAnalysisTool, { manifest_path: inside, model: "m", change_type: "modify" }],
         ] as const) {
           const { ctx, asks } = makeCtx()
           const t = await initTool(tool as any)
