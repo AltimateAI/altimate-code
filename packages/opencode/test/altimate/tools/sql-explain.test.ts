@@ -192,6 +192,16 @@ describe("validateAnalyzeSafety", () => {
     expect(validateAnalyzeSafety("SELECT '--'; DELETE FROM users", true)).not.toBeNull()
   })
 
+  test("PostgreSQL E-string escapes cannot mask DML (backslash fails closed)", () => {
+    // PG parses E'\'' as a literal containing a quote, ending the string where
+    // this lexer's ''-pair rule would CONTINUE — which would mask the DELETE
+    // as string content. Backslash in a literal must therefore reject analyze.
+    expect(validateAnalyzeSafety("SELECT E'\\''; DELETE FROM t; SELECT ''", true)).not.toBeNull()
+    // Benign backslash-bearing literals are also rejected — safe direction,
+    // the caller falls back to the estimated plan.
+    expect(validateAnalyzeSafety("SELECT 'C:\\path\\file' FROM t", true)).not.toBeNull()
+  })
+
   test("unterminated string or block comment fails closed", () => {
     expect(validateAnalyzeSafety("SELECT 'unterminated", true)).not.toBeNull()
     expect(validateAnalyzeSafety("SELECT 1 /* unterminated", true)).not.toBeNull()

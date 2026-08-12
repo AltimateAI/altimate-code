@@ -93,9 +93,11 @@ function validateWarehouseName(warehouse: string | undefined): string | null {
  *
  * Handles: 'single' (with '' escape), "double" (with "" escape), -- line
  * comments, block comments, and PostgreSQL dollar-quotes with identifier-rule
- * tags ($$, $tag1$ — digits allowed after the first char). Backslash escapes
- * are treated as ordinary characters (safe direction: `\'` ends the string
- * early, leaving MORE text visible to the keyword scan, never less).
+ * tags ($$, $tag1$ — digits allowed after the first char). Backslashes inside
+ * single-quoted literals fail closed: dialect escape rules (PostgreSQL E'...',
+ * MySQL) make `\''` end where this lexer's ''-pair rule would continue, which
+ * would mask real code as string content — so any backslash-bearing literal
+ * rejects analyze instead of being lexed.
  *
  * Returns the SQL with literal/comment contents removed, or null when a
  * construct is unterminated (fail closed).
@@ -112,6 +114,12 @@ function maskLiteralsAndComments(sql: string): string | null {
       i++
       for (;;) {
         if (i >= n) return null
+        // Backslash inside a single-quoted literal fails closed: PostgreSQL
+        // E'...' (and MySQL) treat \' as an escaped quote, so `E'\''` ends
+        // where this lexer would continue — masking real DML as string
+        // content. Rather than dialect-aware escape rules, reject analyze for
+        // any backslash-bearing literal (caller falls back to analyze:false).
+        if (sql[i] === "\\") return null
         if (sql[i] === "'" && sql[i + 1] === "'") i += 2
         else if (sql[i] === "'") break
         else i++
