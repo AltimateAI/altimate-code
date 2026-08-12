@@ -792,8 +792,29 @@ describe("check command E2E", () => {
         overall_grade: "D",
         scores: { overall: 0.4 },
         lint: { clean: true, findings: [] },
-        validation: { valid: false, errors: [{ code: "E002", message: "Column 'zzz' not found" }] },
-        safety: { safe: false, threats: [{ rule: "tautology_attack", severity: "high", message: "OR 1=1 detected" }] },
+        validation: {
+          valid: false,
+          errors: [
+            {
+              code: "E002",
+              message: "Column 'zzz' not found",
+              location: { line: 1, column: 8 },
+              suggestions: [{ kind: "column", message: "Did you mean 'id'?", confidence: 0.9 }],
+            },
+          ],
+        },
+        safety: {
+          safe: false,
+          threats: [
+            {
+              rule: "tautology_attack",
+              severity: "high",
+              message: "OR 1=1 detected",
+              detail: "Remove the always-true predicate",
+              location: [10, 7],
+            },
+          ],
+        },
       },
     }))
     installDispatcherMocks()
@@ -801,10 +822,15 @@ describe("check command E2E", () => {
     const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
     const j = parseJson(r.stdout)
     expect(j.results.grade.findings.length).toBe(2)
-    const rules = j.results.grade.findings.map((f: any) => f.rule)
-    expect(rules).toContain("validate")
-    expect(rules).toContain("tautology_attack")
-    expect(j.results.grade.findings.some((f: any) => f.severity === "error")).toBe(true)
+    const byRule = Object.fromEntries(j.results.grade.findings.map((f: any) => [f.rule, f]))
+    // ValidationError location/suggestions must survive the flat mapper.
+    expect(byRule.validate.severity).toBe("error")
+    expect(byRule.validate.line).toBe(1)
+    expect(byRule.validate.column).toBe(8)
+    expect(byRule.validate.suggestion).toBe("Did you mean 'id'?")
+    // ThreatFinding byte-range location and detail must survive too.
+    expect(byRule.tautology_attack.message).toBe("OR 1=1 detected (bytes 10-17)")
+    expect(byRule.tautology_attack.suggestion).toBe("Remove the always-true predicate")
   })
 
   test("grade check fails closed on engine failure envelope", async () => {

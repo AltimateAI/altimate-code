@@ -295,17 +295,36 @@ async function runGrade(
     const lint = result.data.lint as Record<string, unknown> | undefined
     const validation = result.data.validation as Record<string, unknown> | undefined
     const safety = result.data.safety as Record<string, unknown> | undefined
+    // Normalize each section's location/suggestion shape to the flat fields
+    // the shared mapper below reads — otherwise nested findings drop the line
+    // numbers and fixes that runValidate/runSafety already surface.
     const nested = [
       ...((lint?.findings as Array<Record<string, unknown>> | undefined) ?? []),
-      ...(((validation?.errors as Array<Record<string, unknown>> | undefined) ?? []).map((e) => ({
-        ...e,
-        rule: "validate",
-        severity: "error",
-      })) as Array<Record<string, unknown>>),
-      ...(((safety?.threats as Array<Record<string, unknown>> | undefined) ?? []).map((t) => ({
-        ...t,
-        rule: (t.rule as string) ?? "safety",
-      })) as Array<Record<string, unknown>>),
+      ...(((validation?.errors as Array<Record<string, unknown>> | undefined) ?? []).map((e) => {
+        // ValidationError: location {line, column} | null, suggestions[]
+        const location = e.location as { line?: number; column?: number } | null | undefined
+        const s0 = (e.suggestions as unknown[] | undefined)?.[0]
+        return {
+          ...e,
+          rule: "validate",
+          severity: "error",
+          line: location?.line ?? e.line,
+          column: location?.column ?? e.column,
+          suggestion: e.suggestion ?? (typeof s0 === "string" ? s0 : (s0 as Record<string, unknown> | undefined)?.message),
+        }
+      }) as Array<Record<string, unknown>>),
+      ...(((safety?.threats as Array<Record<string, unknown>> | undefined) ?? []).map((t) => {
+        // ThreatFinding: location is [byteOffset, byteLength]; detail is the fix hint
+        const loc = t.location as [number, number] | undefined
+        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + loc[1]})` : ""
+        return {
+          ...t,
+          rule: (t.rule as string) ?? "safety",
+          message: `${(t.message ?? "") as string}${at}`,
+          location: undefined,
+          suggestion: t.suggestion ?? t.detail,
+        }
+      }) as Array<Record<string, unknown>>),
     ]
     const issues = (result.data.issues ??
       result.data.findings ??
