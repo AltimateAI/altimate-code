@@ -4,27 +4,16 @@
  */
 
 import * as core from "@altimateai/altimate-core"
-import { bandConfidence, classificationToString } from "../engine-coerce"
+import { bandConfidence, classificationToString, piiColumnsFromReport } from "../engine-coerce"
 import { getCache } from "./cache"
+
+export { piiColumnsFromReport }
 import * as Registry from "../connections/registry"
 import type {
   PiiDetectParams,
   PiiDetectResult,
   PiiFinding,
 } from "../types"
-
-/**
- * Extract the real PII rows from an engine PiiReport.
- *
- * The engine returns `{ columns, pii_count, risk_level, total_columns }` with
- * a row for EVERY column — classification "None" means not PII. (The previous
- * consumer read a nonexistent `findings` field, making detection a silent
- * no-op.) Exported for tests.
- */
-export function piiColumnsFromReport(piiData: unknown): Array<Record<string, any>> {
-  const columns = ((piiData as Record<string, any>)?.columns ?? []) as Array<Record<string, any>>
-  return columns.filter((c) => c.classification !== "None")
-}
 
 /**
  * Detect PII in cached schema metadata by running altimate-core's

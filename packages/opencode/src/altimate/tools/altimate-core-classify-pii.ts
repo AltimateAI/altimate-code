@@ -1,8 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { classificationToString } from "../native/engine-coerce"
-import { piiColumnsFromReport } from "../native/schema/pii-detector"
+import { classificationToString, piiColumnsFromReport } from "../native/engine-coerce"
 
 /** Engine PiiReport lists EVERY column; classification "None" means not PII. */
 function realPiiColumns(data: Record<string, any>): any[] {

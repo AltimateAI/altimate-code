@@ -24,6 +24,8 @@ export function dialectHint(dialect: string | undefined | null): string | undefi
 
 /** Map the engine's numeric confidence (0..1) to a string band. */
 export function bandConfidence(c: unknown): "high" | "medium" | "low" {
+  // Missing confidence is unknown, not low.
+  if (c == null) return "medium"
   if (typeof c === "string") {
     const s = c.toLowerCase()
     if (s === "high" || s === "medium" || s === "low") return s
@@ -32,4 +34,17 @@ export function bandConfidence(c: unknown): "high" | "medium" | "low" {
   if (n >= 0.8) return "high"
   if (n >= 0.5) return "medium"
   return "low"
+}
+
+/**
+ * Extract the real PII rows from an engine PiiReport.
+ *
+ * The engine returns `{ columns, pii_count, risk_level, total_columns }` with
+ * a row for EVERY column — classification "None" means not PII. Lives here
+ * (not in pii-detector) so tool modules can import it without eagerly loading
+ * the native NAPI binding at registry-load time.
+ */
+export function piiColumnsFromReport(piiData: unknown): Array<Record<string, any>> {
+  const columns = ((piiData as Record<string, any>)?.columns ?? []) as Array<Record<string, any>>
+  return columns.filter((c) => c.classification !== "None")
 }

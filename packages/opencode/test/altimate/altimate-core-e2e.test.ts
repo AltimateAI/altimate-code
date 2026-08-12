@@ -1251,16 +1251,17 @@ describeIf("consumer contract sync (round 2)", () => {
       const fs = await import("fs/promises")
       const os = await import("os")
       const path = await import("path")
-      const badSchema = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "pii-err-")), "schema.json")
-      await fs.writeFile(badSchema, "not json{{{")
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pii-err-"))
       try {
+        const badSchema = path.join(dir, "schema.json")
+        await fs.writeFile(badSchema, "not json{{{")
         const result = await tool.execute({ schema_path: badSchema }, toolCtx())
         expect(result.title).toBe("PII Classification: ERROR")
         expect(result.metadata.success).toBe(false)
         expect(result.output).toContain("Error")
         expect(result.output).not.toContain("No PII columns detected")
       } finally {
-        await fs.rm(path.dirname(badSchema), { recursive: true, force: true })
+        await fs.rm(dir, { recursive: true, force: true })
       }
     })
 
