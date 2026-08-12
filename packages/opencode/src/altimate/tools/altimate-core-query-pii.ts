@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { classificationToString } from "../native/engine-coerce"
 
 export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
   description:
@@ -20,11 +21,17 @@ export const AltimateCoreQueryPiiTool = Tool.define("altimate_core_query_pii", {
       const data = (result.data ?? {}) as Record<string, any>
       const piiCols = data.pii_columns ?? data.exposures ?? []
       const exposureCount = piiCols.length
-      const error = result.error ?? data.error
+      // The engine reports unparseable SQL via data.parse_error with an empty
+      // pii_columns list — that is an abstention, not a CLEAN verdict.
+      const error = result.error ?? data.error ?? data.parse_error
+      // Never render CLEAN when the engine call itself failed.
+      const title = error
+        ? "Query PII: ERROR"
+        : `Query PII: ${exposureCount === 0 ? "CLEAN" : `${exposureCount} exposure(s)`}`
       return {
-        title: `Query PII: ${exposureCount === 0 ? "CLEAN" : `${exposureCount} exposure(s)`}`,
+        title,
         metadata: { success: result.success, exposure_count: exposureCount, ...(error && { error }) },
-        output: formatQueryPii(data),
+        output: error ? `Error: ${error}` : formatQueryPii(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -45,9 +52,7 @@ function formatQueryPii(data: Record<string, any>): string {
   if (data.risk_level) lines.push(`Risk level: ${data.risk_level}`)
   lines.push("PII exposure detected:\n")
   for (const e of piiCols) {
-    // Classification is a string OR { Custom: string }.
-    const raw = e.classification ?? e.category ?? "PII"
-    const classification = typeof raw === "string" ? raw : (raw?.Custom ?? "PII")
+    const classification = classificationToString(e.classification ?? e.category)
     const table = e.table ?? "unknown"
     const column = e.column ?? "unknown"
     lines.push(`  ${table}.${column}: ${classification}`)

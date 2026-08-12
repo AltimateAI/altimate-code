@@ -63,19 +63,27 @@ async function runValidate(sql: string, file: string, schemaPath?: string): Prom
       sql,
       schema_path: schemaPath ?? "",
     })
-    if (result.success) return []
+    // The handler returns success=true even for invalid SQL — the verdict
+    // lives in data.valid (engine ValidationResult). Gating on success alone
+    // made this check pass every file.
+    if (result.success && result.data.valid !== false) return []
     const errors = (result.data.errors ?? result.data.findings ?? []) as Array<Record<string, unknown>>
     if (errors.length > 0) {
-      return errors.map((f) => ({
-        file,
-        line: f.line as number | undefined,
-        column: f.column as number | undefined,
-        code: f.code as string | undefined,
-        rule: "validate",
-        severity: normalizeSeverity(f.severity as string),
-        message: (f.message ?? f.description ?? "") as string,
-        suggestion: f.suggestion as string | undefined,
-      }))
+      return errors.map((f) => {
+        // Engine ValidationError: { code, kind, message, location: {line, column} | null, suggestions }
+        const location = f.location as { line?: number; column?: number } | null | undefined
+        const suggestions = f.suggestions as Array<Record<string, unknown>> | undefined
+        return {
+          file,
+          line: (location?.line ?? f.line) as number | undefined,
+          column: (location?.column ?? f.column) as number | undefined,
+          code: f.code as string | undefined,
+          rule: "validate",
+          severity: "error" as const,
+          message: (f.message ?? f.description ?? "") as string,
+          suggestion: (f.suggestion ?? suggestions?.[0]?.message) as string | undefined,
+        }
+      })
     }
     // If no structured errors but validation failed, emit a single finding
     const errorMsg = result.error ?? result.data.error ?? "SQL validation failed"
@@ -102,16 +110,21 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
       result.data.findings ??
       []) as Array<Record<string, unknown>>
     if (issues.length > 0) {
-      return issues.map((f) => ({
-        file,
-        line: f.line as number | undefined,
-        column: f.column as number | undefined,
-        code: f.code as string | undefined,
-        rule: (f.rule ?? f.category ?? "safety") as string,
-        severity: normalizeSeverity(f.severity as string),
-        message: (f.message ?? f.description ?? "") as string,
-        suggestion: (f.suggestion ?? f.detail) as string | undefined,
-      }))
+      return issues.map((f) => {
+        // ThreatFinding.location is [byteOffset, byteLength], not [start, end].
+        const loc = f.location as [number, number] | undefined
+        const at = Array.isArray(loc) ? ` (chars ${loc[0]}-${loc[0] + loc[1]})` : ""
+        return {
+          file,
+          line: f.line as number | undefined,
+          column: f.column as number | undefined,
+          code: f.code as string | undefined,
+          rule: (f.rule ?? f.category ?? "safety") as string,
+          severity: normalizeSeverity(f.severity as string),
+          message: `${(f.message ?? f.description ?? "") as string}${at}`,
+          suggestion: (f.suggestion ?? f.detail) as string | undefined,
+        }
+      })
     }
     if (!result.success || result.data.safe === false) {
       return [
@@ -213,8 +226,15 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
       sql,
       schema_path: schemaPath ?? "",
     })
-    if (result.success && result.data.valid !== false) return []
-    const issues = (result.data.issues ?? result.data.findings ?? []) as Array<Record<string, unknown>>
+    // Engine SemanticResult reports findings under `findings` and can return
+    // valid:true WITH findings (e.g. cartesian product) — `valid` means
+    // "plannable", not "clean". Never gate findings on it.
+    const issues = (result.data.findings ?? result.data.issues ?? []) as Array<Record<string, unknown>>
+    // Fail closed on engine failure, but only when there are no structured
+    // findings to surface.
+    if (!result.success && issues.length === 0) {
+      return [dispatcherErrorFinding("semantic", file, result.error ?? "altimate_core.semantics failed")]
+    }
     if (issues.length > 0) {
       return issues.map((f) => ({
         file,
@@ -254,9 +274,20 @@ async function runGrade(
       sql,
       schema_path: schemaPath ?? "",
     })
-    const issues = (result.data.issues ?? result.data.findings ?? result.data.recommendations ?? []) as Array<
-      Record<string, unknown>
-    >
+    // Native handlers report failures via the envelope (success:false), not by
+    // throwing — fail closed instead of emitting a passing empty grade.
+    if (!result.success) {
+      return { findings: [dispatcherErrorFinding("grade", file, result.error ?? "altimate_core.grade failed")] }
+    }
+    // Engine EvalResult: { explain, lint, overall_grade, safety, scores, sql,
+    // total_time_ms, validation } — the grade is `overall_grade`, the numeric
+    // score is `scores.overall`, and actionable findings live in `lint.findings`.
+    const lint = result.data.lint as Record<string, unknown> | undefined
+    const issues = (result.data.issues ??
+      result.data.findings ??
+      result.data.recommendations ??
+      lint?.findings ??
+      []) as Array<Record<string, unknown>>
     const findings = issues.map((f) => ({
       file,
       line: f.line as number | undefined,
@@ -268,8 +299,9 @@ async function runGrade(
       suggestion: f.suggestion as string | undefined,
     }))
     // Preserve the primary A-F grade value from the backend
-    const grade = (result.data.grade ?? result.data.letter_grade) as string | undefined
-    const score = (result.data.score ?? result.data.numeric_score) as number | undefined
+    const grade = (result.data.overall_grade ?? result.data.grade ?? result.data.letter_grade) as string | undefined
+    const scores = result.data.scores as Record<string, unknown> | undefined
+    const score = (scores?.overall ?? result.data.score ?? result.data.numeric_score) as number | undefined
     return { findings, grade, score }
   } catch (e) {
     console.error(`[grade] error processing ${file}: ${e instanceof Error ? e.message : String(e)}`)

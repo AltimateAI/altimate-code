@@ -29,17 +29,20 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
         schema_context: args.schema_context,
       })
       const data = (result.data ?? {}) as Record<string, any>
-      const issueCount = data.issues?.length ?? 0
+      // Engine SemanticResult reports findings under `findings`; `valid` means
+      // "plannable", not "clean" — the engine returns valid:true WITH findings
+      // (e.g. cartesian product). Never gate the count or title on `valid`.
+      const issues = (data.findings ?? data.issues ?? []) as any[]
+      const issueCount = issues.length
       const error = result.error ?? data.error ?? extractSemanticsErrors(data)
       const hasError = Boolean(error)
       // altimate_change start — sql quality findings for telemetry
-      const issues = Array.isArray(data.issues) ? data.issues : []
-      const findings: Telemetry.Finding[] = issues.map(() => ({
-        category: "semantic_issue",
+      const findings: Telemetry.Finding[] = issues.map((f: any) => ({
+        category: f?.rule ?? "semantic_issue",
       }))
       // altimate_change end
       return {
-        title: hasError ? "Semantics: ERROR" : `Semantics: ${data.valid ? "VALID" : `${issueCount} issues`}`,
+        title: hasError ? "Semantics: ERROR" : `Semantics: ${issueCount === 0 ? "VALID" : `${issueCount} issues`}`,
         metadata: {
           success: true, // engine ran — semantic issues are findings, not failures
           valid: data.valid,
@@ -73,9 +76,12 @@ export function extractSemanticsErrors(data: Record<string, any>): string | unde
 
 export function formatSemantics(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (data.valid) return "No semantic issues found."
+  // `valid` means "plannable", not "clean" — findings must render even when
+  // valid is true (e.g. cartesian product returns valid:true + findings).
+  const issues = (data.findings ?? data.issues ?? []) as any[]
+  if (!issues.length) return "No semantic issues found."
   const lines = ["Semantic issues:\n"]
-  for (const issue of data.issues ?? []) {
+  for (const issue of issues) {
     lines.push(`  [${issue.severity ?? "warning"}] ${issue.rule ?? issue.type}: ${issue.message}`)
     if (issue.suggestion) lines.push(`    Fix: ${issue.suggestion}`)
   }

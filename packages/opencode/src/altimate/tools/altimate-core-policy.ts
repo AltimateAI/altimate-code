@@ -29,16 +29,21 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
         category: v.rule ?? "policy_violation",
       }))
       // altimate_change end
+      // Engine PolicyResult: { allowed, violations, warnings, … } — `pass`
+      // never existed, so every clean query used to render VIOLATIONS FOUND.
+      const allowed = (data.allowed ?? data.pass) as boolean | undefined
       return {
-        title: `Policy: ${data.pass ? "PASS" : "VIOLATIONS FOUND"}`,
+        title: error ? "Policy: ERROR" : `Policy: ${allowed ? "PASS" : "VIOLATIONS FOUND"}`,
         metadata: {
-          success: true, // engine ran — violations are findings, not failures
-          pass: data.pass,
+          // Violations are findings, not failures — but a failed engine call
+          // (e.g. malformed policy JSON) must not report success.
+          success: result.success,
+          pass: allowed,
           has_schema: hasSchema,
           ...(error && { error }),
           ...(findings.length > 0 && { findings }),
         },
-        output: formatPolicy(data),
+        output: error ? `Error: ${error}` : formatPolicy(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -53,7 +58,7 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
 
 function formatPolicy(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (data.pass) return "SQL passes all policy checks."
+  if (data.allowed ?? data.pass) return "SQL passes all policy checks."
   const lines = ["Policy violations:\n"]
   for (const v of data.violations ?? []) {
     lines.push(`  [${v.severity ?? "error"}] ${v.rule}: ${v.message}`)

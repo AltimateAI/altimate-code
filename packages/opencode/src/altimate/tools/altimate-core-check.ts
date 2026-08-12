@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { classificationToString } from "../native/engine-coerce"
 import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
@@ -32,7 +33,7 @@ export const AltimateCoreCheckTool = Tool.define("altimate_core_check", {
       for (const t of data.safety?.threats ?? []) {
         findings.push({ category: t.rule ?? t.type ?? "safety_threat" })
       }
-      for (const p of data.pii?.findings ?? []) {
+      for (const p of data.pii?.pii_columns ?? data.pii?.findings ?? []) {
         findings.push({ category: "pii_detected" })
       }
       // altimate_change end
@@ -62,7 +63,7 @@ export function formatCheckTitle(data: Record<string, any>): string {
   if (!data.validation?.valid) parts.push("validation errors")
   if (!data.lint?.clean) parts.push(`${data.lint?.findings?.length ?? 0} lint findings`)
   if (!data.safety?.safe) parts.push("safety threats")
-  if (data.pii?.findings?.length) parts.push("PII detected")
+  if (data.pii?.pii_columns?.length || data.pii?.findings?.length) parts.push("PII detected")
   return parts.length ? parts.join(", ") : "PASS"
 }
 
@@ -98,11 +99,15 @@ export function formatCheck(data: Record<string, any>): string {
   }
 
   lines.push("\n=== PII ===")
-  if (!data.pii?.findings?.length) {
+  // Engine PiiQueryResult: { accesses_pii, pii_columns, risk_level, … }
+  const piiCols = (data.pii?.pii_columns ?? data.pii?.findings ?? []) as any[]
+  if (!piiCols.length) {
     lines.push("No PII detected.")
   } else {
-    for (const p of data.pii?.findings ?? []) {
-      lines.push(`  ${p.column ?? "unknown"}: ${p.category ?? "PII"} (${p.confidence ?? "unknown"} confidence)`)
+    for (const p of piiCols) {
+      const cls = classificationToString(p.classification ?? p.category)
+      const where = [p.table, p.column ?? "unknown"].filter(Boolean).join(".")
+      lines.push(`  ${where}: ${cls}${p.suggested_masking ? ` (masking: ${p.suggested_masking})` : ""}`)
     }
   }
 

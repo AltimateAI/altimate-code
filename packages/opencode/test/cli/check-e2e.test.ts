@@ -611,6 +611,8 @@ describe("check command E2E", () => {
             severity: "high",
             message: "Unbalanced quote suggests injection breakout",
             detail: "Quote count is odd within a single statement",
+            // Real engine semantics: [byteOffset, byteLength] — "OR 1=1 " at 37.
+            location: [37, 7],
             matched_pattern: "' OR 1=1 --",
           },
         ],
@@ -622,7 +624,8 @@ describe("check command E2E", () => {
     const j = parseJson(r.stdout)
     expect(j.results.safety.findings).toHaveLength(1)
     expect(j.results.safety.findings[0].rule).toBe("unbalanced_quote")
-    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout")
+    // ThreatFinding.location is [byteOffset, byteLength] — rendered as an offset range.
+    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (chars 37-44)")
     expect(j.results.safety.findings[0].suggestion).toBe("Quote count is odd within a single statement")
     // Engine severity "high" must normalize to error, not degrade to info —
     // otherwise --fail-on/--severity filters silently pass high-risk injections.
@@ -707,13 +710,22 @@ describe("check command E2E", () => {
     expect(j.results.semantic.findings[0].rule).toBe("cartesian-join")
   })
 
-  test("grade check returns recommendations", async () => {
+  test("grade check maps the real EvalResult shape (overall_grade/scores.overall/lint.findings)", async () => {
+    // Real core@0.7.0 evaluate() shape — the previous mock used grade/recommendations,
+    // fields the engine never returns, which enshrined a dead consumer.
     const file = await writeSql(tmpDir.dir, "grade.sql", "SELECT * FROM big_table;")
     setDispatcherResponse("altimate_core.grade", () => ({
       success: true,
       data: {
-        grade: "C",
-        recommendations: [{ rule: "selectivity", severity: "info", message: "Add WHERE clause" }],
+        overall_grade: "C",
+        scores: { overall: 0.72, complexity: 0.9, safety: 1, style: 0.6, syntax: 1 },
+        lint: {
+          clean: false,
+          findings: [{ rule: "select-star", severity: "info", message: "Add WHERE clause or explicit columns" }],
+        },
+        explain: {},
+        safety: { safe: true },
+        validation: { valid: true },
       },
     }))
     installDispatcherMocks()
@@ -722,6 +734,98 @@ describe("check command E2E", () => {
     const j = parseJson(r.stdout)
     expect(j.results.grade.findings).toHaveLength(1)
     expect(j.results.grade.findings[0].message).toContain("WHERE clause")
+    expect(j.results.grade.grade).toBe("C")
+    expect(j.results.grade.score).toBe(0.72)
+  })
+
+  test("grade check fails closed on engine failure envelope", async () => {
+    // Native handlers report failures via {success:false}, not by throwing —
+    // a failed grade run must not pass silently with zero findings.
+    const file = await writeSql(tmpDir.dir, "grade-fail.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.grade", () => ({
+      success: false,
+      data: {},
+      error: "Failed to parse JSON schema",
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.grade.findings).toHaveLength(1)
+    expect(j.results.grade.findings[0].severity).toBe("error")
+    expect(j.results.grade.findings[0].message).toContain("Failed to parse JSON schema")
+  })
+
+  test("validate check fails invalid SQL despite handler success (dead-gate regression)", async () => {
+    // The native handler returns success=true even for invalid SQL — the
+    // verdict is data.valid. Gating on success alone made validate a no-op.
+    const file = await writeSql(tmpDir.dir, "invalid.sql", "SELECT zzz FROM t;")
+    setDispatcherResponse("altimate_core.validate", () => ({
+      success: true,
+      data: {
+        valid: false,
+        errors: [
+          {
+            code: "E002",
+            kind: { type: "ColumnNotFound", column: "zzz", table: null },
+            message: "Column 'zzz' not found",
+            location: { line: 1, column: 8 },
+            suggestions: [],
+          },
+        ],
+        warnings: [],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.validate.findings).toHaveLength(1)
+    expect(j.results.validate.findings[0].severity).toBe("error")
+    expect(j.results.validate.findings[0].message).toBe("Column 'zzz' not found")
+    expect(j.results.validate.findings[0].line).toBe(1)
+  })
+
+  test("validate check passes valid SQL", async () => {
+    const file = await writeSql(tmpDir.dir, "valid.sql", "SELECT id FROM t;")
+    setDispatcherResponse("altimate_core.validate", () => ({
+      success: true,
+      data: { valid: true, errors: [], warnings: [] },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.validate.findings).toHaveLength(0)
+  })
+
+  test("semantic check surfaces findings when valid:true (valid means plannable, not clean)", async () => {
+    const file = await writeSql(tmpDir.dir, "cartesian.sql", "SELECT * FROM a, b;")
+    setDispatcherResponse("altimate_core.semantics", () => ({
+      success: true,
+      data: {
+        valid: true,
+        semantic_score: 0.5,
+        findings: [
+          {
+            rule: "missing_join_condition",
+            severity: "error",
+            message: "Cartesian product detected between 'a' and 'b'",
+            explanation: "…",
+            confidence: 0.95,
+          },
+        ],
+        passed_checks: [],
+        validation_errors: [],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "semantic" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.semantic.findings).toHaveLength(1)
+    expect(j.results.semantic.findings[0].rule).toBe("missing_join_condition")
+    expect(j.results.semantic.findings[0].severity).toBe("error")
   })
 
   // --- Schema resolution ---

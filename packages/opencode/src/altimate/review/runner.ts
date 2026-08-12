@@ -1,4 +1,5 @@
 import { Dispatcher } from "../native"
+import { classificationToString } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
@@ -400,7 +401,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           .filter((c) => c?.classification && c.classification !== "None")
           .map((c) => ({
             column: String(c.column ?? ""),
-            classification: String(c.classification ?? ""),
+            // classification can be { Custom: string } — String() would emit "[object Object]"
+            classification: classificationToString(c.classification, ""),
             confidence: typeof c.confidence === "number" ? c.confidence : 0,
             masking: c.suggested_masking ?? undefined,
           }))
