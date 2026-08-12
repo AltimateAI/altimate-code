@@ -1,3 +1,8 @@
+---
+title: "dbt PR Review — Real-World Issue Corpus"
+description: "Real-world dbt pitfall corpus used to benchmark Altimate Code's PR review: 15/15 issues caught, 0/5 false positives."
+---
+
 # dbt PR Review — real-world issue corpus
 
 A living, **sourced** corpus of real dbt/SQL pitfalls practitioners report (dbt

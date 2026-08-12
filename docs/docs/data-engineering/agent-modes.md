@@ -1,3 +1,8 @@
+---
+title: "Agent Modes — Builder, Analyst, and Plan"
+description: "Altimate Code offers three agent modes: Builder (full tool access), Analyst (read-only), and Plan (planning only)."
+---
+
 # Agent Modes
 
 altimate runs in one of three specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.

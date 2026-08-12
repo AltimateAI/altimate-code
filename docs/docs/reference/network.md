@@ -1,3 +1,8 @@
+---
+title: "Network & Proxy Configuration — Altimate Code"
+description: "Configure Altimate Code for proxied or restricted network environments using HTTP_PROXY and related environment variables."
+---
+
 # Network
 
 Configure network settings for proxied or restricted environments.

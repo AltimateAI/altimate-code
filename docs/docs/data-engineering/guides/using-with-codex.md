@@ -1,3 +1,8 @@
+---
+title: "Using Altimate with OpenAI Codex"
+description: "Two ways to integrate Altimate with Codex: as an LLM provider or as a Codex skill for data engineering tasks."
+---
+
 # Using altimate with Codex
 
 altimate integrates with Codex in two ways: as an **LLM provider** (use your ChatGPT subscription to power altimate) and as a **Codex skill** (invoke altimate from within Codex CLI).

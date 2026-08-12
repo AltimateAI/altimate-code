@@ -1,3 +1,8 @@
+---
+title: "Changelog — Altimate Code"
+description: "Full version history for Altimate Code following Keep a Changelog format with semantic versioning."
+---
+
 # Changelog
 
 All notable changes to this project will be documented in this file.
@@ -185,7 +190,7 @@ After upgrading, the TUI welcome banner shows what changed since your previous v
 ### Added
 
 - `/feedback` command and `feedback_submit` tool for in-app user feedback (#89)
-- Datamate manager — dynamic MCP server management (#99)
+- Altimate MCP manager — dynamic MCP server management (#99)
 - Non-interactive mode for `mcp add` command with input validation
 - `mcp remove` command
 - Upstream merge with OpenCode v1.2.20

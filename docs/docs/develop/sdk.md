@@ -1,3 +1,8 @@
+---
+title: "TypeScript SDK — Altimate Code"
+description: "The Altimate Code TypeScript SDK gives you programmatic access to all tools and agent capabilities from your own applications."
+---
+
 # SDK
 
 The altimate SDK (`@altimateai/altimate-code-sdk`) provides a TypeScript client for programmatic access to altimate functionality. Use it to automate SQL analysis, manage sessions, and integrate altimate into your CI/CD pipelines or internal tools.

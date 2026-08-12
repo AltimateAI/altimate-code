@@ -1,3 +1,8 @@
+---
+title: Keybindings — Altimate Code TUI
+description: "85+ customizable keybindings for the Altimate Code terminal UI. Configure the leader key and reassign any shortcut."
+---
+
 # Keybinds
 
 altimate supports 85+ customizable keybindings for the TUI.
@@ -115,7 +120,7 @@ All configurable keybind identifiers:
 
 ### Session
 
-`session_export`, `session_new`, `session_list`, `session_timeline`, `session_fork`, `session_rename`, `session_delete`, `session_child_cycle`, `session_parent`, `session_share`, `session_unshare`, `session_interrupt`, `session_compact`, `session_yolo_toggle`
+`session_export`, `session_new`, `session_list`, `session_timeline`, `session_fork`, `session_rename`, `session_delete`, `session_child_cycle`, `session_parent`, `session_share`, `session_unshare`, `session_interrupt`, `session_compact`
 
 ### Messages
 

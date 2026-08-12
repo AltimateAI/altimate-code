@@ -1,5 +1,6 @@
 ---
-description: "Install altimate-code and run your first SQL analysis. The open-source data engineering harness with 100+ tools for building, validating, optimizing, and shipping data products."
+title: Quickstart — Altimate Code
+description: "Install Altimate Code, connect your warehouse and LLM, and run your first SQL analysis in under 5 minutes."
 ---
 
 # Quickstart
@@ -113,5 +114,5 @@ Once basics are working, explore these commands:
 
 - [Full Setup](getting-started.md): All warehouse configs, LLM providers, advanced setup
 - [Agent Modes](data-engineering/agent-modes.md): Choose the right agent for your task
-- [CI & Automation](data-engineering/guides/ci-headless.md): Run altimate in automated pipelines
+- [CI & Automation](usage/ci-headless.md): Run altimate in automated pipelines
 - Train your AI teammate: Use `/teach` and `/train` to build team-specific knowledge that persists across sessions

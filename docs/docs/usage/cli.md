@@ -1,3 +1,8 @@
+---
+title: "CLI Reference — Altimate Code"
+description: "Command-line reference for Altimate Code: subcommands for launching the TUI, running headless prompts, and more."
+---
+
 # CLI
 
 altimate provides subcommands for headless operation, automation, and integration.
