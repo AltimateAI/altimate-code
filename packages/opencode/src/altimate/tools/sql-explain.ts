@@ -83,11 +83,26 @@ function validateWarehouseName(warehouse: string | undefined): string | null {
  */
 function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): string | null {
   if (!analyze) return null
+  const blocked =
+    "analyze:true runs EXPLAIN ANALYZE, which actually executes the statement — it is only allowed for a single plain SELECT query. " +
+    "Re-run with analyze:false for an estimated plan."
+  // Dollar-quoted strings (PostgreSQL $tag$...$tag$) can hide arbitrary text from
+  // the masking below; fail closed rather than tokenize them.
+  if (/\$[a-zA-Z_]*\$/.test(sql)) return blocked
+  // Mask string literals BEFORE removing comments. Comments-first is bypassable:
+  // in `SELECT '/*'; DELETE FROM t; SELECT '*/'` the comment regex would swallow
+  // the DELETE because the `/*` and `*/` live inside string literals. Masking
+  // errs toward false positives (a mangled comment can only ADD leftover text),
+  // which fails closed — the caller just falls back to analyze:false.
   const stripped = sql
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .replace(/"(?:[^"]|"")*"/g, '""')
     .replace(/--[^\n]*/g, " ")
     .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/'(?:[^']|'')*'/g, "''")
     .trim()
+  // Exactly one executable statement: any semicolon other than a trailing one
+  // means a multi-statement payload.
+  if (stripped.replace(/;\s*$/, "").includes(";")) return blocked
   const readOnlyStart = /^(select|with|show|describe|desc|values|table)\b/i.test(stripped)
   // Data-modifying CTEs (`WITH x AS (...) INSERT INTO ...`) and similar mean a
   // read-only prefix is not enough — reject write keywords anywhere.
@@ -97,12 +112,7 @@ function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): strin
     /\b(insert|update|delete|merge|truncate|drop|alter|create|replace|grant|revoke|copy|call|vacuum|set|into)\b/i.test(
       stripped,
     )
-  if (!readOnlyStart || hasWriteKeyword) {
-    return (
-      "analyze:true runs EXPLAIN ANALYZE, which actually executes the statement — it is only allowed for plain SELECT queries. " +
-      "Re-run with analyze:false for an estimated plan."
-    )
-  }
+  if (!readOnlyStart || hasWriteKeyword) return blocked
   return null
 }
 

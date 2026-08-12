@@ -26,7 +26,7 @@ import { describe, test, expect } from "bun:test"
 import { spawnSync } from "child_process"
 import path from "path"
 import fs from "fs/promises"
-import os from "os"
+import { tmpdir } from "../fixture/fixture"
 
 const CLI = process.env["OPENCODE_TEST_CLI"]
 const ENABLED = process.env["OPTIMIZER_LIVE_EVAL"] === "1" && !!CLI
@@ -90,8 +90,10 @@ describeIf("optimizer live eval — planted-project scan", () => {
   test(
     "scan finds >=4/6 planted issues, keeps the candidate contract, edits nothing",
     async () => {
-      // Fresh copy so the eval can never dirty the checked-in fixture.
-      const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "optimizer-eval-"))
+      // Fresh copy so the eval can never dirty the checked-in fixture. `await
+      // using` disposes the tmpdir on success, assertion failure, and error.
+      await using tmp = await tmpdir()
+      const workdir = tmp.path
       await fs.cp(FIXTURE, workdir, { recursive: true })
       const before = await snapshotTree(workdir)
 
@@ -139,7 +141,6 @@ describeIf("optimizer live eval — planted-project scan", () => {
       expect(removed).toEqual([])
       expect(added).toEqual([])
 
-      await fs.rm(workdir, { recursive: true, force: true })
     },
     600_000,
   )

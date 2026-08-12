@@ -172,6 +172,32 @@ it.instance(
   },
 )
 
+it.instance(
+  "dbt-optimizer bash boundary: user bash overrides relax builds, never DDL or SQL writes",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // DOCUMENTED BOUNDARY: `bash` is "ask" by default; a user who explicitly
+      // sets bash overrides accepts that dbt builds (which mutate a dev target)
+      // run without a prompt. That is the user's choice — but the invariants
+      // hold regardless: destructive DDL through bash stays denied, and the
+      // direct SQL write tool stays denied.
+      expect(
+        Permission.evaluate("bash", "altimate-dbt build --model fct_orders", optimizer!.permission).action,
+      ).toBe("allow")
+      expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+      expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+    }),
+  {
+    config: {
+      permission: { bash: "allow" },
+      agent: {
+        "dbt-optimizer": { permission: { bash: "allow" } },
+      },
+    },
+  },
+)
+
 it.instance("sensitive_write guard actually fires (not neutralized by *: allow)", () =>
   Effect.gen(function* () {
     // The #209 sensitive-write guard asks for the "sensitive_write" permission. It must NOT

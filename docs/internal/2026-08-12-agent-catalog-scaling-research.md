@@ -1,5 +1,22 @@
 # Scaling Agent Catalogs Without Losing TUI Speed
 
+> **Status: research record, not an implementation spec.** The SaaS distribution
+> design sketched below (control plane, signed bundles, capability tiers) is NOT
+> built; nothing in this document changes runtime behavior. Security review
+> flagged four design requirements that any implementation must resolve before
+> shipping, tracked here as design inputs:
+> 1. cache entries partitioned by full authorization scope + policy version, with
+>    defined offline/revocation behavior including active sessions;
+> 2. warehouse-write denial for optimizer-class agents expressed as a
+>    non-overridable deny state, not an approval tier (the shipped `dbt-optimizer`
+>    already enforces this in `agent.ts` — `sql_execute_write` deny is re-applied
+>    after all config merges);
+> 3. promotion to primary restricted to `mode: both` definitions with
+>    immutable-manifest + session-policy validation, never a safety label alone;
+> 4. a non-self-referential signature envelope (canonical serialization, signature
+>    excluded from signed bytes, algorithm + key ID) and redacted, allowlisted
+>    audit payloads.
+
 ## Executive Summary
 
 - **Hybrid Selection**: Claude Code, OpenCode, Cursor, Codex, and Cline all expose a user-facing agent that can delegate bounded work to specialists, while also offering explicit ways to invoke or configure specialists. Claude Code uses description-based routing plus explicit `@` selection, and OpenCode uses automatic invocation plus `@` mentions. [16] [16] [5] [5] -> Keep automatic delegation, but always provide an explicit picker and mention syntax.
@@ -192,24 +209,20 @@ On distribution, use the same boundary that the strongest platforms expose: huma
 12. *Configure the sandboxed Bash tool*. https://code.claude.com/docs/en/sandboxing
 13. *Application card: GitHub Copilot Agents*. https://docs.github.com/en/copilot/responsible-use/agents
 14. *Agent Server*. https://docs.langchain.com/langsmith/agent-server
-15. *Create and distribute a plugin marketplace*. http://code.claude.com/docs/en/plugin-marketplaces
+15. *Create and distribute a plugin marketplace*. https://code.claude.com/docs/en/plugin-marketplaces
 16. *Create custom subagents*. https://code.claude.com/docs/en/sub-agents
-17. *Discover and install prebuilt plugins through marketplaces*. http://code.claude.com/docs/en/discover-plugins
+17. *Discover and install prebuilt plugins through marketplaces*. https://code.claude.com/docs/en/discover-plugins
 18. *Preparing to use custom agents in your organization*. https://docs.github.com/en/copilot/how-tos/administer-copilot/manage-for-organization/prepare-for-custom-agents
 19. *Creating and using custom agents for GitHub Copilot CLI*. https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/create-custom-agents-for-cli
-20. [
-  Subagents | ChatGPT Learn
-](https://learn.chatgpt.com/docs/agent-configuration/subagents)
+20. *Subagents | ChatGPT Learn*. https://learn.chatgpt.com/docs/agent-configuration/subagents
 21. *feat: subagents · Issue #431 · charmbracelet/crush · GitHub*. https://github.com/charmbracelet/crush/issues/431
 22. *Aider - AI Pair Programming in Your Terminal*. https://aider.chat/
 23. *Run agents in parallel*. https://code.claude.com/docs/en/agents
-24. [
-  Advanced Configuration | ChatGPT Learn
-](https://learn.chatgpt.com/docs/config-file/config-advanced)
+24. *Advanced Configuration | ChatGPT Learn*. https://learn.chatgpt.com/docs/config-file/config-advanced
 25. *Recipe Reference Guide | goose | Your open source AI agent*. https://goose-docs.ai/docs/guides/recipes/recipe-reference/
 26. *Manage multiple agents with agent view*. https://code.claude.com/docs/en/agent-view
 27. *Subagents*. https://docs.cline.bot/features/subagents
-28. *Using Agent in CLI | Cursor Docs*. http://cursor.com/docs/cli/using
+28. *Using Agent in CLI | Cursor Docs*. https://cursor.com/docs/cli/using
 29. *Subagents | Cursor Docs*. https://cursor.com/docs/subagents
 30. *Reusable Recipes | goose | Your open source AI agent*. https://goose-docs.ai/docs/guides/recipes/session-recipes
 31. *Using Commands*. https://docs.cline.bot/core-workflows/using-commands
@@ -225,9 +238,8 @@ On distribution, use the same boundary that the strongest platforms expose: huma
 41. *Tools*. https://opencode.ai/docs/tools/
 42. *Chat modes*. https://aider.chat/docs/usage/modes.html
 43. *Plugins*. https://opencode.ai/docs/plugins/
-44. [Chat Participant API | Visual Studio Code Extension
-API](https://code.visualstudio.com/api/extension-guides/ai/chat)
-45. *http://cursor.com/docs*. http://cursor.com/docs
+44. *Chat Participant API | Visual Studio Code Extension API*. https://code.visualstudio.com/api/extension-guides/ai/chat
+45. *https://cursor.com/docs*. https://cursor.com/docs
 46. *Agent Skills | Cursor Docs*. https://cursor.com/docs/skills
 47. *Agent Skills*. https://opencode.ai/docs/skills/
 48. *Aider Documentation*. https://aider.chat/docs/
@@ -235,7 +247,7 @@ API](https://code.visualstudio.com/api/extension-guides/ai/chat)
 50. *Plugins | Cursor Docs*. https://cursor.com/docs/plugins
 51. *Separating code reasoning and editing*. https://aider.chat/2024/09/26/architect.html
 52. *Set up Claude Code for your organization*. https://code.claude.com/docs/en/admin-setup
-53. *Enterprise | Cursor Docs*. http://cursor.com/docs/enterprise
+53. *Enterprise | Cursor Docs*. https://cursor.com/docs/enterprise
 54. *Configure server-managed settings*. https://code.claude.com/docs/en/server-managed-settings
 55. *About GitHub Copilot cloud agent*. https://docs.github.com/copilot/concepts/agents/cloud-agent/about-cloud-agent
 56. *Managing GPT access in Enterprise and Edu workspaces | OpenAI Help Center*. https://help.openai.com/en/articles/8555535-managing-gpt-access-in-enterprise-and-edu-workspaces

@@ -8,7 +8,9 @@ fixes with cost and impact reporting so the user can prioritize. Your outputs ar
 - **Pull requests** — for the fixes the user applies
 
 Your permissions enforce your phases: file edits and shell commands prompt the user
-for approval by default, and warehouse writes are denied outright.
+for approval by default, and the direct SQL write tool (`sql_execute_write`) is
+denied outright. dbt builds DO mutate the warehouse — that is why they run only as
+shell commands the user approves, against a dev target (see Build safety).
 
 ## Trust boundary
 

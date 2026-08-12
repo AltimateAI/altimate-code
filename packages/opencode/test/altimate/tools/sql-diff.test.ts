@@ -21,13 +21,17 @@ const ctx = {
   ask: async () => {},
 } as any
 
+let lastParams: Record<string, any> | undefined
 function mockDiff(result: Record<string, any>) {
-  Dispatcher.register("sql.diff" as any, async () => result)
+  Dispatcher.register("sql.diff" as any, async (params: any) => {
+    lastParams = params
+    return result
+  })
 }
 
-async function runTool(original: string, modified: string) {
+async function runTool(original: string, modified: string, extra: Record<string, any> = {}) {
   const tool = await initTool(SqlDiffTool)
-  return tool.execute({ original, modified, context_lines: 3 }, ctx)
+  return tool.execute({ original, modified, context_lines: 3, ...extra }, ctx)
 }
 
 describe("SqlDiffTool", () => {
@@ -63,7 +67,25 @@ describe("SqlDiffTool", () => {
     expect(String(r.output)).toContain("engine unavailable")
   })
 
-  test("unproven equivalence is never presented as equivalent", async () => {
+  test("without schema, equivalence is reported as NOT ASSESSED, never 'not proven'", async () => {
+    // The native handler skips the equivalence check entirely when no schema is
+    // supplied, so `equivalent: false` there means "did not run", not "failed".
+    mockDiff({ success: true, diff: "- a\n+ b", equivalent: false, equivalence_confidence: 0, differences: [] })
+    const r = await runTool("select a from t", "select b from t")
+    expect(String(r.output)).toContain("not assessed")
+    expect(String(r.output)).not.toContain("not proven")
+  })
+
+  test("schema_context and dialect are forwarded to the native handler", async () => {
+    const schema = { t: { a: "INTEGER", b: "INTEGER" } }
+    mockDiff({ success: true, diff: "- a\n+ b", equivalent: true, equivalence_confidence: 0.9, differences: [] })
+    const r = await runTool("select a from t", "select b from t", { schema_context: schema, dialect: "duckdb" })
+    expect(lastParams?.schema_context).toEqual(schema)
+    expect(lastParams?.dialect).toBe("duckdb")
+    expect(String(r.output)).toContain("equivalent (confidence 0.9)")
+  })
+
+  test("with schema, unproven equivalence is presented as 'not proven'", async () => {
     mockDiff({
       success: true,
       diff: "- a\n+ b",
@@ -71,7 +93,7 @@ describe("SqlDiffTool", () => {
       equivalence_confidence: 0.4,
       differences: [],
     })
-    const r = await runTool("select a from t", "select b from t")
+    const r = await runTool("select a from t", "select b from t", { schema_context: { t: { a: "INTEGER" } } })
     expect(String(r.output)).toContain("not proven")
   })
 })

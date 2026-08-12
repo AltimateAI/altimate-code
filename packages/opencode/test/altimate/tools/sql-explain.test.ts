@@ -155,6 +155,23 @@ describe("validateAnalyzeSafety", () => {
     expect(validateAnalyzeSafety("SELECT * FROM audit WHERE action = 'delete'", true)).toBeNull()
   })
 
+  test("comment markers inside string literals cannot smuggle a DELETE (strip-order bypass)", () => {
+    // Comments-first stripping would swallow the DELETE between the quoted
+    // markers; strings must be masked first.
+    expect(validateAnalyzeSafety("SELECT '/*'; DELETE FROM t; SELECT '*/'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety('SELECT "/*"; DELETE FROM t; SELECT "*/"', true)).not.toBeNull()
+  })
+
+  test("multi-statement payloads are rejected, trailing semicolon is fine", () => {
+    expect(validateAnalyzeSafety("SELECT 1; SELECT 2", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT id FROM users;", true)).toBeNull()
+  })
+
+  test("dollar-quoted strings fail closed", () => {
+    expect(validateAnalyzeSafety("SELECT $$/*$$; DELETE FROM t; SELECT $$*/$$", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT $tag$x$tag$", true)).not.toBeNull()
+  })
+
   test("write keywords inside comments do not block a SELECT", () => {
     expect(validateAnalyzeSafety("SELECT id FROM t -- drop old rows later", true)).toBeNull()
   })

@@ -383,7 +383,7 @@ export const layer = Layer.effect(
           "dbt-optimizer": {
             name: "dbt-optimizer",
             description:
-              "Scan a dbt project for fixable issues — performance, materialization, repeated logic, missing tests/docs — and propose targeted fixes with cost and impact reporting. File edits and shell commands prompt for approval; warehouse writes are denied.",
+              "Scan a dbt project for fixable issues — performance, materialization, repeated logic, missing tests/docs — and propose targeted fixes with cost and impact reporting. File edits and shell commands prompt for approval; the direct SQL write tool is denied non-overridably, and dbt builds against a dev target run only as user-approved shell commands.",
             prompt: PROMPT_OPTIMIZER,
             options: {},
             permission: Permission.merge(

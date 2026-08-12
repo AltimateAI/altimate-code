@@ -726,6 +726,8 @@ export interface SqlDiffParams {
   context_lines?: number
   /** Optional parsing-dialect hint forwarded to the equivalence engine. */
   dialect?: string
+  /** Inline schema for the equivalence check; without it the handler skips equivalence entirely. */
+  schema_context?: Record<string, unknown>
 }
 
 export interface SqlDiffResult {
