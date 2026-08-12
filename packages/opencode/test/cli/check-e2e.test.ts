@@ -667,6 +667,8 @@ describe("check command E2E", () => {
     expect(j.results.pii.findings[0].message).toContain("exposed via: contact")
     expect(j.results.pii.findings[0].suggestion).toBe("'***MASKED***'")
     expect(j.results.pii.findings[1].rule).toBe("EmployeeId")
+    // suggested_masking: null must not leak into suggestion as null.
+    expect(j.results.pii.findings[1].suggestion).toBeUndefined()
   })
 
   test("pii check reports PII columns", async () => {

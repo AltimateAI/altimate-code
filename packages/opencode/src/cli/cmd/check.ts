@@ -197,7 +197,8 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
         rule,
         severity: "warning" as const,
         message: (f.message ?? f.description ?? `PII detected: ${qualified || "unknown"}${targets}`) as string,
-        suggestion: (f.suggestion ?? f.suggested_masking) as string | undefined,
+        // suggested_masking is string | null — never emit null as a suggestion.
+        suggestion: (f.suggestion ?? f.suggested_masking ?? undefined) as string | undefined,
       }
     })
   } catch (e) {
