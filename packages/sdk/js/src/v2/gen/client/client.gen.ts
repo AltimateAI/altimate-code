@@ -169,7 +169,18 @@ export const createClient = (config: Config = {}): Client => {
           // Some servers return 200 with no Content-Length and empty body.
           // response.json() would throw; read as text and parse if non-empty.
           const text = await response.text()
-          data = text ? JSON.parse(text) : {}
+          // altimate_change start — upstream_fix: guard JSON parse against non-JSON (HTML) response bodies
+          // A 200 whose body is an HTML error page from a proxy/gateway/CDN otherwise crashes with a
+          // raw "JSON Parse error: Unrecognized token '<'". Surface an actionable error instead.
+          try {
+            data = text ? JSON.parse(text) : {}
+          } catch {
+            throw new Error(
+              `Expected a JSON response but received ${response.headers.get("content-type") || "an unknown content type"} ` +
+                `(HTTP ${response.status}). This is usually a proxy or gateway error page, not the API.`,
+            )
+          }
+          // altimate_change end
           break
         }
         case "stream":
