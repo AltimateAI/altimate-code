@@ -188,6 +188,10 @@ describe("Ripgrep", () => {
     ),
   ])
 
+  // The stub is a POSIX shell script and `chmod` is a no-op on win32, so the spawn cannot work
+  // there. Windows ripgrep behaviour has its own coverage in script/windows-ripgrep-e2e.ts.
+  const stubTest = bunTest.skipIf(process.platform === "win32")
+
   const grepWithStubbedRecords = (records: string[]) =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -224,7 +228,7 @@ describe("Ripgrep", () => {
   /** The single aggregate warning for the last search, or undefined when nothing was skipped. */
   const lastSkip = () => skipWarnings.at(-1)
 
-  bunTest("skips an unparseable record without failing the search", async () => {
+  stubTest("skips an unparseable record without failing the search", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
         matchRecord("a.txt"),
@@ -240,7 +244,7 @@ describe("Ripgrep", () => {
 
   // The size ceiling is asserted on a record built to exceed it, rather than inferred from a large
   // file — that keeps the case independent of whether a given ripgrep build emits the match at all.
-  bunTest("skips an oversized record and keeps parsing the records after it", async () => {
+  stubTest("skips an oversized record and keeps parsing the records after it", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
         matchRecord("a.txt"),
@@ -254,7 +258,7 @@ describe("Ripgrep", () => {
 
   // A path is an identifier the caller reopens, so it must never be lossily decoded. Such a record
   // is skipped rather than reported under a U+FFFD-mangled path that names no real file.
-  bunTest("skips a match whose path is not valid UTF-8, keeping the rest", async () => {
+  stubTest("skips a match whose path is not valid UTF-8, keeping the rest", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
         matchRecord("a.txt"),
@@ -268,7 +272,7 @@ describe("Ripgrep", () => {
 
   // `Buffer.from` maps unconvertible base64 to an empty buffer instead of throwing, which would turn
   // a corrupt record into a schema-valid EMPTY match. It must be skipped, not silently emptied.
-  bunTest("skips a record whose bytes field is not valid base64", async () => {
+  stubTest("skips a record whose bytes field is not valid base64", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
         matchRecord("a.txt"),
@@ -283,7 +287,7 @@ describe("Ripgrep", () => {
   // Submatch offsets are BYTE offsets into the raw line. A lossy decode widens every undecodable
   // byte to a 3-byte U+FFFD, so the raw offsets no longer locate the match and must be rebased onto
   // the decoded text's own UTF-8 encoding. Without this the match reads "��need".
-  bunTest("rebases submatch offsets onto the decoded line after a lossy decode", async () => {
+  stubTest("rebases submatch offsets onto the decoded line after a lossy decode", async () => {
     const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
@@ -302,7 +306,7 @@ describe("Ripgrep", () => {
     expect(Buffer.from(text, "utf8").subarray(submatches[0].start, submatches[0].end).toString("utf8")).toBe("needle")
   })
 
-  bunTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
+  stubTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "" } })]),
     )
@@ -311,7 +315,7 @@ describe("Ripgrep", () => {
     expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
   })
 
-  bunTest("skips a record whose bytes field uses non-canonical padding", async () => {
+  stubTest("skips a record whose bytes field uses non-canonical padding", async () => {
     // "Zh==" and "Zg==" both decode to "f"; only the canonical spelling round-trips.
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "Zh==" } })]),
@@ -322,7 +326,7 @@ describe("Ripgrep", () => {
 
   // Control records carry no match and are ignored silently; an unrecognised type is a protocol
   // surprise and must be counted, or a ripgrep change turns every match into an innocent "no match".
-  bunTest("ignores control records but counts records with an unknown type", async () => {
+  stubTest("ignores control records but counts records with an unknown type", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
         JSON.stringify({ type: "begin", data: { path: { text: "./a.txt" } } }),
@@ -341,14 +345,14 @@ describe("Ripgrep", () => {
     expect(lastSkip()?.reasons).toEqual([`unrecognised record type "match-v2" (./b.txt)`, "record has no type"])
   })
 
-  bunTest("returns an empty result when every record is unusable, rather than failing", async () => {
+  stubTest("returns an empty result when every record is unusable, rather than failing", async () => {
     const matches = await Effect.runPromise(grepWithStubbedRecords(["{oops", "{also oops", "{still oops"]))
 
     expect(matches).toEqual([])
   })
 
   // Pins the ceiling itself: at the limit the record is kept, one byte over it is skipped.
-  bunTest("accepts a record at exactly the size ceiling and skips one byte over", async () => {
+  stubTest("accepts a record at exactly the size ceiling and skips one byte over", async () => {
     const sizeOf = (file: string, padding: number) => matchRecord(file, { lines: { text: "n".repeat(padding) } })
     const overhead = Buffer.byteLength(sizeOf("a.txt", 0), "utf8")
     const limit = 16 * 1024 * 1024
@@ -363,7 +367,7 @@ describe("Ripgrep", () => {
   // Pins the OUTPUT contract of the cap. Note it cannot prove the retained-memory improvement that
   // motivated moving the cap into the parser: capping at parse time and capping at the end produce
   // byte-identical output, and only the peak heap during collection differs.
-  bunTest("caps the returned line text and keeps the elision marker", async () => {
+  stubTest("caps the returned line text and keeps the elision marker", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([matchRecord("a.txt", { lines: { text: "needle" + "x".repeat(50_000) } })]),
     )
@@ -372,7 +376,7 @@ describe("Ripgrep", () => {
     expect(matches[0].text.endsWith("...")).toBe(true)
   })
 
-  bunTest("decodes a non-UTF8 match line to replacement characters", async () => {
+  stubTest("decodes a non-UTF8 match line to replacement characters", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
         matchRecord("a.txt", {

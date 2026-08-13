@@ -19,25 +19,31 @@ const withRepo = async (run: (dir: string) => Promise<void>) => {
 }
 
 describe("legacy Ripgrep.search", () => {
-  test("returns matches from a file whose matched line is not valid UTF-8", () =>
-    withRepo(async (dir) => {
-      await fs.writeFile(path.join(dir, "a-plain.txt"), "needle here\n")
-      // ripgrep emits `{"bytes": "<base64>"}` rather than `{"text": ...}` for this line, which the
-      // strict Zod schema rejected — taking the unrelated matches down with it.
-      await fs.writeFile(path.join(dir, "b-binary.txt"), Buffer.from("needle \xff\xfe tail\n", "binary"))
-      await fs.writeFile(path.join(dir, "c-plain.txt"), "needle here\n")
+  // Explicit timeout: this drives the real binary, and `search()` resolves it through `state()`,
+  // which downloads a release archive when `rg` is absent from PATH and from Global.Path.bin.
+  test(
+    "returns matches from a file whose matched line is not valid UTF-8",
+    () =>
+      withRepo(async (dir) => {
+        await fs.writeFile(path.join(dir, "a-plain.txt"), "needle here\n")
+        // ripgrep emits `{"bytes": "<base64>"}` rather than `{"text": ...}` for this line, which the
+        // strict Zod schema rejected — taking the unrelated matches down with it.
+        await fs.writeFile(path.join(dir, "b-binary.txt"), Buffer.from("needle \xff\xfe tail\n", "binary"))
+        await fs.writeFile(path.join(dir, "c-plain.txt"), "needle here\n")
 
-      const matches = await Ripgrep.search({ cwd: dir, pattern: "needle", limit: 10 })
+        const matches = await Ripgrep.search({ cwd: dir, pattern: "needle", limit: 10 })
 
-      expect(matches.map((match) => match.path.text.replace(/^\.\//, "")).sort()).toEqual([
-        "a-plain.txt",
-        "b-binary.txt",
-        "c-plain.txt",
-      ])
-      const binary = matches.find((match) => match.path.text.includes("b-binary.txt"))
-      expect(binary?.lines.text).toContain("needle")
-      expect(binary?.lines.text).toContain("tail")
-    }))
+        expect(matches.map((match) => match.path.text.replace(/^\.\//, "")).sort()).toEqual([
+          "a-plain.txt",
+          "b-binary.txt",
+          "c-plain.txt",
+        ])
+        const binary = matches.find((match) => match.path.text.includes("b-binary.txt"))
+        expect(binary?.lines.text).toContain("needle")
+        expect(binary?.lines.text).toContain("tail")
+      }),
+    120_000,
+  )
 })
 
 // `parseRecords` is exercised directly so the skip branches this PR adds — the `JSON.parse` catch,
@@ -87,6 +93,24 @@ describe("legacy Ripgrep.parseRecords", () => {
     ])
     expect(parsed).toHaveLength(1)
     expect(parsed[0].lines.text).toBe("needle � tail\n")
+  })
+
+  // Offsets are byte offsets into the RAW line; a lossy decode widens each undecodable byte to a
+  // 3-byte U+FFFD. This response shape is published by the `/find` route, so leaving them unrebased
+  // would be newly wrong output rather than a skipped record. Mirrors the core parser.
+  test("rebases submatch offsets after a lossy line decode", () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const parsed = Ripgrep.parseRecords([
+      record("a.txt", {
+        lines: { bytes: raw.toString("base64") },
+        submatches: [{ match: { bytes: Buffer.from("needle").toString("base64") }, start: 1, end: 7 }],
+      }),
+    ])
+
+    expect(parsed).toHaveLength(1)
+    const [{ lines, submatches }] = parsed
+    expect(submatches[0]).toEqual({ match: { text: "needle" }, start: 3, end: 9 })
+    expect(Buffer.from(lines.text, "utf8").subarray(3, 9).toString("utf8")).toBe("needle")
   })
 
   test("returns an empty array when every record is unusable, rather than throwing", () => {

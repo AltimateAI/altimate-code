@@ -119,18 +119,32 @@ export namespace Ripgrep {
       value !== null && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined
     const data = read(json, "data")
     if (!data || typeof data !== "object") return json
-    const asText = (value: unknown): unknown => {
-      if (!value || typeof value !== "object" || "text" in value) return value
+    /** Decode a `{text}`/`{bytes}` field, returning the raw buffer so offsets can be rebased. */
+    const decode = (value: unknown): { text: string; raw?: Buffer } | undefined => {
+      if (!value || typeof value !== "object") return undefined
+      const text = read(value, "text")
+      if (typeof text === "string") return { text }
       const bytes = read(value, "bytes")
       // Guarded three ways because `Buffer.from` decodes unconvertible input to an EMPTY buffer
       // instead of throwing, which would turn a corrupt record into a schema-valid empty match:
       // reject the empty string (a matched line is never empty), check the spelling, then require
       // a round-trip so non-canonical padding ("Zh==" and "Zg==" both decode to "f") is rejected.
-      if (typeof bytes !== "string" || bytes.length === 0 || !BASE64.test(bytes)) return value
+      if (typeof bytes !== "string" || bytes.length === 0 || !BASE64.test(bytes)) return undefined
       const decoded = Buffer.from(bytes, "base64")
-      if (decoded.toString("base64") !== bytes) return value
-      return { text: decoded.toString("utf8") }
+      if (decoded.toString("base64") !== bytes) return undefined
+      return { text: decoded.toString("utf8"), raw: decoded }
     }
+    const lines = "lines" in data ? decode(read(data, "lines")) : undefined
+    // Submatch offsets are BYTE offsets into the RAW line, and a lossy decode widens every
+    // undecodable byte to a 3-byte U+FFFD — so they must be rebased onto the decoded text's own
+    // UTF-8 encoding or they no longer locate the match. This response shape is published by the
+    // `/find` route, so unrebased offsets would be newly wrong output rather than a skipped record.
+    // Mirrors packages/core/src/ripgrep.ts.
+    const raw = lines?.raw
+    const rebase = (offset: unknown): unknown =>
+      raw && typeof offset === "number" && offset >= 0
+        ? Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
+        : offset
     const submatches = read(data, "submatches")
     // Only rewrite keys the record actually carries — `begin`/`end`/`summary` records reach here too
     // and must keep their exact shape, or the strict union below would reject them.
@@ -141,14 +155,20 @@ export namespace Ripgrep {
       ...json,
       data: {
         ...data,
-        ...("lines" in data ? { lines: asText(read(data, "lines")) } : {}),
+        ...(lines ? { lines: { text: lines.text } } : {}),
         ...(Array.isArray(submatches)
           ? {
-              submatches: submatches.map((submatch) =>
-                submatch && typeof submatch === "object"
-                  ? { ...submatch, match: asText(read(submatch, "match")) }
-                  : submatch,
-              ),
+              submatches: submatches.map((submatch) => {
+                if (!submatch || typeof submatch !== "object") return submatch
+                const match = decode(read(submatch, "match"))
+                if (!match) return submatch
+                return {
+                  ...submatch,
+                  match: { text: match.text },
+                  start: rebase(read(submatch, "start")),
+                  end: rebase(read(submatch, "end")),
+                }
+              }),
             }
           : {}),
       },

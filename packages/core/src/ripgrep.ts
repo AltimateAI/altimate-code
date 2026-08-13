@@ -348,122 +348,129 @@ export const layer = Layer.effect(
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
       // altimate_change start — upstream_fix: tally skipped records for one aggregate warning.
-      // Upstream returns `run(...)` directly; the body exists only to hold the tally, which must be
-      // per invocation and never per layer so two concurrent searches cannot share it.
-      grep: (input) => {
-        const skipped: { count: number; samples: string[] } = { count: 0, samples: [] }
-        return run<RawMatchData>({
-          // altimate_change end
-          ...input,
-          args: [
-            "--no-config",
-            "--json",
-            "--hidden",
-            "--no-messages",
-            // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
-            ...(typeof input.include === "string"
-              ? [`--glob=${input.include}`]
-              : (input.include ?? []).map((pattern) => `--glob=${pattern}`)),
-            // altimate_change end
-            "--glob=!**/.git/**",
-            "--",
-            input.pattern,
-            input.file ?? ".",
-          ],
-          // altimate_change start — upstream_fix: a bad record skips itself, never the search.
-          // `parse` runs inside `Stream.mapEffect`, so ANY failure here aborts the whole stream and
-          // discards every match already collected from unrelated files. A record is independent of
-          // its neighbours, so none of the three ways one can be unusable — oversized, unparseable
-          // JSON, or schema-rejected — justifies destroying the rest of the search.
-          parse: (line) => {
-            const bytes = Buffer.byteLength(line, "utf8")
-            // Captured during the walk so the aggregate warning can name a file when one is
-            // recoverable. Malformed JSON has no path by definition, hence "when present".
-            let where: string | undefined
-            return Effect.gen(function* () {
-              // Checked before JSON.parse purely to bound parse cost; `Stream.splitLines` has
-              // already materialized the line, so this cannot bound memory. See MAX_RECORD_BYTES.
-              if (bytes > MAX_RECORD_BYTES)
-                return yield* Effect.fail(failure(`record exceeded ${MAX_RECORD_BYTES} bytes`))
-              const json = yield* Effect.try({
-                try: () => JSON.parse(line) as unknown,
-                catch: (cause) => failure("unparseable JSON", cause),
-              })
-              if (!json || typeof json !== "object" || !("type" in json))
-                return yield* Effect.fail(failure("record has no type"))
-              // Captured before the type check so an unrecognised record can still name its file.
-              const pathField = readProp(readProp(json, "data"), "path")
-              const pathText = readProp(pathField, "text")
-              if (typeof pathText === "string") where = pathText
-              // Control records are expected and simply carry no match. An unrecognised type is a
-              // protocol surprise and is counted rather than dropped on the floor, so a ripgrep
-              // change cannot quietly turn every match into "no matches".
-              if (json.type !== "match")
-                return typeof json.type === "string" && CONTROL_TYPES.has(json.type)
-                  ? undefined
-                  : yield* Effect.fail(failure(`unrecognised record type ${JSON.stringify(json.type)}`))
-              const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalizeMatch(json)).pipe(
-                Effect.mapError((cause) => failure("unexpected match shape", cause)),
-              )
-              // `normalizeMatch` already caps submatches and line text, so nothing is re-trimmed.
-              return { ...match.data, path: { text: match.data.path.text.replace(/^\.[\\/]/, "") } }
-            }).pipe(
-              Effect.catch((cause) =>
-                Effect.sync(() => {
-                  skipped.count++
-                  if (skipped.samples.length < SKIP_SAMPLES)
-                    skipped.samples.push(where ? `${cause.message} (${where})` : cause.message)
-                  return undefined
-                }),
-              ),
-            )
-          },
-          // altimate_change end
-        }).pipe(
-          // altimate_change start — upstream_fix: one aggregate warning per search, not per record.
-          // A systematic protocol mismatch rejects every record in the tree, and a per-record log
-          // would bury the machine in noise while still answering with an innocent-looking empty
-          // result — the very failure this change exists to prevent.
-          Effect.tap(() =>
-            skipped.count > 0
-              ? Effect.logWarning("skipped unusable ripgrep records", {
-                  skipped: skipped.count,
-                  reasons: skipped.samples,
+      // Upstream returns `run(...)` directly. `Effect.suspend` — rather than a plain block body —
+      // is what makes the tally per EXECUTION: an Effect is a value that can be run more than once
+      // and concurrently, so a tally captured when the Effect is built would accumulate across runs
+      // and over-report.
+      //
+      // The marked region covers the whole implementation rather than just these lines, because the
+      // wrapper re-indents every line of the body: an upstream change anywhere in here genuinely
+      // needs manual reconciliation, which is exactly what the marker is for.
+      grep: (input) =>
+        Effect.suspend(() => {
+          const skipped: { count: number; samples: string[] } = { count: 0, samples: [] }
+          return run<RawMatchData>({
+            ...input,
+            args: [
+              "--no-config",
+              "--json",
+              "--hidden",
+              "--no-messages",
+              // altimate_change start — upstream_fix: preserve all debug rg search --glob entries
+              ...(typeof input.include === "string"
+                ? [`--glob=${input.include}`]
+                : (input.include ?? []).map((pattern) => `--glob=${pattern}`)),
+              // altimate_change end
+              "--glob=!**/.git/**",
+              "--",
+              input.pattern,
+              input.file ?? ".",
+            ],
+            // altimate_change start — upstream_fix: a bad record skips itself, never the search.
+            // `parse` runs inside `Stream.mapEffect`, so ANY failure here aborts the whole stream and
+            // discards every match already collected from unrelated files. A record is independent of
+            // its neighbours, so none of the three ways one can be unusable — oversized, unparseable
+            // JSON, or schema-rejected — justifies destroying the rest of the search.
+            parse: (line) => {
+              const bytes = Buffer.byteLength(line, "utf8")
+              // Captured during the walk so the aggregate warning can name a file when one is
+              // recoverable. Malformed JSON has no path by definition, hence "when present".
+              let where: string | undefined
+              return Effect.gen(function* () {
+                // Checked before JSON.parse purely to bound parse cost; `Stream.splitLines` has
+                // already materialized the line, so this cannot bound memory. See MAX_RECORD_BYTES.
+                if (bytes > MAX_RECORD_BYTES)
+                  return yield* Effect.fail(failure(`record exceeded ${MAX_RECORD_BYTES} bytes`))
+                const json = yield* Effect.try({
+                  try: () => JSON.parse(line) as unknown,
+                  catch: (cause) => failure("unparseable JSON", cause),
                 })
-              : Effect.void,
-          ),
-          // altimate_change end
-          Effect.map((result) =>
-            result.items.map((match) => {
-              const relative = match.path.text
-                .replace(/^(?:\.[\\/])+/u, "")
-                .replace(/^[\\/]+/u, "")
-                .replaceAll("\\", "/")
-              const absolute = path.resolve(input.cwd, relative)
-              return new Match({
-                entry: new Entry({
-                  path: RelativePath.make(relative),
-                  type: "file",
-                  mime: FSUtil.mimeType(absolute),
-                }),
-                line: match.line_number,
-                offset: match.absolute_offset,
-                // altimate_change start — upstream_fix: capped at parse time, see LINE_TEXT_CAP.
-                // Re-applied here so the cap still holds if the parser ever stops trimming.
-                text: capLineText(match.lines.text),
-                // altimate_change end
-                submatches: match.submatches.map((submatch) => ({
-                  text: submatch.match.text,
-                  start: submatch.start,
-                  end: submatch.end,
-                })),
-              })
-            }),
-          ),
-          // altimate_change start — upstream_fix: closes the block body opened for the skip tally.
-        )
-      },
-      // altimate_change end
+                if (!json || typeof json !== "object" || !("type" in json))
+                  return yield* Effect.fail(failure("record has no type"))
+                // Captured before the type check so an unrecognised record can still name its file.
+                const pathField = readProp(readProp(json, "data"), "path")
+                const pathText = readProp(pathField, "text")
+                if (typeof pathText === "string") where = pathText
+                // Control records are expected and simply carry no match. An unrecognised type is a
+                // protocol surprise and is counted rather than dropped on the floor, so a ripgrep
+                // change cannot quietly turn every match into "no matches".
+                if (json.type !== "match")
+                  return typeof json.type === "string" && CONTROL_TYPES.has(json.type)
+                    ? undefined
+                    : yield* Effect.fail(failure(`unrecognised record type ${JSON.stringify(json.type)}`))
+                const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalizeMatch(json)).pipe(
+                  Effect.mapError((cause) => failure("unexpected match shape", cause)),
+                )
+                // `normalizeMatch` already caps submatches and line text, so nothing is re-trimmed.
+                return { ...match.data, path: { text: match.data.path.text.replace(/^\.[\\/]/, "") } }
+              }).pipe(
+                Effect.catch((cause) =>
+                  Effect.sync(() => {
+                    skipped.count++
+                    if (skipped.samples.length < SKIP_SAMPLES)
+                      skipped.samples.push(where ? `${cause.message} (${where})` : cause.message)
+                    return undefined
+                  }),
+                ),
+              )
+            },
+            // altimate_change end
+          }).pipe(
+            // altimate_change start — upstream_fix: one aggregate warning per search, not per record.
+            // A systematic protocol mismatch rejects every record in the tree, and a per-record log
+            // would bury the machine in noise while still answering with an innocent-looking empty
+            // result — the very failure this change exists to prevent.
+            // `onExit` rather than `tap`: a search that fails or is interrupted part-way is exactly
+            // when the diagnostic matters, and `tap` would discard the tally in both cases.
+            Effect.onExit(() =>
+              skipped.count > 0
+                ? Effect.logWarning("skipped unusable ripgrep records", {
+                    skipped: skipped.count,
+                    reasons: skipped.samples,
+                  })
+                : Effect.void,
+            ),
+            // altimate_change end
+            Effect.map((result) =>
+              result.items.map((match) => {
+                const relative = match.path.text
+                  .replace(/^(?:\.[\\/])+/u, "")
+                  .replace(/^[\\/]+/u, "")
+                  .replaceAll("\\", "/")
+                const absolute = path.resolve(input.cwd, relative)
+                return new Match({
+                  entry: new Entry({
+                    path: RelativePath.make(relative),
+                    type: "file",
+                    mime: FSUtil.mimeType(absolute),
+                  }),
+                  line: match.line_number,
+                  offset: match.absolute_offset,
+                  // altimate_change start — upstream_fix: capped at parse time, see LINE_TEXT_CAP.
+                  // Re-applied here so the cap still holds if the parser ever stops trimming.
+                  text: capLineText(match.lines.text),
+                  // altimate_change end
+                  submatches: match.submatches.map((submatch) => ({
+                    text: submatch.match.text,
+                    start: submatch.start,
+                    end: submatch.end,
+                  })),
+                })
+              }),
+            ),
+          )
+        }),
+      // altimate_change end — closes the grep block opened above for the skip tally.
     })
   }),
 )
