@@ -16,11 +16,53 @@ import * as OnboardingTelemetry from "../telemetry/onboarding"
 // EventV2 bridge the server/routes/tui.ts uses to publish TuiEvent.CommandExecute
 // so the workspace TuiPlugin (packages/opencode/src/plugin/tui/altimate/workspace.tsx)
 // runs its post-scan flow. Feature-flagged via Flag.ALTIMATE_WORKSPACE.
+import { Effect } from "effect"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { AltimateApi } from "@/altimate/api/client"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
+import { Event as SessionEvent } from "@/session/status"
+
+/**
+ * Publish the workspace-postScan command AFTER the session goes idle, not on
+ * `project_scan`'s tool.execute.after. Rationale: project_scan tool RETURNS while
+ * the LLM is still generating the activation-menu text; the dialog paints in
+ * that window but user interactions queue behind the streaming. Waiting for
+ * session.idle costs a few seconds of latency but sidesteps the race entirely —
+ * the dialog appears once things are quiet.
+ *
+ * One-shot per sessionID: the listener unregisters as soon as the target
+ * session emits idle. A pending arm is dropped if a second project_scan fires
+ * in the same session (unlikely but handled).
+ */
+const pendingWorkspacePromptSessions = new Set<string>()
+let workspacePromptListenerArmed = false
+
+async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void> {
+  pendingWorkspacePromptSessions.add(sessionID)
+  if (workspacePromptListenerArmed) return
+  workspacePromptListenerArmed = true
+  await AppRuntime.runPromise(
+    EventV2Bridge.Service.use((events) =>
+      events.listen((event) =>
+        Effect.gen(function* () {
+          if (event.type !== SessionEvent.Idle.type) return
+          const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
+          if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
+          pendingWorkspacePromptSessions.delete(sid)
+          yield* events.publish(TuiEvent.CommandExecute, {
+            command: "altimate.workspace.postScan",
+          })
+        }),
+      ),
+    ),
+  ).catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error("[altimate-workspace] session-idle listener install failed:", err)
+    workspacePromptListenerArmed = false
+  })
+}
 // altimate_change end
 
 const ONBOARD_CONNECT = "onboard-connect"
@@ -145,25 +187,11 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
           input.sessionID,
         )
         // altimate_change start — AI-8398 workspaces post-scan prompt trigger.
-        // Fires the TUI plugin's altimate.workspace.postScan command once the scan
-        // completes AND the CLI has real Altimate credentials (BYOK users skip this
-        // path entirely — no place to send them). All the state (Skip latch, cache,
-        // server pre-check) is plugin-side so the trigger stays a fire-and-forget
-        // signal here; a retry would just re-enter the plugin's idempotent runFlow.
+        // ARM (don't publish yet) — the dialog fires when the session goes idle,
+        // not the moment project_scan returns. See armWorkspacePromptOnSessionIdle
+        // above for why the immediate publish raced the LLM's ongoing streaming.
         if (Flag.ALTIMATE_WORKSPACE && (await AltimateApi.isConfigured().catch(() => false))) {
-          void AppRuntime.runPromise(
-            EventV2Bridge.Service.use((events) =>
-              events.publish(TuiEvent.CommandExecute, {
-                command: "altimate.workspace.postScan",
-              }),
-            ),
-          ).catch((err) => {
-            // Never block onboarding on a publish failure — worst case the
-            // user picks up the workspace on their next launch or via the
-            // /altimate.workspace.link palette command.
-            // eslint-disable-next-line no-console
-            console.error("[altimate-workspace] postScan trigger failed:", err)
-          })
+          void armWorkspacePromptOnSessionIdle(input.sessionID)
         }
         // altimate_change end
         return

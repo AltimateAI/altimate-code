@@ -118,6 +118,7 @@ describe("workspace binding cache", () => {
       datamateId: 42,
       datamateName: "Marketing",
       repoRemote: "git@github.com:acme/proj-a.git",
+      projectPath: "/work/proj-a",
       linkedAt: 1_700_000_000_000,
     })
 
@@ -132,6 +133,7 @@ describe("workspace binding cache", () => {
       datamateId: 1,
       datamateName: "X",
       repoRemote: "git@github.com:acme/x.git",
+      projectPath: "/work/proj-a",
       linkedAt: 1,
     })
     expect(existsSync(cachePath())).toBe(true)
@@ -144,6 +146,7 @@ describe("workspace binding cache", () => {
       datamateId: 42,
       datamateName: "Marketing",
       repoRemote: "git@github.com:acme/proj-a.git",
+      projectPath: "/work/proj-a",
       linkedAt: 1,
     })
 
@@ -160,6 +163,7 @@ describe("workspace binding cache", () => {
       datamateId: 42,
       datamateName: "Marketing",
       repoRemote: "git@github.com:acme/proj-a.git",
+      projectPath: "/work/proj-a",
       linkedAt: 1,
     })
 
@@ -175,6 +179,7 @@ describe("workspace binding cache", () => {
       datamateId: 42,
       datamateName: "Marketing",
       repoRemote: "git@github.com:acme/proj-a.git",
+      projectPath: "/work/proj-a",
       linkedAt: 1,
     })
     const read = await readLocalBinding("/work/proj-b")
@@ -194,38 +199,50 @@ describe("workspace binding cache", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Skip latch", () => {
-  const remote = "git@github.com:acme/proj-a.git"
+  const ident = { repoRemote: "git@github.com:acme/proj-a.git", projectPath: "/work/proj-a" }
 
   test("no record → not active", () => {
     const api = { kv: makeKv() } as any
-    expect(isSkipActive(api, remote, Date.now())).toBe(false)
+    expect(isSkipActive(api, ident, Date.now())).toBe(false)
   })
 
   test("recorded within 7 days → active", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, remote, now)
-    expect(isSkipActive(api, remote, now + 6 * 24 * 60 * 60 * 1000)).toBe(true)
+    recordSkip(api, ident, now)
+    expect(isSkipActive(api, ident, now + 6 * 24 * 60 * 60 * 1000)).toBe(true)
   })
 
   test("recorded past 7 days → not active", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, remote, now)
-    expect(isSkipActive(api, remote, now + 8 * 24 * 60 * 60 * 1000)).toBe(false)
+    recordSkip(api, ident, now)
+    expect(isSkipActive(api, ident, now + 8 * 24 * 60 * 60 * 1000)).toBe(false)
   })
 
   test("boundary at exactly 7 days → not active (>= rejects)", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, remote, now)
-    expect(isSkipActive(api, remote, now + 7 * 24 * 60 * 60 * 1000)).toBe(false)
+    recordSkip(api, ident, now)
+    expect(isSkipActive(api, ident, now + 7 * 24 * 60 * 60 * 1000)).toBe(false)
   })
 
   test("different remotes have independent latches", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, "git@github.com:acme/one.git", now)
-    expect(isSkipActive(api, "git@github.com:acme/two.git", now)).toBe(false)
+    recordSkip(api, { repoRemote: "git@github.com:acme/one.git", projectPath: "/w/one" }, now)
+    expect(
+      isSkipActive(api, { repoRemote: "git@github.com:acme/two.git", projectPath: "/w/two" }, now),
+    ).toBe(false)
+  })
+
+  test("path-only projects (no remote) also get a latch — key derives from path", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    const pathOnly = { projectPath: "/scratch/sample-dbt" }
+    recordSkip(api, pathOnly, now)
+    expect(isSkipActive(api, pathOnly, now + 3 * 24 * 60 * 60 * 1000)).toBe(true)
+    // A different path is not affected.
+    expect(isSkipActive(api, { projectPath: "/scratch/other" }, now)).toBe(false)
   })
 })

@@ -1,13 +1,15 @@
 // altimate_change - new file
 //
-// On-demand "link this project to a workspace" subcommand. Runs the same three-
-// way flow the TuiPlugin (packages/opencode/src/plugin/tui/altimate/workspace.tsx)
-// offers post-scan, but outside a TUI session — so a user who skipped the
-// post-scan offer (or skipped it 7+ days ago and wants to link now) has a
-// path back in.
+// On-demand "link this project to a workspace" subcommand. User invoked it
+// explicitly, so we skip the Create/Link/Skip funnel the post-scan trigger
+// uses and jump straight to a picker over the user's workspaces — the
+// currently-linked one is marked, and "＋ Create a new workspace" is the
+// first row. New workspaces are auto-named from the git repo (or directory
+// name for path-only projects) so the user never has to type anything.
 //
-// Deliberately shares the WorkspaceApi + state modules with the plugin so the
-// two entry points can't drift on request shape or error handling.
+// Deliberately shares the WorkspaceApi + state + detect modules with the
+// TuiPlugin so the two entry points can't drift on request shape, project
+// identity, or error handling.
 import { cmd } from "./cmd"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
@@ -21,9 +23,17 @@ import {
   NotFoundError,
   PreconditionFailedError,
   type DatamateRef,
+  type GetBindingResponse,
+  type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
-import { detectProjectRemote, projectNameFromRemote } from "@/altimate/workspace/detect"
+import {
+  projectNameFromPath,
+  projectNameFromRemote,
+  resolveProjectIdentifier,
+} from "@/altimate/workspace/detect"
 import { recordApprovedBinding } from "@/altimate/workspace/state"
+
+const CREATE_NEW_SENTINEL = "__create_new__"
 
 export const LinkCommand = cmd({
   command: "link",
@@ -36,8 +46,6 @@ export const LinkCommand = cmd({
       default: process.cwd(),
     }),
   handler: async (args) => {
-    // Bail early if the CLI has no Altimate credentials — there's no place to
-    // send them and no gateway to authenticate against.
     if (!(await AltimateApi.isConfigured())) {
       UI.error(
         "Not signed in to Altimate. Run the TUI (altimate-code) and sign in first, then re-run `altimate-code link`.",
@@ -46,22 +54,17 @@ export const LinkCommand = cmd({
       return
     }
 
-    const remote = detectProjectRemote(args.directory)
-    if (!remote) {
-      UI.error(
-        `No git remote found in ${args.directory}. A workspace is bound to a project via its git remote — initialize a repo and add a remote first.`,
-      )
-      process.exitCode = 1
-      return
-    }
+    const identifier = resolveProjectIdentifier(args.directory)
 
-    prompts.intro("Link workspace")
-    prompts.log.info(`Project remote: ${remote}`)
+    prompts.intro("Link this project to a workspace")
+    if (identifier.repoRemote) prompts.log.info(`Project remote: ${identifier.repoRemote}`)
+    else prompts.log.info(`Project path: ${identifier.projectPath} (no git remote)`)
 
-    // Server-authoritative pre-check.
-    let existing: Awaited<ReturnType<typeof WorkspaceApi.getBindingForRemote>> = null
+    // Pre-check for the currently-linked marker + workspace list. Both are
+    // fetched up-front so the picker can annotate the current binding.
+    let existing: GetBindingResponse | null = null
     try {
-      existing = await WorkspaceApi.getBindingForRemote(remote)
+      existing = await WorkspaceApi.getBindingForProject(identifier)
     } catch (err) {
       if (err instanceof NotConfiguredError) {
         UI.error(err.message)
@@ -69,92 +72,95 @@ export const LinkCommand = cmd({
         return
       }
       prompts.log.warn(
-        `Could not reach the workspace service (${err instanceof Error ? err.message : String(err)}). Continuing anyway.`,
+        `Could not reach the workspace service to look up existing bindings (${err instanceof Error ? err.message : String(err)}). Continuing without the currently-linked marker.`,
       )
     }
 
-    if (existing) {
-      const choice = await prompts.select<"attach" | "relink" | "cancel">({
-        message: `This project is already linked to workspace "${existing.datamate.name}".`,
-        options: [
-          { value: "attach", label: "Keep this binding (no changes)" },
-          { value: "relink", label: "Re-link to a different workspace" },
-          { value: "cancel", label: "Cancel" },
-        ],
-        initialValue: "attach",
-      })
-      if (prompts.isCancel(choice) || choice === "cancel" || choice === "attach") {
-        prompts.outro(choice === "attach" ? `Kept "${existing.datamate.name}".` : "No changes.")
-        return
-      }
-      await pickAndBind(remote, "relink", existing.datamate.id, args.directory)
+    const spin = prompts.spinner()
+    spin.start("Loading workspaces...")
+    let list: DatamateRef[]
+    try {
+      list = await WorkspaceApi.listDatamates()
+    } catch (err) {
+      spin.stop("Could not load workspaces.", 1)
+      prompts.log.error(err instanceof Error ? err.message : String(err))
+      process.exitCode = 1
       return
     }
+    spin.stop(`Found ${list.length} workspace${list.length === 1 ? "" : "s"}.`)
 
-    const choice = await prompts.select<"create" | "link" | "cancel">({
-      message: "Set up a workspace for this project?",
-      options: [
-        {
-          value: "create",
-          label: "Create a new workspace",
-          hint: "Opens a browser to configure integrations and knowledge.",
-        },
-        {
-          value: "link",
-          label: "Link to an existing workspace",
-          hint: "Attach this project to a workspace you already own.",
-        },
-        { value: "cancel", label: "Cancel" },
-      ],
-      initialValue: "create",
+    const autoName = identifier.repoRemote
+      ? projectNameFromRemote(identifier.repoRemote)
+      : projectNameFromPath(identifier.projectPath)
+    const currentId = existing?.datamate.id
+    const currentName = existing?.datamate.name
+
+    const options: Array<{ value: string; label: string; hint?: string }> = [
+      {
+        value: CREATE_NEW_SENTINEL,
+        label: `＋ Create a new workspace "${autoName}"`,
+        hint: "Named from this project; rename in the SaaS after.",
+      },
+      ...list.map((dm) => ({
+        value: String(dm.id),
+        label: dm.id === currentId ? `● ${dm.name}` : `  ${dm.name}`,
+        hint: dm.id === currentId ? "currently linked here" : undefined,
+      })),
+    ]
+
+    const pick = await prompts.select<string>({
+      message: existing
+        ? `Currently linked to "${currentName}". Pick a workspace (or create a new one):`
+        : "Pick a workspace to link (or create a new one):",
+      options,
+      initialValue: currentId !== undefined ? String(currentId) : CREATE_NEW_SENTINEL,
     })
-    if (prompts.isCancel(choice) || choice === "cancel") {
-      prompts.outro("No workspace was linked.")
+
+    if (prompts.isCancel(pick)) {
+      prompts.outro("No changes.")
       return
     }
 
-    if (choice === "create") {
-      await createAndBind(remote, args.directory)
+    if (pick === CREATE_NEW_SENTINEL) {
+      await createAndBind(identifier, autoName, args.directory)
       return
     }
-    await pickAndBind(remote, "attach", undefined, args.directory)
+
+    const targetId = Number(pick)
+    if (targetId === currentId) {
+      prompts.outro(`Kept "${currentName}" — nothing changed.`)
+      return
+    }
+
+    await bindOrRebind(identifier, targetId, currentId, args.directory)
   },
 })
 
-async function createAndBind(remote: string, directory: string): Promise<void> {
-  const defaultName = projectNameFromRemote(remote)
-  const nameInput = await prompts.text({
-    message: "Name this workspace",
-    placeholder: defaultName,
-    defaultValue: defaultName,
-  })
-  if (prompts.isCancel(nameInput)) {
-    prompts.outro("No workspace was created.")
-    return
-  }
-  const name = String(nameInput).trim() || defaultName
-
+async function createAndBind(
+  identifier: ProjectIdentifier,
+  name: string,
+  directory: string,
+): Promise<void> {
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
   try {
-    const res = await WorkspaceApi.createAndBind({ name, repoRemote: remote })
+    const res = await WorkspaceApi.createAndBind({ name, identifier })
     await recordApprovedBinding(directory, {
       datamateId: res.datamate.id,
       datamateName: res.datamate.name,
       repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
     spin.stop(`Workspace "${res.datamate.name}" created and linked.`)
     prompts.log.info(`Manage it at: ${res.manage_url}`)
-    // Best-effort browser open — never blocks. If it fails the user has the
-    // URL above to copy manually.
     await open(res.manage_url).catch(() => undefined)
     prompts.outro("Done.")
   } catch (err) {
     spin.stop("Failed to create workspace.", 1)
     if (err instanceof ConflictError) {
       prompts.log.error(
-        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` and pick "Re-link" if you want to move it.`,
+        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch.`,
       )
     } else {
       prompts.log.error(err instanceof Error ? err.message : String(err))
@@ -163,75 +169,57 @@ async function createAndBind(remote: string, directory: string): Promise<void> {
   }
 }
 
-async function pickAndBind(
-  remote: string,
-  mode: "attach" | "relink",
-  expectedCurrentDatamateId: number | undefined,
+async function bindOrRebind(
+  identifier: ProjectIdentifier,
+  targetDatamateId: number,
+  currentDatamateId: number | undefined,
   directory: string,
 ): Promise<void> {
+  const isRebind = currentDatamateId !== undefined
   const spin = prompts.spinner()
-  spin.start("Loading workspaces...")
-  let list: DatamateRef[]
+  spin.start(isRebind ? `Re-linking to workspace...` : `Linking to workspace...`)
   try {
-    list = await WorkspaceApi.listDatamates()
-  } catch (err) {
-    spin.stop("Could not load workspaces.", 1)
-    prompts.log.error(err instanceof Error ? err.message : String(err))
-    process.exitCode = 1
-    return
-  }
-  spin.stop(`Found ${list.length} workspace${list.length === 1 ? "" : "s"}.`)
-
-  if (list.length === 0) {
-    prompts.log.warn(
-      "You don't have any workspaces yet. Re-run and pick \"Create a new workspace\" instead.",
-    )
-    prompts.outro("No workspace to link.")
-    return
-  }
-
-  const pick = await prompts.select<number | "cancel">({
-    message: mode === "attach" ? "Pick a workspace to attach to" : "Pick a workspace to re-link to",
-    options: [
-      ...list.map((dm) => ({ value: dm.id as number | "cancel", label: dm.name })),
-      { value: "cancel" as const, label: "Cancel" },
-    ],
-  })
-  if (prompts.isCancel(pick) || pick === "cancel") {
-    prompts.outro("No changes.")
-    return
-  }
-
-  const target = list.find((dm) => dm.id === pick)!
-  const spin2 = prompts.spinner()
-  spin2.start(`${mode === "attach" ? "Linking" : "Re-linking"} to "${target.name}"...`)
-  try {
-    const res =
-      mode === "attach"
-        ? await WorkspaceApi.bindExisting(pick, remote)
-        : await WorkspaceApi.rebindByRemote({
-            remote,
-            targetDatamateId: pick,
-            expectedCurrentDatamateId,
-          })
+    const res = await (async () => {
+      if (isRebind) {
+        // Rebind endpoint depends on which identifier is present. Prefer remote
+        // (stronger identity — survives directory moves); fall back to path.
+        return identifier.repoRemote
+          ? WorkspaceApi.rebindByRemote({
+              remote: identifier.repoRemote,
+              targetDatamateId,
+              expectedCurrentDatamateId: currentDatamateId,
+            })
+          : WorkspaceApi.rebindByPath({
+              projectPath: identifier.projectPath!,
+              targetDatamateId,
+              expectedCurrentDatamateId: currentDatamateId,
+            })
+      }
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier)
+    })()
     await recordApprovedBinding(directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
-    spin2.stop(`${mode === "attach" ? "Linked" : "Re-linked"} to "${res.binding.datamate_name}".`)
+    spin.stop(
+      isRebind
+        ? `Re-linked to "${res.binding.datamate_name}".`
+        : `Linked to "${res.binding.datamate_name}".`,
+    )
     prompts.outro("Done.")
   } catch (err) {
-    spin2.stop(`${mode === "attach" ? "Link" : "Re-link"} failed.`, 1)
+    spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (err instanceof ConflictError) {
       prompts.log.error(
-        `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` and pick "Re-link".`,
+        `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`,
       )
     } else if (err instanceof PreconditionFailedError) {
-      prompts.log.error("Someone else re-linked this project — reload and try again.")
+      prompts.log.error("Someone else re-linked this project — re-run and try again.")
     } else if (err instanceof NotFoundError) {
-      prompts.log.error("No existing binding to re-link. Try again and pick Create or Link.")
+      prompts.log.error("No existing binding to re-link. Re-run and pick again.")
     } else if (err instanceof ForbiddenError) {
       prompts.log.error("Only the workspace owner can attach projects to it.")
     } else {

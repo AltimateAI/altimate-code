@@ -23,8 +23,18 @@ export interface Binding {
   id: number
   datamate_id: number
   datamate_name: string
-  repo_remote: string
+  /** Either ``repo_remote`` OR ``project_path`` is populated (at least one). */
+  repo_remote: string | null
+  project_path: string | null
   created_at?: string
+}
+
+/** Project identifier passed to create/bind endpoints. At least one field is
+ * required by the backend's CHECK constraint; the CLI's resolveProjectIdentifier
+ * always populates ``projectPath`` and populates ``repoRemote`` when available. */
+export interface ProjectIdentifier {
+  repoRemote?: string
+  projectPath?: string
 }
 
 export interface CreateAndBindResponse {
@@ -47,6 +57,7 @@ export interface ConflictDetail {
   existing_datamate_id?: number
   existing_datamate_name?: string | null
   repo_remote?: string
+  project_path?: string
 }
 
 export interface PreconditionDetail {
@@ -170,7 +181,7 @@ async function req<T>(
 }
 
 export namespace WorkspaceApi {
-  /** Server-authoritative pre-check: is this remote already bound in this tenant? */
+  /** Server-authoritative pre-check by git remote. Returns null on 404. */
   export async function getBindingForRemote(remote: string): Promise<GetBindingResponse | null> {
     try {
       return await req<GetBindingResponse>("GET", "/by-remote", { query: { repo_remote: remote } })
@@ -180,23 +191,56 @@ export namespace WorkspaceApi {
     }
   }
 
+  /** Symmetric pre-check by absolute project directory path (for projects
+   * without a git remote). Returns null on 404. */
+  export async function getBindingForPath(projectPath: string): Promise<GetBindingResponse | null> {
+    try {
+      return await req<GetBindingResponse>("GET", "/by-path", { query: { project_path: projectPath } })
+    } catch (err) {
+      if (err instanceof NotFoundError) return null
+      throw err
+    }
+  }
+
+  /** Tries remote first (stronger identity), then path. Returns the first hit
+   * or null. Both fields on the identifier are optional but at least one must
+   * be present. */
+  export async function getBindingForProject(id: ProjectIdentifier): Promise<GetBindingResponse | null> {
+    if (id.repoRemote) {
+      const hit = await getBindingForRemote(id.repoRemote)
+      if (hit) return hit
+    }
+    if (id.projectPath) {
+      return await getBindingForPath(id.projectPath)
+    }
+    return null
+  }
+
   export async function createAndBind(input: {
     name: string
-    repoRemote: string
+    identifier: ProjectIdentifier
     description?: string
   }): Promise<CreateAndBindResponse> {
     return req<CreateAndBindResponse>("POST", "/", {
       body: {
         name: input.name,
-        repo_remote: input.repoRemote,
+        repo_remote: input.identifier.repoRemote ?? null,
+        project_path: input.identifier.projectPath ?? null,
         description: input.description ?? null,
       },
     })
   }
 
-  export async function bindExisting(datamateId: number, remote: string): Promise<BindingResponse> {
+  export async function bindExisting(
+    datamateId: number,
+    identifier: ProjectIdentifier,
+  ): Promise<BindingResponse> {
     return req<BindingResponse>("POST", "/bind", {
-      body: { datamate_id: datamateId, repo_remote: remote },
+      body: {
+        datamate_id: datamateId,
+        repo_remote: identifier.repoRemote ?? null,
+        project_path: identifier.projectPath ?? null,
+      },
     })
   }
 
@@ -208,6 +252,24 @@ export namespace WorkspaceApi {
     return req<BindingResponse>("PUT", "/by-remote", {
       body: {
         repo_remote: input.remote,
+        target_datamate_id: input.targetDatamateId,
+        ...(input.expectedCurrentDatamateId !== undefined
+          ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
+          : {}),
+      },
+    })
+  }
+
+  /** Path-identified rebind — symmetric to ``rebindByRemote`` for projects
+   * without a git remote. */
+  export async function rebindByPath(input: {
+    projectPath: string
+    targetDatamateId: number
+    expectedCurrentDatamateId?: number
+  }): Promise<BindingResponse> {
+    return req<BindingResponse>("PUT", "/by-path", {
+      body: {
+        project_path: input.projectPath,
         target_datamate_id: input.targetDatamateId,
         ...(input.expectedCurrentDatamateId !== undefined
           ? { expected_current_datamate_id: input.expectedCurrentDatamateId }

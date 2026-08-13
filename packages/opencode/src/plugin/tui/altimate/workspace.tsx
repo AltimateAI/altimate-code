@@ -25,7 +25,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
 import open from "open"
-import { createSignal, onMount, Show } from "solid-js"
+import { createSignal, onMount } from "solid-js"
 import {
   ConflictError,
   ForbiddenError,
@@ -34,8 +34,13 @@ import {
   WorkspaceApi,
   type DatamateRef,
   type GetBindingResponse,
+  type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
-import { detectProjectRemote, projectNameFromRemote } from "@/altimate/workspace/detect"
+import {
+  projectNameFromPath,
+  projectNameFromRemote,
+  resolveProjectIdentifier,
+} from "@/altimate/workspace/detect"
 import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
 import { Log } from "@/altimate/util/log"
 
@@ -52,20 +57,21 @@ const log = Log.create({ service: "altimate-workspace" })
 const SKIP_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const KV_SKIP_PREFIX = "altimate.workspace.postScan.skip."
 
-function skipKey(remote: string): string {
-  // Hash to keep the KV keyspace bounded and avoid embedding a URL (which can
-  // contain userinfo even after scrubbing edge cases) into a persisted key.
-  return KV_SKIP_PREFIX + createHash("sha1").update(remote).digest("hex")
+/** Latch key from the project's primary identifier (remote > path). Path-only
+ * projects also get a latch — sample-scaffold users are still users. */
+function skipKey(id: ProjectIdentifier): string {
+  const primary = id.repoRemote ?? id.projectPath ?? ""
+  return KV_SKIP_PREFIX + createHash("sha1").update(primary).digest("hex")
 }
 
-function isSkipActive(api: TuiPluginApi, remote: string, nowMs: number): boolean {
-  const rec = api.kv.get<{ skippedAt: number }>(skipKey(remote))
+function isSkipActive(api: TuiPluginApi, id: ProjectIdentifier, nowMs: number): boolean {
+  const rec = api.kv.get<{ skippedAt: number }>(skipKey(id))
   if (!rec || typeof rec.skippedAt !== "number") return false
   return nowMs - rec.skippedAt < SKIP_TTL_MS
 }
 
-function recordSkip(api: TuiPluginApi, remote: string, nowMs: number): void {
-  api.kv.set(skipKey(remote), { skippedAt: nowMs })
+function recordSkip(api: TuiPluginApi, id: ProjectIdentifier, nowMs: number): void {
+  api.kv.set(skipKey(id), { skippedAt: nowMs })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,20 +82,21 @@ function recordSkip(api: TuiPluginApi, remote: string, nowMs: number): void {
 
 interface OfferProps {
   api: TuiPluginApi
-  remote: string
+  identifier: ProjectIdentifier
   defaultName: string
   suppressLatch?: boolean // altimate link on-demand skips the Skip latch
 }
 
 function OfferDialog(props: OfferProps) {
+  const identLabel = () => props.identifier.repoRemote ?? props.identifier.projectPath ?? "this project"
   return (
     <props.api.ui.DialogSelect
-      title={`Set up a workspace for this project? (${props.remote})`}
+      title={`Set up a workspace for this project? (${identLabel()})`}
       options={[
         {
           title: "Create a new workspace",
           value: "create",
-          description: "Opens a browser to configure integrations and knowledge.",
+          description: `Auto-named "${props.defaultName}" from this repo — rename in the SaaS.`,
         },
         {
           title: "Link to an existing workspace",
@@ -105,28 +112,71 @@ function OfferDialog(props: OfferProps) {
       current="create"
       onSelect={(option) => {
         if (option.value === "skip") {
-          if (!props.suppressLatch) recordSkip(props.api, props.remote, Date.now())
+          if (!props.suppressLatch) recordSkip(props.api, props.identifier, Date.now())
           props.api.ui.dialog.clear()
           return
         }
         if (option.value === "create") {
-          props.api.ui.dialog.replace(() => (
-            <CreateDialog api={props.api} defaultName={props.defaultName} remote={props.remote} />
-          ))
+          // Auto-name from git repo — no name prompt. The SaaS UI is the place to
+          // rename / configure; the CLI's job is just to establish the binding.
+          void createAndBindInline(props.api, props.identifier, props.defaultName)
           return
         }
-        // link → picker
+        // link → picker (fresh-project attach path)
         props.api.ui.dialog.replace(() => (
-          <PickerDialog api={props.api} remote={props.remote} mode="attach" />
+          <PickerDialog api={props.api} identifier={props.identifier} mode="attach" />
         ))
       }}
     />
   )
 }
 
+async function createAndBindInline(
+  api: TuiPluginApi,
+  identifier: ProjectIdentifier,
+  name: string,
+): Promise<void> {
+  api.ui.dialog.clear()
+  try {
+    const res = await WorkspaceApi.createAndBind({ name, identifier })
+    await recordApprovedBinding(api.state.path.directory, {
+      datamateId: res.datamate.id,
+      datamateName: res.datamate.name,
+      repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
+      linkedAt: Date.now(),
+    })
+    try {
+      await open(res.manage_url)
+      api.ui.toast({
+        variant: "success",
+        message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
+      })
+    } catch {
+      api.ui.toast({
+        variant: "info",
+        message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
+        duration: 10_000,
+      })
+    }
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      api.ui.toast({
+        variant: "warning",
+        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Use the palette's "Link this project to a workspace" to change.`,
+      })
+    } else {
+      api.ui.toast({
+        variant: "error",
+        message: err instanceof Error ? err.message : "Failed to create workspace",
+      })
+    }
+  }
+}
+
 interface AlreadyLinkedProps {
   api: TuiPluginApi
-  remote: string
+  identifier: ProjectIdentifier
   workspaceName: string
   workspaceId: number
   hasDrift: boolean
@@ -140,7 +190,8 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
   // it puts the critical info in the user's field of view before they pick.
   const title = () => {
     const parts: string[] = [`Project is linked to workspace "${props.workspaceName}"`]
-    if (props.hasDrift && props.driftedWas) parts.push(`(was ${props.driftedWas}, now ${props.remote})`)
+    const now = props.identifier.repoRemote ?? props.identifier.projectPath
+    if (props.hasDrift && props.driftedWas) parts.push(`(was ${props.driftedWas}, now ${now})`)
     if (props.unverified) parts.push("(⚠ unverified — server unreachable, showing cached value)")
     return parts.join(" ")
   }
@@ -175,7 +226,7 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
         props.api.ui.dialog.replace(() => (
           <PickerDialog
             api={props.api}
-            remote={props.remote}
+            identifier={props.identifier}
             mode="relink"
             expectedCurrentDatamateId={props.workspaceId}
           />
@@ -187,7 +238,7 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
 
 interface PickerProps {
   api: TuiPluginApi
-  remote: string
+  identifier: ProjectIdentifier
   mode: "attach" | "relink"
   expectedCurrentDatamateId?: number
 }
@@ -211,11 +262,12 @@ function PickerDialog(props: PickerProps) {
   async function pick(datamateId: number) {
     try {
       if (props.mode === "attach") {
-        const res = await WorkspaceApi.bindExisting(datamateId, props.remote)
+        const res = await WorkspaceApi.bindExisting(datamateId, props.identifier)
         await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
           repoRemote: res.binding.repo_remote,
+          projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
         props.api.ui.toast({
@@ -223,15 +275,25 @@ function PickerDialog(props: PickerProps) {
           message: `Linked to workspace "${res.binding.datamate_name}".`,
         })
       } else {
-        const res = await WorkspaceApi.rebindByRemote({
-          remote: props.remote,
-          targetDatamateId: datamateId,
-          expectedCurrentDatamateId: props.expectedCurrentDatamateId,
-        })
+        // Rebind: pick the endpoint that matches the identifier we have.
+        // Prefer remote (stronger identity) when available; else fall back to
+        // path — matches the pre-check ordering in getBindingForProject.
+        const res = props.identifier.repoRemote
+          ? await WorkspaceApi.rebindByRemote({
+              remote: props.identifier.repoRemote,
+              targetDatamateId: datamateId,
+              expectedCurrentDatamateId: props.expectedCurrentDatamateId,
+            })
+          : await WorkspaceApi.rebindByPath({
+              projectPath: props.identifier.projectPath!,
+              targetDatamateId: datamateId,
+              expectedCurrentDatamateId: props.expectedCurrentDatamateId,
+            })
         await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
           repoRemote: res.binding.repo_remote,
+          projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
         props.api.ui.toast({
@@ -292,106 +354,210 @@ function PickerDialog(props: PickerProps) {
   )
 }
 
-interface CreateProps {
+// Sentinel value for the "＋ Create a new workspace" row in the on-demand
+// picker. Negative so it can't collide with any real datamate id (SERIAL PK).
+const CREATE_NEW_SENTINEL = -2
+
+interface OnDemandPickerProps {
   api: TuiPluginApi
+  identifier: ProjectIdentifier
+  currentlyLinkedDatamateId?: number
+  currentlyLinkedDatamateName?: string
   defaultName: string
-  remote: string
 }
 
-function CreateDialog(props: CreateProps) {
-  const [busy, setBusy] = createSignal(false)
-  const [error, setError] = createSignal<string | null>(null)
+/** Picker-first flow for the on-demand `altimate.workspace.link` command.
+ *
+ * Skips the Create/Link/Skip funnel — the user already opted in by invoking
+ * the palette. Immediately lists workspaces; currently-linked one is marked;
+ * "＋ Create a new workspace" is the first row. No Skip option (user chose to
+ * be here). Auto-names any new workspace from the git repo. */
+function OnDemandPickerDialog(props: OnDemandPickerProps) {
+  const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
+
+  onMount(async () => {
+    try {
+      const list = await WorkspaceApi.listDatamates()
+      setDatamates(list)
+    } catch (err) {
+      props.api.ui.toast({
+        variant: "error",
+        message: err instanceof Error ? err.message : "Failed to load workspaces",
+      })
+      props.api.ui.dialog.clear()
+    }
+  })
+
+  const options = () => {
+    const list = datamates()
+    if (!list) return [{ title: "Loading workspaces...", value: -1, disabled: true }]
+    // Deliberately short titles + hint in description so the dialog's narrow
+    // width doesn't truncate either. The "●" marker stays in the title (single
+    // char, cheap) so the currently-linked row is scannable at a glance.
+    return [
+      {
+        title: "＋ Create a new workspace",
+        value: CREATE_NEW_SENTINEL,
+        description: `Auto-named "${props.defaultName}" from this repo — rename in the SaaS.`,
+      },
+      ...list.map((dm) => ({
+        title: dm.id === props.currentlyLinkedDatamateId ? `● ${dm.name}` : `  ${dm.name}`,
+        value: dm.id,
+        description: dm.id === props.currentlyLinkedDatamateId ? "currently linked to this project" : undefined,
+      })),
+    ]
+  }
+
   return (
-    <props.api.ui.DialogPrompt
-      title="Create workspace"
-      placeholder={props.defaultName || "workspace name"}
-      busy={busy()}
-      busyText="Creating workspace..."
-      description={() => (
-        <box gap={1}>
-          <text fg={props.api.theme.current.textMuted}>Name this workspace (defaults to your project name):</text>
-          <text fg={props.api.theme.current.textMuted}>You can add integrations, knowledge, and guardrails in the browser after.</text>
-          <Show when={error()}>
-            <text fg={props.api.theme.current.error}>{error()!}</text>
-          </Show>
-        </box>
-      )}
-      onConfirm={async (value) => {
-        if (busy()) return
-        const name = (value || "").trim() || props.defaultName || "Untitled Workspace"
-        setBusy(true)
-        setError(null)
-        try {
-          const res = await WorkspaceApi.createAndBind({
-            name,
-            repoRemote: props.remote,
-          })
-          await recordApprovedBinding(props.api.state.path.directory, {
-            datamateId: res.datamate.id,
-            datamateName: res.datamate.name,
-            repoRemote: res.binding.repo_remote,
-            linkedAt: Date.now(),
-          })
-          // Best-effort browser open. On failure, fall back to a toast with the
-          // URL so the user has a copy-pasteable path forward — silent failure
-          // was flagged by codex round 1.
-          try {
-            await open(res.manage_url)
-            props.api.ui.toast({
-              variant: "success",
-              message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
-            })
-          } catch {
-            props.api.ui.toast({
-              variant: "info",
-              message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} in your browser to configure it.`,
-              duration: 10_000,
-            })
-          }
+    <props.api.ui.DialogSelect<number>
+      title="Link this project to a workspace"
+      options={options()}
+      current={props.currentlyLinkedDatamateId ?? CREATE_NEW_SENTINEL}
+      onSelect={(option) => {
+        if (option.value === -1) {
           props.api.ui.dialog.clear()
-        } catch (err) {
-          if (err instanceof ConflictError) {
-            setError(
-              `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Cancel and pick "Re-link" from the offer if you want to move it.`,
-            )
-          } else {
-            setError(err instanceof Error ? err.message : "Failed to create workspace")
-          }
-        } finally {
-          setBusy(false)
+          return
         }
+        if (option.value === CREATE_NEW_SENTINEL) {
+          void createAndBindInline(props.api, props.identifier, props.defaultName)
+          return
+        }
+        // Picked an existing workspace.
+        if (option.value === props.currentlyLinkedDatamateId) {
+          // No-op — user picked the workspace this project is already linked to.
+          props.api.ui.toast({
+            variant: "info",
+            message: `Already linked to "${props.currentlyLinkedDatamateName}" — nothing changed.`,
+          })
+          props.api.ui.dialog.clear()
+          return
+        }
+        void bindOrRebindInline(
+          props.api,
+          props.identifier,
+          option.value,
+          props.currentlyLinkedDatamateId,
+        )
       }}
-      onCancel={() => props.api.ui.dialog.clear()}
     />
   )
 }
 
+async function bindOrRebindInline(
+  api: TuiPluginApi,
+  identifier: ProjectIdentifier,
+  targetDatamateId: number,
+  currentDatamateId: number | undefined,
+): Promise<void> {
+  api.ui.dialog.clear()
+  try {
+    const res = await (async () => {
+      if (currentDatamateId) {
+        // Rebind: use whichever identifier we have; remote-first for identity.
+        return identifier.repoRemote
+          ? WorkspaceApi.rebindByRemote({
+              remote: identifier.repoRemote,
+              targetDatamateId,
+              expectedCurrentDatamateId: currentDatamateId,
+            })
+          : WorkspaceApi.rebindByPath({
+              projectPath: identifier.projectPath!,
+              targetDatamateId,
+              expectedCurrentDatamateId: currentDatamateId,
+            })
+      }
+      return WorkspaceApi.bindExisting(targetDatamateId, identifier)
+    })()
+    await recordApprovedBinding(api.state.path.directory, {
+      datamateId: res.binding.datamate_id,
+      datamateName: res.binding.datamate_name,
+      repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
+      linkedAt: Date.now(),
+    })
+    api.ui.toast({
+      variant: "success",
+      message: currentDatamateId
+        ? `Re-linked to workspace "${res.binding.datamate_name}".`
+        : `Linked to workspace "${res.binding.datamate_name}".`,
+    })
+  } catch (err) {
+    let msg: string
+    if (err instanceof ConflictError) {
+      msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`
+    } else if (err instanceof PreconditionFailedError) {
+      msg = "Someone else re-linked this project — reload and try again."
+    } else if (err instanceof NotFoundError) {
+      msg = "No existing binding to re-link. Try again."
+    } else if (err instanceof ForbiddenError) {
+      msg = "Only the workspace owner can attach projects to it."
+    } else {
+      msg = err instanceof Error ? err.message : "Failed to link workspace"
+    }
+    api.ui.toast({ variant: "error", message: msg })
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Flow orchestrator — runs on every `altimate.workspace.postScan` command
-// dispatch AND on every `altimate.workspace.link` command dispatch. Idempotent
-// re-entry: if a dialog is already up, the mount replaces it (that's fine —
-// two rapid scan completions collapse to one visible offer).
+// Flow orchestrators.
+//
+// `runFlow` — the post-scan trigger flow. Three-way Create/Link/Skip funnel
+// for a user we're prompting FROM ZERO (they haven't opted in). Skip is a
+// first-class outcome; Create branch auto-names.
+//
+// `runOnDemandPicker` — the palette / `/altimate.workspace.link` flow. User
+// already opted in by invoking, so no Skip. Fetches the workspace list +
+// pre-check binding, opens the picker with the currently-linked one marked.
 // ─────────────────────────────────────────────────────────────────────────────
+
+async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<void> {
+  const identifier = resolveProjectIdentifier(directory)
+  // Pre-check for the currently-linked marker. Failures are non-fatal — we
+  // still show the picker without the "(currently linked here)" annotation.
+  let existing: GetBindingResponse | null = null
+  try {
+    existing = await WorkspaceApi.getBindingForProject(identifier)
+  } catch (err) {
+    log.warn("on-demand picker pre-check failed", {
+      err: err instanceof Error ? err.message : String(err),
+    })
+  }
+  const defaultName = identifier.repoRemote
+    ? projectNameFromRemote(identifier.repoRemote)
+    : projectNameFromPath(identifier.projectPath)
+  api.ui.dialog.replace(() => (
+    <OnDemandPickerDialog
+      api={api}
+      identifier={identifier}
+      currentlyLinkedDatamateId={existing?.datamate.id}
+      currentlyLinkedDatamateName={existing?.datamate.name}
+      defaultName={defaultName}
+    />
+  ))
+}
 
 async function runFlow(
   api: TuiPluginApi,
   directory: string,
   opts: { suppressLatch?: boolean } = {},
 ): Promise<void> {
-  const remote = detectProjectRemote(directory)
-  if (!remote) {
-    // Not a git project (or git failed) — nothing to bind to. Silent per spec:
-    // the ticket says "handle failures without blocking the existing flow".
-    return
-  }
-  if (!opts.suppressLatch && isSkipActive(api, remote, Date.now())) {
-    log.info("workspace prompt suppressed by 7-day Skip latch", { remote })
+  const identifier = resolveProjectIdentifier(directory)
+  // Path is always populated by resolveProjectIdentifier — projects without a
+  // git remote (sample dbt scaffolds, scratch dirs) still get a binding offer.
+  if (!opts.suppressLatch && isSkipActive(api, identifier, Date.now())) {
+    log.info("workspace prompt suppressed by 7-day Skip latch", {
+      identifier: identifier.repoRemote ?? identifier.projectPath,
+    })
     return
   }
 
+  const defaultName = identifier.repoRemote
+    ? projectNameFromRemote(identifier.repoRemote)
+    : projectNameFromPath(identifier.projectPath)
+
   let serverBinding: GetBindingResponse | null | undefined
   try {
-    serverBinding = await WorkspaceApi.getBindingForRemote(remote)
+    serverBinding = await WorkspaceApi.getBindingForProject(identifier)
   } catch (err) {
     log.warn("workspace pre-check server call failed, falling back to local cache", {
       err: err instanceof Error ? err.message : String(err),
@@ -404,13 +570,14 @@ async function runFlow(
     await recordApprovedBinding(directory, {
       datamateId: serverBinding.datamate.id,
       datamateName: serverBinding.datamate.name,
-      repoRemote: remote,
+      repoRemote: serverBinding.binding.repo_remote,
+      projectPath: serverBinding.binding.project_path,
       linkedAt: Date.now(),
     })
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
-        remote={remote}
+        identifier={identifier}
         workspaceName={serverBinding!.datamate.name}
         workspaceId={serverBinding!.datamate.id}
         hasDrift={false}
@@ -424,8 +591,8 @@ async function runFlow(
     api.ui.dialog.replace(() => (
       <OfferDialog
         api={api}
-        remote={remote}
-        defaultName={projectNameFromRemote(remote)}
+        identifier={identifier}
+        defaultName={defaultName}
         suppressLatch={opts.suppressLatch}
       />
     ))
@@ -435,14 +602,19 @@ async function runFlow(
   // Server unreachable — fall back to the local cache (marked as unverified).
   const local = await readLocalBinding(directory)
   if (local) {
+    // Drift = the identifier the cache remembers differs from what we're
+    // seeing now. Compare on the field that's actually populated in the cache.
+    const cachedIdent = local.repoRemote ?? local.projectPath ?? ""
+    const currentIdent = identifier.repoRemote ?? identifier.projectPath
+    const hasDrift = cachedIdent !== currentIdent
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
-        remote={remote}
+        identifier={identifier}
         workspaceName={local.datamateName}
         workspaceId={local.datamateId}
-        hasDrift={local.repoRemote !== remote}
-        driftedWas={local.repoRemote !== remote ? local.repoRemote : undefined}
+        hasDrift={hasDrift}
+        driftedWas={hasDrift ? cachedIdent : undefined}
         unverified
       />
     ))
@@ -457,8 +629,8 @@ async function runFlow(
   api.ui.dialog.replace(() => (
     <OfferDialog
       api={api}
-      remote={remote}
-      defaultName={projectNameFromRemote(remote)}
+      identifier={identifier}
+      defaultName={defaultName}
       suppressLatch={opts.suppressLatch}
     />
   ))
@@ -486,8 +658,9 @@ const tui: TuiPlugin = async (api) => {
         category: "Altimate",
         namespace: "palette",
         run() {
-          // User-initiated → bypass the Skip latch.
-          void runFlow(api, api.state.path.directory, { suppressLatch: true })
+          // User-initiated → jump straight to picker (currently-linked marked,
+          // "＋ Create new" as the first row). No Skip funnel — they invoked.
+          void runOnDemandPicker(api, api.state.path.directory)
         },
       },
     ],

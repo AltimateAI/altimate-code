@@ -24,7 +24,11 @@ const log = Log.create({ service: "altimate-workspace-state" })
 export interface CachedBinding {
   datamateId: number
   datamateName: string
-  repoRemote: string
+  /** Either ``repoRemote`` or ``projectPath`` is populated (at least one).
+   * Mirrors the server-side binding row, which is identified by whichever
+   * fields it has. */
+  repoRemote: string | null
+  projectPath: string | null
   linkedAt: number
 }
 
