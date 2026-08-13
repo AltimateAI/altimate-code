@@ -13,7 +13,7 @@
  */
 
 /** PiiClassification is 'Email' | … | { Custom: string } | 'None'. */
-export function classificationToString(c: unknown, fallback = "PII"): string {
+export function classificationToString(c: unknown, fallback = "UNKNOWN"): string {
   if (typeof c === "string") return c
   if (c && typeof c === "object" && typeof (c as { Custom?: unknown }).Custom === "string") {
     return (c as { Custom: string }).Custom

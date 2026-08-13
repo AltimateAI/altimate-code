@@ -15,6 +15,8 @@ export interface Finding {
   severity: "error" | "warning" | "info"
   message: string
   suggestion?: string
+  /** Machine-readable column name for PII findings (not a position). */
+  columnName?: string
 }
 
 export interface CheckCategoryResult {
@@ -56,6 +58,8 @@ export function normalizeSeverity(s?: string | unknown): Severity {
   // must not degrade to info or --fail-on/--severity filters silently pass.
   if (lower === "error" || lower === "fatal" || lower === "critical" || lower === "high") return "error"
   if (lower === "warning" || lower === "warn" || lower === "medium") return "warning"
+  // Everything else (incl. engine "low") is info by design: low-severity
+  // threats inform but do not trip --fail-on warning.
   return "info"
 }
 

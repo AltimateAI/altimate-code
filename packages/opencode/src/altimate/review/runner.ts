@@ -204,6 +204,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // failures surface as data.validation.errors. We also keep the legacy
       // top-level keys as a fallback for older core builds.
       const rawIssues = asArray(data.lint?.findings)
+        .concat(asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" })))
+        .concat(asArray(data.safety?.threats))
         .concat(asArray(data.issues))
         .concat(asArray(data.violations))
         .concat(asArray(data.findings))
@@ -290,7 +292,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       try {
         const res = await Dispatcher.call("altimate_core.grade", { sql, schema_context: await resolveSchema() })
         const data = (res.data ?? {}) as Record<string, any>
-        return { grade: data.grade ?? data.overall_grade }
+        return { grade: data.overall_grade ?? data.grade }
       } catch {
         return {}
       }
@@ -400,7 +402,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           .map((c) => ({
             column: String(c.column ?? ""),
             // classification can be { Custom: string } — String() would emit "[object Object]"
-            classification: EngineCoerce.classificationToString(c.classification, ""),
+            classification: EngineCoerce.classificationToString(c.classification),
             confidence: typeof c.confidence === "number" ? c.confidence : 0,
             masking: c.suggested_masking ?? undefined,
           }))

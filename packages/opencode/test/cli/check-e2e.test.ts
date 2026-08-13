@@ -597,7 +597,11 @@ describe("check command E2E", () => {
     // Real core@0.7.0 scanSql shape: threats[], each { rule, severity, message, detail }.
     // Regression guard: the consumer previously only read issues/findings, so
     // real threats (e.g. the 0.6.0 unbalanced_quote rule) rendered as a generic warning.
-    const file = await writeSql(tmpDir.dir, "breakout.sql", "SELECT * FROM users WHERE name = 'x' OR 1=1 --';")
+    // Engine-faithful fixture: a dangling quote genuinely emits the
+    // unbalanced_quote rule at runtime (verified against the live 0.7.0
+    // binary; the rule is only missing from the stale SafetyRule union in
+    // index.d.ts — filed upstream as altimate-core-internal#764).
+    const file = await writeSql(tmpDir.dir, "breakout.sql", "SELECT * FROM users WHERE name = 'x'';")
     setDispatcherResponse("altimate_core.safety", () => ({
       success: true,
       data: {
@@ -612,7 +616,7 @@ describe("check command E2E", () => {
             message: "Unbalanced quote suggests injection breakout",
             detail: "Quote count is odd within a single statement",
             // Real engine semantics: [byteOffset, byteLength] — "OR 1=1 " at 37.
-            location: [37, 7],
+            location: [33, 3],
             matched_pattern: "' OR 1=1 --",
           },
         ],
@@ -624,8 +628,8 @@ describe("check command E2E", () => {
     const j = parseJson(r.stdout)
     expect(j.results.safety.findings).toHaveLength(1)
     expect(j.results.safety.findings[0].rule).toBe("unbalanced_quote")
-    // ThreatFinding.location is [byteOffset, byteLength] — rendered as a byte range.
-    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (bytes 37-44)")
+    // ThreatFinding.location is [byteOffset, byteLength] — rendered as an INCLUSIVE byte range.
+    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (bytes 33-35)")
     expect(j.results.safety.findings[0].suggestion).toBe("Quote count is odd within a single statement")
     // Engine severity "high" must normalize to error, not degrade to info —
     // otherwise --fail-on/--severity filters silently pass high-risk injections.
@@ -829,7 +833,7 @@ describe("check command E2E", () => {
     expect(byRule.validate.column).toBe(8)
     expect(byRule.validate.suggestion).toBe("Did you mean 'id'?")
     // ThreatFinding byte-range location and detail must survive too.
-    expect(byRule.tautology_attack.message).toBe("OR 1=1 detected (bytes 10-17)")
+    expect(byRule.tautology_attack.message).toBe("OR 1=1 detected (bytes 10-16)")
     expect(byRule.tautology_attack.suggestion).toBe("Remove the always-true predicate")
   })
 

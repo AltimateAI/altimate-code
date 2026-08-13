@@ -112,15 +112,13 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
       []) as Array<Record<string, unknown>>
     if (issues.length > 0) {
       return issues.map((f) => {
-        // ThreatFinding.location is [byteOffset, byteLength] — label as bytes,
-        // since byte offsets diverge from character indexes on multibyte SQL.
+        // ThreatFinding.location is [byteOffset, byteLength] — label as bytes
+        // (offsets diverge from char indexes on multibyte SQL) and render the
+        // INCLUSIVE end. ThreatFinding carries no line/column/code fields.
         const loc = f.location as [number, number] | undefined
-        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + loc[1]})` : ""
+        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + Math.max(loc[1] - 1, 0)})` : ""
         return {
           file,
-          line: f.line as number | undefined,
-          column: f.column as number | undefined,
-          code: f.code as string | undefined,
           rule: (f.rule ?? f.category ?? "safety") as string,
           severity: normalizeSeverity(f.severity as string),
           message: `${(f.message ?? f.description ?? "") as string}${at}`,
@@ -128,7 +126,12 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
         }
       })
     }
-    if (!result.success || result.data.safe === false) {
+    if (!result.success) {
+      // Fail closed like every other check — a crashed safety engine must not
+      // pass --fail-on error.
+      return [dispatcherErrorFinding("safety", file, result.error ?? "altimate_core.safety failed")]
+    }
+    if (result.data.safe === false) {
       return [
         {
           file,
@@ -163,7 +166,8 @@ async function runPolicy(sql: string, file: string, policyJson: string, schemaPa
         rule: (f.rule ?? f.policy ?? "policy") as string,
         severity: normalizeSeverity(f.severity as string),
         message: (f.message ?? f.description ?? "") as string,
-        suggestion: f.suggestion as string | undefined,
+        // PolicyViolation carries its fix hint as `remediation`.
+        suggestion: (f.suggestion ?? f.remediation) as string | undefined,
       }))
     }
     if (result.data.allowed === false) {
@@ -217,6 +221,9 @@ async function runPii(sql: string, file: string, schemaPath?: string): Promise<F
         code: f.code as string | undefined,
         rule,
         severity: "warning" as const,
+        // Machine-readable column NAME (the engine's `column` is a name, not a
+        // position, so it must not populate the numeric `column` field).
+        columnName: f.column as string | undefined,
         message: (f.message ?? f.description ?? `PII detected: ${qualified || "unknown"}${targets}`) as string,
         // suggested_masking is string | null — never emit null as a suggestion.
         suggestion: (f.suggestion ?? f.suggested_masking ?? undefined) as string | undefined,
@@ -256,12 +263,18 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
       }))
     }
     if (result.data.valid === false) {
+      // SemanticResult.validation_errors carries the reason the query is
+      // unplannable — surface it instead of a bare generic message.
+      const detail = (result.data.validation_errors as unknown[] | undefined)
+        ?.map((e) => (typeof e === "string" ? e : ((e as Record<string, unknown>)?.message ?? String(e))))
+        .filter(Boolean)
+        .join("; ")
       return [
         {
           file,
           rule: "semantic",
           severity: "warning",
-          message: result.error ?? "Semantic check found issues",
+          message: (result.error ?? detail) || "Semantic check found issues",
         },
       ]
     }
@@ -316,7 +329,7 @@ async function runGrade(
       ...(((safety?.threats as Array<Record<string, unknown>> | undefined) ?? []).map((t) => {
         // ThreatFinding: location is [byteOffset, byteLength]; detail is the fix hint
         const loc = t.location as [number, number] | undefined
-        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + loc[1]})` : ""
+        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + Math.max(loc[1] - 1, 0)})` : ""
         return {
           ...t,
           rule: (t.rule as string) ?? "safety",

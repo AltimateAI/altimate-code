@@ -3,10 +3,19 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { detectPii, piiColumnsFromReport } from "../../src/altimate/native/schema/pii-detector"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
-const RUN = process.env.ALTIMATE_RUN_WAREHOUSE_E2E === "1"
+// Skip (don't crash) when the NAPI binary is absent — same guard as
+// altimate-core-e2e.test.ts; this file imports the engine at module scope.
+let coreAvailable = false
+try {
+  require.resolve("@altimateai/altimate-core")
+  coreAvailable = true
+} catch {}
+const describeIf = coreAvailable ? describe : describe.skip
+
+const RUN = coreAvailable && process.env.ALTIMATE_RUN_WAREHOUSE_E2E === "1"
 const e2eTest = RUN ? test : test.skip
 
-describe("piiColumnsFromReport (real engine PiiReport shape)", () => {
+describeIf("piiColumnsFromReport (real engine PiiReport shape)", () => {
   test("extracts PII rows and drops 'None' rows from a live classifyPii result", () => {
     const core = require("@altimateai/altimate-core")
     const schema = core.Schema.fromJson(
