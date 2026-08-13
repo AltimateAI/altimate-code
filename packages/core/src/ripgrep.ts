@@ -18,8 +18,21 @@ import { RipgrepBinary } from "./ripgrep/binary"
  */
 
 const ERROR_BYTES = 8 * 1024
-const MAX_RECORD_BYTES = 64 * 1024
+// altimate_change start — upstream_fix: survive oversized ripgrep JSON records.
+// A single `--json` match record carries the entire matched line, so one minified bundle, source
+// map, or single-line JSON/CSV fixture anywhere in the tree produces a record far past the old
+// 64 KiB ceiling. That ceiling aborted the whole stream, so every other match in the search — in
+// unrelated files — was lost with it. Telemetry showed 74 machines hitting this in 7 days.
+//
+// The ceiling never bounded memory either: `Stream.splitLines` has already materialized the full
+// line by the time `parse` sees it, so the allocation is paid before the check runs. All it can
+// still bound is JSON.parse cost, which is why it survives as a much higher sanity limit — 16 MiB
+// clears real-world long lines by a wide margin. Bounding memory needs byte-level framing ahead of
+// `splitLines`, which this does not attempt. Records past it are dropped with a warning; the search
+// continues either way.
+const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_SUBMATCHES = 100
+// altimate_change end
 
 const RawMatch = Schema.Struct({
   type: Schema.Literal("match"),
@@ -39,6 +52,60 @@ const RawMatch = Schema.Struct({
 })
 
 type RawMatchData = (typeof RawMatch.Type)["data"]
+
+// altimate_change start — upstream_fix: accept ripgrep's `{bytes}` form of an arbitrary-data field.
+// Every `path`/`lines`/`match` field in ripgrep's JSON is a union: `{"text": "..."}` when the value
+// is valid UTF-8, `{"bytes": "<base64>"}` when it is not. `RawMatch` only models the `text` arm, so
+// a single stray non-UTF-8 byte anywhere in the tree failed schema decoding and — inside
+// `Stream.mapEffect` — took the whole search down with it, exactly like the oversized record did.
+// Normalising to the `text` arm up front keeps the schema single-shape and keeps the match usable;
+// `toString("utf8")` substitutes U+FFFD for the undecodable bytes rather than dropping the match.
+/** Canonical base64, so a corrupt field is left to fail decoding rather than silently becoming "". */
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+
+const readProp = (value: unknown, key: string): unknown =>
+  value !== null && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined
+
+const normalizeData = (value: unknown): unknown => {
+  if (!value || typeof value !== "object" || "text" in value) return value
+  const bytes = readProp(value, "bytes")
+  // `Buffer.from` is permissive: it turns "!!!" into an empty buffer rather than throwing, which
+  // would quietly manufacture a schema-valid empty match out of a corrupt record. Spelling is
+  // checked first so anything unconvertible stays in the `{bytes}` arm and gets skipped instead.
+  if (typeof bytes !== "string" || !BASE64.test(bytes)) return value
+  return { text: Buffer.from(bytes, "base64").toString("utf8") }
+}
+
+/**
+ * Rewrite the `{bytes}` arm of a raw ripgrep match record into its `{text}` equivalent.
+ *
+ * `path` is deliberately NOT rewritten. Decoding it is lossy — `toString("utf8")` maps undecodable
+ * bytes to U+FFFD — and a path is an identifier, not display text: the caller resolves it, stats it
+ * and reopens it, so a lossy path is a path to a file that does not exist, and two distinct
+ * filenames can collapse onto the same string. Leaving it in the `{bytes}` arm fails the schema, so
+ * a match in a file whose NAME is not valid UTF-8 is skipped and logged. Match content is display
+ * text, so lossy decoding there is the right trade: the match stays useful.
+ */
+const normalizeMatch = (json: object): unknown => {
+  const data = readProp(json, "data")
+  if (!data || typeof data !== "object") return json
+  const submatches = readProp(data, "submatches")
+  return {
+    ...json,
+    data: {
+      ...data,
+      lines: normalizeData(readProp(data, "lines")),
+      submatches: Array.isArray(submatches)
+        ? submatches.map((submatch) =>
+            submatch && typeof submatch === "object"
+              ? { ...submatch, match: normalizeData(readProp(submatch, "match")) }
+              : submatch,
+          )
+        : submatches,
+    },
+  }
+}
+// altimate_change end
 
 export class Error extends Schema.TaggedErrorClass<Error>()("Ripgrep.Error", {
   message: Schema.String,
@@ -244,27 +311,41 @@ export const layer = Layer.effect(
             input.pattern,
             input.file ?? ".",
           ],
-          parse: (line) =>
-            (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES
-              ? Effect.fail(failure(`Ripgrep JSON record exceeded ${MAX_RECORD_BYTES} bytes`))
-              : Effect.try({
-                  try: () => JSON.parse(line) as unknown,
-                  catch: (cause) => failure("Invalid ripgrep JSON output", cause),
-                })
-            ).pipe(
-              Effect.flatMap((json) => {
-                if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
-                  return Effect.succeed(undefined)
-                return Schema.decodeUnknownEffect(RawMatch)(json).pipe(
-                  Effect.map((match) => ({
-                    ...match.data,
-                    path: { text: match.data.path.text.replace(/^\.[\\/]/, "") },
-                    submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
-                  })),
-                  Effect.mapError((cause) => failure("Invalid ripgrep match output", cause)),
-                )
-              }),
-            ),
+          // altimate_change start — upstream_fix: a bad record skips itself, never the search.
+          // `parse` runs inside `Stream.mapEffect`, so ANY failure here aborts the whole stream and
+          // discards every match already collected from unrelated files. A record is independent of
+          // its neighbours, so none of the three ways one can be unusable — oversized, unparseable
+          // JSON, or schema-rejected — justifies destroying the rest of the search.
+          parse: (line) => {
+            const bytes = Buffer.byteLength(line, "utf8")
+            return Effect.gen(function* () {
+              // Checked before JSON.parse purely to bound parse cost; `Stream.splitLines` has
+              // already materialized the line, so this cannot bound memory. See MAX_RECORD_BYTES.
+              if (bytes > MAX_RECORD_BYTES)
+                return yield* Effect.fail(failure(`record exceeded ${MAX_RECORD_BYTES} bytes`))
+              const json = yield* Effect.try({
+                try: () => JSON.parse(line) as unknown,
+                catch: (cause) => failure("unparseable JSON", cause),
+              })
+              // Non-match records (begin/end/summary) are expected and simply carry no match.
+              if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match") return undefined
+              const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalizeMatch(json)).pipe(
+                Effect.mapError((cause) => failure("unexpected match shape", cause)),
+              )
+              return {
+                ...match.data,
+                path: { text: match.data.path.text.replace(/^\.[\\/]/, "") },
+                submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
+              }
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("skipping unusable ripgrep record", { bytes, reason: cause.message }).pipe(
+                  Effect.as(undefined),
+                ),
+              ),
+            )
+          },
+          // altimate_change end
         }).pipe(
           Effect.map((result) =>
             result.items.map((match) => {

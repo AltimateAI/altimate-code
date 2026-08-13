@@ -94,6 +94,56 @@ export namespace Ripgrep {
 
   const Result = z.union([Begin, Match, End, Summary])
 
+  // altimate_change start — upstream_fix: tolerate ripgrep's `{bytes}` arm and malformed lines.
+  /** Canonical base64, so a corrupt field fails decoding rather than silently becoming "". */
+  const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+
+  /** Parse one NDJSON record, rewriting `{bytes: base64}` fields into the `{text}` arm. */
+  const normalizeRecord = (line: string): unknown => {
+    let json: unknown
+    try {
+      json = JSON.parse(line)
+    } catch {
+      return undefined
+    }
+    if (!json || typeof json !== "object") return json
+    const read = (value: unknown, key: string): unknown =>
+      value !== null && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined
+    const data = read(json, "data")
+    if (!data || typeof data !== "object") return json
+    const asText = (value: unknown): unknown => {
+      if (!value || typeof value !== "object" || "text" in value) return value
+      const bytes = read(value, "bytes")
+      // Spelling is validated first because `Buffer.from` decodes "!!!" to an empty buffer instead
+      // of throwing, which would turn a corrupt record into a schema-valid empty match.
+      if (typeof bytes !== "string" || !BASE64.test(bytes)) return value
+      return { text: Buffer.from(bytes, "base64").toString("utf8") }
+    }
+    const submatches = read(data, "submatches")
+    // Only rewrite keys the record actually carries — `begin`/`end`/`summary` records reach here too
+    // and must keep their exact shape, or the strict union below would reject them.
+    // `path` is deliberately left alone: decoding it is lossy, and a path is an identifier the
+    // caller reopens, so a U+FFFD-mangled path names a file that does not exist. Such a record
+    // stays in the `{bytes}` arm and is skipped. See packages/core/src/ripgrep.ts.
+    return {
+      ...json,
+      data: {
+        ...data,
+        ...("lines" in data ? { lines: asText(read(data, "lines")) } : {}),
+        ...(Array.isArray(submatches)
+          ? {
+              submatches: submatches.map((submatch) =>
+                submatch && typeof submatch === "object"
+                  ? { ...submatch, match: asText(read(submatch, "match")) }
+                  : submatch,
+              ),
+            }
+          : {}),
+      },
+    }
+  }
+  // altimate_change end
+
   export type Result = z.infer<typeof Result>
   export type Match = z.infer<typeof Match>
   export type Begin = z.infer<typeof Begin>
@@ -374,11 +424,27 @@ export namespace Ripgrep {
     const lines = result.text.trim().split(/\r?\n/).filter(Boolean)
     // Parse JSON lines from ripgrep output
 
-    return lines
-      .map((line) => JSON.parse(line))
-      .map((parsed) => Result.parse(parsed))
-      .filter((r) => r.type === "match")
-      .map((r) => r.data)
+    // altimate_change start — upstream_fix: a bad record skips itself, not the whole search.
+    // `JSON.parse` + a strict `Result.parse` on every line meant one unusable record threw out of
+    // `search()` and discarded every match already collected from unrelated files — the same defect
+    // fixed in packages/core/src/ripgrep.ts. Records are independent, so a bad one is dropped.
+    // `lines`/`path`/`match` are `{text}` only when the value is valid UTF-8 and `{bytes}` otherwise,
+    // so the `{bytes}` arm is normalised rather than left to fail the strict schema.
+    const matches: Match["data"][] = []
+    let skipped = 0
+    for (const line of lines) {
+      const parsed = Result.safeParse(normalizeRecord(line))
+      if (!parsed.success) {
+        skipped++
+        continue
+      }
+      if (parsed.data.type === "match") matches.push(parsed.data.data)
+    }
+    // Counted and reported once rather than per record: without this a ripgrep protocol change
+    // would make `/find` answer `[]`, which is indistinguishable from an honest "no matches".
+    if (skipped > 0) log.warn("skipped unusable ripgrep records", { skipped, total: lines.length })
+    return matches
+    // altimate_change end
   }
 }
 // altimate_change end
