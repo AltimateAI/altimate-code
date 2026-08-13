@@ -347,10 +347,13 @@ export const layer = Layer.effect(
           Effect.map((result) => result.items),
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
+      // altimate_change start — upstream_fix: tally skipped records for one aggregate warning.
+      // Upstream returns `run(...)` directly; the body exists only to hold the tally, which must be
+      // per invocation and never per layer so two concurrent searches cannot share it.
       grep: (input) => {
-        // Per invocation, never per layer: two concurrent searches must not share a tally.
         const skipped: { count: number; samples: string[] } = { count: 0, samples: [] }
         return run<RawMatchData>({
+          // altimate_change end
           ...input,
           args: [
             "--no-config",
@@ -417,9 +420,10 @@ export const layer = Layer.effect(
           },
           // altimate_change end
         }).pipe(
-          // One aggregate warning per search, not one per record: a systematic protocol mismatch
-          // rejects every record in the tree, and a per-record log would bury the machine in noise
-          // while still answering with an innocent-looking empty result.
+          // altimate_change start — upstream_fix: one aggregate warning per search, not per record.
+          // A systematic protocol mismatch rejects every record in the tree, and a per-record log
+          // would bury the machine in noise while still answering with an innocent-looking empty
+          // result — the very failure this change exists to prevent.
           Effect.tap(() =>
             skipped.count > 0
               ? Effect.logWarning("skipped unusable ripgrep records", {
@@ -428,6 +432,7 @@ export const layer = Layer.effect(
                 })
               : Effect.void,
           ),
+          // altimate_change end
           Effect.map((result) =>
             result.items.map((match) => {
               const relative = match.path.text
@@ -455,8 +460,10 @@ export const layer = Layer.effect(
               })
             }),
           ),
+          // altimate_change start — upstream_fix: closes the block body opened for the skip tally.
         )
       },
+      // altimate_change end
     })
   }),
 )
