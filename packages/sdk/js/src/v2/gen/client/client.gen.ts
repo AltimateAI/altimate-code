@@ -174,10 +174,11 @@ export const createClient = (config: Config = {}): Client => {
           // raw "JSON Parse error: Unrecognized token '<'". Surface an actionable error instead.
           try {
             data = text ? JSON.parse(text) : {}
-          } catch {
+          } catch (cause) {
             throw new Error(
               `Expected a JSON response but received ${response.headers.get("content-type") || "an unknown content type"} ` +
                 `(HTTP ${response.status}). This is usually a proxy or gateway error page, not the API.`,
+              { cause },
             )
           }
           // altimate_change end
