@@ -115,6 +115,16 @@ describeIf("optimizer live eval — planted-project scan", () => {
       const workdir = path.join(tmp.path, "project")
       const isolatedHome = path.join(tmp.path, "home")
       await fs.mkdir(isolatedHome, { recursive: true })
+      // OPTIMIZER_EVAL_AUTH: path to a provider auth.json (OAuth/API creds for
+      // MODEL providers only) copied into the isolated HOME so OAuth-based
+      // accounts can run the eval. Warehouse isolation is unaffected —
+      // connections.json and config are still absent.
+      const authFile = process.env["OPTIMIZER_EVAL_AUTH"]
+      if (authFile) {
+        const dataDir = path.join(isolatedHome, ".local/share/altimate-code")
+        await fs.mkdir(dataDir, { recursive: true })
+        await fs.cp(authFile, path.join(dataDir, "auth.json"))
+      }
       await fs.cp(FIXTURE, workdir, { recursive: true })
       const before = await snapshotTree(workdir)
 
@@ -137,6 +147,9 @@ describeIf("optimizer live eval — planted-project scan", () => {
           cwd: workdir,
           encoding: "utf8",
           timeout: 540_000,
+          // SIGTERM proved insufficient: an errored CLI lingered as a dangling
+          // process for ~2h past the timeout in practice. Kill hard.
+          killSignal: "SIGKILL",
           // Isolated environment: fresh HOME/XDG so the subprocess cannot load
           // the developer's real warehouse connections, permissive overrides,
           // or custom agents — the optimizer prompt calls finops tools, and a
@@ -150,13 +163,26 @@ describeIf("optimizer live eval — planted-project scan", () => {
             XDG_CACHE_HOME: path.join(isolatedHome, ".cache"),
             ...Object.fromEntries(
               [
-                // Model/provider credentials
+                // Model/provider credentials — names must match what provider
+                // discovery actually reads (models.dev env definitions):
+                // google is GEMINI_API_KEY / GOOGLE_GENERATIVE_AI_API_KEY,
+                // NOT GOOGLE_API_KEY.
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
-                "GOOGLE_API_KEY",
+                "GEMINI_API_KEY",
+                "GOOGLE_GENERATIVE_AI_API_KEY",
                 "GROQ_API_KEY",
                 "MISTRAL_API_KEY",
+                // Vertex model access (Application Default Credentials path +
+                // project/location) — model-plane only, no warehouse creds.
+                // NOTE: the vertex loader DETECTS via GOOGLE_CLOUD_PROJECT /
+                // GCP_PROJECT / GCLOUD_PROJECT; GOOGLE_VERTEX_PROJECT is an
+                // output var only (provider.ts:629).
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "GOOGLE_CLOUD_PROJECT",
+                "GOOGLE_CLOUD_LOCATION",
+                "GOOGLE_VERTEX_LOCATION",
                 // NOTE: AWS_* is deliberately NOT passed through — those double
                 // as warehouse credentials, contradicting the isolation goal.
                 // Bedrock-model users can extend this list locally.
@@ -176,6 +202,10 @@ describeIf("optimizer live eval — planted-project scan", () => {
         },
       )
       const transcript = `${run.stdout ?? ""}\n${run.stderr ?? ""}`
+      // OPTIMIZER_EVAL_TRANSCRIPT: dump the full transcript for qualitative
+      // analysis alongside the deterministic grades.
+      const dump = process.env["OPTIMIZER_EVAL_TRANSCRIPT"]
+      if (dump) await fs.writeFile(dump, transcript)
       expect(run.error).toBeUndefined()
       // A nonzero exit (crash, auth failure, model error) must fail the eval —
       // an empty transcript would otherwise just read as "0 issues found".
