@@ -147,12 +147,20 @@ export namespace Ripgrep {
     // An unaddressable offset marks the record corrupt so it is skipped and counted instead.
     let corrupt = false
     const rebase = (offset: unknown): unknown => {
-      if (!raw) return offset
+      if (!raw || !lines) return offset
       if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) {
         corrupt = true
         return offset
       }
-      return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
+      // Decoding the prefix alone differs from a prefix of the full decode when the offset splits a
+      // VALID multi-byte sequence, so require it to actually prefix the decoded line. See
+      // packages/core/src/ripgrep.ts for the worked example.
+      const prefix = raw.subarray(0, offset).toString("utf8")
+      if (!lines.text.startsWith(prefix)) {
+        corrupt = true
+        return offset
+      }
+      return Buffer.byteLength(prefix, "utf8")
     }
     const submatches = read(data, "submatches")
     // Only rewrite keys the record actually carries — `begin`/`end`/`summary` records reach here too

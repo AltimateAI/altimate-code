@@ -330,6 +330,26 @@ describe("Ripgrep", () => {
     expect(lastSkip()?.skipped).toBe(1)
   })
 
+  // A byte-mode pattern can match inside a valid multi-byte character. Decoding the prefix alone
+  // then yields U+FFFD where the full decode has "é", so the offset would rebase to a plausible but
+  // wrong position (3, landing mid-word) instead of being recognised as unaddressable.
+  stubTest("skips a record whose submatch offset splits a multi-byte character", async () => {
+    const raw = Buffer.concat([Buffer.from("é"), Buffer.from("needle")])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt"),
+        matchRecord("b.txt", {
+          lines: { bytes: raw.toString("base64") },
+          submatches: [{ match: { text: "needle" }, start: 1, end: 3 }],
+        }),
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+    expect(lastSkip()?.skipped).toBe(1)
+  })
+
   stubTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "" } })]),

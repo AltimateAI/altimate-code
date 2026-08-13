@@ -144,7 +144,18 @@ const normalizeMatch = (json: object): unknown => {
       corrupt = true
       return offset
     }
-    return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
+    // Decoding the prefix in isolation is not the same as taking a prefix of the full decode when
+    // the offset splits a VALID multi-byte sequence: `Buffer.from("éneedle")` sliced at byte 1
+    // decodes to U+FFFD, so the offset would rebase to 3 and point at the wrong character in a line
+    // that decoded cleanly at that spot. Requiring the prefix to actually prefix the decoded line
+    // catches that; an offset that lands mid-character is not addressable and marks the record
+    // corrupt. This costs nothing asymptotically — decoding the prefix is already O(offset).
+    const prefix = raw.subarray(0, offset).toString("utf8")
+    if (!lines.text.startsWith(prefix)) {
+      corrupt = true
+      return offset
+    }
+    return Buffer.byteLength(prefix, "utf8")
   }
   const submatches = readProp(data, "submatches")
   const normalized = {
