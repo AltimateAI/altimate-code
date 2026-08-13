@@ -39,4 +39,59 @@ describe("legacy Ripgrep.search", () => {
       expect(binary?.lines.text).toContain("tail")
     }))
 })
+
+// `parseRecords` is exercised directly so the skip branches this PR adds — the `JSON.parse` catch,
+// the size ceiling, the counter — are covered without depending on what the installed ripgrep build
+// happens to emit.
+describe("legacy Ripgrep.parseRecords", () => {
+  const record = (file: string, overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      type: "match",
+      data: {
+        path: { text: `./${file}` },
+        lines: { text: "needle\n" },
+        line_number: 1,
+        absolute_offset: 0,
+        submatches: [{ match: { text: "needle" }, start: 0, end: 6 }],
+        ...overrides,
+      },
+    })
+  const paths = (records: string[]) => Ripgrep.parseRecords(records).map((match) => match.path.text)
+
+  test("skips an unparseable record and keeps the ones around it", () => {
+    expect(paths([record("a.txt"), '{"type":"match","data":{"path":{"text":"./b.t', record("c.txt")])).toEqual([
+      "./a.txt",
+      "./c.txt",
+    ])
+  })
+
+  test("skips a record past the size ceiling", () => {
+    const huge = record("b.txt", { lines: { text: "n".repeat(17 * 1024 * 1024) } })
+    expect(paths([record("a.txt"), huge, record("c.txt")])).toEqual(["./a.txt", "./c.txt"])
+  })
+
+  test("skips a record whose path is not valid UTF-8, rather than mangling the path", () => {
+    const bad = record("ignored", { path: { bytes: Buffer.from("./b\xff.txt", "binary").toString("base64") } })
+    expect(paths([record("a.txt"), bad])).toEqual(["./a.txt"])
+  })
+
+  test("skips empty and non-canonical base64 rather than emitting an empty match", () => {
+    expect(paths([record("a.txt"), record("b.txt", { lines: { bytes: "" } })])).toEqual(["./a.txt"])
+    expect(paths([record("a.txt"), record("b.txt", { lines: { bytes: "Zh==" } })])).toEqual(["./a.txt"])
+  })
+
+  test("decodes a non-UTF8 line and ignores control records", () => {
+    const parsed = Ripgrep.parseRecords([
+      JSON.stringify({ type: "begin", data: { path: { text: "./a.txt" } } }),
+      record("a.txt", { lines: { bytes: Buffer.from("needle \xff tail\n", "binary").toString("base64") } }),
+    ])
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].lines.text).toBe("needle � tail\n")
+  })
+
+  test("returns an empty array when every record is unusable, rather than throwing", () => {
+    expect(() => Ripgrep.parseRecords(["{oops", "{also oops"])).not.toThrow()
+    expect(Ripgrep.parseRecords(["{oops", "{also oops"])).toEqual([])
+  })
+})
 // altimate_change end

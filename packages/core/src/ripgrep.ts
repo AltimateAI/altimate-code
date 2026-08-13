@@ -32,6 +32,21 @@ const ERROR_BYTES = 8 * 1024
 // continues either way.
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
 const MAX_SUBMATCHES = 100
+
+// The 16 MiB ceiling bounds the cost of parsing ONE line. It does not bound what the search
+// retains: `run` collects rows with `Stream.runCollect` and holds them until the stream ends, and
+// each row carried the FULL `lines.text` until the mapping step trimmed it at the very end. Peak
+// retained memory is therefore rows x record size — and callers pass no meaningful row cap
+// (`tool/grep.ts` passes `Number.MAX_SAFE_INTEGER`), so raising the per-record ceiling raised the
+// retained bound with it. Capping the line here instead keeps the parse ceiling while making the
+// retained bound tighter than it was before this change. Nothing downstream ever renders more.
+const LINE_TEXT_CAP = 2_000
+
+/** Trim a matched line to what any consumer actually shows, preserving the elision marker. */
+const capLineText = (text: string) => (text.length > LINE_TEXT_CAP ? text.slice(0, LINE_TEXT_CAP) + "..." : text)
+
+/** Distinct skip reasons kept for the aggregate warning; enough to diagnose, bounded for logs. */
+const SKIP_SAMPLES = 5
 // altimate_change end
 
 const RawMatch = Schema.Struct({
@@ -63,17 +78,34 @@ type RawMatchData = (typeof RawMatch.Type)["data"]
 /** Canonical base64, so a corrupt field is left to fail decoding rather than silently becoming "". */
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
 
+/** ripgrep's control records. Anything else with an unrecognised `type` is a protocol surprise. */
+const CONTROL_TYPES = new Set(["begin", "end", "summary"])
+
 const readProp = (value: unknown, key: string): unknown =>
   value !== null && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined
 
-const normalizeData = (value: unknown): unknown => {
-  if (!value || typeof value !== "object" || "text" in value) return value
+/**
+ * Decode one ripgrep arbitrary-data field (`{text}` or `{bytes}`) to a string.
+ *
+ * Returns undefined when the field cannot be trusted, which leaves the original shape in place so
+ * the schema rejects it and the record is skipped — the point being that a corrupt field must never
+ * be silently converted into a valid-looking empty one. `Buffer.from` makes that easy to get wrong:
+ * it maps unconvertible input to an EMPTY buffer instead of throwing. Hence three guards — reject
+ * the empty string (a matched line is never empty, so an empty `bytes` arm is always corrupt),
+ * check the spelling, then require the decode to round-trip so non-canonical padding bits (`Zh==`
+ * and `Zg==` both decode to "f") cannot slip through.
+ *
+ * `raw` is returned alongside so submatch offsets can be rebased; see `normalizeMatch`.
+ */
+const decodeField = (value: unknown): { text: string; raw?: Buffer } | undefined => {
+  if (!value || typeof value !== "object") return undefined
+  const text = readProp(value, "text")
+  if (typeof text === "string") return { text }
   const bytes = readProp(value, "bytes")
-  // `Buffer.from` is permissive: it turns "!!!" into an empty buffer rather than throwing, which
-  // would quietly manufacture a schema-valid empty match out of a corrupt record. Spelling is
-  // checked first so anything unconvertible stays in the `{bytes}` arm and gets skipped instead.
-  if (typeof bytes !== "string" || !BASE64.test(bytes)) return value
-  return { text: Buffer.from(bytes, "base64").toString("utf8") }
+  if (typeof bytes !== "string" || bytes.length === 0 || !BASE64.test(bytes)) return undefined
+  const raw = Buffer.from(bytes, "base64")
+  if (raw.toString("base64") !== bytes) return undefined
+  return { text: raw.toString("utf8"), raw }
 }
 
 /**
@@ -85,22 +117,44 @@ const normalizeData = (value: unknown): unknown => {
  * filenames can collapse onto the same string. Leaving it in the `{bytes}` arm fails the schema, so
  * a match in a file whose NAME is not valid UTF-8 is skipped and logged. Match content is display
  * text, so lossy decoding there is the right trade: the match stays useful.
+ *
+ * Submatch `start`/`end` are BYTE offsets into the raw line. A lossy decode destroys that frame of
+ * reference — each undecodable sequence becomes U+FFFD, three bytes wide — so they are rebased onto
+ * the decoded text's own UTF-8 encoding. That preserves the established byte-offset contract rather
+ * than silently switching these records to a different unit: without it, a line beginning with one
+ * bad byte reports `needle` at [3,9) of a string where [3,9) reads "edle t".
  */
 const normalizeMatch = (json: object): unknown => {
   const data = readProp(json, "data")
   if (!data || typeof data !== "object") return json
+  const lines = decodeField(readProp(data, "lines"))
+  if (!lines) return json
+  const raw = lines.raw
+  const rebase = (offset: unknown): unknown =>
+    raw && typeof offset === "number" && offset >= 0
+      ? Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
+      : offset
   const submatches = readProp(data, "submatches")
   return {
     ...json,
     data: {
       ...data,
-      lines: normalizeData(readProp(data, "lines")),
+      // Capped here rather than after decoding: the full line is retained by `Stream.runCollect`
+      // until the search ends, and nothing downstream ever shows more than this. See LINE_TEXT_CAP.
+      lines: { text: capLineText(lines.text) },
+      // Sliced BEFORE decoding so a pathological submatch count is not decoded only to be dropped.
       submatches: Array.isArray(submatches)
-        ? submatches.map((submatch) =>
-            submatch && typeof submatch === "object"
-              ? { ...submatch, match: normalizeData(readProp(submatch, "match")) }
-              : submatch,
-          )
+        ? submatches.slice(0, MAX_SUBMATCHES).map((submatch) => {
+            if (!submatch || typeof submatch !== "object") return submatch
+            const match = decodeField(readProp(submatch, "match"))
+            if (!match) return submatch
+            return {
+              ...submatch,
+              match: { text: match.text },
+              start: rebase(readProp(submatch, "start")),
+              end: rebase(readProp(submatch, "end")),
+            }
+          })
         : submatches,
     },
   }
@@ -293,8 +347,10 @@ export const layer = Layer.effect(
           Effect.map((result) => result.items),
           Effect.catchTag("Ripgrep.InvalidPatternError", (cause) => Effect.fail(failure(cause.message, cause))),
         ),
-      grep: (input) =>
-        run<RawMatchData>({
+      grep: (input) => {
+        // Per invocation, never per layer: two concurrent searches must not share a tally.
+        const skipped: { count: number; samples: string[] } = { count: 0, samples: [] }
+        return run<RawMatchData>({
           ...input,
           args: [
             "--no-config",
@@ -318,6 +374,9 @@ export const layer = Layer.effect(
           // JSON, or schema-rejected — justifies destroying the rest of the search.
           parse: (line) => {
             const bytes = Buffer.byteLength(line, "utf8")
+            // Captured during the walk so the aggregate warning can name a file when one is
+            // recoverable. Malformed JSON has no path by definition, hence "when present".
+            let where: string | undefined
             return Effect.gen(function* () {
               // Checked before JSON.parse purely to bound parse cost; `Stream.splitLines` has
               // already materialized the line, so this cannot bound memory. See MAX_RECORD_BYTES.
@@ -327,26 +386,48 @@ export const layer = Layer.effect(
                 try: () => JSON.parse(line) as unknown,
                 catch: (cause) => failure("unparseable JSON", cause),
               })
-              // Non-match records (begin/end/summary) are expected and simply carry no match.
-              if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match") return undefined
+              if (!json || typeof json !== "object" || !("type" in json))
+                return yield* Effect.fail(failure("record has no type"))
+              // Captured before the type check so an unrecognised record can still name its file.
+              const pathField = readProp(readProp(json, "data"), "path")
+              const pathText = readProp(pathField, "text")
+              if (typeof pathText === "string") where = pathText
+              // Control records are expected and simply carry no match. An unrecognised type is a
+              // protocol surprise and is counted rather than dropped on the floor, so a ripgrep
+              // change cannot quietly turn every match into "no matches".
+              if (json.type !== "match")
+                return typeof json.type === "string" && CONTROL_TYPES.has(json.type)
+                  ? undefined
+                  : yield* Effect.fail(failure(`unrecognised record type ${JSON.stringify(json.type)}`))
               const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalizeMatch(json)).pipe(
                 Effect.mapError((cause) => failure("unexpected match shape", cause)),
               )
-              return {
-                ...match.data,
-                path: { text: match.data.path.text.replace(/^\.[\\/]/, "") },
-                submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
-              }
+              // `normalizeMatch` already caps submatches and line text, so nothing is re-trimmed.
+              return { ...match.data, path: { text: match.data.path.text.replace(/^\.[\\/]/, "") } }
             }).pipe(
               Effect.catch((cause) =>
-                Effect.logWarning("skipping unusable ripgrep record", { bytes, reason: cause.message }).pipe(
-                  Effect.as(undefined),
-                ),
+                Effect.sync(() => {
+                  skipped.count++
+                  if (skipped.samples.length < SKIP_SAMPLES)
+                    skipped.samples.push(where ? `${cause.message} (${where})` : cause.message)
+                  return undefined
+                }),
               ),
             )
           },
           // altimate_change end
         }).pipe(
+          // One aggregate warning per search, not one per record: a systematic protocol mismatch
+          // rejects every record in the tree, and a per-record log would bury the machine in noise
+          // while still answering with an innocent-looking empty result.
+          Effect.tap(() =>
+            skipped.count > 0
+              ? Effect.logWarning("skipped unusable ripgrep records", {
+                  skipped: skipped.count,
+                  reasons: skipped.samples,
+                })
+              : Effect.void,
+          ),
           Effect.map((result) =>
             result.items.map((match) => {
               const relative = match.path.text
@@ -362,7 +443,10 @@ export const layer = Layer.effect(
                 }),
                 line: match.line_number,
                 offset: match.absolute_offset,
-                text: match.lines.text.length > 2_000 ? match.lines.text.slice(0, 2_000) + "..." : match.lines.text,
+                // altimate_change start — upstream_fix: capped at parse time, see LINE_TEXT_CAP.
+                // Re-applied here so the cap still holds if the parser ever stops trimming.
+                text: capLineText(match.lines.text),
+                // altimate_change end
                 submatches: match.submatches.map((submatch) => ({
                   text: submatch.match.text,
                   start: submatch.start,
@@ -371,7 +455,8 @@ export const layer = Layer.effect(
               })
             }),
           ),
-        ),
+        )
+      },
     })
   }),
 )

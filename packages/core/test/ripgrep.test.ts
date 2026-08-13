@@ -1,7 +1,7 @@
-import { describe, expect, test as bunTest } from "bun:test"
+import { beforeEach, describe, expect, test as bunTest } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Logger } from "effect"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
 import { AppProcess } from "@opencode-ai/core/process"
@@ -166,6 +166,28 @@ describe("Ripgrep", () => {
       },
     })
 
+  /**
+   * Collected so the skip *count* can be asserted — it is invisible in the returned matches.
+   * `Effect.logWarning(message, data)` puts both into `entry.message` as a tuple, not annotations.
+   */
+  const skipWarnings: Array<{ skipped?: number; reasons?: string[] }> = []
+  const captureWarnings = Logger.layer([
+    Logger.formatStructured.pipe(
+      Logger.map((entry): void => {
+        const parts: unknown[] = Array.isArray(entry.message) ? entry.message : [entry.message]
+        if (parts[0] !== "skipped unusable ripgrep records") return
+        const data = parts[1]
+        if (!data || typeof data !== "object") return
+        const skipped = Reflect.get(data, "skipped")
+        const reasons = Reflect.get(data, "reasons")
+        skipWarnings.push({
+          skipped: typeof skipped === "number" ? skipped : undefined,
+          reasons: Array.isArray(reasons) ? reasons.map(String) : undefined,
+        })
+      }),
+    ),
+  ])
+
   const grepWithStubbedRecords = (records: string[]) =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
@@ -189,10 +211,18 @@ describe("Ripgrep", () => {
                 Layer.provide(AppProcess.defaultLayer),
               ),
             ),
+            Effect.provide(captureWarnings),
           )
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     )
+
+  beforeEach(() => {
+    skipWarnings.length = 0
+  })
+
+  /** The single aggregate warning for the last search, or undefined when nothing was skipped. */
+  const lastSkip = () => skipWarnings.at(-1)
 
   bunTest("skips an unparseable record without failing the search", async () => {
     const matches = await Effect.runPromise(
@@ -205,6 +235,7 @@ describe("Ripgrep", () => {
 
     // The malformed middle record is dropped; the records on either side survive.
     expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+    expect(lastSkip()).toEqual({ skipped: 1, reasons: ["unparseable JSON"] })
   })
 
   // The size ceiling is asserted on a record built to exceed it, rather than inferred from a large
@@ -247,6 +278,98 @@ describe("Ripgrep", () => {
     )
 
     expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+  })
+
+  // Submatch offsets are BYTE offsets into the raw line. A lossy decode widens every undecodable
+  // byte to a 3-byte U+FFFD, so the raw offsets no longer locate the match and must be rebased onto
+  // the decoded text's own UTF-8 encoding. Without this the match reads "��need".
+  bunTest("rebases submatch offsets onto the decoded line after a lossy decode", async () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { bytes: raw.toString("base64") },
+          // "needle" sits at raw bytes [1, 7).
+          submatches: [{ match: { bytes: Buffer.from("needle").toString("base64") }, start: 1, end: 7 }],
+        }),
+      ]),
+    )
+
+    expect(matches).toHaveLength(1)
+    const [{ text, submatches }] = matches
+    expect(submatches[0]).toEqual({ text: "needle", start: 3, end: 9 })
+    // The contract is byte offsets into the returned text, so slice its UTF-8 encoding.
+    expect(Buffer.from(text, "utf8").subarray(submatches[0].start, submatches[0].end).toString("utf8")).toBe("needle")
+  })
+
+  bunTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "" } })]),
+    )
+
+    // "" is spelled like valid base64 but a matched line is never empty, so the record is corrupt.
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
+  })
+
+  bunTest("skips a record whose bytes field uses non-canonical padding", async () => {
+    // "Zh==" and "Zg==" both decode to "f"; only the canonical spelling round-trips.
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "Zh==" } })]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
+  })
+
+  // Control records carry no match and are ignored silently; an unrecognised type is a protocol
+  // surprise and must be counted, or a ripgrep change turns every match into an innocent "no match".
+  bunTest("ignores control records but counts records with an unknown type", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        JSON.stringify({ type: "begin", data: { path: { text: "./a.txt" } } }),
+        matchRecord("a.txt"),
+        JSON.stringify({ type: "match-v2", data: { path: { text: "./b.txt" } } }),
+        JSON.stringify({}),
+        JSON.stringify({ type: "end", data: { path: { text: "./a.txt" } } }),
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+    // begin/end are silent; the unknown type and the typeless record are counted, not dropped
+    // silently — the whole point being that a protocol change cannot masquerade as "no matches".
+    expect(lastSkip()?.skipped).toBe(2)
+    expect(lastSkip()?.reasons).toEqual([`unrecognised record type "match-v2" (./b.txt)`, "record has no type"])
+  })
+
+  bunTest("returns an empty result when every record is unusable, rather than failing", async () => {
+    const matches = await Effect.runPromise(grepWithStubbedRecords(["{oops", "{also oops", "{still oops"]))
+
+    expect(matches).toEqual([])
+  })
+
+  // Pins the ceiling itself: at the limit the record is kept, one byte over it is skipped.
+  bunTest("accepts a record at exactly the size ceiling and skips one byte over", async () => {
+    const sizeOf = (file: string, padding: number) => matchRecord(file, { lines: { text: "n".repeat(padding) } })
+    const overhead = Buffer.byteLength(sizeOf("a.txt", 0), "utf8")
+    const limit = 16 * 1024 * 1024
+
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([sizeOf("a.txt", limit - overhead), sizeOf("b.txt", limit - overhead + 1)]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
+  })
+
+  // Pins the OUTPUT contract of the cap. Note it cannot prove the retained-memory improvement that
+  // motivated moving the cap into the parser: capping at parse time and capping at the end produce
+  // byte-identical output, and only the peak heap during collection differs.
+  bunTest("caps the returned line text and keeps the elision marker", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([matchRecord("a.txt", { lines: { text: "needle" + "x".repeat(50_000) } })]),
+    )
+
+    expect(matches[0].text).toHaveLength(2_003)
+    expect(matches[0].text.endsWith("...")).toBe(true)
   })
 
   bunTest("decodes a non-UTF8 match line to replacement characters", async () => {
