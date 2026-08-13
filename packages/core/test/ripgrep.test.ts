@@ -189,7 +189,11 @@ describe("Ripgrep", () => {
   ])
 
   // The stub is a POSIX shell script and `chmod` is a no-op on win32, so the spawn cannot work
-  // there. Windows ripgrep behaviour has its own coverage in script/windows-ripgrep-e2e.ts.
+  // there. Be clear about the cost: this leaves the record-parsing behaviour below — skipping,
+  // decoding, offset rebasing, the size ceiling — WITHOUT Windows coverage. script/windows-
+  // ripgrep-e2e.ts covers only binary resolution, extraction and one real search, not any of this.
+  // Closing the gap needs a `.cmd` stub on win32; the parser itself is platform-independent, so the
+  // risk is a Windows-only spawn/quoting regression going unnoticed rather than a parsing one.
   const stubTest = bunTest.skipIf(process.platform === "win32")
 
   const grepWithStubbedRecords = (records: string[]) =>
@@ -304,6 +308,26 @@ describe("Ripgrep", () => {
     expect(submatches[0]).toEqual({ text: "needle", start: 3, end: 9 })
     // The contract is byte offsets into the returned text, so slice its UTF-8 encoding.
     expect(Buffer.from(text, "utf8").subarray(submatches[0].start, submatches[0].end).toString("utf8")).toBe("needle")
+  })
+
+  // `Buffer.subarray` clamps an out-of-range end and truncates a fractional one instead of throwing,
+  // so rebasing without a range check would turn a corrupt offset into a plausible-looking one.
+  stubTest("skips a record whose submatch offset is not addressable in the line", async () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt"),
+        matchRecord("b.txt", {
+          lines: { bytes: raw.toString("base64") },
+          // Well past the end of the raw line — nonsense that must not be silently clamped.
+          submatches: [{ match: { text: "needle" }, start: 1, end: 9_999 }],
+        }),
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+    expect(lastSkip()?.skipped).toBe(1)
   })
 
   stubTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {

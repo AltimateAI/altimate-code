@@ -113,6 +113,16 @@ describe("legacy Ripgrep.parseRecords", () => {
     expect(Buffer.from(lines.text, "utf8").subarray(3, 9).toString("utf8")).toBe("needle")
   })
 
+  test("skips a record whose submatch offset is not addressable in the line", () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const bad = record("b.txt", {
+      lines: { bytes: raw.toString("base64") },
+      submatches: [{ match: { text: "needle" }, start: 1, end: 9_999 }],
+    })
+    // `z.number()` would accept 9999 happily, so the range check is what rejects this.
+    expect(paths([record("a.txt"), bad, record("c.txt")])).toEqual(["./a.txt", "./c.txt"])
+  })
+
   test("returns an empty array when every record is unusable, rather than throwing", () => {
     expect(() => Ripgrep.parseRecords(["{oops", "{also oops"])).not.toThrow()
     expect(Ripgrep.parseRecords(["{oops", "{also oops"])).toEqual([])

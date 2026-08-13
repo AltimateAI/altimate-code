@@ -130,12 +130,24 @@ const normalizeMatch = (json: object): unknown => {
   const lines = decodeField(readProp(data, "lines"))
   if (!lines) return json
   const raw = lines.raw
-  const rebase = (offset: unknown): unknown =>
-    raw && typeof offset === "number" && offset >= 0
-      ? Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
-      : offset
+  // Rebasing is a claim about coordinates, so it is only made for an offset actually addressable in
+  // the raw line. `Buffer.subarray` clamps an out-of-range end and truncates a fractional one rather
+  // than throwing, so an unchecked rebase would quietly repair a corrupt offset into a
+  // plausible-looking one — and the schema would not catch it, since `NonNegativeInt` happily
+  // accepts a number past the end of the line. An unaddressable offset therefore marks the whole
+  // record corrupt (undefined) so it is skipped and counted. Offsets on the `{text}` arm are left
+  // alone: no rebasing happens there, so no claim is made and ripgrep's values stand as before.
+  let corrupt = false
+  const rebase = (offset: unknown): unknown => {
+    if (!raw) return offset
+    if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) {
+      corrupt = true
+      return offset
+    }
+    return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
+  }
   const submatches = readProp(data, "submatches")
-  return {
+  const normalized = {
     ...json,
     data: {
       ...data,
@@ -158,6 +170,7 @@ const normalizeMatch = (json: object): unknown => {
         : submatches,
     },
   }
+  return corrupt ? undefined : normalized
 }
 // altimate_change end
 

@@ -141,17 +141,26 @@ export namespace Ripgrep {
     // `/find` route, so unrebased offsets would be newly wrong output rather than a skipped record.
     // Mirrors packages/core/src/ripgrep.ts.
     const raw = lines?.raw
-    const rebase = (offset: unknown): unknown =>
-      raw && typeof offset === "number" && offset >= 0
-        ? Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
-        : offset
+    // Only rebase an offset addressable in the raw line: `Buffer.subarray` clamps an out-of-range
+    // end and truncates a fractional one rather than throwing, so an unchecked rebase would quietly
+    // repair a corrupt offset, and the schema would not catch it (`z.number()` accepts any number).
+    // An unaddressable offset marks the record corrupt so it is skipped and counted instead.
+    let corrupt = false
+    const rebase = (offset: unknown): unknown => {
+      if (!raw) return offset
+      if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) {
+        corrupt = true
+        return offset
+      }
+      return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
+    }
     const submatches = read(data, "submatches")
     // Only rewrite keys the record actually carries — `begin`/`end`/`summary` records reach here too
     // and must keep their exact shape, or the strict union below would reject them.
     // `path` is deliberately left alone: decoding it is lossy, and a path is an identifier the
     // caller reopens, so a U+FFFD-mangled path names a file that does not exist. Such a record
     // stays in the `{bytes}` arm and is skipped. See packages/core/src/ripgrep.ts.
-    return {
+    const normalized = {
       ...json,
       data: {
         ...data,
@@ -173,6 +182,7 @@ export namespace Ripgrep {
           : {}),
       },
     }
+    return corrupt ? undefined : normalized
   }
 
   /**
