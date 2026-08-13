@@ -84,7 +84,7 @@ function flatToSchemaDefinition(flat: Record<string, any>): Record<string, any> 
  * Normalize a schema_context into SchemaDefinition JSON format.
  * Accepts both flat and SchemaDefinition formats.
  */
-function normalizeSchemaContext(ctx: Record<string, any>): string {
+export function normalizeSchemaContext(ctx: Record<string, any>): string {
   if (isSchemaDefinitionFormat(ctx)) {
     return JSON.stringify(ctx)
   }

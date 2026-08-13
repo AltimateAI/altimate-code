@@ -25,9 +25,11 @@ export const AltimateCorePolicyTool = Tool.define("altimate_core_policy", {
       const error = result.error ?? data.error
       // altimate_change start — sql quality findings for telemetry
       const violations = Array.isArray(data.violations) ? data.violations : []
-      const findings: Telemetry.Finding[] = violations.map((v: any) => ({
-        category: v.rule ?? "policy_violation",
-      }))
+      const warnings = Array.isArray(data.warnings) ? data.warnings : []
+      const findings: Telemetry.Finding[] = [
+        ...violations.map((v: any) => ({ category: v.rule ?? "policy_violation" })),
+        ...warnings.map((w: any) => ({ category: w.rule ?? "policy_warning" })),
+      ]
       // altimate_change end
       // Engine PolicyResult: { allowed, violations, warnings, … } — `pass`
       // never existed, so every clean query used to render VIOLATIONS FOUND.

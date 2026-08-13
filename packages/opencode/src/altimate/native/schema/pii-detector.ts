@@ -220,3 +220,5 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
     }
   }
 }
+
+export * as PiiDetector from "./pii-detector"

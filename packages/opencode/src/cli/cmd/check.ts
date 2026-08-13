@@ -276,7 +276,9 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
     }
     if (result.data.valid === false) {
       // SemanticResult.validation_errors carries the reason the query is
-      // unplannable — surface it instead of a bare generic message.
+      // unplannable — surface it instead of a bare generic message. With a
+      // schema supplied this is an abstention that must fail closed (error);
+      // schema-less runs abstain routinely, so only warn there.
       const detail = (result.data.validation_errors as unknown[] | undefined)
         ?.map((e) => (typeof e === "string" ? e : ((e as Record<string, unknown>)?.message ?? String(e))))
         .filter(Boolean)
@@ -285,7 +287,7 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
         {
           file,
           rule: "semantic",
-          severity: "warning",
+          severity: schemaPath ? ("error" as const) : ("warning" as const),
           message: (result.error ?? detail) || "Semantic check found issues",
         },
       ]

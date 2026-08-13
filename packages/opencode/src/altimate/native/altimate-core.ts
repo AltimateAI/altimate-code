@@ -11,7 +11,7 @@
 import * as core from "@altimateai/altimate-core"
 import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
-import { schemaOrEmpty, resolveSchema } from "./schema-resolver"
+import { schemaOrEmpty, resolveSchema, normalizeSchemaContext } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -169,7 +169,11 @@ export function registerAll(): void {
   register("altimate_core.check", async (params) => {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const validation = await core.validate(params.sql, schema)
+      // NOTE: validation is deliberately NOT diff-scoped against base_sql.
+      // The engine validates fail-fast (only the FIRST error is reported), so
+      // subtracting base errors can hide genuinely new breakage behind a
+      // pre-existing one. Re-reporting a pre-existing error is the safe mode.
+      const validation: Record<string, unknown> = toData(await core.validate(params.sql, schema))
       // Diff-scoped lint: when a base SQL is supplied, core returns only the
       // findings the change INTRODUCED (pre-existing issues in the file are
       // dropped) — the structural comparison stays in the AST engine.
@@ -178,21 +182,39 @@ export function registerAll(): void {
           ? core.lintDiff(
               params.sql,
               params.base_sql,
-              params.schema_context ? JSON.stringify(params.schema_context) : undefined,
+              // lintDiff takes SchemaDefinition JSON — normalize flat agent
+              // schemas too, or the whole composite throws "missing field tables".
+              params.schema_context ? normalizeSchemaContext(params.schema_context) : undefined,
             )
           : core.lint(params.sql, schema)
       // Diff-scope safety like lint: threats present in the base SQL are
-      // pre-existing, not introduced by this change — subtract them by
-      // (rule, matched_pattern) identity when a base is supplied.
-      let safety = core.scanSql(params.sql)
+      // pre-existing, not introduced by this change. Subtract as a MULTISET on
+      // (rule, matched_pattern) — one base occurrence consumes one head
+      // occurrence, so a PR that ADDS a second identical injection still
+      // reports it. Recompute safe/risk_score from the surviving threats so a
+      // fully pre-existing threat set doesn't leave a stale unsafe verdict.
+      let safety: Record<string, unknown> = toData(core.scanSql(params.sql))
       if (params.base_sql) {
         try {
-          const baseKeys = new Set(
-            core.scanSql(params.base_sql).threats.map((t: any) => `${t.rule}|${t.matched_pattern}`),
-          )
+          const baseCounts = new Map<string, number>()
+          for (const t of core.scanSql(params.base_sql).threats) {
+            const k = `${t.rule}|${t.matched_pattern}`
+            baseCounts.set(k, (baseCounts.get(k) ?? 0) + 1)
+          }
+          const remaining = (safety.threats as any[]).filter((t: any) => {
+            const k = `${t.rule}|${t.matched_pattern}`
+            const left = baseCounts.get(k) ?? 0
+            if (left > 0) {
+              baseCounts.set(k, left - 1)
+              return false
+            }
+            return true
+          })
           safety = {
             ...safety,
-            threats: safety.threats.filter((t: any) => !baseKeys.has(`${t.rule}|${t.matched_pattern}`)),
+            threats: remaining,
+            safe: remaining.length === 0 ? true : safety.safe,
+            risk_score: remaining.length === 0 ? 0 : safety.risk_score,
           }
         } catch {
           // Unscannable base — keep the full head scan (fail open to MORE findings).
@@ -204,13 +226,26 @@ export function registerAll(): void {
       let pii: Record<string, unknown>
       try {
         pii = toData(core.checkQueryPii(params.sql, schema))
+        if (params.base_sql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
+          try {
+            // Pre-existing exposures (same table.column already exposed by the
+            // base) are not introduced by this change.
+            const baseExposed = new Set(
+              core.checkQueryPii(params.base_sql, schema).pii_columns.map((c: any) => `${c.table}|${c.column}`),
+            )
+            const remaining = (pii.pii_columns as any[]).filter((c: any) => !baseExposed.has(`${c.table}|${c.column}`))
+            pii = { ...pii, pii_columns: remaining, accesses_pii: remaining.length > 0 ? pii.accesses_pii : false }
+          } catch {
+            // Unscannable base — keep the full head exposure list.
+          }
+        }
       } catch (e) {
         // Mark as an abstention — an empty object would render "No PII
         // detected", a false-clean verdict.
         pii = { parse_error: String(e) }
       }
       const data: Record<string, unknown> = {
-        validation: toData(validation),
+        validation,
         lint: toData(lintResult),
         safety: toData(safety),
         pii,

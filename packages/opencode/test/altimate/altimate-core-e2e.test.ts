@@ -1312,6 +1312,28 @@ describeIf("consumer contract sync (round 2)", () => {
       })
       const scopedThreats = ((scoped.data as any).safety?.threats ?? []).map((t: any) => t.rule)
       expect(scopedThreats).not.toContain("tautology_attack")
+      // With every threat pre-existing, the verdict must not stay stale-unsafe.
+      expect((scoped.data as any).safety.safe).toBe(true)
+      expect((scoped.data as any).safety.risk_score).toBe(0)
+    })
+
+    test("composite check diff-scopes PII but NOT validation against base_sql", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const base = "SELECT zzz, email FROM customers"
+      const head = "SELECT zzz, yyy, email FROM customers"
+      const scoped = await Dispatcher.call("altimate_core.check", { sql: head, base_sql: base, schema_context: SCHEMA })
+      const d = scoped.data as any
+      // Validation is deliberately NOT diff-scoped: the engine reports only
+      // the FIRST error, so base subtraction could hide new breakage (yyy).
+      expect(d.validation.valid).toBe(false)
+      expect((d.validation.errors ?? []).length).toBeGreaterThan(0)
+      // email was already exposed by the base — not introduced by this change.
+      const exposed = (d.pii?.pii_columns ?? []).map((c: any) => c.column)
+      expect(exposed).not.toContain("email")
+      // Full run (no base) still reports the exposure.
+      const full = await Dispatcher.call("altimate_core.check", { sql: head, schema_context: SCHEMA })
+      const fullExposed = ((full.data as any).pii?.pii_columns ?? []).map((c: any) => c.column)
+      expect(fullExposed).toContain("email")
     })
 
     test("check tool PII section reports abstention for unparseable SQL, not a clean verdict", async () => {
