@@ -1297,6 +1297,23 @@ describeIf("consumer contract sync (round 2)", () => {
       expect(result.output).not.toContain("No PII detected")
     })
 
+    test("composite check diff-scopes safety threats against base_sql", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const threatSql = "SELECT * FROM customers WHERE first_name = 'x' OR 1=1 --"
+      // Full scan without base: the tautology threat is reported.
+      const full = await Dispatcher.call("altimate_core.check", { sql: threatSql, schema_context: SCHEMA })
+      const fullThreats = ((full.data as any).safety?.threats ?? []).map((t: any) => t.rule)
+      expect(fullThreats).toContain("tautology_attack")
+      // Same threat already present in base: it is pre-existing, not introduced.
+      const scoped = await Dispatcher.call("altimate_core.check", {
+        sql: threatSql,
+        base_sql: threatSql,
+        schema_context: SCHEMA,
+      })
+      const scopedThreats = ((scoped.data as any).safety?.threats ?? []).map((t: any) => t.rule)
+      expect(scopedThreats).not.toContain("tautology_attack")
+    })
+
     test("check tool PII section reports abstention for unparseable SQL, not a clean verdict", async () => {
       const { formatCheck } = await import("../../src/altimate/tools/altimate-core-check")
       const output = formatCheck({

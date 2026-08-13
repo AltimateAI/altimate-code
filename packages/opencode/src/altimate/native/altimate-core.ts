@@ -181,7 +181,23 @@ export function registerAll(): void {
               params.schema_context ? JSON.stringify(params.schema_context) : undefined,
             )
           : core.lint(params.sql, schema)
-      const safety = core.scanSql(params.sql)
+      // Diff-scope safety like lint: threats present in the base SQL are
+      // pre-existing, not introduced by this change — subtract them by
+      // (rule, matched_pattern) identity when a base is supplied.
+      let safety = core.scanSql(params.sql)
+      if (params.base_sql) {
+        try {
+          const baseKeys = new Set(
+            core.scanSql(params.base_sql).threats.map((t: any) => `${t.rule}|${t.matched_pattern}`),
+          )
+          safety = {
+            ...safety,
+            threats: safety.threats.filter((t: any) => !baseKeys.has(`${t.rule}|${t.matched_pattern}`)),
+          }
+        } catch {
+          // Unscannable base — keep the full head scan (fail open to MORE findings).
+        }
+      }
       // PII exposure for the composite check — the tool has always rendered a
       // PII section; previously nothing populated it. Additive: a PII failure
       // must not fail the whole composite.

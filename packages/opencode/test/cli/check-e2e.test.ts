@@ -702,6 +702,30 @@ describe("check command E2E", () => {
     expect(j.results.pii.findings[1].suggestion).toBeUndefined()
   })
 
+  test("policy check surfaces advisory warnings on an allowed result", async () => {
+    const file = await writeSql(tmpDir.dir, "policy-warn.sql", "SELECT 1;")
+    const policyFile = path.join(tmpDir.dir, "policy.json")
+    await fs.writeFile(policyFile, JSON.stringify({ rules: [] }))
+    setDispatcherResponse("altimate_core.policy", () => ({
+      success: true,
+      data: {
+        allowed: true,
+        violations: [],
+        warnings: [{ rule: "row_estimate", category: "cost_control", message: "Query may scan a large table" }],
+        policies_evaluated: 1,
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile } as any))
+    const j = parseJson(r.stdout)
+    expect(j.results.policy.findings).toHaveLength(1)
+    expect(j.results.policy.findings[0].severity).toBe("info")
+    expect(j.results.policy.findings[0].rule).toBe("row_estimate")
+    // Advisory warnings must not fail the check.
+    expect(j.summary.pass).toBe(true)
+  })
+
   test("pii check fails when the engine abstains via parse_error", async () => {
     // Unparseable SQL: engine returns success + parse_error + empty pii_columns.
     // No findings would let --fail-on PASS a file whose PII analysis never ran.

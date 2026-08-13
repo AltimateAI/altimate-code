@@ -160,7 +160,14 @@ async function runPolicy(sql: string, file: string, policyJson: string, schemaPa
       policy_json: policyJson,
       schema_path: schemaPath ?? "",
     })
-    if (result.success && result.data.allowed !== false) return []
+    // allowed:true can still carry advisory warnings — surface them as info.
+    const warningFindings = ((result.data.warnings ?? []) as Array<Record<string, unknown>>).map((w) => ({
+      file,
+      rule: (w.rule ?? "policy") as string,
+      severity: "info" as const,
+      message: (w.message ?? "") as string,
+    }))
+    if (result.success && result.data.allowed !== false) return warningFindings
     const violations = (result.data.violations ?? result.data.findings ?? []) as Array<Record<string, unknown>>
     if (violations.length > 0) {
       return violations.map((f) => ({

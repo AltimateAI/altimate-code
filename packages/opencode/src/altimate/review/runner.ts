@@ -188,7 +188,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // native functions) — in BOTH full and lint-only modes. core's schema
       // validation requires ≥1 table, so when there's no manifest we attach a
       // throwaway table purely to carry the dialect; AST lint walks the query,
-      // not the schema, so it's inert (and validation errors aren't surfaced).
+      // not the schema, so it's inert (validation errors are only surfaced
+      // when a real schema exists — see hasTables below).
       const schema = (await resolveSchema()) as { tables?: Record<string, unknown> } | undefined
       const hasTables = !!schema && Object.keys(schema.tables ?? {}).length > 0
       const schemaContext = !dialect
@@ -204,7 +205,14 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // failures surface as data.validation.errors. We also keep the legacy
       // top-level keys as a fallback for older core builds.
       const rawIssues = asArray(data.lint?.findings)
-        .concat(asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" })))
+        .concat(
+          // Only surface validation errors when a REAL schema was supplied —
+          // in lint-only mode the throwaway `_altimate_lint_` schema makes
+          // every real table "unknown" and would flood the review.
+          hasTables
+            ? asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
+            : [],
+        )
         .concat(
           // ThreatFinding severity is low|medium|high|critical and its location
           // is a byte tuple — normalize both so downstream lanes (which only
