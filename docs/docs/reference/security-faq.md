@@ -140,9 +140,12 @@ A single `first_launch` event is sent containing only:
 
 - The installed version (e.g., "0.5.9")
 - Whether this is a fresh install or upgrade (boolean)
+- Which installer was used (`curl`, `powershell`, or `npm`)
 - Your anonymous machine ID (random UUID)
 
 No code, queries, file paths, or personal information is included. This event helps us understand adoption and is fully opt-out-able.
+
+The install scripts (`altimate.sh/install`, `install.ps1`) and the npm postinstall send nothing themselves and contact no telemetry endpoint. They only record the version and installer name to a local file that the CLI reads on its next run, so the opt-out above still decides whether anything is ever transmitted.
 
 ## What happens when I authenticate via a well-known URL?
 

@@ -239,6 +239,9 @@ function writeUpgradeMarker(version) {
     const dataDir = path.join(xdgData, "altimate-code")
     fs.mkdirSync(dataDir, { recursive: true })
     fs.writeFileSync(path.join(dataDir, ".installed-version"), version.replace(/^v/, ""))
+    // Record the installer so first_launch can distinguish npm from the curl /
+    // PowerShell install scripts, which write the same marker.
+    fs.writeFileSync(path.join(dataDir, ".install-source"), "npm")
   } catch {
     // Non-fatal — the CLI just won't show a welcome banner
   }

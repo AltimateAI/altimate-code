@@ -305,6 +305,40 @@ if (-not $needsBaseline) {
 }
 
 # ---------------------------------------------------------------------------
+# Post-install marker (install telemetry)
+# ---------------------------------------------------------------------------
+# Mirrors npm's postinstall.mjs so the CLI emits its `first_launch` event on the
+# next run; without it this install path is invisible in install metrics.
+#
+# The directory MUST match welcome.ts's resolution - $XDG_DATA_HOME, else
+# <home>\.local\share - because the CLI reads it through Node's os.homedir() and
+# never looks at %LOCALAPPDATA%. Writing to LOCALAPPDATA here would be silently
+# ignored at read time.
+#
+# No network call and no identifier is written; only the installed version is
+# recorded. The CLI's existing telemetry opt-out gates still decide whether
+# anything is ever sent.
+$dataRoot = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } else { Join-Path $env:USERPROFILE ".local\share" }
+$dataDir = Join-Path $dataRoot "altimate-code"
+try {
+  New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+  # The CLI deletes an empty marker without reporting, so fall back to "unknown"
+  # when the version could not be resolved (GitHub API unreachable).
+  $markerVersion = if ($specificVersion) { $specificVersion -replace '^v', '' } else { "unknown" }
+  # -NoNewline: the CLI trims, but keep the file byte-identical to the npm path.
+  #
+  # -Encoding ascii, not utf8: the documented entrypoint is `powershell -c "irm ... | iex"`,
+  # i.e. Windows PowerShell 5.1, where `-Encoding utf8` prepends a UTF-8 BOM. Both values are
+  # ASCII by construction, so ascii is lossless here and cannot emit one. The CLI's .trim()
+  # happens to strip a leading BOM (U+FEFF is JS whitespace), but the install-source value is
+  # matched against a fixed allowlist and must not depend on that.
+  Set-Content -Path (Join-Path $dataDir ".installed-version") -Value $markerVersion -NoNewline -Encoding ascii
+  Set-Content -Path (Join-Path $dataDir ".install-source") -Value "powershell" -NoNewline -Encoding ascii
+} catch {
+  # Non-fatal - a missing marker only costs us the install event.
+}
+
+# ---------------------------------------------------------------------------
 # PATH (user scope, via registry + broadcast)
 # ---------------------------------------------------------------------------
 # Write the user PATH through the registry (not setx, which truncates at 1024

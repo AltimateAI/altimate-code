@@ -38,7 +38,7 @@ We collect the following categories of events:
 | `feature_suggestion` | A post-connection feature suggestion is shown (suggestion_type, suggestions_shown, warehouse_type — no user input) |
 | `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
 | `core_failure` | An internal tool error occurs (tool name, category, error class, truncated error message, PII-safe input signature, and optionally masked arguments — no raw values or credentials) |
-| `first_launch` | Fired once on first CLI run after installation. Contains version and is_upgrade flag. No PII. |
+| `first_launch` | Fired once on the first CLI run after an install or upgrade, triggered by a marker file the installer wrote — the installers themselves send nothing. Contains the installed version, `is_upgrade` (whether this machine had ever run altimate-code before), and `install_method` (`curl`, `powershell`, `npm`, or `unknown` for markers written before the field existed). A brand-new install is `is_upgrade: false`. No PII. |
 | `task_outcome_signal` | Behavioral quality signal at session end — accepted, error, abandoned, or cancelled. Includes tool count, step count, duration, and last tool category. No user content. |
 | `task_classified` | Intent classification of the first user message using keyword matching — category (e.g. `debug_dbt`, `write_sql`, `optimize_query`), confidence score, and detected warehouse type. No user text is sent — only the classified category. |
 | `tool_chain_outcome` | Aggregated tool execution sequence at session end — ordered tool names (capped at 50), error count, recovery count, final outcome, duration, and cost. No tool arguments or outputs. |

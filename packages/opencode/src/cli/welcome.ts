@@ -9,6 +9,32 @@ import { Telemetry } from "../altimate/telemetry"
 
 const APP_NAME = "altimate-code"
 const MARKER_FILE = ".installed-version"
+// altimate_change start — written alongside MARKER_FILE by whichever installer ran
+// (postinstall.mjs, install, install.ps1) so first_launch can attribute the install.
+const SOURCE_FILE = ".install-source"
+const INSTALL_METHODS = ["curl", "powershell", "npm"] as const
+type InstallMethod = (typeof INSTALL_METHODS)[number] | "unknown"
+
+/**
+ * Read the installer that wrote the marker, then remove the file so it stays in
+ * lockstep with MARKER_FILE — a stale value must never be attributed to a later
+ * install whose installer did not write one.
+ *
+ * Returns "unknown" for a missing, unreadable, or unrecognized value: the marker
+ * predates this field on upgrade from an older version, and an unrecognized
+ * string must not reach the event as a free-form value.
+ */
+function readInstallMethod(dataDir: string): InstallMethod {
+  const sourcePath = path.join(dataDir, SOURCE_FILE)
+  try {
+    const raw = fs.readFileSync(sourcePath, "utf-8").trim()
+    fs.unlinkSync(sourcePath)
+    return (INSTALL_METHODS as readonly string[]).includes(raw) ? (raw as InstallMethod) : "unknown"
+  } catch {
+    return "unknown"
+  }
+}
+// altimate_change end
 
 /** Resolve the data directory at call time (respects XDG_DATA_HOME changes in tests). */
 function getDataDir(): string {
@@ -27,12 +53,18 @@ function getDataDir(): string {
  */
 export function showWelcomeBannerIfNeeded(): void {
   try {
-    const markerPath = path.join(getDataDir(), MARKER_FILE)
+    const dataDir = getDataDir()
+    const markerPath = path.join(dataDir, MARKER_FILE)
     if (!fs.existsSync(markerPath)) return
 
     const installedVersion = fs.readFileSync(markerPath, "utf-8").trim()
     if (!installedVersion) {
       fs.unlinkSync(markerPath)
+      // altimate_change — clear the companion file too, so an orphaned source value
+      // cannot be attributed to a later install. Both install scripts write "unknown"
+      // rather than an empty version, so this path should now only be reachable from
+      // a truncated or hand-edited marker.
+      readInstallMethod(dataDir)
       return
     }
 
@@ -64,6 +96,7 @@ export function showWelcomeBannerIfNeeded(): void {
       session_id: "",
       version: installedVersion,
       is_upgrade: isUpgrade,
+      install_method: readInstallMethod(dataDir),
     })
     // altimate_change end
 

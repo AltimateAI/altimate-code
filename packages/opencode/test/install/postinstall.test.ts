@@ -107,6 +107,10 @@ describe("postinstall.mjs", () => {
     const markerPath = path.join(dataDir, "altimate-code", ".installed-version")
     expect(fs.existsSync(markerPath)).toBe(true)
     expect(fs.readFileSync(markerPath, "utf-8")).toBe("2.5.0")
+    // altimate_change — the curl and PowerShell installers write the same marker, so
+    // first_launch can only separate npm volume from theirs via this companion file.
+    const sourcePath = path.join(dataDir, "altimate-code", ".install-source")
+    expect(fs.readFileSync(sourcePath, "utf-8")).toBe("npm")
   })
 
   test("upgrade marker strips v prefix from version", () => {
