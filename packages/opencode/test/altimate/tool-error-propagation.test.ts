@@ -147,8 +147,12 @@ describe("altimate_core_semantics error propagation", () => {
       stubCtx(),
     )
 
-    // Handler completed (success=true), but validation_errors are surfaced in metadata.error
-    expect(result.metadata.success).toBe(true)
+    // The handler completed, but validation_errors mean the semantic check
+    // ABSTAINED — a soft failure: telemetry classifies on
+    // metadata.success === false, so an ERROR-titled abstention must not
+    // report success.
+    expect(result.metadata.success).toBe(false)
+    expect(result.title).toBe("Semantics: ERROR")
     expect(result.metadata.error).toContain("Failed to resolve table")
     expect(telemetryWouldExtract(result.metadata)).not.toBe("unknown error")
   })

@@ -589,8 +589,32 @@ describe("check command E2E", () => {
 
     const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
     const j = parseJson(r.stdout)
-    expect(j.results.safety.findings).toHaveLength(1)
+    // success:false envelope adds a fail-closed error finding alongside the threat.
+    expect(j.results.safety.findings).toHaveLength(2)
     expect(j.results.safety.findings[0].rule).toBe("sql-injection")
+    expect(j.results.safety.findings[1].rule).toBe("safety-error")
+    expect(j.results.safety.findings[1].severity).toBe("error")
+  })
+
+  test("safety envelope failure with only sub-error threats still fails closed", async () => {
+    // success:false + partial warning-severity threats must not let
+    // --fail-on=error pass — an error-severity envelope finding is appended.
+    const file = await writeSql(tmpDir.dir, "partial.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.safety", () => ({
+      success: false,
+      error: "scanner crashed midway",
+      data: {
+        safe: false,
+        threats: [{ rule: "multi_statement", severity: "medium", message: "Multiple statements" }],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "safety", "fail-on": "error", failOn: "error" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.safety.findings).toHaveLength(2)
+    expect(j.results.safety.findings.some((f: any) => f.severity === "error")).toBe(true)
+    expect(j.summary.pass).toBe(false)
   })
 
   test("safety check surfaces engine ThreatFinding shape (threats/rule/message/detail)", async () => {
@@ -615,9 +639,9 @@ describe("check command E2E", () => {
             severity: "high",
             message: "Unbalanced quote suggests injection breakout",
             detail: "Quote count is odd within a single statement",
-            // Real engine semantics: [byteOffset, byteLength] — "OR 1=1 " at 37.
+            // Real engine semantics: [byteOffset, byteLength] — the 'x' literal.
             location: [33, 3],
-            matched_pattern: "' OR 1=1 --",
+            matched_pattern: "'",
           },
         ],
       },

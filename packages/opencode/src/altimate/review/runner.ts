@@ -205,7 +205,16 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // top-level keys as a fallback for older core builds.
       const rawIssues = asArray(data.lint?.findings)
         .concat(asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" })))
-        .concat(asArray(data.safety?.threats))
+        .concat(
+          // ThreatFinding severity is low|medium|high|critical and its location
+          // is a byte tuple — normalize both so downstream lanes (which only
+          // recognize error/warning and location.line) classify them correctly.
+          asArray(data.safety?.threats).map((t: any) => ({
+            ...t,
+            severity: t.severity === "critical" || t.severity === "high" ? "error" : t.severity === "medium" ? "warning" : "info",
+            location: undefined,
+          })),
+        )
         .concat(asArray(data.issues))
         .concat(asArray(data.violations))
         .concat(asArray(data.findings))

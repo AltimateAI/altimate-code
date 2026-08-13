@@ -1,16 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 
-import { detectPii, piiColumnsFromReport } from "../../src/altimate/native/schema/pii-detector"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
 // Skip (don't crash) when the NAPI binary is absent — same guard as
-// altimate-core-e2e.test.ts; this file imports the engine at module scope.
+// altimate-core-e2e.test.ts. pii-detector imports the engine at module scope,
+// so it must be loaded AFTER (and only if) the guard passes.
 let coreAvailable = false
 try {
   require.resolve("@altimateai/altimate-core")
   coreAvailable = true
 } catch {}
 const describeIf = coreAvailable ? describe : describe.skip
+
+const { detectPii, piiColumnsFromReport } = coreAvailable
+  ? await import("../../src/altimate/native/schema/pii-detector")
+  : ({} as typeof import("../../src/altimate/native/schema/pii-detector"))
 
 const RUN = coreAvailable && process.env.ALTIMATE_RUN_WAREHOUSE_E2E === "1"
 const e2eTest = RUN ? test : test.skip

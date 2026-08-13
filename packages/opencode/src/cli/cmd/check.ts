@@ -22,6 +22,13 @@ import {
 // On Dispatcher failure, emit an error-severity finding so CI doesn't false-pass.
 // ---------------------------------------------------------------------------
 
+/** Render an engine [byteOffset, byteLength] tuple as an inclusive byte range. */
+function byteRange(loc: unknown): string {
+  if (!Array.isArray(loc) || loc.length < 2) return ""
+  const [start, len] = loc as [number, number]
+  return ` (bytes ${start}-${start + Math.max(len - 1, 0)})`
+}
+
 function dispatcherErrorFinding(check: string, file: string, e: unknown): Finding {
   return {
     file,
@@ -110,26 +117,24 @@ async function runSafety(sql: string, file: string): Promise<Finding[]> {
       result.data.issues ??
       result.data.findings ??
       []) as Array<Record<string, unknown>>
-    if (issues.length > 0) {
-      return issues.map((f) => {
-        // ThreatFinding.location is [byteOffset, byteLength] — label as bytes
-        // (offsets diverge from char indexes on multibyte SQL) and render the
-        // INCLUSIVE end. ThreatFinding carries no line/column/code fields.
-        const loc = f.location as [number, number] | undefined
-        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + Math.max(loc[1] - 1, 0)})` : ""
-        return {
-          file,
-          rule: (f.rule ?? f.category ?? "safety") as string,
-          severity: normalizeSeverity(f.severity as string),
-          message: `${(f.message ?? f.description ?? "") as string}${at}`,
-          suggestion: (f.suggestion ?? f.detail) as string | undefined,
-        }
-      })
-    }
+    const mapped = issues.map((f) => ({
+      file,
+      rule: (f.rule ?? f.category ?? "safety") as string,
+      severity: normalizeSeverity(f.severity as string),
+      // ThreatFinding.location is [byteOffset, byteLength] — labeled as bytes
+      // (offsets diverge from char indexes on multibyte SQL), inclusive end.
+      // ThreatFinding carries no line/column/code fields.
+      message: `${(f.message ?? f.description ?? "") as string}${byteRange(f.location)}`,
+      suggestion: (f.suggestion ?? f.detail) as string | undefined,
+    }))
     if (!result.success) {
       // Fail closed like every other check — a crashed safety engine must not
-      // pass --fail-on error.
-      return [dispatcherErrorFinding("safety", file, result.error ?? "altimate_core.safety failed")]
+      // pass --fail-on error, even when partial threats were returned and none
+      // of them is error-severity.
+      return [...mapped, dispatcherErrorFinding("safety", file, result.error ?? "altimate_core.safety failed")]
+    }
+    if (mapped.length > 0) {
+      return mapped
     }
     if (result.data.safe === false) {
       return [
@@ -328,12 +333,10 @@ async function runGrade(
       }) as Array<Record<string, unknown>>),
       ...(((safety?.threats as Array<Record<string, unknown>> | undefined) ?? []).map((t) => {
         // ThreatFinding: location is [byteOffset, byteLength]; detail is the fix hint
-        const loc = t.location as [number, number] | undefined
-        const at = Array.isArray(loc) ? ` (bytes ${loc[0]}-${loc[0] + Math.max(loc[1] - 1, 0)})` : ""
         return {
           ...t,
           rule: (t.rule as string) ?? "safety",
-          message: `${(t.message ?? "") as string}${at}`,
+          message: `${(t.message ?? "") as string}${byteRange(t.location)}`,
           location: undefined,
           suggestion: t.suggestion ?? t.detail,
         }
