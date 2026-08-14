@@ -534,10 +534,13 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
     },
 
-    async detectPii(sql: string): Promise<{ columns: string[] }> {
+    async detectPii(sql: string, dialect?: string, oldSql?: string): Promise<{ columns: string[] }> {
       // Text-based PII comes from altimate_core.check (schema.detect_pii is
       // warehouse-based and unavailable in CI). Reuses the memoized check.
-      const result = await runCheck(sql)
+      // Passing the base SQL diff-scopes exposures in the composite handler,
+      // so a modified model only reports PII its change INTRODUCED — an
+      // unrelated edit no longer promotes the review tier.
+      const result = await runCheck(sql, dialect, oldSql)
       return { columns: result.piiColumns ?? [] }
     },
   }

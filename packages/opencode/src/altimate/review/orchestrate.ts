@@ -118,7 +118,7 @@ export interface ReviewRunner {
   grade(sql: string, dialect: string): Promise<GradeResult>
   check(sql: string, dialect: string, baseSql?: string): Promise<CheckResult>
   equivalence(oldSql: string, newSql: string, dialect?: string): Promise<EquivalenceResult>
-  detectPii(sql: string, dialect: string): Promise<{ columns: string[] }>
+  detectPii(sql: string, dialect: string, oldSql?: string): Promise<{ columns: string[] }>
   /**
    * Lexical scan (reserved-word aliases + dialect operators) — the curated lists
    * and detection live in the compiled core; this passes raw added diff lines.
@@ -1087,7 +1087,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       const engineOldSql = compiledOld ?? oldSql
       const impact = await input.runner.impact(model)
       if (impact.hasManifest) anyManifest = true
-      const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect)).columns : []
+      // Diff-scoped for modified files: only exposures the change introduced
+      // count toward PII tier promotion and the broad PII fallback.
+      const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect, engineOldSql)).columns : []
       const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
       ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
     }),
