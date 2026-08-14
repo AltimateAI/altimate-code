@@ -78,7 +78,10 @@ const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|
 // Split on numbered/bulleted item starts; when the transcript has no list
 // structure (fewer than 3 items), fall back to one segment per paragraph.
 function segments(transcript: string): string[] {
-  const items = transcript.split(/\n(?=\s*(?:\d+[.)]\s|[-*]\s\*\*|#{2,4}\s))/)
+  // Split ONLY on numbered candidate starts and headings — the prompt renders
+  // each candidate's FIELDS as `- **Category**` bullets, so splitting on
+  // bullets would tear one candidate's model line from its evidence line.
+  const items = transcript.split(/\n(?=\s*(?:\d+[.)]\s|#{2,4}\s))/)
   if (items.length >= 3) return items
   return transcript.split(/\n\s*\n/)
 }

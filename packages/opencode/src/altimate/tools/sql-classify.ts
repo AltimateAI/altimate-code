@@ -53,9 +53,10 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
   // masked statement body forces "write" — the safe direction is a prompt.
   const WRITE_KEYWORD =
     /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into)\b/i
-  // replace/copy/call/set double as read-only functions (REPLACE(str,..)); only
-  // the statement form (not immediately followed by `(`) counts as a write.
-  const WRITE_STATEMENT_FORM = /\b(replace|copy|call|set)\b(?!\s*\()/i
+  // replace/copy/call/set double as read-only functions and column names; only
+  // the STATEMENT form (keyword at statement start) counts as a write —
+  // scanning the whole statement would escalate `SELECT set FROM t`.
+  const WRITE_STATEMENT_FORM = /^\s*(replace|copy|call|set)\b/i
   let queryType: "read" | "write" = "read"
   let blocked = false
   for (const stmt of statements) {

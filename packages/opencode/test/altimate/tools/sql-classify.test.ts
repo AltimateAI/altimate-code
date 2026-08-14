@@ -378,3 +378,17 @@ describe("round-9 review hardening", () => {
     expect(classify('SELECT "nextval_cache", [order] FROM t')).toBe("read")
   })
 })
+
+describe("round-10 review hardening", () => {
+  test("side-effecting calls inside array subscripts are detected (bracket content preserved)", () => {
+    expect(classify("SELECT arr[nextval('s')] FROM t")).toBe("write")
+  })
+
+  test("bracket identifiers still cannot smuggle comments, and content is scan-visible", () => {
+    expect(classifyAndCheck("SELECT 1 AS [--]; DELETE FROM users").queryType).toBe("write")
+  })
+
+  test("unquoted read identifiers named set/replace/copy stay reads (anchored statement form)", () => {
+    expect(classify("SELECT set, replace, copy FROM options")).toBe("read")
+  })
+})

@@ -70,7 +70,14 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           ...req,
           sessionID: input.session.id,
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
+          // altimate_change start — session-supplied permissions (legacy `tools:{}`
+          // request input) must not outrank the agent's configured rules: with
+          // session rules merged LAST under last-match-wins, a request carrying
+          // `tools: { sql_execute_write: true }` would flip dbt-optimizer's
+          // non-overridable deny. Agent config is authoritative; session rules
+          // may only fill gaps.
+          ruleset: Permission.merge(input.session.permission ?? [], input.agent.permission),
+          // altimate_change end
         })
         .pipe(Effect.orDie),
   })

@@ -363,7 +363,7 @@ export function registerAllSql(): void {
       // back to index alignment (SQL models are far below it in practice).
       const linesA = sqlA.split("\n")
       const linesB = sqlB.split("\n")
-      const contextLines = Math.max(0, Number(params.context_lines ?? 3) || 0)
+      const contextLines = Math.max(0, Math.floor(Number(params.context_lines ?? 3) || 0))
       const diffLines: string[] = []
       if (linesA.length * linesB.length <= 1_000_000) {
         const n = linesA.length
@@ -391,10 +391,19 @@ export function registerAllSql(): void {
         while (i < n) ops.push({ tag: "-", line: linesA[i++] })
         while (j < m) ops.push({ tag: "+", line: linesB[j++] })
 
-        const keep = new Array(ops.length).fill(false)
+        // Difference-array marking: O(ops) regardless of context size — a
+        // per-change rescan would go quadratic for large context_lines.
+        const delta = new Array(ops.length + 1).fill(0)
         for (let k = 0; k < ops.length; k++) {
           if (ops[k].tag === " ") continue
-          for (let c = Math.max(0, k - contextLines); c <= Math.min(ops.length - 1, k + contextLines); c++) keep[c] = true
+          delta[Math.max(0, k - contextLines)]++
+          delta[Math.min(ops.length, k + contextLines + 1)]--
+        }
+        const keep = new Array(ops.length).fill(false)
+        let acc = 0
+        for (let k = 0; k < ops.length; k++) {
+          acc += delta[k]
+          keep[k] = acc > 0
         }
         let lastKept = -2
         for (let k = 0; k < ops.length; k++) {
@@ -407,7 +416,7 @@ export function registerAllSql(): void {
         // Oversized for exact LCS — index-aligned comparison inflates change
         // counts (a top insertion reads as a full-file replacement), so the
         // output is explicitly marked approximate.
-        diffLines.push("(approximate diff: input too large for exact line matching)")
+        diffLines.push("(approximate diff: input too large for exact line matching; context lines unavailable)")
         const maxLen = Math.max(linesA.length, linesB.length)
         for (let i = 0; i < maxLen; i++) {
           const a = linesA[i] ?? ""

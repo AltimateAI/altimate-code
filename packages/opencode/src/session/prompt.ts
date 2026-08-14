@@ -1715,7 +1715,10 @@ export namespace SessionPrompt {
             ...req,
             sessionID: input.session.id,
             tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-            ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+            // altimate_change start — session rules must not outrank agent config
+            // (see session/tools.ts): merged FIRST so agent denies stay final.
+            ruleset: PermissionNext.merge(input.session.permission ?? [], input.agent.permission),
+            // altimate_change end
           } as Parameters<typeof PermissionNext.ask>[0])
           // altimate_change end
         }),

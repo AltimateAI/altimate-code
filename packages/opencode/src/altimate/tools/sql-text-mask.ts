@@ -71,12 +71,24 @@ export function maskLiteralsAndComments(
       if (j === -1) return null
       i = j
     } else if (c === "[") {
-      // SQL Server bracket-quoted identifiers can contain `--` etc.; consume
-      // as a unit so their content cannot open a comment state. Postgres array
-      // subscripts (arr[1]) lex through here harmlessly.
-      const j = consumeDelimited("[", "]")
-      if (j === -1) return null
-      i = j
+      // Brackets are ambiguous: SQL Server quoted identifiers ([--]) vs
+      // PostgreSQL array subscripts (arr[nextval('s')]). Consume as a unit so
+      // identifier content can never open a comment state, but ALWAYS preserve
+      // the content in the output: blanking it would hide a side-effecting
+      // subscript expression from the keyword scans. Preserved content is
+      // never re-lexed, so it can only ADD text for the scans to see — the
+      // fail-safe direction (an identifier literally named [delete] merely
+      // triggers a prompt).
+      const start = i
+      let j = i + 1
+      for (;;) {
+        if (j >= n) return null
+        if (sql[j] === "]" && sql[j + 1] === "]") j += 2
+        else if (sql[j] === "]") break
+        else j++
+      }
+      out += sql.slice(start, j + 1)
+      i = j + 1
     } else if (c === "-" && next === "-") {
       // Line comments end at \n OR \r — CR-only line endings must not extend
       // the comment to EOF and hide later statements.
