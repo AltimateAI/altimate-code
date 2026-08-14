@@ -47,12 +47,14 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
         }
       }
 
-      // Step 2: Find the target model and its downstream dependents
-      const targetModel = manifest.models.find(
+      // Step 2: Find the target model(s). Computed ONCE — the not-found check
+      // and the affected-id set both derive from this list, so the matching
+      // rule cannot silently drift between them.
+      const targetMatches = manifest.models.filter(
         (m: { name: string }) => m.name === args.model || m.name.endsWith(`.${args.model}`),
       )
 
-      if (!targetModel) {
+      if (targetMatches.length === 0) {
         const available = manifest.models
           .slice(0, 10)
           .map((m: { name: string }) => m.name)
@@ -80,10 +82,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       // name-keyed map would overwrite package-qualified models sharing a name
       // and silently drop the overwritten branch's tests. All same-named
       // targets count (the traversal seeded all of them).
-      const targetIds = manifest.models
-        .filter((m: { name: string }) => m.name === args.model || m.name.endsWith(`.${args.model}`))
-        .map((m: { unique_id?: string }) => m.unique_id)
-        .filter(Boolean)
+      const targetIds = targetMatches.map((m: { unique_id?: string }) => m.unique_id).filter(Boolean)
       const affectedModelIds = new Set([...targetIds, ...downstream.map((d) => d.unique_id).filter(Boolean)])
       const affectedTests = (manifest.tests ?? []).filter((t) =>
         t.depends_on?.some((dep) => affectedModelIds.has(dep)),

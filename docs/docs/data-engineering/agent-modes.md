@@ -255,9 +255,12 @@ All SQL queries are classified before execution using AST-based parsing:
 
 | Query Type | Builder | Analyst | Reviewer | dbt-Optimizer |
 |-----------|---------|---------|----------|---------------|
-| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed | — | Allowed |
+| `SELECT` | Allowed | Allowed | — | Allowed |
+| `SHOW`, `DESCRIBE`, `EXPLAIN` (classified ambiguous) | Prompts for approval | Denied | — | Denied — use `schema_inspect` / `sql_explain` instead |
 | `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied | — | Denied (non-overridable) |
 | `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked | — | Blocked |
+
+The classifier treats only plain `SELECT` as a proven read; `SHOW`/`DESCRIBE`/`EXPLAIN` fall into the ambiguous category and follow the write column. Use the dedicated read tools (`schema_inspect` for structure, `sql_explain` for plans) instead.
 
 The Reviewer has no direct SQL execution tools at all — it works through the `dbt_pr_review` verdict engine and read-only analysis tools; see [dbt PR Review](../usage/dbt-pr-review.md).
 

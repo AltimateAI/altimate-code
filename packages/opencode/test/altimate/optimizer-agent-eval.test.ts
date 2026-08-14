@@ -174,15 +174,14 @@ describeIf("optimizer live eval — planted-project scan", () => {
                 "GOOGLE_GENERATIVE_AI_API_KEY",
                 "GROQ_API_KEY",
                 "MISTRAL_API_KEY",
-                // Vertex model access (Application Default Credentials path +
-                // project/location) — model-plane only, no warehouse creds.
-                // NOTE: the vertex loader DETECTS via GOOGLE_CLOUD_PROJECT /
-                // GCP_PROJECT / GCLOUD_PROJECT; GOOGLE_VERTEX_PROJECT is an
-                // output var only (provider.ts:629).
-                "GOOGLE_APPLICATION_CREDENTIALS",
-                "GOOGLE_CLOUD_PROJECT",
-                "GOOGLE_CLOUD_LOCATION",
-                "GOOGLE_VERTEX_LOCATION",
+                // NOTE: GOOGLE_APPLICATION_CREDENTIALS / GOOGLE_CLOUD_PROJECT
+                // are deliberately NOT passed through. ADC is a full service-
+                // account credential that this codebase's own env detection
+                // (project-scan detectEnvVars) treats as a BIGQUERY WAREHOUSE
+                // credential — forwarding it would let the scan authenticate
+                // to a real warehouse, defeating the isolation this env block
+                // exists to provide. Vertex-based model auth must come through
+                // OPTIMIZER_EVAL_AUTH (auth.json, model plane) instead.
                 // NOTE: AWS_* is deliberately NOT passed through — those double
                 // as warehouse credentials, contradicting the isolation goal.
                 // Bedrock-model users can extend this list locally.

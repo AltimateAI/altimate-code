@@ -550,8 +550,10 @@ export namespace ToolRegistry {
           // session/llm.ts renames unknown/malformed tool calls to it so the
           // model receives a structured validation error. Filtering it under a
           // deny-by-default agent would turn every repaired call into a hard
-          // failure that can end the turn.
-          if (t.id === "invalid") return true
+          // failure that can end the turn. The exemption applies ONLY to the
+          // builtin definition — a plugin/custom tool registered under the
+          // same id stays subject to the agent's permission filter.
+          if (t.id === "invalid" && t.registrySource !== "external") return true
           return !Permission.disabled([t.id], agent.permission).has(t.id)
         })
         // altimate_change end

@@ -359,3 +359,22 @@ describe("quoted-identifier side-effect calls", () => {
     expect(classify('SELECT "order" FROM t')).toBe("read")
   })
 })
+
+describe("round-9 review hardening", () => {
+  test("comment wedged between quoted function name and paren cannot bypass", () => {
+    expect(classify(`SELECT "dblink_exec" /*x*/ ('conn','DELETE')`)).toBe("write")
+    expect(classify(`SELECT "lo_import" /**/ ('/tmp/x')`)).toBe("write")
+  })
+
+  test("bracket-quoted identifiers cannot smuggle line comments (SQL Server)", () => {
+    expect(classifyAndCheck("SELECT 1 AS [--]; DELETE FROM users").queryType).toBe("write")
+  })
+
+  test("backtick-quoted side-effect calls escalate (MySQL)", () => {
+    expect(classify("SELECT `dblink_exec`('conn','x')")).toBe("write")
+  })
+
+  test("quoted non-call identifiers still classify as reads", () => {
+    expect(classify('SELECT "nextval_cache", [order] FROM t')).toBe("read")
+  })
+})

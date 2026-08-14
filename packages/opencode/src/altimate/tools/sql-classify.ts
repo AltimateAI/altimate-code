@@ -47,11 +47,20 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
   if (cleaned === null) return { queryType: "write", blocked: false }
   const statements = cleaned.split(";").map(s => s.trim()).filter(Boolean)
   if (statements.length === 0) return { queryType: "read", blocked: false }
+  // A read-shaped PREFIX is not proof: `WITH x AS (SELECT 1) DELETE FROM u`
+  // and `EXPLAIN ANALYZE DELETE FROM u` start like reads but execute writes
+  // (and PostgreSQL EXPLAIN ANALYZE always executes). Any write keyword in the
+  // masked statement body forces "write" — the safe direction is a prompt.
+  const WRITE_KEYWORD =
+    /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into)\b/i
+  // replace/copy/call/set double as read-only functions (REPLACE(str,..)); only
+  // the statement form (not immediately followed by `(`) counts as a write.
+  const WRITE_STATEMENT_FORM = /\b(replace|copy|call|set)\b(?!\s*\()/i
   let queryType: "read" | "write" = "read"
   let blocked = false
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
-    if (!READ_PATTERN.test(stmt)) queryType = "write"
+    if (!READ_PATTERN.test(stmt) || WRITE_KEYWORD.test(stmt) || WRITE_STATEMENT_FORM.test(stmt)) queryType = "write"
   }
   return { queryType, blocked }
 }
@@ -74,18 +83,23 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
 const SIDE_EFFECT_FUNCTIONS =
   /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)\s*\(/i
 
-// Quoted-identifier call form: `SELECT "lo_import"('/tmp/x')` is a valid
-// PostgreSQL invocation, but the masker replaces "..." content with "" —
-// hiding the name. Checked against the RAW (normalized) SQL; a match inside a
-// string literal false-positives toward "write", which only costs a prompt.
+// Quoted-identifier call form: `SELECT "lo_import"('/tmp/x')` (or the
+// `backtick`/[bracket] dialect variants) is a valid invocation. Checked
+// against the identifier-PRESERVING mask (comments and string literals
+// removed, quoted-identifier content kept): raw-SQL matching would miss a
+// comment wedged between the quote and the paren (`"lo_import"/**/(...)`),
+// while the default mask blanks the name entirely. On the preserved-id mask
+// the wedge collapses to whitespace and the delimited name survives.
 const QUOTED_SIDE_EFFECT =
-  /"(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)"\s*\(/i
+  /["`[](nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)["`\]]\s*\(/i
 
 function hasSideEffectFunction(sql: string): boolean {
-  if (QUOTED_SIDE_EFFECT.test(sql)) return true
   const masked = maskLiteralsAndComments(sql)
   if (masked === null) return true
-  return SIDE_EFFECT_FUNCTIONS.test(masked)
+  if (SIDE_EFFECT_FUNCTIONS.test(masked)) return true
+  const maskedWithIds = maskLiteralsAndComments(sql, { preserveQuotedIdentifiers: true })
+  if (maskedWithIds === null) return true
+  return QUOTED_SIDE_EFFECT.test(maskedWithIds)
 }
 
 /**

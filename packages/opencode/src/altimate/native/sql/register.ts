@@ -363,6 +363,7 @@ export function registerAllSql(): void {
       // back to index alignment (SQL models are far below it in practice).
       const linesA = sqlA.split("\n")
       const linesB = sqlB.split("\n")
+      const contextLines = Math.max(0, Number(params.context_lines ?? 3) || 0)
       const diffLines: string[] = []
       if (linesA.length * linesB.length <= 1_000_000) {
         const n = linesA.length
@@ -371,21 +372,42 @@ export function registerAllSql(): void {
         for (let i = n - 1; i >= 0; i--)
           for (let j = m - 1; j >= 0; j--)
             lcs[i][j] = linesA[i] === linesB[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+        // Op stream from LCS backtrack, then emit hunks including up to
+        // `context_lines` unchanged lines (prefixed "  ") around each change
+        // run so changes in long/repetitive SQL are locatable.
+        const ops: Array<{ tag: " " | "-" | "+"; line: string }> = []
         let i = 0
         let j = 0
         while (i < n && j < m) {
           if (linesA[i] === linesB[j]) {
-            i++
+            ops.push({ tag: " ", line: linesA[i++] })
             j++
           } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
-            diffLines.push(`- ${linesA[i++]}`)
+            ops.push({ tag: "-", line: linesA[i++] })
           } else {
-            diffLines.push(`+ ${linesB[j++]}`)
+            ops.push({ tag: "+", line: linesB[j++] })
           }
         }
-        while (i < n) diffLines.push(`- ${linesA[i++]}`)
-        while (j < m) diffLines.push(`+ ${linesB[j++]}`)
+        while (i < n) ops.push({ tag: "-", line: linesA[i++] })
+        while (j < m) ops.push({ tag: "+", line: linesB[j++] })
+
+        const keep = new Array(ops.length).fill(false)
+        for (let k = 0; k < ops.length; k++) {
+          if (ops[k].tag === " ") continue
+          for (let c = Math.max(0, k - contextLines); c <= Math.min(ops.length - 1, k + contextLines); c++) keep[c] = true
+        }
+        let lastKept = -2
+        for (let k = 0; k < ops.length; k++) {
+          if (!keep[k]) continue
+          if (k > lastKept + 1 && diffLines.length > 0) diffLines.push("...")
+          diffLines.push(ops[k].tag === " " ? `  ${ops[k].line}` : `${ops[k].tag} ${ops[k].line}`)
+          lastKept = k
+        }
       } else {
+        // Oversized for exact LCS — index-aligned comparison inflates change
+        // counts (a top insertion reads as a full-file replacement), so the
+        // output is explicitly marked approximate.
+        diffLines.push("(approximate diff: input too large for exact line matching)")
         const maxLen = Math.max(linesA.length, linesB.length)
         for (let i = 0; i < maxLen; i++) {
           const a = linesA[i] ?? ""

@@ -100,8 +100,11 @@ critical path".
 - Sibling models independently scanning the same source/window — build one shared
   staging relation.
 - Dead models: no downstream model, exposure, or scheduled selector references.
-  High confidence to REPORT; deletion is always propose-only with owner confirmation
-  (external BI consumers do not appear in the manifest).
+  The `dbt_manifest` summary and `impact_analysis` DO NOT surface exposures — read
+  the raw manifest.json (`exposures` key) before declaring a model dead; a model
+  referenced only by an exposure is NOT dead. High confidence to REPORT; deletion
+  is always propose-only with owner confirmation (external BI consumers do not
+  appear in the manifest at all).
 - Over-materialized single-consumer intermediates; staging-layer bloat (chains of
   pass-through models); unused columns carried through many models.
 - Critical-path root cause: the one slow node on the longest weighted path.
