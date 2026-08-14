@@ -1,3 +1,8 @@
+---
+title: "Data Engineering Guides — Altimate Code"
+description: "Practical guides for Altimate Code: cost optimization, SQL migration, dbt PR review, ClickHouse, and CI headless mode."
+---
+
 # Guides
 
 Practical guides for common data engineering workflows.

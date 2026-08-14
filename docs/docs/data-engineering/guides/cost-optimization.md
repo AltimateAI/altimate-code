@@ -1,3 +1,8 @@
+---
+title: "Cost Optimization Guide — Altimate Code"
+description: "Find and reduce warehouse costs using Altimate Code's finops_analyze_credits and finops_expensive_queries tools."
+---
+
 # Cost Optimization Guide
 
 altimate is your cost advocate. Here's how to use it to cut warehouse spend.

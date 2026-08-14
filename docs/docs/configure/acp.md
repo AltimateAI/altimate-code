@@ -1,3 +1,8 @@
+---
+title: ACP (Agent Communication Protocol) Support
+description: "Use Altimate Code with the Agent Communication Protocol (ACP) for interoperability with other AI agents and editor integrations."
+---
+
 # ACP Support
 
 altimate implements the Agent Communication Protocol (ACP), allowing it to act as a backend for editors and IDEs.

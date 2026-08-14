@@ -1,3 +1,8 @@
+---
+title: "Security FAQ — Altimate Code"
+description: "Answers to common security questions about Altimate Code: what data is sent to LLMs, how credentials are stored, and more."
+---
+
 # Security FAQ
 
 Answers to the most common security questions about running Altimate Code in your environment.
@@ -130,7 +135,7 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 - **Logged-in users:** Your email is SHA-256 hashed before sending. We never see your raw email.
 - **Anonymous users:** A random UUID (`crypto.randomUUID()`) is generated on first run and stored at `~/.altimate/machine-id`. This is NOT tied to your hardware, OS, or identity — it's purely random.
-- **Both identifiers** are only sent when telemetry is enabled. Disable via `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option.
+- **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option.
 - **No fingerprinting:** We do not use browser fingerprinting, hardware IDs, MAC addresses, or IP-based tracking.
 - **CLI auth flow:** When you sign in via `altimate auth login`, the anonymous machine ID is included in the authorization URL and associated with your account in product analytics for funnel analysis. This is suppressed when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option — and the machine ID is omitted from the URL entirely.
 

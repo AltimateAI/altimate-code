@@ -1,3 +1,8 @@
+---
+title: "HTTP Server Mode — Altimate Code"
+description: "Run Altimate Code as an HTTP API server for remote access and tool invocation from external applications."
+---
+
 # Server
 
 altimate includes an HTTP API server for remote access and integrations.

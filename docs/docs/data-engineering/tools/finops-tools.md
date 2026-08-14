@@ -1,3 +1,8 @@
+---
+title: "FinOps Tools — Cost Optimization — Altimate Code"
+description: "Monitor warehouse costs, query history, and credits with Altimate Code's FinOps tools including finops_query_history."
+---
+
 # FinOps Tools
 
 Cost optimization and warehouse governance. These tools help you find where money is being wasted and fix it.

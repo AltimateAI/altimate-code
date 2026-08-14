@@ -1,3 +1,8 @@
+---
+title: "Lineage Tools — Column-Level Lineage — Altimate Code"
+description: "Trace column-level data lineage across your warehouse with Altimate Code's lineage_check tool."
+---
+
 # Lineage Tools
 
 ## lineage_check

@@ -1,3 +1,8 @@
+---
+title: "dbt Tools — Altimate Code"
+description: "Run dbt commands from Altimate Code using the dbt_run tool with full output capture and error reporting."
+---
+
 # dbt Tools
 
 ## dbt_run
@@ -83,7 +88,7 @@ Unit Test Gen: 4 test(s) for fct_orders
 
 === Unit Test Generation Summary ===
 Model: fct_orders
-Description: Daily order totals by order ID
+Description: "Daily order totals by order ID"
 Materialization: table
 Upstream dependencies: 2
 Tests generated: 4

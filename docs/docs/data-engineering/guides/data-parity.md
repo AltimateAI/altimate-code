@@ -1,3 +1,8 @@
+---
+title: "Data Parity (Table Diff) — Altimate Code"
+description: "Validate table equivalence across databases for migrations, ETL refactors, and data quality checks with Altimate Code."
+---
+
 # Data Parity (Table Diff)
 
 Validate that two tables — or two query results — are identical across databases, or diagnose exactly how they differ. Use for **migration validation**, **ETL regression**, and **query refactor verification**.
