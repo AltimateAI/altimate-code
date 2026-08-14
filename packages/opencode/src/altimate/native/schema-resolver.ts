@@ -120,3 +120,5 @@ export function schemaOrEmpty(
   if (s !== null) return s
   return Schema.fromDdl("CREATE TABLE _empty_ (id INT);")
 }
+
+export * as SchemaResolver from "./schema-resolver"

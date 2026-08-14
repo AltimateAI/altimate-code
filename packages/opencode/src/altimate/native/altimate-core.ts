@@ -11,7 +11,7 @@
 import * as core from "@altimateai/altimate-core"
 import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
-import { schemaOrEmpty, resolveSchema, normalizeSchemaContext } from "./schema-resolver"
+import { schemaOrEmpty, resolveSchema, SchemaResolver } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -184,7 +184,7 @@ export function registerAll(): void {
               params.base_sql,
               // lintDiff takes SchemaDefinition JSON — normalize flat agent
               // schemas too, or the whole composite throws "missing field tables".
-              params.schema_context ? normalizeSchemaContext(params.schema_context) : undefined,
+              params.schema_context ? SchemaResolver.normalizeSchemaContext(params.schema_context) : undefined,
             )
           : core.lint(params.sql, schema)
       // Diff-scope safety like lint: threats present in the base SQL are
@@ -210,11 +210,20 @@ export function registerAll(): void {
             }
             return true
           })
+          // The engine's risk_score covers the FULL head scan — once threats
+          // are filtered it no longer matches. Recompute a documented
+          // approximation from the surviving severities (matches the engine's
+          // observed single-threat scores closely enough for gating).
+          const severityScore: Record<string, number> = { critical: 0.98, high: 0.95, medium: 0.6, low: 0.3 }
+          const rescored =
+            remaining.length === (safety.threats as any[]).length
+              ? (safety.risk_score as number)
+              : remaining.reduce((m: number, t: any) => Math.max(m, severityScore[t.severity] ?? 0.5), 0)
           safety = {
             ...safety,
             threats: remaining,
             safe: remaining.length === 0 ? true : safety.safe,
-            risk_score: remaining.length === 0 ? 0 : safety.risk_score,
+            risk_score: rescored,
           }
         } catch {
           // Unscannable base — keep the full head scan (fail open to MORE findings).
@@ -228,13 +237,22 @@ export function registerAll(): void {
         pii = toData(core.checkQueryPii(params.sql, schema))
         if (params.base_sql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
           try {
-            // Pre-existing exposures (same table.column already exposed by the
-            // base) are not introduced by this change.
-            const baseExposed = new Set(
-              core.checkQueryPii(params.base_sql, schema).pii_columns.map((c: any) => `${c.table}|${c.column}`),
-            )
-            const remaining = (pii.pii_columns as any[]).filter((c: any) => !baseExposed.has(`${c.table}|${c.column}`))
-            pii = { ...pii, pii_columns: remaining, accesses_pii: remaining.length > 0 ? pii.accesses_pii : false }
+            // Pre-existing exposures are not introduced by this change. The
+            // identity INCLUDES the sorted output aliases — adding or renaming
+            // a SELECT-list alias for an already-exposed column is a NEW
+            // output exposure and must still surface.
+            const exposureKey = (c: any) =>
+              `${c.table}|${c.column}|${[...(c.query_targets ?? [])].sort().join(",")}`
+            const baseExposed = new Set(core.checkQueryPii(params.base_sql, schema).pii_columns.map(exposureKey))
+            const remaining = (pii.pii_columns as any[]).filter((c: any) => !baseExposed.has(exposureKey(c)))
+            pii = {
+              ...pii,
+              pii_columns: remaining,
+              accesses_pii: remaining.length > 0 ? pii.accesses_pii : false,
+              // risk_level covered the full head report; with no surviving
+              // exposures it must not keep claiming risk.
+              risk_level: remaining.length === 0 ? "None" : pii.risk_level,
+            }
           } catch {
             // Unscannable base — keep the full head exposure list.
           }

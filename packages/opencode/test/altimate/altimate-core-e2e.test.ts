@@ -1334,6 +1334,28 @@ describeIf("consumer contract sync (round 2)", () => {
       const full = await Dispatcher.call("altimate_core.check", { sql: head, schema_context: SCHEMA })
       const fullExposed = ((full.data as any).pii?.pii_columns ?? []).map((c: any) => c.column)
       expect(fullExposed).toContain("email")
+      // With every exposure pre-existing, risk_level must not stay stale.
+      expect((scoped.data as any).pii.risk_level).toBe("None")
+    })
+
+    test("PII diff-scoping keys on output aliases — a renamed alias still surfaces", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const base = "SELECT email AS old_contact FROM customers"
+      // Same source column, NEW output alias → a new exposure, not pre-existing.
+      const renamed = await Dispatcher.call("altimate_core.check", {
+        sql: "SELECT email AS new_contact FROM customers",
+        base_sql: base,
+        schema_context: SCHEMA,
+      })
+      const renamedCols = ((renamed.data as any).pii?.pii_columns ?? []) as any[]
+      expect(renamedCols.some((c) => (c.query_targets ?? []).includes("new_contact"))).toBe(true)
+      // Identical alias → pre-existing, filtered.
+      const same = await Dispatcher.call("altimate_core.check", {
+        sql: base,
+        base_sql: base,
+        schema_context: SCHEMA,
+      })
+      expect(((same.data as any).pii?.pii_columns ?? []).length).toBe(0)
     })
 
     test("check tool PII section reports abstention for unparseable SQL, not a clean verdict", async () => {
