@@ -589,8 +589,185 @@ describe("check command E2E", () => {
 
     const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
     const j = parseJson(r.stdout)
-    expect(j.results.safety.findings).toHaveLength(1)
+    // success:false envelope adds a fail-closed error finding alongside the threat.
+    expect(j.results.safety.findings).toHaveLength(2)
     expect(j.results.safety.findings[0].rule).toBe("sql-injection")
+    expect(j.results.safety.findings[1].rule).toBe("safety-error")
+    expect(j.results.safety.findings[1].severity).toBe("error")
+  })
+
+  test("safety envelope failure with only sub-error threats still fails closed", async () => {
+    // success:false + partial warning-severity threats must not let
+    // --fail-on=error pass — an error-severity envelope finding is appended.
+    const file = await writeSql(tmpDir.dir, "partial.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.safety", () => ({
+      success: false,
+      error: "scanner crashed midway",
+      data: {
+        safe: false,
+        threats: [{ rule: "multi_statement", severity: "medium", message: "Multiple statements" }],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "safety", "fail-on": "error", failOn: "error" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.safety.findings).toHaveLength(2)
+    expect(j.results.safety.findings.some((f: any) => f.severity === "error")).toBe(true)
+    expect(j.summary.pass).toBe(false)
+  })
+
+  test("safety check surfaces engine ThreatFinding shape (threats/rule/message/detail)", async () => {
+    // Real core@0.7.0 scanSql shape: threats[], each { rule, severity, message, detail }.
+    // Regression guard: the consumer previously only read issues/findings, so
+    // real threats (e.g. the 0.6.0 unbalanced_quote rule) rendered as a generic warning.
+    // Engine-faithful fixture: a dangling quote genuinely emits the
+    // unbalanced_quote rule at runtime (verified against the live 0.7.0
+    // binary; the rule is only missing from the stale SafetyRule union in
+    // index.d.ts — filed upstream as altimate-core-internal#764).
+    const file = await writeSql(tmpDir.dir, "breakout.sql", "SELECT * FROM users WHERE name = 'x'';")
+    setDispatcherResponse("altimate_core.safety", () => ({
+      success: true,
+      data: {
+        safe: false,
+        risk_score: 0.9,
+        statement_count: 1,
+        statement_types: ["SELECT"],
+        threats: [
+          {
+            rule: "unbalanced_quote",
+            severity: "high",
+            message: "Unbalanced quote suggests injection breakout",
+            detail: "Quote count is odd within a single statement",
+            // Real engine semantics: [byteOffset, byteLength] — the 'x' literal.
+            location: [33, 3],
+            matched_pattern: "'",
+          },
+        ],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.safety.findings).toHaveLength(1)
+    expect(j.results.safety.findings[0].rule).toBe("unbalanced_quote")
+    // ThreatFinding.location is [byteOffset, byteLength] — rendered as an INCLUSIVE byte range.
+    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (bytes 33-35)")
+    expect(j.results.safety.findings[0].suggestion).toBe("Quote count is odd within a single statement")
+    // Engine severity "high" must normalize to error, not degrade to info —
+    // otherwise --fail-on/--severity filters silently pass high-risk injections.
+    expect(j.results.safety.findings[0].severity).toBe("error")
+  })
+
+  test("pii check surfaces engine PiiColumnAccess shape (classification/query_targets/masking)", async () => {
+    // Real core@0.7.0 query_pii shape: pii_columns[], each
+    // { table, column, classification, query_targets, suggested_masking }.
+    const file = await writeSql(tmpDir.dir, "pii-real.sql", "SELECT email AS contact FROM customers;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: true,
+      data: {
+        accesses_pii: true,
+        risk_level: "Medium",
+        pii_columns: [
+          {
+            table: "customers",
+            column: "email",
+            classification: "Email",
+            query_targets: ["contact"],
+            suggested_masking: "'***MASKED***'",
+          },
+          {
+            table: "customers",
+            column: "employee_ref",
+            // PiiClassification can be { Custom: string }, not just a string.
+            classification: { Custom: "EmployeeId" },
+            query_targets: [],
+            suggested_masking: null,
+          },
+        ],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(2)
+    expect(j.results.pii.findings[0].rule).toBe("Email")
+    expect(j.results.pii.findings[0].message).toContain("customers.email")
+    expect(j.results.pii.findings[0].message).toContain("exposed via: contact")
+    expect(j.results.pii.findings[0].suggestion).toBe("'***MASKED***'")
+    expect(j.results.pii.findings[1].rule).toBe("EmployeeId")
+    // suggested_masking: null must not leak into suggestion as null.
+    expect(j.results.pii.findings[1].suggestion).toBeUndefined()
+  })
+
+  test("policy check surfaces advisory warnings on an allowed result", async () => {
+    const file = await writeSql(tmpDir.dir, "policy-warn.sql", "SELECT 1;")
+    const policyFile = path.join(tmpDir.dir, "policy.json")
+    await fs.writeFile(policyFile, JSON.stringify({ rules: [] }))
+    setDispatcherResponse("altimate_core.policy", () => ({
+      success: true,
+      data: {
+        allowed: true,
+        violations: [],
+        warnings: [{ rule: "row_estimate", category: "cost_control", message: "Query may scan a large table" }],
+        policies_evaluated: 1,
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile } as any))
+    const j = parseJson(r.stdout)
+    expect(j.results.policy.findings).toHaveLength(1)
+    expect(j.results.policy.findings[0].severity).toBe("info")
+    expect(j.results.policy.findings[0].rule).toBe("row_estimate")
+    // Advisory warnings must not fail the check.
+    expect(j.summary.pass).toBe(true)
+  })
+
+  test("pii check fails when the engine abstains via parse_error", async () => {
+    // Unparseable SQL: engine returns success + parse_error + empty pii_columns.
+    // No findings would let --fail-on PASS a file whose PII analysis never ran.
+    const file = await writeSql(tmpDir.dir, "pii-abstain.sql", "SELECT FROM;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: true,
+      data: { accesses_pii: false, parse_error: "Syntax error: Expected: identifier", pii_columns: [] },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(1)
+    expect(j.results.pii.findings[0].severity).toBe("error")
+    expect(j.results.pii.findings[0].message).toContain("PII analysis skipped")
+  })
+
+  test("grade check keeps per-file grades on multi-file runs", async () => {
+    const fileA = await writeSql(tmpDir.dir, "grade-a.sql", "SELECT 1;")
+    const fileB = await writeSql(tmpDir.dir, "grade-b.sql", "SELECT * FROM t;")
+    let call = 0
+    setDispatcherResponse("altimate_core.grade", () => {
+      call++
+      return {
+        success: true,
+        data: {
+          overall_grade: call === 1 ? "A" : "C",
+          scores: { overall: call === 1 ? 0.95 : 0.7 },
+          lint: { clean: true, findings: [] },
+        },
+      }
+    })
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [fileA, fileB], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    const grades = j.results.grade.grades as Record<string, { grade: string; score: number }>
+    expect(Object.keys(grades)).toHaveLength(2)
+    expect(new Set(Object.values(grades).map((g) => g.grade))).toEqual(new Set(["A", "C"]))
+    // Flat grade/score only meaningful for single-file runs — must not pick a
+    // racy winner across files.
+    expect(j.results.grade.grade).toBeUndefined()
   })
 
   test("pii check reports PII columns", async () => {
@@ -629,13 +806,22 @@ describe("check command E2E", () => {
     expect(j.results.semantic.findings[0].rule).toBe("cartesian-join")
   })
 
-  test("grade check returns recommendations", async () => {
+  test("grade check maps the real EvalResult shape (overall_grade/scores.overall/lint.findings)", async () => {
+    // Real core@0.7.0 evaluate() shape — the previous mock used grade/recommendations,
+    // fields the engine never returns, which enshrined a dead consumer.
     const file = await writeSql(tmpDir.dir, "grade.sql", "SELECT * FROM big_table;")
     setDispatcherResponse("altimate_core.grade", () => ({
       success: true,
       data: {
-        grade: "C",
-        recommendations: [{ rule: "selectivity", severity: "info", message: "Add WHERE clause" }],
+        overall_grade: "C",
+        scores: { overall: 0.72, complexity: 0.9, safety: 1, style: 0.6, syntax: 1 },
+        lint: {
+          clean: false,
+          findings: [{ rule: "select-star", severity: "info", message: "Add WHERE clause or explicit columns" }],
+        },
+        explain: {},
+        safety: { safe: true },
+        validation: { valid: true },
       },
     }))
     installDispatcherMocks()
@@ -644,6 +830,149 @@ describe("check command E2E", () => {
     const j = parseJson(r.stdout)
     expect(j.results.grade.findings).toHaveLength(1)
     expect(j.results.grade.findings[0].message).toContain("WHERE clause")
+    expect(j.results.grade.grade).toBe("C")
+    expect(j.results.grade.score).toBe(0.72)
+  })
+
+  test("grade check surfaces validation/safety findings when lint is clean", async () => {
+    // EvalResult can carry validation errors or safety threats with zero lint
+    // findings — the grade check must not present an empty (passing) list.
+    const file = await writeSql(tmpDir.dir, "grade-nested.sql", "SELECT zzz FROM t;")
+    setDispatcherResponse("altimate_core.grade", () => ({
+      success: true,
+      data: {
+        overall_grade: "D",
+        scores: { overall: 0.4 },
+        lint: { clean: true, findings: [] },
+        validation: {
+          valid: false,
+          errors: [
+            {
+              code: "E002",
+              message: "Column 'zzz' not found",
+              location: { line: 1, column: 8 },
+              suggestions: [{ kind: "column", message: "Did you mean 'id'?", confidence: 0.9 }],
+            },
+          ],
+        },
+        safety: {
+          safe: false,
+          threats: [
+            {
+              rule: "tautology_attack",
+              severity: "high",
+              message: "OR 1=1 detected",
+              detail: "Remove the always-true predicate",
+              location: [10, 7],
+            },
+          ],
+        },
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.grade.findings.length).toBe(2)
+    const byRule = Object.fromEntries(j.results.grade.findings.map((f: any) => [f.rule, f]))
+    // ValidationError location/suggestions must survive the flat mapper.
+    expect(byRule.validate.severity).toBe("error")
+    expect(byRule.validate.line).toBe(1)
+    expect(byRule.validate.column).toBe(8)
+    expect(byRule.validate.suggestion).toBe("Did you mean 'id'?")
+    // ThreatFinding byte-range location and detail must survive too.
+    expect(byRule.tautology_attack.message).toBe("OR 1=1 detected (bytes 10-16)")
+    expect(byRule.tautology_attack.suggestion).toBe("Remove the always-true predicate")
+  })
+
+  test("grade check fails closed on engine failure envelope", async () => {
+    // Native handlers report failures via {success:false}, not by throwing —
+    // a failed grade run must not pass silently with zero findings.
+    const file = await writeSql(tmpDir.dir, "grade-fail.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.grade", () => ({
+      success: false,
+      data: {},
+      error: "Failed to parse JSON schema",
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.grade.findings).toHaveLength(1)
+    expect(j.results.grade.findings[0].severity).toBe("error")
+    expect(j.results.grade.findings[0].message).toContain("Failed to parse JSON schema")
+  })
+
+  test("validate check fails invalid SQL despite handler success (dead-gate regression)", async () => {
+    // The native handler returns success=true even for invalid SQL — the
+    // verdict is data.valid. Gating on success alone made validate a no-op.
+    const file = await writeSql(tmpDir.dir, "invalid.sql", "SELECT zzz FROM t;")
+    setDispatcherResponse("altimate_core.validate", () => ({
+      success: true,
+      data: {
+        valid: false,
+        errors: [
+          {
+            code: "E002",
+            kind: { type: "ColumnNotFound", column: "zzz", table: null },
+            message: "Column 'zzz' not found",
+            location: { line: 1, column: 8 },
+            suggestions: [],
+          },
+        ],
+        warnings: [],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.validate.findings).toHaveLength(1)
+    expect(j.results.validate.findings[0].severity).toBe("error")
+    expect(j.results.validate.findings[0].message).toBe("Column 'zzz' not found")
+    expect(j.results.validate.findings[0].line).toBe(1)
+  })
+
+  test("validate check passes valid SQL", async () => {
+    const file = await writeSql(tmpDir.dir, "valid.sql", "SELECT id FROM t;")
+    setDispatcherResponse("altimate_core.validate", () => ({
+      success: true,
+      data: { valid: true, errors: [], warnings: [] },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.validate.findings).toHaveLength(0)
+  })
+
+  test("semantic check surfaces findings when valid:true (valid means plannable, not clean)", async () => {
+    const file = await writeSql(tmpDir.dir, "cartesian.sql", "SELECT * FROM a, b;")
+    setDispatcherResponse("altimate_core.semantics", () => ({
+      success: true,
+      data: {
+        valid: true,
+        semantic_score: 0.5,
+        findings: [
+          {
+            rule: "missing_join_condition",
+            severity: "error",
+            message: "Cartesian product detected between 'a' and 'b'",
+            explanation: "…",
+            confidence: 0.95,
+          },
+        ],
+        passed_checks: [],
+        validation_errors: [],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "semantic" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.semantic.findings).toHaveLength(1)
+    expect(j.results.semantic.findings[0].rule).toBe("missing_join_condition")
+    expect(j.results.semantic.findings[0].severity).toBe("error")
   })
 
   // --- Schema resolution ---
