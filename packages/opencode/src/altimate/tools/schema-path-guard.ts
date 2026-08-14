@@ -41,3 +41,15 @@ export async function guardExternalFile(
 export async function guardSchemaPath(ctx: unknown, p: string | undefined): Promise<string | undefined> {
   return guardExternalFile(ctx, p, "file")
 }
+
+/**
+ * True for permission-lifecycle errors (user rejection/correction, configured
+ * denial). Tool catch blocks that wrap a guard call MUST rethrow these — the
+ * session processor only applies blocked/corrected-call semantics when the
+ * error escapes the tool; converting it into an ordinary error result lets
+ * the agent retry a call the user explicitly refused.
+ */
+export function isPermissionError(e: unknown): boolean {
+  const name = e instanceof Error ? e.constructor.name : ""
+  return name === "RejectedError" || name === "CorrectedError" || name === "DeniedError"
+}

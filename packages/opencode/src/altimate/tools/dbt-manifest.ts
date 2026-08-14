@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardExternalFile } from "./schema-path-guard"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { DbtManifestResult } from "../native/types"
 
 export const DbtManifestTool = Tool.define("dbt_manifest", {
@@ -33,6 +33,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
         output: formatManifest(result),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Manifest: ERROR",

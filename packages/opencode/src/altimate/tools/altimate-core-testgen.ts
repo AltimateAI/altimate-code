@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardSchemaPath } from "./schema-path-guard"
+import { guardSchemaPath, isPermissionError } from "./schema-path-guard"
 
 export const AltimateCoreTestgenTool = Tool.define("altimate_core_testgen", {
   description:
@@ -28,6 +28,7 @@ export const AltimateCoreTestgenTool = Tool.define("altimate_core_testgen", {
         output: formatTestgen(data),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "TestGen: ERROR",

@@ -71,25 +71,35 @@ const PLANTED: Array<{ id: string; models: string[]; signals: string[] }> = [
 // positive reports whose explanation merely contains a negator.
 const NEGATION = /\b(not|no|never|isn'?t|doesn'?t|wasn'?t|aren'?t|cannot|can'?t|rather than|instead of)\b[^.;,!?\n]{0,40}$/i
 
+// Segment the transcript into candidate items so a signal can only score with
+// a model mentioned in the SAME item — a ±N-char window can bleed into the
+// neighboring entry of a numbered list ("legacy_events_backup ..." followed by
+// a different model called dead) and credit a claim the agent never made.
+// Split on numbered/bulleted item starts; when the transcript has no list
+// structure (fewer than 3 items), fall back to one segment per paragraph.
+function segments(transcript: string): string[] {
+  const items = transcript.split(/\n(?=\s*(?:\d+[.)]\s|[-*]\s\*\*|#{2,4}\s))/)
+  if (items.length >= 3) return items
+  return transcript.split(/\n\s*\n/)
+}
+
+function signalMatchesWithoutNegation(seg: string, signal: string): boolean {
+  // Global flag: a negated FIRST occurrence must not hide a later positive
+  // occurrence of the same signal in the segment.
+  const re = new RegExp(signal, "gi")
+  let match: RegExpExecArray | null
+  while ((match = re.exec(seg)) !== null) {
+    const preceding = seg.slice(Math.max(0, match.index - 60), match.index)
+    if (!NEGATION.test(preceding)) return true
+    if (re.lastIndex === match.index) re.lastIndex++
+  }
+  return false
+}
+
 function found(transcript: string, item: (typeof PLANTED)[number]): boolean {
-  const t = transcript.toLowerCase()
-  for (const m of item.models) {
-    let idx = t.indexOf(m.toLowerCase())
-    while (idx >= 0) {
-      const window = t.slice(Math.max(0, idx - 400), idx + m.length + 400)
-      for (const s of item.signals) {
-        // Global flag: a negated FIRST occurrence must not hide a later
-        // positive occurrence of the same signal in the window.
-        const re = new RegExp(s, "gi")
-        let match: RegExpExecArray | null
-        while ((match = re.exec(window)) !== null) {
-          const preceding = window.slice(Math.max(0, match.index - 60), match.index)
-          if (!NEGATION.test(preceding)) return true
-          if (re.lastIndex === match.index) re.lastIndex++
-        }
-      }
-      idx = t.indexOf(m.toLowerCase(), idx + 1)
-    }
+  for (const seg of segments(transcript.toLowerCase())) {
+    if (!item.models.some((m) => seg.includes(m.toLowerCase()))) continue
+    if (item.signals.some((s) => signalMatchesWithoutNegation(seg, s))) return true
   }
   return false
 }

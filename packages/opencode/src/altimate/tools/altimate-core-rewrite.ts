@@ -2,7 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import type { LegacyResult } from "../tool-zod-compat"
 import { Dispatcher } from "../native"
-import { guardSchemaPath } from "./schema-path-guard"
+import { guardSchemaPath, isPermissionError } from "./schema-path-guard"
 
 export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
   description:
@@ -63,6 +63,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
         output: formatRewrite(data),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Rewrite: ERROR",
@@ -171,6 +172,7 @@ async function verifyRewrites(
         unverified.push({ sql: c.sql, rule: c.rule, reason })
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       unverified.push({ sql: c.sql, rule: c.rule, reason: `equivalence check failed: ${msg}` })
     }

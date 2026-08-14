@@ -2,7 +2,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardExternalFile } from "./schema-path-guard"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { DbtUnitTestGenResult } from "../native/types"
 
 export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
@@ -64,6 +64,7 @@ export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
         output: formatOutput(result),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Unit Test Gen: ERROR",

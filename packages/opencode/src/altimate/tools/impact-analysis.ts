@@ -5,7 +5,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardExternalFile } from "./schema-path-guard"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
@@ -162,6 +162,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
         output: output + columnCaveat,
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Impact: ERROR",

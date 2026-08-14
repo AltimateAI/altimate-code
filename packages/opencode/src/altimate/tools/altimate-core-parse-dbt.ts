@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardExternalFile } from "./schema-path-guard"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 
 export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
   description: "Parse a dbt project directory. Extracts models, sources, tests, and project structure for analysis.",
@@ -28,6 +28,7 @@ export const AltimateCoreParseDbtTool = Tool.define("altimate_core_parse_dbt", {
         output: formatParseDbt(data),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return { title: "Parse dbt: ERROR", metadata: { success: false, error: msg }, output: `Failed: ${msg}` }
     }

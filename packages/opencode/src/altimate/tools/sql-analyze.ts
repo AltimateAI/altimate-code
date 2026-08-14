@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardSchemaPath } from "./schema-path-guard"
+import { guardSchemaPath, isPermissionError } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 import type { SqlAnalyzeResult } from "../native/types"
 // altimate_change start — progressive disclosure suggestions
@@ -80,6 +80,7 @@ export const SqlAnalyzeTool = Tool.define("sql_analyze", {
         output,
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return analysisError(args, hasSchema, msg)
     }

@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardExternalFile } from "./schema-path-guard"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { DbtLineageResult } from "../native/types"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
@@ -36,6 +36,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         output: formatDbtLineage(result),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "dbt Lineage: ERROR",

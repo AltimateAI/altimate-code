@@ -1,7 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import { guardSchemaPath } from "./schema-path-guard"
+import { guardSchemaPath, isPermissionError } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalence", {
@@ -72,6 +72,7 @@ export const AltimateCoreEquivalenceTool = Tool.define("altimate_core_equivalenc
         output: formatEquivalence(isRealFailure ? { ...data, error } : data),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Equivalence: ERROR",

@@ -598,6 +598,36 @@ it.instance(
         ruleset: [],
       })
       expect(result).toBeUndefined()
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - persisted approval NEVER overrides a configured deny (cross-agent leak)",
+  () =>
+    Effect.gen(function* () {
+      // A stored "always allow" (e.g. granted while in builder) must not defeat
+      // another agent's non-overridable deny after a session switch — approvals
+      // may only upgrade ask -> allow, never deny -> allow.
+      const ctx = yield* requireInstance
+      const now = Date.now()
+      const stored: PermissionV1.Rule[] = [{ permission: "sql_execute_write", pattern: "*", action: "allow" }]
+      LegacyDatabase.use((db) =>
+        db.run(sql`
+          INSERT INTO permission (id, project_id, action, resource, time_created, time_updated, data)
+          VALUES (${`persisted-deny-${ctx.project.id}`}, ${ctx.project.id}, ${"allow"}, ${"*"}, ${now}, ${now}, ${JSON.stringify(stored)})
+        `),
+      )
+
+      const exit = yield* ask({
+        sessionID: SessionID.make("session_deny_wins"),
+        permission: "sql_execute_write",
+        patterns: ["INSERT INTO t VALUES (1)"],
+        metadata: {},
+        always: [],
+        ruleset: [{ permission: "sql_execute_write", pattern: "*", action: "deny" }],
+      }).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
       expect(yield* list()).toHaveLength(0)
     }),
   { git: true },
