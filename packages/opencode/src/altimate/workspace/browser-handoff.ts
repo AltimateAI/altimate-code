@@ -40,10 +40,23 @@ const CALLBACK_PORT_MIN = 7317
 const CALLBACK_PORT_MAX = 7325
 
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
-const DELIVERY_HTML_SUCCESS = `<!doctype html><meta charset="utf-8"><title>Altimate Code</title>
+
+/** Loopback success page. We land the user back on the SaaS workspace page via
+ * top-level navigation — matches the OAuth sign-in pattern in altimate.ts,
+ * which is proven in prod. The rationale over a subresource fetch: HTTPS→HTTP
+ * loopback subresource fetches trigger Chrome/Safari Private Network Access
+ * checks (preflight OPTIONS with Access-Control-Request-Private-Network); a
+ * top-level navigation from an HTTP 302 or ``window.location.href`` bypasses
+ * PNA entirely. Meta refresh + JS assign for belt-and-suspenders. */
+function deliverySuccessHtml(manageUrl: string): string {
+  const safe = escapeHtml(manageUrl)
+  return `<!doctype html><meta charset="utf-8"><title>Altimate Code</title>
+<meta http-equiv="refresh" content="0;url=${safe}">
 <body style="font-family:system-ui;text-align:center;padding:64px">
-<h2>Workspace ready</h2><p>Return to your terminal to finish linking.</p>
-<script>setTimeout(()=>window.close(),1500)</script></body>`
+<h2>Workspace ready</h2><p>Returning you to the workspace page…</p>
+<p><a href="${safe}">Continue</a> if you're not redirected automatically.</p>
+<script>window.location.replace(${JSON.stringify(manageUrl)})</script></body>`
+}
 
 const log = Log.create({ service: "altimate-workspace-handoff" })
 
@@ -59,6 +72,20 @@ function htmlError(msg: string): string {
 <body style="font-family:system-ui;text-align:center;padding:64px">
 <h2>Workspace handoff failed</h2><p>${escapeHtml(msg)}</p>
 <p>Please return to your terminal and try again.</p></body>`
+}
+
+/** Cancel-path response: bounce the browser back to the SaaS workspace home
+ * so the user doesn't get stranded on the plain loopback page. Same top-level
+ * navigation mechanism as ``deliverySuccessHtml``. */
+function cancelHtml(workspaceWebBase: URL): string {
+  const home = workspaceWebBase.toString().replace(/\/$/, "") + "/"
+  const safe = escapeHtml(home)
+  return `<!doctype html><meta charset="utf-8"><title>Altimate Code</title>
+<meta http-equiv="refresh" content="0;url=${safe}">
+<body style="font-family:system-ui;text-align:center;padding:64px">
+<h2>Cancelled</h2><p>Returning you to the workspace home…</p>
+<p><a href="${safe}">Continue</a> if you're not redirected automatically.</p>
+<script>window.location.replace(${JSON.stringify(home)})</script></body>`
 }
 
 export type HandoffFailureReason =
@@ -111,6 +138,9 @@ export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL
 interface HandoffPending {
   state: string
   expectedTenant: string
+  /** Base URL for the tenant's SaaS workspace stack, used to build the
+   * ``/w/:id`` bounce target that the loopback success HTML redirects to. */
+  workspaceWebBase: URL
   resolve: (v: HandoffSuccess) => void
   reject: (err: Error & { handoffReason?: HandoffFailureReason }) => void
 }
@@ -151,7 +181,11 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
     const error = url.searchParams.get("error")
     if (error) {
       const reason: HandoffFailureReason = error === "cancelled" ? "cancelled" : "error"
-      respond(200, htmlError(error === "cancelled" ? "Cancelled by user" : error))
+      // Cancel bounces the browser back to the SaaS workspace home so the user
+      // isn't stranded on the plain loopback page; hard errors keep the plain
+      // error card (there's no useful place to bounce them to).
+      const body = error === "cancelled" ? cancelHtml(pending.workspaceWebBase) : htmlError(error)
+      respond(200, body)
       pending.reject(markReason(new Error(error), reason))
       return
     }
@@ -184,7 +218,11 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
       return
     }
 
-    respond(200, DELIVERY_HTML_SUCCESS)
+    // Bounce the browser back to the SaaS workspace page. Loopback constructs
+    // the URL itself (no need to trust a `return` query param) — the base is
+    // deterministic from the tenant we already validated above.
+    const manageUrl = `${pending.workspaceWebBase.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    respond(200, deliverySuccessHtml(manageUrl))
     pending.resolve({ ok: true, workspaceId, tenant })
   })
 
@@ -272,6 +310,7 @@ export async function runHandoffWithOpener(
     const pending: HandoffPending = {
       state,
       expectedTenant: creds.altimateInstanceName,
+      workspaceWebBase: webUrl,
       resolve: (v) => {
         closeListener()
         clearTimeout(timeoutHandle)

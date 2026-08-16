@@ -21,24 +21,6 @@ const CACHE_VERSION = 1
 
 const log = Log.create({ service: "altimate-workspace-state" })
 
-/** Canonicalize a directory into a stable cache key so callers passing
- * ``/tmp/foo``, ``/private/tmp/foo`` (macOS symlink), ``/tmp/foo/``, or a
- * relative path all read/write the same row. Uses ``path.resolve`` first so
- * relative inputs anchor to cwd, then ``realpathSync`` to collapse symlinks
- * and trailing separators. Falls back to the resolved-only form when the
- * path doesn't exist on disk (e.g. cache written for a repo that has since
- * moved) — better a stable-if-unresolved key than an exception that skips
- * the cache entirely. (cubic + kilo cycle 6 — different clients keyed the
- * same project under different paths.) */
-function canonicalDirKey(directory: string): string {
-  const resolved = path.resolve(directory)
-  try {
-    return realpathSync(resolved)
-  } catch {
-    return resolved
-  }
-}
-
 export interface CachedBinding {
   datamateId: number
   datamateName: string
@@ -124,6 +106,18 @@ function writeCache(cache: CacheFile): void {
   }
 }
 
+/** Canonicalize a directory path so cache lookups survive symlink differences
+ * (macOS ``/tmp`` → ``/private/tmp`` is the common case). Writers and readers
+ * must both funnel through this or a shell-cwd write silently misses when the
+ * TUI's canonicalized ``state.path.directory`` looks it back up. */
+function canonicalizeKey(directory: string): string {
+  try {
+    return realpathSync(path.resolve(directory))
+  } catch {
+    return path.resolve(directory)
+  }
+}
+
 async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
   // Best-effort: ``AltimateApi.getCredentials`` can throw ``SyntaxError`` on
   // a corrupt credentials JSON, ``ZodError`` on schema drift, or a raw
@@ -153,7 +147,17 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
   const cache = readCache()
   if (!cache) return null
   if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
-  return cache.bindings[canonicalDirKey(directory)] ?? null
+  const canon = canonicalizeKey(directory)
+  // First try the direct canonical + raw key lookups (cheap). If neither hits,
+  // scan every stored key and re-canonicalize it — catches entries written by
+  // earlier CLI builds under an unresolved key (e.g. ``/tmp/foo``) even though
+  // the caller looks them back up under the resolved key (``/private/tmp/foo``).
+  const direct = cache.bindings[canon] ?? cache.bindings[directory]
+  if (direct) return direct
+  for (const [k, v] of Object.entries(cache.bindings)) {
+    if (canonicalizeKey(k) === canon) return v
+  }
+  return null
 }
 
 export async function recordApprovedBinding(
@@ -166,14 +170,15 @@ export async function recordApprovedBinding(
   // truth (the server-side binding is). If the state directory is read-only
   // or the disk is full, callers otherwise report "link failed" and prompt
   // duplicate retries against a workspace that IS bound server-side.
-  // (cubic round 3.)
+  // (cubic round 3.) canonicalizeKey resolves symlinks so writes and reads
+  // funnel through the same key (macOS ``/tmp`` → ``/private/tmp``).
   try {
     const existing = readCache()
     const cache: CacheFile =
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-    cache.bindings[canonicalDirKey(directory)] = binding
+    cache.bindings[canonicalizeKey(directory)] = binding
     writeCache(cache)
   } catch (err) {
     log.warn("could not persist workspace binding cache", {

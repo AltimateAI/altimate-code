@@ -471,6 +471,8 @@ async function bindOrRebind(
         ? `Re-linked to "${res.binding.datamate_name}".`
         : `Linked to "${res.binding.datamate_name}".`,
     )
+    const manageUrl = await manageUrlFor(res.binding.datamate_id)
+    if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
     prompts.outro("Done.")
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)

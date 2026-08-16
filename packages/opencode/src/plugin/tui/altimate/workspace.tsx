@@ -220,6 +220,100 @@ function OfferDialog(props: OfferProps) {
   )
 }
 
+/** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
+ * from tenant + id, so any caller can construct it without an extra round-trip.
+ * Returns null when the current deployment isn't the freemium web (BYOK or
+ * unresolvable) — the confirmation dialog degrades to id-only in that case. */
+async function buildManageUrl(workspaceId: number): Promise<string | null> {
+  try {
+    const creds = await AltimateApi.getCredentials()
+    const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    if (!base) return null
+    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+  } catch {
+    return null
+  }
+}
+
+interface LinkedProps {
+  api: TuiPluginApi
+  workspaceName: string
+  manageUrl: string | null
+  /** Verb for the title — "Linked" / "Re-linked" / "Created". Keeps the
+   * three success paths visually consistent while still labelling what
+   * just happened. */
+  verb: "Linked" | "Re-linked" | "Created"
+}
+
+/** Persistent confirmation card shown after a successful bind. Replaces the
+ * transient success toast so the user has an unmissable "yes, it worked" and
+ * a stable CTA back to the browser. Dismissable via Done or Esc. */
+function WorkspaceLinkedDialog(props: LinkedProps) {
+  const title = () => {
+    const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
+    return `${props.verb} workspace "${props.workspaceName}"${suffix}`
+  }
+  const options = () => {
+    if (props.manageUrl) {
+      return [
+        {
+          title: "Continue editing in browser",
+          value: "open",
+          description: "Open the workspace in your browser.",
+        },
+        { title: "Done", value: "done", description: "Close this dialog." },
+      ]
+    }
+    return [{ title: "Done", value: "done", description: "Close this dialog." }]
+  }
+  return (
+    <props.api.ui.DialogSelect
+      title={title()}
+      options={options()}
+      current={props.manageUrl ? "open" : "done"}
+      onSelect={(option) => {
+        if (option.value === "open" && props.manageUrl) {
+          const url = props.manageUrl
+          // Guard before delegating to open() — a rogue manage_url with a
+          // non-http protocol would otherwise dispatch to an unrelated OS
+          // scheme handler. buildManageUrl only ever emits http(s) URLs from
+          // resolveWorkspaceWebUrl, but the guard survives future changes.
+          if (!isSafeHttpUrl(url)) {
+            props.api.ui.toast({
+              variant: "warning",
+              message: `Refused to open a non-http URL: ${url}`,
+              duration: 15_000,
+            })
+          } else {
+            open(url).catch(() => {
+              props.api.ui.toast({
+                variant: "warning",
+                message: `Could not open browser. Copy this URL: ${url}`,
+                duration: 15_000,
+              })
+            })
+          }
+        }
+        props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** Show the persistent linked-confirmation dialog. Builds the manage URL
+ * best-effort; degrades gracefully on BYOK/unresolvable. */
+async function showLinkedConfirmation(
+  api: TuiPluginApi,
+  verb: LinkedProps["verb"],
+  workspaceId: number,
+  workspaceName: string,
+): Promise<void> {
+  const manageUrl = await buildManageUrl(workspaceId)
+  api.ui.dialog.replace(() => (
+    <WorkspaceLinkedDialog api={api} workspaceName={workspaceName} manageUrl={manageUrl} verb={verb} />
+  ))
+}
+
 /** Post-scan / on-demand browser-handoff runner. Opens the SaaS approval
  * modal, waits for the callback, and binds the current project to the
  * returned workspace via the existing ``POST /bind`` endpoint. Every failure
@@ -233,7 +327,7 @@ async function runBrowserHandoff(
   api.ui.dialog.clear()
   api.ui.toast({
     variant: "info",
-    message: "Opening browser to set up your workspace — return here once you approve.",
+    message: "Opening browser to set up your workspace — approve there, then check back here for the confirmation.",
   })
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
   if (!result.ok) {
@@ -251,10 +345,7 @@ async function runBrowserHandoff(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
-    api.ui.toast({
-      variant: "success",
-      message: `Linked to workspace "${res.binding.datamate_name}".`,
-    })
+    await showLinkedConfirmation(api, "Linked", res.binding.datamate_id, res.binding.datamate_name)
   } catch (err) {
     if (err instanceof ConflictError) {
       api.ui.toast({
@@ -389,10 +480,11 @@ async function createAndBindInline(
   // Post-success tail — this function is invoked fire-and-forget
   // (``void createAndBindInline(...)``), so a bare rejection here would
   // surface as an unhandled promise and terminate the TUI. Contain the
-  // fallout inside the function itself: ``recordApprovedBinding`` already
-  // swallows its own errors (state.ts is best-effort), but ``open()`` and
-  // the toast APIs can reject unexpectedly. Fall back to a plain info
-  // toast so the user still sees the URL. (Kilo cycle 5.)
+  // fallout inside the function itself. ``recordApprovedBinding`` already
+  // swallows its own errors (state.ts is best-effort), but
+  // ``showLinkedConfirmation`` can reject on dialog-teardown races — the
+  // toast fallback keeps the user informed without taking the process down.
+  // (Kilo cycle 5.)
   try {
     await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.datamate.id,
@@ -401,27 +493,7 @@ async function createAndBindInline(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
-    // Guard against a non-http(s) manage_url — ``open`` dispatches to whatever
-    // OS handler matches the protocol, so a rogue value could launch an
-    // unrelated app. Fall through to the info toast (with the URL for manual
-    // copy) if the URL isn't a safe http/https link.
-    if (isSafeHttpUrl(res.manage_url)) {
-      try {
-        await open(res.manage_url)
-        api.ui.toast({
-          variant: "success",
-          message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
-        })
-        return
-      } catch {
-        /* fall through to the "open manually" toast below */
-      }
-    }
-    api.ui.toast({
-      variant: "info",
-      message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
-      duration: 10_000,
-    })
+    await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
   } catch (err) {
     api.ui.toast({
       variant: "info",
@@ -433,7 +505,9 @@ async function createAndBindInline(
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
- * dispatch to whatever OS scheme handler matches the protocol). */
+ * dispatch to whatever OS scheme handler matches the protocol). Kept exported
+ * as a top-level helper because both ``showLinkedConfirmation`` (below) and
+ * the on-demand link paths need the same guard. */
 function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
@@ -589,10 +663,13 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        props.api.ui.toast({
-          variant: "success",
-          message: `Linked to workspace "${res.binding.datamate_name}".`,
-        })
+        await showLinkedConfirmation(
+          props.api,
+          "Linked",
+          res.binding.datamate_id,
+          res.binding.datamate_name,
+        )
+        return
       } else {
         // Rebind: pick the endpoint that matches which identifier the
         // pre-check RESOLVED the binding on — not what the current identifier
@@ -615,12 +692,14 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        props.api.ui.toast({
-          variant: "success",
-          message: `Re-linked to workspace "${res.binding.datamate_name}".`,
-        })
+        await showLinkedConfirmation(
+          props.api,
+          "Re-linked",
+          res.binding.datamate_id,
+          res.binding.datamate_name,
+        )
+        return
       }
-      props.api.ui.dialog.clear()
     } catch (err) {
       // Surface as a toast so the user sees the specific failure. Dialog
       // closes either way — the palette command ``altimate.workspace.link``
@@ -817,12 +896,12 @@ async function bindOrRebindInline(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
-    api.ui.toast({
-      variant: "success",
-      message: isRebind
-        ? `Re-linked to workspace "${res.binding.datamate_name}".`
-        : `Linked to workspace "${res.binding.datamate_name}".`,
-    })
+    await showLinkedConfirmation(
+      api,
+      isRebind ? "Re-linked" : "Linked",
+      res.binding.datamate_id,
+      res.binding.datamate_name,
+    )
   } catch (err) {
     let msg: string
     if (err instanceof ConflictError) {
