@@ -23,6 +23,9 @@ import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
 import { Event as SessionEvent } from "@/session/status"
+import { Log } from "@/altimate/util/log"
+
+const workspaceLog = Log.create({ service: "altimate-workspace" })
 
 /**
  * Publish the workspace-postScan command AFTER the session goes idle, not on
@@ -32,36 +35,55 @@ import { Event as SessionEvent } from "@/session/status"
  * session.idle costs a few seconds of latency but sidesteps the race entirely —
  * the dialog appears once things are quiet.
  *
- * One-shot per sessionID: the listener unregisters as soon as the target
- * session emits idle. A pending arm is dropped if a second project_scan fires
- * in the same session (unlikely but handled).
+ * One-shot per sessionID: pending sessions live in a Set, and when a session
+ * emits idle its id is removed. When the Set drains, the EventV2 listener is
+ * torn down via the unsubscribe returned by ``events.listen()`` so a
+ * permanently-installed no-op handler isn't left behind for the process
+ * lifetime (m4 in the consensus review). A pending arm is dropped if a
+ * second project_scan fires in the same session.
  */
 const pendingWorkspacePromptSessions = new Set<string>()
-let workspacePromptListenerArmed = false
+let workspacePromptUnsubscribe: (() => void) | null = null
 
 async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void> {
   pendingWorkspacePromptSessions.add(sessionID)
-  if (workspacePromptListenerArmed) return
-  workspacePromptListenerArmed = true
-  await AppRuntime.runPromise(
-    EventV2Bridge.Service.use((events) =>
-      events.listen((event) =>
-        Effect.gen(function* () {
-          if (event.type !== SessionEvent.Idle.type) return
-          const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
-          if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
-          pendingWorkspacePromptSessions.delete(sid)
-          yield* events.publish(TuiEvent.CommandExecute, {
-            command: "altimate.workspace.postScan",
-          })
-        }),
+  if (workspacePromptUnsubscribe) return
+  try {
+    const unsubscribe = await AppRuntime.runPromise(
+      EventV2Bridge.Service.use((events) =>
+        events.listen((event) =>
+          Effect.gen(function* () {
+            if (event.type !== SessionEvent.Idle.type) return
+            const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
+            if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
+            pendingWorkspacePromptSessions.delete(sid)
+            yield* events.publish(TuiEvent.CommandExecute, {
+              command: "altimate.workspace.postScan",
+            })
+            // Once the Set drains, tear the listener down. A later scan
+            // that adds a new pending session re-arms it from scratch.
+            if (pendingWorkspacePromptSessions.size === 0 && workspacePromptUnsubscribe) {
+              const teardown = workspacePromptUnsubscribe
+              workspacePromptUnsubscribe = null
+              try {
+                teardown()
+              } catch (err) {
+                workspaceLog.warn("session-idle listener teardown failed", {
+                  err: String(err),
+                })
+              }
+            }
+          }),
+        ),
       ),
-    ),
-  ).catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error("[altimate-workspace] session-idle listener install failed:", err)
-    workspacePromptListenerArmed = false
-  })
+    )
+    workspacePromptUnsubscribe = unsubscribe as unknown as () => void
+  } catch (err) {
+    // Install failed — drop the pending session so the next scan retries
+    // from scratch instead of accumulating a stale id that will never fire.
+    pendingWorkspacePromptSessions.delete(sessionID)
+    workspaceLog.warn("session-idle listener install failed", { err: String(err) })
+  }
 }
 // altimate_change end
 

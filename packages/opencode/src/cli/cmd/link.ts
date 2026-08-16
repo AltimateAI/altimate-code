@@ -23,7 +23,8 @@ import {
   NotFoundError,
   PreconditionFailedError,
   type DatamateRef,
-  type GetBindingResponse,
+  type MatchedIdentifier,
+  type ProjectBindingLookup,
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
@@ -62,7 +63,11 @@ export const LinkCommand = cmd({
 
     // Pre-check for the currently-linked marker + workspace list. Both are
     // fetched up-front so the picker can annotate the current binding.
-    let existing: GetBindingResponse | null = null
+    // ``preCheckOk = false`` means the pre-check itself failed (network,
+    // 5xx) rather than "not linked" — used later to retry a 409 as a rebind
+    // instead of surfacing "already linked to X" with no next step. (m10)
+    let existing: ProjectBindingLookup | null = null
+    let preCheckOk = true
     try {
       existing = await WorkspaceApi.getBindingForProject(identifier)
     } catch (err) {
@@ -71,6 +76,7 @@ export const LinkCommand = cmd({
         process.exitCode = 1
         return
       }
+      preCheckOk = false
       prompts.log.warn(
         `Could not reach the workspace service to look up existing bindings (${err instanceof Error ? err.message : String(err)}). Continuing without the currently-linked marker.`,
       )
@@ -99,7 +105,9 @@ export const LinkCommand = cmd({
       {
         value: CREATE_NEW_SENTINEL,
         label: `＋ Create a new workspace "${autoName}"`,
-        hint: "Named from this project; rename in the SaaS after.",
+        hint: existing
+          ? "Creates a new workspace and repoints this project to it."
+          : "Named from this project; rename in the SaaS after.",
       },
       ...list.map((dm) => ({
         value: String(dm.id),
@@ -122,7 +130,7 @@ export const LinkCommand = cmd({
     }
 
     if (pick === CREATE_NEW_SENTINEL) {
-      await createAndBind(identifier, autoName, args.directory)
+      await createThenBindOrRebind(identifier, autoName, args.directory, existing)
       return
     }
 
@@ -132,71 +140,136 @@ export const LinkCommand = cmd({
       return
     }
 
-    await bindOrRebind(identifier, targetId, currentId, args.directory)
+    await bindOrRebind(identifier, targetId, existing, preCheckOk, args.directory)
   },
 })
 
-async function createAndBind(
+/** "＋ Create a new workspace" flow. When the project is already linked, this
+ * MUST rebind after create — otherwise the new workspace is a real (billable)
+ * SaaS resource the CLI knows nothing about and the project is still bound to
+ * the old workspace (M2 in the consensus review). When rebind fails, the
+ * error message tells the user the workspace was created and how to recover;
+ * we do NOT silently swallow the orphan. */
+async function createThenBindOrRebind(
   identifier: ProjectIdentifier,
   name: string,
   directory: string,
+  existing: ProjectBindingLookup | null,
 ): Promise<void> {
   const spin = prompts.spinner()
   spin.start(`Creating workspace "${name}"...`)
+  let created: Awaited<ReturnType<typeof WorkspaceApi.createAndBind>>
   try {
-    const res = await WorkspaceApi.createAndBind({ name, identifier })
-    await recordApprovedBinding(directory, {
-      datamateId: res.datamate.id,
-      datamateName: res.datamate.name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
-      linkedAt: Date.now(),
-    })
-    spin.stop(`Workspace "${res.datamate.name}" created and linked.`)
-    prompts.log.info(`Manage it at: ${res.manage_url}`)
-    await open(res.manage_url).catch(() => undefined)
-    prompts.outro("Done.")
+    created = await WorkspaceApi.createAndBind({ name, identifier })
   } catch (err) {
     spin.stop("Failed to create workspace.", 1)
+    // A 409 from create means someone else's binding on the same
+    // remote/path beat us. If the pre-check already knew about it, the user
+    // can pick from the list; if the pre-check missed it, this is the
+    // authoritative signal — surface it and hint the picker.
     if (err instanceof ConflictError) {
       prompts.log.error(
-        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch.`,
+        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch to a different workspace.`,
       )
     } else {
       prompts.log.error(err instanceof Error ? err.message : String(err))
     }
     process.exitCode = 1
+    return
   }
+  spin.stop(`Workspace "${created.datamate.name}" created.`)
+
+  // If the project was already linked, the new workspace exists but the
+  // binding still points at the OLD workspace — rebind so the project is
+  // now bound to the freshly-created one. Otherwise createAndBind already
+  // wrote the binding as part of the atomic create; we're done.
+  if (existing) {
+    const rebindSpin = prompts.spinner()
+    rebindSpin.start(`Repointing project at "${created.datamate.name}"...`)
+    try {
+      await rebindByMatchedIdentifier({
+        identifier,
+        targetDatamateId: created.datamate.id,
+        expectedCurrentDatamateId: existing.datamate.id,
+        matchedBy: existing.matchedBy,
+      })
+      rebindSpin.stop(`Project is now linked to "${created.datamate.name}".`)
+    } catch (err) {
+      rebindSpin.stop("Could not repoint the project.", 1)
+      prompts.log.error(
+        `Workspace "${created.datamate.name}" was CREATED but could not be linked to this project. ${err instanceof Error ? err.message : String(err)} — re-run \`altimate-code link\` to retry (or delete the workspace in the SaaS).`,
+      )
+      process.exitCode = 1
+      return
+    }
+  }
+  await recordApprovedBinding(directory, {
+    datamateId: created.datamate.id,
+    datamateName: created.datamate.name,
+    repoRemote: created.binding.repo_remote,
+    projectPath: created.binding.project_path,
+    linkedAt: Date.now(),
+  })
+  prompts.log.info(`Manage it at: ${created.manage_url}`)
+  await open(created.manage_url).catch(() => undefined)
+  prompts.outro("Done.")
 }
 
 async function bindOrRebind(
   identifier: ProjectIdentifier,
   targetDatamateId: number,
-  currentDatamateId: number | undefined,
+  existing: ProjectBindingLookup | null,
+  preCheckOk: boolean,
   directory: string,
 ): Promise<void> {
-  const isRebind = currentDatamateId !== undefined
+  const isRebind = existing !== null
   const spin = prompts.spinner()
   spin.start(isRebind ? `Re-linking to workspace...` : `Linking to workspace...`)
   try {
-    const res = await (async () => {
-      if (isRebind) {
-        // Rebind endpoint depends on which identifier is present. Prefer remote
-        // (stronger identity — survives directory moves); fall back to path.
-        return identifier.repoRemote
-          ? WorkspaceApi.rebindByRemote({
-              remote: identifier.repoRemote,
-              targetDatamateId,
-              expectedCurrentDatamateId: currentDatamateId,
-            })
-          : WorkspaceApi.rebindByPath({
-              projectPath: identifier.projectPath!,
-              targetDatamateId,
-              expectedCurrentDatamateId: currentDatamateId,
-            })
+    let res
+    if (isRebind) {
+      res = await rebindByMatchedIdentifier({
+        identifier,
+        targetDatamateId,
+        expectedCurrentDatamateId: existing.datamate.id,
+        matchedBy: existing.matchedBy,
+      })
+    } else {
+      // No known binding OR pre-check failed. Try bindExisting first — if the
+      // pre-check missed a real binding, the server will 409, and we retry as
+      // rebind when we're allowed to. (m10)
+      try {
+        res = await WorkspaceApi.bindExisting(targetDatamateId, identifier)
+      } catch (err) {
+        if (err instanceof ConflictError && !preCheckOk) {
+          // Pre-check failed and the server confirms this project IS linked
+          // already. Retry as an unconditional rebind — we don't have an
+          // ``expected_current_datamate_id`` (pre-check gave us nothing) so
+          // this is last-writer-wins. Callers who need optimistic concurrency
+          // should re-run once the network is back and the pre-check succeeds.
+          spin.stop("Pre-check missed an existing binding — retrying as re-link.", 1)
+          const rebindSpin = prompts.spinner()
+          rebindSpin.start("Re-linking...")
+          try {
+            res = identifier.repoRemote
+              ? await WorkspaceApi.rebindByRemote({
+                  remote: identifier.repoRemote,
+                  targetDatamateId,
+                })
+              : await WorkspaceApi.rebindByPath({
+                  projectPath: identifier.projectPath!,
+                  targetDatamateId,
+                })
+            rebindSpin.stop(`Re-linked to "${res.binding.datamate_name}".`)
+          } catch (retryErr) {
+            rebindSpin.stop("Re-link failed.", 1)
+            throw retryErr
+          }
+        } else {
+          throw err
+        }
       }
-      return WorkspaceApi.bindExisting(targetDatamateId, identifier)
-    })()
+    }
     await recordApprovedBinding(directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
@@ -214,7 +287,7 @@ async function bindOrRebind(
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)
     if (err instanceof ConflictError) {
       prompts.log.error(
-        `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}".`,
+        `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch.`,
       )
     } else if (err instanceof PreconditionFailedError) {
       prompts.log.error("Someone else re-linked this project — re-run and try again.")
@@ -227,4 +300,34 @@ async function bindOrRebind(
     }
     process.exitCode = 1
   }
+}
+
+/** Pick the rebind endpoint that matches which identifier the pre-check
+ * resolved the binding on — NOT which identifier the current call happens to
+ * carry. A repo whose remote was renamed still has a binding under its path;
+ * rebindByRemote against the new remote would 404 with no repair path from
+ * the CLI. (M3) */
+async function rebindByMatchedIdentifier(input: {
+  identifier: ProjectIdentifier
+  targetDatamateId: number
+  expectedCurrentDatamateId: number
+  matchedBy: MatchedIdentifier
+}) {
+  if (input.matchedBy === "remote" && input.identifier.repoRemote) {
+    return WorkspaceApi.rebindByRemote({
+      remote: input.identifier.repoRemote,
+      targetDatamateId: input.targetDatamateId,
+      expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+    })
+  }
+  if (input.matchedBy === "path" && input.identifier.projectPath) {
+    return WorkspaceApi.rebindByPath({
+      projectPath: input.identifier.projectPath,
+      targetDatamateId: input.targetDatamateId,
+      expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+    })
+  }
+  throw new Error(
+    `Cannot rebind — the pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+  )
 }

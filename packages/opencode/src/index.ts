@@ -10,6 +10,7 @@ import { UninstallCommand } from "./cli/cmd/uninstall"
 import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
 import { InstallationVersion, InstallationLocal } from "@opencode-ai/core/installation/version"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { FormatError } from "./cli/error"
 import { ServeCommand } from "./cli/cmd/serve"
 // altimate_change start — workspace-serve: dev-only workspace serve command
@@ -173,8 +174,14 @@ let cli = yargs(args)
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
   // altimate_change end
-  // altimate_change start — link: workspace-binding subcommand
-  .command(LinkCommand)
+
+// altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
+// so the command isn't registered — and doesn't show in --help — for users
+// who haven't opted in to the workspaces feature via ALTIMATE_WORKSPACE=1.
+// (M1 in the consensus review.)
+if (Flag.ALTIMATE_WORKSPACE) {
+  cli = cli.command(LinkCommand)
+}
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

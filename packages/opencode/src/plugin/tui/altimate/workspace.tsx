@@ -33,7 +33,8 @@ import {
   PreconditionFailedError,
   WorkspaceApi,
   type DatamateRef,
-  type GetBindingResponse,
+  type MatchedIdentifier,
+  type ProjectBindingLookup,
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
@@ -135,30 +136,16 @@ async function createAndBindInline(
   api: TuiPluginApi,
   identifier: ProjectIdentifier,
   name: string,
+  /** When present, this project is already bound to another workspace.
+   * createAndBind succeeds but leaves the binding pointing at the OLD
+   * workspace; without this rebind step the new workspace is an orphaned
+   * (billable) SaaS resource the CLI knows nothing about (M2). */
+  rebindFrom?: { expectedCurrentDatamateId: number; matchedBy: MatchedIdentifier },
 ): Promise<void> {
   api.ui.dialog.clear()
+  let res: Awaited<ReturnType<typeof WorkspaceApi.createAndBind>>
   try {
-    const res = await WorkspaceApi.createAndBind({ name, identifier })
-    await recordApprovedBinding(api.state.path.directory, {
-      datamateId: res.datamate.id,
-      datamateName: res.datamate.name,
-      repoRemote: res.binding.repo_remote,
-      projectPath: res.binding.project_path,
-      linkedAt: Date.now(),
-    })
-    try {
-      await open(res.manage_url)
-      api.ui.toast({
-        variant: "success",
-        message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
-      })
-    } catch {
-      api.ui.toast({
-        variant: "info",
-        message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
-        duration: 10_000,
-      })
-    }
+    res = await WorkspaceApi.createAndBind({ name, identifier })
   } catch (err) {
     if (err instanceof ConflictError) {
       api.ui.toast({
@@ -171,7 +158,81 @@ async function createAndBindInline(
         message: err instanceof Error ? err.message : "Failed to create workspace",
       })
     }
+    return
   }
+
+  if (rebindFrom) {
+    // The atomic create-and-bind wrote a NEW binding for the new workspace,
+    // but the existing binding for THIS project's remote/path still points
+    // at the old workspace. Repoint via the matched-identifier rebind
+    // endpoint. If rebind fails, tell the user the workspace exists but
+    // the link didn't switch — do not silently orphan.
+    try {
+      await rebindByMatchedIdentifier({
+        identifier,
+        targetDatamateId: res.datamate.id,
+        expectedCurrentDatamateId: rebindFrom.expectedCurrentDatamateId,
+        matchedBy: rebindFrom.matchedBy,
+      })
+    } catch (err) {
+      api.ui.toast({
+        variant: "error",
+        message: `Workspace "${res.datamate.name}" was CREATED but could not be linked to this project (${err instanceof Error ? err.message : String(err)}). Run \`altimate-code link\` to retry.`,
+        duration: 15_000,
+      })
+      return
+    }
+  }
+
+  await recordApprovedBinding(api.state.path.directory, {
+    datamateId: res.datamate.id,
+    datamateName: res.datamate.name,
+    repoRemote: res.binding.repo_remote,
+    projectPath: res.binding.project_path,
+    linkedAt: Date.now(),
+  })
+  try {
+    await open(res.manage_url)
+    api.ui.toast({
+      variant: "success",
+      message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
+    })
+  } catch {
+    api.ui.toast({
+      variant: "info",
+      message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
+      duration: 10_000,
+    })
+  }
+}
+
+/** Pick the rebind endpoint that matches which identifier the pre-check
+ * resolved the binding on. Shared with cli/cmd/link.ts through duplicated
+ * code (M3) — the modules deliberately don't cross-import so the CLI
+ * subcommand stays self-contained. */
+async function rebindByMatchedIdentifier(input: {
+  identifier: ProjectIdentifier
+  targetDatamateId: number
+  expectedCurrentDatamateId: number
+  matchedBy: MatchedIdentifier
+}) {
+  if (input.matchedBy === "remote" && input.identifier.repoRemote) {
+    return WorkspaceApi.rebindByRemote({
+      remote: input.identifier.repoRemote,
+      targetDatamateId: input.targetDatamateId,
+      expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+    })
+  }
+  if (input.matchedBy === "path" && input.identifier.projectPath) {
+    return WorkspaceApi.rebindByPath({
+      projectPath: input.identifier.projectPath,
+      targetDatamateId: input.targetDatamateId,
+      expectedCurrentDatamateId: input.expectedCurrentDatamateId,
+    })
+  }
+  throw new Error(
+    `Cannot rebind — pre-check matched on ${input.matchedBy} but that field is not present on the current project identifier.`,
+  )
 }
 
 interface AlreadyLinkedProps {
@@ -182,6 +243,12 @@ interface AlreadyLinkedProps {
   hasDrift: boolean
   driftedWas?: string | null
   unverified?: boolean
+  /** Which identifier arm resolved the binding — remote-matched projects
+   * rebind via ``/by-remote``, path-matched via ``/by-path``. Not the same
+   * as ``identifier.repoRemote`` / ``identifier.projectPath``, which reflect
+   * the CURRENT project, not the binding's origin. Threaded into PickerDialog
+   * so a re-link picks the correct endpoint. (M3) */
+  matchedBy: MatchedIdentifier
 }
 
 function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
@@ -222,13 +289,15 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
           return
         }
         // relink → picker with the current workspace id as expected_current so
-        // a concurrent re-link by another client 412s cleanly.
+        // a concurrent re-link by another client 412s cleanly. matchedBy
+        // determines which rebind endpoint the picker will call (M3).
         props.api.ui.dialog.replace(() => (
           <PickerDialog
             api={props.api}
             identifier={props.identifier}
             mode="relink"
             expectedCurrentDatamateId={props.workspaceId}
+            matchedBy={props.matchedBy}
           />
         ))
       }}
@@ -241,6 +310,9 @@ interface PickerProps {
   identifier: ProjectIdentifier
   mode: "attach" | "relink"
   expectedCurrentDatamateId?: number
+  /** Set for ``mode: "relink"`` — which identifier arm the pre-check matched
+   * on so we pick the correct rebind endpoint. (M3) */
+  matchedBy?: MatchedIdentifier
 }
 
 function PickerDialog(props: PickerProps) {
@@ -275,20 +347,20 @@ function PickerDialog(props: PickerProps) {
           message: `Linked to workspace "${res.binding.datamate_name}".`,
         })
       } else {
-        // Rebind: pick the endpoint that matches the identifier we have.
-        // Prefer remote (stronger identity) when available; else fall back to
-        // path — matches the pre-check ordering in getBindingForProject.
-        const res = props.identifier.repoRemote
-          ? await WorkspaceApi.rebindByRemote({
-              remote: props.identifier.repoRemote,
-              targetDatamateId: datamateId,
-              expectedCurrentDatamateId: props.expectedCurrentDatamateId,
-            })
-          : await WorkspaceApi.rebindByPath({
-              projectPath: props.identifier.projectPath!,
-              targetDatamateId: datamateId,
-              expectedCurrentDatamateId: props.expectedCurrentDatamateId,
-            })
+        // Rebind: pick the endpoint that matches which identifier the
+        // pre-check RESOLVED the binding on — not what the current identifier
+        // happens to carry. A repo whose remote was renamed still has its
+        // binding under its path; rebindByRemote against the new remote would
+        // 404 with no repair path from the TUI. (M3)
+        if (!props.matchedBy || !props.expectedCurrentDatamateId) {
+          throw new Error("relink picker opened without matchedBy / expectedCurrentDatamateId")
+        }
+        const res = await rebindByMatchedIdentifier({
+          identifier: props.identifier,
+          targetDatamateId: datamateId,
+          expectedCurrentDatamateId: props.expectedCurrentDatamateId,
+          matchedBy: props.matchedBy,
+        })
         await recordApprovedBinding(props.api.state.path.directory, {
           datamateId: res.binding.datamate_id,
           datamateName: res.binding.datamate_name,
@@ -363,6 +435,10 @@ interface OnDemandPickerProps {
   identifier: ProjectIdentifier
   currentlyLinkedDatamateId?: number
   currentlyLinkedDatamateName?: string
+  /** Which identifier arm the pre-check matched on. Required to pick the
+   * correct rebind endpoint when the user swaps workspaces or picks Create
+   * on an already-linked project. (M3) */
+  matchedBy?: MatchedIdentifier
   defaultName: string
 }
 
@@ -419,7 +495,18 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
           return
         }
         if (option.value === CREATE_NEW_SENTINEL) {
-          void createAndBindInline(props.api, props.identifier, props.defaultName)
+          // If already linked, thread the pre-check outcome so createAndBind
+          // is followed by a rebind — otherwise the new workspace is a real
+          // (billable) SaaS resource left orphaned while the project is
+          // still bound to the OLD workspace. (M2)
+          const rebindFrom =
+            props.currentlyLinkedDatamateId !== undefined && props.matchedBy
+              ? {
+                  expectedCurrentDatamateId: props.currentlyLinkedDatamateId,
+                  matchedBy: props.matchedBy,
+                }
+              : undefined
+          void createAndBindInline(props.api, props.identifier, props.defaultName, rebindFrom)
           return
         }
         // Picked an existing workspace.
@@ -432,12 +519,11 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
           props.api.ui.dialog.clear()
           return
         }
-        void bindOrRebindInline(
-          props.api,
-          props.identifier,
-          option.value,
-          props.currentlyLinkedDatamateId,
-        )
+        const existing =
+          props.currentlyLinkedDatamateId !== undefined && props.matchedBy
+            ? { datamateId: props.currentlyLinkedDatamateId, matchedBy: props.matchedBy }
+            : undefined
+        void bindOrRebindInline(props.api, props.identifier, option.value, existing)
       }}
     />
   )
@@ -447,24 +533,22 @@ async function bindOrRebindInline(
   api: TuiPluginApi,
   identifier: ProjectIdentifier,
   targetDatamateId: number,
-  currentDatamateId: number | undefined,
+  /** Pre-check outcome. Absent means "not linked / pre-check missed" and
+   * we call bindExisting; present means "linked" and we rebind via the
+   * matched-identifier endpoint (M3). */
+  existing: { datamateId: number; matchedBy: MatchedIdentifier } | undefined,
 ): Promise<void> {
   api.ui.dialog.clear()
+  const isRebind = existing !== undefined
   try {
     const res = await (async () => {
-      if (currentDatamateId) {
-        // Rebind: use whichever identifier we have; remote-first for identity.
-        return identifier.repoRemote
-          ? WorkspaceApi.rebindByRemote({
-              remote: identifier.repoRemote,
-              targetDatamateId,
-              expectedCurrentDatamateId: currentDatamateId,
-            })
-          : WorkspaceApi.rebindByPath({
-              projectPath: identifier.projectPath!,
-              targetDatamateId,
-              expectedCurrentDatamateId: currentDatamateId,
-            })
+      if (existing) {
+        return rebindByMatchedIdentifier({
+          identifier,
+          targetDatamateId,
+          expectedCurrentDatamateId: existing.datamateId,
+          matchedBy: existing.matchedBy,
+        })
       }
       return WorkspaceApi.bindExisting(targetDatamateId, identifier)
     })()
@@ -477,7 +561,7 @@ async function bindOrRebindInline(
     })
     api.ui.toast({
       variant: "success",
-      message: currentDatamateId
+      message: isRebind
         ? `Re-linked to workspace "${res.binding.datamate_name}".`
         : `Linked to workspace "${res.binding.datamate_name}".`,
     })
@@ -514,7 +598,7 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
   const identifier = resolveProjectIdentifier(directory)
   // Pre-check for the currently-linked marker. Failures are non-fatal — we
   // still show the picker without the "(currently linked here)" annotation.
-  let existing: GetBindingResponse | null = null
+  let existing: ProjectBindingLookup | null = null
   try {
     existing = await WorkspaceApi.getBindingForProject(identifier)
   } catch (err) {
@@ -531,6 +615,7 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
       identifier={identifier}
       currentlyLinkedDatamateId={existing?.datamate.id}
       currentlyLinkedDatamateName={existing?.datamate.name}
+      matchedBy={existing?.matchedBy}
       defaultName={defaultName}
     />
   ))
@@ -555,7 +640,7 @@ async function runFlow(
     ? projectNameFromRemote(identifier.repoRemote)
     : projectNameFromPath(identifier.projectPath)
 
-  let serverBinding: GetBindingResponse | null | undefined
+  let serverBinding: ProjectBindingLookup | null | undefined
   try {
     serverBinding = await WorkspaceApi.getBindingForProject(identifier)
   } catch (err) {
@@ -574,13 +659,27 @@ async function runFlow(
       projectPath: serverBinding.binding.project_path,
       linkedAt: Date.now(),
     })
+    // Drift = the identifier the server matched on doesn't equal the
+    // corresponding identifier this project currently has. E.g. we matched
+    // on remote but the current remote differs from what the binding
+    // stored — the repo was renamed / remote swapped. The dialog surfaces
+    // this so the user isn't silently attached to a stale binding. (M3)
+    const boundIdent =
+      serverBinding.matchedBy === "remote"
+        ? serverBinding.binding.repo_remote
+        : serverBinding.binding.project_path
+    const currentIdent =
+      serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
+    const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
         identifier={identifier}
         workspaceName={serverBinding!.datamate.name}
         workspaceId={serverBinding!.datamate.id}
-        hasDrift={false}
+        matchedBy={serverBinding!.matchedBy}
+        hasDrift={hasDrift}
+        driftedWas={hasDrift ? boundIdent : undefined}
       />
     ))
     return
@@ -602,17 +701,20 @@ async function runFlow(
   // Server unreachable — fall back to the local cache (marked as unverified).
   const local = await readLocalBinding(directory)
   if (local) {
-    // Drift = the identifier the cache remembers differs from what we're
-    // seeing now. Compare on the field that's actually populated in the cache.
+    // Prefer whichever identifier the cache remembers as populated. Same
+    // ordering as the server-side pre-check: remote first, path fallback.
+    const cachedMatchedBy: MatchedIdentifier = local.repoRemote ? "remote" : "path"
     const cachedIdent = local.repoRemote ?? local.projectPath ?? ""
-    const currentIdent = identifier.repoRemote ?? identifier.projectPath
-    const hasDrift = cachedIdent !== currentIdent
+    const currentIdent =
+      cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
+    const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
         identifier={identifier}
         workspaceName={local.datamateName}
         workspaceId={local.datamateId}
+        matchedBy={cachedMatchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? cachedIdent : undefined}
         unverified

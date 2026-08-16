@@ -52,6 +52,17 @@ export interface GetBindingResponse {
   datamate: DatamateRef
 }
 
+/** Which identifier arm the pre-check lookup actually matched on. Callers use
+ * this to pick the correct rebind endpoint (``/by-remote`` vs ``/by-path``)
+ * regardless of what the CURRENT identifier has — a repo whose remote was
+ * renamed still resolves via its ``project_path``, and a later ``rebindByRemote``
+ * would 404 because no binding exists under the new remote. (M3) */
+export type MatchedIdentifier = "remote" | "path"
+
+export interface ProjectBindingLookup extends GetBindingResponse {
+  matchedBy: MatchedIdentifier
+}
+
 export interface ConflictDetail {
   message: string
   existing_datamate_id?: number
@@ -120,11 +131,24 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
 async function req<T>(
   method: string,
   subpath: string,
-  opts: { body?: unknown; query?: Record<string, string> } = {},
+  opts: {
+    body?: unknown
+    query?: Record<string, string>
+    /** Override the base path prefix. Defaults to
+     * ``/datamate-project-bindings`` (this module's namespace). Pass e.g.
+     * ``/datamates`` to hit the sibling datamates_router through the same
+     * timeout / typed-error / empty-body machinery. */
+    base?: string
+    /** If true, a 2xx with an empty body returns ``undefined`` typed as T
+     * instead of throwing. Only set for endpoints known to return 204 or a
+     * bare 200 with no payload. */
+    allowEmptyBody?: boolean
+  } = {},
 ): Promise<T> {
   const { url, instance, apiKey } = await creds()
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""
-  const target = `${url}/datamate-project-bindings${subpath}${qs}`
+  const basePath = opts.base ?? "/datamate-project-bindings"
+  const target = `${url}${basePath}${subpath}${qs}`
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   let res: Response
@@ -140,6 +164,15 @@ async function req<T>(
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
     })
   } catch (err) {
+    // Distinguish "we hit our 15s abort" from "network stack failed" so the
+    // caller can decide differently (retry, longer timeout, offline banner).
+    // (m8 in the consensus review.)
+    const name = (err as { name?: string } | undefined)?.name
+    if (name === "AbortError") {
+      throw new WorkspaceApiError(
+        `Request to ${target} timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`,
+      )
+    }
     const msg = err instanceof Error ? err.message : String(err)
     throw new WorkspaceApiError(`Cannot reach ${target}: ${msg}`)
   } finally {
@@ -177,6 +210,18 @@ async function req<T>(
       res.status,
     )
   }
+  // A 2xx with an empty (or unparseable) body is not the same as a resource.
+  // Callers dereference the return immediately (``.binding``, ``.datamate``,
+  // ``.manage_url``), so silently handing back ``undefined as T`` produces a
+  // ``TypeError`` inside caller code that the typed-error switches can't
+  // classify. Surface it as a WorkspaceApiError instead — unless the caller
+  // opted in via ``allowEmptyBody`` (e.g. 204 endpoints). (m7)
+  if (json === undefined && !opts.allowEmptyBody) {
+    throw new WorkspaceApiError(
+      `Empty ${res.status} body from ${target} — expected JSON payload`,
+      res.status,
+    )
+  }
   return json as T
 }
 
@@ -203,15 +248,18 @@ export namespace WorkspaceApi {
   }
 
   /** Tries remote first (stronger identity), then path. Returns the first hit
-   * or null. Both fields on the identifier are optional but at least one must
-   * be present. */
-  export async function getBindingForProject(id: ProjectIdentifier): Promise<GetBindingResponse | null> {
+   * TAGGED with which identifier matched, so a caller that later rebinds
+   * picks the right endpoint even if the current identifier's remote has
+   * changed since the binding was created (M3). Both fields on the
+   * identifier are optional but at least one must be present. */
+  export async function getBindingForProject(id: ProjectIdentifier): Promise<ProjectBindingLookup | null> {
     if (id.repoRemote) {
       const hit = await getBindingForRemote(id.repoRemote)
-      if (hit) return hit
+      if (hit) return { ...hit, matchedBy: "remote" }
     }
     if (id.projectPath) {
-      return await getBindingForPath(id.projectPath)
+      const hit = await getBindingForPath(id.projectPath)
+      if (hit) return { ...hit, matchedBy: "path" }
     }
     return null
   }
@@ -279,15 +327,20 @@ export namespace WorkspaceApi {
   }
 
   /** Populates the "link to existing workspace" picker. Reuses the existing
-   * /datamates/ list endpoint on the datamates_router. */
+   * ``/datamates/`` list endpoint on the datamates_router — routed through
+   * the shared ``req()`` machinery so it inherits the 15s abort, typed
+   * error mapping, empty-body guard, and detail-parsing everyone else
+   * gets. (M5) Filters out non-integer / non-positive ids so a corrupt row
+   * doesn't reach the picker as a "NaN" label that the caller then binds
+   * against. */
   export async function listDatamates(): Promise<DatamateRef[]> {
-    const { url, instance, apiKey } = await creds()
-    const res = await fetch(`${url}/datamates/`, {
-      headers: { Authorization: `Bearer ${apiKey}`, "x-tenant": instance },
-    })
-    if (!res.ok)
-      throw new WorkspaceApiError(`Failed to list workspaces (status ${res.status})`, res.status)
-    const body = (await res.json()) as { datamates?: Array<{ id: number | string; name: string }> }
-    return (body.datamates ?? []).map((d) => ({ id: Number(d.id), name: d.name }))
+    const body = await req<{ datamates?: Array<{ id: number | string; name: string }> }>(
+      "GET",
+      "/",
+      { base: "/datamates" },
+    )
+    return (body.datamates ?? [])
+      .map((d) => ({ id: Number(d.id), name: d.name }))
+      .filter((d) => Number.isInteger(d.id) && d.id > 0)
   }
 }

@@ -9,6 +9,7 @@
 // plugin list in ../internal.ts.
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import type { RuntimeFlags } from "@/effect/runtime-flags"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import ProviderCredentials from "./provider-credentials"
 import PromptEnhance from "./prompt-enhance"
 import SkillOps from "./skill-ops"
@@ -24,6 +25,11 @@ import Workspace from "./workspace"
 //   import TraceViewer from "./trace-viewer"
 //   import Workspace from "./workspace"
 export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimentalEventSystem">): BuiltinTuiPlugin[] {
-  return [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer, Workspace]
+  const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer]
+  // Workspace TUI plugin is pilot-gated: only registered for users who
+  // opted into ALTIMATE_WORKSPACE. Otherwise the post-scan dialog + the
+  // altimate.workspace.link palette command would ship to 100% of users
+  // regardless of the flag setting. (M1 in the consensus review.)
+  return Flag.ALTIMATE_WORKSPACE ? [...base, Workspace] : base
 }
 // altimate_change end
