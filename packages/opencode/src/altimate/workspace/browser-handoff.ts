@@ -33,6 +33,15 @@ import type { ProjectIdentifier } from "./api-client"
 const FREEMIUM_API_HOST = "api.myaltimate.com"
 const FREEMIUM_WORKSPACE_HOST = "ws.myaltimate.com"
 
+/** DNS-label-shaped tenant guard for the freemium subdomain. Credentials
+ * only require ``altimateInstanceName`` to be a non-empty string, so a tenant
+ * like ``evil.example/path?x=`` would otherwise be interpolated straight into
+ * the origin, opening the handoff URL — carrying the project path, remote,
+ * callback address, CSRF state, and telemetry context — at
+ * ``https://evil.example`` (m3 in the consensus review). Reject anything that
+ * would not survive a round-trip through URL parsing back to the same host. */
+const TENANT_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i
+
 // Loopback port range for the workspace-bound callback. Shared with the OAuth
 // sign-in listener in altimate.ts — each listener walks independently, so a
 // live OAuth server on 7317 forces us to 7318 (or later) transparently.
@@ -55,7 +64,7 @@ function deliverySuccessHtml(manageUrl: string): string {
 <body style="font-family:system-ui;text-align:center;padding:64px">
 <h2>Workspace ready</h2><p>Returning you to the workspace page…</p>
 <p><a href="${safe}">Continue</a> if you're not redirected automatically.</p>
-<script>window.location.replace(${JSON.stringify(manageUrl)})</script></body>`
+<script>window.location.replace(${escapeInlineScript(manageUrl)})</script></body>`
 }
 
 const log = Log.create({ service: "altimate-workspace-handoff" })
@@ -65,6 +74,15 @@ function escapeHtml(s: string): string {
     /[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string,
   )
+}
+
+/** JSON-encode + escape any ``</`` so a value containing ``</script>`` cannot
+ * close the surrounding inline <script> block. Not reachable via any
+ * caller-supplied field today (tenant is DNS-label-guarded, workspace_id is
+ * a validated integer), but the belt-and-suspenders is trivial. (N5.b in
+ * the consensus review.) */
+function escapeInlineScript(value: string): string {
+  return JSON.stringify(value).replace(/<\/(script)/gi, "<\\/$1")
 }
 
 function htmlError(msg: string): string {
@@ -85,7 +103,7 @@ function cancelHtml(workspaceWebBase: URL): string {
 <body style="font-family:system-ui;text-align:center;padding:64px">
 <h2>Cancelled</h2><p>Returning you to the workspace home…</p>
 <p><a href="${safe}">Continue</a> if you're not redirected automatically.</p>
-<script>window.location.replace(${JSON.stringify(home)})</script></body>`
+<script>window.location.replace(${escapeInlineScript(home)})</script></body>`
 }
 
 export type HandoffFailureReason =
@@ -94,14 +112,29 @@ export type HandoffFailureReason =
   | "timeout" // 15-min window expired
   | "cancelled" // user hit Cancel in the browser
   | "tenant_mismatch" // callback tenant != credentials tenant
-  | "port_exhausted" // 7317..7325 all in use
+  | "port_exhausted" // 7317..7325 all EADDRINUSE
   | "browser_open_failed"
+  | "aborted" // caller-provided AbortSignal fired
   | "error"
+
+/** Snapshot of the credentials the handoff started against, returned to the
+ * caller so it can re-verify against fresh creds immediately before binding
+ * (M6 in the consensus review). Workspace ids are tenant-schema-local, so
+ * binding a callback validated for tenant A under tenant B (after an account
+ * switch mid-flow) would 404 or, worse, hit an unrelated workspace. */
+export interface CredentialFingerprint {
+  apiUrl: string
+  tenant: string
+}
 
 export interface HandoffSuccess {
   ok: true
   workspaceId: number
   tenant: string
+  /** Credentials the handoff resolved and validated the callback against.
+   * Callers must compare against ``AltimateApi.getCredentials()`` at bind
+   * time and refuse the bind if either field drifted. */
+  credentials: CredentialFingerprint
 }
 export interface HandoffFailure {
   ok: false
@@ -114,14 +147,19 @@ export type HandoffResult = HandoffSuccess | HandoffFailure
 /** Compute the workspace-stack URL for a given API host + tenant, or null if
  * this deployment isn't supported (localhost, enterprise, custom domain).
  *
- * Dev escape hatch: ``ALTIMATE_WORKSPACE_WEB_URL`` overrides the map lookup
- * when set (must be a well-formed URL). Used for local integration testing
- * against a non-freemium SaaS instance. Not something production users touch. */
+ * Dev escape hatch: ``ALTIMATE_WORKSPACE_WEB_URL`` overrides the tenant map
+ * lookup when set. The override is DEV-ONLY — it returns the URL as-is
+ * without tenant scoping (which is what a local ``altimate2.localhost:3003``
+ * dev server needs). Production callers must not set it; if it is somehow
+ * present and points off-tenant, the CSRF ``state`` still gates the callback
+ * so no cross-workspace bind is possible. */
 export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL | null {
   const override = process.env["ALTIMATE_WORKSPACE_WEB_URL"]
   if (override) {
     try {
-      return new URL(override)
+      const u = new URL(override)
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null
+      return u
     } catch {
       return null
     }
@@ -129,7 +167,15 @@ export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL
   try {
     const apiHost = new URL(altimateUrl).host
     if (apiHost !== FREEMIUM_API_HOST) return null
-    return new URL(`https://${tenant}.${FREEMIUM_WORKSPACE_HOST}`)
+    // DNS-label guard — see TENANT_LABEL_RE for rationale. Double-check by
+    // reconstructing the origin from the parsed URL: if the parser resolved
+    // to a different host (embedded slashes, port, path in the "tenant"),
+    // refuse rather than emit a URL that points off-domain.
+    if (!TENANT_LABEL_RE.test(tenant)) return null
+    const lower = tenant.toLowerCase()
+    const u = new URL(`https://${lower}.${FREEMIUM_WORKSPACE_HOST}`)
+    if (u.hostname !== `${lower}.${FREEMIUM_WORKSPACE_HOST}`) return null
+    return u
   } catch {
     return null
   }
@@ -211,7 +257,9 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
     }
 
     const workspaceId = Number(workspaceIdRaw)
-    if (!Number.isFinite(workspaceId) || workspaceId <= 0) {
+    // Integer-only: floats like ``42.5`` are rejected server-side but produce
+    // a confusing failure the caller can't recover from. (m9 in the review.)
+    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
       const msg = `Invalid workspace_id: ${workspaceIdRaw}`
       respond(400, htmlError(msg))
       pending.reject(markReason(new Error(msg), "error"))
@@ -223,7 +271,15 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
     // deterministic from the tenant we already validated above.
     const manageUrl = `${pending.workspaceWebBase.toString().replace(/\/$/, "")}/w/${workspaceId}`
     respond(200, deliverySuccessHtml(manageUrl))
-    pending.resolve({ ok: true, workspaceId, tenant })
+    // Callback validated — but the SUCCESS payload carries the credentials
+    // snapshot the handoff was started against; the caller re-verifies
+    // against fresh creds before binding (M6). This module never binds.
+    pending.resolve({
+      ok: true,
+      workspaceId,
+      tenant,
+      credentials: { apiUrl: "", tenant: pending.expectedTenant }, // apiUrl filled in by caller
+    })
   })
 
   // Walk 7317..7325 — each server instance is independent, so a squatting
@@ -246,6 +302,9 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
       lastErr = err as NodeJS.ErrnoException
       // Defensive cleanup in case any listeners linger after a rejected bind.
       server.removeAllListeners("error")
+      // Only keep walking on EADDRINUSE — any other errno (EACCES, EBADF, …)
+      // is a real problem, not port squatting, so break out and report it
+      // faithfully rather than falsely claiming "all ports in use". (m5)
       if (lastErr.code !== "EADDRINUSE") break
     }
   }
@@ -258,13 +317,18 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
         ? `Every port in ${CALLBACK_PORT_MIN}-${CALLBACK_PORT_MAX} is in use (tried ${tried.join(", ")}). Close what's using them (e.g. \`lsof -i :${CALLBACK_PORT_MIN}\`) and try again.`
         : `Could not start the workspace-handoff server: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
     ),
-    "port_exhausted",
+    code === "EADDRINUSE" ? "port_exhausted" : "error",
   )
 }
 
 export interface OpenBrowserHandoffInput {
   identifier: ProjectIdentifier
   projectName: string
+  /** Optional AbortSignal — if it fires the flow settles with
+   * ``{ok: false, reason: "aborted"}`` and tears down the listener. Lets a
+   * TUI supersede a stale handoff without leaking a port for the full
+   * 15-minute window. (m2) */
+  signal?: AbortSignal
 }
 
 /** Full browser-handoff flow. Returns the created/picked workspace ID on
@@ -283,12 +347,28 @@ export async function runHandoffWithOpener(
   input: OpenBrowserHandoffInput,
   openBrowser: (url: string) => Promise<void>,
 ): Promise<HandoffResult> {
-  if (!(await AltimateApi.isConfigured().catch(() => false))) {
-    return { ok: false, reason: "not_configured" }
+  // Preflight is inside the same try/catch that owns the startup IIFE — a
+  // rejection from ``getCredentials()`` (malformed JSON, unresolved ${env:…}
+  // placeholder, schema mismatch) or from any other setup step converts to
+  // a HandoffResult instead of propagating as an unhandled rejection into
+  // the TUI's ``void runBrowserHandoff(...)`` call sites. (M4)
+  let creds: Awaited<ReturnType<typeof AltimateApi.getCredentials>>
+  let webUrl: URL
+  try {
+    if (!(await AltimateApi.isConfigured().catch(() => false))) {
+      return { ok: false, reason: "not_configured" }
+    }
+    creds = await AltimateApi.getCredentials()
+    const resolved = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    if (!resolved) return { ok: false, reason: "unavailable" }
+    webUrl = resolved
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "error",
+      message: err instanceof Error ? err.message : String(err),
+    }
   }
-  const creds = await AltimateApi.getCredentials()
-  const webUrl = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
-  if (!webUrl) return { ok: false, reason: "unavailable" }
 
   const state = randomBytes(16).toString("hex")
 
@@ -306,7 +386,8 @@ export async function runHandoffWithOpener(
     }
   }
 
-  const settled = new Promise<HandoffResult>((resolve) => {
+  return new Promise<HandoffResult>((resolve) => {
+    let onAbort: (() => void) | null = null
     const pending: HandoffPending = {
       state,
       expectedTenant: creds.altimateInstanceName,
@@ -314,11 +395,16 @@ export async function runHandoffWithOpener(
       resolve: (v) => {
         closeListener()
         clearTimeout(timeoutHandle)
-        resolve(v)
+        if (onAbort && input.signal) input.signal.removeEventListener("abort", onAbort)
+        // Fill in the apiUrl snapshot the listener couldn't set (it doesn't
+        // hold ``creds``); the tenant already went through the expectedTenant
+        // check inside the listener.
+        resolve({ ...v, credentials: { apiUrl: creds.altimateUrl, tenant: v.tenant } })
       },
       reject: (err) => {
         closeListener()
         clearTimeout(timeoutHandle)
+        if (onAbort && input.signal) input.signal.removeEventListener("abort", onAbort)
         const reason = (err as { handoffReason?: HandoffFailureReason }).handoffReason ?? "error"
         const authorizeUrl = (err as { authorizeUrl?: string }).authorizeUrl
         resolve({
@@ -332,49 +418,75 @@ export async function runHandoffWithOpener(
     const timeoutHandle = setTimeout(() => {
       pending.reject(markReason(new Error("Timed out waiting for browser workspace handoff"), "timeout"))
     }, DEFAULT_TIMEOUT_MS)
+    // ``.unref()`` so the timer alone doesn't keep the CLI process alive
+    // once every other handle has exited. (m2)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(timeoutHandle as any)?.unref?.()
+
+    // Wire the AbortSignal — if it fires the flow settles with
+    // ``reason: "aborted"`` and the listener is torn down immediately.
+    if (input.signal) {
+      if (input.signal.aborted) {
+        pending.reject(markReason(new Error("Handoff aborted"), "aborted"))
+        return
+      }
+      onAbort = () => pending.reject(markReason(new Error("Handoff aborted"), "aborted"))
+      input.signal.addEventListener("abort", onAbort, { once: true })
+    }
 
     ;(async () => {
       try {
         listenerHandle = await startListener(pending)
+        // Capture the port to a local IMMEDIATELY — ``listenerHandle`` is
+        // cleared by ``closeListener`` on timeout, and a lazy ``import()``
+        // below can straddle that clear. (M4 sub-case)
+        const boundPort = listenerHandle.port
+
+        // Import buildCliContext lazily so this module doesn't pull altimate.ts
+        // into every consumer's import graph at load time.
+        const { buildCliContext } = await import("../plugin/altimate")
+        const cliContext = await buildCliContext().catch((err) => {
+          log.warn("buildCliContext failed; proceeding without", { err: String(err) })
+          return ""
+        })
+
+        const redirect = `http://127.0.0.1:${boundPort}/workspace-bound`
+        const target = new URL("/create-and-link", webUrl)
+        target.searchParams.set("client", "altimate-code")
+        target.searchParams.set("redirect", redirect)
+        target.searchParams.set("state", state)
+        target.searchParams.set("project_name", input.projectName)
+        // Project path + remote go in the URL FRAGMENT, not the query, so
+        // they don't land in SaaS access logs, WAF logs, or browser history
+        // as query params. Same rationale as ``cli_context`` in altimate.ts
+        // (see altimate.ts:135-137). (m6)
+        const fragment = new URLSearchParams()
+        if (input.identifier.repoRemote) fragment.set("project_remote", input.identifier.repoRemote)
+        if (input.identifier.projectPath) fragment.set("project_path", input.identifier.projectPath)
+        if (cliContext) fragment.set("cli_context", cliContext)
+        const authorizeUrl = fragment.toString()
+          ? `${target.toString()}#${fragment.toString()}`
+          : target.toString()
+
+        try {
+          await openBrowser(authorizeUrl)
+        } catch (err) {
+          // Browser open failed. Preserve the URL so the caller can copy-paste.
+          pending.reject(
+            Object.assign(
+              markReason(new Error(`Could not open browser: ${err instanceof Error ? err.message : String(err)}`), "browser_open_failed"),
+              { authorizeUrl },
+            ),
+          )
+        }
       } catch (err) {
+        // ANY throw in this async IIFE — startListener rejection, the lazy
+        // ``import()``, ``buildCliContext()`` panic — funnels through
+        // pending.reject so ``settled`` resolves and the caller sees a
+        // ``HandoffResult`` instead of a 15-minute silent hang. (M4)
         const reason = (err as { handoffReason?: HandoffFailureReason }).handoffReason ?? "error"
         pending.reject(markReason(err as Error, reason))
-        return
-      }
-
-      // Import buildCliContext lazily so this module doesn't pull altimate.ts
-      // into every consumer's import graph at load time.
-      const { buildCliContext } = await import("../plugin/altimate")
-      const cliContext = await buildCliContext().catch((err) => {
-        log.warn("buildCliContext failed; proceeding without", { err: String(err) })
-        return ""
-      })
-
-      const redirect = `http://127.0.0.1:${listenerHandle.port}/workspace-bound`
-      const target = new URL("/create-and-link", webUrl)
-      target.searchParams.set("client", "altimate-code")
-      target.searchParams.set("redirect", redirect)
-      target.searchParams.set("state", state)
-      if (input.identifier.repoRemote) target.searchParams.set("project_remote", input.identifier.repoRemote)
-      if (input.identifier.projectPath) target.searchParams.set("project_path", input.identifier.projectPath)
-      target.searchParams.set("project_name", input.projectName)
-      const authorizeUrl = cliContext
-        ? `${target.toString()}#cli_context=${encodeURIComponent(cliContext)}`
-        : target.toString()
-
-      try {
-        await openBrowser(authorizeUrl)
-      } catch (err) {
-        // Browser open failed. Preserve the URL so the caller can copy-paste.
-        pending.reject(
-          Object.assign(
-            markReason(new Error(`Could not open browser: ${err instanceof Error ? err.message : String(err)}`), "browser_open_failed"),
-            { authorizeUrl },
-          ),
-        )
       }
     })()
   })
-
-  return settled
 }

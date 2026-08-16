@@ -209,6 +209,28 @@ async function runBrowserHandoff(
     process.exitCode = 1
     return
   }
+  // M6 in the consensus review: re-verify credentials before binding. The
+  // browser window can stay open for up to 15 minutes; an account switch in
+  // that window would otherwise bind a callback validated for tenant A
+  // under tenant B (workspace ids are tenant-schema-local).
+  try {
+    const fresh = await AltimateApi.getCredentials()
+    if (
+      fresh.altimateInstanceName !== result.credentials.tenant ||
+      fresh.altimateUrl !== result.credentials.apiUrl
+    ) {
+      spin.stop(
+        `Credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
+        1,
+      )
+      process.exitCode = 1
+      return
+    }
+  } catch {
+    spin.stop("Lost Altimate credentials while the browser was open — sign in and re-run.", 1)
+    process.exitCode = 1
+    return
+  }
   spin.stop(`Workspace approved. Binding to project...`)
   const bindSpin = prompts.spinner()
   bindSpin.start("Linking workspace...")

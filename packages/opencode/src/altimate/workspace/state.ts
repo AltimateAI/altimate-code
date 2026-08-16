@@ -91,6 +91,32 @@ function readCache(): CacheFile | null {
   }
 }
 
+/** True when every key in the cache is already the canonical form of itself
+ * (i.e. no earlier-CLI-build unresolved keys remain). Cheap side condition
+ * so we can skip the per-read migration once the cache has been rewritten. */
+function isCanonicalized(cache: CacheFile): boolean {
+  for (const k of Object.keys(cache.bindings)) {
+    if (canonicalizeKey(k) !== k) return false
+  }
+  return true
+}
+
+/** One-shot migration: rewrite the cache with canonical keys, collapsing any
+ * pair that resolves to the same target (last-writer-wins by ``linkedAt``).
+ * After this runs the O(n) lookup-time rescan in ``readLocalBinding`` is
+ * dead code — every subsequent read hits the direct key lookup. */
+function migrateToCanonicalKeys(cache: CacheFile): CacheFile {
+  const migrated: Record<string, CachedBinding> = {}
+  for (const [k, v] of Object.entries(cache.bindings)) {
+    const canon = canonicalizeKey(k)
+    const existing = migrated[canon]
+    if (!existing || existing.linkedAt <= v.linkedAt) migrated[canon] = v
+  }
+  const next: CacheFile = { ...cache, bindings: migrated }
+  writeCache(next)
+  return next
+}
+
 function writeCache(cache: CacheFile): void {
   const p = cachePath()
   Filesystem.writeJsonAtomic(p, cache)
@@ -139,23 +165,25 @@ async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
 }
 
 /** Read the local binding for ``directory`` — only returns a hit when the
- * cache's stored (tenant, apiUrl) matches the current credentials. Directory
- * is canonicalized so raw / symlink / trailing-slash variants collide. */
+ * cache's stored (tenant, apiUrl) matches the current credentials. Runs a
+ * one-shot migration to canonical keys on the first read that finds an
+ * unresolved key (macOS ``/tmp`` → ``/private/tmp``), then relies on direct
+ * lookup for the process's remaining lifetime. */
 export async function readLocalBinding(directory: string): Promise<CachedBinding | null> {
   const key = await tenantKey()
   if (!key) return null
-  const cache = readCache()
+  let cache = readCache()
   if (!cache) return null
   if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
   const canon = canonicalizeKey(directory)
-  // First try the direct canonical + raw key lookups (cheap). If neither hits,
-  // scan every stored key and re-canonicalize it — catches entries written by
-  // earlier CLI builds under an unresolved key (e.g. ``/tmp/foo``) even though
-  // the caller looks them back up under the resolved key (``/private/tmp/foo``).
-  const direct = cache.bindings[canon] ?? cache.bindings[directory]
+  const direct = cache.bindings[canon]
   if (direct) return direct
-  for (const [k, v] of Object.entries(cache.bindings)) {
-    if (canonicalizeKey(k) === canon) return v
+  // Cache miss: check if the cache still has any non-canonical keys and
+  // migrate the whole file once. After migration the lookup is a plain
+  // property access on every future read.
+  if (!isCanonicalized(cache)) {
+    cache = migrateToCanonicalKeys(cache)
+    return cache.bindings[canon] ?? null
   }
   return null
 }

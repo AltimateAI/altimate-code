@@ -2,8 +2,7 @@
 // Right-pane sidebar tile that shows the workspace the current project
 // directory is bound to (or "Not linked" with a hint). Reads from the local
 // binding cache written by `../workspace.tsx` (post-scan dialog, on-demand
-// picker, browser handoff). Cache is polled every 3s so a fresh bind
-// surfaces without the user having to reload the TUI.
+// picker, browser handoff).
 //
 // Deliberately read-only. All bind mutations live in workspace.tsx / link.ts;
 // this tile just reflects state.
@@ -16,33 +15,69 @@ import { AltimateApi } from "@/altimate/api/client"
 
 const id = "altimate:sidebar-workspace"
 
-const POLL_MS = 3000
+/** Cache-file poll cadence. Longer than a "reactive" ideal but the cheapest
+ * option that does not require plumbing an event bus through the binding
+ * writers. Trade-off documented (m1 in the consensus review): a fresh bind
+ * surfaces within one interval instead of instantly; a mostly-idle CLI reads
+ * the small cache file twice per minute. In-flight guard below prevents
+ * overlap when the file grows / the disk is slow. */
+const POLL_MS = 30_000
+
+/** Cached credential lookup — the API is a network round-trip candidate in
+ * the general case, but the credentials source here (local file) rarely
+ * changes within a single CLI process. We memoize the resolved manage-URL
+ * base per (apiUrl, tenant) pair for the life of the process; if the file
+ * changes mid-session, the binding cache invalidation (in state.ts) still
+ * catches it via its own (tenant, apiUrl) top-level scoping. */
+let cachedManageBase: { apiUrl: string; tenant: string; base: string | null } | null = null
+async function resolveManageBase(): Promise<string | null> {
+  try {
+    const creds = await AltimateApi.getCredentials()
+    if (
+      cachedManageBase &&
+      cachedManageBase.apiUrl === creds.altimateUrl &&
+      cachedManageBase.tenant === creds.altimateInstanceName
+    ) {
+      return cachedManageBase.base
+    }
+    const url = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    const base = url ? url.toString().replace(/\/$/, "") : null
+    cachedManageBase = { apiUrl: creds.altimateUrl, tenant: creds.altimateInstanceName, base }
+    return base
+  } catch {
+    return null
+  }
+}
 
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const [binding, setBinding] = createSignal<CachedBinding | null>(null)
   const [manageUrl, setManageUrl] = createSignal<string | null>(null)
 
+  let refreshInFlight = false
   const refresh = async () => {
-    const dir = props.api.state.path.directory
-    const b = await readLocalBinding(dir).catch(() => null)
-    setBinding(b)
-    if (!b) {
-      setManageUrl(null)
-      return
-    }
+    if (refreshInFlight) return
+    refreshInFlight = true
     try {
-      const creds = await AltimateApi.getCredentials()
-      const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
-      setManageUrl(base ? `${base.toString().replace(/\/$/, "")}/w/${b.datamateId}` : null)
-    } catch {
-      setManageUrl(null)
+      const dir = props.api.state.path.directory
+      const b = await readLocalBinding(dir).catch(() => null)
+      setBinding(b)
+      if (!b) {
+        setManageUrl(null)
+        return
+      }
+      const base = await resolveManageBase()
+      setManageUrl(base ? `${base}/w/${b.datamateId}` : null)
+    } finally {
+      refreshInFlight = false
     }
   }
 
   onMount(() => {
     void refresh()
     const timer = setInterval(() => void refresh(), POLL_MS)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(timer as any)?.unref?.()
     onCleanup(() => clearInterval(timer))
   })
 
@@ -55,7 +90,7 @@ function View(props: { api: TuiPluginApi }) {
         when={binding()}
         fallback={
           <text fg={theme().textMuted}>
-            Not linked — run <b>/link</b>
+            Not linked — run <b>altimate-code link</b>
           </text>
         }
       >

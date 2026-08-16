@@ -204,7 +204,11 @@ describe("runHandoffWithOpener end-to-end", () => {
     }
   })
 
-  test("URL includes project_remote + project_path + project_name from input", async () => {
+  test("URL includes project_name in query and project_remote/project_path in fragment", async () => {
+    // Per m6 in the consensus review: project_path + project_remote MUST NOT
+    // be sent as query params (they'd land in browser history, SaaS/CDN/WAF
+    // access logs, and REST-log aggregators). Move them to the URL fragment
+    // instead — same reason cli_context lives in the fragment.
     let observed = ""
     await runHandoffWithOpener(
       {
@@ -219,9 +223,16 @@ describe("runHandoffWithOpener end-to-end", () => {
       },
     )
     const u = new URL(observed)
-    expect(u.searchParams.get("project_remote")).toBe("git@github.com:acme/foo.git")
-    expect(u.searchParams.get("project_path")).toBe("/w/foo")
+    // project_name is a display-safe label — the SaaS approval screen
+    // renders it in the modal — so it stays in the query.
     expect(u.searchParams.get("project_name")).toBe("foo")
+    // project_remote + project_path MUST NOT be in the query.
+    expect(u.searchParams.get("project_remote")).toBeNull()
+    expect(u.searchParams.get("project_path")).toBeNull()
+    // They live in the fragment instead.
+    const frag = new URLSearchParams(u.hash.replace(/^#/, ""))
+    expect(frag.get("project_remote")).toBe("git@github.com:acme/foo.git")
+    expect(frag.get("project_path")).toBe("/w/foo")
     expect(u.pathname).toBe("/create-and-link")
   })
 })

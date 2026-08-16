@@ -334,8 +334,36 @@ async function runBrowserHandoff(
     toastHandoffFailure(api, result)
     return
   }
-  // Handoff succeeded — bind the project to the returned workspace via the
-  // existing bind endpoint. Same code path as PickerDialog's attach mode.
+  // M6 in the consensus review: the browser window can stay open for up to
+  // 15 minutes. If the user signs out or switches tenant mid-flow, the
+  // WorkspaceApi client re-reads credentials on every call — so a callback
+  // validated for tenant A would then bind under tenant B, and workspace
+  // ids are tenant-schema-local (same integer, different workspace). Compare
+  // the credential fingerprint the handoff was validated against with the
+  // credentials we're about to bind under, and refuse if either drifted.
+  try {
+    const fresh = await AltimateApi.getCredentials()
+    if (
+      fresh.altimateInstanceName !== result.credentials.tenant ||
+      fresh.altimateUrl !== result.credentials.apiUrl
+    ) {
+      api.ui.toast({
+        variant: "error",
+        message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
+        duration: 15_000,
+      })
+      return
+    }
+  } catch {
+    api.ui.toast({
+      variant: "error",
+      message: "Lost Altimate credentials while the browser was open — sign in and re-run.",
+    })
+    return
+  }
+  // Handoff succeeded and credentials are still consistent — bind the project
+  // to the returned workspace via the existing bind endpoint. Same code path
+  // as PickerDialog's attach mode.
   try {
     const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
     await recordApprovedBinding(api.state.path.directory, {
