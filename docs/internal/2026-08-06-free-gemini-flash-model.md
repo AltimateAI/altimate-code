@@ -8,6 +8,11 @@
 
 Two deliverables, both local-only, nothing pushed:
 
+> **Update 2026-08-18.** Both sides went through repeated adversarial review after this section was
+> written: **four rounds on the client, three on the gateway, every one returning FIX-FIRST.** Counts
+> below are the originals; current state is 45 client commits and 33+ gateway commits. See
+> "What the review rounds actually found" near the end — it is the most useful part of this document.
+
 **`~/codebase/altimate-gateway`** (new repo, `main`, 17 commits) — LiteLLM proxy pinned to
 `ghcr.io/berriai/litellm-database:v1.95.0` serving `vertex_ai/gemini-2.5-flash` (project
 `altimate-models`, global endpoint), a FastAPI **issuer** holding the master key, Postgres, Redis,
@@ -293,6 +298,64 @@ A heavy agent user ≈ 5M input + 300k output tokens/day ≈ **$2.25/day** on ge
 | **1 — Issuer + edge** (~days) | Issuer service beside LiteLLM (principals + short-lived keys + progressive grants); public edge with the two routes, Cloud Armor, deny-by-default request policy; inline kill switch; normalized error taxonomy; spend dashboard | Idempotent principal per install secret; key rotation without budget reset; kill switch kills in-flight tier in <1 min; each limit type returns its distinct, tested error |
 | **2 — Client** (~days) | The 7-file client change; consent-gated registration; telemetry funnel events; beta release (`/release-beta`) | Fresh install → pick free model → confirm disclosure → working session, zero config; nothing sent before consent |
 | **3 — Soak + launch** | Beta soak; watch farming signals (principals/IP, tokens/principal, ASN spread, stockpiling attempts); tune grants; then promote to `latest` and announce | ≥1 week beta with spend within model; abuse-response runbook exercised (kill switch drill) |
+
+## What the review rounds actually found (2026-08-07 → 08-18)
+
+Seven adversarial review rounds — four on the client, three on the gateway — every one returning
+FIX-FIRST. Two patterns dominate, and both are worth carrying into any future security-sensitive
+work here.
+
+**1. A vulnerability class reopens through a new entrance each time you fix a field.** The
+credential-exfiltration bug was closed four separate times: a project config could redirect
+`baseURL`, then `npm` (which `getSDK()` *imports*, handing it the stored key), then
+`variants.fast.options.baseURL` through a third consumer that read `config.provider[id]` directly,
+and finally a **ModelsDev registry record** named `altimate-free` winning the conditional
+registration — not project config at all, but remote data refreshed at runtime. Only the fourth fix
+was structural: deny the id where config is *read*, so every consumer inherits it, including ones
+that do not exist yet. The lesson is that "fix the field the reviewer named" is not a fix.
+
+**2. Tests that pass against the bug they target.** Seven shipped across the client rounds, plus
+several on the gateway, *including tests written specifically to fix earlier false greens*:
+
+- a mode assertion that passed against the very non-atomic writer it targeted (the discriminator is
+  the **inode**, since the old writer also ends at `0600` after its `chmod`)
+- a fixture that made `metadata["headers"]` and `proxy_server_request["headers"]` the **same dict
+  object**, so it could never distinguish the two copies it asserted about
+- a migration fake that iterated a dict in insertion order, so it could not exhibit the page
+  instability it existed to detect
+- a role test covering only fresh creation, while the bug was that *existing* principals were never
+  reconciled
+- `<= 3` where the buggy single-pass version satisfies it with 1 — upper bounds assert termination,
+  exact counts discriminate
+- a "different token" built as `token.slice(0,-1) + "0"`, which reconstructs the original ~1 in 16
+  times (measured 7.06% over 10,000 tokens against the 6.25% the hex alphabet predicts)
+
+The only thing that reliably caught these was **revert the fix, run the test, watch it go red**. And
+a late refinement: two near-misses were invalid *experiments* rather than invalid tests — a revert
+that threw a `ReferenceError` aborted before the assertion could discriminate, and a heredoc silently
+ate invisible PUA literals so both comparators agreed. When a revert makes a test pass, first prove
+the revert actually reached the code.
+
+**Findings that mattered most, in rough order:**
+
+| Finding | Why it mattered |
+|---|---|
+| LiteLLM's `internal_user` role includes `/key/*` | A free-tier key could mint itself unlimited keys through its own inference port. Fixed with `internal_user_viewer`; key-level `allowed_routes` does *not* help, as it is only consulted in a later `elif`. |
+| 37 real over-privileged principals | The migration found them on our own stack, 36 predating this work. "Self-healing on re-registration" only repairs a *cooperative* principal; an attacker never comes back. |
+| `async_logging_hook` never fires on failures | Any forced error shipped raw prompts to Langfuse with no redaction at all. |
+| Secrets in `tools[].function.description` | Reached Langfuse raw, because tools ride in `optional_params`, not `messages` — confirmed by canary before fixing. |
+| Migration offset paging over unstable ordering | `/user/list` sorts by nothing unless asked, so rows shift between pages and displaced ones are never seen — then it reports success. The exact silent-partial failure of the snippet it replaced. |
+| Atomic write without a shared lock | Made a partial-corruption bug *worse*: the last rename now deletes the other writer's credential outright (reproduced 40/40). |
+| `AuthService` narrowed the credential schema | Adding or removing any other provider silently dropped our `install_secret` and `base_url`. Surfaced only when the two `Auth` implementations were put side by side. |
+
+**Two claims corrected by measurement**, both of which I had relayed as fact: a ~60s role-propagation
+cache window (measured 0s in our configuration) and a budget-reset postponement (this version uses
+calendar-aligned resets — verified across three consecutive registrations).
+
+**Stopped without a clean verdict.** The final gateway review was terminated by a provider-side
+content refusal after ~50 minutes, and an earlier attempt was killed mid-run, so one round-3 finding
+was never identified. That is an absence of a verdict, not evidence of safety, and it should be read
+that way.
 
 ## Follow-ups discovered during the build (tracked separately, none blocking)
 
