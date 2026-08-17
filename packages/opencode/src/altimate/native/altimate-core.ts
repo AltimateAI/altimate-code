@@ -207,7 +207,7 @@ export function registerAll(): void {
       // occurrence, so a PR that ADDS a second identical injection still
       // reports it. Recompute safe/risk_score from the surviving threats so a
       // fully pre-existing threat set doesn't leave a stale unsafe verdict.
-      let safety: Record<string, unknown> = redactScan(toData(core.scanSql(params.sql)))
+      let safety: Record<string, unknown> = toData(core.scanSql(params.sql))
       if (params.base_sql) {
         try {
           const baseCounts = new Map<string, number>()
@@ -243,6 +243,10 @@ export function registerAll(): void {
           // Unscannable base — keep the full head scan (fail open to MORE findings).
         }
       }
+      // Redact AFTER diff-scoping: subtraction must compare raw engine
+      // matched_patterns on both sides (redacting first would rewrite head
+      // multi_statement keys to "<redacted>" and never match the base).
+      safety = redactScan(safety)
       // PII exposure for the composite check — the tool has always rendered a
       // PII section; previously nothing populated it. Additive: a PII failure
       // must not fail the whole composite.

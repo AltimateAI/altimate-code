@@ -58,6 +58,17 @@ describeIf("safety handlers redact raw-input echoes (real engine)", () => {
     expect(threats.toLowerCase()).not.toContain("root:x:0")
   })
 
+  test("diff-scoping still filters pre-existing multi_statement threats despite redaction", async () => {
+    // Regression (cursor review on #1111): redacting BEFORE base subtraction
+    // rewrote head matched_patterns to "<redacted>" so base keys never matched
+    // and pre-existing threats resurfaced as introduced. Redaction now runs
+    // after subtraction: identical base/head must yield zero threats.
+    const { Dispatcher } = await import("../../src/altimate/native")
+    const r = await Dispatcher.call("altimate_core.check", { sql: PASSWD, base_sql: PASSWD })
+    expect((((r.data as any).safety?.threats ?? []) as any[]).length).toBe(0)
+    expect((r.data as any).safety.safe).toBe(true)
+  })
+
   test("real SQL statement types are preserved in messages", async () => {
     const { Dispatcher } = await import("../../src/altimate/native")
     const r = await Dispatcher.call("altimate_core.safety", { sql: "SELECT 1; DROP TABLE users;" })
