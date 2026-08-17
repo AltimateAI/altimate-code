@@ -1343,3 +1343,82 @@ it.instance(
   { config: { mcp: {} } },
 )
 // altimate_change end
+
+// altimate_change start — the two sorts above must order by CODE POINT, not by UTF-16 code unit.
+//
+// `<` on strings compares UTF-16 code units. Astral characters (U+10000 and above) are stored as
+// surrogate pairs in 0xD800-0xDBFF, which sit BELOW the private-use area at 0xE000-0xF8FF, so an
+// emoji compares as LESS than a PUA glyph by code unit and GREATER by scalar value. Every other
+// prompt-facing sort in the tree uses `compareCodePoints`, so leaving `<` here meant two sorted
+// lists in the same request could disagree about the same pair of names.
+//
+// Both fixtures below are built so the two orderings give DIFFERENT answers — a name set that
+// sorts identically under either comparator cannot tell them apart, and asserting on one would
+// be another green test that proves nothing.
+//
+// Note `McpCatalog.sanitize` has no `u` flag, so it rewrites per code unit: one astral character
+// becomes TWO underscores and one PUA character becomes one. Pairing one astral against two PUA
+// keeps the sanitized names the same length, which is what puts the raw-name tiebreak in play.
+
+const ASTRAL = "\u{1F600}" // U+1F600, surrogates D83D DE00
+const PUA_PAIR = "\uE000\uE000" // two code units, same sanitized width as one astral
+
+it.instance(
+  "orders MCP servers by code point, not by UTF-16 code unit",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Sanitize to `srv__x` and `srv__y`, so the emitted keys are distinct and the only
+        // question is which comes first. By code unit the astral name leads (0xD83D < 0xE000);
+        // by code point the PUA name leads (0xE000 < 0x1F600).
+        for (const name of ["srv" + ASTRAL + "x", "srv" + PUA_PAIR + "y"]) {
+          lastCreatedClientName = name
+          getOrCreateClientState(name).tools = [{ name: "run", inputSchema: { type: "object", properties: {} } }]
+          yield* mcp.add(name, { type: "local", command: ["echo", "test"] })
+        }
+
+        // Exact sequence, not a containment check: the bug reverses these two and nothing else.
+        expect(Object.keys(yield* mcp.tools())).toEqual(["srv__y_run", "srv__x_run"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "breaks sanitized tool-name ties by code point, deciding which colliding tool survives",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Both sanitize to `t__`, so they collide on one key and FIRST WINS — which makes the
+        // raw-name tiebreak observable as the surviving tool's description rather than as an
+        // order. By code unit the astral name wins; by code point the PUA name wins.
+        const astralTool = {
+          name: "t" + ASTRAL,
+          description: "astral",
+          inputSchema: { type: "object", properties: {} },
+        }
+        const puaTool = {
+          name: "t" + PUA_PAIR,
+          description: "pua",
+          inputSchema: { type: "object", properties: {} },
+        }
+
+        // Reported in both orders across two servers: the winner must depend on the names alone,
+        // not on the order `tools/list` happened to return them in.
+        lastCreatedClientName = "one"
+        getOrCreateClientState("one").tools = [astralTool, puaTool]
+        yield* mcp.add("one", { type: "local", command: ["echo", "test"] })
+
+        lastCreatedClientName = "two"
+        getOrCreateClientState("two").tools = [puaTool, astralTool]
+        yield* mcp.add("two", { type: "local", command: ["echo", "test"] })
+
+        const tools = yield* mcp.tools()
+        expect(Object.keys(tools).sort()).toEqual(["one_t__", "two_t__"])
+        expect(tools["one_t__"]!.description).toBe("pua")
+        expect(tools["two_t__"]!.description).toBe("pua")
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end

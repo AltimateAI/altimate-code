@@ -31,6 +31,8 @@ const execFileAsync = promisify(execFile)
 // altimate_change end
 import { withTimeout } from "@/util/timeout"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+// altimate_change — one code-point comparator for every prompt-facing sort
+import { compareCodePoints } from "@opencode-ai/core/util/collate"
 import { McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
@@ -1032,7 +1034,10 @@ export const layer = Layer.effect(
       // race. Tool definitions are part of the exact-match prefix that Vertex/Gemini and
       // OpenAI cache, and the record's key order is what reaches the wire — a reshuffle
       // invalidates the entire cached prefix for no reason.
-      for (const [clientName, client] of Object.entries(s.clients).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      // `<` compares UTF-16 code units, which orders astral names below the private-use area and
+      // disagrees with every other sort in the prompt path; `compareCodePoints` is the one
+      // comparator for anything whose order reaches a prompt.
+      for (const [clientName, client] of Object.entries(s.clients).sort(([a], [b]) => compareCodePoints(a, b))) {
         // altimate_change end
         if (s.status[clientName]?.status !== "connected") continue
         const mcpConfig = config[clientName]
@@ -1057,8 +1062,9 @@ export const layer = Layer.effect(
         const ordered = [...listed].sort((a, b) => {
           const sa = McpCatalog.sanitize(a.name)
           const sb = McpCatalog.sanitize(b.name)
-          if (sa !== sb) return sa < sb ? -1 : 1
-          return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+          const bySanitized = compareCodePoints(sa, sb)
+          if (bySanitized !== 0) return bySanitized
+          return compareCodePoints(a.name, b.name)
         })
         for (const mcpTool of ordered) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
