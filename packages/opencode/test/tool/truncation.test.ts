@@ -9,7 +9,7 @@ import { Identifier } from "../../src/id/id"
 import { Process } from "@/util/process"
 import path from "path"
 import { testEffect } from "../lib/effect"
-import { writeFileStringScoped } from "../lib/filesystem"
+import { symlinkScoped, writeFileStringScoped } from "../lib/filesystem"
 import { TestConfig } from "../fixture/config"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
@@ -262,7 +262,10 @@ describe("Truncate", () => {
         yield* writeFileStringScoped(old, "old content")
         yield* writeFileStringScoped(recent, "recent content")
         const nfs = yield* Effect.promise(() => import("node:fs/promises"))
-        yield* Effect.promise(() => nfs.symlink(path.join(Truncate.DIR, "nonexistent-target"), dangling))
+        // Scoped: the finalizer unlinks it even when an assertion fails —
+        // otherwise a failed expect would leak the link into the real data
+        // dir, where the fail-safe under test deliberately keeps it forever.
+        yield* symlinkScoped(path.join(Truncate.DIR, "nonexistent-target"), dangling)
         const oldTime = new Date(Date.now() - 10 * DAY_MS)
         const recentTime = new Date(Date.now() - 3 * DAY_MS)
         yield* Effect.promise(() => nfs.utimes(old, oldTime, oldTime))
@@ -275,7 +278,6 @@ describe("Truncate", () => {
         // dangling link even when the link itself survived.
         const danglingKept = yield* Effect.promise(() => nfs.lstat(dangling).then(() => true).catch(() => false))
         expect(danglingKept).toBe(true)
-        yield* Effect.promise(() => nfs.unlink(dangling).catch(() => {}))
       }),
     )
   })
