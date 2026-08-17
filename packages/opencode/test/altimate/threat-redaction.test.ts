@@ -35,6 +35,17 @@ describe("redactThreatText", () => {
     expect(EngineCoerce.redactThreatText("Statement type 'PRIVATE NOTE' is not in the allowed list")).toBe(
       "Statement type '<non-SQL content redacted>' is not in the allowed list",
     )
+    // A keyword PREFIX must not preserve an arbitrary tail.
+    expect(EngineCoerce.redactThreatText("Disallowed statement type: SET SECRET PASSWORD")).toBe(
+      "Disallowed statement type: <non-SQL content redacted>",
+    )
+    expect(EngineCoerce.redactThreatText("Disallowed statement type: DROP DEAD FRED")).toBe(
+      "Disallowed statement type: <non-SQL content redacted>",
+    )
+    // Compound statement types made purely of keywords stay useful.
+    expect(EngineCoerce.redactThreatText("Disallowed statement type: DROP INDEX IF EXISTS")).toBe(
+      "Disallowed statement type: DROP INDEX IF EXISTS",
+    )
   })
 
   test("embedded apostrophes cannot close the quoted match early", () => {
@@ -103,15 +114,27 @@ describeIf("safety consumers redact raw-input echoes (real engine)", () => {
 
   test("sql.analyze does not echo non-SQL file content in issues", async () => {
     const r = await D.call("sql.analyze", { sql: PASSWD })
-    const text = JSON.stringify((r as any).issues ?? [])
+    const safetyIssues = (((r as any).issues ?? []) as any[]).filter((i) => i.type === "safety")
+    // The sanitizer must actually be exercised — no safety issues would make
+    // the not-contains assertion vacuous.
+    expect(safetyIssues.length).toBeGreaterThan(0)
+    const text = JSON.stringify(safetyIssues)
     expect(text.toLowerCase()).not.toContain("root:x:0")
+    expect(text).toContain("redacted")
   })
 
-  test("altimate_core.grade nested safety threats are redacted", async () => {
+  test("altimate_core.grade result does not echo non-SQL file content", async () => {
+    // EvalResult's safety section is { method, score } — no threat scan to
+    // echo (the handler's redactScan is defense-in-depth if that changes).
+    // Assert the whole result is echo-free, minus the `sql` field, which by
+    // contract carries back the caller's own input.
     const r = await D.call("altimate_core.grade", { sql: PASSWD })
     expect(r.success).toBe(true)
-    const text = JSON.stringify(((r.data as any).safety?.threats ?? []))
-    expect(text.toLowerCase()).not.toContain("root:x:0")
+    // `sql` (EvalResult) and `lint.sql` (LintResult) carry back the caller's
+    // own input by contract and are never rendered by the CLI grade check.
+    const { sql: _echoedInput, ...rest } = r.data as any
+    if (rest.lint) rest.lint = { ...rest.lint, sql: undefined }
+    expect(JSON.stringify(rest).toLowerCase()).not.toContain("root:x:0")
   })
 
   test("diff-scoping still filters pre-existing multi_statement threats despite redaction", async () => {
