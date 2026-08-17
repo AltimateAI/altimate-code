@@ -370,7 +370,14 @@ export namespace WorkspaceApi {
     } else {
       rows = []
     }
+    // Filter valid row objects BEFORE map (Kilo cycle 5) — a single ``null``
+    // (or non-object) element in an otherwise-valid array would otherwise
+    // throw ``TypeError: Cannot read properties of null`` on ``d.id`` before
+    // the post-map filter can drop it. That's the exact picker-down failure
+    // the round-3/4 envelope guards were added to prevent, just from a
+    // per-element rather than per-envelope malformed value.
     return rows
+      .filter((d): d is Row => d !== null && typeof d === "object")
       .map((d) => ({ id: Number(d.id), name: d.name }))
       .filter((d) => Number.isInteger(d.id) && d.id > 0 && typeof d.name === "string")
   }

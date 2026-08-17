@@ -230,34 +230,49 @@ async function createAndBindInline(
     }
   }
 
-  await recordApprovedBinding(api.state.path.directory, {
-    datamateId: res.datamate.id,
-    datamateName: res.datamate.name,
-    repoRemote: res.binding.repo_remote,
-    projectPath: res.binding.project_path,
-    linkedAt: Date.now(),
-  })
-  // Guard against a non-http(s) manage_url — ``open`` dispatches to whatever
-  // OS handler matches the protocol, so a rogue value could launch an
-  // unrelated app. Fall through to the info toast (with the URL for manual
-  // copy) if the URL isn't a safe http/https link.
-  if (isSafeHttpUrl(res.manage_url)) {
-    try {
-      await open(res.manage_url)
-      api.ui.toast({
-        variant: "success",
-        message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
-      })
-      return
-    } catch {
-      /* fall through to the "open manually" toast below */
+  // Post-success tail — this function is invoked fire-and-forget
+  // (``void createAndBindInline(...)``), so a bare rejection here would
+  // surface as an unhandled promise and terminate the TUI. Contain the
+  // fallout inside the function itself: ``recordApprovedBinding`` already
+  // swallows its own errors (state.ts is best-effort), but ``open()`` and
+  // the toast APIs can reject unexpectedly. Fall back to a plain info
+  // toast so the user still sees the URL. (Kilo cycle 5.)
+  try {
+    await recordApprovedBinding(api.state.path.directory, {
+      datamateId: res.datamate.id,
+      datamateName: res.datamate.name,
+      repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
+      linkedAt: Date.now(),
+    })
+    // Guard against a non-http(s) manage_url — ``open`` dispatches to whatever
+    // OS handler matches the protocol, so a rogue value could launch an
+    // unrelated app. Fall through to the info toast (with the URL for manual
+    // copy) if the URL isn't a safe http/https link.
+    if (isSafeHttpUrl(res.manage_url)) {
+      try {
+        await open(res.manage_url)
+        api.ui.toast({
+          variant: "success",
+          message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
+        })
+        return
+      } catch {
+        /* fall through to the "open manually" toast below */
+      }
     }
+    api.ui.toast({
+      variant: "info",
+      message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
+      duration: 10_000,
+    })
+  } catch (err) {
+    api.ui.toast({
+      variant: "info",
+      message: `Workspace "${res.datamate.name}" created and linked.`,
+    })
+    void err
   }
-  api.ui.toast({
-    variant: "info",
-    message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
-    duration: 10_000,
-  })
 }
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
