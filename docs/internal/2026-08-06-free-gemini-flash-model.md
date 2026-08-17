@@ -405,6 +405,37 @@ test that fails when a *new* carrier appears** — plant a canary in every clien
 assert the stored document contains none of them, run on every image bump — plus the same treatment
 for spend logs.
 
+## Round 5: the enumeration held, the per-field claims did not
+
+A Codex review *of the enumeration* found four more issues, which settles the completeness question
+empirically. The structural result is the useful part: **both new carriers were inside fields already
+classified as masked**, not new fields. Field-level enumeration held; per-field claims were too coarse.
+
+- **Dictionary KEYS were never masked** — only values. `tools[].function.parameters.properties` is a
+  caller-authored object whose *keys* are field names, so a secret used as a property name was stored
+  in the clear beside its masked value, and the request-path scan ignored keys too, so no
+  `redacted:` tag fired either.
+- **`redact_messages` covered a named four** (`content`, `tool_calls`, `function_call`, `name`).
+  Everything else in a caller-authored message went raw: `tool_call_id`, `reasoning_content`,
+  `thinking_blocks`, and any unknown key the schema accepts — three of which were listed as
+  secret-bearing *elsewhere in our own code*.
+- **The fail-closed path left metadata intact, and a caller can trigger it deliberately** — masking
+  raises past 24 levels of nesting, and a permitted tool schema can be nested that deep, so an
+  attacker forces the failure and `_withhold` blanks everything except the widest carrier.
+- **A strip rule deleted by remembered name.** A name in the caller's snapshot proves they supplied
+  the *name*, not that the value is still theirs; the proxy later writes the authoritative hashed
+  token to that key, and the rule would have deleted it. Provenance was proven; deletion was not.
+
+**Verification lesson worth more than the fixes: check whose placeholder it is.** The failure-text
+carrier appeared masked in the trace — as bare `REDACTED`, which is *LiteLLM's* placeholder, not
+ours. Recording that as our coverage would have made a future `LITELLM_DISABLE_REDACT_SECRETS=true`
+a silent unmasking. Setting that variable and re-running showed our own typed placeholder underneath,
+so both layers cover it independently.
+
+**A fifth false-green mechanism:** a test using a hand-written stand-in for a pydantic model passed
+against reverted code, because the walk it was testing only fires on real models — the same shape as
+an earlier `Delta` fixture. A stand-in cannot exercise code that keys off the real type.
+
 ## Notes for a human reviewer
 
 - **18 of 39 changed `.ts`/`.tsx` files fail `prettier`, and it is pre-existing** — verified by
