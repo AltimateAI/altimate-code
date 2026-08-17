@@ -63,11 +63,12 @@ export const layer = Layer.effect(
       )
       for (const entry of entries) {
         const file = path.join(TRUNCATION_DIR, entry)
-        const mtimeMs = yield* Effect.tryPromise(() => import("node:fs/promises").then((nfs) => nfs.stat(file))).pipe(
-          Effect.map((st) => st.mtimeMs),
-          // Unstat-able file: keep it — deletion must fail safe.
-          Effect.catch(() => Effect.succeed(Number.POSITIVE_INFINITY)),
-        )
+        // Stat through the INJECTED filesystem (FSUtil extends FileSystem) so
+        // custom/in-memory providers behave identically to the host FS.
+        const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        // Unstat-able file or absent mtime: keep it — deletion must fail safe.
+        const mtimeMs =
+          info && Option.isSome(info.mtime) ? info.mtime.value.getTime() : Number.POSITIVE_INFINITY
         if (mtimeMs >= cutoffMs) continue
         yield* fs.remove(file).pipe(Effect.catch(() => Effect.void))
       }
