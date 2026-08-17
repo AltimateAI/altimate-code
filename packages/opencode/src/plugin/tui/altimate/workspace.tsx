@@ -762,6 +762,20 @@ async function runFlow(
 // Plugin registration
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Report a fire-and-forget flow failure. The keymap ``run()`` callbacks
+ * discard the returned promise with ``void``, so any rejection from
+ * ``recordApprovedBinding`` / ``readLocalBinding`` / anything else awaited
+ * inside would otherwise surface as an unhandled rejection and terminate
+ * the TUI process. Log + surface a toast so the user knows the workspace
+ * flow bailed. (CR round 2.) */
+function reportFlowFailure(api: TuiPluginApi, err: unknown): void {
+  log.error("workspace flow failed", { err: err instanceof Error ? err.message : String(err) })
+  api.ui.toast({
+    variant: "error",
+    message: "Workspace setup failed — see the CLI log for details.",
+  })
+}
+
 const tui: TuiPlugin = async (api) => {
   api.keymap.registerLayer({
     commands: [
@@ -771,7 +785,7 @@ const tui: TuiPlugin = async (api) => {
         category: "Altimate",
         namespace: "internal",
         run() {
-          void runFlow(api, api.state.path.directory)
+          runFlow(api, api.state.path.directory).catch((err) => reportFlowFailure(api, err))
         },
       },
       {
@@ -782,7 +796,9 @@ const tui: TuiPlugin = async (api) => {
         run() {
           // User-initiated → jump straight to picker (currently-linked marked,
           // "＋ Create new" as the first row). No Skip funnel — they invoked.
-          void runOnDemandPicker(api, api.state.path.directory)
+          runOnDemandPicker(api, api.state.path.directory).catch((err) =>
+            reportFlowFailure(api, err),
+          )
         },
       },
     ],

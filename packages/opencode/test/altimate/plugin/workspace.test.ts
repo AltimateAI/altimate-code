@@ -5,16 +5,28 @@
 // they need a running TUI harness and are covered by the manual smoke plan.
 // This file focuses on the deterministic layer: URL parsing, git detection,
 // state read/write + chmod, latch semantics, and error classification.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
 // Redirect Global.Path.state BEFORE importing the module under test so its
-// module-level cachePath() resolves inside the sandbox.
+// module-level cachePath() resolves inside the sandbox. Restore the original
+// XDG_STATE_HOME in afterAll so parallel test files aren't polluted by our
+// process-scoped tempdir. (CR round 2 — test isolation.)
+const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
 const SANDBOX = path.join(os.tmpdir(), `altimate-workspace-test-${process.pid}-${Date.now()}`)
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+afterAll(() => {
+  if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
+  try {
+    rmSync(SANDBOX, { recursive: true, force: true })
+  } catch {
+    /* best effort */
+  }
+})
 
 const { isSkipActive, recordSkip } = await import(
   "../../../src/plugin/tui/altimate/workspace"
@@ -98,8 +110,14 @@ describe("projectNameFromRemote", () => {
 
 describe("detectProjectRemote", () => {
   test("returns undefined when directory is not a git repo", () => {
-    // /tmp is never a git repo in a stock macOS install.
-    const result = detectProjectRemote(os.tmpdir())
+    // Use a FRESHLY-created empty directory inside SANDBOX rather than
+    // ``os.tmpdir()`` — an ancestor of the system tmpdir can be inside a
+    // git worktree (e.g. when the whole /tmp is on a repo-managed volume),
+    // and ``git remote get-url`` would then walk up and return the parent
+    // repo's remote. (CR round 2.)
+    const emptyDir = path.join(SANDBOX, `empty-${Date.now()}`)
+    mkdirSync(emptyDir, { recursive: true })
+    const result = detectProjectRemote(emptyDir)
     expect(result).toBeUndefined()
   })
 })

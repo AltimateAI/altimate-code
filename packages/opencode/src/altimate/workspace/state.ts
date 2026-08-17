@@ -43,12 +43,38 @@ export function cachePath(): string {
   return path.join(Global.Path.state, "altimate-workspace-bindings.json")
 }
 
+/** Runtime shape check for a parsed cache file — the JSON blob comes from
+ * disk and could be anything (older CLI version, hand-edited, corrupted
+ * mid-write). The type assertion alone doesn't guard against e.g.
+ * ``{"version": 1, "bindings": null}`` which then throws on
+ * ``cache.bindings[k]``. Discard anything that fails the shape check so
+ * readers always get a valid ``CacheFile`` or null. (CR round 2.) */
+function isValidCacheFile(raw: unknown): raw is CacheFile {
+  if (!raw || typeof raw !== "object") return false
+  const r = raw as Record<string, unknown>
+  if (r.version !== CACHE_VERSION) return false
+  if (typeof r.tenant !== "string" || !r.tenant) return false
+  if (typeof r.apiUrl !== "string" || !r.apiUrl) return false
+  if (!r.bindings || typeof r.bindings !== "object" || Array.isArray(r.bindings)) return false
+  for (const [k, v] of Object.entries(r.bindings)) {
+    if (typeof k !== "string") return false
+    if (!v || typeof v !== "object") return false
+    const b = v as Record<string, unknown>
+    if (typeof b.datamateId !== "number" || !Number.isInteger(b.datamateId)) return false
+    if (typeof b.datamateName !== "string") return false
+    if (b.repoRemote !== null && typeof b.repoRemote !== "string") return false
+    if (b.projectPath !== null && typeof b.projectPath !== "string") return false
+    if (typeof b.linkedAt !== "number") return false
+  }
+  return true
+}
+
 function readCache(): CacheFile | null {
   const p = cachePath()
   if (!existsSync(p)) return null
   try {
-    const raw = JSON.parse(readFileSync(p, "utf8")) as CacheFile
-    if (!raw || raw.version !== CACHE_VERSION) return null
+    const raw = JSON.parse(readFileSync(p, "utf8")) as unknown
+    if (!isValidCacheFile(raw)) return null
     return raw
   } catch (err) {
     log.warn("workspace binding cache is corrupt, discarding", {

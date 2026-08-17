@@ -152,6 +152,7 @@ async function req<T>(
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   let res: Response
+  let text: string
   try {
     res = await fetch(target, {
       method,
@@ -163,10 +164,16 @@ async function req<T>(
       signal: controller.signal,
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
     })
+    // Keep the AbortController timeout ACTIVE while we read the response body.
+    // ``fetch()`` resolves after headers arrive; a server can send headers then
+    // stall the body stream indefinitely, so pulling the body inside the same
+    // try/finally is the difference between our 15s cap and hanging until TCP
+    // gives up. (CR bot-review round 2.)
+    text = await res.text().catch(() => "")
   } catch (err) {
     // Distinguish "we hit our 15s abort" from "network stack failed" so the
     // caller can decide differently (retry, longer timeout, offline banner).
-    // (m8 in the consensus review.)
+    // The abort fires equally when it kills the fetch OR the body read. (m8)
     const name = (err as { name?: string } | undefined)?.name
     if (name === "AbortError") {
       throw new WorkspaceApiError(
@@ -179,7 +186,6 @@ async function req<T>(
     clearTimeout(timeout)
   }
   let json: unknown = undefined
-  const text = await res.text().catch(() => "")
   if (text) {
     try {
       json = JSON.parse(text)

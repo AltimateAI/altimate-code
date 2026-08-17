@@ -44,46 +44,59 @@ const workspaceLog = Log.create({ service: "altimate-workspace" })
  */
 const pendingWorkspacePromptSessions = new Set<string>()
 let workspacePromptUnsubscribe: (() => void) | null = null
+// Guard against two concurrent scans passing the ``!workspacePromptUnsubscribe``
+// check before either install completes — both would then install a listener
+// and the later assignment would overwrite the first disposer, leaking the
+// first listener for the process lifetime. Store the in-flight install as a
+// shared promise so concurrent callers await the same result. (CR round 2.)
+let workspacePromptInstall: Promise<void> | null = null
 
 async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void> {
   pendingWorkspacePromptSessions.add(sessionID)
   if (workspacePromptUnsubscribe) return
-  try {
-    const unsubscribe = await AppRuntime.runPromise(
-      EventV2Bridge.Service.use((events) =>
-        events.listen((event) =>
-          Effect.gen(function* () {
-            if (event.type !== SessionEvent.Idle.type) return
-            const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
-            if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
-            pendingWorkspacePromptSessions.delete(sid)
-            yield* events.publish(TuiEvent.CommandExecute, {
-              command: "altimate.workspace.postScan",
-            })
-            // Once the Set drains, tear the listener down. A later scan
-            // that adds a new pending session re-arms it from scratch.
-            if (pendingWorkspacePromptSessions.size === 0 && workspacePromptUnsubscribe) {
-              const teardown = workspacePromptUnsubscribe
-              workspacePromptUnsubscribe = null
-              try {
-                teardown()
-              } catch (err) {
-                workspaceLog.warn("session-idle listener teardown failed", {
-                  err: String(err),
-                })
+  if (workspacePromptInstall) return workspacePromptInstall
+
+  workspacePromptInstall = (async () => {
+    try {
+      const unsubscribe = await AppRuntime.runPromise(
+        EventV2Bridge.Service.use((events) =>
+          events.listen((event) =>
+            Effect.gen(function* () {
+              if (event.type !== SessionEvent.Idle.type) return
+              const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
+              if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
+              pendingWorkspacePromptSessions.delete(sid)
+              yield* events.publish(TuiEvent.CommandExecute, {
+                command: "altimate.workspace.postScan",
+              })
+              // Once the Set drains, tear the listener down. A later scan
+              // that adds a new pending session re-arms it from scratch.
+              if (pendingWorkspacePromptSessions.size === 0 && workspacePromptUnsubscribe) {
+                const teardown = workspacePromptUnsubscribe
+                workspacePromptUnsubscribe = null
+                try {
+                  teardown()
+                } catch (err) {
+                  workspaceLog.warn("session-idle listener teardown failed", {
+                    err: String(err),
+                  })
+                }
               }
-            }
-          }),
+            }),
+          ),
         ),
-      ),
-    )
-    workspacePromptUnsubscribe = unsubscribe as unknown as () => void
-  } catch (err) {
-    // Install failed — drop the pending session so the next scan retries
-    // from scratch instead of accumulating a stale id that will never fire.
-    pendingWorkspacePromptSessions.delete(sessionID)
-    workspaceLog.warn("session-idle listener install failed", { err: String(err) })
-  }
+      )
+      workspacePromptUnsubscribe = unsubscribe as unknown as () => void
+    } catch (err) {
+      // Install failed — drop the pending session so the next scan retries
+      // from scratch instead of accumulating a stale id that will never fire.
+      pendingWorkspacePromptSessions.delete(sessionID)
+      workspaceLog.warn("session-idle listener install failed", { err: String(err) })
+    } finally {
+      workspacePromptInstall = null
+    }
+  })()
+  return workspacePromptInstall
 }
 // altimate_change end
 
