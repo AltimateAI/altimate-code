@@ -215,8 +215,11 @@ async function req<T>(
   // ``.manage_url``), so silently handing back ``undefined as T`` produces a
   // ``TypeError`` inside caller code that the typed-error switches can't
   // classify. Surface it as a WorkspaceApiError instead — unless the caller
-  // opted in via ``allowEmptyBody`` (e.g. 204 endpoints). (m7)
-  if (json === undefined && !opts.allowEmptyBody) {
+  // opted in via ``allowEmptyBody`` (e.g. 204 endpoints). Use ``== null`` so a
+  // literal ``JSON.parse("null")`` (which sets json to null, not undefined)
+  // is treated as an empty body too — otherwise ``null as T`` reaches callers
+  // and .foo throws in a way the typed switches can't classify. (m7 + CR)
+  if (json == null && !opts.allowEmptyBody) {
     throw new WorkspaceApiError(
       `Empty ${res.status} body from ${target} — expected JSON payload`,
       res.status,

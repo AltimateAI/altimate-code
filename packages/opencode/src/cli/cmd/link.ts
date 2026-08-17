@@ -211,8 +211,28 @@ async function createThenBindOrRebind(
     linkedAt: Date.now(),
   })
   prompts.log.info(`Manage it at: ${created.manage_url}`)
-  await open(created.manage_url).catch(() => undefined)
+  // Guard against a server that hands back a non-http(s) manage_url — ``open``
+  // delegates to the OS handler, so a rogue value could launch an unrelated
+  // application. Log a warning and skip the auto-open rather than trusting
+  // whatever protocol the URL parses to.
+  if (isSafeHttpUrl(created.manage_url)) {
+    await open(created.manage_url).catch(() => undefined)
+  } else {
+    prompts.log.warn(`Skipped auto-open: manage_url is not an http/https URL.`)
+  }
   prompts.outro("Done.")
+}
+
+/** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
+ * Used before handing a server-supplied URL to ``open()`` (which would otherwise
+ * dispatch to whatever OS scheme handler matches the protocol). */
+function isSafeHttpUrl(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return u.protocol === "http:" || u.protocol === "https:"
+  } catch {
+    return false
+  }
 }
 
 async function bindOrRebind(

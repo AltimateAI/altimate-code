@@ -191,18 +191,38 @@ async function createAndBindInline(
     projectPath: res.binding.project_path,
     linkedAt: Date.now(),
   })
+  // Guard against a non-http(s) manage_url — ``open`` dispatches to whatever
+  // OS handler matches the protocol, so a rogue value could launch an
+  // unrelated app. Fall through to the info toast (with the URL for manual
+  // copy) if the URL isn't a safe http/https link.
+  if (isSafeHttpUrl(res.manage_url)) {
+    try {
+      await open(res.manage_url)
+      api.ui.toast({
+        variant: "success",
+        message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
+      })
+      return
+    } catch {
+      /* fall through to the "open manually" toast below */
+    }
+  }
+  api.ui.toast({
+    variant: "info",
+    message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
+    duration: 10_000,
+  })
+}
+
+/** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
+ * Used before handing a server-supplied URL to ``open()`` (which would otherwise
+ * dispatch to whatever OS scheme handler matches the protocol). */
+function isSafeHttpUrl(url: string): boolean {
   try {
-    await open(res.manage_url)
-    api.ui.toast({
-      variant: "success",
-      message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
-    })
+    const u = new URL(url)
+    return u.protocol === "http:" || u.protocol === "https:"
   } catch {
-    api.ui.toast({
-      variant: "info",
-      message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
-      duration: 10_000,
-    })
+    return false
   }
 }
 
