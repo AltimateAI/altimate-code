@@ -12,9 +12,8 @@ export const writeFileStringScoped = Effect.fn("test.writeFileStringScoped")(fun
 /** Create a symlink whose removal is guaranteed by the test scope, even when
  *  an assertion fails mid-test (finalizers run on scope close regardless). */
 export const symlinkScoped = Effect.fn("test.symlinkScoped")(function* (target: string, link: string) {
-  yield* Effect.promise(() => import("node:fs/promises").then((nfs) => nfs.symlink(target, link)))
-  yield* Effect.addFinalizer(() =>
-    Effect.promise(() => import("node:fs/promises").then((nfs) => nfs.unlink(link).catch(() => {}))),
-  )
+  const fs = yield* FileSystem.FileSystem
+  yield* fs.symlink(target, link)
+  yield* Effect.addFinalizer(() => fs.remove(link, { force: true }).pipe(Effect.orDie))
   return link
 })
