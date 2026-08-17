@@ -436,6 +436,60 @@ so both layers cover it independently.
 against reverted code, because the walk it was testing only fires on real models — the same shape as
 an earlier `Delta` fixture. A stand-in cannot exercise code that keys off the real type.
 
+## The sweep test — how this stopped
+
+`issuer/tests/test_carrier_sweep.py` plants a distinct canary in **23 client-reachable positions**
+(dict keys as well as values at depth, every message field including unknown ones and
+`tool_call_id`, body-metadata keys/values/nesting, `litellm_metadata`, header names *and* values,
+tool-schema names/descriptions/property-names/enum-values/defaults, plus `user`, `stop`,
+`User-Agent`, session id) and asserts the **stored trace document** contains none of them. It fetches
+the full trace so observations are embedded, waits for the observation rather than asserting into the
+ingestion gap, and **fails rather than skips** without Langfuse credentials. Runbook command sits
+next to the enumeration in the gateway README. It costs ~$0.0002 a run, so running it on every image
+bump is free in practice — which matters, because three carriers are covered by upstream accident.
+
+**First run found nothing new** — zero raw canaries across all 23 positions, with 29 of our
+placeholders visible, so masking was demonstrably running rather than the payload having missed. The
+field-level enumeration held, and so did the positional expansion of it.
+
+But it did not *pass* first time, and the reason is the better result: the request included an orphan
+`role: "tool"` message, so the whole sweep silently ran down the **failure** path where upstream's
+redaction masks error text first. The attribution check caught it — four bare `REDACTED` markers that
+were not ours. The sweep now asserts `status_code == 200`, because a sweep that quietly runs on the
+failure path is weaker than it looks and nothing else would have said so.
+
+**Attribution lives in the assertion, not the prose:** the sweep strips our `[REDACTED:*]`
+placeholders and fails on any remaining bare `REDACTED`, since that is upstream's and would unmask on
+an env-var change.
+
+**The anti-vacuity exercise produced two more fixes**, which is the argument for always doing it:
+- The withhold revert came back **GREEN** — every canary it planted was covered by some *other* part
+  of `_withhold`, so removing the metadata branch changed nothing observable. It needed a canary that
+  reaches metadata *and* survives the request-path strip (`User-Agent`, which the proxy writes into
+  metadata after the caller's snapshot is taken). A test that cannot observe the thing it names is
+  the same class of defect as a false green.
+- The strip revert exposed a real missing second layer: a metadata **key** whose *name* is a secret.
+  `_mask_metadata_values` rewrote what keys pointed at, never the key itself. Not a live leak — the
+  strip removes those keys first — but the defence in depth was absent, and only the revert showed it.
+
+### What the sweep does NOT cover
+
+Written down rather than assumed:
+
+1. **Positions no client can reach today** (`_arealtime` input, non-chat output branches, guardrail
+   and grounding spans). Enabling a route or a guardrail widens the surface without changing a sweep
+   result — the sweep cannot tell you that you enabled something.
+2. **The Postgres spend logs.** Trace store only. `standard_logging_object` is built before the
+   logging hook and carries unmasked `messages`.
+3. **Secret *shapes* we have no rule for.** Every canary is AWS-key shaped because that rule is
+   unambiguous. The sweep proves **positions** are masked; it says nothing about pattern coverage, and
+   a credential shape absent from `_RULES` passes all 23 positions cleanly. **This is now the largest
+   uncovered thing on this surface, and it is a different axis from the carrier work.**
+4. **Masking quality** — absence of the canary, not whether the placeholder keeps a trace debuggable.
+
+The recommendation from the agent that built it, which I endorse: do not run another enumeration
+round against the trace store. Point the next one at the pattern set.
+
 ## Notes for a human reviewer
 
 - **18 of 39 changed `.ts`/`.tsx` files fail `prettier`, and it is pre-existing** — verified by
