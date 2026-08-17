@@ -168,8 +168,11 @@ async function req<T>(
     // ``fetch()`` resolves after headers arrive; a server can send headers then
     // stall the body stream indefinitely, so pulling the body inside the same
     // try/finally is the difference between our 15s cap and hanging until TCP
-    // gives up. (CR bot-review round 2.)
-    text = await res.text().catch(() => "")
+    // gives up. (CR round 2.) Do NOT wrap in ``.catch(() => "")`` — that
+    // swallows the AbortError from the timeout firing during the body read
+    // and turns a stalled response into a false "empty body". Rejection
+    // rethrows into the outer catch and is classified there. (cubic round 3.)
+    text = await res.text()
   } catch (err) {
     // Distinguish "we hit our 15s abort" from "network stack failed" so the
     // caller can decide differently (retry, longer timeout, offline banner).
@@ -343,13 +346,24 @@ export namespace WorkspaceApi {
    * doesn't reach the picker as a "NaN" label that the caller then binds
    * against. */
   export async function listDatamates(): Promise<DatamateRef[]> {
-    const body = await req<{ datamates?: Array<{ id: number | string; name: string }> }>(
-      "GET",
-      "/",
-      { base: "/datamates" },
-    )
-    return (body.datamates ?? [])
+    // Accept THREE response envelopes — today's ``{datamates: [...]}``, a
+    // bare ``[...]``, and a generic ``{data: [...]}`` — so a backend
+    // contract change (or compat layer) doesn't silently empty the picker.
+    // (cubic-dev-ai round 3.)
+    type Row = { id: number | string; name: string }
+    const body = await req<Row[] | { datamates?: Row[]; data?: Row[] }>("GET", "/", {
+      base: "/datamates",
+    })
+    let rows: Row[]
+    if (Array.isArray(body)) {
+      rows = body
+    } else if (body && typeof body === "object") {
+      rows = body.datamates ?? body.data ?? []
+    } else {
+      rows = []
+    }
+    return rows
       .map((d) => ({ id: Number(d.id), name: d.name }))
-      .filter((d) => Number.isInteger(d.id) && d.id > 0)
+      .filter((d) => Number.isInteger(d.id) && d.id > 0 && typeof d.name === "string")
   }
 }

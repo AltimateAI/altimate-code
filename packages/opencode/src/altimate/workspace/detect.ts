@@ -53,9 +53,17 @@ export function resolveProjectIdentifier(directory: string): {
 
 /** Sensible default workspace name from a remote URL — best-effort. Used to
  * prefill the workspace-name prompt in the CreateDialog and `altimate link`.
- * ``github.com/foo/bar.git`` → ``bar`` ; ``git@github.com:foo/bar.git`` → ``bar``. */
+ * ``github.com/foo/bar.git`` → ``bar`` ; ``git@github.com:foo/bar.git`` → ``bar`` ;
+ * ``https://x/foo/bar.git/`` (trailing slash after .git) → ``bar``. */
 export function projectNameFromRemote(remote: string): string {
-  const trimmed = remote.replace(/\.git$/, "").replace(/\/$/, "")
+  // Strip trailing slashes FIRST, then the ``.git`` suffix, then any
+  // trailing slashes the suffix strip exposed. Order matters — the
+  // previous ``.git$`` → ``/$`` pipeline missed ``.git/`` because the
+  // final ``/`` wasn't ``.git`` any more. (cubic round 3.)
+  const trimmed = remote
+    .replace(/[/]+$/, "")
+    .replace(/\.git$/, "")
+    .replace(/[/]+$/, "")
   const parts = trimmed.split(/[/:]/)
   return parts[parts.length - 1] || "workspace"
 }

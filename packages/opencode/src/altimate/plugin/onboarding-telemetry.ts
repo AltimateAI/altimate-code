@@ -43,7 +43,12 @@ const workspaceLog = Log.create({ service: "altimate-workspace" })
  * second project_scan fires in the same session.
  */
 const pendingWorkspacePromptSessions = new Set<string>()
-let workspacePromptUnsubscribe: (() => void) | null = null
+/** The unsubscribe returned by ``events.listen()`` is an Effect (not a plain
+ * function) — running it removes the listener. Store the Effect and execute
+ * it through ``AppRuntime.runPromise`` on teardown; earlier code cast it to
+ * ``() => void`` and called it directly, which threw because Effects are not
+ * callable as functions. (cubic-dev-ai round 3.) */
+let workspacePromptUnsubscribe: Effect.Effect<void, never, never> | null = null
 // Guard against two concurrent scans passing the ``!workspacePromptUnsubscribe``
 // check before either install completes — both would then install a listener
 // and the later assignment would overwrite the first disposer, leaking the
@@ -55,6 +60,13 @@ async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void>
   pendingWorkspacePromptSessions.add(sessionID)
   if (workspacePromptUnsubscribe) return
   if (workspacePromptInstall) return workspacePromptInstall
+
+  // Capture the set of pending sessions at install-time so an install
+  // failure drains EVERY caller that awaited this install, not just the
+  // one whose sessionID we happen to be handling. Later waiters would
+  // otherwise see success from the shared promise and stop retrying,
+  // leaving permanently-stale entries in the pending set. (cubic round 3.)
+  const armingSessions = new Set(pendingWorkspacePromptSessions)
 
   workspacePromptInstall = (async () => {
     try {
@@ -71,26 +83,29 @@ async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void>
               })
               // Once the Set drains, tear the listener down. A later scan
               // that adds a new pending session re-arms it from scratch.
+              // ``teardown`` is an Effect — run it through the app runtime,
+              // don't call it as a function. (cubic round 3.)
               if (pendingWorkspacePromptSessions.size === 0 && workspacePromptUnsubscribe) {
                 const teardown = workspacePromptUnsubscribe
                 workspacePromptUnsubscribe = null
-                try {
-                  teardown()
-                } catch (err) {
+                AppRuntime.runPromise(teardown).catch((err) => {
                   workspaceLog.warn("session-idle listener teardown failed", {
                     err: String(err),
                   })
-                }
+                })
               }
             }),
           ),
         ),
       )
-      workspacePromptUnsubscribe = unsubscribe as unknown as () => void
+      workspacePromptUnsubscribe = unsubscribe
     } catch (err) {
-      // Install failed — drop the pending session so the next scan retries
-      // from scratch instead of accumulating a stale id that will never fire.
-      pendingWorkspacePromptSessions.delete(sessionID)
+      // Install failed — drop every session that was waiting on this install
+      // so the next scan retries from scratch. Dropping only the current
+      // caller's ID would leave later waiters (already resolved by the
+      // shared install promise) with permanently-stale pending entries.
+      // (cubic round 3.)
+      for (const sid of armingSessions) pendingWorkspacePromptSessions.delete(sid)
       workspaceLog.warn("session-idle listener install failed", { err: String(err) })
     } finally {
       workspacePromptInstall = null

@@ -43,6 +43,7 @@ import {
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
 import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
+import { AltimateApi } from "@/altimate/api/client"
 import { Log } from "@/altimate/util/log"
 
 const PLUGIN_ID = "altimate:workspace"
@@ -58,21 +59,60 @@ const log = Log.create({ service: "altimate-workspace" })
 const SKIP_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const KV_SKIP_PREFIX = "altimate.workspace.postScan.skip."
 
-/** Latch key from the project's primary identifier (remote > path). Path-only
- * projects also get a latch — sample-scaffold users are still users. */
-function skipKey(id: ProjectIdentifier): string {
-  const primary = id.repoRemote ?? id.projectPath ?? ""
-  return KV_SKIP_PREFIX + createHash("sha1").update(primary).digest("hex")
+/** (tenant, apiUrl) scope for the Skip latch — matches the local binding
+ * cache's top-level scoping. Without this a Skip in one Altimate account
+ * suppresses the post-scan prompt for the same project in every other
+ * account for 7 days. Sync-provided by the caller because ``recordSkip`` is
+ * invoked inside the dialog's synchronous ``onSelect`` handler. Null means
+ * "unscoped" (used only when credentials are unavailable). (cubic round 3.) */
+export interface LatchScope {
+  tenant: string
+  apiUrl: string
 }
 
-function isSkipActive(api: TuiPluginApi, id: ProjectIdentifier, nowMs: number): boolean {
-  const rec = api.kv.get<{ skippedAt: number }>(skipKey(id))
+/** Latch key from (tenant, apiUrl, primary identifier). Path-only projects
+ * also get a latch — sample-scaffold users are still users. */
+function skipKey(id: ProjectIdentifier, scope: LatchScope | null): string {
+  const primary = id.repoRemote ?? id.projectPath ?? ""
+  const scopeString = scope ? `${scope.tenant}|${scope.apiUrl}|` : ""
+  return (
+    KV_SKIP_PREFIX +
+    createHash("sha1")
+      .update(scopeString + primary)
+      .digest("hex")
+  )
+}
+
+function isSkipActive(
+  api: TuiPluginApi,
+  id: ProjectIdentifier,
+  scope: LatchScope | null,
+  nowMs: number,
+): boolean {
+  const rec = api.kv.get<{ skippedAt: number }>(skipKey(id, scope))
   if (!rec || typeof rec.skippedAt !== "number") return false
   return nowMs - rec.skippedAt < SKIP_TTL_MS
 }
 
-function recordSkip(api: TuiPluginApi, id: ProjectIdentifier, nowMs: number): void {
-  api.kv.set(skipKey(id), { skippedAt: nowMs })
+function recordSkip(
+  api: TuiPluginApi,
+  id: ProjectIdentifier,
+  scope: LatchScope | null,
+  nowMs: number,
+): void {
+  api.kv.set(skipKey(id, scope), { skippedAt: nowMs })
+}
+
+/** Best-effort ``LatchScope`` from the current CLI credentials. Returns null
+ * on any credential failure — the latch then falls back to an unscoped key. */
+async function currentLatchScope(): Promise<LatchScope | null> {
+  try {
+    if (!(await AltimateApi.isConfigured().catch(() => false))) return null
+    const creds = await AltimateApi.getCredentials()
+    return { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl }
+  } catch {
+    return null
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,6 +126,11 @@ interface OfferProps {
   identifier: ProjectIdentifier
   defaultName: string
   suppressLatch?: boolean // altimate link on-demand skips the Skip latch
+  /** (tenant, apiUrl) scope for the Skip latch. Resolved once by the caller
+   * so the sync ``onSelect`` handler can call ``recordSkip`` without a
+   * mid-render await. Null when creds are unavailable — latch falls back
+   * to unscoped. (cubic round 3.) */
+  latchScope: LatchScope | null
 }
 
 function OfferDialog(props: OfferProps) {
@@ -113,7 +158,8 @@ function OfferDialog(props: OfferProps) {
       current="create"
       onSelect={(option) => {
         if (option.value === "skip") {
-          if (!props.suppressLatch) recordSkip(props.api, props.identifier, Date.now())
+          if (!props.suppressLatch)
+            recordSkip(props.api, props.identifier, props.latchScope, Date.now())
           props.api.ui.dialog.clear()
           return
         }
@@ -647,9 +693,13 @@ async function runFlow(
   opts: { suppressLatch?: boolean } = {},
 ): Promise<void> {
   const identifier = resolveProjectIdentifier(directory)
+  // Resolve latch scope ONCE — passed to isSkipActive here + threaded into
+  // OfferDialog so its sync onSelect can call recordSkip without awaiting.
+  // (cubic round 3.)
+  const latchScope = await currentLatchScope()
   // Path is always populated by resolveProjectIdentifier — projects without a
   // git remote (sample dbt scaffolds, scratch dirs) still get a binding offer.
-  if (!opts.suppressLatch && isSkipActive(api, identifier, Date.now())) {
+  if (!opts.suppressLatch && isSkipActive(api, identifier, latchScope, Date.now())) {
     log.info("workspace prompt suppressed by 7-day Skip latch", {
       identifier: identifier.repoRemote ?? identifier.projectPath,
     })
@@ -713,6 +763,7 @@ async function runFlow(
         identifier={identifier}
         defaultName={defaultName}
         suppressLatch={opts.suppressLatch}
+        latchScope={latchScope}
       />
     ))
     return
@@ -754,6 +805,7 @@ async function runFlow(
       identifier={identifier}
       defaultName={defaultName}
       suppressLatch={opts.suppressLatch}
+      latchScope={latchScope}
     />
   ))
 }

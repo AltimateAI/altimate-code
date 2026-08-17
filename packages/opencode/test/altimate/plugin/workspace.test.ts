@@ -110,15 +110,23 @@ describe("projectNameFromRemote", () => {
 
 describe("detectProjectRemote", () => {
   test("returns undefined when directory is not a git repo", () => {
-    // Use a FRESHLY-created empty directory inside SANDBOX rather than
-    // ``os.tmpdir()`` — an ancestor of the system tmpdir can be inside a
-    // git worktree (e.g. when the whole /tmp is on a repo-managed volume),
-    // and ``git remote get-url`` would then walk up and return the parent
-    // repo's remote. (CR round 2.)
+    // Cubic round 3 caught that "empty dir under SANDBOX" still shares
+    // ``os.tmpdir()``'s ancestor chain — if any ancestor is a git worktree,
+    // ``git remote get-url`` walks up and returns that repo's remote. Set
+    // ``GIT_CEILING_DIRECTORIES`` to stop the walk at SANDBOX so this test
+    // is deterministic regardless of where ``os.tmpdir()`` lives on the
+    // runner.
     const emptyDir = path.join(SANDBOX, `empty-${Date.now()}`)
     mkdirSync(emptyDir, { recursive: true })
-    const result = detectProjectRemote(emptyDir)
-    expect(result).toBeUndefined()
+    const prevCeiling = process.env.GIT_CEILING_DIRECTORIES
+    process.env.GIT_CEILING_DIRECTORIES = SANDBOX
+    try {
+      const result = detectProjectRemote(emptyDir)
+      expect(result).toBeUndefined()
+    } finally {
+      if (prevCeiling === undefined) delete process.env.GIT_CEILING_DIRECTORIES
+      else process.env.GIT_CEILING_DIRECTORIES = prevCeiling
+    }
   })
 })
 
@@ -218,39 +226,50 @@ describe("workspace binding cache", () => {
 
 describe("Skip latch", () => {
   const ident = { repoRemote: "git@github.com:acme/proj-a.git", projectPath: "/work/proj-a" }
+  const scope = { tenant: "acme", apiUrl: "https://api.acme.example.com" }
 
   test("no record → not active", () => {
     const api = { kv: makeKv() } as any
-    expect(isSkipActive(api, ident, Date.now())).toBe(false)
+    expect(isSkipActive(api, ident, scope, Date.now())).toBe(false)
   })
 
   test("recorded within 7 days → active", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, ident, now)
-    expect(isSkipActive(api, ident, now + 6 * 24 * 60 * 60 * 1000)).toBe(true)
+    recordSkip(api, ident, scope, now)
+    expect(isSkipActive(api, ident, scope, now + 6 * 24 * 60 * 60 * 1000)).toBe(true)
   })
 
   test("recorded past 7 days → not active", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, ident, now)
-    expect(isSkipActive(api, ident, now + 8 * 24 * 60 * 60 * 1000)).toBe(false)
+    recordSkip(api, ident, scope, now)
+    expect(isSkipActive(api, ident, scope, now + 8 * 24 * 60 * 60 * 1000)).toBe(false)
   })
 
   test("boundary at exactly 7 days → not active (>= rejects)", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, ident, now)
-    expect(isSkipActive(api, ident, now + 7 * 24 * 60 * 60 * 1000)).toBe(false)
+    recordSkip(api, ident, scope, now)
+    expect(isSkipActive(api, ident, scope, now + 7 * 24 * 60 * 60 * 1000)).toBe(false)
   })
 
   test("different remotes have independent latches", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
-    recordSkip(api, { repoRemote: "git@github.com:acme/one.git", projectPath: "/w/one" }, now)
+    recordSkip(
+      api,
+      { repoRemote: "git@github.com:acme/one.git", projectPath: "/w/one" },
+      scope,
+      now,
+    )
     expect(
-      isSkipActive(api, { repoRemote: "git@github.com:acme/two.git", projectPath: "/w/two" }, now),
+      isSkipActive(
+        api,
+        { repoRemote: "git@github.com:acme/two.git", projectPath: "/w/two" },
+        scope,
+        now,
+      ),
     ).toBe(false)
   })
 
@@ -258,9 +277,21 @@ describe("Skip latch", () => {
     const api = { kv: makeKv() } as any
     const now = 1_700_000_000_000
     const pathOnly = { projectPath: "/scratch/sample-dbt" }
-    recordSkip(api, pathOnly, now)
-    expect(isSkipActive(api, pathOnly, now + 3 * 24 * 60 * 60 * 1000)).toBe(true)
+    recordSkip(api, pathOnly, scope, now)
+    expect(isSkipActive(api, pathOnly, scope, now + 3 * 24 * 60 * 60 * 1000)).toBe(true)
     // A different path is not affected.
-    expect(isSkipActive(api, { projectPath: "/scratch/other" }, now)).toBe(false)
+    expect(isSkipActive(api, { projectPath: "/scratch/other" }, scope, now)).toBe(false)
+  })
+
+  test("different tenant scopes are independent latches (cubic round 3)", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordSkip(api, ident, { tenant: "acme", apiUrl: "https://api.acme.example.com" }, now)
+    expect(
+      isSkipActive(api, ident, { tenant: "other", apiUrl: "https://api.acme.example.com" }, now),
+    ).toBe(false)
+    expect(
+      isSkipActive(api, ident, { tenant: "acme", apiUrl: "https://api.other.example.com" }, now),
+    ).toBe(false)
   })
 })

@@ -64,6 +64,13 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
     if (typeof b.datamateName !== "string") return false
     if (b.repoRemote !== null && typeof b.repoRemote !== "string") return false
     if (b.projectPath !== null && typeof b.projectPath !== "string") return false
+    // At least one identity — otherwise the cached row can never be verified
+    // against a project and would surface as a "phantom" workspace on the
+    // offline-fallback render path. (cubic round 3.)
+    const hasIdentity =
+      (typeof b.repoRemote === "string" && b.repoRemote.length > 0) ||
+      (typeof b.projectPath === "string" && b.projectPath.length > 0)
+    if (!hasIdentity) return false
     if (typeof b.linkedAt !== "number") return false
   }
   return true
@@ -122,11 +129,23 @@ export async function recordApprovedBinding(
 ): Promise<void> {
   const key = await tenantKey()
   if (!key) return
-  const existing = readCache()
-  const cache: CacheFile =
-    existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
-      ? existing
-      : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-  cache.bindings[directory] = binding
-  writeCache(cache)
+  // Best-effort: cache persistence is a UX convenience, not the source of
+  // truth (the server-side binding is). If the state directory is read-only
+  // or the disk is full, callers otherwise report "link failed" and prompt
+  // duplicate retries against a workspace that IS bound server-side.
+  // (cubic round 3.)
+  try {
+    const existing = readCache()
+    const cache: CacheFile =
+      existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
+        ? existing
+        : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
+    cache.bindings[directory] = binding
+    writeCache(cache)
+  } catch (err) {
+    log.warn("could not persist workspace binding cache", {
+      code: (err as NodeJS.ErrnoException)?.code,
+      err: String(err),
+    })
+  }
 }
