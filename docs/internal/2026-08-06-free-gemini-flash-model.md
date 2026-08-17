@@ -10,7 +10,7 @@ Two deliverables, both local-only, nothing pushed:
 
 > **Update 2026-08-18.** Both sides went through repeated adversarial review after this section was
 > written: **four rounds on the client, three on the gateway, every one returning FIX-FIRST.** Counts
-> below are the originals; current state is 45 client commits and 33+ gateway commits. See
+> below are the originals; current state is 46+ client commits and 33+ gateway commits. See
 > "What the review rounds actually found" near the end — it is the most useful part of this document.
 
 **`~/codebase/altimate-gateway`** (new repo, `main`, 17 commits) — LiteLLM proxy pinned to
@@ -335,6 +335,32 @@ a late refinement: two near-misses were invalid *experiments* rather than invali
 that threw a `ReferenceError` aborted before the assertion could discriminate, and a heredoc silently
 ate invisible PUA literals so both comparators agreed. When a revert makes a test pass, first prove
 the revert actually reached the code.
+
+The strongest form of that rule, earned from three further instances during the final verification
+pass: **an experiment must be shown to have run in the same environment as the thing it claims to
+characterise, not merely to have executed.** A `cd` inside a compound command made `git show` emit
+zero-byte files that formatted cleanly; `bunx` fetched a floating tool version instead of the pinned
+one; and baselining by copying files to `/tmp` resolved *no* config at all, which inverted the
+conclusion — it made pre-existing formatting violations look self-inflicted. A green result from a
+config-less directory, an empty file, or an aborted code path is indistinguishable from a real pass.
+
+## Notes for a human reviewer
+
+- **18 of 39 changed `.ts`/`.tsx` files fail `prettier`, and it is pre-existing** — verified by
+  baselining in-repo rather than in a temp copy (see the `/tmp` trap above). None of the lines added
+  by this work are affected, and no CI workflow or git hook runs `prettier --check` (`.husky` has
+  only a pre-push `typecheck`), so it is cosmetic. Called out because a reviewer running prettier
+  locally will see a large spurious diff and should know it predates this branch. Deliberately not
+  reformatted — out of scope.
+- **The `request.ts` reachability guard is a regression test, not a proof.** It hand-rolls a static
+  import walk covering `import/export … from`, bare `import "x"`, and `import("literal")` — but not
+  `require()`, re-export through a variable, or a computed dynamic specifier. It fails correctly when
+  someone adds a normal import (verified), and the dead-code conclusion rests on all three lines of
+  evidence together rather than on this test alone. It also asserts `reachable.size > 400` as an
+  anti-vacuity floor (today: 594), so a refactor that legitimately shrinks the graph would fail it
+  spuriously — a one-line fix if that happens.
+- **The ModelsDev collision test injects via `spyOn(ModelsDev, "get")`**, so it does not exercise the
+  real `models.json` fetch/parse path. The injection point is documented in the test.
 
 **Findings that mattered most, in rough order:**
 
