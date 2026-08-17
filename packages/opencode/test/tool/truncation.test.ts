@@ -255,16 +255,27 @@ describe("Truncate", () => {
         // ~795 days — see Truncate.cleanup), so set mtimes explicitly.
         const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
         const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
+        // Dangling symlink: listed by readDirectory, but stat fails — the
+        // fail-safe branch must KEEP it rather than delete on uncertainty.
+        const dangling = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
 
         yield* writeFileStringScoped(old, "old content")
         yield* writeFileStringScoped(recent, "recent content")
         const nfs = yield* Effect.promise(() => import("node:fs/promises"))
-        yield* Effect.promise(() => nfs.utimes(old, new Date(Date.now() - 10 * DAY_MS), new Date(Date.now() - 10 * DAY_MS)))
-        yield* Effect.promise(() => nfs.utimes(recent, new Date(Date.now() - 3 * DAY_MS), new Date(Date.now() - 3 * DAY_MS)))
+        yield* Effect.promise(() => nfs.symlink(path.join(Truncate.DIR, "nonexistent-target"), dangling))
+        const oldTime = new Date(Date.now() - 10 * DAY_MS)
+        const recentTime = new Date(Date.now() - 3 * DAY_MS)
+        yield* Effect.promise(() => nfs.utimes(old, oldTime, oldTime))
+        yield* Effect.promise(() => nfs.utimes(recent, recentTime, recentTime))
         yield* svc.cleanup()
 
         expect(yield* fs.exists(old)).toBe(false)
         expect(yield* fs.exists(recent)).toBe(true)
+        // lstat: fs.exists follows symlinks and would report false for a
+        // dangling link even when the link itself survived.
+        const danglingKept = yield* Effect.promise(() => nfs.lstat(dangling).then(() => true).catch(() => false))
+        expect(danglingKept).toBe(true)
+        yield* Effect.promise(() => nfs.unlink(dangling).catch(() => {}))
       }),
     )
   })
