@@ -358,7 +358,15 @@ export namespace WorkspaceApi {
     if (Array.isArray(body)) {
       rows = body
     } else if (body && typeof body === "object") {
-      rows = body.datamates ?? body.data ?? []
+      // Guard each envelope field with Array.isArray — a non-array
+      // ``datamates`` or ``data`` value (object / string / null) would
+      // otherwise slip through and throw on ``.map`` below, taking the
+      // picker down before it renders. (cubic round 4.)
+      rows = Array.isArray(body.datamates)
+        ? body.datamates
+        : Array.isArray(body.data)
+          ? body.data
+          : []
     } else {
       rows = []
     }
