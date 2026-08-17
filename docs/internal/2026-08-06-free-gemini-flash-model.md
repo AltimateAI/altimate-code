@@ -344,6 +344,67 @@ one; and baselining by copying files to `/tmp` resolved *no* config at all, whic
 conclusion — it made pre-existing formatting violations look self-inflicted. A green result from a
 config-less directory, an empty file, or an aborted code path is indistinguishable from a real pass.
 
+## The carrier enumeration (2026-08-18) — and a correction to what "verified" meant
+
+After four review rounds had each found *one more* place a secret travels into the trace, we stopped
+patching and enumerated the whole surface from the pinned image's source. That enumeration found
+**seven more client-controlled values reaching Langfuse in the clear**, in a trace already hardened
+four times. Full 25-row table with source citations lives in the gateway README under
+*The secret carriers into Langfuse*; summary:
+
+- **5 already masked** — re-verified by canary this round rather than taken on trust.
+- **3 masked by accident** — nothing *we* do covers them; upstream happens to. Langfuse skips one
+  header copy *by name*, computes `clean_headers` from another and then discards the result (dead
+  code upstream), and pops `secret_fields` before use. A LiteLLM bump can flip any of these with no
+  signal, and our masking of the third is currently a no-op that protects nothing.
+- **7 not masked** — arbitrary body-metadata keys, a *fourth* header copy, client-minted tags,
+  `langfuse_*` values surviving under a copied key, `user` → `user_api_key_end_user_id`, User-Agent
+  (twice, including into `trace.tags`), and the session id landing in `trace.id`. All fixed.
+
+**Root cause behind most of them:** at logging time `metadata` is not on `model_call_details` at all
+— it lives only under `litellm_params`, which is where Langfuse reads it. Our auth-header masking
+read `kwargs["metadata"]` and therefore masked nothing on either path. Reading the source would not
+have revealed this; only dumping a live record did.
+
+**A trace-write primitive, exploitable anonymously, now closed.** Body
+`metadata: {"existing_trace_id": …}` made Langfuse write our generation into a caller-named trace.
+Demonstrated live with an ordinary key from anonymous `/register` over the one public route: it
+produced a trace with a caller-chosen name, `userId: null`, `tags: []`. Two consequences, the second
+worse — a caller can write into a trace it names, **and** the write escapes `tier:free`, so it is
+invisible to the query we use to review free-tier usage. The same channel carried `trace_name`,
+`prompt`, `update_trace_keys`, `parent_observation_id`, `debug_langfuse`, and `mask_input/output`;
+all dropped, plus a second path via body `litellm_metadata` which the proxy merges *after* the
+snapshot.
+
+**The correction that matters most.** Six of the seven were in `observations[0].metadata`. Our
+verification — including the first end-to-end check, which was reported upward as confirmation that
+redaction worked — searched `input`/`output` of an object from the **list** endpoint, where
+`observations` is a list of id *strings* and trace metadata is `{}`. The data was never in the object
+being searched, so that assertion was **unfalsifiable for the entire class**, whatever was planted.
+The earlier results were correct but narrower than stated: the evidence supported "no secret material
+in `input`/`output`", not "no secret material in the trace". Restate them that way rather than
+retract them. Checking a trace now means fetching `/api/public/traces/<id>`, which embeds
+observations, and searching the whole document.
+
+**A fourth false-green mechanism, and the first that was timing-dependent:** Langfuse ingests trace
+and observation separately, so for a few seconds the full document has `observations: []`. A new test
+passed against reverted code purely because it looked before the metadata existed. "Looked too early"
+is indistinguishable from a real pass.
+
+**Still open, and deliberately out of scope:** the Postgres **spend logs** are unexamined and are
+known to hold unmasked `messages` and `response` — `standard_logging_object` is built *before* the
+logging hook. Langfuse never reads those fields, so they do not reach the trace, but they are in our
+database. That is a separate surface needing its own enumeration.
+
+**Is the set complete? No — larger.** What is defensible: the set of fields Langfuse writes is closed
+and read off the pinned image, so a new carrier must arrive through one of them; and the verification
+method can now actually fail. What falls short: three carriers rest on upstream accident, the strip
+is necessarily subtractive (an allowlist cannot work, since the router legitimately adds metadata keys
+after our hook), and only the trace store was enumerated. What would justify "complete": a **negative
+test that fails when a *new* carrier appears** — plant a canary in every client-reachable input and
+assert the stored document contains none of them, run on every image bump — plus the same treatment
+for spend logs.
+
 ## Notes for a human reviewer
 
 - **18 of 39 changed `.ts`/`.tsx` files fail `prettier`, and it is pre-existing** — verified by
