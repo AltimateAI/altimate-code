@@ -42,6 +42,20 @@ function fail(error: unknown): AltimateCoreResult {
   return { success: false, data: {}, error: String(error) }
 }
 
+/** Redact raw-input echoes from a scan result's threats (see EngineCoerce.redactThreatText). */
+function redactScan(scan: Record<string, unknown>): Record<string, unknown> {
+  const threats = (scan.threats as any[] | undefined)?.map((t: any) => ({
+    ...t,
+    message: typeof t.message === "string" ? EngineCoerce.redactThreatText(t.message) : t.message,
+    detail: typeof t.detail === "string" ? EngineCoerce.redactThreatText(t.detail) : t.detail,
+    // For multi_statement the matched pattern IS the raw input line — an
+    // arbitrary-file content echo. Injection rules keep their SQL-shaped
+    // patterns (useful, and inherently query-derived).
+    matched_pattern: t.rule === "multi_statement" ? "<redacted>" : t.matched_pattern,
+  }))
+  return threats ? { ...scan, threats } : scan
+}
+
 // ---------------------------------------------------------------------------
 // IFF / QUALIFY transpile transforms (ported from Python guard.py)
 // ---------------------------------------------------------------------------
@@ -114,7 +128,7 @@ export function registerAll(): void {
   register("altimate_core.safety", async (params) => {
     try {
       const raw = core.scanSql(params.sql)
-      const data = toData(raw)
+      const data = redactScan(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -193,7 +207,7 @@ export function registerAll(): void {
       // occurrence, so a PR that ADDS a second identical injection still
       // reports it. Recompute safe/risk_score from the surviving threats so a
       // fully pre-existing threat set doesn't leave a stale unsafe verdict.
-      let safety: Record<string, unknown> = toData(core.scanSql(params.sql))
+      let safety: Record<string, unknown> = redactScan(toData(core.scanSql(params.sql)))
       if (params.base_sql) {
         try {
           const baseCounts = new Map<string, number>()

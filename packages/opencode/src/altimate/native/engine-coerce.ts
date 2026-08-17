@@ -59,4 +59,23 @@ export function piiColumnsFromReport(piiData: unknown): Array<Record<string, any
   return columns.filter((c) => c && c.classification !== "None")
 }
 
+/**
+ * Redact raw input echoed inside engine threat messages.
+ *
+ * The engine's `multi_statement` rule quotes the offending "statement type"
+ * verbatim — for non-SQL input (e.g. `altimate check /etc/passwd`) that
+ * reflects arbitrary file content back into CLI/tool output. Keep the token
+ * only when it looks like a SQL keyword phrase; otherwise redact.
+ */
+const SQL_KEYWORD_LIKE = /^[A-Za-z_][A-Za-z0-9_$ ]{0,31}$/
+export function redactThreatText(text: string): string {
+  return text
+    .replace(/(Disallowed statement type: )(.+)$/i, (_m, prefix: string, tok: string) =>
+      SQL_KEYWORD_LIKE.test(tok.trim()) ? `${prefix}${tok}` : `${prefix}<non-SQL content redacted>`,
+    )
+    .replace(/(Statement type ')([^']*)(')/i, (_m, a: string, tok: string, c: string) =>
+      SQL_KEYWORD_LIKE.test(tok) ? `${a}${tok}${c}` : `${a}<non-SQL content redacted>${c}`,
+    )
+}
+
 export * as EngineCoerce from "./engine-coerce"
