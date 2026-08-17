@@ -138,7 +138,13 @@ export const LinkCommand = cmd({
       // leaving the browser-created workspace stranded and no rebind actually
       // happening. If the project is already linked, the caller wants a
       // rebind path (offered elsewhere in this menu), not create-and-bind.
-      ...(browserAvailable && !existing
+      //
+      // Also gate on ``preCheckOk`` (Kilo cycle 6): when the pre-check itself
+      // failed (network / 5xx), ``existing`` stays null but the project MAY
+      // be linked server-side. Offering the browser flow then would run the
+      // same 409 → stranded-workspace path. Better to hide the option until
+      // the caller can confirm the binding state.
+      ...(browserAvailable && !existing && preCheckOk
         ? [
             {
               value: SET_UP_IN_BROWSER_SENTINEL,

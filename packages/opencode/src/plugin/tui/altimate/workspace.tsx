@@ -60,9 +60,17 @@ const log = Log.create({ service: "altimate-workspace" })
  * flow and the on-demand `altimate-code link` picker can hide the option
  * consistently when the deployment isn't supported. */
 async function isBrowserHandoffAvailable(): Promise<boolean> {
-  if (!(await AltimateApi.isConfigured().catch(() => false))) return false
-  const creds = await AltimateApi.getCredentials()
-  return resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
+  // Both credential calls can throw (corrupt JSON, schema drift, unresolved
+  // ``${env:...}`` reference). Callers use this in the sync arm of dialog
+  // rendering, so an unhandled rejection would take the TUI down. Fail
+  // closed — treat any credential error as "handoff unavailable". (CR cycle 6.)
+  try {
+    if (!(await AltimateApi.isConfigured().catch(() => false))) return false
+    const creds = await AltimateApi.getCredentials()
+    return resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
+  } catch {
+    return false
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -523,11 +531,14 @@ async function createAndBindInline(
     })
     await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
   } catch (err) {
+    // Log the failure so a regression in ``showLinkedConfirmation`` doesn't
+    // vanish silently, then fall back to a plain toast. Previously ``void err``
+    // discarded the diagnostic — Kilo cycle 6 called it out.
+    log.warn("workspace post-create confirmation failed", { err: String(err) })
     api.ui.toast({
       variant: "info",
       message: `Workspace "${res.datamate.name}" created and linked.`,
     })
-    void err
   }
 }
 
