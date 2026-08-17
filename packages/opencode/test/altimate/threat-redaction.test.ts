@@ -9,10 +9,10 @@ try {
 const describeIf = coreAvailable ? describe : describe.skip
 
 describe("redactThreatText", () => {
-  test("keeps SQL-statement-keyword types", () => {
+  test("keeps single SQL-statement-keyword types (the only shape the engine emits)", () => {
     expect(EngineCoerce.redactThreatText("Disallowed statement type: DROP")).toBe("Disallowed statement type: DROP")
-    expect(EngineCoerce.redactThreatText("Statement type 'ALTER TABLE' is not in the allowed list")).toBe(
-      "Statement type 'ALTER TABLE' is not in the allowed list",
+    expect(EngineCoerce.redactThreatText("Statement type 'ALTER' is not in the allowed list")).toBe(
+      "Statement type 'ALTER' is not in the allowed list",
     )
   })
 
@@ -35,16 +35,17 @@ describe("redactThreatText", () => {
     expect(EngineCoerce.redactThreatText("Statement type 'PRIVATE NOTE' is not in the allowed list")).toBe(
       "Statement type '<non-SQL content redacted>' is not in the allowed list",
     )
-    // A keyword PREFIX must not preserve an arbitrary tail.
+    // ANY multi-word phrase redacts — the engine only emits single-word
+    // statement types (live-probed), so multi-word input is never engine
+    // vocabulary: keyword-prefixed tails and keyword permutations both die.
     expect(EngineCoerce.redactThreatText("Disallowed statement type: SET SECRET PASSWORD")).toBe(
       "Disallowed statement type: <non-SQL content redacted>",
     )
     expect(EngineCoerce.redactThreatText("Disallowed statement type: DROP DEAD FRED")).toBe(
       "Disallowed statement type: <non-SQL content redacted>",
     )
-    // Compound statement types made purely of keywords stay useful.
-    expect(EngineCoerce.redactThreatText("Disallowed statement type: DROP INDEX IF EXISTS")).toBe(
-      "Disallowed statement type: DROP INDEX IF EXISTS",
+    expect(EngineCoerce.redactThreatText("Disallowed statement type: SELECT DELETE UPDATE")).toBe(
+      "Disallowed statement type: <non-SQL content redacted>",
     )
   })
 

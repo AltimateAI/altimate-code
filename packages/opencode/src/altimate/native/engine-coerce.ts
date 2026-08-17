@@ -78,22 +78,17 @@ const SQL_STATEMENT_KEYWORDS = new Set([
   "DESC", "EXECUTE", "EXEC", "REPLACE", "VALUES", "LOCK", "UNLOCK", "COMMENT",
   "RENAME", "START", "SAVEPOINT", "RELEASE", "PREPARE", "DEALLOCATE",
 ])
-// Auxiliary words allowed AFTER a statement keyword ("ALTER TABLE",
-// "DROP INDEX IF EXISTS"). Every word of a preserved phrase must come from
-// the keyword vocabulary — checking only the first word would preserve
-// attacker tails like "SET SECRET PASSWORD" verbatim.
-const SQL_AUX_KEYWORDS = new Set([
-  "TABLE", "INDEX", "VIEW", "DATABASE", "SCHEMA", "COLUMN", "TRIGGER",
-  "FUNCTION", "PROCEDURE", "SEQUENCE", "MATERIALIZED", "TEMPORARY", "TEMP",
-  "IF", "NOT", "EXISTS", "OR", "INTO", "TRANSACTION", "WORK", "CASCADE",
-  "UNIQUE", "ROLE", "USER", "EXTENSION", "TYPE",
-])
+// The engine emits SINGLE-WORD statement types only — probed against the
+// live 0.7.0 binary across DDL/DML/DCL/TCL second statements, the full
+// observed set is {ALTER, BEGIN, CALL, CREATE, DELETE, DROP, EXPLAIN, GRANT,
+// INSERT, SET, TRUNCATE, UPDATE}. Exact single-keyword matching is therefore
+// both engine-faithful and the strictest rule: multi-word input can only be
+// non-engine content (kills keyword-permutation leaks like
+// "SELECT DELETE UPDATE" without redacting anything the engine produces).
 function isSqlStatementType(token: string): boolean {
   const t = token.trim()
   if (!SQL_TOKEN_SHAPE.test(t)) return false
-  const words = t.split(/\s+/).map((w) => w.toUpperCase())
-  if (!SQL_STATEMENT_KEYWORDS.has(words[0])) return false
-  return words.slice(1).every((w) => SQL_STATEMENT_KEYWORDS.has(w) || SQL_AUX_KEYWORDS.has(w))
+  return SQL_STATEMENT_KEYWORDS.has(t.toUpperCase())
 }
 export function redactThreatText(text: string): string {
   return (
