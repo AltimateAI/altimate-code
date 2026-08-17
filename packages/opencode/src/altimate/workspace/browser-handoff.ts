@@ -256,9 +256,20 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
       return
     }
 
-    const workspaceId = Number(workspaceIdRaw)
     // Integer-only: floats like ``42.5`` are rejected server-side but produce
     // a confusing failure the caller can't recover from. (m9 in the review.)
+    // Also reject non-canonical spellings — ``Number()`` happily coerces
+    // ``"1e2"``, ``"0x2a"``, and ``"  42 "`` into finite integers, so a
+    // callback URL carrying those forms would slip past ``isInteger`` and
+    // reach the bind payload. Requiring a plain decimal-digit string first
+    // is the tight gate. (cubic cycle 4/5.)
+    if (!/^[1-9][0-9]*$/.test(workspaceIdRaw)) {
+      const msg = `Invalid workspace_id: ${workspaceIdRaw}`
+      respond(400, htmlError(msg))
+      pending.reject(markReason(new Error(msg), "error"))
+      return
+    }
+    const workspaceId = Number(workspaceIdRaw)
     if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
       const msg = `Invalid workspace_id: ${workspaceIdRaw}`
       respond(400, htmlError(msg))

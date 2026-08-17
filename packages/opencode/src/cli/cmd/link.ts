@@ -132,7 +132,13 @@ export const LinkCommand = cmd({
       resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
 
     const options: Array<{ value: string; label: string; hint?: string }> = [
-      ...(browserAvailable
+      // Only offer browser handoff for UNLINKED projects (CodeRabbit cycle 5).
+      // ``runBrowserHandoff`` creates a fresh workspace and calls
+      // ``bindExisting``, which 409s when there's already an active binding —
+      // leaving the browser-created workspace stranded and no rebind actually
+      // happening. If the project is already linked, the caller wants a
+      // rebind path (offered elsewhere in this menu), not create-and-bind.
+      ...(browserAvailable && !existing
         ? [
             {
               value: SET_UP_IN_BROWSER_SENTINEL,
