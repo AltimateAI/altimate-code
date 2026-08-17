@@ -91,7 +91,14 @@ function isSkipActive(
 ): boolean {
   const rec = api.kv.get<{ skippedAt: number }>(skipKey(id, scope))
   if (!rec || typeof rec.skippedAt !== "number") return false
-  return nowMs - rec.skippedAt < SKIP_TTL_MS
+  // Reject records timestamped in the future — a system-clock rewind after
+  // ``recordSkip`` would otherwise produce ``nowMs - rec.skippedAt < 0``,
+  // trivially below the 7-day TTL, and suppress the prompt indefinitely.
+  // Treat future timestamps as "corrupt, retry" so the next scan re-offers.
+  // (CodeRabbit cycle 6.)
+  const delta = nowMs - rec.skippedAt
+  if (delta < 0) return false
+  return delta < SKIP_TTL_MS
 }
 
 function recordSkip(
@@ -475,18 +482,21 @@ function PickerDialog(props: PickerProps) {
     }
   }
 
-  // While loading (or on error before dialog closes), render an empty select as
-  // a placeholder — DialogSelect requires the options array up front and doesn't
-  // have a native busy state; the empty list closes to a "no workspaces" message.
+  // While loading (or on error before dialog closes), render a placeholder
+  // row the user can dismiss with Enter. NOTE: DialogSelect's ``filtered()``
+  // drops rows with ``disabled: true`` (packages/tui/src/ui/dialog-select.tsx),
+  // so the placeholder MUST be rendered without that flag — otherwise the
+  // picker shows an empty list, hiding both the loading state and the
+  // "no workspaces yet" hint. Selection is dispatched to ``value === -1``
+  // in ``onSelect`` below and simply clears the dialog. (Kilo cycle 6.)
   const options = () => {
     const list = datamates()
-    if (!list) return [{ title: "Loading workspaces...", value: -1, disabled: true }]
+    if (!list) return [{ title: "Loading workspaces...", value: -1 }]
     if (list.length === 0)
       return [
         {
           title: "No workspaces yet — cancel and pick 'Create a new workspace' instead.",
           value: -1,
-          disabled: true,
         },
       ]
     return list.map((dm: DatamateRef) => ({ title: dm.name, value: dm.id }))
@@ -547,7 +557,8 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
 
   const options = () => {
     const list = datamates()
-    if (!list) return [{ title: "Loading workspaces...", value: -1, disabled: true }]
+    // No ``disabled: true`` — DialogSelect filters those out (Kilo cycle 6).
+    if (!list) return [{ title: "Loading workspaces...", value: -1 }]
     // Deliberately short titles + hint in description so the dialog's narrow
     // width doesn't truncate either. The "●" marker stays in the title (single
     // char, cheap) so the currently-linked row is scannable at a glance.

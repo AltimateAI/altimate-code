@@ -66,8 +66,13 @@ export const Flag = {
   // altimate_change start — pilot flag for the Workspaces feature (post-scan prompt +
   // altimate link subcommand). Read as a getter so tests and the runtime `--` middleware
   // can flip it between plugin activation and command execution.
+  //
+  // Opt-in only — deliberately does NOT inherit ``OPENCODE_EXPERIMENTAL`` (as
+  // ``enabledByExperimental`` would). The pilot ships behind its own explicit
+  // gate so users already opted into other experimental features don't get
+  // this one turned on for them. (Kilo cycle 6.)
   get ALTIMATE_WORKSPACE() {
-    return enabledByExperimental("ALTIMATE_WORKSPACE")
+    return truthy("ALTIMATE_WORKSPACE")
   },
   // altimate_change end
 

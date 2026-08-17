@@ -107,9 +107,23 @@ function writeCache(cache: CacheFile): void {
 }
 
 async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
-  if (!(await AltimateApi.isConfigured())) return null
-  const c = await AltimateApi.getCredentials()
-  return { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl }
+  // Best-effort: ``AltimateApi.getCredentials`` can throw ``SyntaxError`` on
+  // a corrupt credentials JSON, ``ZodError`` on schema drift, or a raw
+  // ``Error`` on an unresolvable ``${env:...}`` reference — anything the
+  // credential-loader library can produce. This helper is the last gate
+  // between those errors and callers who treat their failures as fatal (the
+  // TUI's fire-and-forget bind path terminates on unhandled rejections), so
+  // swallow them and treat as "no credentials". (Kilo cycle 6.)
+  try {
+    if (!(await AltimateApi.isConfigured())) return null
+    const c = await AltimateApi.getCredentials()
+    return { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl }
+  } catch (err) {
+    log.warn("could not resolve workspace credentials for cache scoping", {
+      err: String(err),
+    })
+    return null
+  }
 }
 
 /** Read the local binding for ``directory`` — only returns a hit when the

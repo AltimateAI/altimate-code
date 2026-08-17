@@ -203,7 +203,10 @@ async function createThenBindOrRebind(
       return
     }
   }
-  await recordApprovedBinding(directory, {
+  // Prefer the canonicalized ``identifier.projectPath`` over the raw
+  // ``--directory`` argument so ``altimate-code link -d ./myproj`` and its
+  // symlink-resolved twin both write under the same cache key (Kilo cycle 6).
+  await recordApprovedBinding(identifier.projectPath ?? directory, {
     datamateId: created.datamate.id,
     datamateName: created.datamate.name,
     repoRemote: created.binding.repo_remote,
@@ -267,19 +270,45 @@ async function bindOrRebind(
           // ``expected_current_datamate_id`` (pre-check gave us nothing) so
           // this is last-writer-wins. Callers who need optimistic concurrency
           // should re-run once the network is back and the pre-check succeeds.
+          //
+          // Pick the rebind endpoint from the CONFLICT DETAIL, not from the
+          // current identifier — the existing binding may be keyed by a
+          // different identifier than the project's current one (path-keyed
+          // legacy binding + newly-added remote, or vice versa). Keying off
+          // the current identifier reproduces the M3 hazard on this fallback
+          // path. (Kilo cycle 6.)
           spin.stop("Pre-check missed an existing binding — retrying as re-link.", 1)
           const rebindSpin = prompts.spinner()
           rebindSpin.start("Re-linking...")
           try {
-            res = identifier.repoRemote
-              ? await WorkspaceApi.rebindByRemote({
-                  remote: identifier.repoRemote,
-                  targetDatamateId,
-                })
-              : await WorkspaceApi.rebindByPath({
-                  projectPath: identifier.projectPath!,
-                  targetDatamateId,
-                })
+            // detail.project_path present → the conflicting binding is
+            // path-keyed; use /by-path. Else the conflict was on repo_remote.
+            const conflictPath = err.detail.project_path
+            const conflictRemote = err.detail.repo_remote
+            if (conflictPath) {
+              res = await WorkspaceApi.rebindByPath({
+                projectPath: conflictPath,
+                targetDatamateId,
+              })
+            } else if (conflictRemote) {
+              res = await WorkspaceApi.rebindByRemote({
+                remote: conflictRemote,
+                targetDatamateId,
+              })
+            } else {
+              // Server didn't tell us which identifier owned the conflict —
+              // fall back to the current identifier's preference (better than
+              // nothing, but shouldn't happen with a well-formed 409 body).
+              res = identifier.repoRemote
+                ? await WorkspaceApi.rebindByRemote({
+                    remote: identifier.repoRemote,
+                    targetDatamateId,
+                  })
+                : await WorkspaceApi.rebindByPath({
+                    projectPath: identifier.projectPath!,
+                    targetDatamateId,
+                  })
+            }
             rebindSpin.stop(`Re-linked to "${res.binding.datamate_name}".`)
           } catch (retryErr) {
             rebindSpin.stop("Re-link failed.", 1)
@@ -290,7 +319,8 @@ async function bindOrRebind(
         }
       }
     }
-    await recordApprovedBinding(directory, {
+    // Prefer the canonicalized identifier over the raw --directory (Kilo cycle 6).
+    await recordApprovedBinding(identifier.projectPath ?? directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,
