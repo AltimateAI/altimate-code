@@ -251,11 +251,16 @@ describe("Truncate", () => {
 
         yield* fs.makeDirectory(Truncate.DIR, { recursive: true })
 
-        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 10 * DAY_MS))
-        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
+        // Age is judged by file mtime (ID-embedded timestamps wrap every
+        // ~795 days — see Truncate.cleanup), so set mtimes explicitly.
+        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
+        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
 
         yield* writeFileStringScoped(old, "old content")
         yield* writeFileStringScoped(recent, "recent content")
+        const nfs = yield* Effect.promise(() => import("node:fs/promises"))
+        yield* Effect.promise(() => nfs.utimes(old, new Date(Date.now() - 10 * DAY_MS), new Date(Date.now() - 10 * DAY_MS)))
+        yield* Effect.promise(() => nfs.utimes(recent, new Date(Date.now() - 3 * DAY_MS), new Date(Date.now() - 3 * DAY_MS)))
         yield* svc.cleanup()
 
         expect(yield* fs.exists(old)).toBe(false)
