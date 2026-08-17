@@ -38,7 +38,8 @@ export function registerAllSql(): void {
 
       const lint = JSON.parse(JSON.stringify(lintRaw))
       const semantics = JSON.parse(JSON.stringify(semanticsRaw))
-      const safety = JSON.parse(JSON.stringify(safetyRaw))
+      // Redact raw-input echoes (multi_statement quotes the input verbatim).
+      const safety = EngineCoerce.redactScan(JSON.parse(JSON.stringify(safetyRaw))) as any
 
       const issues: SqlAnalyzeIssue[] = []
 

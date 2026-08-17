@@ -42,20 +42,6 @@ function fail(error: unknown): AltimateCoreResult {
   return { success: false, data: {}, error: String(error) }
 }
 
-/** Redact raw-input echoes from a scan result's threats (see EngineCoerce.redactThreatText). */
-function redactScan(scan: Record<string, unknown>): Record<string, unknown> {
-  const threats = (scan.threats as any[] | undefined)?.map((t: any) => ({
-    ...t,
-    message: typeof t.message === "string" ? EngineCoerce.redactThreatText(t.message) : t.message,
-    detail: typeof t.detail === "string" ? EngineCoerce.redactThreatText(t.detail) : t.detail,
-    // For multi_statement the matched pattern IS the raw input line — an
-    // arbitrary-file content echo. Injection rules keep their SQL-shaped
-    // patterns (useful, and inherently query-derived).
-    matched_pattern: t.rule === "multi_statement" ? "<redacted>" : t.matched_pattern,
-  }))
-  return threats ? { ...scan, threats } : scan
-}
-
 // ---------------------------------------------------------------------------
 // IFF / QUALIFY transpile transforms (ported from Python guard.py)
 // ---------------------------------------------------------------------------
@@ -128,7 +114,7 @@ export function registerAll(): void {
   register("altimate_core.safety", async (params) => {
     try {
       const raw = core.scanSql(params.sql)
-      const data = redactScan(toData(raw))
+      const data = EngineCoerce.redactScan(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -246,7 +232,7 @@ export function registerAll(): void {
       // Redact AFTER diff-scoping: subtraction must compare raw engine
       // matched_patterns on both sides (redacting first would rewrite head
       // multi_statement keys to "<redacted>" and never match the base).
-      safety = redactScan(safety)
+      safety = EngineCoerce.redactScan(safety)
       // PII exposure for the composite check — the tool has always rendered a
       // PII section; previously nothing populated it. Additive: a PII failure
       // must not fail the whole composite.
@@ -488,7 +474,13 @@ export function registerAll(): void {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
       const raw = await core.evaluate(params.sql, schema)
-      return ok(true, toData(raw))
+      const data = toData(raw)
+      // EvalResult embeds a full safety scan — redact its threat echoes too
+      // (the CLI grade check renders nested threat messages).
+      if (data.safety && typeof data.safety === "object") {
+        data.safety = EngineCoerce.redactScan(data.safety as Record<string, unknown>)
+      }
+      return ok(true, data)
     } catch (e) {
       return fail(e)
     }
