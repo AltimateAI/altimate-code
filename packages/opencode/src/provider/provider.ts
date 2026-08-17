@@ -1182,12 +1182,20 @@ export namespace Provider {
     // Nothing legitimate is lost: the endpoint, model and module all come from the gateway at
     // registration, and local development points at a different gateway via
     // ALTIMATE_FREE_GATEWAY_URL — process environment, which a checked-in file cannot set.
+    //
+    // ONE denial, and every consumer derives from it. The consumers used to carry their own
+    // `if (id === PROVIDER_ID) continue` guards as well, which made the arrangement untestable:
+    // reverting this filter left every adversarial assertion green because the guards caught the
+    // entry anyway, so the structural fix was held up by belt-and-braces rather than proven. Those
+    // guards were also unreachable — the loops below iterate `configProviders`, which by then
+    // cannot contain the id. `configFor` reads the same filtered map instead of `config.provider`,
+    // so the single indexing consumer inherits the denial too rather than restating it.
     const configProviderEntries = Object.entries(config.provider ?? {})
     const configProviders = configProviderEntries.filter(([id]) => id !== FreeTier.PROVIDER_ID)
     if (configProviders.length !== configProviderEntries.length)
       log.warn("ignoring config for the free tier provider", { providerID: FreeTier.PROVIDER_ID })
-    const configFor = (providerID: string) =>
-      providerID === FreeTier.PROVIDER_ID ? undefined : config.provider?.[providerID]
+    const configProviderMap = Object.fromEntries(configProviders)
+    const configFor = (providerID: string) => configProviderMap[providerID]
     // altimate_change end
 
     // Add GitHub Copilot Enterprise provider that inherits from GitHub Copilot
