@@ -1,3 +1,8 @@
+---
+title: "Agent Modes — Builder, Analyst, Reviewer, dbt-Optimizer, and Plan"
+description: "Altimate Code offers five agent modes: Builder (full tool access), Analyst (read-only), Reviewer (signed dbt PR verdicts), dbt-Optimizer (dbt project optimization), and Plan (planning only)."
+---
+
 # Agent Modes
 
 altimate runs in one of five specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.

@@ -1,3 +1,8 @@
+---
+title: Database Driver Support — Altimate Code
+description: "Altimate Code supports 13 native database connections via TypeScript drivers. See the full compatibility matrix."
+---
+
 # Database Driver Support
 
 ## Overview

@@ -1,3 +1,7 @@
+---
+title: "Telemetry — Altimate Code"
+description: "Altimate Code collects anonymous usage telemetry by default. See what's collected and how to opt out."
+---
 # Telemetry
 
 Altimate Code collects anonymous usage data to help us improve the product. This page describes what we collect, why, and how to opt out.
@@ -173,7 +177,7 @@ When you sign in using the CLI browser auth flow (`altimate auth login`), the an
 
 ### Data Retention
 
-Telemetry data is sent to Azure Application Insights and retained according to [Microsoft's data retention policies](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure). We do not maintain a separate data store. To request deletion of your telemetry data, contact privacy@altimate.ai.
+Telemetry data is sent to Azure Application Insights and retained according to [Microsoft's data retention policies](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure). Aside from the PostHog auth-attribution described above, we do not maintain a separate data store for event telemetry. To request deletion of your telemetry data, contact privacy@altimate.ai.
 
 ## Network
 

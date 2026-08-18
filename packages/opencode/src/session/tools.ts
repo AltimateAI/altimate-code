@@ -70,13 +70,19 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           ...req,
           sessionID: input.session.id,
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          // altimate_change start — session-supplied permissions (legacy `tools:{}`
-          // request input) must not outrank the agent's configured rules: with
-          // session rules merged LAST under last-match-wins, a request carrying
-          // `tools: { sql_execute_write: true }` would flip dbt-optimizer's
-          // non-overridable deny. Agent config is authoritative; session rules
-          // may only fill gaps.
-          ruleset: Permission.merge(input.session.permission ?? [], input.agent.permission),
+          // altimate_change start — DENY wins in BOTH directions. Session rules
+          // (legacy `tools:{}` input, subagent ceilings from
+          // deriveSubagentSessionPermission) merge after agent rules so their
+          // DENIES hold as runtime ceilings (`tools: { read: false }` works),
+          // but the agent's own DENY rules are re-applied last so a session
+          // ALLOW (`tools: { sql_execute_write: true }`) can never flip a
+          // non-overridable agent deny under last-match-wins. Grants may only
+          // fill gaps; denials from either side are final.
+          ruleset: Permission.merge(
+            input.agent.permission,
+            input.session.permission ?? [],
+            input.agent.permission.filter((r) => r.action === "deny"),
+          ),
           // altimate_change end
         })
         .pipe(Effect.orDie),

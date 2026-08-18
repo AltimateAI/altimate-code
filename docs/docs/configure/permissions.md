@@ -1,3 +1,8 @@
+---
+title: Permissions — Altimate Code
+description: "Set allow, ask, or deny permissions for Altimate Code tool actions globally or per-project."
+---
+
 # Permissions
 
 Permissions control which tools agents can use and what actions they can perform.
@@ -131,8 +136,6 @@ The fallback `OPENCODE_YOLO` env var is also supported. When both are set, `ALTI
 **Safety:** Explicit `deny` rules in your config are still enforced. Deny rules throw an error *before* any permission prompt is created, so yolo mode never sees them. If you've denied `rm *` or `DROP *`, those remain blocked even with `--yolo`.
 
 When yolo mode is active in the TUI, a `△ YOLO` indicator appears in the footer status bar.
-
-**Mid-session toggle (TUI):** Press `Ctrl+Y` inside the TUI to toggle yolo mode for the current session without restarting. Enabling requires a one-tap confirmation; disabling is instant. The toggle is **session and subagent scoped and lives in memory only** — restart the CLI and yolo defaults back to whatever `--yolo`, `ALTIMATE_CLI_YOLO`, or `OPENCODE_YOLO` was at launch. Deny rules stay enforced.
 
 ## Recommended Configurations
 

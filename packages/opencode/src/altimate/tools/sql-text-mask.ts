@@ -15,11 +15,12 @@
  * (PostgreSQL E'...', MySQL) make `\''` end where this lexer's ''-pair rule
  * would continue, which would mask real code as string content.
  *
- * `preserveQuotedIdentifiers`: keep the CONTENT of "double", [bracket], and
- * `backtick` identifiers in the output (still consumed as one token, so their
- * content can never open a comment/string state). Callers that need to detect
- * quoted function names (sql-classify's side-effect scan) use this variant;
- * the default blanks them.
+ * `preserveQuotedIdentifiers`: keep the CONTENT of "double" and `backtick`
+ * identifiers in the output (still consumed as one token, so their content can
+ * never open a comment/string state); the default blanks those two. [Bracket]
+ * spans are ALWAYS preserved regardless of the option — they double as
+ * PostgreSQL array subscripts, and blanking would hide side-effecting
+ * subscript expressions (arr[nextval(..)]) from the keyword scans.
  *
  * Returns the SQL with literal/comment contents removed, or null when a
  * construct is unterminated or unlexable (callers must fail closed).
@@ -35,7 +36,7 @@ export function maskLiteralsAndComments(
 
   // Consume a delimited identifier ('"', '`') or bracket pair, where `close`
   // doubled means an escaped delimiter. Returns the new index or -1.
-  const consumeDelimited = (open: string, close: string): number => {
+  const consumeDelimited = (open: string, close: string, forcePreserve = false): number => {
     const start = i
     let j = i + 1
     for (;;) {
@@ -44,7 +45,7 @@ export function maskLiteralsAndComments(
       else if (sql[j] === close) break
       else j++
     }
-    out += keepIds ? sql.slice(start, j + 1) : open + close
+    out += keepIds || forcePreserve ? sql.slice(start, j + 1) : open + close
     return j + 1
   }
 
@@ -79,16 +80,9 @@ export function maskLiteralsAndComments(
       // never re-lexed, so it can only ADD text for the scans to see — the
       // fail-safe direction (an identifier literally named [delete] merely
       // triggers a prompt).
-      const start = i
-      let j = i + 1
-      for (;;) {
-        if (j >= n) return null
-        if (sql[j] === "]" && sql[j + 1] === "]") j += 2
-        else if (sql[j] === "]") break
-        else j++
-      }
-      out += sql.slice(start, j + 1)
-      i = j + 1
+      const j = consumeDelimited("[", "]", true)
+      if (j === -1) return null
+      i = j
     } else if (c === "-" && next === "-") {
       // Line comments end at \n OR \r — CR-only line endings must not extend
       // the comment to EOF and hide later statements.

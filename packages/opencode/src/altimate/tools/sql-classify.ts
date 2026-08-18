@@ -53,15 +53,15 @@ function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: 
   // masked statement body forces "write" — the safe direction is a prompt.
   const WRITE_KEYWORD =
     /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into)\b/i
-  // replace/copy/call/set double as read-only functions and column names; only
-  // the STATEMENT form (keyword at statement start) counts as a write —
-  // scanning the whole statement would escalate `SELECT set FROM t`.
-  const WRITE_STATEMENT_FORM = /^\s*(replace|copy|call|set)\b/i
+  // NOTE: statement-form writes like REPLACE INTO / COPY / CALL / SET need no
+  // separate check — statements are trimmed, so anything starting with them
+  // already fails READ_PATTERN below and classifies as write, while the same
+  // words as columns (`SELECT set FROM t`) sit behind a read prefix.
   let queryType: "read" | "write" = "read"
   let blocked = false
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
-    if (!READ_PATTERN.test(stmt) || WRITE_KEYWORD.test(stmt) || WRITE_STATEMENT_FORM.test(stmt)) queryType = "write"
+    if (!READ_PATTERN.test(stmt) || WRITE_KEYWORD.test(stmt)) queryType = "write"
   }
   return { queryType, blocked }
 }

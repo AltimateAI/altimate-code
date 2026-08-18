@@ -376,7 +376,11 @@ describeIf("altimate-core E2E", () => {
     })
 
     test("explicit columns grade >= SELECT *", async () => {
-      const r1 = await D.call("altimate_core.grade", { sql: SQL.simple, schema_context: ECOMMERCE_FLAT })
+      // Same table + same rows, differing ONLY in star vs explicit projection —
+      // otherwise complexity subscores (filters, table count) dominate the
+      // style penalty for SELECT * and the comparison is meaningless.
+      const explicitSql = "SELECT order_id, customer_id, order_date, status, amount FROM orders"
+      const r1 = await D.call("altimate_core.grade", { sql: explicitSql, schema_context: ECOMMERCE_FLAT })
       const r2 = await D.call("altimate_core.grade", { sql: SQL.selectStar, schema_context: ECOMMERCE_FLAT })
       expect((r1.data as any).scores.overall).toBeGreaterThanOrEqual((r2.data as any).scores.overall)
     })
@@ -719,13 +723,62 @@ describeIf("altimate-core E2E", () => {
 
   describe("altimate_core.migration", () => {
     test("adding nullable column is safe", async () => {
-      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "CREATE TABLE t (id INT, name VARCHAR);" })
-      expect(r).toBeDefined()
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR" })
+      const d = r.data as any
+      expect(r.success).toBe(true)
+      expect(d.safe).toBe(true)
+      expect(d.overall_risk).toBe("safe")
     })
 
-    test("dropping column detected", async () => {
-      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT, name VARCHAR);", new_ddl: "CREATE TABLE t (id INT);" })
-      expect(r).toBeDefined()
+    test("dropping column detected as destructive", async () => {
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT, name VARCHAR);", new_ddl: "ALTER TABLE t DROP COLUMN name" })
+      const d = r.data as any
+      expect(r.success).toBe(true)
+      expect(d.safe).toBe(false)
+      expect(d.overall_risk).toBe("destructive")
+      expect((d.findings ?? []).some((f: any) => f.risk === "destructive")).toBe(true)
+    })
+
+    test("DELETE without WHERE is destructive (core@0.6.0 behavior)", async () => {
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "DELETE FROM t" })
+      expect((r.data as any).safe).toBe(false)
+    })
+
+    test("empty dialect is coerced to auto-detect (does NOT error)", async () => {
+      const r = await D.call("altimate_core.migration", { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR", dialect: "" })
+      expect(r.success).toBe(true)
+    })
+
+    test("migration tool never renders SAFE on destructive change or engine error", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreMigrationTool } = await import("../../src/altimate/tools/altimate-core-migration")
+      const tool = await initTool(AltimateCoreMigrationTool)
+      const ctx = {
+        sessionID: "test",
+        messageID: "test",
+        agent: "test",
+        abort: new AbortController().signal,
+        messages: [],
+        metadata: () => {},
+      } as any
+      const destructive = await tool.execute(
+        { old_ddl: "CREATE TABLE t (id INT, name VARCHAR);", new_ddl: "ALTER TABLE t DROP COLUMN name" },
+        ctx,
+      )
+      expect(destructive.title).not.toContain("SAFE")
+      expect(destructive.title).toContain("DESTRUCTIVE")
+      expect(destructive.output).toContain("DROP COLUMN t.name")
+      const safe = await tool.execute(
+        { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR" },
+        ctx,
+      )
+      expect(safe.title).toBe("Migration: SAFE")
+      const errored = await tool.execute(
+        { old_ddl: "CREATE TABLE t (id INT);", new_ddl: "ALTER TABLE t ADD COLUMN name VARCHAR", dialect: "not-a-real-dialect" },
+        ctx,
+      )
+      expect(errored.title).toBe("Migration: ERROR")
+      expect(errored.output).toContain("Error")
     })
   })
 
@@ -785,9 +838,40 @@ describeIf("altimate-core E2E", () => {
       expect((d.pii_columns ?? []).length).toBeGreaterThan(0)
     })
 
+    test("query_pii reports query_targets for aliased PII output (core@0.7.0 contract)", async () => {
+      const r = await D.call("altimate_core.query_pii", {
+        sql: "SELECT email AS contact FROM customers",
+        schema_context: ECOMMERCE_FLAT,
+      })
+      const d = r.data as any
+      expect(d.accesses_pii).toBe(true)
+      const emailCol = (d.pii_columns ?? []).find((c: any) => c.column === "email")
+      expect(emailCol).toBeDefined()
+      expect(emailCol.query_targets).toContain("contact")
+    })
+
     test("query_pii clean for non-PII columns", async () => {
       const r = await D.call("altimate_core.query_pii", { sql: "SELECT customer_id FROM customers", schema_context: ECOMMERCE_FLAT })
       expect((r.data as any).accesses_pii).toBe(false)
+    })
+
+    test("query_pii tool renders query_targets as 'Exposed via'", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreQueryPiiTool } = await import("../../src/altimate/tools/altimate-core-query-pii")
+      const tool = await initTool(AltimateCoreQueryPiiTool)
+      const result = await tool.execute(
+        { sql: "SELECT email AS contact FROM customers", schema_context: ECOMMERCE_FLAT },
+        {
+          sessionID: "test",
+          messageID: "test",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        } as any,
+      )
+      expect(result.output).toContain("customers.email")
+      expect(result.output).toContain("Exposed via: contact")
     })
   })
 
@@ -823,6 +907,51 @@ describeIf("altimate-core E2E", () => {
         schema_context: ECOMMERCE_FLAT,
       })
       expect(r.success).toBe(true)
+    })
+
+    test("track-lineage tool surfaces edges from queries[].edges (engine shape)", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreTrackLineageTool } = await import("../../src/altimate/tools/altimate-core-track-lineage")
+      const tool = await initTool(AltimateCoreTrackLineageTool)
+      const result = await tool.execute(
+        {
+          queries: [
+            "CREATE TABLE staging AS SELECT customer_id, first_name FROM customers",
+            "CREATE TABLE summary AS SELECT customer_id, COUNT(*) AS cnt FROM staging GROUP BY customer_id",
+          ],
+          schema_context: ECOMMERCE_FLAT,
+        },
+        {
+          sessionID: "test",
+          messageID: "test",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        } as any,
+      )
+      expect(result.metadata.edge_count).toBeGreaterThan(0)
+      expect(result.output).toContain("customers.customer_id")
+      expect(result.output).not.toContain("No lineage edges found")
+    })
+
+    test("track-lineage tool renders ERROR (not '0 edges') when the engine call fails", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreTrackLineageTool } = await import("../../src/altimate/tools/altimate-core-track-lineage")
+      const tool = await initTool(AltimateCoreTrackLineageTool)
+      const result = await tool.execute(
+        { queries: ["SELECT FROM"], schema_context: ECOMMERCE_FLAT },
+        {
+          sessionID: "test",
+          messageID: "test",
+          agent: "test",
+          abort: new AbortController().signal,
+          messages: [],
+          metadata: () => {},
+        } as any,
+      )
+      expect(result.title).toBe("Track Lineage: ERROR")
+      expect(result.output).not.toContain("No lineage edges found")
     })
   })
 
@@ -930,6 +1059,330 @@ describeIf("altimate-core E2E", () => {
         schema_context: { customers: { customer_id: "INTEGER" }, empty_table: {} },
       })
       expect(r).toBeDefined()
+    })
+  })
+})
+
+// ===========================================================================
+// Consumer contract sync — consensus-review round 2 regression tests.
+// Every test here runs the REAL engine; each locks a consumer that previously
+// read a field the engine never returns (latent since the Python-engine
+// elimination) or crashed on the default empty-dialect invocation.
+// ===========================================================================
+
+const toolCtx = () =>
+  ({
+    sessionID: "test",
+    messageID: "test",
+    agent: "test",
+    abort: new AbortController().signal,
+    messages: [],
+    metadata: () => {},
+  }) as any
+
+describeIf("consumer contract sync (round 2)", () => {
+  const SCHEMA = {
+    customers: {
+      customer_id: "INTEGER",
+      email: "VARCHAR",
+      first_name: "VARCHAR",
+    },
+    orders: { order_id: "INTEGER", customer_id: "INTEGER" },
+  }
+
+  beforeAll(async () => {
+    const { registerAll } = await import("../../src/altimate/native/altimate-core")
+    registerAll()
+  })
+
+  describe("semantics valid-gate", () => {
+    test("engine contract: cartesian join returns valid:true WITH findings", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const r = await Dispatcher.call("altimate_core.semantics", {
+        sql: "SELECT * FROM customers, orders",
+        schema_context: SCHEMA,
+      })
+      const d = r.data as any
+      expect(d.valid).toBe(true)
+      expect((d.findings ?? []).some((f: any) => f.rule === "missing_join_condition")).toBe(true)
+    })
+
+    test("semantics tool surfaces findings despite valid:true", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreSemanticsTool } = await import("../../src/altimate/tools/altimate-core-semantics")
+      const tool = await initTool(AltimateCoreSemanticsTool)
+      const result = await tool.execute({ sql: "SELECT * FROM customers, orders", schema_context: SCHEMA }, toolCtx())
+      expect(result.title).not.toContain("VALID")
+      expect(result.title).toMatch(/\d+ issues/)
+      expect(result.output).toContain("missing_join_condition")
+    })
+  })
+
+  describe("compare tool (engine shape: identical/diff_count/diffs)", () => {
+    test("different queries do NOT render IDENTICAL (no dialect)", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreCompareTool } = await import("../../src/altimate/tools/altimate-core-compare")
+      const tool = await initTool(AltimateCoreCompareTool)
+      const result = await tool.execute(
+        {
+          left_sql: "SELECT customer_id FROM customers",
+          right_sql: "SELECT customer_id FROM customers WHERE customer_id = 1",
+        },
+        toolCtx(),
+      )
+      expect(result.title).not.toContain("IDENTICAL")
+      expect(result.title).toMatch(/\d+ difference/)
+      expect(result.metadata.difference_count).toBeGreaterThan(0)
+    })
+
+    test("identical queries render IDENTICAL", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreCompareTool } = await import("../../src/altimate/tools/altimate-core-compare")
+      const tool = await initTool(AltimateCoreCompareTool)
+      const result = await tool.execute(
+        { left_sql: "SELECT customer_id FROM customers", right_sql: "SELECT customer_id FROM customers" },
+        toolCtx(),
+      )
+      expect(result.title).toBe("Compare: IDENTICAL")
+    })
+  })
+
+  describe("policy tool (engine shape: allowed/violations)", () => {
+    const POLICY = JSON.stringify({
+      data_protection: { blocked_columns: [{ table: "customers", columns: ["email"] }] },
+    })
+
+    test("clean SQL renders PASS (previously always VIOLATIONS FOUND)", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCorePolicyTool } = await import("../../src/altimate/tools/altimate-core-policy")
+      const tool = await initTool(AltimateCorePolicyTool)
+      const result = await tool.execute(
+        { sql: "SELECT customer_id FROM customers", policy_json: POLICY, schema_context: SCHEMA },
+        toolCtx(),
+      )
+      expect(result.title).toBe("Policy: PASS")
+    })
+
+    test("blocked column renders VIOLATIONS FOUND with the rule", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCorePolicyTool } = await import("../../src/altimate/tools/altimate-core-policy")
+      const tool = await initTool(AltimateCorePolicyTool)
+      const result = await tool.execute(
+        { sql: "SELECT email FROM customers", policy_json: POLICY, schema_context: SCHEMA },
+        toolCtx(),
+      )
+      expect(result.title).toBe("Policy: VIOLATIONS FOUND")
+      expect(result.output).toContain("blocked_columns")
+    })
+  })
+
+  describe("classify-pii tool (None rows excluded)", () => {
+    test("finding count excludes classification:'None' columns", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreClassifyPiiTool } = await import("../../src/altimate/tools/altimate-core-classify-pii")
+      const tool = await initTool(AltimateCoreClassifyPiiTool)
+      // 3 customers columns: email is PII; customer_id/first_name may or may not
+      // be — but order_id definitely is not. Assert count matches engine pii_count.
+      const result = await tool.execute({ schema_context: SCHEMA }, toolCtx())
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const raw = await Dispatcher.call("altimate_core.classify_pii", { schema_context: SCHEMA })
+      const piiCount = (raw.data as any).pii_count
+      // customers.email must classify as PII — a zero count would make this
+      // test pass without exercising the None-filter it guards.
+      expect(piiCount).toBeGreaterThan(0)
+      expect(result.metadata.finding_count).toBe(piiCount)
+      expect(result.output).not.toContain(": None")
+    })
+  })
+
+  describe("no-dialect tool invocation (empty-string coercion in handlers)", () => {
+    test("column-lineage tool works without dialect", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreColumnLineageTool } = await import("../../src/altimate/tools/altimate-core-column-lineage")
+      const tool = await initTool(AltimateCoreColumnLineageTool)
+      const result = await tool.execute({ sql: "SELECT customer_id FROM customers", schema_context: SCHEMA }, toolCtx())
+      expect(result.metadata.error ?? "").not.toContain("unknown dialect")
+    })
+
+    test("extract-metadata tool works without dialect", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreExtractMetadataTool } = await import("../../src/altimate/tools/altimate-core-extract-metadata")
+      const tool = await initTool(AltimateCoreExtractMetadataTool)
+      const result = await tool.execute({ sql: "SELECT customer_id FROM customers" }, toolCtx())
+      expect(result.metadata.error ?? "").not.toContain("unknown dialect")
+      expect(result.output).toContain("customers")
+    })
+
+    test("import-ddl tool works without dialect", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreImportDdlTool } = await import("../../src/altimate/tools/altimate-core-import-ddl")
+      const tool = await initTool(AltimateCoreImportDdlTool)
+      const result = await tool.execute({ ddl: "CREATE TABLE t (id INT, email VARCHAR);" }, toolCtx())
+      expect(result.metadata.error ?? "").not.toContain("unknown dialect")
+    })
+
+    test("compare tool works without dialect (was: unknown dialect '')", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreCompareTool } = await import("../../src/altimate/tools/altimate-core-compare")
+      const tool = await initTool(AltimateCoreCompareTool)
+      const result = await tool.execute({ left_sql: "SELECT 1", right_sql: "SELECT 1" }, toolCtx())
+      expect(result.metadata.error ?? "").not.toContain("unknown dialect")
+    })
+  })
+
+  describe("query-pii error gating", () => {
+    test("unparseable SQL renders ERROR, not CLEAN (engine abstains via parse_error)", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreQueryPiiTool } = await import("../../src/altimate/tools/altimate-core-query-pii")
+      const tool = await initTool(AltimateCoreQueryPiiTool)
+      // Live engine returns { parse_error: "…", pii_columns: [] } for this —
+      // an abstention that previously rendered "Query PII: CLEAN".
+      const result = await tool.execute({ sql: "SELECT FROM", schema_context: SCHEMA }, toolCtx())
+      expect(result.title).toBe("Query PII: ERROR")
+      expect(result.metadata.error).toBeDefined()
+      expect(result.output).toContain("Error")
+    })
+  })
+
+  describe("failure output consistency (title and body must agree)", () => {
+    test("classify-pii engine error renders ERROR title and Error output", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreClassifyPiiTool } = await import("../../src/altimate/tools/altimate-core-classify-pii")
+      const tool = await initTool(AltimateCoreClassifyPiiTool)
+      // Malformed schema file → deterministic engine failure envelope
+      // (a nonexistent path would silently fall back to an empty schema).
+      const fs = await import("fs/promises")
+      const os = await import("os")
+      const path = await import("path")
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pii-err-"))
+      try {
+        const badSchema = path.join(dir, "schema.json")
+        await fs.writeFile(badSchema, "not json{{{")
+        const result = await tool.execute({ schema_path: badSchema }, toolCtx())
+        expect(result.title).toBe("PII Classification: ERROR")
+        expect(result.metadata.success).toBe(false)
+        expect(result.output).toContain("Error")
+        expect(result.output).not.toContain("No PII columns detected")
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true })
+      }
+    })
+
+    test("policy tool malformed policy JSON renders ERROR with failing metadata", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCorePolicyTool } = await import("../../src/altimate/tools/altimate-core-policy")
+      const tool = await initTool(AltimateCorePolicyTool)
+      const result = await tool.execute(
+        { sql: "SELECT 1", policy_json: "not-valid-json{", schema_context: SCHEMA },
+        toolCtx(),
+      )
+      expect(result.title).toBe("Policy: ERROR")
+      expect(result.metadata.success).toBe(false)
+      expect(result.output).toContain("Error")
+    })
+  })
+
+  describe("composite check PII section (now wired)", () => {
+    test("check tool reports PII exposure for a PII query", async () => {
+      const { initTool } = await import("./tool-fixture")
+      const { AltimateCoreCheckTool } = await import("../../src/altimate/tools/altimate-core-check")
+      const tool = await initTool(AltimateCoreCheckTool)
+      const result = await tool.execute(
+        { sql: "SELECT email AS contact FROM customers", schema_context: SCHEMA },
+        toolCtx(),
+      )
+      expect(result.output).toContain("=== PII ===")
+      expect(result.output).toContain("customers.email")
+      expect(result.output).toContain("exposed via: contact")
+      expect(result.output).not.toContain("No PII detected")
+    })
+
+    test("composite check diff-scopes safety threats against base_sql", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const threatSql = "SELECT * FROM customers WHERE first_name = 'x' OR 1=1 --"
+      // Full scan without base: the tautology threat is reported.
+      const full = await Dispatcher.call("altimate_core.check", { sql: threatSql, schema_context: SCHEMA })
+      const fullThreats = ((full.data as any).safety?.threats ?? []).map((t: any) => t.rule)
+      expect(fullThreats).toContain("tautology_attack")
+      // Same threat already present in base: it is pre-existing, not introduced.
+      const scoped = await Dispatcher.call("altimate_core.check", {
+        sql: threatSql,
+        base_sql: threatSql,
+        schema_context: SCHEMA,
+      })
+      const scopedThreats = ((scoped.data as any).safety?.threats ?? []).map((t: any) => t.rule)
+      expect(scopedThreats).not.toContain("tautology_attack")
+      // With every threat pre-existing, the verdict must not stay stale-unsafe.
+      expect((scoped.data as any).safety.safe).toBe(true)
+      expect((scoped.data as any).safety.risk_score).toBe(0)
+    })
+
+    test("composite check diff-scopes PII but NOT validation against base_sql", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const base = "SELECT zzz, email FROM customers"
+      const head = "SELECT zzz, yyy, email FROM customers"
+      const scoped = await Dispatcher.call("altimate_core.check", { sql: head, base_sql: base, schema_context: SCHEMA })
+      const d = scoped.data as any
+      // Validation is deliberately NOT diff-scoped: the engine reports only
+      // the FIRST error, so base subtraction could hide new breakage (yyy).
+      expect(d.validation.valid).toBe(false)
+      expect((d.validation.errors ?? []).length).toBeGreaterThan(0)
+      // email was already exposed by the base — not introduced by this change.
+      const exposed = (d.pii?.pii_columns ?? []).map((c: any) => c.column)
+      expect(exposed).not.toContain("email")
+      // Full run (no base) still reports the exposure.
+      const full = await Dispatcher.call("altimate_core.check", { sql: head, schema_context: SCHEMA })
+      const fullExposed = ((full.data as any).pii?.pii_columns ?? []).map((c: any) => c.column)
+      expect(fullExposed).toContain("email")
+      // With every exposure pre-existing, risk_level must not stay stale.
+      expect((scoped.data as any).pii.risk_level).toBe("None")
+    })
+
+    test("PII diff-scoping keys on output aliases — a renamed alias still surfaces", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const base = "SELECT email AS old_contact FROM customers"
+      // Same source column, NEW output alias → a new exposure, not pre-existing.
+      const renamed = await Dispatcher.call("altimate_core.check", {
+        sql: "SELECT email AS new_contact FROM customers",
+        base_sql: base,
+        schema_context: SCHEMA,
+      })
+      const renamedCols = ((renamed.data as any).pii?.pii_columns ?? []) as any[]
+      expect(renamedCols.some((c) => (c.query_targets ?? []).includes("new_contact"))).toBe(true)
+      // Identical alias → pre-existing, filtered.
+      const same = await Dispatcher.call("altimate_core.check", {
+        sql: base,
+        base_sql: base,
+        schema_context: SCHEMA,
+      })
+      expect(((same.data as any).pii?.pii_columns ?? []).length).toBe(0)
+    })
+
+    test("check tool PII section reports abstention for unparseable SQL, not a clean verdict", async () => {
+      const { formatCheck } = await import("../../src/altimate/tools/altimate-core-check")
+      const output = formatCheck({
+        validation: { valid: false, errors: [{ message: "syntax" }] },
+        lint: { clean: true },
+        safety: { safe: true },
+        pii: { accesses_pii: false, pii_columns: [], parse_error: "Syntax error: Expected: identifier" },
+      })
+      expect(output).toContain("PII check skipped")
+      expect(output).not.toContain("No PII detected")
+    })
+  })
+
+  describe("grade CLI mapping (engine shape: overall_grade/scores.overall)", () => {
+    test("engine contract: evaluate has overall_grade and scores.overall, no grade/score", async () => {
+      const { Dispatcher } = await import("../../src/altimate/native")
+      const r = await Dispatcher.call("altimate_core.grade", {
+        sql: "SELECT customer_id FROM customers",
+        schema_context: SCHEMA,
+      })
+      const d = r.data as any
+      expect(d.overall_grade).toBeDefined()
+      expect(d.scores?.overall).toBeDefined()
+      expect(d.grade).toBeUndefined()
+      expect(d.score).toBeUndefined()
     })
   })
 })

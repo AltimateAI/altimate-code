@@ -1,3 +1,8 @@
+---
+title: Amazon Bedrock Custom Endpoints — Altimate Code
+description: "Configure Altimate Code to use a custom Amazon Bedrock endpoint, API gateway, or proxy for your LLM calls."
+---
+
 # Amazon Bedrock Custom Endpoints
 
 This guide covers using Altimate Code with a custom Amazon Bedrock endpoint — such as a corporate API gateway, reverse proxy, or VPC endpoint that sits in front of Bedrock.

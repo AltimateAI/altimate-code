@@ -1,3 +1,8 @@
+---
+title: Keybindings — Altimate Code TUI
+description: "85+ customizable keybindings for the Altimate Code terminal UI. Configure the leader key and reassign any shortcut."
+---
+
 # Keybinds
 
 altimate supports 85+ customizable keybindings for the TUI.

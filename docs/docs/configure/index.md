@@ -1,3 +1,8 @@
+---
+title: Configure Altimate Code
+description: "Configure warehouses, LLM providers, agent modes, and preferences in Altimate Code."
+---
+
 # Configure
 
 Set up your warehouses, LLM providers, and preferences. For agents, tools, skills, and commands, see the [Use](../data-engineering/agent-modes.md) section. For rules, permissions, and context management, see [Governance](rules.md).

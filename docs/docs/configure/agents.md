@@ -1,3 +1,8 @@
+---
+title: Agent Modes — Builder, Analyst, Reviewer, dbt-Optimizer, Plan
+description: "Altimate Code ships five AI agent personas — Builder, Analyst, Reviewer, dbt-Optimizer, and Plan — each with different tool access levels and use cases."
+---
+
 # Agents
 
 Agents define different AI personas with specific models, prompts, permissions, and capabilities.
@@ -105,7 +110,7 @@ Create agents as markdown files in `.altimate-code/agents/`:
 ---
 name: cost-reviewer
 model: anthropic/claude-sonnet-4-6
-description: Reviews queries for cost efficiency
+description: "Reviews queries for cost efficiency"
 ---
 
 You are a Snowflake cost optimization expert. For every query:

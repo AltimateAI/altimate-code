@@ -1715,9 +1715,14 @@ export namespace SessionPrompt {
             ...req,
             sessionID: input.session.id,
             tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-            // altimate_change start — session rules must not outrank agent config
-            // (see session/tools.ts): merged FIRST so agent denies stay final.
-            ruleset: PermissionNext.merge(input.session.permission ?? [], input.agent.permission),
+            // altimate_change start — DENY wins in BOTH directions (see
+            // session/tools.ts): session denies hold as ceilings, agent denies
+            // re-applied last stay non-overridable.
+            ruleset: PermissionNext.merge(
+              input.agent.permission,
+              input.session.permission ?? [],
+              input.agent.permission.filter((r) => r.action === "deny"),
+            ),
             // altimate_change end
           } as Parameters<typeof PermissionNext.ask>[0])
           // altimate_change end

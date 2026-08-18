@@ -1,3 +1,8 @@
+---
+title: Session Traces & Recordings — Altimate Code
+description: "Altimate Code records session traces with LLM calls, tool usage, token counts, and costs. Stored locally by default."
+---
+
 # Trace
 
 Altimate Code captures detailed traces (session recordings) of every session, including LLM generations, tool calls, token usage, cost, and timing, and saves them locally as JSON files. Traces are invaluable for debugging agent behavior, optimizing cost, and understanding how the agent solves problems.
