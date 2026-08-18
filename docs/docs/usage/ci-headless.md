@@ -1,3 +1,8 @@
+---
+title: "CI & Headless Mode — Altimate Code"
+description: "Run Altimate Code prompts non-interactively in CI/CD pipelines. Returns plain text or structured JSON."
+---
+
 # CI & Headless Mode
 
 Run any altimate prompt non-interactively from scripts, CI pipelines, or scheduled jobs. No TUI. Output is plain text or JSON.

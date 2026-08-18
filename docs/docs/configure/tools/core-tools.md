@@ -1,3 +1,8 @@
+---
+title: Core SQL Engine Tools — Altimate Code
+description: "Reference for 28 Rust-based SQL engine tools in Altimate Code: altimate_core_check, altimate_core_validate, and more."
+---
+
 # Core Tools
 
 The `altimate_core_*` tools are powered by a Rust-based SQL engine that provides fast, deterministic analysis without LLM calls. These tools handle validation, linting, safety scanning, lineage, formatting, and more.

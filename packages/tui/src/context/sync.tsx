@@ -33,6 +33,7 @@ import path from "path"
 import { useKV } from "./kv"
 // altimate_change start - yolo mode + smooth streaming
 import { Flag } from "@opencode-ai/core/flag/flag"
+import * as Yolo from "../util/yolo"
 // altimate_change end
 
 const emptyConsoleState: ConsoleState = {
@@ -77,6 +78,19 @@ export const {
       permission: {
         [sessionID: string]: PermissionRequest[]
       }
+      // altimate_change start - yolo mode: per-session override, keyed by ROOT session.
+      // Absent = inherit the process-wide Flag.ALTIMATE_CLI_YOLO default (set by --yolo);
+      // present = explicit user choice for this session, which can turn a globally
+      // enabled yolo back off. Deliberately in-memory only: yolo must never survive a
+      // restart, or resuming an old session would silently reinstate it.
+      yolo: {
+        [sessionID: string]: boolean
+      }
+      // Choice made on the welcome screen, before any session exists. Adopted by the
+      // first session created and then cleared, so it does NOT become a process-wide
+      // default that silently yolos every later session ("current session only").
+      yolo_pending: boolean | undefined
+      // altimate_change end
       question: {
         [sessionID: string]: QuestionRequest[]
       }
@@ -128,6 +142,10 @@ export const {
       status: "loading",
       agent: [],
       permission: {},
+      // altimate_change start — yolo mode: per-session override map (see type above)
+      yolo: {},
+      yolo_pending: undefined,
+      // altimate_change end
       question: {},
       command: [],
       provider: [],
@@ -215,62 +233,159 @@ export const {
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
+    // altimate_change start - yolo mode scoping. The rules (root-session normalization
+    // so subagents inherit, explicit-choice-beats---yolo, and fail-closed on an
+    // unresolvable chain) live in util/yolo.ts so they are unit-testable without a
+    // renderer; these are thin bindings to the store.
+    const getSessionNode = (sessionID: string) => result.session.get(sessionID)
+
+    function rootSessionID(sessionID: string): string | undefined {
+      return Yolo.resolveRoot(sessionID, getSessionNode)
+    }
+
+    // The process-wide default ONLY. A welcome-screen (pending) choice deliberately does
+    // NOT feed this: it belongs to the session about to be created, and letting it act as
+    // a fallback would auto-approve for every other undecided session — including one
+    // still streaming in the background after `session.new` navigated away from it.
+    function yoloFallback(): boolean {
+      return Flag.ALTIMATE_CLI_YOLO
+    }
+
+    function yoloEnabled(sessionID: string): boolean {
+      return Yolo.yoloEnabled({
+        sessionID,
+        overrides: store.yolo,
+        getSession: getSessionNode,
+        fallback: yoloFallback(),
+      })
+    }
+
+    // Insert a permission request into the store so the normal prompt renders. Extracted
+    // from the permission.asked handler so the yolo path can fall back to it.
+    function enqueuePermission(request: PermissionRequest) {
+      const requests = store.permission[request.sessionID]
+      if (!requests) {
+        setStore("permission", request.sessionID, [request])
+        return
+      }
+      const match = search(requests, request.id, (r) => r.id)
+      if (match.found) {
+        setStore("permission", request.sessionID, match.index, reconcile(request))
+        return
+      }
+      setStore(
+        "permission",
+        request.sessionID,
+        produce((draft) => {
+          draft.splice(match.index, 0, request)
+        }),
+      )
+    }
+
+    // Remove a settled permission request from the store. Idempotent — both the
+    // `permission.replied` event and a successful auto-approve call it.
+    function removePermission(sessionID: string, requestID: string) {
+      const requests = store.permission[sessionID]
+      if (!requests?.length) return
+      const match = search(requests, requestID, (r) => r.id)
+      if (!match.found) return
+      setStore(
+        "permission",
+        sessionID,
+        produce((draft) => {
+          draft.splice(match.index, 1)
+        }),
+      )
+    }
+
+    // Requests currently being auto-approved. A reply is not removed from
+    // store.permission until the server's `permission.replied` event lands, so without
+    // this a second flush (toggle off then on again, or two set() calls) would reply to
+    // the same request twice. The second reply targets an already-settled request, the
+    // server rejects it, and the rejection would be misread as a lost reply — putting a
+    // prompt back on screen for something already answered.
+    const autoApproving = new Set<string>()
+
+    // Auto-approve on behalf of the user. MUST fail loudly: the handler does not enqueue
+    // the request, so if the reply is lost the server-side Deferred in Permission.ask
+    // never settles and the agent hangs with nothing on screen explaining why.
+    //
+    // `throwOnError: true` is required — the generated SDK client defaults to returning
+    // `{ error }` rather than throwing (packages/sdk/js/src/gen/client/client.gen.ts), so
+    // a plain `.catch()` here would never fire on an ordinary HTTP failure.
+    //
+    // The workspace is read here rather than taken from callers: the session permission
+    // UI passes `project.workspace.current()` on every reply, and threading it through
+    // each call site is exactly how it went missing on the flush path.
+    async function autoApprove(request: PermissionRequest, workspace?: string) {
+      if (autoApproving.has(request.id)) return
+      autoApproving.add(request.id)
+      try {
+        await sdk.client.permission.reply(
+          { requestID: request.id, reply: "once", workspace: workspace ?? project.workspace.current() },
+          { throwOnError: true },
+        )
+        // Drop it now rather than waiting for the server's `permission.replied` event.
+        // The in-flight set above only covers concurrent duplicates; a later flush (toggle
+        // off, then on again) would still find the request sitting in the store and reply
+        // to an already-settled id. The event handler's removal is idempotent.
+        removePermission(request.sessionID, request.id)
+      } catch (e) {
+        console.error("yolo mode auto-approve failed", {
+          error: e instanceof Error ? e.message : String(e),
+          requestID: request.id,
+        })
+        // Fall back to asking the user rather than silently swallowing the request.
+        enqueuePermission(request)
+      } finally {
+        autoApproving.delete(request.id)
+      }
+    }
+
+    // Enabling yolo while a prompt is already on screen must clear that prompt too.
+    // Without this, the most natural moment to press ctrl+y — the agent is blocked
+    // asking for approval — shows "YOLO ON" next to a still-blocked agent.
+    function flushPendingPermissions(root: string, workspace?: string) {
+      for (const [sessionID, requests] of Object.entries(store.permission)) {
+        if (!requests?.length) continue
+        if (rootSessionID(sessionID) !== root) continue
+        for (const request of [...requests]) void autoApprove(request, workspace)
+      }
+    }
+    // altimate_change end
+
     event.subscribe((event, { workspace }) => {
       switch (event.type) {
         case "server.instance.disposed":
           void bootstrap()
           break
         case "permission.replied": {
-          const requests = store.permission[event.properties.sessionID]
-          if (!requests) break
-          const match = search(requests, event.properties.requestID, (r) => r.id)
-          if (!match.found) break
-          setStore(
-            "permission",
-            event.properties.sessionID,
-            produce((draft) => {
-              draft.splice(match.index, 1)
-            }),
-          )
+          // altimate_change start — was inline; shares removePermission with the yolo
+          // auto-approve path so the removal logic exists in one place.
+          removePermission(event.properties.sessionID, event.properties.requestID)
+          // altimate_change end
           break
         }
 
         case "permission.asked": {
           const request = event.properties
-          // altimate_change start - yolo mode: auto-approve without showing prompt
-          if (Flag.ALTIMATE_CLI_YOLO) {
-            void sdk.client.permission
-              .reply({
-                requestID: request.id,
-                reply: "once",
-                workspace,
-              })
-              .catch((e) => {
-                console.error("yolo mode auto-approve failed", {
-                  error: e instanceof Error ? e.message : String(e),
-                  requestID: request.id,
-                })
-              })
+          // altimate_change start - yolo mode: auto-approve without showing prompt.
+          // Scoped to the request's root session so a subagent's own child session
+          // inherits the choice the user made on the conversation they can actually see.
+          //
+          // Safety note: this can only ever answer requests the SERVER already decided
+          // to ask about. Permission.ask (packages/opencode/src/permission/index.ts)
+          // evaluates the ruleset first and returns DeniedError without emitting any
+          // event for a "deny" match, so configured guardrails (DROP DATABASE, DROP
+          // SCHEMA, TRUNCATE) never reach this handler and cannot be auto-approved.
+          if (yoloEnabled(request.sessionID)) {
+            void autoApprove(request, workspace)
             break
           }
+          // Upstream inlined the store insertion here; extracted to enqueuePermission so
+          // the yolo path can fall back to it when an auto-approve reply fails.
+          enqueuePermission(request)
           // altimate_change end
-          const requests = store.permission[request.sessionID]
-          if (!requests) {
-            setStore("permission", request.sessionID, [request])
-            break
-          }
-          const match = search(requests, request.id, (r) => r.id)
-          if (match.found) {
-            setStore("permission", request.sessionID, match.index, reconcile(request))
-            break
-          }
-          setStore(
-            "permission",
-            request.sessionID,
-            produce((draft) => {
-              draft.splice(match.index, 0, request)
-            }),
-          )
           break
         }
 
@@ -330,6 +445,17 @@ export const {
               }),
             )
           }
+          // altimate_change start — yolo mode: drop the override with the session.
+          // Harmless today (ids are unique, so a stale entry cannot be re-matched) but a
+          // stale `true` outliving its session is exactly what turns into a bug if this
+          // map ever gains persistence.
+          setStore(
+            "yolo",
+            produce((draft) => {
+              delete draft[event.properties.info.id]
+            }),
+          )
+          // altimate_change end
           break
         }
         case "session.updated": {
@@ -700,6 +826,42 @@ export const {
       get path() {
         return project.instance.path()
       },
+      // altimate_change start - yolo mode: per-session toggle surfaced to the TUI.
+      // Reads go through yoloEnabled() so callers get root-session semantics and the
+      // --yolo default for free; reactivity comes from the underlying store.
+      yolo: {
+        // sessionID is optional so the welcome screen (no session yet) can read and
+        // set the mode with the same API the session view uses. With no session this
+        // reports the PENDING choice — a display value only; it never influences the
+        // decision made for any real session.
+        enabled(sessionID?: string) {
+          if (!sessionID) return store.yolo_pending ?? Flag.ALTIMATE_CLI_YOLO
+          return yoloEnabled(sessionID)
+        },
+        set(sessionID: string | undefined, value: boolean, workspace?: string) {
+          if (!sessionID) {
+            setStore("yolo_pending", value)
+            return
+          }
+          // An unresolvable chain still has to be settable — key it by the id we were
+          // given so the user's explicit choice is recorded somewhere.
+          const root = rootSessionID(sessionID) ?? sessionID
+          setStore("yolo", root, value)
+          if (value) flushPendingPermissions(root, workspace)
+        },
+        // Hand a pre-session choice to the session that was just CREATED, then clear it.
+        // Deliberately called from the creation path rather than from a route effect:
+        // a route effect fires on any navigation into a session, so resuming an old
+        // conversation after a welcome-screen enable would silently yolo that one.
+        adopt(sessionID: string) {
+          const pending = store.yolo_pending
+          if (pending === undefined) return
+          const root = rootSessionID(sessionID) ?? sessionID
+          if (store.yolo[root] === undefined) setStore("yolo", root, pending)
+          setStore("yolo_pending", undefined)
+        },
+      },
+      // altimate_change end
       session: {
         get(sessionID: string) {
           const match = search(store.session, sessionID, (s) => s.id)

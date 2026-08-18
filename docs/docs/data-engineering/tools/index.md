@@ -1,3 +1,8 @@
+---
+title: "Data Engineering Tools Reference — Altimate Code"
+description: "Reference for 100+ specialized data engineering tools in Altimate Code, organized by SQL, schema, FinOps, lineage, and more."
+---
+
 # Tools Reference
 
 altimate has 100+ specialized tools organized by function.

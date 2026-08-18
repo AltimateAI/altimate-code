@@ -1,6 +1,14 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { EngineCoerce } from "../native/engine-coerce"
+
+/** Engine PiiReport lists EVERY column; classification "None" means not PII. */
+function realPiiColumns(data: Record<string, any>): any[] {
+  if (Array.isArray(data.columns)) return EngineCoerce.piiColumnsFromReport(data)
+  // Legacy fallback shape.
+  return ((data.findings ?? []) as any[]).filter((c) => c.classification !== "None")
+}
 
 export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_pii", {
   description:
@@ -16,13 +24,14 @@ export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_p
         schema_context: args.schema_context,
       })
       const data = (result.data ?? {}) as Record<string, any>
-      const piiColumns = data.columns ?? data.findings ?? []
+      const piiColumns = realPiiColumns(data)
       const findingCount = piiColumns.length
       const error = result.error ?? data.error
       return {
-        title: `PII Classification: ${findingCount} finding(s)`,
+        // Never render a finding count when the engine call itself failed.
+        title: error ? "PII Classification: ERROR" : `PII Classification: ${findingCount} finding(s)`,
         metadata: { success: result.success, finding_count: findingCount, ...(error && { error }) },
-        output: formatClassifyPii(data),
+        output: error ? `Error: ${error}` : formatClassifyPii(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -37,7 +46,7 @@ export const AltimateCoreClassifyPiiTool = Tool.define("altimate_core_classify_p
 
 function formatClassifyPii(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  const piiColumns = data.columns ?? data.findings ?? []
+  const piiColumns = realPiiColumns(data)
   if (!piiColumns.length) return "No PII columns detected."
   const lines: string[] = []
   if (data.risk_level) lines.push(`Risk level: ${data.risk_level}`)
@@ -45,7 +54,7 @@ function formatClassifyPii(data: Record<string, any>): string {
   lines.push("")
   lines.push("PII columns found:")
   for (const f of piiColumns) {
-    const classification = f.classification ?? f.category ?? "PII"
+    const classification = EngineCoerce.classificationToString(f.classification ?? f.category)
     const confidence = f.confidence ?? "high"
     const table = f.table ?? "unknown"
     const column = f.column ?? "unknown"

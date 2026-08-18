@@ -9,8 +9,9 @@
  */
 
 import * as core from "@altimateai/altimate-core"
+import { EngineCoerce } from "./engine-coerce"
 import { register } from "./dispatcher"
-import { schemaOrEmpty, resolveSchema } from "./schema-resolver"
+import { schemaOrEmpty, resolveSchema, SchemaResolver } from "./schema-resolver"
 import type { AltimateCoreResult } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -168,7 +169,11 @@ export function registerAll(): void {
   register("altimate_core.check", async (params) => {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
-      const validation = await core.validate(params.sql, schema)
+      // NOTE: validation is deliberately NOT diff-scoped against base_sql.
+      // The engine validates fail-fast (only the FIRST error is reported), so
+      // subtracting base errors can hide genuinely new breakage behind a
+      // pre-existing one. Re-reporting a pre-existing error is the safe mode.
+      const validation: Record<string, unknown> = toData(await core.validate(params.sql, schema))
       // Diff-scoped lint: when a base SQL is supplied, core returns only the
       // findings the change INTRODUCED (pre-existing issues in the file are
       // dropped) — the structural comparison stays in the AST engine.
@@ -177,14 +182,91 @@ export function registerAll(): void {
           ? core.lintDiff(
               params.sql,
               params.base_sql,
-              params.schema_context ? JSON.stringify(params.schema_context) : undefined,
+              // lintDiff takes SchemaDefinition JSON — normalize flat agent
+              // schemas too, or the whole composite throws "missing field tables".
+              params.schema_context ? SchemaResolver.normalizeSchemaContext(params.schema_context) : undefined,
             )
           : core.lint(params.sql, schema)
-      const safety = core.scanSql(params.sql)
+      // Diff-scope safety like lint: threats present in the base SQL are
+      // pre-existing, not introduced by this change. Subtract as a MULTISET on
+      // (rule, matched_pattern) — one base occurrence consumes one head
+      // occurrence, so a PR that ADDS a second identical injection still
+      // reports it. Recompute safe/risk_score from the surviving threats so a
+      // fully pre-existing threat set doesn't leave a stale unsafe verdict.
+      let safety: Record<string, unknown> = toData(core.scanSql(params.sql))
+      if (params.base_sql) {
+        try {
+          const baseCounts = new Map<string, number>()
+          for (const t of core.scanSql(params.base_sql).threats) {
+            const k = `${t.rule}|${t.matched_pattern}`
+            baseCounts.set(k, (baseCounts.get(k) ?? 0) + 1)
+          }
+          const remaining = (safety.threats as any[]).filter((t: any) => {
+            const k = `${t.rule}|${t.matched_pattern}`
+            const left = baseCounts.get(k) ?? 0
+            if (left > 0) {
+              baseCounts.set(k, left - 1)
+              return false
+            }
+            return true
+          })
+          // The engine's risk_score covers the FULL head scan — once threats
+          // are filtered it no longer matches. Recompute a documented
+          // approximation from the surviving severities (matches the engine's
+          // observed single-threat scores closely enough for gating).
+          const severityScore: Record<string, number> = { critical: 0.98, high: 0.95, medium: 0.6, low: 0.3 }
+          const rescored =
+            remaining.length === (safety.threats as any[]).length
+              ? (safety.risk_score as number)
+              : remaining.reduce((m: number, t: any) => Math.max(m, severityScore[t.severity] ?? 0.5), 0)
+          safety = {
+            ...safety,
+            threats: remaining,
+            safe: remaining.length === 0 ? true : safety.safe,
+            risk_score: rescored,
+          }
+        } catch {
+          // Unscannable base — keep the full head scan (fail open to MORE findings).
+        }
+      }
+      // PII exposure for the composite check — the tool has always rendered a
+      // PII section; previously nothing populated it. Additive: a PII failure
+      // must not fail the whole composite.
+      let pii: Record<string, unknown>
+      try {
+        pii = toData(core.checkQueryPii(params.sql, schema))
+        if (params.base_sql && Array.isArray(pii.pii_columns) && (pii.pii_columns as any[]).length) {
+          try {
+            // Pre-existing exposures are not introduced by this change. The
+            // identity INCLUDES the sorted output aliases — adding or renaming
+            // a SELECT-list alias for an already-exposed column is a NEW
+            // output exposure and must still surface.
+            const exposureKey = (c: any) =>
+              `${c.table}|${c.column}|${[...(c.query_targets ?? [])].sort().join(",")}`
+            const baseExposed = new Set(core.checkQueryPii(params.base_sql, schema).pii_columns.map(exposureKey))
+            const remaining = (pii.pii_columns as any[]).filter((c: any) => !baseExposed.has(exposureKey(c)))
+            pii = {
+              ...pii,
+              pii_columns: remaining,
+              accesses_pii: remaining.length > 0 ? pii.accesses_pii : false,
+              // risk_level covered the full head report; with no surviving
+              // exposures it must not keep claiming risk.
+              risk_level: remaining.length === 0 ? "None" : pii.risk_level,
+            }
+          } catch {
+            // Unscannable base — keep the full head exposure list.
+          }
+        }
+      } catch (e) {
+        // Mark as an abstention — an empty object would render "No PII
+        // detected", a false-clean verdict.
+        pii = { parse_error: String(e) }
+      }
       const data: Record<string, unknown> = {
-        validation: toData(validation),
+        validation,
         lint: toData(lintResult),
         safety: toData(safety),
+        pii,
       }
       return ok(true, data)
     } catch (e) {
@@ -323,10 +405,10 @@ export function registerAll(): void {
       // Pass the optional dialect hint so dialect-specific compiled warehouse SQL
       // (e.g. Snowflake semi-structured `col:field`) parses and the pair is
       // decidable instead of abstaining on a syntax error. Supported since
-      // altimate-core@0.5.1. Use `|| undefined` (not `??`) so the default empty
-      // string from ReviewConfig.dialect coerces to "no hint": the engine throws
-      // on an unknown dialect "", and "" must mean auto-detect, not a real dialect.
-      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, params.dialect || undefined)
+      // altimate-core@0.5.1. dialectHint coerces "" (the ReviewConfig default)
+      // to undefined: the engine throws on an unknown dialect "", and "" must
+      // mean auto-detect, not a real dialect.
+      const raw = await core.checkEquivalence(params.sql1, params.sql2, schema, EngineCoerce.dialectHint(params.dialect))
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -337,8 +419,9 @@ export function registerAll(): void {
   // 12. altimate_core.migration
   register("altimate_core.migration", async (params) => {
     try {
-      // Build schema from old_ddl, analyze new_ddl against it
-      const schema = core.Schema.fromDdl(params.old_ddl, params.dialect ?? undefined)
+      // Build schema from old_ddl, analyze new_ddl against it. dialectHint
+      // coerces "" to auto-detect (the engine throws on an unknown dialect "").
+      const schema = core.Schema.fromDdl(params.old_ddl, EngineCoerce.dialectHint(params.dialect))
       const raw = core.analyzeMigration(params.new_ddl, schema)
       const data = toData(raw)
       return ok(true, data)
@@ -432,7 +515,7 @@ export function registerAll(): void {
   register("altimate_core.column_lineage", async (params) => {
     try {
       const schema = resolveSchema(params.schema_path, params.schema_context)
-      const raw = core.columnLineage(params.sql, params.dialect ?? undefined, schema ?? undefined)
+      const raw = core.columnLineage(params.sql, EngineCoerce.dialectHint(params.dialect), schema ?? undefined)
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -453,7 +536,7 @@ export function registerAll(): void {
   // 22. altimate_core.format
   register("altimate_core.format", async (params) => {
     try {
-      const raw = core.formatSql(params.sql, params.dialect ?? undefined)
+      const raw = core.formatSql(params.sql, EngineCoerce.dialectHint(params.dialect))
       const data = toData(raw)
       return ok(true, data)
     } catch (e) {
@@ -464,7 +547,7 @@ export function registerAll(): void {
   // 23. altimate_core.metadata
   register("altimate_core.metadata", async (params) => {
     try {
-      const raw = core.extractMetadata(params.sql, params.dialect ?? undefined)
+      const raw = core.extractMetadata(params.sql, EngineCoerce.dialectHint(params.dialect))
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -474,7 +557,7 @@ export function registerAll(): void {
   // 24. altimate_core.compare
   register("altimate_core.compare", async (params) => {
     try {
-      const raw = core.compareQueries(params.left_sql, params.right_sql, params.dialect ?? undefined)
+      const raw = core.compareQueries(params.left_sql, params.right_sql, EngineCoerce.dialectHint(params.dialect))
       return ok(true, toData(raw))
     } catch (e) {
       return fail(e)
@@ -528,7 +611,7 @@ export function registerAll(): void {
   // 29. altimate_core.import_ddl — returns Schema, must serialize
   register("altimate_core.import_ddl", async (params) => {
     try {
-      const schema = core.importDdl(params.ddl, params.dialect ?? undefined)
+      const schema = core.importDdl(params.ddl, EngineCoerce.dialectHint(params.dialect))
       const jsonObj = schema.toJson()
       return ok(true, { success: true, schema: toData(jsonObj) })
     } catch (e) {

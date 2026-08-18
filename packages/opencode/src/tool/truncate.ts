@@ -6,7 +6,6 @@ import type { Agent } from "../agent/agent"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { evaluate } from "@/permission/evaluate"
 import { Config } from "@/config/config"
-import { Identifier } from "../id/id"
 import { ToolID } from "./schema"
 import { TRUNCATION_DIR } from "./truncation-dir"
 
@@ -52,17 +51,28 @@ export const layer = Layer.effect(
     const fs = yield* FSUtil.Service
 
     const cleanup = Effect.fn("Truncate.cleanup")(function* () {
-      const cutoff = Identifier.timestamp(
-        Identifier.create("tool", "ascending", Date.now() - Duration.toMillis(RETENTION)),
-      )
+      // altimate_change start — upstream_fix: age files by mtime, not decoded ID timestamps.
+      // Identifier packs `timestamp * 4096` into 48 bits, which wraps every
+      // 2^36 ms (~795 days) — the 26th wrap landed 2026-08-14T11:19:55Z, after
+      // which every new ID decoded as "ancient" and cleanup deleted files the
+      // moment they were written. File mtime has no wrap.
+      const cutoffMs = Date.now() - Duration.toMillis(RETENTION)
       const entries = yield* fs.readDirectory(TRUNCATION_DIR).pipe(
         Effect.map((all) => all.filter((name) => name.startsWith("tool_"))),
         Effect.catch(() => Effect.succeed([])),
       )
       for (const entry of entries) {
-        if (Identifier.timestamp(entry) >= cutoff) continue
-        yield* fs.remove(path.join(TRUNCATION_DIR, entry)).pipe(Effect.catch(() => Effect.void))
+        const file = path.join(TRUNCATION_DIR, entry)
+        // Stat through the INJECTED filesystem (FSUtil extends FileSystem) so
+        // custom/in-memory providers behave identically to the host FS.
+        const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
+        // Unstat-able file or absent mtime: keep it — deletion must fail safe.
+        const mtimeMs =
+          info && Option.isSome(info.mtime) ? info.mtime.value.getTime() : Number.POSITIVE_INFINITY
+        if (mtimeMs >= cutoffMs) continue
+        yield* fs.remove(file).pipe(Effect.catch(() => Effect.void))
       }
+      // altimate_change end
     })
 
     const write = Effect.fn("Truncate.write")(function* (text: string) {

@@ -1,3 +1,7 @@
+---
+title: "Telemetry — Altimate Code"
+description: "Altimate Code collects anonymous usage telemetry by default. See what's collected and how to opt out."
+---
 # Telemetry
 
 Altimate Code collects anonymous usage data to help us improve the product. This page describes what we collect, why, and how to opt out.
@@ -171,9 +175,13 @@ Both identifiers are only sent when telemetry is enabled. Disable telemetry enti
 
 The [Gemini Flash (Free)](../configure/providers.md#gemini-flash-free) tier uses a **separate** identifier, deliberately not the machine ID above: a random secret minted only when you accept its disclosure, stored with your other credentials, and sent to the free-tier gateway only as a SHA-256 hash. It exists to hold that install's usage budget, and it is never used for telemetry — the two datasets are not joined. Declining the free model, or never opening it, means the identifier is never created.
 
+### CLI Authentication Flow
+
+When you sign in using the CLI browser auth flow (`altimate auth login`), the anonymous machine ID (a random UUID persisted at `~/.altimate/machine-id` — a device/installation identifier, reused across sessions) is included in the authorization URL and associated with your account in product analytics. This is used solely to correlate CLI install events with authenticated accounts in aggregate funnel analytics — it is not used for advertising or cross-site tracking. Your telemetry opt-out suppresses this: when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true` **or** the `telemetry.disabled` config option — the machine ID is omitted from the authorization URL entirely. The machine ID is associated with your account in PostHog for this funnel analysis, separate from the Azure Application Insights pipeline used for other CLI telemetry events.
+
 ### Data Retention
 
-Telemetry data is sent to Azure Application Insights and retained according to [Microsoft's data retention policies](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure). We do not maintain a separate data store. To request deletion of your telemetry data, contact privacy@altimate.ai.
+Telemetry data is sent to Azure Application Insights and retained according to [Microsoft's data retention policies](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure). Aside from the PostHog auth-attribution described above, we do not maintain a separate data store for event telemetry. To request deletion of your telemetry data, contact privacy@altimate.ai.
 
 ## Network
 

@@ -1,4 +1,5 @@
 import { Dispatcher } from "../native"
+import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
@@ -55,16 +56,6 @@ function mergePrimaryKeys(
 /** Extract a column name from a PII-flavored check issue, best-effort. */
 function piiColumnOf(issue: any): string | undefined {
   return issue?.column ?? issue?.target ?? issue?.name ?? undefined
-}
-
-/** The engine returns a numeric confidence (0..1); map it to a band. */
-function bandConfidence(c: unknown): "high" | "medium" | "low" {
-  if (typeof c === "string") {
-    const s = c.toLowerCase()
-    if (s === "high" || s === "medium" || s === "low") return s
-  }
-  const n = typeof c === "number" ? c : 0.5
-  return n >= 0.8 ? "high" : n >= 0.5 ? "medium" : "low"
 }
 
 /**
@@ -197,7 +188,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // native functions) — in BOTH full and lint-only modes. core's schema
       // validation requires ≥1 table, so when there's no manifest we attach a
       // throwaway table purely to carry the dialect; AST lint walks the query,
-      // not the schema, so it's inert (and validation errors aren't surfaced).
+      // not the schema, so it's inert (validation errors are only surfaced
+      // when a real schema exists — see hasTables below).
       const schema = (await resolveSchema()) as { tables?: Record<string, unknown> } | undefined
       const hasTables = !!schema && Object.keys(schema.tables ?? {}).length > 0
       const schemaContext = !dialect
@@ -213,6 +205,24 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // failures surface as data.validation.errors. We also keep the legacy
       // top-level keys as a fallback for older core builds.
       const rawIssues = asArray(data.lint?.findings)
+        .concat(
+          // Only surface validation errors when a REAL schema was supplied —
+          // in lint-only mode the throwaway `_altimate_lint_` schema makes
+          // every real table "unknown" and would flood the review.
+          hasTables
+            ? asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
+            : [],
+        )
+        .concat(
+          // ThreatFinding severity is low|medium|high|critical and its location
+          // is a byte tuple — normalize both so downstream lanes (which only
+          // recognize error/warning and location.line) classify them correctly.
+          asArray(data.safety?.threats).map((t: any) => ({
+            ...t,
+            severity: t.severity === "critical" || t.severity === "high" ? "error" : t.severity === "medium" ? "warning" : "info",
+            location: undefined,
+          })),
+        )
         .concat(asArray(data.issues))
         .concat(asArray(data.violations))
         .concat(asArray(data.findings))
@@ -227,11 +237,19 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       // RAW issues (which still carry column/target/name) — the normalized
       // `issues` drop those fields, so mapping over them would always miss.
       const piiColumns = [
-        ...asArray<any>(data.pii).map(piiColumnOf),
+        // data.pii is the engine PiiQueryResult ({ pii_columns, … }); the
+        // legacy array shape is kept as a fallback. Each entry names the
+        // SOURCE column; query_targets carries the exposed OUTPUT aliases
+        // (e.g. `SELECT email AS contact` → column "email", targets ["contact"]).
+        // Prefer the aliases when present — the source name is not in the
+        // model output, so reporting it would flag a column that isn't there.
+        ...asArray<any>((data.pii as any)?.pii_columns ?? data.pii).flatMap((p: any) =>
+          Array.isArray(p?.query_targets) && p.query_targets.length ? p.query_targets : [piiColumnOf(p)],
+        ),
         ...rawIssues
           .filter((i: any) => /pii|sensitive/i.test(String(i.category ?? i.rule ?? i.code ?? i.kind ?? "")))
           .map(piiColumnOf),
-      ].filter((c): c is string => !!c)
+      ].filter((c): c is string => typeof c === "string" && !!c)
       // ran=true: the core parsed and analyzed the SQL (even if zero issues).
       // This lets the orchestrator defer structural checks to the AST lint.
       out = { issues, piiColumns: [...new Set(piiColumns)], ran: true }
@@ -291,7 +309,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       try {
         const res = await Dispatcher.call("altimate_core.grade", { sql, schema_context: await resolveSchema() })
         const data = (res.data ?? {}) as Record<string, any>
-        return { grade: data.grade ?? data.overall_grade }
+        return { grade: data.overall_grade ?? data.grade }
       } catch {
         return {}
       }
@@ -400,7 +418,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           .filter((c) => c?.classification && c.classification !== "None")
           .map((c) => ({
             column: String(c.column ?? ""),
-            classification: String(c.classification ?? ""),
+            // classification can be { Custom: string } — String() would emit "[object Object]"
+            classification: EngineCoerce.classificationToString(c.classification),
             confidence: typeof c.confidence === "number" ? c.confidence : 0,
             masking: c.suggested_masking ?? undefined,
           }))
@@ -508,7 +527,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           decided: true,
           equivalent,
           differences: diffs.map((d) => d?.description ?? String(d)),
-          confidence: bandConfidence(data.confidence),
+          confidence: EngineCoerce.bandConfidence(data.confidence),
         }
       } catch {
         return { decided: false }

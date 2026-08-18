@@ -1,3 +1,8 @@
+---
+title: Context Management — Altimate Code
+description: "How Altimate Code automatically manages conversation context to stay within model limits using pruning and compacting."
+---
+
 # Context Management
 
 altimate automatically manages conversation context so you can work through long sessions without hitting model limits. When a conversation grows large, the CLI summarizes older messages, prunes stale tool outputs, and recovers from provider overflow errors, all without losing the important details of your work.

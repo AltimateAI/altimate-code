@@ -1,3 +1,8 @@
+---
+title: "Memory Tools — Persistent Agent Memory — Altimate Code"
+description: "Altimate Code's memory tools provide persistent, cross-session memory stored as Markdown files on disk."
+---
+
 # Altimate Memory Tools
 
 Altimate Memory gives your data engineering agent **persistent, cross-session memory**. Instead of re-explaining your warehouse setup, naming conventions, or team preferences every session, the agent remembers what matters and picks up where you left off.

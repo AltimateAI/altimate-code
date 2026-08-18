@@ -1,3 +1,8 @@
+---
+title: "Validators (Completion Gates) — Altimate Code"
+description: "Harness-side validators run after the agent declares done, catching SQL errors, schema drift, and test failures automatically."
+---
+
 # Validators (completion gates)
 
 Validators are harness-side checks that run **after** the agent declares done.

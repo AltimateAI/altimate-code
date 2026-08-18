@@ -1,3 +1,8 @@
+---
+title: "Warehouse Tools — Altimate Code"
+description: "Scan your warehouse environment with Altimate Code's project_scan and warehouse management tools."
+---
+
 # Warehouse Tools
 
 ## project_scan

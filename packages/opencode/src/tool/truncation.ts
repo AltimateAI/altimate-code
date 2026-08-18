@@ -1,7 +1,6 @@
 import fs from "fs/promises"
 import path from "path"
 import { Global } from "../global"
-import { Identifier } from "../id/id"
 import { PermissionNext } from "../permission/next"
 import type { Agent } from "../agent/agent"
 import { Scheduler } from "../scheduler"
@@ -35,20 +34,24 @@ export namespace Truncate {
   }
 
   export async function cleanup() {
-    const cutoff = Identifier.timestamp(Identifier.create("tool", "ascending", Date.now() - RETENTION_MS))
+    // altimate_change start — upstream_fix: age files by mtime, not decoded ID
+    // timestamps. Identifier packs `timestamp * 4096` into 48 bits, wrapping
+    // every 2^36 ms (~795 days; the 26th wrap: 2026-08-14T11:19:55Z), after
+    // which every new ID decoded as "ancient" and cleanup deleted files the
+    // moment they were written. File mtime has no wrap. Stat failures keep
+    // the file — deletion must fail safe.
+    const cutoffMs = Date.now() - RETENTION_MS
     const entries = await Glob.scan("tool_*", { cwd: DIR, include: "file" }).catch(() => [] as string[])
     for (const entry of entries) {
-      // altimate_change start - tolerate stale/malformed tool-output files from older builds.
-      let timestamp: number
-      try {
-        timestamp = Identifier.timestamp(entry)
-      } catch {
-        continue
-      }
-      if (timestamp >= cutoff) continue
-      // altimate_change end
-      await fs.unlink(path.join(DIR, entry)).catch(() => {})
+      const file = path.join(DIR, entry)
+      const mtimeMs = await fs
+        .stat(file)
+        .then((st) => st.mtimeMs)
+        .catch(() => Number.POSITIVE_INFINITY)
+      if (mtimeMs >= cutoffMs) continue
+      await fs.unlink(file).catch(() => {})
     }
+    // altimate_change end
   }
 
   function hasTaskTool(agent?: Agent.Info): boolean {

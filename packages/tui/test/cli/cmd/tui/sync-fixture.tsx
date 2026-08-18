@@ -2,6 +2,10 @@
 import { testRender } from "@opentui/solid"
 import { onMount } from "solid-js"
 import { ArgsProvider } from "../../../../src/context/args"
+// altimate_change - SyncProvider calls useExit(). Without this provider every test in
+// this harness failed with "Exit context must be used within a context provider", which
+// is why the three pre-existing `tui sync` tests were red on main.
+import { ExitProvider } from "../../../../src/context/exit"
 import { KVProvider, useKV } from "../../../../src/context/kv"
 import { ProjectProvider, useProject } from "../../../../src/context/project"
 import { SDKProvider } from "../../../../src/context/sdk"
@@ -45,15 +49,17 @@ export async function mount(override?: FetchHandler, state?: string) {
   const app = await testRender(() => (
     <TestTuiContexts paths={state ? { state } : undefined}>
       <ArgsProvider>
-        <KVProvider>
-          <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
-            <ProjectProvider>
-              <SyncProvider>
-                <Probe />
-              </SyncProvider>
-            </ProjectProvider>
-          </SDKProvider>
-        </KVProvider>
+        <ExitProvider exit={() => {}}>
+          <KVProvider>
+            <SDKProvider url="http://test" directory={directory} fetch={calls.fetch} events={events.source}>
+              <ProjectProvider>
+                <SyncProvider>
+                  <Probe />
+                </SyncProvider>
+              </ProjectProvider>
+            </SDKProvider>
+          </KVProvider>
+        </ExitProvider>
       </ArgsProvider>
     </TestTuiContexts>
   ))

@@ -1,3 +1,7 @@
+---
+title: Built-in Tools Reference — Altimate Code
+description: "Reference for Altimate Code's built-in tools: bash, read, edit, write, glob, grep, and list."
+---
 # Tools
 
 altimate includes built-in tools that agents use to interact with your codebase and environment.

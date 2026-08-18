@@ -9,7 +9,7 @@ import { Identifier } from "../../src/id/id"
 import { Process } from "@/util/process"
 import path from "path"
 import { testEffect } from "../lib/effect"
-import { writeFileStringScoped } from "../lib/filesystem"
+import { symlinkScoped, writeFileStringScoped } from "../lib/filesystem"
 import { TestConfig } from "../fixture/config"
 
 const FIXTURES_DIR = path.join(import.meta.dir, "fixtures")
@@ -251,15 +251,33 @@ describe("Truncate", () => {
 
         yield* fs.makeDirectory(Truncate.DIR, { recursive: true })
 
-        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 10 * DAY_MS))
-        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending", Date.now() - 3 * DAY_MS))
+        // Age is judged by file mtime (ID-embedded timestamps wrap every
+        // ~795 days — see Truncate.cleanup), so set mtimes explicitly.
+        const old = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
+        const recent = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
+        // Dangling symlink: listed by readDirectory, but stat fails — the
+        // fail-safe branch must KEEP it rather than delete on uncertainty.
+        const dangling = path.join(Truncate.DIR, Identifier.create("tool", "ascending"))
 
         yield* writeFileStringScoped(old, "old content")
         yield* writeFileStringScoped(recent, "recent content")
+        const nfs = yield* Effect.promise(() => import("node:fs/promises"))
+        // Scoped: the finalizer unlinks it even when an assertion fails —
+        // otherwise a failed expect would leak the link into the real data
+        // dir, where the fail-safe under test deliberately keeps it forever.
+        yield* symlinkScoped(path.join(Truncate.DIR, "nonexistent-target"), dangling)
+        const oldTime = new Date(Date.now() - 10 * DAY_MS)
+        const recentTime = new Date(Date.now() - 3 * DAY_MS)
+        yield* Effect.promise(() => nfs.utimes(old, oldTime, oldTime))
+        yield* Effect.promise(() => nfs.utimes(recent, recentTime, recentTime))
         yield* svc.cleanup()
 
         expect(yield* fs.exists(old)).toBe(false)
         expect(yield* fs.exists(recent)).toBe(true)
+        // lstat: fs.exists follows symlinks and would report false for a
+        // dangling link even when the link itself survived.
+        const danglingKept = yield* Effect.promise(() => nfs.lstat(dangling).then(() => true).catch(() => false))
+        expect(danglingKept).toBe(true)
       }),
     )
   })
