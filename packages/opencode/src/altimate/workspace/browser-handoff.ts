@@ -308,6 +308,18 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
           resolve()
         })
       })
+      // Post-listen persistent error handler. Without this, any socket-level
+      // ``error`` event during the ~15-minute wait (spurious ECONNRESET,
+      // client abort mid-request, an OS EMFILE spike) is unhandled and takes
+      // the process down. We can't do anything useful with the error — the
+      // listener is per-flow and short-lived — so log-and-continue is the
+      // right call. (CodeRabbit cycle 6.)
+      server.on("error", (err: NodeJS.ErrnoException) => {
+        log.warn("handoff loopback listener emitted a post-listen error", {
+          code: err.code,
+          err: err.message,
+        })
+      })
       return { server, port }
     } catch (err) {
       lastErr = err as NodeJS.ErrnoException
@@ -386,6 +398,13 @@ export async function runHandoffWithOpener(
   // Register pending, then bind the listener. Timeout owns rejection with
   // reason "timeout"; the listener's own reject paths mark their own reasons.
   let listenerHandle: { server: Server; port: number } | undefined
+  // ``settled`` reflects whether ``pending.resolve``/``pending.reject`` has
+  // fired. Needed to close the server if the flow rejects (timeout / abort /
+  // browser-open failure) DURING the ``await startListener(pending)`` window
+  // — otherwise ``closeListener`` runs while ``listenerHandle`` is still
+  // undefined, then the awaited startListener returns a server that never
+  // gets closed and stays bound for the full 15-min timeout. (cubic cycle 5.)
+  let settled = false
   const closeListener = () => {
     if (listenerHandle) {
       try {
@@ -404,6 +423,7 @@ export async function runHandoffWithOpener(
       expectedTenant: creds.altimateInstanceName,
       workspaceWebBase: webUrl,
       resolve: (v) => {
+        settled = true
         closeListener()
         clearTimeout(timeoutHandle)
         if (onAbort && input.signal) input.signal.removeEventListener("abort", onAbort)
@@ -413,6 +433,7 @@ export async function runHandoffWithOpener(
         resolve({ ...v, credentials: { apiUrl: creds.altimateUrl, tenant: v.tenant } })
       },
       reject: (err) => {
+        settled = true
         closeListener()
         clearTimeout(timeoutHandle)
         if (onAbort && input.signal) input.signal.removeEventListener("abort", onAbort)
@@ -448,6 +469,15 @@ export async function runHandoffWithOpener(
     ;(async () => {
       try {
         listenerHandle = await startListener(pending)
+        // If the flow already settled during the ``await`` above (timeout
+        // fired, abort fired, browser-open failed), ``closeListener`` ran
+        // with ``listenerHandle`` still undefined — nothing was closed. Now
+        // that we own a real handle, close it and bail so it doesn't sit
+        // bound for the full timeout. (cubic cycle 5.)
+        if (settled) {
+          closeListener()
+          return
+        }
         // Capture the port to a local IMMEDIATELY — ``listenerHandle`` is
         // cleared by ``closeListener`` on timeout, and a lazy ``import()``
         // below can straddle that clear. (M4 sub-case)
