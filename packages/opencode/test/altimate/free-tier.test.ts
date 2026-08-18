@@ -564,7 +564,11 @@ describe("real gateway 429 bodies", () => {
   const TOKENS_429 = JSON.stringify({
     error: {
       message:
-        "Rate limit exceeded for api_key: e4ab7e652480c088469613d7f09fce37d978c5635c2c94fc8fe402c16c1342ac. Limit type: tokens. Current limit: 150000, Remaining: 39505. Limit resets at: 2126-08-06 13:57:48 UTC",
+        // The key identifier is a placeholder of the right SHAPE, not the one the live gateway
+        // returned. The captured body carried a real hashed key, which is what a secret scanner
+        // is for — and the assertion below only needs an identifier present so it can prove our
+        // wording never passes one through to the user. Everything else is verbatim.
+        `Rate limit exceeded for api_key: ${"0".repeat(64)}. Limit type: tokens. Current limit: 150000, Remaining: 39505. Limit resets at: 2126-08-06 13:57:48 UTC`,
       type: "throttling_error",
       param: null,
       code: "429",
@@ -573,7 +577,7 @@ describe("real gateway 429 bodies", () => {
   const REQUESTS_429 = JSON.stringify({
     error: {
       message:
-        "Rate limit exceeded for api_key: e4ab7e65. Limit type: requests. Current limit: 10, Remaining: 0. Limit resets at: 2126-08-06 13:57:52 UTC",
+        "Rate limit exceeded for api_key: 00000000. Limit type: requests. Current limit: 10, Remaining: 0. Limit resets at: 2126-08-06 13:57:52 UTC",
       type: "throttling_error",
       param: null,
       code: "429",
@@ -597,8 +601,13 @@ describe("real gateway 429 bodies", () => {
 
   test("neither message leaks the key identifier from the gateway's text", () => {
     // The gateway names the key hash in its message; our wording must not carry it to the user.
+    // The identifier is read back OUT of each body rather than written here as a constant: a
+    // literal would go stale the moment the fixture changed and then assert nothing, which is
+    // how this assertion was briefly vacuous when the captured hash was replaced.
     for (const body of [TOKENS_429, REQUESTS_429]) {
-      expect(FreeTier.describeRateLimit({ body })).not.toContain("e4ab7e65")
+      const identifier = JSON.parse(body).error.message.match(/api_key: (\S+?)\./)![1]
+      expect(identifier.length).toBeGreaterThan(7)
+      expect(FreeTier.describeRateLimit({ body })).not.toContain(identifier)
     }
   })
 })
