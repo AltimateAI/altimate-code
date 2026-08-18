@@ -47,6 +47,23 @@ export const LinkCommand = cmd({
       default: process.cwd(),
     }),
   handler: async (args) => {
+    // Fail fast on non-TTY stdin — the whole subcommand is a series of
+    // ``@clack/prompts`` interactive selects (workspace picker, name prompt,
+    // confirm), so a piped or redirected stdin (``altimate-code link < /dev/null``,
+    // CI runner, background job) makes every prompt.select() block forever
+    // with no output — the user sees a hung process at 0% CPU. Bail with a
+    // clear message directing them to the alternative that actually works
+    // headless (the TUI plugin's palette command). (kilo cycle 6.)
+    if (!process.stdin.isTTY) {
+      UI.error(
+        "`altimate-code link` needs an interactive terminal (stdin must be a TTY). " +
+          "Run it directly in a shell, or use the TUI palette command " +
+          '"Link this project to a workspace".',
+      )
+      process.exitCode = 1
+      return
+    }
+
     if (!(await AltimateApi.isConfigured())) {
       UI.error(
         "Not signed in to Altimate. Run the TUI (altimate-code) and sign in first, then re-run `altimate-code link`.",

@@ -10,7 +10,7 @@
 // ``Global.Path.state`` at 0o600 — chmod is applied post-write since
 // ``Filesystem.writeJsonAtomic`` does not chmod (see filesystem.ts:294 for
 // why; codex round-2 flagged this gap).
-import { chmodSync, existsSync, readFileSync } from "node:fs"
+import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs"
 import path from "node:path"
 import { AltimateApi } from "@/altimate/api/client"
 import { Global } from "@/global"
@@ -20,6 +20,24 @@ import { Log } from "@/altimate/util/log"
 const CACHE_VERSION = 1
 
 const log = Log.create({ service: "altimate-workspace-state" })
+
+/** Canonicalize a directory into a stable cache key so callers passing
+ * ``/tmp/foo``, ``/private/tmp/foo`` (macOS symlink), ``/tmp/foo/``, or a
+ * relative path all read/write the same row. Uses ``path.resolve`` first so
+ * relative inputs anchor to cwd, then ``realpathSync`` to collapse symlinks
+ * and trailing separators. Falls back to the resolved-only form when the
+ * path doesn't exist on disk (e.g. cache written for a repo that has since
+ * moved) — better a stable-if-unresolved key than an exception that skips
+ * the cache entirely. (cubic + kilo cycle 6 — different clients keyed the
+ * same project under different paths.) */
+function canonicalDirKey(directory: string): string {
+  const resolved = path.resolve(directory)
+  try {
+    return realpathSync(resolved)
+  } catch {
+    return resolved
+  }
+}
 
 export interface CachedBinding {
   datamateId: number
@@ -127,14 +145,15 @@ async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
 }
 
 /** Read the local binding for ``directory`` — only returns a hit when the
- * cache's stored (tenant, apiUrl) matches the current credentials. */
+ * cache's stored (tenant, apiUrl) matches the current credentials. Directory
+ * is canonicalized so raw / symlink / trailing-slash variants collide. */
 export async function readLocalBinding(directory: string): Promise<CachedBinding | null> {
   const key = await tenantKey()
   if (!key) return null
   const cache = readCache()
   if (!cache) return null
   if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
-  return cache.bindings[directory] ?? null
+  return cache.bindings[canonicalDirKey(directory)] ?? null
 }
 
 export async function recordApprovedBinding(
@@ -154,7 +173,7 @@ export async function recordApprovedBinding(
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-    cache.bindings[directory] = binding
+    cache.bindings[canonicalDirKey(directory)] = binding
     writeCache(cache)
   } catch (err) {
     log.warn("could not persist workspace binding cache", {

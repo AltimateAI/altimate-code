@@ -132,7 +132,6 @@ interface OfferProps {
   api: TuiPluginApi
   identifier: ProjectIdentifier
   defaultName: string
-  suppressLatch?: boolean // altimate link on-demand skips the Skip latch
   /** (tenant, apiUrl) scope for the Skip latch. Resolved once by the caller
    * so the sync ``onSelect`` handler can call ``recordSkip`` without a
    * mid-render await. Null when creds are unavailable — latch falls back
@@ -159,14 +158,13 @@ function OfferDialog(props: OfferProps) {
         {
           title: "Skip for now",
           value: "skip",
-          description: props.suppressLatch ? "Close this prompt." : "Won't ask again for 7 days.",
+          description: "Won't ask again for 7 days.",
         },
       ]}
       current="create"
       onSelect={(option) => {
         if (option.value === "skip") {
-          if (!props.suppressLatch)
-            recordSkip(props.api, props.identifier, props.latchScope, Date.now())
+          recordSkip(props.api, props.identifier, props.latchScope, Date.now())
           props.api.ui.dialog.clear()
           return
         }
@@ -406,6 +404,14 @@ interface PickerProps {
 function PickerDialog(props: PickerProps) {
   const [datamates, setDatamates] = createSignal<DatamateRef[] | null>(null)
   const [loadError, setLoadError] = createSignal<string | null>(null)
+  // DialogSelect delivers ``onSelect`` synchronously per Enter keypress, but
+  // ``pick()`` awaits the network round-trip — a second Enter before the
+  // first bind resolves would fire a duplicate ``bindExisting`` /
+  // ``rebindBy…`` against a project that may already be bound by the first
+  // call. The second call typically 409s, but the toast then contradicts the
+  // success toast the first call is about to render. Latch on the first
+  // in-flight ``pick()``. (kilo cycle 6.)
+  let submitting = false
 
   onMount(async () => {
     try {
@@ -420,6 +426,8 @@ function PickerDialog(props: PickerProps) {
   })
 
   async function pick(datamateId: number) {
+    if (submitting) return
+    submitting = true
     try {
       if (props.mode === "attach") {
         const res = await WorkspaceApi.bindExisting(datamateId, props.identifier)
@@ -463,15 +471,20 @@ function PickerDialog(props: PickerProps) {
       }
       props.api.ui.dialog.clear()
     } catch (err) {
-      // Surface as a toast so the user sees the specific failure. Dialog closes
-      // either way — the user can re-invoke via /altimate.workspace.link.
+      // Surface as a toast so the user sees the specific failure. Dialog
+      // closes either way — the palette command ``altimate.workspace.link``
+      // (or re-running ``altimate-code link``) re-enters the flow, so the
+      // user always has a way to try again from a clean slate.
       let msg: string
       if (err instanceof ConflictError) {
-        msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}" — pick Re-link from the offer if you want to move it.`
+        // The picker doesn't have a "Re-link" option; the referral used to
+        // point at OfferDialog's Re-link, which doesn't exist either. Point
+        // at the concrete next action instead. (kilo cycle 6.)
+        msg = `Already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to change the workspace.`
       } else if (err instanceof PreconditionFailedError) {
         msg = "Someone else re-linked this project — reload and try again."
       } else if (err instanceof NotFoundError) {
-        msg = "No existing binding for this remote to re-link. Try Create/Link from the offer instead."
+        msg = "No existing binding for this remote to re-link. Re-run `altimate-code link` and pick Create."
       } else if (err instanceof ForbiddenError) {
         msg = "Only the workspace owner can attach projects to it."
       } else {
@@ -479,6 +492,8 @@ function PickerDialog(props: PickerProps) {
       }
       props.api.ui.toast({ variant: "error", message: msg })
       props.api.ui.dialog.clear()
+    } finally {
+      submitting = false
     }
   }
 
@@ -713,11 +728,7 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
   ))
 }
 
-async function runFlow(
-  api: TuiPluginApi,
-  directory: string,
-  opts: { suppressLatch?: boolean } = {},
-): Promise<void> {
+async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
   const identifier = resolveProjectIdentifier(directory)
   // Resolve latch scope ONCE — passed to isSkipActive here + threaded into
   // OfferDialog so its sync onSelect can call recordSkip without awaiting.
@@ -725,7 +736,7 @@ async function runFlow(
   const latchScope = await currentLatchScope()
   // Path is always populated by resolveProjectIdentifier — projects without a
   // git remote (sample dbt scaffolds, scratch dirs) still get a binding offer.
-  if (!opts.suppressLatch && isSkipActive(api, identifier, latchScope, Date.now())) {
+  if (isSkipActive(api, identifier, latchScope, Date.now())) {
     log.info("workspace prompt suppressed by 7-day Skip latch", {
       identifier: identifier.repoRemote ?? identifier.projectPath,
     })
@@ -788,7 +799,6 @@ async function runFlow(
         api={api}
         identifier={identifier}
         defaultName={defaultName}
-        suppressLatch={opts.suppressLatch}
         latchScope={latchScope}
       />
     ))
@@ -830,7 +840,6 @@ async function runFlow(
       api={api}
       identifier={identifier}
       defaultName={defaultName}
-      suppressLatch={opts.suppressLatch}
       latchScope={latchScope}
     />
   ))
