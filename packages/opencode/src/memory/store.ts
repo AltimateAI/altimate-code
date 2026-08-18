@@ -6,6 +6,13 @@ import { Global } from "@opencode-ai/core/global"
 import { Instance } from "@/project/instance"
 import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, MemoryBlockSchema, type MemoryBlock, type Citation } from "./types"
 import { Telemetry } from "@/altimate/telemetry"
+// altimate_change start - workspace memory mirror. Additive: local files stay
+// authoritative and every call below is fire-and-forget.
+import { archiveBlock, mirrorBlock } from "@/altimate/workspace/memory-sync"
+import { Log } from "@/altimate/util/log"
+
+const mirrorLog = Log.create({ service: "altimate-memory-mirror" })
+// altimate_change end
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
@@ -264,6 +271,19 @@ export namespace MemoryStore {
       tags_count: block.tags.length,
     })
 
+    // altimate_change start - mirror to the bound workspace. The local file is
+    // already durable here, so a cloud failure must not surface as a failed
+    // memory write. No-ops unless the pilot flag is on, the project is bound,
+    // and the workspace has memory enabled.
+    void mirrorBlock(block).catch((e) => {
+      mirrorLog.warn("failed to mirror memory block to workspace", {
+        id: block.id,
+        scope: block.scope,
+        err: String(e),
+      })
+    })
+    // altimate_change end
+
     // Auto-clean expired blocks AFTER successful write to avoid data loss
     if (needsCleanup) {
       const expiredBlocks = allBlocks.filter((b) => isExpired(b))
@@ -291,6 +311,16 @@ export namespace MemoryStore {
         duplicate_count: 0,
         tags_count: 0,
       })
+      // altimate_change start - archive rather than delete the cloud record so
+      // the workspace keeps the history. Fire-and-forget, as with write.
+      void archiveBlock(scope, id).catch((e) => {
+        mirrorLog.warn("failed to archive workspace memory record", {
+          id,
+          scope,
+          err: String(e),
+        })
+      })
+      // altimate_change end
       return true
     } catch (e: any) {
       if (e.code === "ENOENT") return false

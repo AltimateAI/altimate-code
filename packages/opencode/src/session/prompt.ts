@@ -23,6 +23,8 @@ import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
+// altimate_change - workspace memory read path
+import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -1041,6 +1043,12 @@ export namespace SessionPrompt {
       if (step === 1) {
         // altimate_change start - reset training session tracking to avoid stale applied counts
         MemoryPrompt.resetSession()
+        // altimate_change end
+        // altimate_change start - workspace memory: one fetch per session, held as an
+        // in-memory overlay merged at injection time. Started rather than awaited so
+        // the turn proceeds immediately; MemoryPrompt.inject applies a bounded wait.
+        WorkspaceMemory.resetOverlay()
+        void WorkspaceMemory.hydrate(sessionID).catch(() => {})
         // altimate_change end
         SessionSummary.summarize({
           sessionID: sessionID,

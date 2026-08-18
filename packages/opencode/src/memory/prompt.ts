@@ -16,6 +16,8 @@ import {
   type TrainingKind,
 } from "@/altimate/training/types"
 import { TrainingStore } from "@/altimate/training/store"
+// altimate_change - workspace memory overlay (read side of the cloud mirror)
+import { overlayBlocks, whenHydrated, type RemoteMemoryBlock } from "@/altimate/workspace/memory-sync"
 
 // Training kind display headers (moved from training/prompt.ts)
 const KIND_HEADERS: Record<TrainingKind, { header: string; instruction: string }> = {
@@ -50,17 +52,47 @@ const KIND_ORDER: TrainingKind[] = ["rule", "pattern", "standard", "glossary", "
 // Track which training entries have been applied this session (prevents double-counting)
 const appliedThisSession = new Set<string>()
 
+// altimate_change start - merge the workspace overlay into the local block set.
+//
+// Local files win: for a block this project also holds on disk, the local copy
+// is authoritative, because a cloud record can have been edited elsewhere by a
+// client that does not preserve this CLI's metadata.
+//
+// A block from a SIBLING project in the same workspace is kept even when its id
+// collides with a local one — block ids are only unique within a project
+// directory, so a collision there means two genuinely different blocks.
+function isRemote(block: MemoryBlock): block is RemoteMemoryBlock {
+  return (block as RemoteMemoryBlock).remote === true
+}
+
+function mergeOverlay(local: MemoryBlock[], remote: RemoteMemoryBlock[]): MemoryBlock[] {
+  if (remote.length === 0) return local
+  const localKeys = new Set(local.map((b) => `${b.scope}:${b.id}`))
+  const merged: MemoryBlock[] = [...local]
+  for (const block of remote) {
+    const fromSibling = block.origin !== undefined
+    if (!fromSibling && localKeys.has(`${block.scope}:${block.id}`)) continue
+    merged.push(block)
+  }
+  merged.sort((a, b) => b.updated.localeCompare(a.updated))
+  return merged
+}
+// altimate_change end
+
 export namespace MemoryPrompt {
   /** Reset per-session applied tracking. Call at session start (step === 1). */
   export function resetSession(): void {
     appliedThisSession.clear()
   }
 
-  /** Format a non-training memory block for display. */
-  export function formatBlock(block: MemoryBlock): string {
+  /** Format a non-training memory block for display. A block carried in from a
+   * SIBLING project in the same workspace is labelled with its origin —
+   * without it the model would read another project's memory as this one's. */
+  export function formatBlock(block: MemoryBlock & { origin?: string }): string {
     const tagsStr = block.tags.length > 0 ? ` [${block.tags.join(", ")}]` : ""
     const expiresStr = block.expires ? ` (expires: ${block.expires})` : ""
-    let result = `### ${block.id} (${block.scope})${tagsStr}${expiresStr}\n${block.content}`
+    const originStr = block.origin ? ` — from workspace project \`${block.origin}\`` : ""
+    let result = `### ${block.id} (${block.scope})${tagsStr}${expiresStr}${originStr}\n${block.content}`
 
     if (block.citations && block.citations.length > 0) {
       const citationLines = block.citations.map((c) => {
@@ -133,7 +165,10 @@ export namespace MemoryPrompt {
     budget: number = MEMORY_DEFAULT_INJECTION_BUDGET,
     ctx?: InjectionContext,
   ): Promise<string> {
-    const blocks = await MemoryStore.listAll()
+    // altimate_change - fold in this session's workspace memory overlay. The
+    // bounded wait only ever costs the first injection of a session.
+    await whenHydrated()
+    const blocks = mergeOverlay(await MemoryStore.listAll(), overlayBlocks())
     if (blocks.length === 0) return ""
 
     // Score and filter
@@ -219,6 +254,9 @@ export namespace MemoryPrompt {
 
     // Fire-and-forget: increment applied count for training blocks (once per session)
     for (const block of injectedTraining) {
+      // altimate_change - a remote block has no local file; incrementApplied
+      // would fabricate one from the cloud copy. Skip them.
+      if (isRemote(block)) continue
       if (!appliedThisSession.has(block.id)) {
         appliedThisSession.add(block.id)
         const kind = trainingKind(block)

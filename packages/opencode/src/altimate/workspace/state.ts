@@ -227,4 +227,16 @@ export async function recordApprovedBinding(
       err: String(err),
     })
   }
+
+  // altimate_change start - seed the workspace with the memory this machine
+  // already holds. Deliberately OUTSIDE the try above: a failed cache write
+  // must not skip the backfill, and a failed backfill must not read as a failed
+  // link. The dynamic import keeps the module graph acyclic — see the header of
+  // ./memory-backfill.ts for why a static import cannot be used.
+  void import("./memory-backfill")
+    .then((m) => m.backfillOnBind())
+    .catch((err) => {
+      log.warn("could not start workspace memory backfill", { err: String(err) })
+    })
+  // altimate_change end
 }
