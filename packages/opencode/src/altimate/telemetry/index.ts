@@ -101,9 +101,10 @@ const PM_WC = "(?:[\\p{L}\\p{N}_#@().'-]{2,}|[\\p{L}\\p{N}_#@().'+&-]{3,})"
 const PM_WCC = "[\\p{L}\\p{N}_#@().'+&-]+"
 const pmSpFileX = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){1,12}(?<=" + PM_EXT + "))?"
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
-// Layer zero — the local user's home and cwd are KNOWN literal values, so
-// paths under them are replaced by exact match before any structural rule
-// runs. Exact matching handles every username shape (spaces, NBSP, unicode)
+// Known-prefix literals — the local user's home and cwd are KNOWN values,
+// replaced by exact match AFTER the structural rules (structure must see the
+// original string: stripping the prefix first orphans terminal spaced
+// components). The literal pass mops up whatever structure missed. Exact matching handles every username shape (spaces, NBSP, unicode)
 // with zero false positives; the structural rules below remain for paths the
 // literals cannot know (other drives, UNC shares, cloud URIs, relative
 // forms, WSL-mounted homes). Variants cover JSON-doubled backslashes and
@@ -119,7 +120,7 @@ for (const root of [process.cwd(), os.homedir()]) {
 }
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "{0,2}|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + "{1,2})*|" + SEP_W + "{1,2})(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + "{1,2}" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
   windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/|" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+){0,6}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
@@ -1469,7 +1470,9 @@ export namespace Telemetry {
       // word (spaced usernames / object keys — the high-PII classes),
       // suppressed after a dotted extension so "x.sql was deleted" prose
       // survives; other rules consume a trailing word only at end-of-string /
-      // before punctuation. Residue (by design): one prose word may be
+      // before punctuation — except spaced terminal FILENAMES, which may span
+      // interior words when the run ends in a dotted extension (up to 4 words
+      // on deep paths, 12 on explicit shallow ./-style paths). Residue (by design): one prose word may be
       // over-masked after extensionless home/cloud paths; a non-home,
       // non-cloud path's terminal spaced component can leak ONE structure
       // word mid-sentence (no personal names in that class); a delimiter

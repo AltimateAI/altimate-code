@@ -93,6 +93,11 @@ describe("maskString paths — home-rooted paths — roots and reach", () => {
     expect(mask(String.raw`stat \\?\C:\Users\Jane Doe\models\a.sql failed`)).toBe("stat <path> failed")
   })
 
+  it("JSON-doubled separators still get home treatment", () => {
+    expect(mask(String.raw`stat \\fileserver\\Users\\Jane Doe gone`)).toBe("stat <path> gone")
+    expect(mask(String.raw`stat C:\\Users\\Jane Doe missing`)).toBe("stat <path> missing")
+  })
+
   it("home rules reach through spaced prefix components and UNC shares", () => {
     expect(mask("stat /mnt disk/c/Users/Jane Doe does not exist")).toBe("stat <path> does not exist")
     expect(mask(String.raw`stat \\fileserver\Users\Jane Doe does not exist`)).toBe("stat <path> does not exist")
@@ -212,7 +217,7 @@ describe("maskString paths — terminal components and tails — spaced, unicode
   })
 
   it("name particles work across nonbreaking spaces", () => {
-    expect(mask("/Users/Mary van der Berg does not exist")).toBe("<path> does not exist")
+    expect(mask("/Users/Mary\u00A0van\u00A0der\u00A0Berg does not exist")).toBe("<path> does not exist")
   })
 })
 
@@ -786,9 +791,9 @@ describe("maskString paths — performance — linearity and DoS budgets", () =>
     expect(performance.now() - t0).toBeLessThan(300)
   })
 
-  it("unified proof stays linear", () => {
+  it("mixed spaced-run proofs stay linear", () => {
     const t0 = performance.now()
-    mask("C:\\a\\b" + ")".repeat(2000) + "\\c")
+    mask("/a/b;" + "word ".repeat(1500) + ";tail")
     expect(performance.now() - t0).toBeLessThan(300)
   })
 })
