@@ -45,6 +45,7 @@ const log = Log.create({ service: "telemetry" })
  *   | extend err = tostring(customDimensions.error_class)
  *   | summarize count() by err
  */
+
 // altimate_change end
 
 /** True when a test runner is driving the process rather than a real user session.
@@ -113,13 +114,13 @@ const PM_KNOWN_PREFIXES: RegExp[] = []
 for (const root of [process.cwd(), os.homedir()]) {
   if (!root || root.length < 4) continue
   for (const v of new Set([root, root.replace(/\\/g, "\\\\"), root.replace(/\\/g, "/")])) {
-    PM_KNOWN_PREFIXES.push(new RegExp(pmEscape(v), "gi"))
+    PM_KNOWN_PREFIXES.push(new RegExp("(?<![\\w.-])" + pmEscape(v), "gi"))
   }
 }
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/|[\\p{L}_][^\\s\\/\\\\]{0,254}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
@@ -1453,8 +1454,7 @@ export namespace Telemetry {
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
     // Fast path: a string with no separator cannot contain a path — skip the
     // whole path stack (most telemetry strings carry no path at all).
-    if (out.includes("/") || out.includes("\\")) {
-      for (const re of PM_KNOWN_PREFIXES) out = out.replace(re, "<path>")
+    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:[\p{L}_]/u.test(out)) {
       out = out
       // altimate_change start — mask filesystem paths in error text
       // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and
@@ -1486,6 +1486,8 @@ export namespace Telemetry {
       .replace(PATH_RULES.posixHome, "$1<path>")
       .replace(PATH_RULES.posix, "$1<path>")
         .replace(PATH_RULES.tilde, "$1<path>")
+      for (const re of PM_KNOWN_PREFIXES) out = out.replace(re, "<path>")
+      out = out
         // a literal-prefix mask followed by a structurally-masked remainder
         // collapses to one marker
         .replace(/<path>(?:[\\/]?<path>)+/g, "<path>")

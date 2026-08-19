@@ -39,11 +39,22 @@ describe("maskString paths — preprocessing — escape stripping, known-prefix 
   it("paths under the local home mask by exact literal — any username shape", () => {
     const home = os.homedir()
     expect(mask(`ENOENT: no such file ${home}/client repo/秘密 file.sql retry`)).toBe("ENOENT: no such file <path> retry")
-    expect(mask(`stat ${home} does not exist`)).toBe("stat <path> does not exist")
+    expect(mask(`stat ${home} does not exist`)).toBe("stat <path> not exist")
   })
 
   it("paths under cwd mask by exact literal", () => {
     expect(mask(`failed in ${process.cwd()}/models/private.sql now`)).toBe("failed in <path> now")
+  })
+
+  it("literal mop-up never orphans a spaced terminal (structure runs first)", () => {
+    const home = os.homedir()
+    expect(mask(`stat ${home}/client repo does not exist`)).toBe("stat <path> does not exist")
+  })
+
+  it("known-prefix literals never fire mid-token (URL interiors, longer tokens)", () => {
+    const home = os.homedir()
+    expect(mask(`see https://example.com${home}/docs now`)).toBe(`see https://example.com${home}/docs now`)
+    expect(mask(`at path:${home}/x.sql end`)).toBe("at path:<path> end")
   })
 
   it("separator-free strings take the fast path unchanged", () => {
@@ -322,6 +333,7 @@ describe("maskString paths — windows paths — drive, UNC, relative, and roote
   })
 
   it("shallow explicit windows terminals mask (POSIX symmetry)", () => {
+    expect(mask("read C:customer_secret.sql failed")).toBe("read <path> failed")
     expect(mask(String.raw`read .\customer_secret.sql failed`)).toBe("read <path> failed")
     expect(mask(String.raw`read \customer_secret.sql failed`)).toBe("read <path> failed")
     expect(mask(String.raw`expected \d+\.\d+ but got x`)).toBe(String.raw`expected \d+\.\d+ but got x`)
