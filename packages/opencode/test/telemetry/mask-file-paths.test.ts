@@ -359,3 +359,26 @@ describe("maskString paths — fleet round 5 (dot-relative windows, attached fil
     expect(performance.now() - t0).toBeLessThan(500)
   })
 })
+
+describe("maskString paths — fleet round 6 (backslash components, extended-length homes)", () => {
+  it("keeps literal backslashes as path content in slash-delimited rules", () => {
+    expect(mask(String.raw`read s3://bucket/customer data\raw/models/a.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`stat /opt/a\b/c/d.sql failed`)).toBe("stat <path> failed")
+  })
+
+  it("recognizes extended-length Windows home paths", () => {
+    expect(mask(String.raw`\\?\C:\Users\Jane Doe does not exist`)).toBe("<path> does not exist")
+    expect(mask(String.raw`stat \\?\C:\Users\Jane Doe\models\a.sql failed`)).toBe("stat <path> failed")
+  })
+
+  it("backslash-permissive run class never bleeds into following prose", () => {
+    expect(mask(String.raw`use /pattern/ with \d+ tokens`)).toBe(String.raw`use <path> with \d+ tokens`)
+    expect(mask(String.raw`glob /opt/data/*.sql \n escaped`)).toBe(String.raw`glob <path> \n escaped`)
+  })
+
+  it("widened run class stays linear on adversarial input", () => {
+    const t0 = performance.now()
+    mask("s3://b/k " + "w\\x ".repeat(1200))
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})

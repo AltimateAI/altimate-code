@@ -64,6 +64,42 @@ function isAutomatedRun(): boolean {
   return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
 }
 
+// altimate_change start — composed path-masking rules (shared fragments)
+// R: one path-run character — anything but whitespace/separators/quotes,
+// plus an apostrophe when a word character follows (O'Connor vs closing ').
+const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
+// slash-delimited variant: backslash is path content, not a separator
+const PM_R_P = "(?:[^\\s\\/'\"`]|'(?=[\\p{L}\\p{N}_]))"
+const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
+const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<])"
+const PM_EXT = "\\.[A-Za-z0-9]{1,8}"
+// span char: path content incl. delimiters (, ; ) ] } >) that a later
+// separator — or an attached dotted terminal filename (;draft.sql) —
+// proves is path content — multi-word spaced runs allowed, all
+// quantified units space- or separator-anchored with disjoint inner classes
+// (unambiguous parse => linear time; the nested-quantifier ReDoS shape is
+// banned here).
+const SEP_P = "\\/"
+const SEP_W = "[\\\\\\/]"
+const pmR = (sep: string) => (sep === SEP_P ? PM_R_P : PM_R)
+const pmSpan = (sep: string) =>
+  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "*" + sep + "|(?: " + pmR(sep) + "+)+" + sep + "|" + pmR(sep) + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
+const pmChunks = (sep: string) => "(?:(?: " + pmR(sep) + "+)+" + sep + pmSpan(sep) + "*)*"
+// terminal dotted filename: up to four spaced words that END in an extension
+const pmSpFile = (sep: string) => "(?:(?: " + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
+const PM_TERM_COND = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
+const PM_TERM_UNC = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+)?"
+const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
+const PATH_RULES = {
+  cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+\\\\))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
+  posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R_P + "+\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
+  tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
+}
+// altimate_change end
+
 export namespace Telemetry {
   const FLUSH_INTERVAL_MS = 5_000
   const MAX_BUFFER_SIZE = 200
@@ -1381,38 +1417,6 @@ export namespace Telemetry {
   //   Bearer …   Authorization headers leaked in error text
   // Each match replaces with a fixed redaction so length-based fingerprinting
   // can't reconstruct the original token.
-  // altimate_change start — composed path-masking rules (shared fragments)
-  // R: one path-run character — anything but whitespace/separators/quotes,
-  // plus an apostrophe when a word character follows (O'Connor vs closing ').
-  const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
-  const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
-  const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<])"
-  const PM_EXT = "\\.[A-Za-z0-9]{1,8}"
-  // span char: path content incl. delimiters (, ; ) ] } >) that a later
-  // separator — or an attached dotted terminal filename (;draft.sql) —
-  // proves is path content — multi-word spaced runs allowed, all
-  // quantified units space- or separator-anchored with disjoint inner classes
-  // (unambiguous parse => linear time; the nested-quantifier ReDoS shape is
-  // banned here).
-  const pmSpan = (sep: string) =>
-    "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + PM_R + "*" + sep + "|(?: " + PM_R + "+)+" + sep + "|" + PM_R + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
-  const pmChunks = (sep: string) => "(?:(?: " + PM_R + "+)+" + sep + pmSpan(sep) + "*)*"
-  // terminal dotted filename: up to four spaced words that END in an extension
-  const PM_SPFILE = "(?:(?: " + PM_R + "+){1,4}(?<=" + PM_EXT + "))?"
-  const PM_TERM_COND = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
-  const PM_TERM_UNC = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+)?"
-  const SEP_P = "\\/"
-  const SEP_W = "[\\\\\\/]"
-  const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + PM_SPFILE + term
-  const PATH_RULES = {
-    cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
-    windowsHome: new RegExp(PM_ANCHOR + "[A-Za-z]:" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
-    windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+\\\\))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + PM_SPFILE + PM_TERM_COND, "gu"),
-    posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R + "+\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
-    posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R + "+\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
-    tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
-  }
-  // altimate_change end
 
   export function maskString(s: string): string {
     return s
