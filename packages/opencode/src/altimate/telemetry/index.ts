@@ -72,7 +72,7 @@ const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
 const PM_R_P = "(?:[^\\s\\/'\"`]|'(?=[\\p{L}\\p{N}_]))"
 const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
 const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<|])"
-const PM_EXT = "\\.[A-Za-z0-9]{1,8}"
+const PM_EXT = "\\.[A-Za-z0-9]{1,14}"
 // span char: path content incl. delimiters (, ; ) ] } >) that a later
 // separator — or an attached dotted terminal filename (;draft.sql) —
 // proves is path content — multi-word spaced runs allowed, all
@@ -98,7 +98,7 @@ const PM_TERM_UNC =
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?(?:" + PM_R + "+(?: {1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")" + pmCI("users") + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?(?:" + PM_R + "+(?: {1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
   windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|[A-Za-z]:(?=" + PM_R + "+(?: {1,2}" + PM_R + "+)*\\\\|[\\p{L}_][\\p{L}\\p{N}_-]*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?: {1,2}" + PM_R + "+)*\\\\)|\\\\(?=(?:[\\p{L}\\p{N}_#@().'-]{2,}(?: {1,2}[\\p{L}\\p{N}_#@().'-]+)*\\\\){2}|[\\p{L}\\p{N}_#@().'-]{2,}(?: {1,2}[\\p{L}\\p{N}_#@().'-]+)*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|[\\p{L}\\p{N}_#@().'-]{2,}(?: {1,2}[\\p{L}\\p{N}_#@().'-]+)+\\\\[\\p{L}\\p{N}]))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?: {1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?: {1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|\\.{1,2}\\/" + pmSpan(SEP_P) + "+" + pmSpFile(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),

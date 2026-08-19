@@ -585,3 +585,17 @@ describe("maskString paths — fleet round 16 (case folding out of the tail gate
     expect(mask(String.raw`stat \\?\unc\srv\share\Users\Jane Doe gone`)).toBe("stat <path> gone")
   })
 })
+
+describe("maskString paths — fleet round 17 (legacy home roots, longer extensions)", () => {
+  it("legacy Documents and Settings roots get home treatment", () => {
+    expect(mask(String.raw`stat C:\Documents and Settings\Jane Doe does not exist`))
+      .toBe("stat <path> does not exist")
+  })
+
+  it("extensions up to 14 chars count as proof and as prose guards", () => {
+    expect(mask("read ./customer_secret.properties failed")).toBe("read <path> failed")
+    expect(mask("read ../private.configuration now")).toBe("read <path> now")
+    // the suppression direction: prose after a long-extension file survives
+    expect(mask("/Users/jdoe/app.properties was deleted")).toBe("<path> was deleted")
+  })
+})
