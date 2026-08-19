@@ -1394,7 +1394,7 @@ export namespace Telemetry {
   // (unambiguous parse => linear time; the nested-quantifier ReDoS shape is
   // banned here).
   const pmSpan = (sep: string) =>
-    "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;\\]}>](?=" + PM_R + "*" + sep + "|(?: " + PM_R + "+)+" + sep + "))"
+    "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + PM_R + "*" + sep + "|(?: " + PM_R + "+)+" + sep + "))"
   const pmChunks = (sep: string) => "(?:(?: " + PM_R + "+)+" + sep + pmSpan(sep) + "*)*"
   // terminal dotted filename: up to four spaced words that END in an extension
   const PM_SPFILE = "(?:(?: " + PM_R + "+){1,4}(?<=" + PM_EXT + "))?"
@@ -1407,7 +1407,7 @@ export namespace Telemetry {
     cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
     windowsHome: new RegExp(PM_ANCHOR + "[A-Za-z]:" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
     windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\)" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + PM_SPFILE + PM_TERM_COND, "gu"),
-    posixHome: new RegExp(PM_ANCHOR + "\\/(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
+    posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R + "+\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
     posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R + "+\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
     tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
   }

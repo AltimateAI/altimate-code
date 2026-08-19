@@ -306,3 +306,17 @@ describe("maskString paths — fleet round 3 (composed rules)", () => {
     expect(performance.now() - t0).toBeLessThan(500)
   })
 })
+
+describe("maskString paths — fleet round 4 (parens in components, nested homes)", () => {
+  it("continues through ) when a later separator proves it is path content", () => {
+    expect(mask("read /Users/jdoe/client)repo/models/a.sql failed")).toBe("read <path> failed")
+    // closing paren without a following separator stays preserved
+    expect(mask("failed (from /opt/dbt/bin/dbt)")).toBe("failed (from <path>)")
+  })
+
+  it("nested home roots get home-rule masking (WSL, Silverblue)", () => {
+    expect(mask("stat /mnt/c/Users/Jane Doe does not exist"))
+      .toBe("stat <path> does not exist")
+    expect(mask("check /var/home/jane went missing")).toBe("check <path> missing")
+  })
+})
