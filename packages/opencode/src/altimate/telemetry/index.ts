@@ -92,9 +92,9 @@ const PM_TERM_UNC = "(?:(?<!" + PM_EXT + ") {1,2}" + PM_WORD + "+)?"
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
-  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|" + SEP_W + ")Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|[A-Za-z]:(?=[\\p{L}_][\\p{L}\\p{N}_-]*" + SEP_W + ")|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?: {1,2}" + PM_R + "+)*\\\\)|\\\\(?=(?:[\\p{L}\\p{N}_-]{2,}\\\\){2}))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
-  posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|\\\\\\\\(?:\\?\\\\UNC\\\\)?(?:" + PM_R + "+(?: {1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|[A-Za-z]:(?=" + PM_R + "+(?: {1,2}" + PM_R + "+)*\\\\|[\\p{L}_][\\p{L}\\p{N}_-]*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?: {1,2}" + PM_R + "+)*\\\\)|\\\\(?=(?:[\\p{L}\\p{N}_-]{2,}\\\\){2}))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?: {1,2}" + PM_R_P + "+)*\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
   posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R_P + "+(?: {1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
 }

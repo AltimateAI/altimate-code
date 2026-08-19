@@ -471,3 +471,24 @@ describe("maskString paths — fleet round 10 (spaced first components, drive-re
     expect(performance.now() - t0).toBeLessThan(500)
   })
 })
+
+describe("maskString paths — fleet round 11 (home-rule reach: spaced prefixes, UNC; drive-relative breadth)", () => {
+  it("home rules reach through spaced prefix components and UNC shares", () => {
+    expect(mask("stat /mnt disk/c/Users/Jane Doe does not exist")).toBe("stat <path> does not exist")
+    expect(mask(String.raw`stat \\fileserver\Users\Jane Doe does not exist`)).toBe("stat <path> does not exist")
+    expect(mask(String.raw`stat \\?\UNC\srv\share\Users\Jane Doe is gone`)).toBe("stat <path> is gone")
+  })
+
+  it("drive-relative backslash proof accepts spaced and dotted first components", () => {
+    expect(mask(String.raw`read C:client repo\models\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read C:.client\models\private.sql failed`)).toBe("read <path> failed")
+    // slash-proven form keeps the letter-first guard: ratios never match
+    expect(mask("score C:8/10 fine")).toBe("score C:8/10 fine")
+  })
+
+  it("UNC home opener stays linear on adversarial input", () => {
+    const t0 = performance.now()
+    mask("\\\\" + "srv ".repeat(1500) + "x")
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})
