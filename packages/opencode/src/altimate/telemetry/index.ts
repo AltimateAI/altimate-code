@@ -100,10 +100,26 @@ const PM_WC = "(?:[\\p{L}\\p{N}_#@().'-]{2,}|[\\p{L}\\p{N}_#@().'+&-]{3,})"
 const PM_WCC = "[\\p{L}\\p{N}_#@().'+&-]+"
 const pmSpFileX = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){1,12}(?<=" + PM_EXT + "))?"
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
+// Layer zero — the local user's home and cwd are KNOWN literal values, so
+// paths under them are replaced by exact match before any structural rule
+// runs. Exact matching handles every username shape (spaces, NBSP, unicode)
+// with zero false positives; the structural rules below remain for paths the
+// literals cannot know (other drives, UNC shares, cloud URIs, relative
+// forms, WSL-mounted homes). Variants cover JSON-doubled backslashes and
+// swapped separators. Same approach as Salesforce's telemetry GDPR scrub
+// (os.homedir() literal) and gatsby-telemetry's cleanPaths (cwd prefixes).
+const pmEscape = (v: string) => v.replace(/[-[\]/{}()*+?.\\^$|]/g, "\\$&")
+const PM_KNOWN_PREFIXES: RegExp[] = []
+for (const root of [process.cwd(), os.homedir()]) {
+  if (!root || root.length < 4) continue
+  for (const v of new Set([root, root.replace(/\\/g, "\\\\"), root.replace(/\\/g, "/")])) {
+    PM_KNOWN_PREFIXES.push(new RegExp(pmEscape(v), "gi"))
+  }
+}
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\)|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
@@ -1429,12 +1445,17 @@ export namespace Telemetry {
   // can't reconstruct the original token.
 
   export function maskString(s: string): string {
-    return s
+    let out = s
       // ANSI CSI sequences (colored subprocess stderr) would otherwise split
       // tokens so neither credential nor path rules can see them
       .replace(/\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g, "")
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
+    // Fast path: a string with no separator cannot contain a path — skip the
+    // whole path stack (most telemetry strings carry no path at all).
+    if (out.includes("/") || out.includes("\\")) {
+      for (const re of PM_KNOWN_PREFIXES) out = out.replace(re, "<path>")
+      out = out
       // altimate_change start — mask filesystem paths in error text
       // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and
       // ..\, POSIX home, POSIX incl. ./ and ../, ~ incl. ~username), composed from shared
@@ -1456,11 +1477,20 @@ export namespace Telemetry {
       // filename is a permanent boundary.
       .replace(/(^|[\s"'`=(,[{:;<|>)\]}&])[\\/]{4,}(?=$|[\s"'`,;)\]}<>|&])/g, "$1<path>")
       .replace(PATH_RULES.cloud, "$1<path>")
-      .replace(PATH_RULES.windowsHome, "$1<path>")
-      .replace(PATH_RULES.windows, "$1<path>")
+      // the windows rules carry the widest opener alternation — they cannot
+      // match without a backslash, a boundary drive-colon, or a non-scheme //
+      if (out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:/.test(out) || /(?<!:)\/\//.test(out)) {
+        out = out.replace(PATH_RULES.windowsHome, "$1<path>").replace(PATH_RULES.windows, "$1<path>")
+      }
+      out = out
       .replace(PATH_RULES.posixHome, "$1<path>")
       .replace(PATH_RULES.posix, "$1<path>")
-      .replace(PATH_RULES.tilde, "$1<path>")
+        .replace(PATH_RULES.tilde, "$1<path>")
+        // a literal-prefix mask followed by a structurally-masked remainder
+        // collapses to one marker
+        .replace(/<path>(?:[\\/]?<path>)+/g, "<path>")
+    }
+    return out
       // altimate_change end
       // Email addresses — providers occasionally echo caller identity in error text.
       .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")

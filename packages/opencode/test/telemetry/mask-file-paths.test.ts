@@ -760,3 +760,27 @@ describe("maskString paths — fleet round 29 (symbol components, longer extensi
     expect(mask("/Users/jdoe/app.properties was deleted")).toBe("<path> was deleted")
   })
 })
+
+describe("maskString paths — layer zero (known-prefix literals) + fast path", () => {
+  const os = require("os")
+  it("paths under the local home mask by exact literal — any username shape", () => {
+    const home = os.homedir()
+    expect(mask(`ENOENT: no such file ${home}/client repo/秘密 file.sql retry`)).toBe("ENOENT: no such file <path> retry")
+    expect(mask(`stat ${home} does not exist`)).toBe("stat <path> does not exist")
+  })
+
+  it("paths under cwd mask by exact literal", () => {
+    expect(mask(`failed in ${process.cwd()}/models/private.sql now`)).toBe("failed in <path> now")
+  })
+
+  it("shallow explicit windows terminals mask (dual-flagged symmetry gap)", () => {
+    expect(mask(String.raw`read .\customer_secret.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read \customer_secret.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`expected \d+\.\d+ but got x`)).toBe(String.raw`expected \d+\.\d+ but got x`)
+  })
+
+  it("separator-free strings take the fast path unchanged", () => {
+    expect(mask("invalid_token: authentication expired, retry later"))
+      .toBe("invalid_token: authentication expired, retry later")
+  })
+})
