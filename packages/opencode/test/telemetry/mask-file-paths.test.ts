@@ -452,3 +452,22 @@ describe("maskString paths — fleet round 9 (quote-pair safety, pipes, OSC)", (
       .toBe("<path> failed")
   })
 })
+
+describe("maskString paths — fleet round 10 (spaced first components, drive-relative slashes)", () => {
+  it("masks spaced first components in dot-relative paths", () => {
+    expect(mask("read ./client repo/models/private.sql failed")).toBe("read <path> failed")
+    expect(mask(String.raw`read .\client repo\models\a.sql failed`)).toBe("read <path> failed")
+  })
+
+  it("accepts forward slashes in drive-relative paths, digit ratios never match", () => {
+    expect(mask("read C:client-repo/models/private.sql failed")).toBe("read <path> failed")
+    expect(mask("score C:8/10 fine")).toBe("score C:8/10 fine")
+    expect(mask("rated e:10/20 shown")).toBe("rated e:10/20 shown")
+  })
+
+  it("spaced prefix components stay linear on adversarial input", () => {
+    const t0 = performance.now()
+    mask("./" + "a b ".repeat(1500))
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})
