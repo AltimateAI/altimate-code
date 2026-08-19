@@ -227,3 +227,17 @@ describe("maskString paths — round 8 (ASCII apostrophes in components)", () =>
     expect(mask("open '/Users/jdoe/x.sql' failed")).not.toContain("jdoe")
   })
 })
+
+describe("maskString paths — closing round (delimiters inside components)", () => {
+  it("continues through delimiters that a later separator proves are path content", () => {
+    expect(mask("read /Users/Jane Doe/client, repo/models/a.sql failed"))
+      .toBe("read <path> failed")
+    expect(mask("open ~/reports,final/q3.csv now")).toBe("open <path> now")
+  })
+
+  it("a delimiter without a following separator stays a boundary", () => {
+    expect(mask("read /app/data/x.csv, then /var/log/y.log failed"))
+      .toBe("read <path>, then <path> failed")
+    expect(mask("saw [/opt/dbt/a.yml], aborted")).toBe("saw [<path>], aborted")
+  })
+})
