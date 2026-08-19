@@ -1405,6 +1405,22 @@ export namespace Telemetry {
         /\bhttps?:\/\/(?:[^\/\s@]+@)?(?:localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|0\.0\.0\.0|\[(?:::1|fc[0-9a-f]{2}:[^\]]*|fd[0-9a-f]{2}:[^\]]*|fe80:[^\]]*)\]|[A-Za-z0-9.-]+\.(?:local|internal|localhost))(?::\d+)?[\w/.?=&%+#,;~!*'()@:-]*/gi,
         "<internal-host>",
       )
+      // altimate_change start — mask filesystem paths in error text
+      // Tool failures embed the path that failed ("File not found: /Users/…");
+      // home-dir paths carry the OS username, and project-rooted absolute paths
+      // leak client repo structure. QUOTED paths were already destroyed by the
+      // quote rule below — unquoted ones reached telemetry raw (live 32-machine
+      // core_failure/file_not_found cluster). Same philosophy as the rest of
+      // this chain: over-masking is the correct failure mode. Ordered after the
+      // URL rule (a public URL's path segment is never word-anchored, so it
+      // cannot match here) and before quote masking. Three shapes:
+      //   Windows drive / UNC:  C:\Users\…   \\server\share
+      //   POSIX absolute (2+ segments — bare "/mcp" style tokens survive)
+      //   Home-relative: ~/…
+      .replace(/(^|[\s"'`=(,])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`]+/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,])\/(?:[\w.@+-]+\/)+[^\s'"`)\]},]*/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,])~\/[^\s'"`)\]},]*/g, "$1<path>")
+      // altimate_change end
       .replace(/'(?:[^'\\]|\\.)*'/g, "?")
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
       .replace(/\s+/g, " ")
