@@ -62,3 +62,36 @@ describe("maskString file paths", () => {
     expect(mask("open '/Users/jdoe/x.sql' failed")).not.toContain("jdoe")
   })
 })
+
+describe("maskString paths — review + live-data hardening", () => {
+  it("masks paths with embedded spaces (macOS home dirs, spaced repo names)", () => {
+    expect(mask("File not found: /Users/Jane Doe/client repo/models/a.sql"))
+      .toBe("File not found: <path>")
+    expect(mask("No such file: C:\\Users\\Jane Doe\\my project\\models\\a.sql"))
+      .toBe("No such file: <path>")
+    expect(mask("could not read ~/my dbt/profiles config/profiles.yml"))
+      .toBe("could not read <path>")
+    // a trailing spaced FILENAME is consumed; following prose is not
+    expect(mask("open /Users/jdoe/some dir/file name.sql failed"))
+      .toBe("open <path> failed")
+  })
+
+  it("does not let the space-continuation eat trailing prose", () => {
+    expect(mask("File not found: /app/models/a.sql was deleted upstream"))
+      .toBe("File not found: <path> was deleted upstream")
+  })
+
+  it("masks cloud-storage URIs (live leak: client GCS bucket + data layout)", () => {
+    expect(mask("CSV table references gs://client-finance-import/inventory/users/file_date=2026-07-16/users.csv"))
+      .toBe("CSV table references <path>")
+    expect(mask("read failed: s3://acme-prod-lake/raw/orders/part-0001.parquet"))
+      .toBe("read failed: <path>")
+    expect(mask("abfss://container@account.dfs.core.windows.net/data/x failed"))
+      .toBe("<path> failed")
+  })
+
+  it("still leaves public https doc-links alone (provider help URLs)", () => {
+    expect(mask("see https://community.snowflake.com/s/ip-not-allowed for details"))
+      .toBe("see https://community.snowflake.com/s/ip-not-allowed for details")
+  })
+})
