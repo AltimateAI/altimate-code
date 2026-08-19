@@ -747,3 +747,16 @@ describe("maskString paths — fleet round 28 (ampersands, bounds, marks)", () =
     expect(mask("read ./customer.é failed")).toBe("read <path> failed")
   })
 })
+
+describe("maskString paths — fleet round 29 (symbol components, longer extensions)", () => {
+  it("rooted components carry + and & at length 3+; quantified escapes never do", () => {
+    expect(mask(String.raw`read \C++ Projects\client\secret.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read \R&D\client\secret.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`pattern \n+\r+ found`)).toBe(String.raw`pattern \n+\r+ found`)
+  })
+
+  it("extensions up to 30 chars prove explicit paths", () => {
+    expect(mask("read ./customer.sublime-workspace failed")).toBe("read <path> failed")
+    expect(mask("/Users/jdoe/app.properties was deleted")).toBe("<path> was deleted")
+  })
+})
