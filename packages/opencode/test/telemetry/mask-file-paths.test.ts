@@ -507,3 +507,27 @@ describe("maskString paths — fleet round 12 (rooted proof breadth, tilde home 
     expect(mask("read ~jane/Client Secret now")).toBe("read <path> now")
   })
 })
+
+describe("maskString paths — fleet round 13 (multi-word PII tails, proof punctuation, bounded scans)", () => {
+  it("high-PII tail consumes capitalized word runs (middle names, multi-word keys)", () => {
+    expect(mask("/Users/Mary Jane Smith does not exist")).toBe("<path> does not exist")
+    expect(mask("C:\\Users\\Mary Jane Smith does not exist")).toBe("<path> does not exist")
+    expect(mask("s3://bucket/Client Top Secret does not exist")).toBe("<path> does not exist")
+    // lowercase prose still costs exactly one word
+    expect(mask("/Users/jdoe was not found on this system")).toBe("<path> not found on this system")
+  })
+
+  it("rooted proof accepts parenthesized/dotted components", () => {
+    expect(mask(String.raw`open \Program Files (x86)\Altimate\secret.sql denied`)).toBe("open <path> denied")
+    expect(mask(String.raw`expected pattern \d+\.\d+ but got x`)).toBe(String.raw`expected pattern \d+\.\d+ but got x`)
+  })
+
+  it("delimiter runs are linear: bounded proof scans", () => {
+    let t0 = performance.now()
+    mask("C:\\a\\b" + ")".repeat(2000) + "\\c")
+    expect(performance.now() - t0).toBeLessThan(200)
+    t0 = performance.now()
+    mask(")a".repeat(2500) + "/x")
+    expect(performance.now() - t0).toBeLessThan(200)
+  })
+})
