@@ -11,6 +11,7 @@ import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
 import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state"
 import { resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
+import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 import { AltimateApi } from "@/altimate/api/client"
 
 const id = "altimate:sidebar-workspace"
@@ -96,7 +97,12 @@ function View(props: { api: TuiPluginApi }) {
       >
         {(b) => (
           <>
-            <text fg={theme().textMuted}>{b().datamateName}</text>
+            <text fg={theme().textMuted}>
+              {b().datamateName}
+              <Show when={getResolvedWorkspaceId() === b().datamateId}>
+                {" (pinned via --workspace)"}
+              </Show>
+            </text>
             <Show when={manageUrl()}>
               {(u) => <text fg={theme().textMuted}>{u()}</text>}
             </Show>
