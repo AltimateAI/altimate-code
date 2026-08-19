@@ -599,3 +599,19 @@ describe("maskString paths — fleet round 17 (legacy home roots, longer extensi
     expect(mask("/Users/jdoe/app.properties was deleted")).toBe("<path> was deleted")
   })
 })
+
+describe("maskString paths — fleet round 18 (mixed spaced runs in delimiter proofs)", () => {
+  it("a delimiter proof may combine an initial run with spaced runs", () => {
+    expect(mask("/Users/jdoe/client)repo name/models/private.sql failed")).toBe("<path> failed")
+    // all four boundary controls hold
+    expect(mask("failed (from /opt/dbt/bin/dbt)")).toBe("failed (from <path>)")
+    expect(mask(`read "/a/b"/c "secret data" end`)).toBe("read ?/c ? end")
+    expect(mask("cd /Users/jdoe/proj;ls failed")).toBe("cd <path>;ls failed")
+  })
+
+  it("unified proof stays linear", () => {
+    const t0 = performance.now()
+    mask("C:\\a\\b" + ")".repeat(2000) + "\\c")
+    expect(performance.now() - t0).toBeLessThan(300)
+  })
+})

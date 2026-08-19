@@ -88,7 +88,7 @@ const SEP_W = "[\\\\\\/]"
 const pmCI = (w: string) => w.split("").map((c) => ("[" + c + c.toUpperCase() + "]")).join("")
 const pmR = (sep: string) => (sep === SEP_P ? PM_R_P : PM_R)
 const pmSpan = (sep: string) =>
-  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "{0,256}" + sep + "|(?: {1,2}" + pmR(sep) + "{1,64}){1,6}" + sep + "|" + pmR(sep) + "{0,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|[\"'`](?=" + pmR(sep) + "{1,256}" + sep + "|" + pmR(sep) + "{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
+  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "{0,256}(?: {1,2}" + pmR(sep) + "{1,64}){0,6}(?:" + sep + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))|[\"'`](?=" + pmR(sep) + "{1,256}(?: {1,2}" + pmR(sep) + "{1,64}){0,6}(?:" + sep + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))))"
 const pmChunks = (sep: string) => "(?:(?: {1,2}" + pmR(sep) + "+)+" + sep + pmSpan(sep) + "*)*"
 // terminal dotted filename: up to four spaced words that END in an extension
 const pmSpFile = (sep: string) => "(?:(?: {1,2}" + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
