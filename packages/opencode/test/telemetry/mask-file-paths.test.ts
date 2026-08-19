@@ -682,3 +682,21 @@ describe("maskString paths — fleet round 24 (PowerShell tilde paths)", () => {
     expect(mask("approx ~5 items left")).toBe("approx ~5 items left")
   })
 })
+
+describe("maskString paths — fleet round 25 (dotfile tildes, letter-bearing drive proofs, NBSP particles)", () => {
+  it("dot-prefixed backslash tilde paths mask; escaped-dot regex prose never does", () => {
+    expect(mask(String.raw`read ~\.config\altimate\secret.json failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`sub ~\.\d pattern`)).toBe(String.raw`sub ~\.\d pattern`)
+  })
+
+  it("slash drive-relative proof needs only a letter; ratios stay out", () => {
+    expect(mask("read C:.client/models/private.sql failed")).toBe("read <path> failed")
+    expect(mask("read C:client repo/models/private.sql failed")).toBe("read <path> failed")
+    expect(mask("score C:8/10 fine")).toBe("score C:8/10 fine")
+    expect(mask("avg C:8.5/10 shown")).toBe("avg C:8.5/10 shown")
+  })
+
+  it("name particles work across nonbreaking spaces", () => {
+    expect(mask("/Users/Mary van der Berg does not exist")).toBe("<path> does not exist")
+  })
+})
