@@ -1381,51 +1381,66 @@ export namespace Telemetry {
   //   Bearer …   Authorization headers leaked in error text
   // Each match replaces with a fixed redaction so length-based fingerprinting
   // can't reconstruct the original token.
+  // altimate_change start — composed path-masking rules (shared fragments)
+  // R: one path-run character — anything but whitespace/separators/quotes,
+  // plus an apostrophe when a word character follows (O'Connor vs closing ').
+  const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
+  const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
+  const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<])"
+  const PM_EXT = "\\.[A-Za-z0-9]{1,8}"
+  // span char: path content incl. delimiters (, ; ] } >) that a later
+  // separator proves are path content — multi-word spaced runs allowed, all
+  // quantified units space- or separator-anchored with disjoint inner classes
+  // (unambiguous parse => linear time; the nested-quantifier ReDoS shape is
+  // banned here).
+  const pmSpan = (sep: string) =>
+    "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;\\]}>](?=" + PM_R + "*" + sep + "|(?: " + PM_R + "+)+" + sep + "))"
+  const pmChunks = (sep: string) => "(?:(?: " + PM_R + "+)+" + sep + pmSpan(sep) + "*)*"
+  // terminal dotted filename: up to four spaced words that END in an extension
+  const PM_SPFILE = "(?:(?: " + PM_R + "+){1,4}(?<=" + PM_EXT + "))?"
+  const PM_TERM_COND = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
+  const PM_TERM_UNC = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+)?"
+  const SEP_P = "\\/"
+  const SEP_W = "[\\\\\\/]"
+  const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + PM_SPFILE + term
+  const PATH_RULES = {
+    cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
+    windowsHome: new RegExp(PM_ANCHOR + "[A-Za-z]:" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
+    windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\)" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + PM_SPFILE + PM_TERM_COND, "gu"),
+    posixHome: new RegExp(PM_ANCHOR + "\\/(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
+    posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R + "+\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
+    tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
+  }
+  // altimate_change end
+
   export function maskString(s: string): string {
     return s
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
       // altimate_change start — mask filesystem paths in error text
-      // Tool failures embed the path that failed ("File not found: /Users/…");
-      // home-dir paths carry the OS username, and project-rooted absolute paths
-      // leak client repo structure. QUOTED paths were already destroyed by the
-      // quote rule below — unquoted ones reached telemetry raw (live 32-machine
-      // core_failure/file_not_found cluster). Same philosophy as the rest of
-      // this chain: over-masking is the correct failure mode. Ordered after the
-      // credential rules and BEFORE the email/internal-host rules — a URI's
-      // userinfo (container@account...) must not be fragmented into <email>
-      // before the whole URI masks. Public URL interiors stay safe structurally
-      // (after https: comes //, which cannot start a segment chain). Six rules (cloud URIs, Windows home, Windows/UNC, POSIX home, POSIX, ~):
-      //   Windows drive / UNC:  C:\Users\…   \\server\share
-      //   POSIX absolute (2+ segments — bare "/mcp" style tokens survive)
-      //   Home-relative: ~/…
-      //   Cloud-storage URIs (gs://, s3://, abfss://, …) — bucket names identify
-      //   the customer; not http, so the URL rule above never sees them.
-      //   Paths with embedded spaces (macOS "/Users/Jane Doe/client repo/…")
-      //   continue across a space whenever a later chunk carries another
-      //   separator, plus one optional trailing spaced filename, plus one
-      //   trailing spaced WORD only at end-of-string / before punctuation —
-      //   "path + space + word" is otherwise undecidable vs trailing prose
-      //   ("client repo" vs "x.sql was"). HOME-ROOTED paths (/Users, /home,
-      //   C:\Users — where a spaced USERNAME would otherwise leak its tail,
-      //   e.g. "/Users/Jane Doe does not exist") additionally consume one
-      //   unconditional trailing word, suppressed when the path already ended
-      //   in a dotted extension so "x.sql was deleted" prose stays intact.
-      //   Closing delimiters (, ; ] } >) count as path content only when a
-      //   slash-bearing segment follows ("client, repo/models/…"); a delimiter
-      //   NOT followed by a further separator is a boundary, permanently —
-      //   past that point "path content vs prose" is undecidable, the same
-      //   argument as the terminal-word bound. Residue after all rules: one
-      //   prose word may be over-masked after an extensionless home path, and
-      //   a non-home path's terminal spaced component can still leak ONE
-      //   structure word mid-sentence (no personal names there). Anchors
-      //   include [ and { for bracketed paths.
-      .replace(/(^|[\s"'`=(,[{:;<])(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\/\/|file:\/{1,3})(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*(?:(?: [^\s\/\\'"`]+)+\/(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*)*(?: (?:[\p{L}\p{M}\p{N}_.@+()‘’-]|'(?=[\p{L}\p{N}_]))+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) (?:[\p{L}\p{M}\p{N}_‘’-]|'(?=[\p{L}\p{N}_]))+)?/giu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:;<])[A-Za-z]:[\\\/]Users[\\\/](?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*[\\\/]| [^\s\/\\'"`]+[\\\/]))*(?:(?: [^\s\/\\'"`]+)+[\\\/](?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*[\\\/]| [^\s\/\\'"`]+[\\\/]))*)*(?: (?:[\p{L}\p{M}\p{N}_.@+()‘’-]|'(?=[\p{L}\p{N}_]))+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) (?:[\p{L}\p{M}\p{N}_‘’-]|'(?=[\p{L}\p{N}_]))+)?/giu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:;<])(?:[A-Za-z]:[\\\/]|\\\\)(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*[\\\/]| [^\s\/\\'"`]+[\\\/]))+(?:(?: [^\s\/\\'"`]+)+[\\\/](?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*[\\\/]| [^\s\/\\'"`]+[\\\/]))*)*(?: (?:[\p{L}\p{M}\p{N}_.@+()‘’-]|'(?=[\p{L}\p{N}_]))+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) (?:[\p{L}\p{M}\p{N}_‘’-]|'(?=[\p{L}\p{N}_]))+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:;<])\/(?:Users|home)\/(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*(?:(?: [^\s\/\\'"`]+)+\/(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*)*(?: (?:[\p{L}\p{M}\p{N}_.@+()‘’-]|'(?=[\p{L}\p{N}_]))+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) (?:[\p{L}\p{M}\p{N}_‘’-]|'(?=[\p{L}\p{N}_]))+)?/giu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:;<])\.{0,2}\/(?:[\p{L}\p{M}\p{N}_.@+-]+\/)+(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*(?:(?: [^\s\/\\'"`]+)+\/(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*)*(?: (?:[\p{L}\p{M}\p{N}_.@+()‘’-]|'(?=[\p{L}\p{N}_]))+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) (?:[\p{L}\p{M}\p{N}_‘’-]|'(?=[\p{L}\p{N}_]))+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:;<])~\/(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*(?:(?: [^\s\/\\'"`]+)+\/(?:[^\s'"`)\]},;>]|'(?=[\p{L}\p{N}_])|[,;\]}>](?=[^\s\/\\'"`]*\/| [^\s\/\\'"`]+\/))*)*(?: (?:[\p{L}\p{M}\p{N}_.@+()‘’-]|'(?=[\p{L}\p{N}_]))+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) (?:[\p{L}\p{M}\p{N}_‘’-]|'(?=[\p{L}\p{N}_]))+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
+      // Six masking rules (cloud URIs, Windows home, Windows/UNC, POSIX home,
+      // POSIX incl. ./ and ../, ~ incl. ~username), composed from shared
+      // fragments below (PATH_RULES) — one source of truth after repeated
+      // lockstep edits drifted (see PR history). Ordered after the credential
+      // rules and BEFORE the email/internal-host rules so whole URIs mask
+      // before userinfo can fragment into <email>. Public URL interiors are
+      // structurally safe: after "https:" comes "//", which cannot start a
+      // segment chain. Doctrine: over-masking is the correct failure mode.
+      // HOME-ROOTED paths and CLOUD URIs consume one unconditional trailing
+      // word (spaced usernames / object keys — the high-PII classes),
+      // suppressed after a dotted extension so "x.sql was deleted" prose
+      // survives; other rules consume a trailing word only at end-of-string /
+      // before punctuation. Residue (by design): one prose word may be
+      // over-masked after extensionless home/cloud paths; a non-home,
+      // non-cloud path's terminal spaced component can leak ONE structure
+      // word mid-sentence (no personal names in that class); a delimiter not
+      // followed by a further separator is a permanent boundary.
+      .replace(PATH_RULES.cloud, "$1<path>")
+      .replace(PATH_RULES.windowsHome, "$1<path>")
+      .replace(PATH_RULES.windows, "$1<path>")
+      .replace(PATH_RULES.posixHome, "$1<path>")
+      .replace(PATH_RULES.posix, "$1<path>")
+      .replace(PATH_RULES.tilde, "$1<path>")
       // altimate_change end
       // Email addresses — providers occasionally echo caller identity in error text.
       .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")

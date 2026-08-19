@@ -276,3 +276,33 @@ describe("maskString paths — fleet round 2 (relative, symbols, cloud tails)", 
       .toBe("read <path> failed to download")
   })
 })
+
+describe("maskString paths — fleet round 3 (composed rules)", () => {
+  it("delimiter lookahead accepts multi-word components", () => {
+    expect(mask("read /data/x, big client repo/models/a.sql done")).toBe("read <path> done")
+  })
+
+  it("terminal dotted filename may span multiple words", () => {
+    expect(mask("read /Users/jdoe/reports/Q4 final reviewed version.sql failed"))
+      .toBe("read <path> failed")
+  })
+
+  it("first POSIX segment may contain symbols or emoji", () => {
+    expect(mask("read /#clients/acme/private.sql failed")).toBe("read <path> failed")
+    expect(mask("read /💾/acme/private.sql failed")).toBe("read <path> failed")
+  })
+
+  it("named-user tilde homes mask", () => {
+    expect(mask("could not read ~jane/client-repo/profiles.yml")).toBe("could not read <path>")
+  })
+
+  it("apostrophes survive inside spaced components", () => {
+    expect(mask("stat /Users/Jane Doe's client/models/a.sql now")).toBe("stat <path> now")
+  })
+
+  it("multi-word lookahead stays linear on adversarial input", () => {
+    const t0 = performance.now()
+    mask("/a/b, " + "word ".repeat(1000))
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})
