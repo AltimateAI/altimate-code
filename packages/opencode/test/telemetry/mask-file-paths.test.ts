@@ -631,3 +631,17 @@ describe("maskString paths — fleet round 19 (redirects, single-component absol
       .toBe("see https://community.snowflake.com/s/ip-not-allowed for details")
   })
 })
+
+describe("maskString paths — fleet round 20 (closer anchors, forward-slash UNC)", () => {
+  it("closing delimiters anchor paths in structured stderr", () => {
+    expect(mask("[ENOENT]/Users/jdoe/client/a.sql")).toBe("[ENOENT]<path>")
+    expect(mask("error)/Users/jdoe/client/a.sql")).toBe("error)<path>")
+    expect(mask("math (a+b)/(c+d) here")).toBe("math (a+b)/(c+d) here")
+  })
+
+  it("forward-slash UNC masks; dotted hosts stay protocol-relative URLs", () => {
+    expect(mask("open //fileserver/client-share/private.sql failed")).toBe("open <path> failed")
+    // dotless-server discriminator: dotted first components are URL hosts
+    expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
+  })
+})
