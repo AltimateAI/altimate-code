@@ -554,3 +554,21 @@ describe("maskString paths — fleet round 14 (fs-limit bounds, shallow forms)",
     expect(mask("see ./x plain token")).toBe("see ./x plain token")
   })
 })
+
+describe("maskString paths — fleet round 15 (spaced shallow terminals, name particles, extensionless rooted)", () => {
+  it("shallow dot-relative accepts spaced dotted terminals", () => {
+    expect(mask("read ./Q4 final report.sql failed")).toBe("read <path> failed")
+  })
+
+  it("PII tails cross lowercase name particles and caseless scripts", () => {
+    expect(mask("/Users/Mary van der Berg does not exist")).toBe("<path> does not exist")
+    expect(mask("/Users/李 小 明 does not exist")).toBe("<path> does not exist")
+    // ordinary lowercase prose still costs exactly one word
+    expect(mask("/Users/jdoe was not found on this system")).toBe("<path> not found on this system")
+  })
+
+  it("rooted proof accepts spaced-first-component extensionless paths", () => {
+    expect(mask(String.raw`open \Program Files\Altimate denied`)).toBe("open <path>")
+    expect(mask(String.raw`match \bword\b boundary`)).toBe(String.raw`match \bword\b boundary`)
+  })
+})
