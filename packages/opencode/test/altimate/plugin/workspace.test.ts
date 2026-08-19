@@ -228,7 +228,7 @@ describe("workspace binding cache", () => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
       calls++
-      return new Response(JSON.stringify({ datamates: [] }), {
+      return new Response(JSON.stringify({ datamates: [{ id: 9, name: "Warm", memory_enabled: true }] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       })
@@ -246,6 +246,52 @@ describe("workspace binding cache", () => {
       // A genuine rebind to another workspace must still seed.
       await recordApprovedBinding(proj, { ...binding, datamateId: 10 }, { awaitBackfill: true })
       expect(calls).toBeGreaterThan(afterFirst)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
+  test("a seed that never ran stays retryable on the next warm", async () => {
+    // Memory disabled at bind time means the sweep is a no-op, not a completed
+    // seed. Treating it as done left the blocks this machine already holds
+    // absent from the workspace until a rebind or an unrelated edit.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "gated-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "gated.md"),
+      ["---", "id: gated", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+    const binding = {
+      datamateId: 11,
+      datamateName: "Gated",
+      repoRemote: null,
+      projectPath: proj,
+      linkedAt: 1,
+    }
+
+    let memoryEnabled = false
+    let calls = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
+      calls++
+      return new Response(
+        JSON.stringify({ datamates: [{ id: 11, name: "Gated", memory_enabled: memoryEnabled }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )
+    }) as typeof fetch
+
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      const afterGated = calls
+      // Memory switched on later: the same binding must sweep this time.
+      memoryEnabled = true
+      await recordApprovedBinding(proj, { ...binding, linkedAt: 2 }, { awaitBackfill: true })
+      expect(calls).toBeGreaterThan(afterGated)
     } finally {
       globalThis.fetch = originalFetch
       if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE

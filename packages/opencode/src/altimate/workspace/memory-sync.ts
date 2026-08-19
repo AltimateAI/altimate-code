@@ -106,6 +106,8 @@ export function isEnabled(): boolean {
  * active instance; tests set it so they need not boot one. */
 export const syncInternals: {
   resolveBinding?: () => Promise<CachedBinding | null>
+  /** Test seam for the local-existence check. Production reads the store. */
+  blockExists?: (block: MemoryBlock) => Promise<boolean>
 } = {}
 
 /** Instance.directory throws synchronously with no instance context, so a
@@ -296,6 +298,26 @@ type KnownRecords = { records: CloudMemoryRecord[]; truncated: boolean }
  * counting it as success made a sweep report blocks it had not stored. */
 type PushOutcome = "stored" | "unchanged" | "declined" | "skipped"
 
+/** Is this block still in the local store?
+ *
+ * Imported lazily: ``@/memory/store`` reaches this module on its write path, so
+ * a static import would close an eval-order cycle (see ./memory-backfill.ts).
+ * A read failure answers "yes" — refusing to mirror on a transient read error
+ * would silently drop a memory the user does have. */
+async function existsLocally(block: MemoryBlock): Promise<boolean> {
+  if (syncInternals.blockExists) return syncInternals.blockExists(block)
+  try {
+    const { MemoryStore } = await import("@/memory/store")
+    return !!(await MemoryStore.read(block.scope, block.id))
+  } catch (err) {
+    log.warn("could not confirm a block still exists locally; mirroring anyway", {
+      id: block.id,
+      err: String(err),
+    })
+    return true
+  }
+}
+
 async function push(
   block: MemoryBlock,
   binding: CachedBinding | null,
@@ -331,7 +353,29 @@ async function push(
     }
   }
 
-  const match = existing?.memoryId ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
+  // The local store is the authority on whether this block still exists.
+  // `backfill` registers a block on the serialize queue only when a worker
+  // dequeues it, so a delete issued mid-sweep runs first and this push would
+  // otherwise undo it -- recreating a record the user deleted, or reviving an
+  // archived one, and then marking it synced so no later sweep re-archives it.
+  if (!(await existsLocally(block))) {
+    log.warn("skipping mirror for a block that no longer exists locally", {
+      id: block.id,
+      scope: block.scope,
+    })
+    return "skipped"
+  }
+
+  // An archived record is a tombstone. Ignoring the index here sends us to the
+  // identity search below, which excludes archived records -- so a block the
+  // user recreated under an old id gets a fresh record instead of un-archiving
+  // the old one (`MemoryApi.update` replaces metadata wholesale, which would
+  // drop the archived marker).
+  const indexed = existing?.memoryId
+    ? view.records.find((r) => r.id === existing.memoryId)
+    : undefined
+  const indexUsable = existing?.memoryId && (!indexed || !isArchived(indexed))
+  const match = (indexUsable ? existing?.memoryId : undefined) ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,
     // or a stale clone running a sweep, would otherwise overwrite a newer cloud
@@ -415,16 +459,21 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
  * disabled. */
 export async function mirrorBlock(block: MemoryBlock): Promise<void> {
   if (!isEnabled()) return
-  // A binding is required for EVERY scope, not just project. Memories are
-  // associated with a workspace, and the workspace is what carries the
-  // memory_enabled setting — mirroring from an unbound directory would upload
-  // with nothing to consult and nothing to attribute it to. Global blocks still
-  // carry no workspace themselves, so they apply everywhere on read; the
-  // binding governs only whether we upload at all.
-  const binding = await currentBinding()
-  if (!binding) return
-  if (!(await memoryEnabled(binding))) return
-  await serialize(block.scope, block.id, () => push(block, binding))
+  // Queued BEFORE the binding lookup, not after. Both are async, so resolving
+  // them first let two operations on one block reach `serialize` in the
+  // opposite order to the writes that triggered them.
+  await serialize(block.scope, block.id, async () => {
+    // A binding is required for EVERY scope, not just project. Memories are
+    // associated with a workspace, and the workspace is what carries the
+    // memory_enabled setting — mirroring from an unbound directory would upload
+    // with nothing to consult and nothing to attribute it to. Global blocks still
+    // carry no workspace themselves, so they apply everywhere on read; the
+    // binding governs only whether we upload at all.
+    const binding = await currentBinding()
+    if (!binding) return
+    if (!(await memoryEnabled(binding))) return
+    await push(block, binding)
+  })
 }
 
 /** Archive a block's cloud record rather than deleting it, so the workspace
@@ -432,12 +481,15 @@ export async function mirrorBlock(block: MemoryBlock): Promise<void> {
  * not — so an archived record stays visible elsewhere. */
 export async function archiveBlock(scope: "global" | "project", blockId: string): Promise<void> {
   if (!isEnabled()) return
-  const binding = await currentBinding()
-  if (!binding) return
-  if (!(await memoryEnabled(binding))) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
-  // run before the create it is meant to undo.
-  return serialize(scope, blockId, () => archiveNow(scope, blockId, binding))
+  // run before the create it is meant to undo. The binding lookup happens
+  // inside the queued op for the same reason as in `mirrorBlock`.
+  return serialize(scope, blockId, async () => {
+    const binding = await currentBinding()
+    if (!binding) return
+    if (!(await memoryEnabled(binding))) return
+    await archiveNow(scope, blockId, binding)
+  })
 }
 
 async function archiveNow(
@@ -526,13 +578,16 @@ async function runQueue<T>(
 export async function backfill(
   blocks: MemoryBlock[],
   explicitBinding?: CachedBinding,
-): Promise<{ ok: number; failed: number; skipped: number; declined: number }> {
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0 }
+): Promise<{ ok: number; failed: number; skipped: number; declined: number; gated: boolean }> {
+  // ``gated`` says the sweep never ran, as opposed to running and storing
+  // nothing. A caller recording "this binding is seeded" must be able to tell
+  // those apart: memory being off is not a completed seed.
+  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, gated: true }
   // The bind path passes the binding it just recorded; there is no ambient
   // instance to resolve one from on the `link` subcommand.
   const binding = explicitBinding ?? (await currentBinding())
   if (!binding || !(await memoryEnabled(binding)))
-    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0 }
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, gated: true }
   const index = await readIndex()
 
   const pending: { block: MemoryBlock; binding: CachedBinding | null }[] = []
@@ -556,7 +611,7 @@ export async function backfill(
     pending.push({ block, binding: target })
   }
 
-  if (pending.length === 0) return { ok: 0, failed: 0, skipped, declined: 0 }
+  if (pending.length === 0) return { ok: 0, failed: 0, skipped, declined: 0, gated: false }
 
   // One read for the whole sweep. Every block in a first bind is an index miss,
   // so resolving each through its own lookup made a bind cost one full record
@@ -579,7 +634,7 @@ export async function backfill(
   // `skipped` combines blocks filtered before the queue (already synced, or
   // project blocks with no workspace) with those the queue itself declined to
   // act on — a truncated read, or a remote copy that is newer.
-  const totals = { ...result, skipped: result.skipped + skipped }
+  const totals = { ...result, skipped: result.skipped + skipped, gated: false }
   log.info("workspace memory backfill finished", totals)
   return totals
 }

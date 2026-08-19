@@ -30,6 +30,10 @@ export interface CachedBinding {
   repoRemote: string | null
   projectPath: string | null
   linkedAt: number
+  /** Set once a bind-time seed completed without failures. Absent means the
+   * seed has not run, errored, or was skipped because memory was off — all of
+   * which must stay retryable, so a later warm sweeps again. */
+  seededAt?: number
 }
 
 interface CacheFile {
@@ -72,6 +76,8 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
       (typeof b.projectPath === "string" && b.projectPath.length > 0)
     if (!hasIdentity) return false
     if (typeof b.linkedAt !== "number") return false
+    // A corrupt marker must not read as "already seeded" and suppress the sweep.
+    if (b.seededAt !== undefined && typeof b.seededAt !== "number") return false
   }
   return true
 }
@@ -214,6 +220,21 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
   return null
 }
 
+/** Record that this binding's seed completed, so later warms skip the sweep. */
+function markSeeded(directory: string, binding: CachedBinding): void {
+  try {
+    const cache = readCache()
+    if (!cache) return
+    const key = canonicalizeKey(directory)
+    const current = cache.bindings[key]
+    if (!current || !sameBinding(current, binding)) return
+    cache.bindings[key] = { ...current, seededAt: Date.now() }
+    writeCache(cache)
+  } catch (err) {
+    log.warn("could not record the workspace memory seed marker", { err: String(err) })
+  }
+}
+
 /** Same workspace and same project identity — i.e. nothing to re-seed.
  * ``linkedAt`` is deliberately ignored: it moves on every warm. */
 function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
@@ -243,6 +264,7 @@ export async function recordApprovedBinding(
   // costs a full read of local memory and a round trip per block -- now paid
   // synchronously on the `link` path, which awaits the seed.
   let bindingChanged = true
+  let alreadySeeded = false
   try {
     const existing = readCache()
     const cache: CacheFile =
@@ -251,7 +273,10 @@ export async function recordApprovedBinding(
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
     const prior = cache.bindings[canonicalizeKey(directory)]
     bindingChanged = !prior || !sameBinding(prior, binding)
-    cache.bindings[canonicalizeKey(directory)] = binding
+    alreadySeeded = !bindingChanged && !!prior?.seededAt
+    // Carry the seed marker across a warm so a completed seed is not repeated.
+    cache.bindings[canonicalizeKey(directory)] =
+      !bindingChanged && prior?.seededAt ? { ...binding, seededAt: prior.seededAt } : binding
     writeCache(cache)
   } catch (err) {
     // An unreadable cache means the prior binding is unknown, so fall back to
@@ -273,11 +298,19 @@ export async function recordApprovedBinding(
   // as a command handler returns (src/index.ts): a detached sweep is killed
   // mid-flight there, so a bind that reported success could seed nothing. The
   // TUI stays resident and leaves it detached so the dialog closes at once.
-  if (!bindingChanged) return
+  // Skip only when this exact binding has already been seeded successfully. A
+  // warm after a failed or skipped seed must try again, or the blocks this
+  // machine already holds never reach the workspace.
+  if (alreadySeeded) return
   const seeded = import("./memory-backfill")
     .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
+    .then((ok) => {
+      if (ok) markSeeded(directory, binding)
+      return ok
+    })
     .catch((err) => {
       log.warn("could not start workspace memory backfill", { err: String(err) })
+      return false
     })
   if (opts?.awaitBackfill) await seeded
   else void seeded

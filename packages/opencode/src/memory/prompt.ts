@@ -92,7 +92,7 @@ export namespace MemoryPrompt {
   export function formatBlock(block: MemoryBlock & { origin?: string }): string {
     const tagsStr = block.tags.length > 0 ? ` [${block.tags.join(", ")}]` : ""
     const expiresStr = block.expires ? ` (expires: ${block.expires})` : ""
-    const originStr = block.origin ? ` — from workspace project \`${block.origin}\`` : ""
+    const originStr = originSuffix(block.origin)
     let result = `### ${block.id} (${block.scope})${tagsStr}${expiresStr}${originStr}\n${block.content}`
 
     if (block.citations && block.citations.length > 0) {
@@ -108,6 +108,13 @@ export namespace MemoryPrompt {
   }
 
   /** Format a training entry for display (with applied count). */
+  /** Label for a block that came from a sibling project in the workspace.
+   * Shared so ``formatBlock`` and ``formatTrainingEntry`` cannot drift — they
+   * rendered the same literal twice. */
+  function originSuffix(origin?: string): string {
+    return origin ? ` — from workspace project \`${origin}\`` : ""
+  }
+
   function formatTrainingEntry(block: MemoryBlock & { origin?: string }): string {
     const meta = parseTrainingMeta(block.content)
     const appliedStr = meta && meta.applied > 0 ? ` (applied ${meta.applied}x)` : ""
@@ -118,8 +125,7 @@ export namespace MemoryPrompt {
     // does. mergeOverlay deliberately keeps both blocks when a sibling shares an
     // id with this project's, so without this the model sees two identical
     // headings it cannot tell apart — the mis-reading the label exists to stop.
-    const originStr = block.origin ? ` — from workspace project \`${block.origin}\`` : ""
-    return `#### ${name}${appliedStr}${originStr}\n${content}`
+    return `#### ${name}${appliedStr}${originSuffix(block.origin)}\n${content}`
   }
 
   /** Score a block for relevance to the current agent context. */

@@ -146,6 +146,9 @@ beforeEach(() => {
   stubFetch()
   resetOverlay()
   syncInternals.resolveBinding = async () => BINDING as any
+  // The store is not on disk in these tests; the delete-race guard has its
+  // own coverage below.
+  syncInternals.blockExists = async () => true
 })
 
 afterEach(() => {
@@ -156,6 +159,7 @@ afterEach(() => {
     originalGetCreds
   process.env.ALTIMATE_WORKSPACE = "1"
   delete syncInternals.resolveBinding
+  delete syncInternals.blockExists
 })
 
 // ── record id extraction ────────────────────────────────────────────────────
@@ -401,6 +405,46 @@ describe("mirrorBlock", () => {
     captured = []
     await mirrorBlock({ ...b, content: "fact vfbpa", updated: "2026-08-20T00:00:00.000Z" })
     expect(callsTo("/datamates/memory/mem-collide", "PATCH").length).toBe(1)
+  })
+
+  test("a block deleted mid-sweep is not recreated", async () => {
+    // `backfill` registers a block on the serialize queue only when a worker
+    // dequeues it, so a delete issued during the sweep runs first. Without the
+    // local-existence check this push creates a live record for a block the
+    // user just deleted -- and indexes it, so no later sweep re-archives it.
+    syncInternals.blockExists = async () => false
+    await mirrorBlock(block({ id: "deleted-mid-sweep" }))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("a block deleted mid-sweep does not revive its archived record", async () => {
+    const b = block({ id: "tombstoned" })
+    createResult = [{ id: "mem-tomb" }]
+    await mirrorBlock(b)
+    // Archived remotely, and gone locally.
+    listResponse = listResponse.map((r: any) =>
+      r.id === "mem-tomb" ? { ...r, metadata: { ...r.metadata, archived: "true" } } : r,
+    )
+    syncInternals.blockExists = async () => false
+    captured = []
+    await mirrorBlock({ ...b, content: "changed", updated: "2027-01-01T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/mem-tomb", "PATCH").length).toBe(0)
+  })
+
+  test("a recreated block gets a fresh record rather than un-archiving the old one", async () => {
+    // `MemoryApi.update` replaces metadata wholesale, so updating the tombstone
+    // would drop `archived` and bring the deleted record back to life.
+    const b = block({ id: "reborn" })
+    createResult = [{ id: "mem-old" }]
+    await mirrorBlock(b)
+    listResponse = listResponse.map((r: any) =>
+      r.id === "mem-old" ? { ...r, metadata: { ...r.metadata, archived: "true" } } : r,
+    )
+    createResult = [{ id: "mem-new" }]
+    captured = []
+    await mirrorBlock({ ...b, content: "written again", updated: "2027-01-01T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/mem-old", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
   })
 
   test("an unchanged block costs no read at all", async () => {

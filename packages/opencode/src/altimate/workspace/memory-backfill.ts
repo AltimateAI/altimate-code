@@ -23,8 +23,8 @@ const log = Log.create({ service: "altimate-workspace-memory-backfill" })
  * Covers both scopes: project blocks attach to the workspace just bound, and
  * global blocks go up account-level. A bind is the only moment global memory is
  * swept; blocks written later ride the ordinary per-write mirror. */
-export async function backfillOnBind(directory: string, binding: CachedBinding): Promise<void> {
-  if (!isEnabled()) return
+export async function backfillOnBind(directory: string, binding: CachedBinding): Promise<boolean> {
+  if (!isEnabled()) return false
   try {
     // The directory and binding are passed in rather than rediscovered. The
     // `link` subcommand binds from a plain yargs handler with no instance
@@ -32,10 +32,15 @@ export async function backfillOnBind(directory: string, binding: CachedBinding):
     // there — silently, because this catch turns it into a log line while the
     // CLI still prints "Linked". Reading project memory was the entire point.
     const blocks = await MemoryStore.listAll({ directory })
-    if (blocks.length === 0) return
+    if (blocks.length === 0) return true
     const result = await backfill(blocks, binding)
     log.info("workspace memory seeded after bind", result)
+    // Only a sweep that stored everything it meant to counts as seeded. A
+    // failure here must leave the binding eligible for a retry, or local blocks
+    // stay absent from the workspace until a rebind or an unrelated edit.
+    return !result.gated && result.failed === 0
   } catch (err) {
     log.warn("workspace memory backfill after bind failed", { err: String(err) })
+    return false
   }
 }
