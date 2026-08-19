@@ -661,3 +661,15 @@ describe("maskString paths — fleet round 22 (forward-slash UNC homes)", () => 
     expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
   })
 })
+
+describe("maskString paths — fleet round 23 (NBSP components, hyphenated extensions)", () => {
+  it("nonbreaking spaces continue components; tabs stay boundaries", () => {
+    expect(mask("read /Users/Jane Doe/client/model.sql failed")).toBe("read <path> failed")
+    expect(mask("/Users/jdoe/client\tsecret/models/a.sql")).toBe("<path> secret/models/a.sql")
+  })
+
+  it("hyphenated extensions prove shallow paths", () => {
+    expect(mask("read ./client.code-workspace failed")).toBe("read <path> failed")
+    expect(mask(String.raw`open \client\private.code-workspace denied`)).toBe("open <path> denied")
+  })
+})
