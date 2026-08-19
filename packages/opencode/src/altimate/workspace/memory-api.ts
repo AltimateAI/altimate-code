@@ -59,6 +59,9 @@ export interface MirrorMetadata {
   repo_remote?: string
   project_path?: string
   block_tags?: string
+  /** ISO-8601. Mirrored so a TTL'd block expires everywhere rather than living
+   * forever in the workspace once it has left the machine that wrote it. */
+  block_expires?: string
   archived?: "true"
   archived_at?: string
 }
@@ -73,14 +76,19 @@ export function isArchived(record: CloudMemoryRecord): boolean {
   return record.metadata?.archived === "true"
 }
 
-/** Pull the created record's id out of a create response.
+/** Pull every created record id out of a create response.
  *
- * The store's payload shape is not part of any published contract, so this
- * accepts the observed forms and reports failure rather than guessing: a bare
- * array of records, or an object wrapping one under ``results``/``memories``.
- * Returns undefined when nothing was stored — which is the expected outcome
+ * A create runs an extractor server-side, and an extractor is free to split one
+ * submission into several records — each carrying the metadata we sent, so each
+ * looks like our block. Returning only the first would leave the rest holding
+ * rewritten text, never repaired, never indexed and never archived, while the
+ * read path injected all of them under one block id.
+ *
+ * The payload shape is not a published contract, so this accepts the observed
+ * forms rather than guessing: a bare array, or an object wrapping one under
+ * ``results``/``memories``/``data``. An empty result is the expected outcome
  * when the extractor declines the content. */
-export function extractRecordId(result: unknown): string | undefined {
+export function extractRecordIds(result: unknown): string[] {
   const rows = (() => {
     if (Array.isArray(result)) return result
     if (result && typeof result === "object") {
@@ -92,22 +100,28 @@ export function extractRecordId(result: unknown): string | undefined {
     return []
   })()
 
+  const ids: string[] = []
   for (const row of rows) {
     if (!row || typeof row !== "object") continue
     const id = (row as Record<string, unknown>).id ?? (row as Record<string, unknown>).memory_id
-    if (typeof id === "string" && id) return id
+    if (typeof id === "string" && id) ids.push(id)
   }
-  return undefined
+  return ids
+}
+
+/** Convenience for callers that only need to know whether anything was stored. */
+export function extractRecordId(result: unknown): string | undefined {
+  return extractRecordIds(result)[0]
 }
 
 export namespace MemoryApi {
-  /** Create a record and report its id.
+  /** Create a record and report the ids it produced.
    *
-   * Returns undefined when the service stored nothing. That is not an error —
+   * Returns an empty array when the service stored nothing. That is not an error —
    * the extractor declines content it judges unremarkable — so the caller
    * should leave the block unindexed and let a later edit retry, rather than
    * treating it as a failure. */
-  export async function add(content: string, metadata: MirrorMetadata): Promise<string | undefined> {
+  export async function add(content: string, metadata: MirrorMetadata): Promise<string[]> {
     const res = await altimateRequest<{ message?: string; result?: unknown }>("POST", "/", {
       base: BASE,
       allowEmptyBody: true,
@@ -116,7 +130,7 @@ export namespace MemoryApi {
         memory_options: { metadata },
       },
     })
-    return extractRecordId(res?.result)
+    return extractRecordIds(res?.result)
   }
 
   /** Overwrite a record verbatim. Does not run the extractor, and replaces the

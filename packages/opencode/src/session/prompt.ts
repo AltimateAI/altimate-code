@@ -1047,7 +1047,12 @@ export namespace SessionPrompt {
         // altimate_change start - workspace memory: one fetch per session, held as an
         // in-memory overlay merged at injection time. Started rather than awaited so
         // the turn proceeds immediately; MemoryPrompt.inject applies a bounded wait.
-        WorkspaceMemory.resetOverlay()
+        //
+        // This block runs on EVERY user turn (see the comment below on `step === 1`),
+        // so `hydrate` is idempotent per session id and is deliberately not preceded
+        // by a reset — resetting here made every turn refetch, and cleared the overlay
+        // before the refetch, so workspace memory blinked out of the prompt whenever a
+        // fetch ran long.
         void WorkspaceMemory.hydrate(sessionID).catch(() => {})
         // altimate_change end
         SessionSummary.summarize({
@@ -1184,6 +1189,7 @@ export namespace SessionPrompt {
         : await MemoryPrompt.inject(UNIFIED_INJECTION_BUDGET, {
             agent: agent.name,
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
+            sessionID,
           })
       // altimate_change end
       const system = [

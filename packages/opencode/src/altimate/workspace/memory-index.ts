@@ -141,8 +141,13 @@ function matches(file: IndexFile, scope: Scope): boolean {
 
 // Serializes read-modify-write within this process. Two mirror tasks finishing
 // at once would otherwise both read the pre-write file and the second would
-// drop the first's entry. Cross-process races remain — the same known gap as
-// ./state.ts — and cost a duplicate record, which the next save repairs.
+// drop the first's entry.
+//
+// Cross-process races remain — the same known gap as ./state.ts. Two CLI
+// processes writing the same block concurrently can create two records, and
+// that duplicate is NOT self-repairing: a later save resolves one of them and
+// updates it, leaving the other live indefinitely. Closing it needs a file lock
+// here, or an idempotency key at the service.
 let writeChain: Promise<void> = Promise.resolve()
 
 export async function readIndex(): Promise<Record<string, IndexEntry>> {

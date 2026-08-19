@@ -195,7 +195,20 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
   // migrate the whole file once. After migration the lookup is a plain
   // property access on every future read.
   if (!isCanonicalized(cache)) {
-    cache = migrateToCanonicalKeys(cache)
+    // The migration writes, and this is a read path: a read-only or full state
+    // directory would otherwise turn a plain cache lookup into a rejection for
+    // every caller. Degrade to the pre-migration lookup instead.
+    try {
+      cache = migrateToCanonicalKeys(cache)
+    } catch (err) {
+      log.warn("could not migrate workspace binding cache; reading it as-is", {
+        err: String(err),
+      })
+      for (const [k, v] of Object.entries(cache.bindings)) {
+        if (canonicalizeKey(k) === canon) return v
+      }
+      return null
+    }
     return cache.bindings[canon] ?? null
   }
   return null
@@ -234,7 +247,7 @@ export async function recordApprovedBinding(
   // link. The dynamic import keeps the module graph acyclic — see the header of
   // ./memory-backfill.ts for why a static import cannot be used.
   void import("./memory-backfill")
-    .then((m) => m.backfillOnBind())
+    .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
     .catch((err) => {
       log.warn("could not start workspace memory backfill", { err: String(err) })
     })

@@ -48,5 +48,8 @@ export const AGENT_TRAINING_RELEVANCE: Record<string, Partial<Record<string, num
 export interface InjectionContext {
   agent?: string
   disableTraining?: boolean
+  /** Identifies which session's workspace-memory overlay to merge. Omitted in
+   * contexts that have no session, where no overlay is merged. */
+  sessionID?: string
 }
 // altimate_change end

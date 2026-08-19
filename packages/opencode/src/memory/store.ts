@@ -23,8 +23,8 @@ function globalDir(): string {
 // altimate_change start - use .altimate-code (primary) with .opencode (fallback)
 // Cache keyed by Instance.directory to avoid stale paths when context changes
 const _projectDirCache = new Map<string, string>()
-function projectDir(): string {
-  const dir = Instance.directory
+function projectDir(directory?: string): string {
+  const dir = directory ?? Instance.directory
   const cached = _projectDirCache.get(dir)
   if (cached) return cached
   const primary = path.join(dir, ".altimate-code", "memory")
@@ -42,12 +42,12 @@ function projectDir(): string {
 }
 // altimate_change end
 
-function dirForScope(scope: "global" | "project"): string {
-  return scope === "global" ? globalDir() : projectDir()
+function dirForScope(scope: "global" | "project", directory?: string): string {
+  return scope === "global" ? globalDir() : projectDir(directory)
 }
 
-function blockPath(scope: "global" | "project", id: string): string {
-  const base = dirForScope(scope)
+function blockPath(scope: "global" | "project", id: string, directory?: string): string {
+  const base = dirForScope(scope, directory)
   const result = path.join(base, ...id.split("/").slice(0, -1), `${id.split("/").pop()}.md`)
   // Defense-in-depth: verify the resolved path stays within the memory directory
   const resolved = path.resolve(result)
@@ -126,8 +126,12 @@ function auditEntry(action: string, id: string, scope: string, extra?: string): 
 }
 
 export namespace MemoryStore {
-  export async function read(scope: "global" | "project", id: string): Promise<MemoryBlock | undefined> {
-    const filepath = blockPath(scope, id)
+  export async function read(
+    scope: "global" | "project",
+    id: string,
+    directory?: string,
+  ): Promise<MemoryBlock | undefined> {
+    const filepath = blockPath(scope, id, directory)
     let raw: string
     try {
       raw = await fs.readFile(filepath, "utf-8")
@@ -163,8 +167,15 @@ export namespace MemoryStore {
     return validated.data
   }
 
-  export async function list(scope: "global" | "project", opts?: { includeExpired?: boolean }): Promise<MemoryBlock[]> {
-    const dir = dirForScope(scope)
+  /** ``opts.directory`` resolves project scope explicitly instead of from the
+   * ambient instance. Callers outside an instance context — the ``link``
+   * subcommand is one — have no ambient directory, and reading project scope
+   * without it throws. */
+  export async function list(
+    scope: "global" | "project",
+    opts?: { includeExpired?: boolean; directory?: string },
+  ): Promise<MemoryBlock[]> {
+    const dir = dirForScope(scope, opts?.directory)
     const blocks: MemoryBlock[] = []
 
     async function scanDir(currentDir: string, prefix: string) {
@@ -183,7 +194,7 @@ export namespace MemoryStore {
         } else if (entry.name.endsWith(".md")) {
           const baseName = entry.name.slice(0, -3)
           const id = prefix ? `${prefix}/${baseName}` : baseName
-          const block = await read(scope, id)
+          const block = await read(scope, id, opts?.directory)
           if (block) {
             if (!opts?.includeExpired && isExpired(block)) continue
             blocks.push(block)
@@ -197,8 +208,25 @@ export namespace MemoryStore {
     return blocks
   }
 
-  export async function listAll(opts?: { includeExpired?: boolean }): Promise<MemoryBlock[]> {
-    const [global, project] = await Promise.all([list("global", opts), list("project", opts)])
+  /** One scope failing must not take the other down with it: a caller with no
+   * usable project directory should still get global blocks. */
+  export async function listAll(opts?: { includeExpired?: boolean; directory?: string }): Promise<MemoryBlock[]> {
+    const [globalResult, projectResult] = await Promise.allSettled([
+      list("global", opts),
+      list("project", opts),
+    ])
+    if (globalResult.status === "rejected") {
+      Log.create({ service: "memory.store" }).warn("could not read global memory", {
+        err: String(globalResult.reason),
+      })
+    }
+    if (projectResult.status === "rejected") {
+      Log.create({ service: "memory.store" }).warn("could not read project memory", {
+        err: String(projectResult.reason),
+      })
+    }
+    const global = globalResult.status === "fulfilled" ? globalResult.value : []
+    const project = projectResult.status === "fulfilled" ? projectResult.value : []
     const all = [...project, ...global]
     all.sort((a, b) => b.updated.localeCompare(a.updated))
     return all

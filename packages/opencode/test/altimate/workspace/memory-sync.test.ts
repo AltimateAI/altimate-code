@@ -37,6 +37,7 @@ const { indexKey, indexPath, readIndexEntry, recordIndexEntry } = await import(
 )
 const {
   archiveBlock,
+  backfill,
   belongsHere,
   buildMetadata,
   hydrate,
@@ -97,6 +98,7 @@ function callsTo(fragment: string, method?: string): Captured[] {
   return captured.filter((c) => c.url.includes(fragment) && (!method || c.method === method))
 }
 
+const SES = "ses_test"
 const NOW = "2026-08-19T00:00:00.000Z"
 function block(over: Partial<any> = {}): any {
   return {
@@ -227,7 +229,7 @@ describe("gating", () => {
     delete process.env.ALTIMATE_WORKSPACE
     await hydrate("ses_flag_off")
     expect(captured.length).toBe(0)
-    expect(overlayBlocks()).toEqual([])
+    expect(overlayBlocks(SES)).toEqual([])
   })
 
   test("nothing is mirrored from an unbound directory, at either scope", async () => {
@@ -243,8 +245,8 @@ describe("gating", () => {
   test("hydration returns nothing from an unbound directory", async () => {
     syncInternals.resolveBinding = async () => null
     listResponse = [{ id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } }]
-    await hydrate("ses_unbound")
-    expect(overlayBlocks()).toEqual([])
+    await hydrate(SES)
+    expect(overlayBlocks(SES)).toEqual([])
   })
 })
 
@@ -269,6 +271,13 @@ describe("buildMetadata", () => {
     expect(meta.datamate_name).toBeUndefined()
     expect(meta.repo_remote).toBeUndefined()
     expect(meta.block_scope).toBe("global")
+  })
+
+  test("expiry is mirrored, so a TTL'd block can expire everywhere", () => {
+    // Without this a TTL'd block lives forever in the workspace once it has
+    // left the machine that wrote it, and is injected into every session.
+    const meta = buildMetadata(block({ expires: "2027-01-01T00:00:00.000Z" }), null)
+    expect(meta.block_expires).toBe("2027-01-01T00:00:00.000Z")
   })
 
   test("every record is marked private", () => {
@@ -472,6 +481,19 @@ describe("toBlock", () => {
     expect(b?.origin).toBeUndefined()
   })
 
+  test("restores expiry from metadata", () => {
+    const b = toBlock(
+      record({
+        source: MIRROR_SOURCE,
+        block_id: "ttl",
+        block_scope: "global",
+        block_expires: "2027-01-01T00:00:00.000Z",
+      }),
+      undefined,
+    )
+    expect(b?.expires).toBe("2027-01-01T00:00:00.000Z")
+  })
+
   test("rejects records that are not well-formed mirrored blocks", () => {
     expect(toBlock(record(null), undefined)).toBeNull()
     expect(toBlock(record({ source: MIRROR_SOURCE, block_scope: "global" }), undefined)).toBeNull()
@@ -511,8 +533,28 @@ describe("hydrate", () => {
       { id: "3", memory: "none", metadata: null },
       { id: "4", memory: "impostor", metadata: { block_id: "imp", block_scope: "global" } },
     ]
-    await hydrate("ses_filter")
-    expect(overlayBlocks().map((b) => b.id)).toEqual(["cli"])
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["cli"])
+  })
+
+  test("drops records whose mirrored expiry has passed", async () => {
+    // The cloud copy is not swept, so an expired block must be honoured on
+    // read or it outlives its TTL on every other machine.
+    listResponse = [
+      { id: "1", memory: "live", metadata: { source: MIRROR_SOURCE, block_id: "live", block_scope: "global" } },
+      {
+        id: "2",
+        memory: "stale",
+        metadata: {
+          source: MIRROR_SOURCE,
+          block_id: "stale",
+          block_scope: "global",
+          block_expires: "2020-01-01T00:00:00.000Z",
+        },
+      },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["live"])
   })
 
   test("drops archived records", async () => {
@@ -520,8 +562,8 @@ describe("hydrate", () => {
       { id: "1", memory: "live", metadata: { source: MIRROR_SOURCE, block_id: "live", block_scope: "global" } },
       { id: "2", memory: "gone", metadata: { source: MIRROR_SOURCE, block_id: "gone", block_scope: "global", archived: "true" } },
     ]
-    await hydrate("ses_archived")
-    expect(overlayBlocks().map((b) => b.id)).toEqual(["live"])
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["live"])
   })
 
   test("drops project records belonging to another workspace", async () => {
@@ -529,14 +571,14 @@ describe("hydrate", () => {
       { id: "1", memory: "g", metadata: { source: MIRROR_SOURCE, block_id: "g", block_scope: "global" } },
       { id: "2", memory: "other", metadata: { source: MIRROR_SOURCE, block_id: "other", block_scope: "project", datamate_id: "999" } },
     ]
-    await hydrate("ses_scope")
-    expect(overlayBlocks().map((b) => b.id)).toEqual(["g"])
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["g"])
   })
 
   test("opts in explicitly, or the backend returns nothing", async () => {
     // The backend excludes this client's records from list by default.
     listResponse = [{ id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } }]
-    await hydrate("ses_optin")
+    await hydrate(SES)
     expect(callsTo("/datamates/memory/list")[0].url).toContain("include_sources=altimate-code")
   })
 
@@ -552,15 +594,200 @@ describe("hydrate", () => {
     globalThis.fetch = (async () => {
       throw new Error("network down")
     }) as unknown as typeof fetch
-    await hydrate("ses_broken")
-    expect(overlayBlocks()).toEqual([])
+    await hydrate(SES)
+    expect(overlayBlocks(SES)).toEqual([])
   })
 
   test("returns nothing when the workspace has memory disabled", async () => {
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
     listResponse = [{ id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } }]
-    await hydrate("ses_disabled")
-    expect(overlayBlocks()).toEqual([])
+    await hydrate(SES)
+    expect(overlayBlocks(SES)).toEqual([])
+  })
+})
+
+describe("archiveBlock", () => {
+  test("archives in place and never issues a DELETE", async () => {
+    const b = block({ id: "to-archive" })
+    createResult = [{ id: "mem-archive" }]
+    await mirrorBlock(b)
+    captured = []
+    listResponse = [
+      { id: "mem-archive", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive", block_scope: "global" } },
+    ]
+
+    await archiveBlock("global", "to-archive")
+    expect(captured.filter((c) => c.method === "DELETE").length).toBe(0)
+    const patches = callsTo("/datamates/memory/mem-archive", "PATCH")
+    expect(patches.length).toBe(1)
+    expect(patches[0].body.metadata.archived).toBe("true")
+    // Archiving hides a record from injection; it does not erase what it said.
+    expect(patches[0].body.memory).toBe(b.content)
+  })
+
+  test("archives by logical identity when the local index cannot answer", async () => {
+    // The index is per-machine and is discarded on account switch, corruption,
+    // or a wiped state directory. Without this fallback a delete leaves the
+    // record live and every later session re-injects it, with no way to remove it.
+    listResponse = [
+      {
+        id: "mem-elsewhere",
+        memory: "written by another machine",
+        metadata: { source: MIRROR_SOURCE, block_id: "orphaned", block_scope: "global" },
+      },
+    ]
+    await archiveBlock("global", "orphaned")
+    const patches = callsTo("/datamates/memory/mem-elsewhere", "PATCH")
+    expect(patches.length).toBe(1)
+    expect(patches[0].body.metadata.archived).toBe("true")
+  })
+
+  test("does not archive another workspace's record with the same block id", async () => {
+    listResponse = [
+      {
+        id: "mem-other-ws",
+        memory: "different workspace",
+        metadata: { source: MIRROR_SOURCE, block_id: "shared-id", block_scope: "project", datamate_id: "999" },
+      },
+    ]
+    await archiveBlock("project", "shared-id")
+    expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
+  })
+
+  test("an already-archived record is not archived again", async () => {
+    listResponse = [
+      {
+        id: "mem-done",
+        memory: "x",
+        metadata: { source: MIRROR_SOURCE, block_id: "done", block_scope: "global", archived: "true" },
+      },
+    ]
+    await archiveBlock("global", "done")
+    expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
+  })
+})
+
+describe("backfill", () => {
+  // Ids are unique per test: the index file lives in the sandbox and persists
+  // across tests, so reused ids would be skipped as already-synced rather than
+  // exercising the path under test.
+  const blocks = (prefix: string, n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      block({ id: `${prefix}/${i}`, content: `Block ${prefix} ${i} describes a warehouse convention.` }),
+    )
+
+  test("reads the record set once for the whole sweep, not once per block", async () => {
+    // Every block in a first bind is an index miss, so resolving each through
+    // its own lookup made a bind cost one full fetch per block.
+    createResult = [{ id: "mem-x" }]
+    await backfill(blocks("once", 5), BINDING as any)
+    expect(callsTo("/datamates/memory/list").length).toBe(1)
+  })
+
+  test("counts declines separately from stored blocks", async () => {
+    // Reporting a decline as success made a sweep claim it had seeded blocks
+    // the service never kept.
+    createResult = []
+    const result = await backfill(blocks("declined", 3), BINDING as any)
+    expect(result.declined).toBe(3)
+    expect(result.ok).toBe(0)
+  })
+
+  test("skips blocks already synced at their current payload", async () => {
+    createResult = [{ id: "mem-resume" }]
+    const set = blocks("resume", 2)
+    await backfill(set, BINDING as any)
+    captured = []
+    const second = await backfill(set, BINDING as any)
+    expect(second.skipped).toBe(2)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("does nothing when the workspace has memory disabled", async () => {
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    const result = await backfill(blocks("disabled", 2), BINDING as any)
+    expect(result.skipped).toBe(2)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+})
+
+describe("truncated reads", () => {
+  test("refuses to create against a record set that hit the service limit", async () => {
+    // The record may exist just beyond the window, so creating would duplicate
+    // it. Leaving the block unindexed means a later save retries.
+    listResponse = Array.from({ length: 200 }, (_, i) => ({
+      id: `r${i}`,
+      memory: "x",
+      metadata: { source: MIRROR_SOURCE, block_id: `other/${i}`, block_scope: "global" },
+    }))
+    const result = await backfill([block({ id: "beyond/window" })], BINDING as any)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(result.skipped).toBeGreaterThan(0)
+  })
+})
+
+describe("session isolation and turn behaviour", () => {
+  test("a session hydrates once, however many turns it takes", async () => {
+    // The caller's enclosing block runs on EVERY user turn, not once per
+    // session. Without idempotence a 20-turn conversation costs 40 requests,
+    // and the first injection of every turn blocks on them.
+    listResponse = [
+      { id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    await hydrate(SES)
+    await hydrate(SES)
+    expect(callsTo("/datamates/memory/list").length).toBe(1)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["x"])
+  })
+
+  test("a second turn never empties the overlay while refetching", async () => {
+    // Clearing before a refetch made workspace memory blink out of the prompt
+    // on any turn whose fetch ran long.
+    listResponse = [
+      { id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "kept", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).length).toBe(1)
+    await hydrate(SES)
+    expect(overlayBlocks(SES).length).toBe(1)
+  })
+
+  test("two concurrent sessions do not read each other's overlay", async () => {
+    // A shared module-level overlay let a session in one workspace be injected
+    // with another workspace's private memory.
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "alpha", block_scope: "global" } },
+    ]
+    await hydrate("ses_a")
+
+    listResponse = [
+      { id: "b", memory: "beta", metadata: { source: MIRROR_SOURCE, block_id: "beta", block_scope: "global" } },
+    ]
+    await hydrate("ses_b")
+
+    expect(overlayBlocks("ses_a").map((b) => b.id)).toEqual(["alpha"])
+    expect(overlayBlocks("ses_b").map((b) => b.id)).toEqual(["beta"])
+  })
+
+  test("overlayBlocks returns a copy, so a caller cannot corrupt the cache", async () => {
+    listResponse = [
+      { id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } },
+    ]
+    await hydrate(SES)
+    overlayBlocks(SES).length = 0
+    expect(overlayBlocks(SES).length).toBe(1)
+  })
+
+  test("resetting one session leaves the others intact", async () => {
+    listResponse = [
+      { id: "a", memory: "alpha", metadata: { source: MIRROR_SOURCE, block_id: "alpha", block_scope: "global" } },
+    ]
+    await hydrate("ses_a")
+    await hydrate("ses_b")
+    resetOverlay("ses_a")
+    expect(overlayBlocks("ses_a")).toEqual([])
+    expect(overlayBlocks("ses_b").map((b) => b.id)).toEqual(["alpha"])
   })
 })
 
@@ -568,7 +795,7 @@ describe("whenHydrated", () => {
   test("returns immediately when no hydration is in flight", async () => {
     resetOverlay()
     const started = Date.now()
-    await whenHydrated(5_000)
+    await whenHydrated(SES, 5_000)
     expect(Date.now() - started).toBeLessThan(1_000)
   })
 
@@ -576,7 +803,7 @@ describe("whenHydrated", () => {
     globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
     void hydrate("ses_stalled")
     const started = Date.now()
-    await whenHydrated(150)
+    await whenHydrated("ses_stalled", 150)
     const elapsed = Date.now() - started
     expect(elapsed).toBeGreaterThanOrEqual(100)
     expect(elapsed).toBeLessThan(2_000)

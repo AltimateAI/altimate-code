@@ -166,9 +166,12 @@ export namespace MemoryPrompt {
     ctx?: InjectionContext,
   ): Promise<string> {
     // altimate_change - fold in this session's workspace memory overlay. The
-    // bounded wait only ever costs the first injection of a session.
-    await whenHydrated()
-    const blocks = mergeOverlay(await MemoryStore.listAll(), overlayBlocks())
+    // bounded wait only ever costs the first injection of a session, and the
+    // overlay is per-session so concurrent sessions in different workspaces
+    // cannot read each other's memory.
+    if (ctx?.sessionID) await whenHydrated(ctx.sessionID)
+    const remote = ctx?.sessionID ? overlayBlocks(ctx.sessionID) : []
+    const blocks = mergeOverlay(await MemoryStore.listAll(), remote)
     if (blocks.length === 0) return ""
 
     // Score and filter

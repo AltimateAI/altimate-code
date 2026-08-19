@@ -21,10 +21,12 @@ import { Flag } from "@/flag/flag"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { MemoryBlock } from "@/memory/types"
+import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 import { readLocalBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { WorkspaceApi } from "./api-client"
 import {
+  LIST_LIMIT,
   MemoryApi,
   MIRROR_SOURCE,
   isArchived,
@@ -56,12 +58,40 @@ export interface RemoteMemoryBlock extends MemoryBlock {
   origin?: string
 }
 
-let overlay: RemoteMemoryBlock[] = []
-let hydratedFor: string | null = null
-let hydration: Promise<void> | null = null
-/** Guards against a hydration from a previous session resolving after a reset
- * and writing its results into the new session's overlay. */
-let generation = 0
+/** Per-session hydration state.
+ *
+ * Keyed by session id rather than held in module scope: the server runs
+ * concurrent sessions, potentially in different projects bound to different
+ * workspaces, and a single shared overlay would let one session read another's
+ * workspace memory. Binding resolution needs no such keying — ``Instance`` is
+ * AsyncLocalStorage-backed, so ``Instance.directory`` is already correct for
+ * whichever session's async context is running. */
+interface SessionMemory {
+  overlay: RemoteMemoryBlock[]
+  hydration: Promise<void> | null
+  touchedAt: number
+}
+
+const sessions = new Map<string, SessionMemory>()
+
+/** Sessions are evicted oldest-first rather than on a session-end hook, which
+ * does not exist here. Well above any plausible concurrent-session count, and
+ * an eviction only costs a refetch. */
+const MAX_TRACKED_SESSIONS = 32
+
+function sessionState(sessionID: string): SessionMemory {
+  let state = sessions.get(sessionID)
+  if (!state) {
+    if (sessions.size >= MAX_TRACKED_SESSIONS) {
+      const oldest = [...sessions.entries()].sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0]
+      if (oldest) sessions.delete(oldest[0])
+    }
+    state = { overlay: [], hydration: null, touchedAt: Date.now() }
+    sessions.set(sessionID, state)
+  }
+  state.touchedAt = Date.now()
+  return state
+}
 
 /** The mirror rides the workspace pilot flag and honours the memory opt-out.
  * Never active for anyone who has not opted into the pilot. */
@@ -114,6 +144,9 @@ const MEMORY_ENABLED_TTL_MS = 60_000
 
 const memoryEnabledCache = new Map<number, { checkedAt: number }>()
 
+/** Warn once per workspace, not once per write. */
+const missingFieldWarned = new Set<number>()
+
 /** Whether the bound workspace has memory switched on.
  *
  * The workspace app exposes this as a user-facing toggle, so mirroring into a
@@ -125,6 +158,14 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
   try {
     const workspaces = await WorkspaceApi.listDatamates()
     const match = workspaces.find((w) => w.id === binding.datamateId)
+    if (match && match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
+      // Fail-closed is right, but a backend that has not shipped the field
+      // turns the whole feature into a silent no-op. Say so once.
+      missingFieldWarned.add(binding.datamateId)
+      log.warn("workspace has no memory_enabled field; treating memory as disabled", {
+        workspace: binding.datamateId,
+      })
+    }
     const value = match?.memoryEnabled === true
     if (value) memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
     else memoryEnabledCache.delete(binding.datamateId)
@@ -145,7 +186,7 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
  * would fire a request per training block per session for a change no reader
  * can see, so the counter is normalised away before hashing. */
 function stripTrainingMeta(content: string): string {
-  return content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "").trim()
+  return content.replace(TRAINING_META_COMMENT, "").trim()
 }
 
 /** Fingerprint of everything about a block that reaches the store. Tags and
@@ -176,6 +217,7 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
     block_updated: block.updated,
   }
   if (block.tags.length > 0) meta.block_tags = block.tags.join(",")
+  if (block.expires) meta.block_expires = block.expires
   // Global blocks deliberately carry no workspace: they belong to the account
   // and apply in every workspace the user has.
   if (block.scope === "project" && binding) {
@@ -208,12 +250,30 @@ function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: Cac
  * Runs when the local index has no entry — a second machine, a reinstalled
  * CLI, or a create whose response was lost after the store had committed.
  * Without it those cases all produce a duplicate. */
+/** Fetch the record set once, and report whether it was cut short.
+ *
+ * The service ignores paging parameters, so a full result at the limit means
+ * records exist that no request can reach. Callers use ``truncated`` to avoid
+ * acting on a partial view — creating a duplicate, or concluding a record is
+ * absent when it is merely out of reach. */
+async function fetchKnownRecords(): Promise<KnownRecords> {
+  const records = await MemoryApi.list()
+  const truncated = records.length >= LIST_LIMIT
+  if (truncated) {
+    log.warn("workspace memory read hit the service limit; some records are unreachable", {
+      limit: LIST_LIMIT,
+    })
+  }
+  return { records, truncated }
+}
+
 async function findExisting(
   block: MemoryBlock,
   binding: CachedBinding | null,
+  known?: KnownRecords,
 ): Promise<string | undefined> {
   try {
-    const records = await MemoryApi.list()
+    const records = known?.records ?? (await MemoryApi.list())
     return records.find((r) => isSameBlock(r, block, binding))?.id
   } catch (err) {
     log.warn("could not check for an existing record", { id: block.id, err: String(err) })
@@ -221,7 +281,18 @@ async function findExisting(
   }
 }
 
-async function push(block: MemoryBlock, binding: CachedBinding | null): Promise<void> {
+/** Records already known to the caller, so a sweep does not re-list per block. */
+type KnownRecords = { records: CloudMemoryRecord[]; truncated: boolean }
+
+/** What a push actually did. ``declined`` means the service kept nothing —
+ * counting it as success made a sweep report blocks it had not stored. */
+type PushOutcome = "stored" | "unchanged" | "declined" | "skipped"
+
+async function push(
+  block: MemoryBlock,
+  binding: CachedBinding | null,
+  known?: KnownRecords,
+): Promise<PushOutcome> {
   const key = indexKey({
     scope: block.scope,
     blockId: block.id,
@@ -230,29 +301,64 @@ async function push(block: MemoryBlock, binding: CachedBinding | null): Promise<
   })
   const hash = contentHash(block)
   const existing = await readIndexEntry(key)
-  if (existing?.contentHash === hash) return
+  if (existing?.contentHash === hash) return "unchanged"
 
   const metadata = buildMetadata(block, binding)
 
-  const known = existing?.memoryId ?? (await findExisting(block, binding))
-  if (known) {
-    await MemoryApi.update(known, block.content, metadata)
-    await recordIndexEntry(key, { memoryId: known, contentHash: hash, syncedAt: Date.now() })
-    return
+  const match = existing?.memoryId ?? (await findExisting(block, binding, known))
+  if (match) {
+    // Refuse to move a record backwards. Two machines editing the same block,
+    // or a stale clone running a sweep, would otherwise overwrite a newer cloud
+    // value with older local content — last-request-wins rather than
+    // convergence. This narrows the window rather than closing it; closing it
+    // needs a conditional update the service does not offer.
+    const remote = (known?.records ?? []).find((r) => r.id === match)
+    const remoteUpdated = remote && (remote.metadata ?? {}).block_updated
+    if (typeof remoteUpdated === "string" && remoteUpdated > block.updated) {
+      log.warn("declining to overwrite a newer workspace record with older local content", {
+        id: block.id,
+        localUpdated: block.updated,
+        remoteUpdated,
+      })
+      return "skipped"
+    }
+    await MemoryApi.update(match, block.content, metadata)
+    await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
+    return "stored"
+  }
+
+  // Creating against a list we know was cut short risks a duplicate: the
+  // record may exist just beyond the window. Refusing leaves the block
+  // unindexed, so a later save retries once the set is readable.
+  if (known?.truncated) {
+    log.warn("skipping create against a truncated record set", { id: block.id, scope: block.scope })
+    return "skipped"
   }
 
   const created = await MemoryApi.add(block.content, metadata)
-  if (!created) {
+  if (created.length === 0) {
     // The extractor declined the content and stored nothing. Leaving the block
     // unindexed means a later edit retries it rather than silently skipping.
     log.warn("workspace declined to store memory block", { id: block.id, scope: block.scope })
-    return
+    return "declined"
   }
+
   // Repair the create: the extractor rewrote the text and replaced our
   // memory_type/title. update() is verbatim and replaces the whole metadata
   // dict, restoring the block exactly as written.
-  await MemoryApi.update(created, block.content, metadata)
-  await recordIndexEntry(key, { memoryId: created, contentHash: hash, syncedAt: Date.now() })
+  const [primary, ...extras] = created
+  await MemoryApi.update(primary, block.content, metadata)
+  await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
+
+  // An extractor may split one submission into several records, each carrying
+  // the metadata we sent. Only one can represent the block; the rest would
+  // otherwise be injected as duplicates under the same block id, holding text
+  // the user never wrote.
+  for (const extra of extras) {
+    log.warn("archiving an extra record produced by one create", { id: block.id, memoryId: extra })
+    await MemoryApi.update(extra, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
+  }
+  return "stored"
 }
 
 /** Mirror one block. Safe to call unconditionally — returns immediately when
@@ -288,10 +394,28 @@ export async function archiveBlock(scope: "global" | "project", blockId: string)
     projectKey: binding ? projectKeyFor(binding) : undefined,
   })
   const entry = await readIndexEntry(key)
-  if (!entry) return
 
+  // The read exists to recover the record's current text so the archive can
+  // preserve it, and to find the record at all when the index cannot answer.
+  // It is also why archiving fails when the result is truncated.
   const records = await MemoryApi.list()
-  const current = records.find((r) => r.id === entry.memoryId)
+
+  // The index is per-machine and is discarded on account switch, corruption or
+  // a wiped state directory. Without a fallback, deleting a block on a machine
+  // that has lost its index leaves the record live, and every later session
+  // re-injects it with no way to remove it. Match on logical identity instead,
+  // exactly as the write path does.
+  const current = entry
+    ? records.find((r) => r.id === entry.memoryId)
+    : records.find(
+        (r) =>
+          isMirrorRecord(r) &&
+          !isArchived(r) &&
+          (r.metadata ?? {}).block_id === blockId &&
+          (r.metadata ?? {}).block_scope === scope &&
+          (scope !== "project" ||
+            String((r.metadata ?? {}).datamate_id ?? "") === String(binding?.datamateId ?? "")),
+      )
   if (!current) return
 
   const now = new Date().toISOString()
@@ -306,24 +430,30 @@ export async function archiveBlock(scope: "global" | "project", blockId: string)
   }
   // Keep the text — archiving hides a record from injection, it does not erase
   // what it said.
-  await MemoryApi.update(entry.memoryId, current.memory ?? "", metadata)
-  await recordIndexEntry(key, { memoryId: entry.memoryId, contentHash: "", syncedAt: Date.now() })
+  await MemoryApi.update(current.id, current.memory ?? "", metadata)
+  // Written only after the remote archive lands, so a failure leaves the entry
+  // pointing at a record that is still live rather than losing track of it.
+  await recordIndexEntry(key, { memoryId: current.id, contentHash: "", syncedAt: Date.now() })
 }
 
 async function runQueue<T>(
   items: T[],
-  worker: (item: T) => Promise<void>,
+  worker: (item: T) => Promise<PushOutcome>,
   concurrency: number,
-): Promise<{ ok: number; failed: number }> {
+): Promise<{ ok: number; failed: number; declined: number; skipped: number }> {
   let cursor = 0
   let ok = 0
   let failed = 0
+  let declined = 0
+  let skipped = 0
   const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     while (cursor < items.length) {
       const item = items[cursor++]
       try {
-        await worker(item)
-        ok++
+        const outcome = await worker(item)
+        if (outcome === "declined") declined++
+        else if (outcome === "skipped" || outcome === "unchanged") skipped++
+        else ok++
       } catch (err) {
         failed++
         log.warn("memory mirror task failed", { err: String(err) })
@@ -331,16 +461,22 @@ async function runQueue<T>(
     }
   })
   await Promise.all(runners)
-  return { ok, failed }
+  return { ok, failed, declined, skipped }
 }
 
 /** Push a set of blocks — the sweep that runs when a project is bound to a
  * workspace. Throttled and resumable: blocks whose payload is already synced
  * are skipped, so a re-run after a partial failure sends only what is missing. */
-export async function backfill(blocks: MemoryBlock[]): Promise<{ ok: number; failed: number; skipped: number }> {
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0 }
-  const binding = await currentBinding()
-  if (!binding || !(await memoryEnabled(binding))) return { ok: 0, failed: 0, skipped: blocks.length }
+export async function backfill(
+  blocks: MemoryBlock[],
+  explicitBinding?: CachedBinding,
+): Promise<{ ok: number; failed: number; skipped: number; declined: number }> {
+  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0 }
+  // The bind path passes the binding it just recorded; there is no ambient
+  // instance to resolve one from on the `link` subcommand.
+  const binding = explicitBinding ?? (await currentBinding())
+  if (!binding || !(await memoryEnabled(binding)))
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0 }
   const index = await readIndex()
 
   const pending: { block: MemoryBlock; binding: CachedBinding | null }[] = []
@@ -364,11 +500,32 @@ export async function backfill(blocks: MemoryBlock[]): Promise<{ ok: number; fai
     pending.push({ block, binding: target })
   }
 
-  if (pending.length === 0) return { ok: 0, failed: 0, skipped }
+  if (pending.length === 0) return { ok: 0, failed: 0, skipped, declined: 0 }
+
+  // One read for the whole sweep. Every block in a first bind is an index miss,
+  // so resolving each through its own lookup made a bind cost one full record
+  // fetch per block.
+  let known: KnownRecords | undefined
+  try {
+    known = await fetchKnownRecords()
+  } catch (err) {
+    log.warn("could not prefetch records for backfill; falling back per block", {
+      err: String(err),
+    })
+  }
+
   log.info("workspace memory backfill starting", { pending: pending.length, skipped })
-  const result = await runQueue(pending, (item) => push(item.block, item.binding), BACKFILL_CONCURRENCY)
-  log.info("workspace memory backfill finished", { ...result, skipped })
-  return { ...result, skipped }
+  const result = await runQueue(
+    pending,
+    (item) => push(item.block, item.binding, known),
+    BACKFILL_CONCURRENCY,
+  )
+  // `skipped` combines blocks filtered before the queue (already synced, or
+  // project blocks with no workspace) with those the queue itself declined to
+  // act on — a truncated read, or a remote copy that is newer.
+  const totals = { ...result, skipped: result.skipped + skipped }
+  log.info("workspace memory backfill finished", totals)
+  return totals
 }
 
 /** Short label for a record's originating project. */
@@ -419,6 +576,7 @@ export function toBlock(
     tags,
     created: (typeof meta.block_created === "string" ? meta.block_created : undefined) ?? record.created_at ?? updated,
     updated,
+    expires: typeof meta.block_expires === "string" ? meta.block_expires : undefined,
     content: record.memory,
     remote: true,
     ...(fromSibling ? { origin: originLabel(meta) } : {}),
@@ -438,23 +596,33 @@ export function belongsHere(record: CloudMemoryRecord, ownWorkspace: string | un
   return String(meta.datamate_id ?? "") === ownWorkspace
 }
 
-/** Fetch this session's workspace memory once. Idempotent per session id. */
+/** Fetch a session's workspace memory once.
+ *
+ * Idempotent: safe to call on every turn, which matters because the caller's
+ * enclosing block runs per user turn rather than once per session. Repeat calls
+ * return the in-flight or completed hydration instead of refetching, and the
+ * existing overlay is never cleared first — clearing before a refetch made
+ * workspace memory blink out of the prompt whenever a fetch ran long. */
 export async function hydrate(sessionID: string): Promise<void> {
   if (!isEnabled()) return
-  if (hydratedFor === sessionID) return hydration ?? undefined
-  hydratedFor = sessionID
-  hydration = doHydrate(++generation)
-  return hydration
+  const state = sessionState(sessionID)
+  if (state.hydration) return state.hydration
+  state.hydration = doHydrate(sessionID)
+  return state.hydration
 }
 
-/** Wait for an in-flight hydration, capped. Resolves immediately once the
- * fetch has settled, so only the first injection of a session pays. */
-export async function whenHydrated(timeoutMs: number = HYDRATION_WAIT_MS): Promise<void> {
-  if (!hydration) return
+/** Wait for a session's in-flight hydration, capped. Resolves immediately once
+ * the fetch has settled, so only the first injection of a session pays. */
+export async function whenHydrated(
+  sessionID: string,
+  timeoutMs: number = HYDRATION_WAIT_MS,
+): Promise<void> {
+  const pending = sessions.get(sessionID)?.hydration
+  if (!pending) return
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     await Promise.race([
-      hydration,
+      pending,
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs)
         timer.unref?.()
@@ -465,11 +633,11 @@ export async function whenHydrated(timeoutMs: number = HYDRATION_WAIT_MS): Promi
   }
 }
 
-async function doHydrate(forGeneration: number): Promise<void> {
+async function doHydrate(sessionID: string): Promise<void> {
   try {
     const binding = await currentBinding()
     if (!binding || !(await memoryEnabled(binding))) {
-      if (forGeneration === generation) overlay = []
+      sessionState(sessionID).overlay = []
       return
     }
     const ownProjectKey = binding ? projectKeyFor(binding) : undefined
@@ -483,33 +651,38 @@ async function doHydrate(forGeneration: number): Promise<void> {
       if (!isMirrorRecord(record) || isArchived(record)) continue
       if (!belongsHere(record, ownWorkspace)) continue
       const block = toBlock(record, ownProjectKey)
-      if (block) blocks.push(block)
+      if (!block) continue
+      // A TTL'd block must expire everywhere, not just on the machine that
+      // wrote it. The cloud copy is not swept, so honour it on read.
+      if (block.expires && new Date(block.expires) <= new Date()) continue
+      blocks.push(block)
     }
 
-    // A hydration from a previous session must not overwrite the current one.
-    if (forGeneration !== generation) return
-    overlay = blocks
+    sessionState(sessionID).overlay = blocks
     if (blocks.length > 0) {
       log.info("workspace memory hydrated", { blocks: blocks.length, workspace: binding?.datamateName })
     }
   } catch (err) {
     log.warn("workspace memory hydration failed", { err: String(err) })
-    if (forGeneration === generation) overlay = []
+    sessionState(sessionID).overlay = []
   }
 }
 
-/** The current session's cloud overlay. */
-export function overlayBlocks(): RemoteMemoryBlock[] {
-  return overlay
+/** A session's cloud overlay. Returns a copy so a caller cannot mutate the
+ * cached state in place. */
+export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
+  return [...(sessions.get(sessionID)?.overlay ?? [])]
 }
 
-/** Drop the overlay. Called at session start so a long-lived process does not
- * carry one project's workspace memory into the next session. */
-export function resetOverlay(): void {
-  overlay = []
-  hydratedFor = null
-  hydration = null
-  generation++
-  // A new session re-checks the toggle rather than inheriting a stale verdict.
-  memoryEnabledCache.clear()
+/** Forget a session's hydration, or all of them.
+ *
+ * Not called per turn: doing so defeated ``hydrate``'s idempotence and made
+ * every turn refetch. Exposed for tests and for a future session-end hook. */
+export function resetOverlay(sessionID?: string): void {
+  if (sessionID === undefined) {
+    sessions.clear()
+    memoryEnabledCache.clear()
+    return
+  }
+  sessions.delete(sessionID)
 }
