@@ -194,3 +194,22 @@ describe("maskString paths — round 6 (unicode, colon anchors)", () => {
       .toBe("connect db-host:5432/postgres refused")
   })
 })
+
+describe("maskString paths — round 7 (combining marks, punctuation boundaries)", () => {
+  it("masks NFD-decomposed names (macOS filename normalization)", () => {
+    const nfd = "/Users/Jane García/client/model.sql".normalize("NFD")
+    expect(nfd).not.toBe("/Users/Jane García/client/model.sql".normalize("NFC")) // truly decomposed
+    expect(mask(`read ${nfd} failed`)).toBe("read <path> failed")
+  })
+
+  it("masks names with curly apostrophes", () => {
+    expect(mask("read /Users/Jane O’Connor/client/model.sql failed"))
+      .toBe("read <path> failed")
+  })
+
+  it("recognizes ; and < as path boundaries, preserving closers", () => {
+    expect(mask("ENOENT;/Users/jdoe/client/a.sql")).toBe("ENOENT;<path>")
+    expect(mask("failed </Users/jdoe/client/model.sql>")).toBe("failed <<path>>")
+    expect(mask("cfg=a.yml;/etc/dbt/profiles.yml;done")).toBe("cfg=a.yml;<path>;done")
+  })
+})

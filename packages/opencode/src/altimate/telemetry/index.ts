@@ -1385,6 +1385,43 @@ export namespace Telemetry {
     return s
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
+      // altimate_change start — mask filesystem paths in error text
+      // Tool failures embed the path that failed ("File not found: /Users/…");
+      // home-dir paths carry the OS username, and project-rooted absolute paths
+      // leak client repo structure. QUOTED paths were already destroyed by the
+      // quote rule below — unquoted ones reached telemetry raw (live 32-machine
+      // core_failure/file_not_found cluster). Same philosophy as the rest of
+      // this chain: over-masking is the correct failure mode. Ordered after the
+      // credential rules and BEFORE the email/internal-host rules — a URI's
+      // userinfo (container@account...) must not be fragmented into <email>
+      // before the whole URI masks. Public URL interiors stay safe structurally
+      // (after https: comes //, which cannot start a segment chain). Three shapes:
+      //   Windows drive / UNC:  C:\Users\…   \\server\share
+      //   POSIX absolute (2+ segments — bare "/mcp" style tokens survive)
+      //   Home-relative: ~/…
+      //   Cloud-storage URIs (gs://, s3://, abfss://, …) — bucket names identify
+      //   the customer; not http, so the URL rule above never sees them.
+      //   Paths with embedded spaces (macOS "/Users/Jane Doe/client repo/…")
+      //   continue across a space whenever a later chunk carries another
+      //   separator, plus one optional trailing spaced filename, plus one
+      //   trailing spaced WORD only at end-of-string / before punctuation —
+      //   "path + space + word" is otherwise undecidable vs trailing prose
+      //   ("client repo" vs "x.sql was"). HOME-ROOTED paths (/Users, /home,
+      //   C:\Users — where a spaced USERNAME would otherwise leak its tail,
+      //   e.g. "/Users/Jane Doe does not exist") additionally consume one
+      //   unconditional trailing word, suppressed when the path already ended
+      //   in a dotted extension so "x.sql was deleted" prose stays intact.
+      //   Residue after all rules: one prose word may be over-masked after an
+      //   extensionless home path, and a non-home path's terminal spaced
+      //   component can still leak ONE structure word mid-sentence (no
+      //   personal names there). Anchors include [ and { for bracketed paths.
+      .replace(/(^|[\s"'`=(,[{:;<])(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\/\/|file:\/{1,3})[^\s'"`)\]},;>]*(?:(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+)+\/[^\s'"`)\]},;>]*)*(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{M}\p{N}_‘’-]+(?=$|[.,;:)\]}!?]))?/giu, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{:;<])[A-Za-z]:[\\\/]Users[\\\/][^\s'"`)\]},;>]*(?:(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+)+[\\\/][^\s'"`)\]},;>]*)*(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{M}\p{N}_‘’-]+)?/giu, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{:;<])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`)\]},;>]+(?:(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+)+[\\\/][^\s'"`)\]},;>]*)*(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{M}\p{N}_‘’-]+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{:;<])\/(?:Users|home)\/[^\s'"`)\]},;>]*(?:(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+)+\/[^\s'"`)\]},;>]*)*(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{M}\p{N}_‘’-]+)?/giu, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{:;<])\/(?:[\p{L}\p{M}\p{N}_.@+-]+\/)+[^\s'"`)\]},;>]*(?:(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+)+\/[^\s'"`)\]},;>]*)*(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{M}\p{N}_‘’-]+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{:;<])~\/[^\s'"`)\]},;>]*(?:(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+)+\/[^\s'"`)\]},;>]*)*(?: [\p{L}\p{M}\p{N}_.@+()‘’-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{M}\p{N}_‘’-]+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
+      // altimate_change end
       // Email addresses — providers occasionally echo caller identity in error text.
       .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
       // Internal hostnames in URLs — keeps parity with `parseAPICallError`'s
@@ -1405,41 +1442,6 @@ export namespace Telemetry {
         /\bhttps?:\/\/(?:[^\/\s@]+@)?(?:localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|0\.0\.0\.0|\[(?:::1|fc[0-9a-f]{2}:[^\]]*|fd[0-9a-f]{2}:[^\]]*|fe80:[^\]]*)\]|[A-Za-z0-9.-]+\.(?:local|internal|localhost))(?::\d+)?[\w/.?=&%+#,;~!*'()@:-]*/gi,
         "<internal-host>",
       )
-      // altimate_change start — mask filesystem paths in error text
-      // Tool failures embed the path that failed ("File not found: /Users/…");
-      // home-dir paths carry the OS username, and project-rooted absolute paths
-      // leak client repo structure. QUOTED paths were already destroyed by the
-      // quote rule below — unquoted ones reached telemetry raw (live 32-machine
-      // core_failure/file_not_found cluster). Same philosophy as the rest of
-      // this chain: over-masking is the correct failure mode. Ordered after the
-      // URL rule (a public URL's path segment is never word-anchored, so it
-      // cannot match here) and before quote masking. Three shapes:
-      //   Windows drive / UNC:  C:\Users\…   \\server\share
-      //   POSIX absolute (2+ segments — bare "/mcp" style tokens survive)
-      //   Home-relative: ~/…
-      //   Cloud-storage URIs (gs://, s3://, abfss://, …) — bucket names identify
-      //   the customer; not http, so the URL rule above never sees them.
-      //   Paths with embedded spaces (macOS "/Users/Jane Doe/client repo/…")
-      //   continue across a space whenever a later chunk carries another
-      //   separator, plus one optional trailing spaced filename, plus one
-      //   trailing spaced WORD only at end-of-string / before punctuation —
-      //   "path + space + word" is otherwise undecidable vs trailing prose
-      //   ("client repo" vs "x.sql was"). HOME-ROOTED paths (/Users, /home,
-      //   C:\Users — where a spaced USERNAME would otherwise leak its tail,
-      //   e.g. "/Users/Jane Doe does not exist") additionally consume one
-      //   unconditional trailing word, suppressed when the path already ended
-      //   in a dotted extension so "x.sql was deleted" prose stays intact.
-      //   Residue after all rules: one prose word may be over-masked after an
-      //   extensionless home path, and a non-home path's terminal spaced
-      //   component can still leak ONE structure word mid-sentence (no
-      //   personal names there). Anchors include [ and { for bracketed paths.
-      .replace(/(^|[\s"'`=(,[{:])(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\/\/|file:\/{1,3})[^\s'"`)\]},]*(?:(?: [\p{L}\p{N}_.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\p{L}\p{N}_.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{N}_-]+(?=$|[.,;:)\]}!?]))?/giu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:])[A-Za-z]:[\\\/]Users[\\\/][^\s'"`)\]},]*(?:(?: [\p{L}\p{N}_.@+()-]+)+[\\\/][^\s'"`)\]},]*)*(?: [\p{L}\p{N}_.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{N}_-]+)?/giu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`)\]},]+(?:(?: [\p{L}\p{N}_.@+()-]+)+[\\\/][^\s'"`)\]},]*)*(?: [\p{L}\p{N}_.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{N}_-]+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:])\/(?:Users|home)\/[^\s'"`)\]},]*(?:(?: [\p{L}\p{N}_.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\p{L}\p{N}_.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{N}_-]+)?/giu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:])\/(?:[\p{L}\p{N}_.@+-]+\/)+[^\s'"`)\]},]*(?:(?: [\p{L}\p{N}_.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\p{L}\p{N}_.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{N}_-]+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{:])~\/[^\s'"`)\]},]*(?:(?: [\p{L}\p{N}_.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\p{L}\p{N}_.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9]{1,8}) [\p{L}\p{N}_-]+(?=$|[.,;:)\]}!?]))?/gu, "$1<path>")
-      // altimate_change end
       .replace(/'(?:[^'\\]|\\.)*'/g, "?")
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
       .replace(/\s+/g, " ")
