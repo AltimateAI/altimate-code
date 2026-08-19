@@ -708,3 +708,20 @@ describe("maskString paths — fleet round 26 (one-char tilde components)", () =
     expect(mask(String.raw`escapes ~\n\r\t here`)).toBe(String.raw`escapes ~\n\r\t here`)
   })
 })
+
+describe("maskString paths — fleet round 27 (one-char rooted, brace anchors, unicode extensions)", () => {
+  it("one-char rooted components defer proof to the next component", () => {
+    expect(mask(String.raw`read \a\client\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`escape chain \n\r\t here`)).toBe(String.raw`escape chain \n\r\t here`)
+  })
+
+  it("closing braces anchor paths", () => {
+    expect(mask("{ENOENT}/Users/jdoe/client/a.sql")).toBe("{ENOENT}<path>")
+    expect(mask("json {a}/{b} template")).toBe("json {a}/{b} template")
+  })
+
+  it("unicode extensions prove explicit paths", () => {
+    expect(mask("read ./customer.配置 failed")).toBe("read <path> failed")
+    expect(mask("read /秘密.配置 now")).toBe("read <path> now")
+  })
+})
