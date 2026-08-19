@@ -572,3 +572,16 @@ describe("maskString paths — fleet round 15 (spaced shallow terminals, name pa
     expect(mask(String.raw`match \bword\b boundary`)).toBe(String.raw`match \bword\b boundary`)
   })
 })
+
+describe("maskString paths — fleet round 16 (case folding out of the tail gate)", () => {
+  it("home/cloud rules are engine-independent: no i flag, hand-expanded case", () => {
+    // lowercase prose after a home path costs exactly one word — this is the
+    // assertion that silently broke under V8's conformant /iu folding
+    expect(mask("/Users/jdoe was not found on this system")).toBe("<path> not found on this system")
+    // the case-insensitive coverage the i flag used to provide still holds
+    expect(mask("stat c:\\users\\jane doe missing")).toBe("stat <path> missing")
+    expect(mask("check /users/jane went missing")).toBe("check <path> missing")
+    expect(mask("read S3://Bucket/Key now")).toBe("read <path>")
+    expect(mask(String.raw`stat \\?\unc\srv\share\Users\Jane Doe gone`)).toBe("stat <path> gone")
+  })
+})
