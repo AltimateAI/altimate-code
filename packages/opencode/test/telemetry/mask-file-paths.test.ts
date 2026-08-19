@@ -143,9 +143,28 @@ describe("maskString paths — round 4 (spaced usernames, windows delimiters)", 
   })
 
   it("spaced Windows dirs still continue (Program Files shape)", () => {
-    // ENOENT is eaten by the end-of-string trailing-word rule — accepted
-    // over-masking (errorCode travels as its own structured field)
+    // dotted extension -> the trailing word is clearly prose and survives
     expect(mask("spawn C:\\Program Files (x86)\\dbt\\dbt.exe ENOENT"))
-      .toBe("spawn <path>")
+      .toBe("spawn <path> ENOENT")
+  })
+})
+
+describe("maskString paths — round 5", () => {
+  it("masks single-slash file: URIs (RFC 8089)", () => {
+    expect(mask("read file:/Users/jdoe/client/model.sql failed"))
+      .toBe("read <path> failed")
+    expect(mask("open file:///home/jdoe/x.yml then retry")).toBe("open <path> then retry")
+  })
+
+  it("matches Windows home roots case-insensitively", () => {
+    expect(mask("stat C:\\users\\Jane Doe does not exist"))
+      .toBe("stat <path> does not exist")
+  })
+
+  it("recognizes long extensions so following prose survives", () => {
+    expect(mask("/Users/jdoe/data.parquet was deleted"))
+      .toBe("<path> was deleted")
+    expect(mask("wrote /home/jdoe/out/events.jsonl then stopped"))
+      .toBe("wrote <path> then stopped")
   })
 })
