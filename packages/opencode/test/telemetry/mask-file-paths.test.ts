@@ -332,6 +332,15 @@ describe("maskString paths — windows paths — drive, UNC, relative, and roote
     expect(mask(String.raw`pattern \n+\r+ found`)).toBe(String.raw`pattern \n+\r+ found`)
   })
 
+  it("drive-relative terminal filenames mask when the extension carries a letter", () => {
+    expect(mask("read C:123_customer_secret.sql failed")).toBe("read <path> failed")
+    expect(mask("read C:.env.local failed")).toBe("read <path> failed")
+    expect(mask("read C:customer secret.sql failed")).toBe("read <path> failed")
+    // versions and ratios have all-numeric extensions and never qualify
+    expect(mask("avg C:8.5 shown")).toBe("avg C:8.5 shown")
+    expect(mask("version C:1.2.3 tagged")).toBe("version C:1.2.3 tagged")
+  })
+
   it("shallow explicit windows terminals mask (POSIX symmetry)", () => {
     expect(mask("read C:customer_secret.sql failed")).toBe("read <path> failed")
     expect(mask(String.raw`read .\customer_secret.sql failed`)).toBe("read <path> failed")
@@ -416,6 +425,11 @@ describe("maskString paths — tilde paths", () => {
   it("dot-prefixed backslash tilde paths mask; escaped-dot regex prose never does", () => {
     expect(mask(String.raw`read ~\.config\altimate\secret.json failed`)).toBe("read <path> failed")
     expect(mask(String.raw`sub ~\.\d pattern`)).toBe(String.raw`sub ~\.\d pattern`)
+  })
+
+  it("symbol-bearing first components mask (parity with rooted proofs)", () => {
+    expect(mask(String.raw`read ~\C++ Projects\client\secret.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read ~\R&D\client\secret.sql failed`)).toBe("read <path> failed")
   })
 
   it("one-char components mask when the next component proves the path", () => {

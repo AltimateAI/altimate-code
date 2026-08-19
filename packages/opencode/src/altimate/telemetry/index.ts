@@ -120,10 +120,10 @@ for (const root of [process.cwd(), os.homedir()]) {
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/|[\\p{L}_][^\\s\\/\\\\]{0,254}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/|" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+){0,6}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
-  tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+  tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*[\\\\\\/]|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
 }
 // altimate_change end
 
@@ -1454,7 +1454,7 @@ export namespace Telemetry {
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
     // Fast path: a string with no separator cannot contain a path — skip the
     // whole path stack (most telemetry strings carry no path at all).
-    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:[\p{L}_]/u.test(out)) {
+    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:\S/.test(out)) {
       out = out
       // altimate_change start — mask filesystem paths in error text
       // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and
