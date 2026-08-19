@@ -411,3 +411,24 @@ describe("maskString paths — fleet round 7 (double spaces, current-drive-roote
     expect(performance.now() - t0).toBeLessThan(500)
   })
 })
+
+describe("maskString paths — fleet round 8 (ANSI, drive-relative, quote delimiters)", () => {
+  it("strips ANSI CSI sequences before masking", () => {
+    expect(mask("\x1b[31m/Users/jdoe/client/a.sql\x1b[0m failed")).toBe("<path> failed")
+    // an ANSI-split credential must still be caught by the sk- rule
+    expect(mask("token sk-\x1b[31mabc12345678901234567890\x1b[0m end")).toBe("token sk-*** end")
+  })
+
+  it("masks drive-relative windows paths, generic and home", () => {
+    expect(mask(String.raw`read C:client-repo\models\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read C:Users\Jane Doe\client\a.sql failed`)).toBe("read <path> failed")
+    // colon-bearing prose without a backslash chain never matches
+    expect(mask("score C:8/10 fine")).toBe("score C:8/10 fine")
+  })
+
+  it("continues through quote characters a later separator proves", () => {
+    expect(mask(`read /Users/jdoe/client"repo/models/a.sql failed`)).toBe("read <path> failed")
+    // paired inline-code backticks stay intact
+    expect(mask("run `dbt build` in `/opt/proj/app` now")).toBe("run `dbt build` in `<path>` now")
+  })
+})
