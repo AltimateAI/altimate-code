@@ -700,3 +700,11 @@ describe("maskString paths — fleet round 25 (dotfile tildes, letter-bearing dr
     expect(mask("/Users/Mary van der Berg does not exist")).toBe("<path> does not exist")
   })
 })
+
+describe("maskString paths — fleet round 26 (one-char tilde components)", () => {
+  it("one-char components mask when the next component proves the path", () => {
+    expect(mask(String.raw`read ~\a\client\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`chain ~\w\d+ used`)).toBe(String.raw`chain ~\w\d+ used`)
+    expect(mask(String.raw`escapes ~\n\r\t here`)).toBe(String.raw`escapes ~\n\r\t here`)
+  })
+})
