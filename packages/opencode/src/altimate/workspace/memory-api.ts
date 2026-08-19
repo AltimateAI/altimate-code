@@ -152,7 +152,14 @@ export namespace MemoryApi {
    * ``include_sources`` is required: the backend excludes this client's records
    * from list/search by default so they do not surface in Datamate sessions.
    * No workspace filter is sent — the service's own query for a caller's
-   * records is not scoped by workspace, so narrowing happens in the caller. */
+   * records is not scoped by workspace, so narrowing happens in the caller.
+   *
+   * Deliberately NOT capped at ``LIST_LIMIT``. The service ignores paging, so a
+   * cap here would discard real records before anything could rank them, and
+   * the user would lose memory with no signal. Session context is already
+   * bounded downstream: ``MemoryPrompt.inject`` scores every block and appends
+   * only while it fits the caller's budget. ``LIST_LIMIT`` is used to recognise
+   * a possibly-cut-short read (see ``fetchKnownRecords``), not to trim one. */
   export async function list(): Promise<CloudMemoryRecord[]> {
     const rows = await altimateRequest<CloudMemoryRecord[] | { memories?: CloudMemoryRecord[] }>(
       "GET",

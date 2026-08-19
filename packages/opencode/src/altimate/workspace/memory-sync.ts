@@ -16,6 +16,7 @@
 // Nothing is written to disk: local files are the source of truth, and a cloud
 // record can have been edited elsewhere by a client that does not preserve this
 // CLI's metadata.
+import { createHash } from "node:crypto"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Flag } from "@/flag/flag"
 import { Instance } from "@/project/instance"
@@ -70,6 +71,8 @@ interface SessionMemory {
   overlay: RemoteMemoryBlock[]
   hydration: Promise<void> | null
   touchedAt: number
+  /** Set once a bounded wait expired, so later injections do not re-wait. */
+  waitTimedOut?: boolean
 }
 
 const sessions = new Map<string, SessionMemory>()
@@ -197,14 +200,33 @@ function contentHash(block: MemoryBlock): string {
     [...block.tags].sort(),
     block.expires ?? "",
   ])
-  // Non-cryptographic (FNV-1a): this only has to detect change, and must not
-  // pull in a hashing dependency.
-  let h = 0x811c9dc5
-  for (let i = 0; i < payload.length; i++) {
-    h ^= payload.charCodeAt(i)
-    h = Math.imul(h, 0x01000193) >>> 0
+  // sha-256, not a 32-bit non-cryptographic hash. This value is the single
+  // gate deciding whether a save is sent at all: on a collision ``push``
+  // returns "unchanged" and a real edit is silently never mirrored, with no
+  // retry. A 32-bit space makes that reachable; node:crypto is already a
+  // dependency of this feature (see ./memory-index.ts).
+  return createHash("sha256").update(payload).digest("hex")
+}
+
+/** Read tags written by {@link buildMetadata}.
+ *
+ * Accepts the legacy comma-joined form so records written before the JSON
+ * encoding still load; those cannot represent a tag containing a comma, which
+ * is the defect the JSON form fixes. */
+export function decodeTags(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw) return []
+  if (raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) return parsed.filter((t): t is string => typeof t === "string" && t.length > 0)
+    } catch {
+      // Fall through to the legacy form.
+    }
   }
-  return h.toString(16)
+  return raw
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean)
 }
 
 export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null): MirrorMetadata {
@@ -216,7 +238,8 @@ export function buildMetadata(block: MemoryBlock, binding: CachedBinding | null)
     block_created: block.created,
     block_updated: block.updated,
   }
-  if (block.tags.length > 0) meta.block_tags = block.tags.join(",")
+  // JSON, not a comma join: a tag containing a comma split into two on read.
+  if (block.tags.length > 0) meta.block_tags = JSON.stringify(block.tags)
   if (block.expires) meta.block_expires = block.expires
   // Global blocks deliberately carry no workspace: they belong to the account
   // and apply in every workspace the user has.
@@ -245,11 +268,6 @@ function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: Cac
   return !recordProject || !binding || recordProject === projectKeyFor(binding)
 }
 
-/** Find an existing record for this block.
- *
- * Runs when the local index has no entry — a second machine, a reinstalled
- * CLI, or a create whose response was lost after the store had committed.
- * Without it those cases all produce a duplicate. */
 /** Fetch the record set once, and report whether it was cut short.
  *
  * The service ignores paging parameters, so a full result at the limit means
@@ -258,27 +276,17 @@ function isSameBlock(record: CloudMemoryRecord, block: MemoryBlock, binding: Cac
  * absent when it is merely out of reach. */
 async function fetchKnownRecords(): Promise<KnownRecords> {
   const records = await MemoryApi.list()
-  const truncated = records.length >= LIST_LIMIT
+  // Exactly at the limit is the only ambiguous case. Treating ">= limit" as
+  // truncated would permanently block creates for any user whose record set is
+  // larger than the limit -- the service ignores paging, so a response LARGER
+  // than the limit is positive proof the set came back whole.
+  const truncated = records.length === LIST_LIMIT
   if (truncated) {
     log.warn("workspace memory read hit the service limit; some records are unreachable", {
       limit: LIST_LIMIT,
     })
   }
   return { records, truncated }
-}
-
-async function findExisting(
-  block: MemoryBlock,
-  binding: CachedBinding | null,
-  known?: KnownRecords,
-): Promise<string | undefined> {
-  try {
-    const records = known?.records ?? (await MemoryApi.list())
-    return records.find((r) => isSameBlock(r, block, binding))?.id
-  } catch (err) {
-    log.warn("could not check for an existing record", { id: block.id, err: String(err) })
-    return undefined
-  }
 }
 
 /** Records already known to the caller, so a sweep does not re-list per block. */
@@ -305,14 +313,32 @@ async function push(
 
   const metadata = buildMetadata(block, binding)
 
-  const match = existing?.memoryId ?? (await findExisting(block, binding, known))
+  // Resolve the record set even when the index already names a record. Every
+  // safety check below needs it, and previously only ``backfill`` passed one:
+  // on the ordinary per-save path the truncation guard, the lookup-failure
+  // path and the newer-remote guard were all unreachable. Fetched only after
+  // the hash check above, so an unchanged block still costs nothing.
+  let view = known
+  if (!view) {
+    try {
+      view = await fetchKnownRecords()
+    } catch (err) {
+      // A failed lookup must not read as "no record exists" -- that is how a
+      // duplicate gets created. Leave the block unindexed so a later save
+      // retries it.
+      log.warn("could not read the workspace record set; deferring", { id: block.id, err: String(err) })
+      return "skipped"
+    }
+  }
+
+  const match = existing?.memoryId ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,
     // or a stale clone running a sweep, would otherwise overwrite a newer cloud
     // value with older local content — last-request-wins rather than
     // convergence. This narrows the window rather than closing it; closing it
     // needs a conditional update the service does not offer.
-    const remote = (known?.records ?? []).find((r) => r.id === match)
+    const remote = view.records.find((r) => r.id === match)
     const remoteUpdated = remote && (remote.metadata ?? {}).block_updated
     if (typeof remoteUpdated === "string" && remoteUpdated > block.updated) {
       log.warn("declining to overwrite a newer workspace record with older local content", {
@@ -330,7 +356,7 @@ async function push(
   // Creating against a list we know was cut short risks a duplicate: the
   // record may exist just beyond the window. Refusing leaves the block
   // unindexed, so a later save retries once the set is readable.
-  if (known?.truncated) {
+  if (view.truncated) {
     log.warn("skipping create against a truncated record set", { id: block.id, scope: block.scope })
     return "skipped"
   }
@@ -361,6 +387,29 @@ async function push(
   return "stored"
 }
 
+/** Cloud operations for one logical block, run one at a time.
+ *
+ * Both callers are fire-and-forget from the store's write and delete paths, so
+ * without this a delete issued while a mirror is still in flight finds no
+ * record to archive, and the mirror then creates a live one -- resurrecting
+ * memory the user deleted. Two rapid saves race the same way and create
+ * duplicates. Keyed by scope+id, so unrelated blocks still mirror in parallel.
+ */
+const blockQueues = new Map<string, Promise<unknown>>()
+
+function serialize<T>(scope: "global" | "project", blockId: string, op: () => Promise<T>): Promise<T> {
+  const key = `${scope}:${blockId}`
+  const prior = blockQueues.get(key) ?? Promise.resolve()
+  const next = prior.then(op, op)
+  // Retain only while this op is the tail, so the map cannot grow unbounded.
+  blockQueues.set(key, next)
+  const settled = next.catch(() => undefined)
+  void settled.then(() => {
+    if (blockQueues.get(key) === next) blockQueues.delete(key)
+  })
+  return next
+}
+
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * the pilot flag is off, the project is unbound, or the workspace has memory
  * disabled. */
@@ -375,7 +424,7 @@ export async function mirrorBlock(block: MemoryBlock): Promise<void> {
   const binding = await currentBinding()
   if (!binding) return
   if (!(await memoryEnabled(binding))) return
-  await push(block, binding)
+  await serialize(block.scope, block.id, () => push(block, binding))
 }
 
 /** Archive a block's cloud record rather than deleting it, so the workspace
@@ -386,7 +435,16 @@ export async function archiveBlock(scope: "global" | "project", blockId: string)
   const binding = await currentBinding()
   if (!binding) return
   if (!(await memoryEnabled(binding))) return
+  // Queued behind any in-flight mirror for the same block, so a delete cannot
+  // run before the create it is meant to undo.
+  return serialize(scope, blockId, () => archiveNow(scope, blockId, binding))
+}
 
+async function archiveNow(
+  scope: "global" | "project",
+  blockId: string,
+  binding: CachedBinding,
+): Promise<void> {
   const key = indexKey({
     scope,
     blockId,
@@ -407,14 +465,12 @@ export async function archiveBlock(scope: "global" | "project", blockId: string)
   // exactly as the write path does.
   const current = entry
     ? records.find((r) => r.id === entry.memoryId)
-    : records.find(
-        (r) =>
-          isMirrorRecord(r) &&
-          !isArchived(r) &&
-          (r.metadata ?? {}).block_id === blockId &&
-          (r.metadata ?? {}).block_scope === scope &&
-          (scope !== "project" ||
-            String((r.metadata ?? {}).datamate_id ?? "") === String(binding?.datamateId ?? "")),
+    : // Matching on workspace alone is too coarse: two projects in one
+      // workspace may hold the same block id, and deleting one would archive
+      // the other's record. Use the write path's own identity test so the
+      // fallback can only ever hit the record this block would have written.
+      records.find((r) =>
+        isSameBlock(r, { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock, binding),
       )
   if (!current) return
 
@@ -517,7 +573,7 @@ export async function backfill(
   log.info("workspace memory backfill starting", { pending: pending.length, skipped })
   const result = await runQueue(
     pending,
-    (item) => push(item.block, item.binding, known),
+    (item) => serialize(item.block.scope, item.block.id, () => push(item.block, item.binding, known)),
     BACKFILL_CONCURRENCY,
   )
   // `skipped` combines blocks filtered before the queue (already synced, or
@@ -556,10 +612,7 @@ export function toBlock(
   const scope = meta.block_scope === "global" || meta.block_scope === "project" ? meta.block_scope : undefined
   if (!blockId || !scope || !record.memory) return null
 
-  const tags =
-    typeof meta.block_tags === "string" && meta.block_tags
-      ? meta.block_tags.split(",").map((t) => t.trim()).filter(Boolean)
-      : []
+  const tags = decodeTags(meta.block_tags)
   const updated =
     (typeof meta.block_updated === "string" ? meta.block_updated : undefined) ??
     record.updated_at ??
@@ -617,19 +670,29 @@ export async function whenHydrated(
   sessionID: string,
   timeoutMs: number = HYDRATION_WAIT_MS,
 ): Promise<void> {
-  const pending = sessions.get(sessionID)?.hydration
-  if (!pending) return
+  const state = sessions.get(sessionID)
+  const pending = state?.hydration
+  if (!pending || !state) return
+  // A hydration that already blew the budget must not be waited on again: the
+  // promise stays unresolved, so every later injection in the session would pay
+  // the full timeout. Wait once, then let the overlay fill in whenever it lands.
+  if (state.waitTimedOut) return
   let timer: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
   try {
     await Promise.race([
       pending,
       new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeoutMs)
+        timer = setTimeout(() => {
+          timedOut = true
+          resolve()
+        }, timeoutMs)
         timer.unref?.()
       }),
     ])
   } finally {
     if (timer) clearTimeout(timer)
+    if (timedOut) state.waitTimedOut = true
   }
 }
 

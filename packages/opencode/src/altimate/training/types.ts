@@ -76,6 +76,6 @@ export function embedTrainingMeta(content: string, meta: TrainingBlockMeta): str
     "-->",
   ].join("\n")
   // Strip existing training meta block if present
-  const stripped = content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "")
+  const stripped = content.replace(TRAINING_META_COMMENT, "")
   return header + "\n" + stripped
 }

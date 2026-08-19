@@ -49,7 +49,7 @@ const {
   toBlock,
   whenHydrated,
 } = await import("../../../src/altimate/workspace/memory-sync")
-const { MIRROR_SOURCE, extractRecordId } = await import(
+const { MIRROR_SOURCE, extractRecordId, LIST_LIMIT } = await import(
   "../../../src/altimate/workspace/memory-api"
 )
 
@@ -75,15 +75,31 @@ let listResponse: any[] = []
 let createResult: any = [{ id: "mem-new" }]
 /** Workspaces returned by GET /datamates/ — drives the memory_enabled gate. */
 let workspaces: any[] = [{ id: 42, name: "acme", memory_enabled: true }]
+/** When set, GET /list fails -- used to prove a failed lookup never creates. */
+let listFails = false
 
 function stubFetch() {
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input)
     const method = (init?.method ?? "GET").toUpperCase()
     captured.push({ method, url, body: init?.body ? JSON.parse(init.body) : undefined })
+    if (listFails && url.includes("/datamates/memory/list")) {
+      return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+    }
     const payload = (() => {
       if (url.includes("/datamates/memory/list")) return listResponse
-      if (url.includes("/datamates/memory/")) return { message: "ok", result: createResult }
+      if (url.includes("/datamates/memory/")) {
+        // A created record becomes visible to later reads, as it would on the
+        // real service. Without this, anything that creates and then looks the
+        // record up again sees an empty store.
+        if (method === "POST") {
+          const body = init?.body ? JSON.parse(init.body) : {}
+          for (const rec of Array.isArray(createResult) ? createResult : []) {
+            if (rec?.id) listResponse.push({ id: rec.id, memory: body.messages?.[0]?.content ?? "", metadata: body.metadata })
+          }
+        }
+        return { message: "ok", result: createResult }
+      }
       if (url.includes("/datamates/")) return { datamates: workspaces }
       return { message: "ok" }
     })()
@@ -123,6 +139,7 @@ const BINDING = {
 beforeEach(() => {
   captured = []
   listResponse = []
+  listFails = false
   createResult = [{ id: "mem-new" }]
   workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
   stubCreds("acme", "https://api.example.com")
@@ -260,7 +277,7 @@ describe("buildMetadata", () => {
     expect(meta.project_path).toBe(BINDING.projectPath)
     expect(meta.source).toBe(MIRROR_SOURCE)
     expect(meta.block_scope).toBe("project")
-    expect(meta.block_tags).toBe("a,b")
+    expect(meta.block_tags).toBe('["a","b"]')
   })
 
   test("global scope carries no workspace even when a binding exists", () => {
@@ -307,15 +324,95 @@ describe("mirrorBlock", () => {
     expect(patches[0].body.metadata.block_id).toBe("repair-me")
   })
 
-  test("a known block updates without any lookup", async () => {
-    // Once indexed, the id is local: no enumeration is needed to update.
+  test("a known block updates the record the index names", async () => {
+    // The index supplies the id, so the update must never create. The record
+    // set is still read: every safety check below the lookup needs it, and
+    // when only `backfill` supplied one those checks were unreachable on the
+    // ordinary per-save path.
     const b = block({ id: "known" })
     createResult = [{ id: "mem-known" }]
     await mirrorBlock(b)
     captured = []
     await mirrorBlock({ ...b, updated: "2026-08-20T00:00:00.000Z", content: "changed" })
-    expect(callsTo("/datamates/memory/list").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
     expect(callsTo("/datamates/memory/mem-known", "PATCH").length).toBe(1)
+  })
+
+  test("a failed lookup defers instead of creating a duplicate", async () => {
+    // Treating an unreadable record set as "no record exists" is how the same
+    // block gets created twice.
+    listFails = true
+    await mirrorBlock(block({ id: "unreadable" }))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("a truncated read blocks a create on the ordinary save path", async () => {
+    // The guard previously only ran under `backfill`, so per-save mirroring
+    // still created duplicates of records sitting past the window.
+    listResponse = Array.from({ length: LIST_LIMIT }, (_, i) => ({
+      id: `mem-${i}`,
+      memory: "other",
+      metadata: { source: MIRROR_SOURCE, block_id: `other-${i}`, block_scope: "global" },
+    }))
+    await mirrorBlock(block({ id: "past-the-window" }))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("a record set larger than the limit is complete, not truncated", async () => {
+    // The service ignores paging, so more rows than the limit proves the set
+    // came back whole. Treating that as truncated would permanently block
+    // creates for any user with a large workspace.
+    listResponse = Array.from({ length: LIST_LIMIT + 1 }, (_, i) => ({
+      id: `mem-${i}`,
+      memory: "other",
+      metadata: { source: MIRROR_SOURCE, block_id: `other-${i}`, block_scope: "global" },
+    }))
+    await mirrorBlock(block({ id: "still-creatable" }))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("the newer-remote guard applies on the ordinary save path", async () => {
+    // Previously `remote` was only resolved from the backfill prefetch, so a
+    // stale machine could overwrite a newer cloud value on every normal save.
+    listResponse = [
+      {
+        id: "mem-newer",
+        memory: "newer text from another machine",
+        metadata: {
+          source: MIRROR_SOURCE,
+          block_id: "contested",
+          block_scope: "global",
+          block_updated: "2027-01-01T00:00:00.000Z",
+        },
+      },
+    ]
+    await mirrorBlock(block({ id: "contested", updated: NOW, content: "older local text" }))
+    expect(callsTo("/datamates/memory/mem-newer", "PATCH").length).toBe(0)
+  })
+
+  test("an edit is still mirrored when its content collides under a 32-bit hash", async () => {
+    // "fact loczw" and "fact vfbpa" share an FNV-1a 32-bit digest for the exact
+    // payload contentHash builds. The hash is the only gate deciding whether a
+    // save is sent, so under a 32-bit digest this edit is silently dropped with
+    // no retry -- the block's cloud copy just stays wrong.
+    const b = block({ id: "collide", tags: ["warehouse"], content: "fact loczw" })
+    createResult = [{ id: "mem-collide" }]
+    await mirrorBlock(b)
+    captured = []
+    await mirrorBlock({ ...b, content: "fact vfbpa", updated: "2026-08-20T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/mem-collide", "PATCH").length).toBe(1)
+  })
+
+  test("an unchanged block costs no read at all", async () => {
+    // The content hash short-circuits before the record set is fetched, so a
+    // no-op save stays free.
+    const b = block({ id: "cheap" })
+    createResult = [{ id: "mem-cheap" }]
+    await mirrorBlock(b)
+    captured = []
+    await mirrorBlock(b)
+    expect(callsTo("/datamates/memory/list").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-cheap", "PATCH").length).toBe(0)
   })
 
   test("an unknown block looks for an existing record before creating one", async () => {
@@ -504,6 +601,31 @@ describe("toBlock", () => {
   })
 })
 
+describe("tag encoding", () => {
+  test("a tag containing a comma survives the round trip", () => {
+    // The previous comma-joined form split this tag into two on read.
+    const tags = ["warehouse", "owner: data, platform", "prod"]
+    const meta = buildMetadata(block({ tags }), null)
+    const back = toBlock(
+      { id: "1", memory: "x", metadata: { ...meta, source: MIRROR_SOURCE } } as any,
+      undefined,
+    )
+    expect(back?.tags).toEqual(tags)
+  })
+
+  test("records written in the legacy comma form still decode", () => {
+    const back = toBlock(
+      {
+        id: "1",
+        memory: "x",
+        metadata: { source: MIRROR_SOURCE, block_id: "old", block_scope: "global", block_tags: "a,b" },
+      } as any,
+      undefined,
+    )
+    expect(back?.tags).toEqual(["a", "b"])
+  })
+})
+
 describe("belongsHere", () => {
   const rec = (metadata: any) => ({ id: "r", memory: "m", metadata })
 
@@ -606,6 +728,36 @@ describe("hydrate", () => {
   })
 })
 
+describe("whenHydrated", () => {
+  test("a hydration that blew its budget is not waited on again", async () => {
+    // The promise stays unresolved, so without the timed-out latch every later
+    // injection in the session would pay the full timeout again.
+    let release: (() => void) | undefined
+    const stall = new Promise<void>((r) => (release = r))
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) {
+        await stall
+      }
+      return original(input, init)
+    }) as typeof fetch
+
+    try {
+      void hydrate("stalled")
+      const first = Date.now()
+      await whenHydrated("stalled", 40)
+      expect(Date.now() - first).toBeGreaterThanOrEqual(30)
+
+      const second = Date.now()
+      await whenHydrated("stalled", 40)
+      expect(Date.now() - second).toBeLessThan(20)
+    } finally {
+      release?.()
+      globalThis.fetch = original
+    }
+  })
+})
+
 describe("archiveBlock", () => {
   test("archives in place and never issues a DELETE", async () => {
     const b = block({ id: "to-archive" })
@@ -652,6 +804,58 @@ describe("archiveBlock", () => {
     ]
     await archiveBlock("project", "shared-id")
     expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
+  })
+
+  test("does not archive a sibling project's record in the same workspace", async () => {
+    // Same workspace, same block id, different project. Matching on workspace
+    // alone would archive the wrong project's memory.
+    listResponse = [
+      {
+        id: "mem-sibling",
+        memory: "belongs to another project in this workspace",
+        metadata: {
+          source: MIRROR_SOURCE,
+          block_id: "shared-id",
+          block_scope: "project",
+          datamate_id: "42",
+          repo_remote: "ssh://git@github.com/acme/other.git",
+        },
+      },
+    ]
+    await archiveBlock("project", "shared-id")
+    expect(captured.filter((c) => c.method === "PATCH").length).toBe(0)
+  })
+
+  test("archives this project's own record when the index is unavailable", async () => {
+    listResponse = [
+      {
+        id: "mem-mine",
+        memory: "belongs to this project",
+        metadata: {
+          source: MIRROR_SOURCE,
+          block_id: "shared-id",
+          block_scope: "project",
+          datamate_id: "42",
+          repo_remote: BINDING.repoRemote,
+        },
+      },
+    ]
+    await archiveBlock("project", "shared-id")
+    expect(callsTo("/datamates/memory/mem-mine", "PATCH").length).toBe(1)
+  })
+
+  test("a delete issued during an in-flight mirror cannot resurrect the block", async () => {
+    // Both hooks are fire-and-forget from the store. Unserialized, the archive
+    // runs before the create it is meant to undo, and the mirror then leaves a
+    // live record behind that later sessions rehydrate.
+    const b = block({ id: "raced", scope: "global" })
+    createResult = [{ id: "mem-raced" }]
+    const mirroring = mirrorBlock(b)
+    const archiving = archiveBlock("global", "raced")
+    await Promise.all([mirroring, archiving])
+    const patches = callsTo("/datamates/memory/mem-raced", "PATCH")
+    const archivePatch = patches.find((c) => c.body?.metadata?.archived === "true")
+    expect(archivePatch).toBeDefined()
   })
 
   test("an already-archived record is not archived again", async () => {

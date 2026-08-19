@@ -217,6 +217,7 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
+  opts?: { awaitBackfill?: boolean },
 ): Promise<void> {
   const key = await tenantKey()
   if (!key) return
@@ -246,10 +247,17 @@ export async function recordApprovedBinding(
   // must not skip the backfill, and a failed backfill must not read as a failed
   // link. The dynamic import keeps the module graph acyclic — see the header of
   // ./memory-backfill.ts for why a static import cannot be used.
-  void import("./memory-backfill")
+  //
+  // ``awaitBackfill`` exists because the CLI calls ``process.exit()`` as soon
+  // as a command handler returns (src/index.ts): a detached sweep is killed
+  // mid-flight there, so a bind that reported success could seed nothing. The
+  // TUI stays resident and leaves it detached so the dialog closes at once.
+  const seeded = import("./memory-backfill")
     .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
     .catch((err) => {
       log.warn("could not start workspace memory backfill", { err: String(err) })
     })
+  if (opts?.awaitBackfill) await seeded
+  else void seeded
   // altimate_change end
 }
