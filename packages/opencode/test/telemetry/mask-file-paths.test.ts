@@ -213,3 +213,17 @@ describe("maskString paths — round 7 (combining marks, punctuation boundaries)
     expect(mask("cfg=a.yml;/etc/dbt/profiles.yml;done")).toBe("cfg=a.yml;<path>;done")
   })
 })
+
+describe("maskString paths — round 8 (ASCII apostrophes in components)", () => {
+  it("treats an apostrophe followed by a word char as path content", () => {
+    expect(mask("read /Users/Jane/O'Connor/client/model.sql failed"))
+      .toBe("read <path> failed")
+    expect(mask("stat /Users/Jane O'Connor went missing")).toBe("stat <path> went missing")
+  })
+
+  it("still treats a closing apostrophe as a quote delimiter", () => {
+    // path masks inside the quotes, closing quote survives for the quote rule
+    expect(mask("open '/Users/jdoe/x.sql' failed")).toBe("open ? failed")
+    expect(mask("open '/Users/jdoe/x.sql' failed")).not.toContain("jdoe")
+  })
+})
