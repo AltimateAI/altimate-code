@@ -653,3 +653,11 @@ describe("maskString paths — fleet round 21 (colon-anchored bare files)", () =
     expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
   })
 })
+
+describe("maskString paths — fleet round 22 (forward-slash UNC homes)", () => {
+  it("forward-slash UNC homes get the high-PII tail", () => {
+    expect(mask("stat //fileserver/share/Users/Jane Doe does not exist"))
+      .toBe("stat <path> does not exist")
+    expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
+  })
+})
