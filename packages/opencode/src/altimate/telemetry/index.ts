@@ -71,9 +71,9 @@ const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
 // slash-delimited variant: backslash is path content, not a separator
 const PM_R_P = "(?:[^\\s\\/'\"`]|'(?=[\\p{L}\\p{N}_]))"
 const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
-const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<|>)\\]}])"
+const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<|>)\\]}&])"
 const PM_SP = "[^\\S\\t\\n\\r\\v\\f]"
-const PM_EXT = "\\.[\\p{L}\\p{N}-]{0,13}[\\p{L}\\p{N}]"
+const PM_EXT = "\\.[\\p{L}\\p{M}\\p{N}-]{0,13}[\\p{L}\\p{M}\\p{N}]"
 // span char: path content incl. delimiters (, ; ) ] } >) that a later
 // separator — or an attached dotted terminal filename (;draft.sql) —
 // proves is path content — multi-word spaced runs allowed, all
@@ -96,13 +96,14 @@ const pmSpFile = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "+){1,
 const PM_TERM_COND = "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
 const PM_TERM_UNC =
   "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?:" + PM_SP + "{1,2}(?:[\\p{Lu}\\p{Lo}]" + PM_WORD + "*|(?:v[ao]n|de[nrl]?|d[aiou]|dos|la|les?|los|bin|ibn|al|el|te[nr])(?=" + PM_SP + ")))*)?"
+const pmSpFileX = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){1,12}(?<=" + PM_EXT + "))?"
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
   windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "?|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + ")*|" + SEP_W + ")(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "gu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,64}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\)|\\\\(?=(?:[\\p{L}\\p{N}_#@().'-]{2,}(?:" + PM_SP + "{1,2}[\\p{L}\\p{N}_#@().'-]+)*\\\\){2}|[\\p{L}\\p{N}_#@().'-]{2,}(?:" + PM_SP + "{1,2}[\\p{L}\\p{N}_#@().'-]+)*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|[\\p{L}\\p{N}_#@().'-]{2,}(?:" + PM_SP + "{1,2}[\\p{L}\\p{N}_#@().'-]+)+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/)|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\)|\\\\(?=(?:[\\p{L}\\p{N}_#@().'-]{2,}(?:" + PM_SP + "{1,2}[\\p{L}\\p{N}_#@().'-]+)*\\\\){2}|[\\p{L}\\p{N}_#@().'-]{2,}(?:" + PM_SP + "{1,2}[\\p{L}\\p{N}_#@().'-]+)*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|[\\p{L}\\p{N}_#@().'-]{2,}(?:" + PM_SP + "{1,2}[\\p{L}\\p{N}_#@().'-]+)+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFile(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
+  posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
 }
 // altimate_change end

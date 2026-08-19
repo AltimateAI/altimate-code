@@ -725,3 +725,25 @@ describe("maskString paths — fleet round 27 (one-char rooted, brace anchors, u
     expect(mask("read /秘密.配置 now")).toBe("read <path> now")
   })
 })
+
+describe("maskString paths — fleet round 28 (ampersands, bounds, marks)", () => {
+  it("shell ampersands anchor paths", () => {
+    expect(mask("cmd&&/Users/jdoe/client/private.sh failed")).toBe("cmd&&<path> failed")
+    expect(mask("AT&T report ready")).toBe("AT&T report ready")
+  })
+
+  it("drive-relative letter scan reaches the component limit", () => {
+    expect(mask("read C:" + "1".repeat(65) + "a/models/private.sql failed")).toBe("read <path> failed")
+  })
+
+  it("explicit shallow paths take many spaced words; deep tails keep the prose cap", () => {
+    expect(mask("read ./Q1 final audited customer revenue report.sql failed")).toBe("read <path> failed")
+    // prose after a deep extensionless path must NOT be chased to a dotted token
+    expect(mask("read /opt/x error reading the project config.yml here"))
+      .toBe("read <path> error reading the project config.yml here")
+  })
+
+  it("combining marks count in extensions", () => {
+    expect(mask("read ./customer.é failed")).toBe("read <path> failed")
+  })
+})
