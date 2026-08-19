@@ -382,3 +382,32 @@ describe("maskString paths — fleet round 6 (backslash components, extended-len
     expect(performance.now() - t0).toBeLessThan(500)
   })
 })
+
+describe("maskString paths — fleet round 7 (double spaces, current-drive-rooted windows)", () => {
+  it("continues across a double space inside a component", () => {
+    expect(mask("read /Users/Jane  Doe/client/model.sql failed")).toBe("read <path> failed")
+  })
+
+  it("three or more spaces stay a column boundary", () => {
+    expect(mask("read /opt/data/x.sql    404 NotFound")).toBe("read <path> 404 NotFound")
+  })
+
+  it("masks current-drive-rooted windows paths, home and generic", () => {
+    expect(mask(String.raw`read \Users\Jane Doe\models\a.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`open \inetpub\wwwroot\app\web.config denied`)).toBe("open <path> denied")
+  })
+
+  it("rooted opener never eats regex or escape prose", () => {
+    // proof requires two >=2-word-char components: 1-char escape classes and
+    // quantifier-bearing runs both fail it
+    expect(mask(String.raw`expected pattern \d+\.\d+ but got x`)).toBe(String.raw`expected pattern \d+\.\d+ but got x`)
+    expect(mask(String.raw`escape chain \n\r\t here`)).toBe(String.raw`escape chain \n\r\t here`)
+    expect(mask(String.raw`match \bword\b boundary`)).toBe(String.raw`match \bword\b boundary`)
+  })
+
+  it("double-space continuation stays linear on adversarial input", () => {
+    const t0 = performance.now()
+    mask("/Users/x/y" + "  zz".repeat(1200))
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})

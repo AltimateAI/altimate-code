@@ -83,17 +83,17 @@ const SEP_P = "\\/"
 const SEP_W = "[\\\\\\/]"
 const pmR = (sep: string) => (sep === SEP_P ? PM_R_P : PM_R)
 const pmSpan = (sep: string) =>
-  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "*" + sep + "|(?: " + pmR(sep) + "+)+" + sep + "|" + pmR(sep) + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
-const pmChunks = (sep: string) => "(?:(?: " + pmR(sep) + "+)+" + sep + pmSpan(sep) + "*)*"
+  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "*" + sep + "|(?: {1,2}" + pmR(sep) + "+)+" + sep + "|" + pmR(sep) + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
+const pmChunks = (sep: string) => "(?:(?: {1,2}" + pmR(sep) + "+)+" + sep + pmSpan(sep) + "*)*"
 // terminal dotted filename: up to four spaced words that END in an extension
-const pmSpFile = (sep: string) => "(?:(?: " + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
-const PM_TERM_COND = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
-const PM_TERM_UNC = "(?:(?<!" + PM_EXT + ") " + PM_WORD + "+)?"
+const pmSpFile = (sep: string) => "(?:(?: {1,2}" + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
+const PM_TERM_COND = "(?:(?<!" + PM_EXT + ") {1,2}" + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
+const PM_TERM_UNC = "(?:(?<!" + PM_EXT + ") {1,2}" + PM_WORD + "+)?"
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
-  windowsHome: new RegExp(PM_ANCHOR + "(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+\\\\))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:)?" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+\\\\)|\\\\(?=(?:[\\p{L}\\p{N}_-]{2,}\\\\){2}))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
   posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
   posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R_P + "+\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
