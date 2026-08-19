@@ -171,6 +171,25 @@ describe("workspace memory in the injected prompt", () => {
     expect(injected).not.toContain("REMOTE ONLY")
   })
 
+  test("a sibling project's training entry is labelled with its origin", async () => {
+    // mergeOverlay deliberately keeps both when a sibling shares an id with
+    // this project's block, so an unlabelled entry leaves the model with two
+    // identical headings it cannot tell apart. formatBlock labels these;
+    // formatTrainingEntry has to as well.
+    listResponse = [
+      remote("training/rule/shared", "Partition by event_date.", {
+        block_scope: "project",
+        datamate_id: "7",
+        repo_remote: "ssh://git@github.com/acme/other.git",
+        block_tags: '["training","rule"]',
+      }),
+    ]
+    await hydrate(SES)
+    const injected = await MemoryPrompt.inject(20000, { sessionID: SES })
+    expect(injected).toContain("Partition by event_date.")
+    expect(injected).toContain("from workspace project")
+  })
+
   test("a remote training block never drives the local applied counter", async () => {
     // incrementApplied writes to the LOCAL store; firing it for a block this
     // machine never had would fabricate a file from the cloud copy.

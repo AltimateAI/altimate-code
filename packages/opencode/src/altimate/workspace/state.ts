@@ -214,6 +214,16 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
   return null
 }
 
+/** Same workspace and same project identity — i.e. nothing to re-seed.
+ * ``linkedAt`` is deliberately ignored: it moves on every warm. */
+function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
+  return (
+    a.datamateId === b.datamateId &&
+    (a.repoRemote ?? null) === (b.repoRemote ?? null) &&
+    (a.projectPath ?? null) === (b.projectPath ?? null)
+  )
+}
+
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
@@ -227,15 +237,26 @@ export async function recordApprovedBinding(
   // duplicate retries against a workspace that IS bound server-side.
   // (cubic round 3.) canonicalizeKey resolves symlinks so writes and reads
   // funnel through the same key (macOS ``/tmp`` → ``/private/tmp``).
+  // Whether this call actually changes the binding. A flow that merely warms
+  // the cache with the binding already on disk must not trigger a sweep: the
+  // seed exists for a NEW or CHANGED bind, and re-running it on every warm
+  // costs a full read of local memory and a round trip per block -- now paid
+  // synchronously on the `link` path, which awaits the seed.
+  let bindingChanged = true
   try {
     const existing = readCache()
     const cache: CacheFile =
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
+    const prior = cache.bindings[canonicalizeKey(directory)]
+    bindingChanged = !prior || !sameBinding(prior, binding)
     cache.bindings[canonicalizeKey(directory)] = binding
     writeCache(cache)
   } catch (err) {
+    // An unreadable cache means the prior binding is unknown, so fall back to
+    // seeding: a missed seed is worse than a redundant one.
+    bindingChanged = true
     log.warn("could not persist workspace binding cache", {
       code: (err as NodeJS.ErrnoException)?.code,
       err: String(err),
@@ -252,6 +273,7 @@ export async function recordApprovedBinding(
   // as a command handler returns (src/index.ts): a detached sweep is killed
   // mid-flight there, so a bind that reported success could seed nothing. The
   // TUI stays resident and leaves it detached so the dialog closes at once.
+  if (!bindingChanged) return
   const seeded = import("./memory-backfill")
     .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
     .catch((err) => {

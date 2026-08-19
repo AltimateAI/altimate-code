@@ -14,6 +14,7 @@ import {
   trainingKind,
   parseTrainingMeta,
   type TrainingKind,
+  TRAINING_META_COMMENT,
 } from "@/altimate/training/types"
 import { TrainingStore } from "@/altimate/training/store"
 // altimate_change - workspace memory overlay (read side of the cloud mirror)
@@ -107,13 +108,18 @@ export namespace MemoryPrompt {
   }
 
   /** Format a training entry for display (with applied count). */
-  function formatTrainingEntry(block: MemoryBlock): string {
+  function formatTrainingEntry(block: MemoryBlock & { origin?: string }): string {
     const meta = parseTrainingMeta(block.content)
     const appliedStr = meta && meta.applied > 0 ? ` (applied ${meta.applied}x)` : ""
     // Strip the training metadata comment from content for display
-    const content = block.content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "").trim()
+    const content = block.content.replace(TRAINING_META_COMMENT, "").trim()
     const name = block.id.split("/").slice(2).join("/") || block.id
-    return `#### ${name}${appliedStr}\n${content}`
+    // altimate_change - label a sibling project's entry, exactly as formatBlock
+    // does. mergeOverlay deliberately keeps both blocks when a sibling shares an
+    // id with this project's, so without this the model sees two identical
+    // headings it cannot tell apart — the mis-reading the label exists to stop.
+    const originStr = block.origin ? ` — from workspace project \`${block.origin}\`` : ""
+    return `#### ${name}${appliedStr}${originStr}\n${content}`
   }
 
   /** Score a block for relevance to the current agent context. */

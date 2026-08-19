@@ -203,6 +203,56 @@ describe("workspace binding cache", () => {
     }
   })
 
+  test("re-recording an unchanged binding does not re-seed", async () => {
+    // A flow that merely warms the cache must not sweep: the seed is for a new
+    // or changed bind. `link` now awaits the seed, so a redundant one is paid
+    // synchronously by the user.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "warm-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "warm.md"),
+      ["---", "id: warm", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+    const binding = {
+      datamateId: 9,
+      datamateName: "Warm",
+      repoRemote: null,
+      projectPath: proj,
+      linkedAt: 1,
+    }
+
+    let calls = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
+      calls++
+      return new Response(JSON.stringify({ datamates: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }) as typeof fetch
+
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      const afterFirst = calls
+      expect(afterFirst).toBeGreaterThan(0)
+
+      // Same workspace, same project, later timestamp: a warm, not a rebind.
+      await recordApprovedBinding(proj, { ...binding, linkedAt: 2 }, { awaitBackfill: true })
+      expect(calls).toBe(afterFirst)
+
+      // A genuine rebind to another workspace must still seed.
+      await recordApprovedBinding(proj, { ...binding, datamateId: 10 }, { awaitBackfill: true })
+      expect(calls).toBeGreaterThan(afterFirst)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
   test("chmods the cache file to 0o600 after write", async () => {
     await recordApprovedBinding("/work/proj-a", {
       datamateId: 1,
