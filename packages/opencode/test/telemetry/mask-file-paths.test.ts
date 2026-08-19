@@ -615,3 +615,19 @@ describe("maskString paths — fleet round 18 (mixed spaced runs in delimiter pr
     expect(performance.now() - t0).toBeLessThan(300)
   })
 })
+
+describe("maskString paths — fleet round 19 (redirects, single-component absolutes)", () => {
+  it("shell redirection operators anchor paths", () => {
+    expect(mask("echo x >/Users/jdoe/client/private.log failed")).toBe("echo x ><path> failed")
+    expect(mask("cmd 2>/home/jdoe/output.log crashed")).toBe("cmd 2><path> crashed")
+    expect(mask("if a > b then c")).toBe("if a > b then c")
+  })
+
+  it("single-component absolute files mask; URL interiors never do", () => {
+    expect(mask("read /customer_secret.sql failed")).toBe("read <path> failed")
+    // scheme colons and protocol-relative slashes are excluded from the
+    // shallow-absolute form — URL pins elsewhere in this suite stay green
+    expect(mask("see https://community.snowflake.com/s/ip-not-allowed for details"))
+      .toBe("see https://community.snowflake.com/s/ip-not-allowed for details")
+  })
+})
