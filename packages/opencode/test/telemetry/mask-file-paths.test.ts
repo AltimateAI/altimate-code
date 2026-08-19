@@ -71,9 +71,11 @@ describe("maskString paths — review + live-data hardening", () => {
       .toBe("No such file: <path>")
     expect(mask("could not read ~/my dbt/profiles config/profiles.yml"))
       .toBe("could not read <path>")
-    // a trailing spaced FILENAME is consumed; following prose is not
+    // a trailing spaced filename is consumed — and a SINGLE prose word at
+    // end-of-string is too (indistinguishable from a terminal spaced dir;
+    // over-masking doctrine). Mid-sentence prose is protected below.
     expect(mask("open /Users/jdoe/some dir/file name.sql failed"))
-      .toBe("open <path> failed")
+      .toBe("open <path>")
   })
 
   it("does not let the space-continuation eat trailing prose", () => {
@@ -86,12 +88,39 @@ describe("maskString paths — review + live-data hardening", () => {
       .toBe("CSV table references <path>")
     expect(mask("read failed: s3://acme-prod-lake/raw/orders/part-0001.parquet"))
       .toBe("read failed: <path>")
+    // trailing single word at end-of-string is consumed (see doctrine note)
     expect(mask("abfss://container@account.dfs.core.windows.net/data/x failed"))
-      .toBe("<path> failed")
+      .toBe("<path>")
   })
 
   it("still leaves public https doc-links alone (provider help URLs)", () => {
     expect(mask("see https://community.snowflake.com/s/ip-not-allowed for details"))
       .toBe("see https://community.snowflake.com/s/ip-not-allowed for details")
+  })
+})
+
+describe("maskString paths — codex re-review round", () => {
+  it("masks paths enclosed in brackets/braces", () => {
+    expect(mask("failed [/Users/jdoe/client/model.sql]")).toBe("failed [<path>]")
+    expect(mask("ctx {/home/jdoe/proj/x.yml} missing")).toBe("ctx {<path>} missing")
+  })
+
+  it("continues cloud object keys across spaces", () => {
+    expect(mask("read s3://client-bucket/client data/raw file.csv"))
+      .toBe("read <path>")
+    expect(mask("gs://acme-lake/dir with spaces/part 0001.parquet not found"))
+      .toBe("<path> not found")
+  })
+
+  it("masks a terminal spaced component at end-of-string or before punctuation", () => {
+    expect(mask("Directory not found: /Users/jdoe/client repo")).toBe("Directory not found: <path>")
+    expect(mask("could not open /Users/jdoe/client repo.")).toBe("could not open <path>.")
+    expect(mask("bad dir [C:\\Users\\jdoe\\client repo]")).toBe("bad dir [<path>]")
+  })
+
+  it("still never eats mid-sentence prose after a path", () => {
+    expect(mask("open /app/x.sql failed with error")).toBe("open <path> failed with error")
+    expect(mask("File not found: /app/models/a.sql was deleted upstream"))
+      .toBe("File not found: <path> was deleted upstream")
   })
 })

@@ -1421,11 +1421,16 @@ export namespace Telemetry {
       //   the customer; not http, so the URL rule above never sees them.
       //   Paths with embedded spaces (macOS "/Users/Jane Doe/client repo/…")
       //   continue across a space whenever a later chunk carries another
-      //   separator, plus one optional trailing spaced filename.
-      .replace(/(^|[\s"'`=(,])(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs|file):\/\/[^\s'"`)\]},]*/gi, "$1<path>")
-      .replace(/(^|[\s"'`=(,])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`]+(?: [\w.@+()-]+(?:[\\\/][^\s'"`]*)+)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?/g, "$1<path>")
-      .replace(/(^|[\s"'`=(,])\/(?:[\w.@+-]+\/)+[^\s'"`)\]},]*(?: [\w.@+()-]+(?:\/[^\s'"`)\]},]*)+)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?/g, "$1<path>")
-      .replace(/(^|[\s"'`=(,])~\/[^\s'"`)\]},]*(?: [\w.@+()-]+(?:\/[^\s'"`)\]},]*)+)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?/g, "$1<path>")
+      //   separator, plus one optional trailing spaced filename, plus one
+      //   trailing spaced WORD only at end-of-string / before punctuation —
+      //   "path + space + word" is otherwise undecidable vs trailing prose
+      //   ("client repo" vs "x.sql was"). A username can never leak through
+      //   that residual case: it is always slash-terminated, so it is always
+      //   inside the masked span. Anchors include [ and { for bracketed paths.
+      .replace(/(^|[\s"'`=(,[{])(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs|file):\/\/[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/gi, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`]+(?:(?: [\w.@+()-]+)+[\\\/][^\s'"`]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{])\/(?:[\w.@+-]+\/)+[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{])~\/[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
       // altimate_change end
       .replace(/'(?:[^'\\]|\\.)*'/g, "?")
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
