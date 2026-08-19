@@ -168,3 +168,29 @@ describe("maskString paths — round 5", () => {
       .toBe("wrote <path> then stopped")
   })
 })
+
+describe("maskString paths — round 6 (unicode, colon anchors)", () => {
+  it("masks unicode path components across spaces", () => {
+    expect(mask("read /Users/Jane García/client/model.sql failed"))
+      .toBe("read <path> failed")
+    expect(mask("stat /Users/Jane García went missing")).toBe("stat <path> went missing")
+    expect(mask("open /données/config épais/app.yml now")).toBe("open <path> now")
+    // unspaced unicode kept working
+    expect(mask("read /Users/José/client/model.sql failed")).toBe("read <path> failed")
+  })
+
+  it("recognizes paths directly after a colon", () => {
+    expect(mask("ENOENT:/Users/jdoe/client/a.sql")).toBe("ENOENT:<path>")
+    expect(mask("source:s3://customer-bucket/key")).toBe("source:<path>")
+    expect(mask("at path:C:\\Users\\jdoe\\x.sql end")).toBe("at path:<path> end")
+  })
+
+  it("colon anchors never bite into URLs", () => {
+    expect(mask("POST https://api.openai.com/v1/chat/completions failed"))
+      .toBe("POST https://api.openai.com/v1/chat/completions failed")
+    expect(mask("fetch //cdn.example.com/lib.js failed"))
+      .toBe("fetch //cdn.example.com/lib.js failed")
+    expect(mask("connect db-host:5432/postgres refused"))
+      .toBe("connect db-host:5432/postgres refused")
+  })
+})
