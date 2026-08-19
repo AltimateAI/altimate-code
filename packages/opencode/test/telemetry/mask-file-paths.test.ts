@@ -673,3 +673,12 @@ describe("maskString paths — fleet round 23 (NBSP components, hyphenated exten
     expect(mask(String.raw`open \client\private.code-workspace denied`)).toBe("open <path> denied")
   })
 })
+
+describe("maskString paths — fleet round 24 (PowerShell tilde paths)", () => {
+  it("backslash tilde paths mask; regex tilde prose never does", () => {
+    expect(mask(String.raw`read ~\client-repo\models\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read ~jane\Client Secret\a.sql now`)).toBe("read <path> now")
+    expect(mask(String.raw`regex ~\d+ used here`)).toBe(String.raw`regex ~\d+ used here`)
+    expect(mask("approx ~5 items left")).toBe("approx ~5 items left")
+  })
+})
