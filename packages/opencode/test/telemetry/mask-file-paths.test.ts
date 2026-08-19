@@ -645,3 +645,11 @@ describe("maskString paths — fleet round 20 (closer anchors, forward-slash UNC
     expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
   })
 })
+
+describe("maskString paths — fleet round 21 (colon-anchored bare files)", () => {
+  it("errno-style colon prefixes anchor single-component files", () => {
+    expect(mask("ENOENT:/private.sql failed")).toBe("ENOENT:<path> failed")
+    // the protocol-relative guard alone protects URLs — full pin set stays green
+    expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
+  })
+})
