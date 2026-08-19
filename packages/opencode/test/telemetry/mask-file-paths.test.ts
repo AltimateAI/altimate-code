@@ -241,3 +241,19 @@ describe("maskString paths — closing round (delimiters inside components)", ()
     expect(mask("saw [/opt/dbt/a.yml], aborted")).toBe("saw [<path>], aborted")
   })
 })
+
+describe("maskString paths — fleet review round (ReDoS + separators)", () => {
+  it("adversarial delimiter + slash-free run completes in linear time", () => {
+    const t0 = performance.now()
+    mask("/a/b, " + "a".repeat(5000))
+    expect(performance.now() - t0).toBeLessThan(500) // was exponential: ~2s at 28 chars
+  })
+
+  it("delimiters attached directly to a separator continue the path", () => {
+    expect(mask("read /data/a[b]/c.txt failed")).toBe("read <path> failed")
+  })
+
+  it("windows delimiter continuation accepts backslash separators", () => {
+    expect(mask("del C:\\Users\\jdoe\\client, repo\\x.sql now")).toBe("del <path> now")
+  })
+})
