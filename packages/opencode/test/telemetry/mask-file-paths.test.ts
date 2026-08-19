@@ -492,3 +492,18 @@ describe("maskString paths — fleet round 11 (home-rule reach: spaced prefixes,
     expect(performance.now() - t0).toBeLessThan(500)
   })
 })
+
+describe("maskString paths — fleet round 12 (rooted proof breadth, tilde home tail)", () => {
+  it("rooted proof accepts spaced and symbol-bearing components", () => {
+    expect(mask(String.raw`open \Program Files\Altimate\secret.sql denied`)).toBe("open <path> denied")
+    expect(mask(String.raw`read \client repo\models\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`read \#client\models\private.sql failed`)).toBe("read <path> failed")
+    // regex-prose guards must keep failing the proof
+    expect(mask(String.raw`expected pattern \d+\.\d+ but got x`)).toBe(String.raw`expected pattern \d+\.\d+ but got x`)
+  })
+
+  it("tilde homes use the unconditional home tail", () => {
+    expect(mask("stat ~/client repo does not exist")).toBe("stat <path> does not exist")
+    expect(mask("read ~jane/Client Secret now")).toBe("read <path> now")
+  })
+})
