@@ -320,3 +320,42 @@ describe("maskString paths — fleet round 4 (parens in components, nested homes
     expect(mask("check /var/home/jane went missing")).toBe("check <path> missing")
   })
 })
+
+describe("maskString paths — fleet round 5 (dot-relative windows, attached filenames)", () => {
+  it("masks Windows dot-relative paths", () => {
+    expect(mask(String.raw`read .\customers\acme\models\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`open ..\client-repo\profiles.yml now`)).toBe("open <path> now")
+  })
+
+  it("dot-relative prefix never fires on dotted prose or printed escapes", () => {
+    expect(mask("wait...\\ hmm that failed")).toBe("wait...\\ hmm that failed")
+    expect(mask("unexpected token .\\n at position 5")).toBe("unexpected token .\\n at position 5")
+  })
+
+  it("attached dotted terminal filename proves a delimiter (all rule families)", () => {
+    expect(mask("read /Users/jdoe/project;draft.sql")).toBe("read <path>")
+    expect(mask("C:\\Users\\jdoe\\proj;draft.sql gone")).toBe("<path> gone")
+    expect(mask("s3://bucket/dir;file.csv loaded")).toBe("<path> loaded")
+  })
+
+  it("attached delimiter without separator or dotted filename stays a boundary", () => {
+    // shell-style `;cmd` must not be eaten — documented residue
+    expect(mask("cd /Users/jdoe/proj;ls failed")).toBe("cd <path>;ls failed")
+    expect(mask("shell: cd /opt/app; rm -rf tmp")).toBe("shell: cd <path>; rm -rf tmp")
+  })
+
+  it("tab is a field boundary, not path continuation (documented residue)", () => {
+    // tab-delimited log columns after a path must survive; the bare relative
+    // fragment after the tab is the documented undecidable-fragment boundary
+    expect(mask("/Users/jdoe/client\tsecret/models/a.sql")).toBe("<path> secret/models/a.sql")
+  })
+
+  it("extension-proof delimiter branch stays linear on adversarial input", () => {
+    let t0 = performance.now()
+    mask("/a/b/x;" + "a".repeat(5000))
+    expect(performance.now() - t0).toBeLessThan(500)
+    t0 = performance.now()
+    mask("/a/b/x;" + "a.".repeat(2500))
+    expect(performance.now() - t0).toBeLessThan(500)
+  })
+})

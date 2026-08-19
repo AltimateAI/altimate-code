@@ -1388,13 +1388,14 @@ export namespace Telemetry {
   const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
   const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<])"
   const PM_EXT = "\\.[A-Za-z0-9]{1,8}"
-  // span char: path content incl. delimiters (, ; ] } >) that a later
-  // separator proves are path content — multi-word spaced runs allowed, all
+  // span char: path content incl. delimiters (, ; ) ] } >) that a later
+  // separator — or an attached dotted terminal filename (;draft.sql) —
+  // proves is path content — multi-word spaced runs allowed, all
   // quantified units space- or separator-anchored with disjoint inner classes
   // (unambiguous parse => linear time; the nested-quantifier ReDoS shape is
   // banned here).
   const pmSpan = (sep: string) =>
-    "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + PM_R + "*" + sep + "|(?: " + PM_R + "+)+" + sep + "))"
+    "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + PM_R + "*" + sep + "|(?: " + PM_R + "+)+" + sep + "|" + PM_R + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
   const pmChunks = (sep: string) => "(?:(?: " + PM_R + "+)+" + sep + pmSpan(sep) + "*)*"
   // terminal dotted filename: up to four spaced words that END in an extension
   const PM_SPFILE = "(?:(?: " + PM_R + "+){1,4}(?<=" + PM_EXT + "))?"
@@ -1406,7 +1407,7 @@ export namespace Telemetry {
   const PATH_RULES = {
     cloud: new RegExp(PM_ANCHOR + "(?:(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs):\\/\\/|file:\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
     windowsHome: new RegExp(PM_ANCHOR + "[A-Za-z]:" + SEP_W + "Users" + SEP_W + pmTail(SEP_W, PM_TERM_UNC), "giu"),
-    windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\)" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + PM_SPFILE + PM_TERM_COND, "gu"),
+    windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+\\\\))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + PM_SPFILE + PM_TERM_COND, "gu"),
     posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R + "+\\/)*(?:Users|home)\\/" + pmTail(SEP_P, PM_TERM_UNC), "giu"),
     posix: new RegExp(PM_ANCHOR + "\\.{0,2}\\/(?:" + PM_R + "+\\/)+" + pmTail(SEP_P, PM_TERM_COND), "gu"),
     tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*\\/" + pmTail(SEP_P, PM_TERM_COND), "gu"),
@@ -1418,8 +1419,8 @@ export namespace Telemetry {
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
       // altimate_change start — mask filesystem paths in error text
-      // Six masking rules (cloud URIs, Windows home, Windows/UNC, POSIX home,
-      // POSIX incl. ./ and ../, ~ incl. ~username), composed from shared
+      // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and
+      // ..\, POSIX home, POSIX incl. ./ and ../, ~ incl. ~username), composed from shared
       // fragments below (PATH_RULES) — one source of truth after repeated
       // lockstep edits drifted (see PR history). Ordered after the credential
       // rules and BEFORE the email/internal-host rules so whole URIs mask
@@ -1433,8 +1434,9 @@ export namespace Telemetry {
       // before punctuation. Residue (by design): one prose word may be
       // over-masked after extensionless home/cloud paths; a non-home,
       // non-cloud path's terminal spaced component can leak ONE structure
-      // word mid-sentence (no personal names in that class); a delimiter not
-      // followed by a further separator is a permanent boundary.
+      // word mid-sentence (no personal names in that class); a delimiter
+      // followed by neither a further separator nor a dotted terminal
+      // filename is a permanent boundary.
       .replace(PATH_RULES.cloud, "$1<path>")
       .replace(PATH_RULES.windowsHome, "$1<path>")
       .replace(PATH_RULES.windows, "$1<path>")
