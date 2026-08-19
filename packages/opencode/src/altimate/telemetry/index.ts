@@ -1424,11 +1424,19 @@ export namespace Telemetry {
       //   separator, plus one optional trailing spaced filename, plus one
       //   trailing spaced WORD only at end-of-string / before punctuation —
       //   "path + space + word" is otherwise undecidable vs trailing prose
-      //   ("client repo" vs "x.sql was"). A username can never leak through
-      //   that residual case: it is always slash-terminated, so it is always
-      //   inside the masked span. Anchors include [ and { for bracketed paths.
+      //   ("client repo" vs "x.sql was"). HOME-ROOTED paths (/Users, /home,
+      //   C:\Users — where a spaced USERNAME would otherwise leak its tail,
+      //   e.g. "/Users/Jane Doe does not exist") additionally consume one
+      //   unconditional trailing word, suppressed when the path already ended
+      //   in a dotted extension so "x.sql was deleted" prose stays intact.
+      //   Residue after all rules: one prose word may be over-masked after an
+      //   extensionless home path, and a non-home path's terminal spaced
+      //   component can still leak ONE structure word mid-sentence (no
+      //   personal names there). Anchors include [ and { for bracketed paths.
       .replace(/(^|[\s"'`=(,[{])(?:gs|s3[an]?|abfss?|wasbs?|adl|dbfs|hdfs|file):\/\/[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/gi, "$1<path>")
-      .replace(/(^|[\s"'`=(,[{])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`]+(?:(?: [\w.@+()-]+)+[\\\/][^\s'"`]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{])[A-Za-z]:[\\\/]Users[\\\/][^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+[\\\/][^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9])(?<!\.[A-Za-z0-9]{2})(?<!\.[A-Za-z0-9]{3})(?<!\.[A-Za-z0-9]{4}) [\w-]+)?/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{])(?:[A-Za-z]:[\\\/]|\\\\)[^\s'"`)\]},]+(?:(?: [\w.@+()-]+)+[\\\/][^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
+      .replace(/(^|[\s"'`=(,[{])\/(?:Users|home)\/[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?:(?<!\.[A-Za-z0-9])(?<!\.[A-Za-z0-9]{2})(?<!\.[A-Za-z0-9]{3})(?<!\.[A-Za-z0-9]{4}) [\w-]+)?/g, "$1<path>")
       .replace(/(^|[\s"'`=(,[{])\/(?:[\w.@+-]+\/)+[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
       .replace(/(^|[\s"'`=(,[{])~\/[^\s'"`)\]},]*(?:(?: [\w.@+()-]+)+\/[^\s'"`)\]},]*)*(?: [\w.@+()-]+\.[A-Za-z0-9]{1,8})?(?: [\w-]+(?=$|[.,;:)\]}!?]))?/g, "$1<path>")
       // altimate_change end

@@ -71,11 +71,11 @@ describe("maskString paths — review + live-data hardening", () => {
       .toBe("No such file: <path>")
     expect(mask("could not read ~/my dbt/profiles config/profiles.yml"))
       .toBe("could not read <path>")
-    // a trailing spaced filename is consumed — and a SINGLE prose word at
-    // end-of-string is too (indistinguishable from a terminal spaced dir;
-    // over-masking doctrine). Mid-sentence prose is protected below.
+    // a trailing spaced filename is consumed; because the home rule sees the
+    // dotted extension, the following prose word survives (the generic rules
+    // still eat one end-of-string word after extensionless paths).
     expect(mask("open /Users/jdoe/some dir/file name.sql failed"))
-      .toBe("open <path>")
+      .toBe("open <path> failed")
   })
 
   it("does not let the space-continuation eat trailing prose", () => {
@@ -122,5 +122,30 @@ describe("maskString paths — codex re-review round", () => {
     expect(mask("open /app/x.sql failed with error")).toBe("open <path> failed with error")
     expect(mask("File not found: /app/models/a.sql was deleted upstream"))
       .toBe("File not found: <path> was deleted upstream")
+  })
+})
+
+describe("maskString paths — round 4 (spaced usernames, windows delimiters)", () => {
+  it("masks the tail of a spaced username mid-sentence (home-rooted paths)", () => {
+    expect(mask("No such file: /Users/Jane Doe does not exist"))
+      .toBe("No such file: <path> does not exist")   // surname consumed, prose kept
+    expect(mask("stat C:\\Users\\Jane Doe failed hard")).toBe("stat <path> failed hard")
+  })
+
+  it("home paths ending in a real file keep following prose (extension lookbehind)", () => {
+    expect(mask("File not found: /Users/jdoe/models/a.sql was deleted upstream"))
+      .toBe("File not found: <path> was deleted upstream")
+  })
+
+  it("windows paths keep their closing delimiters", () => {
+    expect(mask("failed (C:\\Users\\jdoe\\x.sql)")).toBe("failed (<path>)")
+    expect(mask("in [D:\\proj\\data\\y.csv], aborted")).toBe("in [<path>], aborted")
+  })
+
+  it("spaced Windows dirs still continue (Program Files shape)", () => {
+    // ENOENT is eaten by the end-of-string trailing-word rule — accepted
+    // over-masking (errorCode travels as its own structured field)
+    expect(mask("spawn C:\\Program Files (x86)\\dbt\\dbt.exe ENOENT"))
+      .toBe("spawn <path>")
   })
 })
