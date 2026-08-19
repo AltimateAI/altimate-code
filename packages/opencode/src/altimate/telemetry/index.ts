@@ -104,8 +104,9 @@ const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) 
 // Known-prefix literals — the local user's home and cwd are KNOWN values,
 // replaced by exact match AFTER the structural rules (structure must see the
 // original string: stripping the prefix first orphans terminal spaced
-// components). The literal pass mops up whatever structure missed. Exact matching handles every username shape (spaces, NBSP, unicode)
-// with zero false positives; the structural rules below remain for paths the
+// components). The literal pass mops up whatever structure missed. Exact
+// matching handles every username shape (spaces, NBSP, unicode) with zero
+// false positives; the structural rules below remain for paths the
 // literals cannot know (other drives, UNC shares, cloud URIs, relative
 // forms, WSL-mounted homes). Variants cover JSON-doubled backslashes and
 // swapped separators. Same approach as Salesforce's telemetry GDPR scrub
