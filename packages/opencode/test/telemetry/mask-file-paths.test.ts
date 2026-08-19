@@ -257,3 +257,22 @@ describe("maskString paths — fleet review round (ReDoS + separators)", () => {
     expect(mask("del C:\\Users\\jdoe\\client, repo\\x.sql now")).toBe("del <path> now")
   })
 })
+
+describe("maskString paths — fleet round 2 (relative, symbols, cloud tails)", () => {
+  it("masks dot-relative paths (unambiguous ./ and ../ prefixes)", () => {
+    expect(mask("read failed: ./customers/acme/models/private.sql")).toBe("read failed: <path>")
+    expect(mask("open ../client-repo/profiles.yml now")).toBe("open <path> now")
+  })
+
+  it("continues spaced components that start with symbols", () => {
+    expect(mask("read /Users/Jane Doe/client #1/models/a.sql failed"))
+      .toBe("read <path> failed")
+  })
+
+  it("cloud object keys consume a terminal spaced component like home paths", () => {
+    expect(mask("read s3://customer-bucket/client repo failed")).toBe("read <path> failed")
+    // dotted extension still protects following prose
+    expect(mask("read s3://customer-bucket/data.csv failed to download"))
+      .toBe("read <path> failed to download")
+  })
+})
