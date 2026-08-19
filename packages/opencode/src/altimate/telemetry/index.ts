@@ -1454,6 +1454,7 @@ export namespace Telemetry {
       // word mid-sentence (no personal names in that class); a delimiter
       // followed by neither a further separator nor a dotted terminal
       // filename is a permanent boundary.
+      .replace(/(^|[\s"'`=(,[{:;<|>)\]}&])[\\/]{4,}(?=$|[\s"'`,;)\]}<>|&])/g, "$1<path>")
       .replace(PATH_RULES.cloud, "$1<path>")
       .replace(PATH_RULES.windowsHome, "$1<path>")
       .replace(PATH_RULES.windows, "$1<path>")
