@@ -531,3 +531,26 @@ describe("maskString paths — fleet round 13 (multi-word PII tails, proof punct
     expect(performance.now() - t0).toBeLessThan(200)
   })
 })
+
+describe("maskString paths — fleet round 14 (fs-limit bounds, shallow forms)", () => {
+  it("proof scans reach the filesystem component limit (255)", () => {
+    expect(mask("/Users/jdoe/client)" + "a".repeat(65) + "/models/private.sql leaked")).toBe("<path> leaked")
+    // delimiter runs stay linear at the raised bound
+    const t0 = performance.now()
+    mask("C:\\a\\b" + ")".repeat(2000) + "\\c")
+    expect(performance.now() - t0).toBeLessThan(300)
+  })
+
+  it("shallow rooted windows paths mask via the dotted-terminal proof", () => {
+    expect(mask(String.raw`read \client-repo\private.sql failed`)).toBe("read <path> failed")
+    expect(mask(String.raw`open \Program Files\app.exe denied`)).toBe("open <path> denied")
+    expect(mask(String.raw`match \bword\b boundary`)).toBe(String.raw`match \bword\b boundary`)
+  })
+
+  it("terminal-only dot-relative paths mask when extension-bearing", () => {
+    expect(mask("read ./customer_secret.sql failed")).toBe("read <path> failed")
+    expect(mask("read ../customer_secret.sql now")).toBe("read <path> now")
+    // extensionless ./x stays out — undecidable against prose tokens
+    expect(mask("see ./x plain token")).toBe("see ./x plain token")
+  })
+})
