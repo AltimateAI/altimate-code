@@ -432,3 +432,23 @@ describe("maskString paths — fleet round 8 (ANSI, drive-relative, quote delimi
     expect(mask("run `dbt build` in `/opt/proj/app` now")).toBe("run `dbt build` in `<path>` now")
   })
 })
+
+describe("maskString paths — fleet round 9 (quote-pair safety, pipes, OSC)", () => {
+  it("a closing quote directly before a slash stays a boundary (pairing never shifts)", () => {
+    // the eaten quote used to shift pairing and leak the next quoted value
+    expect(mask(`read "/a/b"/c "secret data" end`)).toBe("read ?/c ? end")
+    // mid-component quotes (non-empty run before the separator) still mask
+    expect(mask(`read /Users/jdoe/client"repo/models/a.sql failed`)).toBe("read <path> failed")
+  })
+
+  it("pipe is a path anchor but plain pipe prose never matches", () => {
+    expect(mask("ENOENT|/Users/jdoe/client/a.sql")).toBe("ENOENT|<path>")
+    expect(mask("source|s3://customer-bucket/private/a.csv")).toBe("source|<path>")
+    expect(mask("a|b or c|d plain prose")).toBe("a|b or c|d plain prose")
+  })
+
+  it("strips OSC hyperlink escapes so wrapped paths still mask", () => {
+    expect(mask("\x1b]8;;vscode://file//x\x1b\\/Users/jdoe/client/a.sql\x1b]8;;\x1b\\ failed"))
+      .toBe("<path> failed")
+  })
+})

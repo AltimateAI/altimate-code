@@ -71,7 +71,7 @@ const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
 // slash-delimited variant: backslash is path content, not a separator
 const PM_R_P = "(?:[^\\s\\/'\"`]|'(?=[\\p{L}\\p{N}_]))"
 const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
-const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<])"
+const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<|])"
 const PM_EXT = "\\.[A-Za-z0-9]{1,8}"
 // span char: path content incl. delimiters (, ; ) ] } >) that a later
 // separator — or an attached dotted terminal filename (;draft.sql) —
@@ -83,7 +83,7 @@ const SEP_P = "\\/"
 const SEP_W = "[\\\\\\/]"
 const pmR = (sep: string) => (sep === SEP_P ? PM_R_P : PM_R)
 const pmSpan = (sep: string) =>
-  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>\"'`](?=" + pmR(sep) + "*" + sep + "|(?: {1,2}" + pmR(sep) + "+)+" + sep + "|" + pmR(sep) + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
+  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "*" + sep + "|(?: {1,2}" + pmR(sep) + "+)+" + sep + "|" + pmR(sep) + "*" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|[\"'`](?=" + pmR(sep) + "+" + sep + "|" + pmR(sep) + "+" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
 const pmChunks = (sep: string) => "(?:(?: {1,2}" + pmR(sep) + "+)+" + sep + pmSpan(sep) + "*)*"
 // terminal dotted filename: up to four spaced words that END in an extension
 const pmSpFile = (sep: string) => "(?:(?: {1,2}" + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
@@ -1422,7 +1422,7 @@ export namespace Telemetry {
     return s
       // ANSI CSI sequences (colored subprocess stderr) would otherwise split
       // tokens so neither credential nor path rules can see them
-      .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "")
+      .replace(/\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g, "")
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
       // altimate_change start — mask filesystem paths in error text
