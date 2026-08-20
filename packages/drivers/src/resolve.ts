@@ -25,8 +25,16 @@ import { createRequire } from "node:module"
 import { pathToFileURL } from "node:url"
 import { spawn } from "node:child_process"
 
-/** Quote a path for inclusion in a copy-pasteable shell command. */
-export function shellQuote(value: string): string {
+/**
+ * Quote a path for a copy-pasteable shell command on the current platform.
+ *
+ * cmd.exe and PowerShell do not understand POSIX single-quoting, so a path with
+ * spaces printed the POSIX way is not runnable on Windows.
+ */
+export function shellQuote(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") {
+    return /^[A-Za-z0-9_.:\\/@-]+$/.test(value) ? value : `"${value.replace(/"/g, '""')}"`
+  }
   return /^[A-Za-z0-9_./@:-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`
 }
 
@@ -292,21 +300,23 @@ export async function loadOptionalDriver(driver: DriverName, specifier: string):
   try {
     return await import(/* @vite-ignore */ specifier)
   } catch (ambientError) {
-    // Only a resolution failure means "look elsewhere". A package that resolves
-    // ambiently but throws while loading is a broken install, and re-reporting
-    // it as missing would send the user to install what they already have.
-    if (!isModuleNotFound(ambientError, specifier)) throw loadFailure(driver, specifier, ambientError)
-
+    const ambientBroken = !isModuleNotFound(ambientError, specifier)
     const roots = driverSearchRoots()
     const resolved = resolveOptionalPackage(specifier, roots)
-    if (!resolved) throw new DriverNotInstalledError(driver, DRIVER_PACKAGES[driver], roots)
+
+    if (!resolved) {
+      // A broken ambient copy is a load failure, not an absence.
+      if (ambientBroken) throw loadFailure(driver, specifier, ambientError)
+      throw new DriverNotInstalledError(driver, DRIVER_PACKAGES[driver], roots)
+    }
 
     try {
       return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
     } catch (loadError) {
       // On disk but will not load — a half-installed copy, or a native addon
-      // built for another platform.
-      throw loadFailure(driver, resolved, loadError)
+      // built for another platform. When an ambient copy was also broken,
+      // report that one: it is the copy the runtime would normally pick.
+      throw loadFailure(driver, ambientBroken ? specifier : resolved, ambientBroken ? ambientError : loadError)
     }
   }
 }
@@ -424,14 +434,41 @@ export function npmInstallArgs(packages: readonly string[]): string[] {
  */
 export async function installOptionalDriver(
   driver: DriverName,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; force?: boolean } = {},
 ): Promise<InstallResult> {
   const packages = DRIVER_PACKAGES[driver]
   const dir = driverInstallDir()
 
-  if (isDriverInstalled(driver)) {
+  // `force` exists because the caller may know something this check cannot:
+  // that the package resolves but does not import. Without it the early return
+  // below reported success for a copy it never rebuilt, so the repair path was
+  // unreachable no matter what the caller had detected.
+  if (!options.force && isDriverInstalled(driver)) {
     return { driver, packages, dir, installed: true, alreadyPresent: true }
   }
+
+  // Serialize per directory: concurrent npm runs against one manifest can leave
+  // the managed directory inconsistent.
+  const pending = installsInFlight.get(dir)
+  if (pending) await pending.catch(() => {})
+  const run = performInstall(driver, packages, dir, options)
+  installsInFlight.set(dir, run)
+  try {
+    return await run
+  } finally {
+    if (installsInFlight.get(dir) === run) installsInFlight.delete(dir)
+  }
+}
+
+/** In-flight installs keyed by target directory (see the note above). */
+const installsInFlight = new Map<string, Promise<InstallResult>>()
+
+async function performInstall(
+  driver: DriverName,
+  packages: readonly string[],
+  dir: string,
+  options: { timeoutMs?: number; force?: boolean },
+): Promise<InstallResult> {
 
   try {
     fs.mkdirSync(dir, { recursive: true })

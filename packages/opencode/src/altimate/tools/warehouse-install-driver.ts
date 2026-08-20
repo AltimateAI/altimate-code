@@ -69,7 +69,9 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
     // a native addon built for another platform, or a half-written copy — used to
     // report "already installed", so the one command that could repair it refused
     // to run. Probe an actual load and only decline when it succeeds.
-    if (isDriverInstalled(driver) && (await driverLoads(driver))) {
+    const resolves = isDriverInstalled(driver)
+    const loads = resolves && (await driverLoads(driver))
+    if (resolves && loads) {
       return {
         title: `${label} driver: already installed`,
         metadata: { success: true, driver, installed: true, alreadyPresent: true, dir },
@@ -77,7 +79,7 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
       }
     }
 
-    const result = await installOptionalDriver(driver)
+    const result = await installOptionalDriver(driver, { force: resolves && !loads })
     const packages = result.packages.join(" ")
 
     if (!result.installed) {

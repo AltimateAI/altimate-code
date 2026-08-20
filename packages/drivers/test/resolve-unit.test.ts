@@ -19,6 +19,7 @@ import {
   isModuleNotFound,
   npmInstallArgs,
   shellQuote,
+  installOptionalDriver,
   DriverNotInstalledError,
   driverInstallDir,
   driverLabel,
@@ -441,5 +442,94 @@ describe("shellQuote", () => {
 
   test("escapes embedded single quotes", () => {
     expect(shellQuote("/tmp/it's here")).toBe(`'/tmp/it'\\''s here'`)
+  })
+})
+
+describe("repairing a broken install", () => {
+  test("force skips the resolution-only early return", async () => {
+    // The bug this pins: installOptionalDriver short-circuited on
+    // isDriverInstalled, a resolution-only check. A caller that had detected a
+    // present-but-unloadable copy asked for a reinstall and got back
+    // `installed: true, alreadyPresent: true` with npm never run — so the
+    // repair path was unreachable.
+    installFakePackage(tmpRoot, "oracledb", "module.exports = {}")
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+
+    // Without force: recognised as installed, returns immediately.
+    const asIs = await installOptionalDriver("oracle")
+    expect(asIs.alreadyPresent).toBe(true)
+    expect(asIs.installed).toBe(true)
+
+    // With force: must NOT take that early return. npm is unavailable for a
+    // package that does not exist, so this reaches a real attempt and reports
+    // failure rather than a fictitious success.
+    const forced = await installOptionalDriver("oracle", { force: true, timeoutMs: 15_000 })
+    expect(forced.alreadyPresent).toBe(false)
+  }, 60_000)
+})
+
+describe("a broken ambient copy does not hide a good one on disk", () => {
+  // This one needs a fixture the ambient resolver can genuinely find, so it is
+  // written into this package's own node_modules and removed afterwards. Every
+  // cheaper version of this test was vacuous: a fixture that only exists under
+  // ALTIMATE_DRIVER_DIR never reaches the ambient branch at all.
+  const AMBIENT = "altimate-ambient-throws"
+  const ambientDir = path.join(import.meta.dir, "..", "node_modules", AMBIENT)
+
+  function installAmbientBroken() {
+    fs.mkdirSync(ambientDir, { recursive: true })
+    fs.writeFileSync(path.join(ambientDir, "package.json"), JSON.stringify({ name: AMBIENT, version: "1.0.0", main: "index.js" }))
+    // A load-time failure, deliberately NOT a resolution error.
+    fs.writeFileSync(path.join(ambientDir, "index.js"), "throw new TypeError('native binding is for another platform')")
+  }
+
+  function removeAmbientBroken() {
+    fs.rmSync(ambientDir, { recursive: true, force: true })
+  }
+
+  test("recovers from the managed root when the ambient copy throws on import", async () => {
+    installAmbientBroken()
+    try {
+      installFakePackage(tmpRoot, AMBIENT, "module.exports = { marker: 'managed' }")
+      process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+
+      const mod: any = await loadOptionalDriver("postgres", AMBIENT)
+
+      expect(mod.marker ?? mod.default?.marker).toBe("managed")
+    } finally {
+      removeAmbientBroken()
+    }
+  })
+
+  test("reports the ambient load failure when no healthy copy exists", async () => {
+    installAmbientBroken()
+    try {
+      process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "empty")
+
+      let error: unknown
+      try {
+        await loadOptionalDriver("postgres", AMBIENT)
+      } catch (e) {
+        error = e
+      }
+
+      // Broken, not absent — the user must not be told to install what they have.
+      expect(error).not.toBeInstanceOf(DriverNotInstalledError)
+      expect((error as Error).message).toContain("native binding is for another platform")
+    } finally {
+      removeAmbientBroken()
+    }
+  })
+})
+
+describe("shellQuote on Windows", () => {
+  test("uses double quotes cmd.exe understands", () => {
+    // POSIX single-quoting is not runnable in cmd.exe or PowerShell, so the
+    // printed install command was broken on Windows for any path with a space.
+    expect(shellQuote("C:\\Users\\x\\My Data\\drivers", "win32")).toBe('"C:\\Users\\x\\My Data\\drivers"')
+  })
+
+  test("leaves an ordinary Windows path unquoted", () => {
+    expect(shellQuote("C:\\Users\\x\\drivers", "win32")).toBe("C:\\Users\\x\\drivers")
   })
 })

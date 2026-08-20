@@ -128,7 +128,11 @@ describe("driver catalogue consistency", () => {
     for (const type of types) {
       // sqlite is bundled with the runtime and needs no optional SDK.
       if (type === "sqlite") continue
-      expect(driverForWarehouseType(type), `registry type "${type}" has no installable driver`).toBeDefined()
+      const resolved = driverForWarehouseType(type)
+      expect(resolved, `registry type "${type}" resolves to no driver`).toBeDefined()
+      // toBeDefined() alone would let a stale alias pass while naming a driver
+      // that DRIVER_PACKAGES cannot actually install.
+      expect(Object.keys(DRIVER_PACKAGES)).toContain(resolved!)
     }
   })
 })
