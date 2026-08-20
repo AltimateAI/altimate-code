@@ -5,6 +5,15 @@ import { Dispatcher } from "../native"
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { Telemetry } from "../../telemetry"
 // altimate_change end
+// altimate_change start — report driver readiness when adding a warehouse
+import {
+  driverForWarehouseType,
+  driverInstallDir,
+  driverLabel,
+  isDriverInstalled,
+  DRIVER_PACKAGES,
+} from "./warehouse-install-driver"
+// altimate_change end
 
 export const WarehouseAddTool = Tool.define("warehouse_add", {
   description:
@@ -47,6 +56,12 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
       if (result.success) {
         // altimate_change start — append post-connect feature suggestions (async, non-blocking)
         let output = `Successfully added warehouse '${result.name}' (type: ${result.type}).\n\nUse warehouse_test to verify connectivity.`
+
+        // Adding a connection whose driver is missing used to leave a broken
+        // entry behind: every later operation failed with "driver not
+        // installed" and nothing said so at the point of adding. Say so here
+        // instead, at the point where it can still be acted on.
+        output += driverReadinessNote(result.type)
 
         // Run suggestion gathering concurrently with a timeout to avoid
         // adding noticeable latency to the warehouse add response.
@@ -131,3 +146,31 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
     }
   },
 })
+
+// altimate_change start — driver readiness note for newly added warehouses
+/**
+ * Note appended to a successful add when the warehouse's driver is missing.
+ *
+ * Deliberately a filesystem check and not an install: adding a connection must
+ * not block on a network `npm install`, which can take minutes. The install
+ * itself is the warehouse_install_driver tool, which this points at.
+ */
+function driverReadinessNote(type: string): string {
+  const driver = driverForWarehouseType(type)
+  // sqlite and any unrecognised type need no optional SDK.
+  if (!driver) return ""
+
+  try {
+    if (isDriverInstalled(driver)) return ""
+    const packages = DRIVER_PACKAGES[driver].join(" ")
+    return (
+      `\n\nNOTE: the ${driverLabel(driver)} driver is not installed yet, so this connection cannot be used until it is.\n` +
+      `Run the warehouse_install_driver tool with driver="${driver}", or install it manually:\n` +
+      `  npm install --prefix ${driverInstallDir()} ${packages}`
+    )
+  } catch {
+    // A driver probe must never fail an add whose configuration was stored.
+    return ""
+  }
+}
+// altimate_change end

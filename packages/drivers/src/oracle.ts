@@ -3,18 +3,12 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let oracledb: any
-  try {
-    // @ts-expect-error — optional dependency, loaded at runtime
-    oracledb = await import("oracledb")
-    oracledb = oracledb.default || oracledb
-  } catch {
-    throw new Error(
-      "Oracle driver not installed. Run: npm install oracledb",
-    )
-  }
+  oracledb = await loadOptionalDriver("oracle", "oracledb")
+  oracledb = oracledb.default || oracledb
 
   // Use thin mode (pure JS, no Oracle client needed)
   oracledb.initOracleClient = undefined

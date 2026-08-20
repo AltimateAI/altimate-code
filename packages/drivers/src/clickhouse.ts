@@ -6,17 +6,14 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let createClient: any
-  try {
-    const mod = await import("@clickhouse/client")
-    createClient = mod.createClient ?? mod.default?.createClient
-    if (!createClient) {
-      throw new Error("createClient export not found in @clickhouse/client")
-    }
-  } catch {
-    throw new Error("ClickHouse driver not installed. Run: npm install @clickhouse/client")
+  const clickhouseModule = await loadOptionalDriver("clickhouse", "@clickhouse/client")
+  createClient = clickhouseModule.createClient ?? clickhouseModule.default?.createClient
+  if (!createClient) {
+    throw new Error("createClient export not found in @clickhouse/client — check the installed package version")
   }
 
   let client: any

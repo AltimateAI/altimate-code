@@ -64,6 +64,7 @@ import { LineageCheckTool } from "../altimate/tools/lineage-check"
 import { WarehouseListTool } from "../altimate/tools/warehouse-list"
 import { WarehouseTestTool } from "../altimate/tools/warehouse-test"
 import { WarehouseAddTool } from "../altimate/tools/warehouse-add"
+import { WarehouseInstallDriverTool } from "../altimate/tools/warehouse-install-driver"
 import { WarehouseRemoveTool } from "../altimate/tools/warehouse-remove"
 import { WarehouseDiscoverTool } from "../altimate/tools/warehouse-discover"
 import { McpDiscoverTool } from "../altimate/tools/mcp-discover"
@@ -395,6 +396,7 @@ export namespace ToolRegistry {
       WarehouseListTool,
       WarehouseTestTool,
       WarehouseAddTool,
+      WarehouseInstallDriverTool,
       WarehouseRemoveTool,
       WarehouseDiscoverTool,
       // altimate_change start - register MCP discovery tool

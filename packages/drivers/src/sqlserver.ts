@@ -3,6 +3,7 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 // ---------------------------------------------------------------------------
 // Azure AD helpers — cache + resource URL resolution
@@ -74,17 +75,10 @@ export function _resetTokenCacheForTests(): void {
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mssql: any
   let MssqlConnectionPool: any
-  try {
-    // @ts-expect-error — mssql has no type declarations; installed as optional peerDependency
-    const mod = await import("mssql")
-    mssql = mod.default || mod
-    // ConnectionPool is a named export, not on .default
-    MssqlConnectionPool = mod.ConnectionPool ?? mssql.ConnectionPool
-  } catch {
-    throw new Error(
-      "SQL Server driver not installed. Run: npm install mssql",
-    )
-  }
+  const mssqlModule = await loadOptionalDriver("sqlserver", "mssql")
+  mssql = mssqlModule.default || mssqlModule
+  // ConnectionPool is a named export, not on .default
+  MssqlConnectionPool = mssqlModule.ConnectionPool ?? mssql.ConnectionPool
 
   let pool: any
 
