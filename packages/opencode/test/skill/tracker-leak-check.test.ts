@@ -11,7 +11,7 @@
 // the regex needs to see, but the literal never appears in git-searchable
 // source. Grep the repo for `\bAI-\d+` and this file returns nothing.
 
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import { spawnSync } from "child_process"
 import fs from "fs"
 import os from "os"
@@ -122,8 +122,16 @@ describe("scanner end-to-end (git behaviour)", () => {
   const SCRIPT = path.resolve(import.meta.dir, "../../../../script/check-tracker-leaks.ts")
   const ZERO = "0".repeat(40)
 
+  // These repositories contain tracker-key fixtures, so they are removed rather
+  // than left in tmp for the next person to grep.
+  const created: string[] = []
+  afterAll(() => {
+    for (const dir of created) fs.rmSync(dir, { recursive: true, force: true })
+  })
+
   function repo(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-e2e-"))
+    created.push(dir)
     const git = (...args: string[]) => spawnSync("git", args, { cwd: dir, encoding: "utf-8" })
     git("init", "-q", "-b", "main", ".")
     git("config", "user.email", "test@example.com")
@@ -185,6 +193,17 @@ describe("scanner end-to-end (git behaviour)", () => {
     const pushed = run(dir, `refs/heads/dirty ${dirtySha} refs/heads/other ${ZERO}\n`)
     expect(pushed.status).toBe(1)
     expect(pushed.stderr).toContain(key(9999))
+  })
+
+  test("scans the destination ref name, which need not match the source", () => {
+    // `git push origin main:refs/heads/<tracker-key>` publishes a tracker-shaped
+    // branch while the source branch and every line of its content are clean.
+    const dir = repo()
+    baseline(dir)
+    const mainSha = git(dir, "rev-parse", "main").stdout.trim()
+    const r = run(dir, `refs/heads/main ${mainSha} refs/heads/${key(7777)} ${ZERO}\n`)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain(key(7777))
   })
 
   test("a deletion-only push scans nothing rather than falling back to HEAD", () => {

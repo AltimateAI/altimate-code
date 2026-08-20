@@ -108,9 +108,38 @@ export namespace ModelsDev {
     return { ok: result.ok, text: await result.text() }
   }
 
+  // altimate_change — bot-review fix (round 2): one validator for every path that
+  // can populate the cache. A 2xx body being valid JSON does not make it the
+  // catalog — `null`, `[]`, a scalar, and an object-shaped error payload
+  // (`{"error": "rate limited"}`) all survive `JSON.parse`, and a misconfigured
+  // proxy returns exactly those with a JSON content-type. Caching one poisons
+  // the disk cache for the whole TTL, and `Provider.state` then maps over it
+  // reading `provider.models` / `provider.id`.
+  //
+  // At least ONE value must validate as a Provider. Requiring ALL of them would
+  // let a single new upstream field empty the catalog, which is a worse failure
+  // than the one being prevented.
+  function isCatalog(value: unknown): value is Record<string, unknown> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false
+    const entries = Object.values(value)
+    if (entries.length === 0) return false
+    return entries.some((entry) => Provider.safeParse(entry).success)
+  }
+
+  function parseCatalog(text: string): Record<string, unknown> | undefined {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      return isCatalog(parsed) ? parsed : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   export const Data = lazy(async () => {
-    const result = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
-    if (result) return result
+    // Bot-review fix: a cache poisoned by an older build must not be trusted on
+    // read either, or the bad entry survives until the TTL expires.
+    const cached: unknown = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
+    if (isCatalog(cached)) return cached
     // @ts-ignore
     const snapshot = await import("./models-snapshot.js")
       .then((m) => m.snapshot as Record<string, unknown>)
@@ -118,8 +147,8 @@ export namespace ModelsDev {
     if (snapshot) return snapshot
     if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
     return Flock.withLock(`models-dev:${filepath}`, async () => {
-      const result = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
-      if (result) return result
+      const cachedUnderLock: unknown = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
+      if (isCatalog(cachedUnderLock)) return cachedUnderLock
       const result2 = await fetchApi()
       // altimate_change — #1052 D14 review-fix (M3): fetchApi returning a non-2xx
       // (e.g. 5xx with an HTML error body) previously fell through to
@@ -136,25 +165,9 @@ export namespace ModelsDev {
       // parse failure, log and return empty — same graceful-degradation path
       // as the non-2xx branch, and we don't poison the disk cache with junk.
       if (!result2.ok) return {}
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(result2.text)
-      } catch (e) {
-        log.error("models.dev returned non-JSON body; not caching", {
-          error: e,
-          firstBytes: result2.text.slice(0, 120),
-        })
-        return {}
-      }
-      // Bot-review follow-up: syntactically valid JSON is not necessarily the
-      // catalog. `null`, `[]` and scalars all survive JSON.parse — a shape a
-      // misconfigured proxy returns with a JSON content-type. Caching one of
-      // those poisons the disk cache for the whole TTL, and `get()` casts it to
-      // `Record<string, Provider>` for `fromModelsDevProvider` to iterate.
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        log.error("models.dev returned JSON that is not a catalog object; not caching", {
-          firstBytes: result2.text.slice(0, 120),
-        })
+      const parsed = parseCatalog(result2.text)
+      if (!parsed) {
+        log.error("models.dev body is not a catalog; not caching", { firstBytes: result2.text.slice(0, 120) })
         return {}
       }
       await Filesystem.write(filepath, result2.text).catch((e) => {
@@ -175,6 +188,15 @@ export namespace ModelsDev {
       if (skip(force)) return ModelsDev.Data.reset()
       const result = await fetchApi()
       if (!result.ok) return
+      // Bot-review fix: this path wrote the body straight to the cache with no
+      // validation at all, so the hourly refresh could poison a cache the
+      // cold-fetch path was careful to protect.
+      if (!parseCatalog(result.text)) {
+        log.error("models.dev refresh body is not a catalog; not caching", {
+          firstBytes: result.text.slice(0, 120),
+        })
+        return
+      }
       await Filesystem.write(filepath, result.text)
       ModelsDev.Data.reset()
     }).catch((e) => {

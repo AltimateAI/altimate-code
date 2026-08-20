@@ -141,13 +141,29 @@ async function main() {
   const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], { failOnError: false })
 
   const hits: Hit[] = []
-  if (branch) scanText(branch, "branch name", hits)
+  if (pushed.hadInput) {
+    // Bot-review fix: scan the ref NAMES being pushed, both ends. The
+    // destination is the one that becomes public, and it need not match the
+    // source — `git push origin main:refs/heads/<tracker-key>` publishes a
+    // tracker-shaped branch while `main` and its contents are perfectly clean.
+    // Tags go the same way. Only fall back to the checked-out branch name when
+    // git gave us nothing (manual run, CI).
+    for (const tip of tips) {
+      scanText(tip.ref, `pushed ref name (${tip.ref})`, hits)
+      if (tip.remote && tip.remote !== tip.ref) scanText(tip.remote, `destination ref name (${tip.remote})`, hits)
+    }
+  } else if (branch) {
+    scanText(branch, "branch name", hits)
+  }
   for (const tip of tips) await scanTip(tip, base, hits)
   reportAndExit(hits)
 }
 
 /** One `<local ref> <local sha> <remote ref> <remote sha>` line per pushed ref. */
-async function readPushedRefs(): Promise<{ hadInput: boolean; tips: Array<{ ref: string; sha: string }> }> {
+async function readPushedRefs(): Promise<{
+  hadInput: boolean
+  tips: Array<{ ref: string; sha: string; remote?: string }>
+}> {
   if (process.stdin.isTTY) return { hadInput: false, tips: [] }
   try {
     const raw = await new Response(Bun.stdin.stream()).text()
@@ -160,7 +176,9 @@ async function readPushedRefs(): Promise<{ hadInput: boolean; tips: Array<{ ref:
     return {
       hadInput: rows.length > 0,
       // An all-zero local sha means the ref is being DELETED — no content to scan.
-      tips: rows.filter((parts) => !/^0{40}$/.test(parts[1])).map((parts) => ({ ref: parts[0], sha: parts[1] })),
+      tips: rows
+        .filter((parts) => !/^0{40}$/.test(parts[1]))
+        .map((parts) => ({ ref: parts[0], sha: parts[1], remote: parts[2] })),
     }
   } catch {
     return { hadInput: false, tips: [] }

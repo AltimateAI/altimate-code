@@ -649,6 +649,9 @@ for (const item of targets) {
         // Roots the walk covered, so the read side can detect files added after
         // the build rather than only rehashing what was present at build time.
         roots: [...new Set(walkedRoots)].sort(),
+        // Glob form so the read side notices a package added AFTER this build;
+        // concrete roots only describe what existed while it ran.
+        rootGlobs: ["packages/*/src"],
         inputs: stampInputs,
       },
       null,

@@ -163,6 +163,7 @@ type BuildStamp = {
   version: string
   aggregate: string
   roots?: string[]
+  rootGlobs?: string[]
   inputs: Array<{ path: string; sha256: string }>
 }
 // Bot-review fix: `as BuildStamp` is a compile-time claim, not a runtime check.
@@ -175,9 +176,16 @@ const readProp = (value: unknown, key: string): unknown =>
 function isStampShape(value: unknown): value is BuildStamp {
   const inputs = readProp(value, "inputs")
   if (!Array.isArray(inputs) || inputs.length === 0) return false
-  return inputs.every(
-    (entry) => typeof readProp(entry, "path") === "string" && typeof readProp(entry, "sha256") === "string",
-  )
+  if (!inputs.every((e) => typeof readProp(e, "path") === "string" && typeof readProp(e, "sha256") === "string"))
+    return false
+  // `roots` gets the same treatment as `inputs`: a non-array value would throw
+  // in the for-of below, and because this runs at module load inside describe(),
+  // that fails the whole file instead of degrading to the mtime fallback.
+  const roots = readProp(value, "roots")
+  if (roots !== undefined && (!Array.isArray(roots) || !roots.every((r) => typeof r === "string"))) return false
+  const globs = readProp(value, "rootGlobs")
+  if (globs !== undefined && (!Array.isArray(globs) || !globs.every((g) => typeof g === "string"))) return false
+  return true
 }
 function readBuildStamp(binaryPath: string): BuildStamp | undefined {
   const stampPath = path.join(path.dirname(binaryPath), "build-inputs.json")
@@ -214,7 +222,23 @@ function isBinaryStaleFromStamp(binaryPath: string): boolean | "no-stamp" {
   // the roots the build walked, using the same shared rules, and treat an
   // unrecorded file as stale.
   const recorded = new Set(stamp.inputs.map((i) => i.path))
-  for (const rel of stamp.roots ?? []) {
+  const roots = [...(stamp.roots ?? [])]
+  // Concrete roots only cover packages that existed at build time. Re-expanding
+  // the recorded globs catches a whole package (or a new `src/`) added since —
+  // otherwise the first build after adding one reports fresh forever.
+  for (const glob of stamp.rootGlobs ?? []) {
+    const [prefix, suffix] = glob.split("/*/")
+    if (!suffix) continue
+    const parent = path.join(REPO_ROOT, prefix)
+    let entries: string[] = []
+    try {
+      entries = fs.readdirSync(parent, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? [e.name] : []))
+    } catch {
+      entries = []
+    }
+    for (const entry of entries) roots.push(path.join(prefix, entry, suffix))
+  }
+  for (const rel of new Set(roots)) {
     for (const abs of walkInputs(path.join(REPO_ROOT, rel))) {
       if (!recorded.has(path.relative(REPO_ROOT, abs))) return true
     }

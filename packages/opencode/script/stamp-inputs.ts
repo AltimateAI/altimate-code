@@ -12,8 +12,13 @@ import path from "path"
 /** Directories never part of a build input set. */
 export const IGNORED_DIRS = new Set(["node_modules", ".turbo", ".cache", "dist", "target"])
 
-/** Extensions Bun.build can pull into the binary from a walked source tree. */
-export const INPUT_EXTENSIONS = /\.(tsx?|json|txt|md)$/
+/**
+ * Extensions Bun.build can pull into the binary from a walked source tree.
+ * `.mp3` is here because packages/tui imports its attention sounds with
+ * `{ type: "file" }`, so a changed or added sound is embedded in the binary and
+ * must invalidate the stamp like any source edit.
+ */
+export const INPUT_EXTENSIONS = /\.(tsx?|json|txt|md|mp3)$/
 
 /**
  * Absolute paths of every input file under `root`, applying the shared rules.
