@@ -141,26 +141,18 @@ export namespace Ripgrep {
     // `/find` route, so unrebased offsets would be newly wrong output rather than a skipped record.
     // Mirrors packages/core/src/ripgrep.ts.
     const raw = lines?.raw
-    // Only rebase an offset addressable in the raw line: `Buffer.subarray` clamps an out-of-range
-    // end and truncates a fractional one rather than throwing, so an unchecked rebase would quietly
-    // repair a corrupt offset, and the schema would not catch it (`z.number()` accepts any number).
-    // An unaddressable offset marks the record corrupt so it is skipped and counted instead.
-    let corrupt = false
-    const rebase = (offset: unknown): unknown => {
-      if (!raw || !lines) return offset
-      if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) {
-        corrupt = true
-        return offset
-      }
-      // Decoding the prefix alone differs from a prefix of the full decode when the offset splits a
-      // VALID multi-byte sequence, so require it to actually prefix the decoded line. See
-      // packages/core/src/ripgrep.ts for the worked example.
-      const prefix = raw.subarray(0, offset).toString("utf8")
-      if (!lines.text.startsWith(prefix)) {
-        corrupt = true
-        return offset
-      }
-      return Buffer.byteLength(prefix, "utf8")
+    // Byte-boundary validation, matching packages/core/src/ripgrep.ts. A decoded-string comparison
+    // is not sufficient: when an invalid byte precedes a LITERAL U+FFFD, an offset inside that
+    // character still yields a prefix that prefixes the line, because the replacement characters
+    // alias. A continuation byte (0b10xxxxxx) at the offset means the split lands inside a sequence.
+    // An offset that cannot be rebased drops ITS SUBMATCH, not the record — the file, line and text
+    // stay correct, and losing a highlight range beats losing the match.
+    const isContinuationByte = (byte: number | undefined) => byte !== undefined && (byte & 0xc0) === 0x80
+    const rebase = (offset: unknown): number | undefined => {
+      if (!raw) return typeof offset === "number" ? offset : undefined
+      if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) return undefined
+      if (offset !== 0 && offset !== raw.length && isContinuationByte(raw[offset])) return undefined
+      return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
     }
     const submatches = read(data, "submatches")
     // Only rewrite keys the record actually carries — `begin`/`end`/`summary` records reach here too
@@ -175,22 +167,20 @@ export namespace Ripgrep {
         ...(lines ? { lines: { text: lines.text } } : {}),
         ...(Array.isArray(submatches)
           ? {
-              submatches: submatches.map((submatch) => {
-                if (!submatch || typeof submatch !== "object") return submatch
+              submatches: submatches.flatMap((submatch) => {
+                if (!submatch || typeof submatch !== "object") return [submatch]
                 const match = decode(read(submatch, "match"))
-                if (!match) return submatch
-                return {
-                  ...submatch,
-                  match: { text: match.text },
-                  start: rebase(read(submatch, "start")),
-                  end: rebase(read(submatch, "end")),
-                }
+                if (!match) return [submatch]
+                const start = rebase(read(submatch, "start"))
+                const end = rebase(read(submatch, "end"))
+                if (start === undefined || end === undefined) return []
+                return [{ ...submatch, match: { text: match.text }, start, end }]
               }),
             }
           : {}),
       },
     }
-    return corrupt ? undefined : normalized
+    return normalized
   }
 
   /**
@@ -199,9 +189,10 @@ export namespace Ripgrep {
    * `JSON.parse` + a strict `Result.parse` on every line meant one unusable record threw out of
    * `search()` and discarded every match already collected from unrelated files — the same defect
    * fixed in packages/core/src/ripgrep.ts. Records are independent, so a bad one is dropped and
-   * counted. Exported so the skip paths are testable without a stub ripgrep binary.
+   * counted. Namespace-private per packages/opencode/AGENTS.md: the skip behaviour is covered
+   * through the public `search()` boundary instead of exporting an implementation detail.
    */
-  export function parseRecords(lines: string[]): Match["data"][] {
+  function parseRecords(lines: string[]): Match["data"][] {
     const matches: Match["data"][] = []
     let skipped = 0
     for (const line of lines) {

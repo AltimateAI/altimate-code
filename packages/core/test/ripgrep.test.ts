@@ -312,42 +312,73 @@ describe("Ripgrep", () => {
 
   // `Buffer.subarray` clamps an out-of-range end and truncates a fractional one instead of throwing,
   // so rebasing without a range check would turn a corrupt offset into a plausible-looking one.
-  stubTest("skips a record whose submatch offset is not addressable in the line", async () => {
+  // The MATCH still survives — only the coordinate we cannot express is dropped.
+  stubTest("drops a submatch whose offset is not addressable, keeping the match", async () => {
     const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
-        matchRecord("a.txt"),
         matchRecord("b.txt", {
           lines: { bytes: raw.toString("base64") },
           // Well past the end of the raw line — nonsense that must not be silently clamped.
           submatches: [{ match: { text: "needle" }, start: 1, end: 9_999 }],
         }),
-        matchRecord("c.txt"),
       ]),
     )
 
-    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
-    expect(lastSkip()?.skipped).toBe(1)
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("b.txt")])
+    expect(matches[0].submatches).toEqual([])
+    expect(matches[0].text).toContain("needle")
   })
 
-  // A byte-mode pattern can match inside a valid multi-byte character. Decoding the prefix alone
-  // then yields U+FFFD where the full decode has "é", so the offset would rebase to a plausible but
-  // wrong position (3, landing mid-word) instead of being recognised as unaddressable.
-  stubTest("skips a record whose submatch offset splits a multi-byte character", async () => {
+  // A byte-mode pattern can match inside a valid multi-byte character, where the offset is simply not
+  // expressible in the decoded line. Byte-boundary validation catches it; a decoded-string
+  // comparison does not, because an invalid byte followed by a LITERAL U+FFFD aliases — both
+  // prefixes decode to the same replacement text.
+  stubTest("drops a submatch whose offset splits a multi-byte character", async () => {
     const raw = Buffer.concat([Buffer.from("é"), Buffer.from("needle")])
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([
-        matchRecord("a.txt"),
         matchRecord("b.txt", {
           lines: { bytes: raw.toString("base64") },
           submatches: [{ match: { text: "needle" }, start: 1, end: 3 }],
         }),
-        matchRecord("c.txt"),
       ]),
     )
 
-    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
-    expect(lastSkip()?.skipped).toBe(1)
+    expect(matches[0].submatches).toEqual([])
+  })
+
+  stubTest("drops a submatch whose offset sits inside a literal replacement character", async () => {
+    // Invalid byte, then the three bytes that spell U+FFFD. Offset 2 is inside that literal
+    // character, but both decoded prefixes read as the same replacement text.
+    const raw = Buffer.from([0xff, 0xef, 0xbf, 0xbd])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("b.txt", {
+          lines: { bytes: raw.toString("base64") },
+          submatches: [{ match: { text: "x" }, start: 2, end: 4 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
+  // A broad pattern such as `x.*` makes ripgrep repeat nearly the whole line in the submatch text,
+  // which would defeat the retained-memory bound that capping `lines.text` establishes.
+  stubTest("caps the retained submatch text, not just the line", async () => {
+    const huge = "n".repeat(50_000)
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { text: huge },
+          submatches: [{ match: { text: huge }, start: 0, end: huge.length }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches[0].text).toHaveLength(2_003)
+    expect(matches[0].submatches[0].text.endsWith("...")).toBe(true)
   })
 
   stubTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
