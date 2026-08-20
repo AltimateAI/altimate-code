@@ -8,6 +8,7 @@ import { lazy } from "@/util/lazy"
 import { Filesystem } from "../util/filesystem"
 import { Flock } from "@/util/flock"
 import { Hash } from "@/util/hash"
+import { ModelsCatalog } from "./models-catalog"
 
 // Try to import bundled snapshot (generated at build time)
 // Falls back to undefined in dev mode when snapshot doesn't exist
@@ -108,32 +109,12 @@ export namespace ModelsDev {
     return { ok: result.ok, text: await result.text() }
   }
 
-  // altimate_change — bot-review fix (round 2): one validator for every path that
-  // can populate the cache. A 2xx body being valid JSON does not make it the
-  // catalog — `null`, `[]`, a scalar, and an object-shaped error payload
-  // (`{"error": "rate limited"}`) all survive `JSON.parse`, and a misconfigured
-  // proxy returns exactly those with a JSON content-type. Caching one poisons
-  // the disk cache for the whole TTL, and `Provider.state` then maps over it
-  // reading `provider.models` / `provider.id`.
-  //
-  // At least ONE value must validate as a Provider. Requiring ALL of them would
-  // let a single new upstream field empty the catalog, which is a worse failure
-  // than the one being prevented.
-  function isCatalog(value: unknown): value is Record<string, unknown> {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return false
-    const entries = Object.values(value)
-    if (entries.length === 0) return false
-    return entries.some((entry) => Provider.safeParse(entry).success)
-  }
-
-  function parseCatalog(text: string): Record<string, unknown> | undefined {
-    try {
-      const parsed: unknown = JSON.parse(text)
-      return isCatalog(parsed) ? parsed : undefined
-    } catch {
-      return undefined
-    }
-  }
+  // altimate_change start — bot-review fix: catalog validation lives in
+  // ./models-catalog so it can be tested directly; see that file for why it is
+  // structural rather than schema-based.
+  const isCatalog = ModelsCatalog.isCatalog
+  const parseCatalog = ModelsCatalog.parseCatalog
+  // altimate_change end
 
   export const Data = lazy(async () => {
     // Bot-review fix: a cache poisoned by an older build must not be trusted on
