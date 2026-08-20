@@ -157,13 +157,19 @@ const normalizeRecord = (line: string): unknown => {
   // An offset that cannot be rebased drops ITS SUBMATCH, not the record — the file, line and text
   // stay correct, and losing a highlight range beats losing the match.
   const isContinuationByte = (byte: number | undefined) => byte !== undefined && (byte & 0xc0) === 0x80
-  const lineBytes = lines ? Buffer.byteLength(lines.text, "utf8") : 0
+  // Encoded once per record and shared by every submatch; also supplies the byte length.
+  const textBytes = raw ?? (lines ? Buffer.from(lines.text, "utf8") : Buffer.alloc(0))
   const rebase = (offset: unknown): number | undefined => {
-    // `{text}` arm: nothing is rebased, but the offset must still be addressable in the line it
-    // indexes. `z.number()` accepts negatives, fractions and values past the end, so without this a
-    // corrupt record reaches the `/find` response with coordinates that index nothing.
+    // `{text}` arm: nothing is rebased, but the offset must still be addressable AND land on a
+    // character boundary — a byte offset can fall inside a multi-byte sequence (`éa`, offset 1
+    // splits `é`). `z.number()` rejects none of that, so a corrupt record would otherwise reach the
+    // `/find` response with coordinates that index nothing or half a character.
     if (!raw)
-      return typeof offset === "number" && Number.isInteger(offset) && offset >= 0 && offset <= lineBytes
+      return typeof offset === "number" &&
+        Number.isInteger(offset) &&
+        offset >= 0 &&
+        offset <= textBytes.length &&
+        !(offset !== 0 && offset !== textBytes.length && isContinuationByte(textBytes[offset]))
         ? offset
         : undefined
     if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) return undefined

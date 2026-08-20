@@ -132,6 +132,20 @@ describe("RipgrepRecords.parseRecords", () => {
     expect(fractional[0].submatches).toEqual([])
   })
 
+  // A byte offset can fall inside a multi-byte character even on a perfectly valid UTF-8 line.
+  test("drops a text-arm submatch whose offset splits a multi-byte character", () => {
+    const parsed = RipgrepRecords.parseRecords([
+      record("a.txt", { lines: { text: "éa" }, submatches: [{ match: { text: "a" }, start: 1, end: 3 }] }),
+    ])
+    expect(parsed[0].submatches).toEqual([])
+
+    // The same line with boundary-aligned offsets is kept.
+    const ok = RipgrepRecords.parseRecords([
+      record("a.txt", { lines: { text: "éa" }, submatches: [{ match: { text: "a" }, start: 2, end: 3 }] }),
+    ])
+    expect(ok[0].submatches).toHaveLength(1)
+  })
+
   // Each submatch costs a rebase per endpoint, and a rebase allocates a string up to the line
   // length, so an unbounded array turns one in-ceiling record into O(count x line) work.
   test("bounds the submatch count like the core parser", () => {

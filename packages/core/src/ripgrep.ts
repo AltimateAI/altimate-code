@@ -145,15 +145,26 @@ const normalizeMatch = (json: object): unknown => {
   // errs conservatively, on lines that begin mid-sequence.
   //
   // An offset that cannot be rebased drops ITS SUBMATCH, not the record: the file, line and text
-  // are still correct and useful, and this whole change exists to stop losing matches. Offsets on
-  // the `{text}` arm are untouched — no rebasing happens there, so no claim is made.
+  // are still correct and useful, and this whole change exists to stop losing matches. `{text}`-arm
+  // offsets are not rebased — there is nothing to rebase onto — but they are validated the same
+  // way, because returning a coordinate pair that indexes nothing, or that splits a character, is
+  // itself a claim.
   const isContinuationByte = (byte: number | undefined) => byte !== undefined && (byte & 0xc0) === 0x80
-  const lineBytes = Buffer.byteLength(lines.text, "utf8")
+  // Encoded once per record and shared by every submatch. This also supplies the byte length, so it
+  // replaces a `Buffer.byteLength` walk rather than adding one; the extra cost is the allocation.
+  const textBytes = raw ?? Buffer.from(lines.text, "utf8")
   const rebase = (offset: unknown): number | undefined => {
-    // `{text}` arm: nothing is rebased, but the offset must still be addressable in the line it
-    // indexes, or the record carries a coordinate pair that points at nothing.
+    // `{text}` arm: nothing is rebased, but the offset must still be addressable AND land on a
+    // character boundary. A byte offset can fall inside a multi-byte sequence — for `éa` the byte
+    // offset 1 splits `é` — and a consumer slicing the line's UTF-8 encoding there gets invalid
+    // bytes. ripgrep never emits such an offset for a valid-UTF-8 line, so rejecting it drops
+    // nothing legitimate. Same rule the `{bytes}` arm applies below.
     if (!raw)
-      return typeof offset === "number" && Number.isInteger(offset) && offset >= 0 && offset <= lineBytes
+      return typeof offset === "number" &&
+        Number.isInteger(offset) &&
+        offset >= 0 &&
+        offset <= textBytes.length &&
+        !(offset !== 0 && offset !== textBytes.length && isContinuationByte(textBytes[offset]))
         ? offset
         : undefined
     if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) return undefined

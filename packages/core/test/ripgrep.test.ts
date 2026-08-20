@@ -248,17 +248,23 @@ describe("Ripgrep", () => {
 
   // The size ceiling is asserted on a record built to exceed it, rather than inferred from a large
   // file — that keeps the case independent of whether a given ripgrep build emits the match at all.
-  stubTest("skips an oversized record and keeps parsing the records after it", async () => {
-    const matches = await Effect.runPromise(
-      grepWithStubbedRecords([
-        matchRecord("a.txt"),
-        matchRecord("b-huge.txt", { lines: { text: "needle" + "x".repeat(17 * 1024 * 1024) } }),
-        matchRecord("c.txt"),
-      ]),
-    )
+  stubTest(
+    "skips an oversized record and keeps parsing the records after it",
+    async () => {
+      const matches = await Effect.runPromise(
+        grepWithStubbedRecords([
+          matchRecord("a.txt"),
+          matchRecord("b-huge.txt", { lines: { text: "needle" + "x".repeat(17 * 1024 * 1024) } }),
+          matchRecord("c.txt"),
+        ]),
+      )
 
-    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
-  })
+      expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+      // Explicit timeout: this materialises a >16 MiB record, so it is slow enough to trip the default
+      // under load even though the parser rejects the record before parsing it.
+    },
+    30_000,
+  )
 
   // A path is an identifier the caller reopens, so it must never be lossily decoded. Such a record
   // is skipped rather than reported under a U+FFFD-mangled path that names no real file.
@@ -360,6 +366,19 @@ describe("Ripgrep", () => {
     )
 
     expect(matches[0].submatches).toEqual([])
+  })
+
+  stubTest("drops a text-arm submatch whose offset splits a multi-byte character", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", { lines: { text: "éa" }, submatches: [{ match: { text: "a" }, start: 1, end: 3 }] }),
+        matchRecord("b.txt", { lines: { text: "éa" }, submatches: [{ match: { text: "a" }, start: 2, end: 3 }] }),
+      ]),
+    )
+
+    // Offset 1 splits `é`; offset 2 is the character boundary, so that submatch is kept.
+    expect(matches[0].submatches).toEqual([])
+    expect(matches[1].submatches).toHaveLength(1)
   })
 
   // Endpoints are rebased independently, so an inverted range can survive both endpoint checks.
