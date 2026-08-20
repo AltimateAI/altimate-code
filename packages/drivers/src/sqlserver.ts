@@ -3,7 +3,7 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
-import { loadOptionalDriver } from "./resolve"
+import { loadOptionalDriver, loadOptionalPackage } from "./resolve"
 
 // ---------------------------------------------------------------------------
 // Azure AD helpers — cache + resource URL resolution
@@ -162,7 +162,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             // who don't use Azure AD don't need to install it. Typed `any` (via a non-literal
             // specifier) so it compiles regardless of which @azure/identity version (if any) is
             // installed; the runtime API is resolved from the user's installed package.
-            const azureIdentity: any = await import("@azure/identity" as string)
+            // Resolved through the shared optional-package loader: a bare
+            // specifier does not resolve inside the compiled binary, so an
+            // installed @azure/identity was invisible and every Azure AD login
+            // silently fell through to the az CLI path.
+            const azureIdentity: any = await loadOptionalPackage("@azure/identity")
+            if (!azureIdentity) throw new Error("@azure/identity is not installed")
             const credential = new azureIdentity.DefaultAzureCredential(
               config.azure_client_id
                 ? { managedIdentityClientId: config.azure_client_id as string }

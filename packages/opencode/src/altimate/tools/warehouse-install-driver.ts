@@ -100,12 +100,29 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
 })
 
 /**
+ * Aliases the connection registry accepts for a warehouse type.
+ *
+ * `DRIVER_MAP` in native/connections/registry.ts routes 18 type strings onto
+ * 13 drivers. Matching only the 12 canonical names meant a connection added as
+ * `postgresql`, `mariadb`, `mssql`, `fabric` or `mongo` never got a readiness
+ * note — the exact silent-broken-connection case #61 is about.
+ */
+const DRIVER_TYPE_ALIASES: Record<string, DriverName> = {
+  postgresql: "postgres",
+  mariadb: "mysql",
+  mssql: "sqlserver",
+  fabric: "sqlserver",
+  mongo: "mongodb",
+}
+
+/**
  * Driver name for a warehouse config `type`, or undefined when the type needs
- * no optional SDK (sqlite ships with the runtime).
+ * no optional SDK (sqlite ships with the runtime) or is unrecognised.
  */
 export function driverForWarehouseType(type: string): DriverName | undefined {
   const normalized = type.trim().toLowerCase()
-  return (DRIVER_NAMES as readonly string[]).includes(normalized) ? (normalized as DriverName) : undefined
+  if ((DRIVER_NAMES as readonly string[]).includes(normalized)) return normalized as DriverName
+  return DRIVER_TYPE_ALIASES[normalized]
 }
 
 export { DRIVER_PACKAGES, driverInstallDir, isDriverInstalled, installOptionalDriver, driverLabel }

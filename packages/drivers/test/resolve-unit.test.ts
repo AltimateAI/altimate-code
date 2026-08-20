@@ -16,6 +16,8 @@ import * as path from "path"
 
 import {
   DRIVER_PACKAGES,
+  isModuleNotFound,
+  npmInstallArgs,
   DriverNotInstalledError,
   driverInstallDir,
   driverLabel,
@@ -307,5 +309,97 @@ describe("driver catalogue", () => {
     ].sort()
 
     expect(Object.keys(DRIVER_PACKAGES).sort()).toEqual(expected)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Regression cover for the consensus-review criticals (PR #1122)
+// ---------------------------------------------------------------------------
+
+describe("installOptionalDriver arguments", () => {
+  test("saves to the manifest so installs are additive", () => {
+    // Verified on npm 11.12.1: with `--no-save`, installing mysql2 into a prefix
+    // that already had pg printed "added 12 packages, and removed 14 packages".
+    // Every previously installed driver is pruned as extraneous, re-creating the
+    // exact "driver not installed" bug this module exists to fix.
+    const args = npmInstallArgs(["mysql2"])
+
+    expect(args).toContain("--save")
+    expect(args).not.toContain("--no-save")
+  })
+
+  test("passes every requested package through", () => {
+    expect(npmInstallArgs(["pg", "@types/pg"]).slice(-2)).toEqual(["pg", "@types/pg"])
+  })
+})
+
+describe("isModuleNotFound", () => {
+  // Pinned directly: deleting this predicate left the behavioural tests passing,
+  // because their fixtures are not ambiently resolvable and so never reach it.
+  test("recognises the Node resolution error code", () => {
+    const err = Object.assign(new Error("nope"), { code: "ERR_MODULE_NOT_FOUND" })
+    expect(isModuleNotFound(err)).toBe(true)
+  })
+
+  test("recognises the CommonJS resolution error code", () => {
+    expect(isModuleNotFound(Object.assign(new Error("nope"), { code: "MODULE_NOT_FOUND" }))).toBe(true)
+  })
+
+  test("recognises the message Bun emits inside bunfs", () => {
+    expect(isModuleNotFound(new Error("Cannot find package 'pg' from '/$bunfs/root/index.js'"))).toBe(true)
+    expect(isModuleNotFound(new Error("Cannot find module 'mysql2/promise'"))).toBe(true)
+  })
+
+  test("does NOT classify a load-time failure as missing", () => {
+    // The distinction that matters: a package that resolves but throws while
+    // initialising (broken native binding) must not be reported as absent.
+    expect(isModuleNotFound(new Error("dlopen failed: wrong architecture"))).toBe(false)
+    expect(isModuleNotFound(new TypeError("x is not a function"))).toBe(false)
+    expect(isModuleNotFound(undefined)).toBe(false)
+  })
+})
+
+describe("half-installed packages", () => {
+  test("an empty package directory does not count as installed", () => {
+    // An interrupted or half-deleted install leaves a bare directory behind.
+    // Counting it as installed made warehouse_install_driver answer "already
+    // installed, no action taken", so the driver could never be repaired.
+    const root = path.join(tmpRoot, "node_modules")
+    fs.mkdirSync(path.join(root, "pg"), { recursive: true })
+
+    expect(resolveOptionalPackage("pg", [root])).toBeUndefined()
+    expect(isDriverInstalled("postgres", [root])).toBe(false)
+  })
+
+  test("a directory with a manifest but no entry file does not count as installed", () => {
+    const root = path.join(tmpRoot, "node_modules")
+    const dir = path.join(root, "oracledb")
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "oracledb", main: "index.js" }))
+
+    expect(resolveOptionalPackage("oracledb", [root])).toBeUndefined()
+  })
+
+  test("a directory with no manifest is not a package, even if a subpath file exists", () => {
+    // Subpath probing looks for physical files (mysql2/promise.js), so without
+    // the manifest check a bare directory holding one would resolve as an
+    // installed package.
+    const root = path.join(tmpRoot, "node_modules")
+    fs.mkdirSync(path.join(root, "mysql2"), { recursive: true })
+    fs.writeFileSync(path.join(root, "mysql2", "promise.js"), "module.exports = {}")
+
+    expect(resolveOptionalPackage("mysql2/promise", [root])).toBeUndefined()
+  })
+
+  test("keeps searching later roots when an earlier one is half-installed", () => {
+    const broken = path.join(tmpRoot, "broken", "node_modules")
+    fs.mkdirSync(path.join(broken, "pg"), { recursive: true })
+    const good = path.join(tmpRoot, "good")
+    installFakePackage(good, "pg", "module.exports = { which: 'good' }")
+
+    const resolved = resolveOptionalPackage("pg", [broken, path.join(good, "node_modules")])
+
+    expect(resolved).toBeDefined()
+    expect(resolved!.includes(path.join("good", "node_modules"))).toBe(true)
   })
 })

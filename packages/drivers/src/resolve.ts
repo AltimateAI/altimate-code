@@ -202,15 +202,72 @@ export function resolveOptionalPackage(specifier: string, roots = driverSearchRo
   const require = createRequire(pathToFileURL(path.join(process.cwd(), "noop.js")).href)
 
   for (const root of roots) {
-    if (!isDirectory(path.join(root, pkg))) continue
+    const pkgDir = path.join(root, pkg)
+    if (!isDirectory(pkgDir)) continue
+    // A directory without a manifest is not an installed package — an
+    // interrupted or half-deleted install leaves one behind. Treating it as
+    // installed made `isDriverInstalled` report true for an empty directory,
+    // so the install path refused to run and the driver could never be repaired.
+    if (!fs.existsSync(path.join(pkgDir, "package.json"))) continue
+
     try {
       return require.resolve(specifier, { paths: [root] })
     } catch {
-      // ESM-only packages have no require-resolvable entry. Hand back the
-      // package directory and let the dynamic import read its export map.
-      const dir = path.join(root, specifier)
-      if (isDirectory(dir) || fs.existsSync(dir)) return dir
-      return path.join(root, pkg)
+      // ESM-only packages expose no require-resolvable entry. Read the entry
+      // out of the manifest instead, and only accept a file that exists.
+      const entry = entryFromManifest(pkgDir, specifier, pkg)
+      if (entry) return entry
+      // Nothing importable here. Keep searching the remaining roots rather
+      // than returning a path the caller cannot import.
+      continue
+    }
+  }
+
+  return undefined
+}
+
+/**
+ * Entry file for `specifier` derived from its package manifest, or undefined
+ * when nothing resolvable exists on disk.
+ */
+function entryFromManifest(pkgDir: string, specifier: string, pkg: string): string | undefined {
+  const subpath = specifier.slice(pkg.length).replace(/^\//, "")
+
+  const candidates: string[] = []
+  if (subpath) {
+    // A subpath such as `mysql2/promise` usually maps to a physical file.
+    candidates.push(
+      path.join(pkgDir, subpath),
+      path.join(pkgDir, `${subpath}.js`),
+      path.join(pkgDir, `${subpath}.mjs`),
+      path.join(pkgDir, `${subpath}.cjs`),
+      path.join(pkgDir, subpath, "index.js"),
+    )
+  } else {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf8"))
+      for (const field of ["module", "main"]) {
+        const value = manifest?.[field]
+        if (typeof value === "string") candidates.push(path.join(pkgDir, value))
+      }
+    } catch {
+      // Unreadable or malformed manifest — fall through to the index probes.
+    }
+    candidates.push(path.join(pkgDir, "index.js"), path.join(pkgDir, "index.mjs"), path.join(pkgDir, "index.cjs"))
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const stat = fs.statSync(candidate)
+      if (stat.isFile()) return candidate
+      if (stat.isDirectory()) {
+        for (const index of ["index.js", "index.mjs", "index.cjs"]) {
+          const nested = path.join(candidate, index)
+          if (fs.existsSync(nested)) return nested
+        }
+      }
+    } catch {
+      // Candidate does not exist; try the next one.
     }
   }
 
@@ -250,7 +307,7 @@ export async function loadOptionalDriver(driver: DriverName, specifier: string):
 }
 
 /** True when `error` means the module could not be resolved, not that it failed while loading. */
-function isModuleNotFound(error: unknown): boolean {
+export function isModuleNotFound(error: unknown): boolean {
   const code = (error as { code?: string } | null)?.code
   if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true
   const message = error instanceof Error ? error.message : String(error)
@@ -262,6 +319,25 @@ function loadFailure(driver: DriverName, where: string, error: unknown): Error {
     `${DRIVER_LABELS[driver]} driver found at ${where} but failed to load: ` +
       `${error instanceof Error ? error.message : String(error)}`,
   )
+}
+
+/**
+ * Import an optional package that is not a warehouse driver, returning
+ * undefined when it is unavailable.
+ *
+ * Same bunfs problem as the drivers — a bare specifier cannot resolve inside
+ * the compiled binary — but these callers have a legitimate fallback and must
+ * not be handed an exception.
+ */
+export async function loadOptionalPackage(specifier: string): Promise<any | undefined> {
+  try {
+    return await import(/* @vite-ignore */ specifier)
+  } catch (ambientError) {
+    if (!isModuleNotFound(ambientError)) throw ambientError
+    const resolved = resolveOptionalPackage(specifier)
+    if (!resolved) return undefined
+    return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
+  }
 }
 
 /** True when `driver`'s packages are all resolvable right now. */
@@ -307,10 +383,23 @@ function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code:
 }
 
 /**
+ * npm arguments for installing `packages` into the managed driver directory.
+ *
+ * `--save` is required, not incidental: with `--no-save` npm treats already
+ * installed drivers as extraneous and prunes them on the next install.
+ */
+export function npmInstallArgs(packages: readonly string[]): string[] {
+  return ["install", "--save", "--no-audit", "--no-fund", "--loglevel=error", ...packages]
+}
+
+/**
  * Install a driver's SDK into the managed driver directory.
  *
- * Installs are additive — `--no-save` against a private package.json — so
- * installing a second driver never removes the first.
+ * Installs must be recorded in the directory's own package.json. With
+ * `--no-save`, npm treats every previously installed driver as extraneous and
+ * prunes it: installing MySQL deleted Postgres, re-creating the very bug this
+ * module exists to fix. Verified on npm 11.12.1 —
+ * `added 12 packages, and removed 14 packages`.
  */
 export async function installOptionalDriver(
   driver: DriverName,
@@ -345,11 +434,7 @@ export async function installOptionalDriver(
     }
   }
 
-  const { code, output } = await runNpm(
-    ["install", "--no-save", "--no-audit", "--no-fund", "--loglevel=error", ...packages],
-    dir,
-    options.timeoutMs ?? 180_000,
-  )
+  const { code, output } = await runNpm(npmInstallArgs(packages), dir, options.timeoutMs ?? 180_000)
 
   if (code === 127) {
     return {

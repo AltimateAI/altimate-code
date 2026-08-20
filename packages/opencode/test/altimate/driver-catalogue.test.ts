@@ -22,7 +22,7 @@ const publishScriptPath = path.join(repoRoot, "packages/opencode/script/publish.
 const expectedPackages = [...new Set(Object.values(DRIVER_PACKAGES).flat())].sort()
 
 /** Optional infra externals that are not warehouse drivers. */
-const NON_DRIVER_EXTERNALS = new Set(["keytar", "ssh2", "dockerode"])
+const NON_DRIVER_EXTERNALS = new Set(["keytar", "ssh2", "dockerode", "@azure/identity"])
 
 function readBlock(file: string, startMarker: string, endMarker: string): string {
   const source = fs.readFileSync(file, "utf8")

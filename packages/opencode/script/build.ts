@@ -245,8 +245,10 @@ const optionalExternals = [
   "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
   "mysql2", "mssql", "oracledb", "duckdb",
   "mongodb", "@clickhouse/client", "trino-client",
-  // Optional infra packages — native addons or heavy optional deps
-  "keytar", "ssh2", "dockerode",
+  // Optional infra packages — native addons or heavy optional deps.
+  // @azure/identity is dynamically imported by the sqlserver driver for Azure
+  // AD auth; it resolves through the same on-disk loader as the drivers.
+  "keytar", "ssh2", "dockerode", "@azure/identity",
 ]
 
 const binaries: Record<string, string> = {}
