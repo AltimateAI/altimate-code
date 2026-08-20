@@ -348,6 +348,20 @@ describe("Ripgrep", () => {
     expect(matches[0].submatches).toEqual([])
   })
 
+  // Endpoints are rebased independently, so an inverted range can survive both endpoint checks.
+  stubTest("drops a submatch whose range is inverted", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { bytes: Buffer.from("needle tail\n").toString("base64") },
+          submatches: [{ match: { text: "needle" }, start: 6, end: 2 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
   stubTest("drops a submatch whose offset sits inside a literal replacement character", async () => {
     // Invalid byte, then the three bytes that spell U+FFFD. Offset 2 is inside that literal
     // character, but both decoded prefixes read as the same replacement text.

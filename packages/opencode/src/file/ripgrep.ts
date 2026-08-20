@@ -20,204 +20,23 @@ import { text } from "node:stream/consumers"
 
 import { ZipReader, BlobReader, BlobWriter } from "@zip.js/zip.js"
 import { Log } from "@/util/log"
+import { RipgrepRecords } from "./ripgrep-records"
 
 export namespace Ripgrep {
   const log = Log.create({ service: "ripgrep" })
-  const Stats = z.object({
-    elapsed: z.object({
-      secs: z.number(),
-      nanos: z.number(),
-      human: z.string(),
-    }),
-    searches: z.number(),
-    searches_with_match: z.number(),
-    bytes_searched: z.number(),
-    bytes_printed: z.number(),
-    matched_lines: z.number(),
-    matches: z.number(),
-  })
-
-  const Begin = z.object({
-    type: z.literal("begin"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-    }),
-  })
-
-  export const Match = z.object({
-    type: z.literal("match"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-      lines: z.object({
-        text: z.string(),
-      }),
-      line_number: z.number(),
-      absolute_offset: z.number(),
-      submatches: z.array(
-        z.object({
-          match: z.object({
-            text: z.string(),
-          }),
-          start: z.number(),
-          end: z.number(),
-        }),
-      ),
-    }),
-  })
-
-  const End = z.object({
-    type: z.literal("end"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-      binary_offset: z.number().nullable(),
-      stats: Stats,
-    }),
-  })
-
-  const Summary = z.object({
-    type: z.literal("summary"),
-    data: z.object({
-      elapsed_total: z.object({
-        human: z.string(),
-        nanos: z.number(),
-        secs: z.number(),
-      }),
-      stats: Stats,
-    }),
-  })
-
-  const Result = z.union([Begin, Match, End, Summary])
-
-  // altimate_change start — upstream_fix: tolerate ripgrep's `{bytes}` arm and malformed lines.
-  //
-  // This mirrors packages/core/src/ripgrep.ts, but deliberately not in every respect. That parser
-  // streams, so it caps the retained line text and rebases submatch offsets; this one buffers all of
-  // stdout up front and hands its records straight to the `/find` response, where the raw ripgrep
-  // shape is the published contract — so it normalises and skips, and leaves the shape alone. Both
-  // report skipped records once per search rather than once per record.
-  const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
-
-  /** Mirrors packages/core/src/ripgrep.ts. Bounds parse cost per record on this path too. */
-  const MAX_RECORD_BYTES = 16 * 1024 * 1024
-
-  /** Parse one NDJSON record, rewriting `{bytes: base64}` fields into the `{text}` arm. */
-  const normalizeRecord = (line: string): unknown => {
-    let json: unknown
-    try {
-      json = JSON.parse(line)
-    } catch {
-      return undefined
-    }
-    if (!json || typeof json !== "object") return json
-    const read = (value: unknown, key: string): unknown =>
-      value !== null && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined
-    const data = read(json, "data")
-    if (!data || typeof data !== "object") return json
-    /** Decode a `{text}`/`{bytes}` field, returning the raw buffer so offsets can be rebased. */
-    const decode = (value: unknown): { text: string; raw?: Buffer } | undefined => {
-      if (!value || typeof value !== "object") return undefined
-      const text = read(value, "text")
-      if (typeof text === "string") return { text }
-      const bytes = read(value, "bytes")
-      // Guarded three ways because `Buffer.from` decodes unconvertible input to an EMPTY buffer
-      // instead of throwing, which would turn a corrupt record into a schema-valid empty match:
-      // reject the empty string (a matched line is never empty), check the spelling, then require
-      // a round-trip so non-canonical padding ("Zh==" and "Zg==" both decode to "f") is rejected.
-      if (typeof bytes !== "string" || bytes.length === 0 || !BASE64.test(bytes)) return undefined
-      const decoded = Buffer.from(bytes, "base64")
-      if (decoded.toString("base64") !== bytes) return undefined
-      return { text: decoded.toString("utf8"), raw: decoded }
-    }
-    const lines = "lines" in data ? decode(read(data, "lines")) : undefined
-    // Submatch offsets are BYTE offsets into the RAW line, and a lossy decode widens every
-    // undecodable byte to a 3-byte U+FFFD — so they must be rebased onto the decoded text's own
-    // UTF-8 encoding or they no longer locate the match. This response shape is published by the
-    // `/find` route, so unrebased offsets would be newly wrong output rather than a skipped record.
-    // Mirrors packages/core/src/ripgrep.ts.
-    const raw = lines?.raw
-    // Byte-boundary validation, matching packages/core/src/ripgrep.ts. A decoded-string comparison
-    // is not sufficient: when an invalid byte precedes a LITERAL U+FFFD, an offset inside that
-    // character still yields a prefix that prefixes the line, because the replacement characters
-    // alias. A continuation byte (0b10xxxxxx) at the offset means the split lands inside a sequence.
-    // An offset that cannot be rebased drops ITS SUBMATCH, not the record — the file, line and text
-    // stay correct, and losing a highlight range beats losing the match.
-    const isContinuationByte = (byte: number | undefined) => byte !== undefined && (byte & 0xc0) === 0x80
-    const rebase = (offset: unknown): number | undefined => {
-      if (!raw) return typeof offset === "number" ? offset : undefined
-      if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) return undefined
-      if (offset !== 0 && offset !== raw.length && isContinuationByte(raw[offset])) return undefined
-      return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
-    }
-    const submatches = read(data, "submatches")
-    // Only rewrite keys the record actually carries — `begin`/`end`/`summary` records reach here too
-    // and must keep their exact shape, or the strict union below would reject them.
-    // `path` is deliberately left alone: decoding it is lossy, and a path is an identifier the
-    // caller reopens, so a U+FFFD-mangled path names a file that does not exist. Such a record
-    // stays in the `{bytes}` arm and is skipped. See packages/core/src/ripgrep.ts.
-    const normalized = {
-      ...json,
-      data: {
-        ...data,
-        ...(lines ? { lines: { text: lines.text } } : {}),
-        ...(Array.isArray(submatches)
-          ? {
-              submatches: submatches.flatMap((submatch) => {
-                if (!submatch || typeof submatch !== "object") return [submatch]
-                const match = decode(read(submatch, "match"))
-                if (!match) return [submatch]
-                const start = rebase(read(submatch, "start"))
-                const end = rebase(read(submatch, "end"))
-                if (start === undefined || end === undefined) return []
-                return [{ ...submatch, match: { text: match.text }, start, end }]
-              }),
-            }
-          : {}),
-      },
-    }
-    return normalized
-  }
-
-  /**
-   * Turn ripgrep NDJSON lines into match data, skipping records that cannot be used.
-   *
-   * `JSON.parse` + a strict `Result.parse` on every line meant one unusable record threw out of
-   * `search()` and discarded every match already collected from unrelated files — the same defect
-   * fixed in packages/core/src/ripgrep.ts. Records are independent, so a bad one is dropped and
-   * counted. Namespace-private per packages/opencode/AGENTS.md: the skip behaviour is covered
-   * through the public `search()` boundary instead of exporting an implementation detail.
-   */
-  function parseRecords(lines: string[]): Match["data"][] {
-    const matches: Match["data"][] = []
-    let skipped = 0
-    for (const line of lines) {
-      // Bounds parse cost per record. This path buffers all of stdout before splitting, so it does
-      // not bound total memory — that needs streaming, tracked separately.
-      const parsed =
-        Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES ? undefined : Result.safeParse(normalizeRecord(line))
-      if (!parsed?.success) {
-        skipped++
-        continue
-      }
-      if (parsed.data.type === "match") matches.push(parsed.data.data)
-    }
-    // Counted and reported once rather than per record: without this a ripgrep protocol change
-    // would make `/find` answer `[]`, which is indistinguishable from an honest "no matches".
-    if (skipped > 0) log.warn("skipped unusable ripgrep records", { skipped, total: lines.length })
-    return matches
-  }
+  // altimate_change start — upstream_fix: record parsing lives in ./ripgrep-records so it can be
+  // tested directly, without exporting an implementation detail through this namespace and without
+  // a stub binary whose per-process memoisation leaks into other test files. `Match` stays exported
+  // here because server/routes/file.ts builds the `/find` response schema from it.
+  export const Match = RipgrepRecords.Match
+  const parseRecords = RipgrepRecords.parseRecords
   // altimate_change end
 
-  export type Result = z.infer<typeof Result>
-  export type Match = z.infer<typeof Match>
-  export type Begin = z.infer<typeof Begin>
-  export type End = z.infer<typeof End>
-  export type Summary = z.infer<typeof Summary>
+  export type Result = RipgrepRecords.Result
+  export type Match = RipgrepRecords.Match
+  export type Begin = RipgrepRecords.Begin
+  export type End = RipgrepRecords.End
+  export type Summary = RipgrepRecords.Summary
   const PLATFORM = {
     "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
     "arm64-linux": {

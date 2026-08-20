@@ -1,0 +1,125 @@
+import { describe, expect, test } from "bun:test"
+import { RipgrepRecords } from "../../src/file/ripgrep-records"
+
+// altimate_change start — upstream_fix: legacy `/find` parsing must survive unusable records.
+// `search()` used to `JSON.parse` + strictly `Result.parse` every line, so a single unusable record
+// threw out of the whole call and discarded every match already collected from unrelated files —
+// the same defect fixed in packages/core/src/ripgrep.ts. This path is reachable from the mounted
+// `/find` route (server/routes/file.ts).
+//
+// These drive the parser directly. It is pure and process-free, so there is no stub binary and no
+// PATH mutation: the legacy binary lookup is memoised per process, so a stub would leak into every
+// later test file in the same `bun test` run.
+const record = (file: string, overrides: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    type: "match",
+    data: {
+      path: { text: `./${file}` },
+      lines: { text: "needle\n" },
+      line_number: 1,
+      absolute_offset: 0,
+      submatches: [{ match: { text: "needle" }, start: 0, end: 6 }],
+      ...overrides,
+    },
+  })
+
+const paths = (records: string[]) => RipgrepRecords.parseRecords(records).map((match) => match.path.text)
+
+describe("RipgrepRecords.parseRecords", () => {
+  test("skips an unparseable record and keeps the ones around it", () => {
+    expect(paths([record("a.txt"), '{"type":"match","data":{"path":{"text":"./b.t', record("c.txt")])).toEqual([
+      "./a.txt",
+      "./c.txt",
+    ])
+  })
+
+  test("skips a record past the size ceiling", () => {
+    const huge = record("b.txt", { lines: { text: "n".repeat(17 * 1024 * 1024) } })
+    expect(paths([record("a.txt"), huge, record("c.txt")])).toEqual(["./a.txt", "./c.txt"])
+  })
+
+  test("skips a record whose path is not valid UTF-8, rather than mangling the path", () => {
+    const bad = record("ignored", { path: { bytes: Buffer.from("./b\xff.txt", "binary").toString("base64") } })
+    expect(paths([record("a.txt"), bad])).toEqual(["./a.txt"])
+  })
+
+  test("skips empty and non-canonical base64 rather than emitting an empty match", () => {
+    expect(paths([record("a.txt"), record("b.txt", { lines: { bytes: "" } })])).toEqual(["./a.txt"])
+    expect(paths([record("a.txt"), record("b.txt", { lines: { bytes: "Zh==" } })])).toEqual(["./a.txt"])
+  })
+
+  test("decodes a non-UTF8 line and ignores control records", () => {
+    const parsed = RipgrepRecords.parseRecords([
+      JSON.stringify({ type: "begin", data: { path: { text: "./a.txt" } } }),
+      record("a.txt", { lines: { bytes: Buffer.from("needle \xff tail\n", "binary").toString("base64") } }),
+    ])
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].lines.text).toBe("needle � tail\n")
+  })
+
+  // Offsets are byte offsets into the RAW line; a lossy decode widens each undecodable byte to a
+  // 3-byte U+FFFD. This shape is published by the `/find` route, so unrebased offsets would be
+  // newly wrong output rather than a skipped record. Mirrors the core parser.
+  test("rebases submatch offsets after a lossy line decode", () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const parsed = RipgrepRecords.parseRecords([
+      record("a.txt", {
+        lines: { bytes: raw.toString("base64") },
+        submatches: [{ match: { bytes: Buffer.from("needle").toString("base64") }, start: 1, end: 7 }],
+      }),
+    ])
+
+    expect(parsed[0].submatches[0]).toEqual({ match: { text: "needle" }, start: 3, end: 9 })
+    expect(Buffer.from(parsed[0].lines.text, "utf8").subarray(3, 9).toString("utf8")).toBe("needle")
+  })
+
+  // An offset that cannot be expressed in the decoded line drops its submatch, not the match.
+  test("drops a submatch whose offset is unaddressable, keeping the match", () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const parsed = RipgrepRecords.parseRecords([
+      record("a.txt", {
+        lines: { bytes: raw.toString("base64") },
+        submatches: [{ match: { text: "needle" }, start: 1, end: 9_999 }],
+      }),
+    ])
+
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].submatches).toEqual([])
+  })
+
+  test("drops a submatch whose offset splits a character or inverts the range", () => {
+    const split = RipgrepRecords.parseRecords([
+      record("a.txt", {
+        lines: { bytes: Buffer.concat([Buffer.from("é"), Buffer.from("needle")]).toString("base64") },
+        submatches: [{ match: { text: "needle" }, start: 1, end: 3 }],
+      }),
+    ])
+    expect(split[0].submatches).toEqual([])
+
+    // Both endpoints are addressable, but the range is inverted.
+    const inverted = RipgrepRecords.parseRecords([
+      record("a.txt", {
+        lines: { bytes: Buffer.from("needle tail\n").toString("base64") },
+        submatches: [{ match: { text: "needle" }, start: 6, end: 2 }],
+      }),
+    ])
+    expect(inverted[0].submatches).toEqual([])
+  })
+
+  // `MAX_RECORD_BYTES` bounds one input record, not what the `/find` response retains.
+  test("caps the retained line and submatch text", () => {
+    const huge = "n".repeat(50_000)
+    const parsed = RipgrepRecords.parseRecords([
+      record("a.txt", { lines: { text: huge }, submatches: [{ match: { text: huge }, start: 0, end: huge.length }] }),
+    ])
+
+    expect(parsed[0].lines.text).toHaveLength(2_003)
+    expect(parsed[0].lines.text.endsWith("...")).toBe(true)
+    expect(parsed[0].submatches[0].match.text).toHaveLength(2_003)
+  })
+
+  test("returns an empty array when every record is unusable, rather than throwing", () => {
+    expect(RipgrepRecords.parseRecords(["{oops", "{also oops"])).toEqual([])
+  })
+})
+// altimate_change end

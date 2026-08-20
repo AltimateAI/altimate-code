@@ -174,7 +174,9 @@ const normalizeMatch = (json: object): unknown => {
             if (!raw) return [decoded]
             const start = rebase(readProp(submatch, "start"))
             const end = rebase(readProp(submatch, "end"))
-            return start === undefined || end === undefined ? [] : [{ ...decoded, start, end }]
+            // Endpoints are rebased independently, so ordering is checked explicitly: an inverted
+            // range is not a usable coordinate pair even when both endpoints are addressable.
+            return start === undefined || end === undefined || start > end ? [] : [{ ...decoded, start, end }]
           })
         : submatches,
     },
