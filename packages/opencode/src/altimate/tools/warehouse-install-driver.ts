@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import {
   DRIVER_PACKAGES,
+  loadOptionalDriver,
   driverInstallDir,
   driverLabel,
   installOptionalDriver,
@@ -10,7 +11,8 @@ import {
 } from "@altimateai/drivers/resolve"
 
 // Listed literally rather than derived from DRIVER_PACKAGES so zod infers a
-// concrete union; the catalogue test in packages/drivers keeps the two in step.
+// concrete literal union. driver-catalogue.test.ts pins this list, and the alias
+// map below, against DRIVER_PACKAGES and the registry's DRIVER_MAP.
 const DRIVER_NAMES = [
   "postgres",
   "redshift",
@@ -33,6 +35,8 @@ const DRIVER_NAMES = [
  */
 interface InstallDriverMetadata {
   [key: string]: any
+  /** Read by Tool as the soft-failure signal (tool/tool.ts). */
+  success: boolean
   driver: DriverName
   installed: boolean
   alreadyPresent: boolean
@@ -61,11 +65,15 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
     const label = driverLabel(driver)
     const dir = driverInstallDir()
 
-    if (isDriverInstalled(driver)) {
+    // Resolution is not usability. A package that resolves but throws on import —
+    // a native addon built for another platform, or a half-written copy — used to
+    // report "already installed", so the one command that could repair it refused
+    // to run. Probe an actual load and only decline when it succeeds.
+    if (isDriverInstalled(driver) && (await driverLoads(driver))) {
       return {
         title: `${label} driver: already installed`,
-        metadata: { driver, installed: true, alreadyPresent: true, dir },
-        output: `The ${label} driver is already installed and resolvable. No action taken.`,
+        metadata: { success: true, driver, installed: true, alreadyPresent: true, dir },
+        output: `The ${label} driver is already installed and loads correctly. No action taken.`,
       }
     }
 
@@ -76,6 +84,7 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
       return {
         title: `${label} driver: install FAILED`,
         metadata: {
+          success: false,
           driver,
           installed: false,
           alreadyPresent: false,
@@ -91,7 +100,7 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
 
     return {
       title: `${label} driver: installed`,
-      metadata: { driver, installed: true, alreadyPresent: false, dir: result.dir },
+      metadata: { success: true, driver, installed: true, alreadyPresent: false, dir: result.dir },
       output:
         `Installed the ${label} driver (${packages}) into ${result.dir}.\n` +
         `It is available now — connections using ${driver} will work without restarting the session.`,
@@ -127,3 +136,21 @@ export function driverForWarehouseType(type: string): DriverName | undefined {
 
 export { DRIVER_PACKAGES, driverInstallDir, isDriverInstalled, installOptionalDriver, driverLabel }
 export type { DriverName }
+
+/**
+ * True when every package the driver needs actually imports.
+ *
+ * Separates "resolvable" from "usable". Either failure mode — genuinely absent,
+ * or present but unloadable — means the install should proceed, so both answer
+ * false; the distinction is already reported in the error text the user sees.
+ */
+async function driverLoads(driver: DriverName): Promise<boolean> {
+  for (const pkg of DRIVER_PACKAGES[driver]) {
+    try {
+      await loadOptionalDriver(driver, pkg)
+    } catch {
+      return false
+    }
+  }
+  return true
+}

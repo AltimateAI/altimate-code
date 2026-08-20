@@ -12,6 +12,7 @@ import { describe, expect, test } from "bun:test"
 import * as fs from "fs"
 import * as path from "path"
 import { DRIVER_PACKAGES } from "@altimateai/drivers/resolve"
+import { driverForWarehouseType } from "../../src/altimate/tools/warehouse-install-driver"
 
 const repoRoot = path.resolve(import.meta.dir, "../../../..")
 const driversPkgPath = path.join(repoRoot, "packages/drivers/package.json")
@@ -23,6 +24,14 @@ const expectedPackages = [...new Set(Object.values(DRIVER_PACKAGES).flat())].sor
 
 /** Optional infra externals that are not warehouse drivers. */
 const NON_DRIVER_EXTERNALS = new Set(["keytar", "ssh2", "dockerode", "@azure/identity"])
+
+/** Names inside a `const X = [ "a", "b" ] as const` literal. */
+function readLiteralList(source: string, marker: string): string[] {
+  const start = source.indexOf(marker)
+  expect(start, `${marker} not found`).toBeGreaterThan(-1)
+  const end = source.indexOf("]", start)
+  return [...source.slice(start + marker.length, end).matchAll(/"([^"]+)"/g)].map((m) => m[1]!)
+}
 
 function readBlock(file: string, startMarker: string, endMarker: string): string {
   const source = fs.readFileSync(file, "utf8")
@@ -85,6 +94,41 @@ describe("driver catalogue consistency", () => {
       const source = fs.readFileSync(path.join(dir, file), "utf8")
       if (!source.includes("loadOptionalDriver")) continue
       expect(registered.has(name), `${file} loads an optional SDK but is not in DRIVER_PACKAGES`).toBe(true)
+    }
+  })
+
+  test("the install tool's DRIVER_NAMES matches DRIVER_PACKAGES", () => {
+    // The tool declares its zod enum literally so the parameter type is a
+    // concrete union. Nothing pinned it to the catalogue until now, so a new
+    // driver could be installable by the resolver but unreachable by the tool.
+    const toolSource = fs.readFileSync(
+      path.join(repoRoot, "packages/opencode/src/altimate/tools/warehouse-install-driver.ts"),
+      "utf8",
+    )
+    const names = [...readLiteralList(toolSource, "const DRIVER_NAMES = [")].sort()
+
+    expect(names).toEqual(Object.keys(DRIVER_PACKAGES).sort())
+  })
+
+  test("every registry warehouse type maps to a driver the tool can install", () => {
+    // DRIVER_MAP accepts aliases (postgresql, mariadb, mssql, fabric, mongo).
+    // Each must resolve through driverForWarehouseType or a connection added
+    // under that alias silently skips the readiness check added for #61.
+    const registry = fs.readFileSync(
+      path.join(repoRoot, "packages/opencode/src/altimate/native/connections/registry.ts"),
+      "utf8",
+    )
+    const mapBlock = registry.slice(
+      registry.indexOf("const DRIVER_MAP: Record<string, string> = {"),
+      registry.indexOf("}", registry.indexOf("const DRIVER_MAP: Record<string, string> = {")),
+    )
+    const types = [...mapBlock.matchAll(/^\s*([a-z0-9]+)\s*:/gm)].map((m) => m[1]!)
+
+    expect(types.length).toBeGreaterThan(12)
+    for (const type of types) {
+      // sqlite is bundled with the runtime and needs no optional SDK.
+      if (type === "sqlite") continue
+      expect(driverForWarehouseType(type), `registry type "${type}" has no installable driver`).toBeDefined()
     }
   })
 })

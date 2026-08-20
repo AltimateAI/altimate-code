@@ -6,6 +6,7 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { Telemetry } from "../../telemetry"
 // altimate_change end
 // altimate_change start — report driver readiness when adding a warehouse
+import { shellQuote } from "@altimateai/drivers/resolve"
 import {
   driverForWarehouseType,
   driverInstallDir,
@@ -166,7 +167,7 @@ function driverReadinessNote(type: string): string {
     return (
       `\n\nNOTE: the ${driverLabel(driver)} driver is not installed yet, so this connection cannot be used until it is.\n` +
       `Run the warehouse_install_driver tool with driver="${driver}", or install it manually:\n` +
-      `  npm install --prefix ${driverInstallDir()} ${packages}`
+      `  npm install --prefix ${shellQuote(driverInstallDir())} ${packages}`
     )
   } catch {
     // A driver probe must never fail an add whose configuration was stored.

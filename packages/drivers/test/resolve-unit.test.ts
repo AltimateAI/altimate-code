@@ -18,6 +18,7 @@ import {
   DRIVER_PACKAGES,
   isModuleNotFound,
   npmInstallArgs,
+  shellQuote,
   DriverNotInstalledError,
   driverInstallDir,
   driverLabel,
@@ -229,9 +230,10 @@ describe("loadOptionalDriver", () => {
     expect(err.message).toContain("Searched")
   })
 
-  test("does not fall back when an ambiently-resolvable package fails to load", async () => {
-    // A package that resolves but throws on import is broken, not absent.
-    // Reporting it as "not installed" sends the user to install what they have.
+  test("reports a disk-resolved package that throws on import as a load failure", async () => {
+    // Named for what it actually exercises: the fixture is not ambiently
+    // resolvable, so this covers the on-disk load path, not the ambient rethrow.
+    // The ambient branch is pinned directly in the isModuleNotFound tests below.
     const broken = path.join(tmpRoot, "ambient")
     installFakePackage(broken, "altimate-ambient-broken", "throw new Error('boom')")
     process.env["ALTIMATE_DRIVER_DIR"] = broken
@@ -350,6 +352,26 @@ describe("isModuleNotFound", () => {
     expect(isModuleNotFound(new Error("Cannot find module 'mysql2/promise'"))).toBe(true)
   })
 
+  test("a missing transitive dependency is NOT the driver going missing", () => {
+    // Observed for real when importing pg's entry inside a compiled binary:
+    // `Cannot find package 'pg-protocol' from '.../pg/lib/connection.js'`.
+    // pg is installed; its dependency tree is incomplete. Classifying that as
+    // "not installed" sends the user to reinstall what they already have.
+    const transitive = new Error("Cannot find package 'pg-protocol' from '/x/node_modules/pg/lib/connection.js'")
+
+    expect(isModuleNotFound(transitive, "pg")).toBe(false)
+    // Same error with no specifier context stays conservative.
+    expect(isModuleNotFound(transitive)).toBe(true)
+  })
+
+  test("the driver's own absence still counts as missing", () => {
+    const own = new Error("Cannot find package 'pg' from '/$bunfs/root/index.js'")
+
+    expect(isModuleNotFound(own, "pg")).toBe(true)
+    // Subpath specifiers resolve against their package name.
+    expect(isModuleNotFound(new Error("Cannot find module 'mysql2'"), "mysql2/promise")).toBe(true)
+  })
+
   test("does NOT classify a load-time failure as missing", () => {
     // The distinction that matters: a package that resolves but throws while
     // initialising (broken native binding) must not be reported as absent.
@@ -401,5 +423,23 @@ describe("half-installed packages", () => {
 
     expect(resolved).toBeDefined()
     expect(resolved!.includes(path.join("good", "node_modules"))).toBe(true)
+  })
+})
+
+describe("shellQuote", () => {
+  test("leaves ordinary paths alone", () => {
+    expect(shellQuote("/Users/x/.local/share/altimate-code/drivers")).toBe(
+      "/Users/x/.local/share/altimate-code/drivers",
+    )
+  })
+
+  test("quotes a path with spaces so the printed command is copy-pasteable", () => {
+    // The install hint is meant to be pasted; an unquoted path with spaces
+    // splits and npm receives the wrong --prefix.
+    expect(shellQuote("/Users/x/My Drive/drivers")).toBe("'/Users/x/My Drive/drivers'")
+  })
+
+  test("escapes embedded single quotes", () => {
+    expect(shellQuote("/tmp/it's here")).toBe(`'/tmp/it'\\''s here'`)
   })
 })

@@ -25,6 +25,11 @@ import { createRequire } from "node:module"
 import { pathToFileURL } from "node:url"
 import { spawn } from "node:child_process"
 
+/** Quote a path for inclusion in a copy-pasteable shell command. */
+export function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_./@:-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`
+}
+
 /** Every driver in this package and the npm packages it needs at runtime. */
 export const DRIVER_PACKAGES = {
   postgres: ["pg"],
@@ -80,7 +85,7 @@ export class DriverNotInstalledError extends Error {
     super(
       `${label} driver not installed.\n` +
         `Install it with the warehouse_install_driver tool, or run:\n` +
-        `  npm install --prefix ${driverInstallDir()} ${packages.join(" ")}\n` +
+        `  npm install --prefix ${shellQuote(driverInstallDir())} ${packages.join(" ")}\n` +
         `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`,
     )
     this.name = "DriverNotInstalledError"
@@ -290,7 +295,7 @@ export async function loadOptionalDriver(driver: DriverName, specifier: string):
     // Only a resolution failure means "look elsewhere". A package that resolves
     // ambiently but throws while loading is a broken install, and re-reporting
     // it as missing would send the user to install what they already have.
-    if (!isModuleNotFound(ambientError)) throw loadFailure(driver, specifier, ambientError)
+    if (!isModuleNotFound(ambientError, specifier)) throw loadFailure(driver, specifier, ambientError)
 
     const roots = driverSearchRoots()
     const resolved = resolveOptionalPackage(specifier, roots)
@@ -306,11 +311,27 @@ export async function loadOptionalDriver(driver: DriverName, specifier: string):
   }
 }
 
-/** True when `error` means the module could not be resolved, not that it failed while loading. */
-export function isModuleNotFound(error: unknown): boolean {
+/**
+ * True when `error` means **`specifier` itself** could not be resolved.
+ *
+ * A package that loads but whose own dependency tree is incomplete raises the
+ * same error shape — `Cannot find package 'pg-protocol' from '…/pg/lib/
+ * connection.js'` — for a driver that is very much installed. Treating that as
+ * "not installed" sends the user to reinstall something already present. So
+ * when the runtime names the module it could not find, only a name matching
+ * what we asked for counts as missing.
+ */
+export function isModuleNotFound(error: unknown, specifier?: string): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  const named = /Cannot find (?:module|package)\s+['"]([^'"]+)['"]/i.exec(message)
+
+  if (named && specifier) {
+    const missing = named[1]!
+    return missing === specifier || missing === packageNameOf(specifier)
+  }
+
   const code = (error as { code?: string } | null)?.code
   if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true
-  const message = error instanceof Error ? error.message : String(error)
   return /Cannot find (module|package)/i.test(message)
 }
 
@@ -333,7 +354,7 @@ export async function loadOptionalPackage(specifier: string): Promise<any | unde
   try {
     return await import(/* @vite-ignore */ specifier)
   } catch (ambientError) {
-    if (!isModuleNotFound(ambientError)) throw ambientError
+    if (!isModuleNotFound(ambientError, specifier)) throw ambientError
     const resolved = resolveOptionalPackage(specifier)
     if (!resolved) return undefined
     return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
