@@ -148,10 +148,17 @@ const normalizeMatch = (json: object): unknown => {
   // are still correct and useful, and this whole change exists to stop losing matches. Offsets on
   // the `{text}` arm are untouched — no rebasing happens there, so no claim is made.
   const isContinuationByte = (byte: number | undefined) => byte !== undefined && (byte & 0xc0) === 0x80
+  const lineBytes = Buffer.byteLength(lines.text, "utf8")
   const rebase = (offset: unknown): number | undefined => {
-    if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw!.length) return undefined
-    if (offset !== 0 && offset !== raw!.length && isContinuationByte(raw![offset])) return undefined
-    return Buffer.byteLength(raw!.subarray(0, offset).toString("utf8"), "utf8")
+    // `{text}` arm: nothing is rebased, but the offset must still be addressable in the line it
+    // indexes, or the record carries a coordinate pair that points at nothing.
+    if (!raw)
+      return typeof offset === "number" && Number.isInteger(offset) && offset >= 0 && offset <= lineBytes
+        ? offset
+        : undefined
+    if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset > raw.length) return undefined
+    if (offset !== 0 && offset !== raw.length && isContinuationByte(raw[offset])) return undefined
+    return Buffer.byteLength(raw.subarray(0, offset).toString("utf8"), "utf8")
   }
   const submatches = readProp(data, "submatches")
   const normalized = {
@@ -171,7 +178,6 @@ const normalizeMatch = (json: object): unknown => {
             // matched text needs the same bound as the line or the retained-memory cap is defeated
             // by the submatches instead.
             const decoded = { ...submatch, match: { text: capLineText(match.text) } }
-            if (!raw) return [decoded]
             const start = rebase(readProp(submatch, "start"))
             const end = rebase(readProp(submatch, "end"))
             // Endpoints are rebased independently, so ordering is checked explicitly: an inverted

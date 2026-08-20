@@ -118,6 +118,28 @@ describe("RipgrepRecords.parseRecords", () => {
     expect(parsed[0].submatches[0].match.text).toHaveLength(2_003)
   })
 
+  // `{text}` arm: nothing is rebased, but `z.number()` accepts negatives, fractions and values past
+  // the end, so a corrupt record would otherwise reach the `/find` response indexing nothing.
+  test("drops a text-arm submatch whose offset is not addressable in the line", () => {
+    const parsed = RipgrepRecords.parseRecords([
+      record("a.txt", { lines: { text: "needle\n" }, submatches: [{ match: { text: "needle" }, start: 0, end: 999 }] }),
+    ])
+    expect(parsed[0].submatches).toEqual([])
+
+    const fractional = RipgrepRecords.parseRecords([
+      record("a.txt", { lines: { text: "needle\n" }, submatches: [{ match: { text: "needle" }, start: 0.5, end: 6 }] }),
+    ])
+    expect(fractional[0].submatches).toEqual([])
+  })
+
+  // Each submatch costs a rebase per endpoint, and a rebase allocates a string up to the line
+  // length, so an unbounded array turns one in-ceiling record into O(count x line) work.
+  test("bounds the submatch count like the core parser", () => {
+    const many = Array.from({ length: 5_000 }, () => ({ match: { text: "n" }, start: 0, end: 1 }))
+    const parsed = RipgrepRecords.parseRecords([record("a.txt", { submatches: many })])
+    expect(parsed[0].submatches).toHaveLength(100)
+  })
+
   test("returns an empty array when every record is unusable, rather than throwing", () => {
     expect(RipgrepRecords.parseRecords(["{oops", "{also oops"])).toEqual([])
   })

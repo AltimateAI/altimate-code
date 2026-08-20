@@ -348,6 +348,20 @@ describe("Ripgrep", () => {
     expect(matches[0].submatches).toEqual([])
   })
 
+  // The `{text}` arm is not rebased, but an offset still has to be addressable in the line.
+  stubTest("drops a text-arm submatch whose offset is past the end of the line", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { text: "needle\n" },
+          submatches: [{ match: { text: "needle" }, start: 0, end: 999 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
   // Endpoints are rebased independently, so an inverted range can survive both endpoint checks.
   stubTest("drops a submatch whose range is inverted", async () => {
     const matches = await Effect.runPromise(
