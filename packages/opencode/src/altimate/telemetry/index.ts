@@ -89,9 +89,14 @@ const SEP_W = "[\\\\\\/]"
 // never rely on the divergence)
 const pmCI = (w: string) => w.split("").map((c) => ("[" + c + c.toUpperCase() + "]")).join("")
 const pmR = (sep: string) => (sep === SEP_P ? PM_R_P : PM_R)
+const PM_WR = "(?:[^\\s\\/\\\\'\"`,;:\\]}>]|'(?=[\\p{L}\\p{N}_]))"
+const PM_WR_P = "(?:[^\\s\\/'\"`,;:\\]}>]|'(?=[\\p{L}\\p{N}_]))"
+const pmWR = (sep: string) => (sep === SEP_P ? PM_WR_P : PM_WR)
+const PM_SEG_L = "(?=[^\\s'\"`]{0,128}[\\p{L}\\p{M}]|[\\s'\"`,;)\\]}>]|$)"
 const pmSpan = (sep: string) =>
-  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "{0,256}(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){0,6}(?:" + sep + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))|[\"'`](?=" + pmR(sep) + "{1,256}(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){0,6}(?:" + sep + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))))"
-const pmChunks = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "+)+" + sep + pmSpan(sep) + "*)*"
+  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "{0,256}(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){0,2}(?:" + sep + PM_SEG_L + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))|[\"'`](?=" + pmR(sep) + "{1,256}(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){0,2}(?:" + sep + PM_SEG_L + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))))"
+const pmChunks = (sep: string) =>
+  "(?:(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_L + pmSpan(sep) + "*){0,2}"
 // terminal dotted filename: up to four spaced words that END in an extension
 const pmSpFile = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
 const PM_TERM_COND = "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
@@ -112,19 +117,35 @@ const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) 
 // swapped separators. Same approach as Salesforce's telemetry GDPR scrub
 // (os.homedir() literal) and gatsby-telemetry's cleanPaths (cwd prefixes).
 const pmEscape = (v: string) => v.replace(/[-[\]/{}()*+?.\\^$|]/g, "\\$&")
-const PM_KNOWN_PREFIXES: RegExp[] = []
-for (const root of [process.cwd(), os.homedir()]) {
-  if (!root || root.length < 4) continue
+const pmPrefixVariants = (root: string): RegExp[] => {
+  if (!root || root.length < 4) return []
+  const out: RegExp[] = []
   for (const v of new Set([root, root.replace(/\\/g, "\\\\"), root.replace(/\\/g, "/")])) {
-    PM_KNOWN_PREFIXES.push(new RegExp("(?<![\\w.-])" + pmEscape(v), "gi"))
+    out.push(new RegExp("(?<![\\w.-])" + pmEscape(v), "gi"))
   }
+  return out
+}
+const PM_HOME_PREFIXES = pmPrefixVariants(os.homedir())
+// The CLI chdirs into the project after this module loads (tui/attach/run),
+// so the cwd literals are rebuilt whenever process.cwd() changes — a stale
+// import-time cwd would miss exactly the shallow, extensionless project root
+// the structural rules cannot mask.
+let pmCwdCache = ""
+let pmCwdPrefixes: RegExp[] = []
+function pmKnownPrefixes(): RegExp[] {
+  const cwd = process.cwd()
+  if (cwd !== pmCwdCache) {
+    pmCwdCache = cwd
+    pmCwdPrefixes = pmPrefixVariants(cwd)
+  }
+  return [...pmCwdPrefixes, ...PM_HOME_PREFIXES]
 }
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "{0,2}|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*" + SEP_W + "{1,2})*|" + SEP_W + "{1,2})(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + "{1,2}" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\/|" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+){0,6}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_R + "+)*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
-  posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_R_P + "+)*\\/)+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "{0,2}|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\]+" + SEP_W + "))(?:" + PM_R + "+(?:" + PM_SP + "{1,2}" + PM_WR + "{1,64})*" + SEP_W + "{1,2})*|" + SEP_W + "{1,2})(?:" + pmCI("users") + "|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + "{1,2}" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\/|" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256}){0,6}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  posixHome: new RegExp(PM_ANCHOR + "\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_WR_P + "{1,64}){0,2}\\/" + PM_SEG_L + ")*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
+  posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "+(?:" + PM_SP + "{1,2}" + PM_WR_P + "{1,64}){0,2}\\/" + PM_SEG_L + ")+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*[\\\\\\/]|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
 }
 // altimate_change end
@@ -1448,6 +1469,10 @@ export namespace Telemetry {
   // can't reconstruct the original token.
 
   export function maskString(s: string): string {
+    // Consumers truncate masked output to <= 2000 chars; masking beyond 8 KB
+    // of input buys nothing and unbounded input is what turns any super-
+    // linear rule into a stall (a wide generated SELECT reached seconds).
+    if (s.length > 8192) s = s.slice(0, 8192)
     let out = s
       // ANSI CSI sequences (colored subprocess stderr) would otherwise split
       // tokens so neither credential nor path rules can see them
@@ -1456,7 +1481,7 @@ export namespace Telemetry {
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
     // Fast path: a string with no separator cannot contain a path — skip the
     // whole path stack (most telemetry strings carry no path at all).
-    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:\S/.test(out)) {
+    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:[^\s:]{1,255}(?: [^\s:]{1,255}){0,2}\.[A-Za-z]/.test(out)) {
       out = out
       // altimate_change start — mask filesystem paths in error text
       // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and
@@ -1490,7 +1515,7 @@ export namespace Telemetry {
       .replace(PATH_RULES.posixHome, "$1<path>")
       .replace(PATH_RULES.posix, "$1<path>")
         .replace(PATH_RULES.tilde, "$1<path>")
-      for (const re of PM_KNOWN_PREFIXES) out = out.replace(re, "<path>")
+      for (const re of pmKnownPrefixes()) out = out.replace(re, "<path>")
       out = out
         // a literal-prefix mask followed by a structurally-masked remainder
         // collapses to one marker
@@ -1499,7 +1524,7 @@ export namespace Telemetry {
     return out
       // altimate_change end
       // Email addresses — providers occasionally echo caller identity in error text.
-      .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
+      .replace(/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
       // Internal hostnames in URLs — keeps parity with `parseAPICallError`'s
       // `maskInternalHost` so an error message containing the same URL doesn't
       // leak through telemetry while metadata.url is masked. Covers:

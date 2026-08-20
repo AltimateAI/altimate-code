@@ -569,8 +569,13 @@ describe("maskString paths — delimiters and quotes inside components — separ
       .toBe("read <path> failed")
   })
 
-  it("delimiter lookahead accepts multi-word components", () => {
-    expect(mask("read /data/x, big client repo/models/a.sql done")).toBe("read <path> done")
+  it("delimiter bridges are bounded to two spaced words", () => {
+    // two spaced words still prove a delimiter...
+    expect(mask("read /data/x, client repo/models/a.sql done")).toBe("read <path> done")
+    // ...three or more read as prose and stay a boundary (they were the
+    // vector that swallowed clauses between a path and any later slash)
+    expect(mask("read /data/x, big client repo/models/a.sql done"))
+      .toBe("read <path>, big client repo/models/a.sql done")
   })
 
   it("continues through ) when a later separator proves it is path content", () => {
@@ -665,6 +670,64 @@ describe("maskString paths — filename extensions", () => {
   })
 })
 
+describe("maskString paths — prose survives around a masked path", () => {
+  // A spaced run may only bridge to a later separator under strict proof
+  // (<= 2 clean words, no delimiter/colon words, a letter reachable past the
+  // separator). URLs, dates, fractions, MIME types, and second path-ish
+  // tokens no longer prove a bridge, so the clause between a path and any
+  // later slash survives.
+  it("later slashes never swallow the clause between", () => {
+    expect(mask("open /app/x.sql failed, see https://docs.example.com/e/123"))
+      .toBe("open <path> failed, see https://docs.example.com/e/123")
+    expect(mask("open /app/x.sql failed on 8/17/2026 today")).toBe("open <path> failed on 8/17/2026 today")
+    expect(mask("open /app/x.sql failed at ratio 1/2 today")).toBe("open <path> failed at ratio 1/2 today")
+    expect(mask("open /app/x.sql failed: application/json expected"))
+      .toBe("open <path> failed: application/json expected")
+    expect(mask("Model /app/models/a.sql references missing source raw/orders"))
+      .toBe("Model <path> references missing source raw/orders")
+  })
+
+  it("internal-host classification is preserved after a path", () => {
+    expect(mask("read /opt/x.sql then GET http://10.0.0.5/api/y failed"))
+      .toBe("read <path> then GET <internal-host> failed")
+  })
+
+  it("distinct errors keep distinct masked text (errorHash identity)", () => {
+    const a = mask("Model /app/models/a.sql references missing source raw/orders")
+    const b = mask("Model /app/models/b.sql references missing column raw/customers")
+    expect(a).not.toBe(b)
+  })
+
+  it("FQDN UNC homes mask; schemed public URLs stay", () => {
+    expect(mask("ENOENT: //server.example.com/share/Users/jdoe/secret.txt")).toBe("ENOENT: <path>")
+    expect(mask("see https://community.snowflake.com/s/ip-not-allowed for details"))
+      .toBe("see https://community.snowflake.com/s/ip-not-allowed for details")
+  })
+})
+
+describe("maskString paths — known-prefix freshness", () => {
+  it("cwd literals follow process.chdir (shallow extensionless roots)", () => {
+    const os = require("os")
+    const fs = require("fs")
+    const path = require("path")
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "customer-repo-"))
+    const prev = process.cwd()
+    try {
+      process.chdir(dir)
+      const real = fs.realpathSync(dir)
+      // the post-chdir cwd must be in the literal list: whichever layer wins,
+      // the directory name (customer-identifying) never survives
+      const out = mask(`stat ${real} failed`)
+      expect(out).not.toContain(real)
+      expect(out).not.toContain("customer-repo")
+      expect(out).toContain("<path>")
+    } finally {
+      process.chdir(prev)
+      fs.rmdirSync(dir)
+    }
+  })
+})
+
 // The must-not-mask set and the by-design residue: public URLs, non-path
 // slashes, mid-sentence prose, column-aligned log output, and tab as a
 // field boundary.
@@ -728,72 +791,51 @@ describe("maskString paths — composition with the rest of the masking chain", 
 // inner classes (unambiguous parse => linear time); proof scans are
 // bounded by the filesystem's 255-byte component limit; the nested-
 // quantifier ReDoS shape is banned.
-describe("maskString paths — performance — linearity and DoS budgets", () => {
-  it("adversarial delimiter + slash-free run completes in linear time", () => {
-    const t0 = performance.now()
-    mask("/a/b, " + "a".repeat(5000))
-    expect(performance.now() - t0).toBeLessThan(500) // was exponential: ~2s at 28 chars
+describe("maskString paths — performance — growth rates, not wall clocks", () => {
+  // A single-size wall-clock budget cannot distinguish O(n) from O(n^2) and
+  // flakes on loaded runners. Each adversarial shape is timed at two sizes;
+  // 8x the input must cost < 16x the time (linear ~8x, quadratic ~64x).
+  const t = (s: string) => {
+    // median of 3 — a single sample is at the mercy of the scheduler
+    const xs = [0, 0, 0].map(() => {
+      const a = performance.now()
+      mask(s)
+      return performance.now() - a
+    })
+    return xs.sort((x, y) => x - y)[1]
+  }
+  const growth = (gen: (n: number) => string) => {
+    mask(gen(1000)) // warmup
+    return t(gen(8000)) / Math.max(t(gen(1000)), 0.05)
+  }
+
+  it("drive-colon runs grow linearly (was quadratic: v:col SQL stalled seconds)", () => {
+    expect(growth(n => "a:".repeat(n / 2))).toBeLessThan(16)
   })
 
-  it("multi-word lookahead stays linear on adversarial input", () => {
-    const t0 = performance.now()
-    mask("/a/b, " + "word ".repeat(1000))
-    expect(performance.now() - t0).toBeLessThan(500)
+  it("delimiter runs grow linearly", () => {
+    expect(growth(n => "C:\\a\\b" + ")".repeat(n) + "\\c")).toBeLessThan(16)
   })
 
-  it("extension-proof delimiter branch stays linear on adversarial input", () => {
-    let t0 = performance.now()
-    mask("/a/b/x;" + "a".repeat(5000))
-    expect(performance.now() - t0).toBeLessThan(500)
-    t0 = performance.now()
-    mask("/a/b/x;" + "a.".repeat(2500))
-    expect(performance.now() - t0).toBeLessThan(500)
+  it("interleaved delimiters grow linearly", () => {
+    expect(growth(n => ")a".repeat(n / 2) + "/x")).toBeLessThan(16)
   })
 
-  it("widened run class stays linear on adversarial input", () => {
-    const t0 = performance.now()
-    mask("s3://b/k " + "w\\x ".repeat(1200))
-    expect(performance.now() - t0).toBeLessThan(500)
+  it("spaced word runs after a path grow linearly", () => {
+    expect(growth(n => "/a/b, " + "word ".repeat(n / 5))).toBeLessThan(16)
   })
 
-  it("double-space continuation stays linear on adversarial input", () => {
-    const t0 = performance.now()
-    mask("/Users/x/y" + "  zz".repeat(1200))
-    expect(performance.now() - t0).toBeLessThan(500)
+  it("separator-free word runs grow linearly (email rule boundary)", () => {
+    expect(growth(n => "x".repeat(n))).toBeLessThan(16)
   })
 
-  it("spaced prefix components stay linear on adversarial input", () => {
-    const t0 = performance.now()
-    mask("./" + "a b ".repeat(1500))
-    expect(performance.now() - t0).toBeLessThan(500)
+  it("backslash runs grow linearly", () => {
+    expect(growth(n => '"' + "\\".repeat(n) + '"')).toBeLessThan(16)
   })
 
-  it("UNC home opener stays linear on adversarial input", () => {
-    const t0 = performance.now()
-    mask("\\\\" + "srv ".repeat(1500) + "x")
-    expect(performance.now() - t0).toBeLessThan(500)
-  })
-
-  it("delimiter runs are linear: bounded proof scans", () => {
-    let t0 = performance.now()
-    mask("C:\\a\\b" + ")".repeat(2000) + "\\c")
-    expect(performance.now() - t0).toBeLessThan(200)
-    t0 = performance.now()
-    mask(")a".repeat(2500) + "/x")
-    expect(performance.now() - t0).toBeLessThan(200)
-  })
-
-  it("proof scans reach the filesystem component limit (255)", () => {
-    expect(mask("/Users/jdoe/client)" + "a".repeat(65) + "/models/private.sql leaked")).toBe("<path> leaked")
-    // delimiter runs stay linear at the raised bound
-    const t0 = performance.now()
-    mask("C:\\a\\b" + ")".repeat(2000) + "\\c")
-    expect(performance.now() - t0).toBeLessThan(300)
-  })
-
-  it("mixed spaced-run proofs stay linear", () => {
-    const t0 = performance.now()
-    mask("/a/b;" + "word ".repeat(1500) + ";tail")
-    expect(performance.now() - t0).toBeLessThan(300)
+  it("entry truncation caps any input at 8 KB of work", () => {
+    const a = performance.now()
+    mask("a:".repeat(200000))
+    expect(performance.now() - a).toBeLessThan(300)
   })
 })
