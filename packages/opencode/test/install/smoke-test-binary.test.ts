@@ -22,6 +22,7 @@ import fs from "fs"
 // altimate_change — #1052 D10: sha256 for stamp-based staleness check.
 import { createHash } from "node:crypto"
 import { tmpdir } from "../fixture/fixture"
+import { walkInputs } from "../../script/stamp-inputs"
 
 const PKG_DIR = path.resolve(import.meta.dir, "../..")
 const REPO_ROOT = path.resolve(PKG_DIR, "../..")
@@ -37,8 +38,7 @@ function findLocalBinary(): string | undefined {
   if (!fs.existsSync(distDir)) return undefined
 
   // node `process.platform` → build's `<os>` slug.
-  const hostOsSlug =
-    process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux"
+  const hostOsSlug = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux"
   // Build only emits arm64 / x64.
   const hostArchSlug = process.arch === "arm64" ? "arm64" : "x64"
 
@@ -162,15 +162,29 @@ type BuildStamp = {
   target: string
   version: string
   aggregate: string
+  roots?: string[]
   inputs: Array<{ path: string; sha256: string }>
+}
+// Bot-review fix: `as BuildStamp` is a compile-time claim, not a runtime check.
+// A stamp of `{"inputs":"x"}` passed the old `parsed?.inputs?.length` guard
+// (a string has a length), then destructured characters in the loop below and
+// threw on `path.join(REPO_ROOT, undefined)`. Validate the shape instead.
+const readProp = (value: unknown, key: string): unknown =>
+  value !== null && typeof value === "object" && key in value ? Reflect.get(value, key) : undefined
+
+function isStampShape(value: unknown): value is BuildStamp {
+  const inputs = readProp(value, "inputs")
+  if (!Array.isArray(inputs) || inputs.length === 0) return false
+  return inputs.every(
+    (entry) => typeof readProp(entry, "path") === "string" && typeof readProp(entry, "sha256") === "string",
+  )
 }
 function readBuildStamp(binaryPath: string): BuildStamp | undefined {
   const stampPath = path.join(path.dirname(binaryPath), "build-inputs.json")
   try {
     if (!fs.existsSync(stampPath)) return undefined
-    const parsed = JSON.parse(fs.readFileSync(stampPath, "utf-8")) as BuildStamp
-    if (!parsed?.inputs?.length) return undefined
-    return parsed
+    const parsed: unknown = JSON.parse(fs.readFileSync(stampPath, "utf-8"))
+    return isStampShape(parsed) ? parsed : undefined
   } catch {
     return undefined
   }
@@ -194,6 +208,17 @@ function isBinaryStaleFromStamp(binaryPath: string): boolean | "no-stamp" {
     if (current === undefined) return true // input vanished → binary can't reflect current tree
     if (current !== sha256) return true
   }
+  // Bot-review fix: rehashing the recorded inputs only catches CHANGED and
+  // DELETED files. A source file ADDED after the build is in neither list, so
+  // the binary is stale while every recorded hash still matches. Re-enumerate
+  // the roots the build walked, using the same shared rules, and treat an
+  // unrecorded file as stale.
+  const recorded = new Set(stamp.inputs.map((i) => i.path))
+  for (const rel of stamp.roots ?? []) {
+    for (const abs of walkInputs(path.join(REPO_ROOT, rel))) {
+      if (!recorded.has(path.relative(REPO_ROOT, abs))) return true
+    }
+  }
   return false
 }
 // altimate_change end
@@ -204,22 +229,14 @@ describe("compiled binary smoke test", () => {
   // back to the mtime walk when the stamp is absent (older `bun run build:local`
   // runs, or targets built before the stamp landed).
   const stampVerdict = binary ? isBinaryStaleFromStamp(binary) : ("no-stamp" as const)
-  const stale =
-    binary === undefined
-      ? false
-      : stampVerdict === "no-stamp"
-        ? isBinaryStale(binary)
-        : stampVerdict
+  const stale = binary === undefined ? false : stampVerdict === "no-stamp" ? isBinaryStale(binary) : stampVerdict
   const skip = !binary || stale
   const runTest = skip ? test.skip : test
 
   if (!binary) {
     test.skip("no local build found — run `bun run build:local` first", () => {})
   } else if (stale) {
-    test.skip(
-      "local binary is stale (build-inputs stamp mismatch or newer src/script mtime) — run `bun run build:local` to refresh",
-      () => {},
-    )
+    test.skip("local binary is stale (build-inputs stamp mismatch or newer src/script mtime) — run `bun run build:local` to refresh", () => {})
   }
 
   runTest("binary starts and prints version", () => {

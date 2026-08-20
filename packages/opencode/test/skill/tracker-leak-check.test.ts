@@ -12,6 +12,10 @@
 // source. Grep the repo for `\bAI-\d+` and this file returns nothing.
 
 import { describe, expect, test } from "bun:test"
+import { spawnSync } from "child_process"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import { RULES } from "../../../../script/check-tracker-leaks"
 
 const jiraRule = RULES.find((r) => r.name.startsWith("Jira ticket key"))!
@@ -104,5 +108,91 @@ describe("Atlassian URL regex", () => {
   test("does not match unrelated atlassian hosts", () => {
     expect(matches(urlRule.pattern, "acme.atlassian.net")).toEqual([])
     expect(matches(urlRule.pattern, "docs.atlassian.com")).toEqual([])
+  })
+})
+
+// altimate_change — bot-review fix: end-to-end coverage of the scanner's git
+// behaviour, not just its regexes. These run the real script against throwaway
+// repositories, because the failures the reviewers found were all in how the
+// scanner picks WHAT to scan, which the regex tests cannot see. The script is
+// invoked as a subprocess rather than importing its internals, so nothing has
+// to be exported purely for tests. Leak fixtures still come from `key()`, so no
+// tracker-shaped literal enters this file.
+describe("scanner end-to-end (git behaviour)", () => {
+  const SCRIPT = path.resolve(import.meta.dir, "../../../../script/check-tracker-leaks.ts")
+  const ZERO = "0".repeat(40)
+
+  function repo(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-e2e-"))
+    const git = (...args: string[]) => spawnSync("git", args, { cwd: dir, encoding: "utf-8" })
+    git("init", "-q", "-b", "main", ".")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "test")
+    return dir
+  }
+  const git = (dir: string, ...args: string[]) => spawnSync("git", args, { cwd: dir, encoding: "utf-8" })
+  function run(dir: string, stdin?: string) {
+    return spawnSync("bun", [SCRIPT], { cwd: dir, encoding: "utf-8", input: stdin ?? "" })
+  }
+  function commit(dir: string, text: string, message: string) {
+    fs.appendFileSync(path.join(dir, "f.txt"), text + "\n")
+    git(dir, "add", "-A")
+    git(dir, "commit", "-qm", message)
+  }
+  function baseline(dir: string) {
+    commit(dir, "base", "init")
+    git(dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+  }
+
+  test("a repository with no commits is a clean scan, not a hard failure", () => {
+    // `rev-parse --abbrev-ref HEAD` exits 128 on an unborn HEAD; failing loud
+    // there contradicted the documented brand-new-repo path.
+    expect(run(repo()).status).toBe(0)
+  })
+
+  test("a clean branch passes silently", () => {
+    const dir = repo()
+    baseline(dir)
+    git(dir, "checkout", "-qb", "feature")
+    commit(dir, "nothing to see", "clean work")
+    const r = run(dir)
+    expect(r.status).toBe(0)
+    expect(r.stderr).toBe("")
+  })
+
+  test("a tracker reference in an added line fails the scan", () => {
+    const dir = repo()
+    baseline(dir)
+    git(dir, "checkout", "-qb", "feature")
+    commit(dir, `see ${key(1234)} for context`, "leaky work")
+    const r = run(dir)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain(key(1234))
+  })
+
+  test("scans the ref being pushed, not the checked-out branch", () => {
+    // git hands a pre-push hook `<local ref> <local sha> <remote ref> <remote sha>`.
+    // Scanning HEAD regardless let `git push origin dirty:other` approve a ref
+    // nobody had looked at.
+    const dir = repo()
+    baseline(dir)
+    git(dir, "checkout", "-qb", "dirty")
+    commit(dir, `hidden ${key(9999)}`, "leaky work")
+    const dirtySha = git(dir, "rev-parse", "dirty").stdout.trim()
+    git(dir, "checkout", "-q", "main") // HEAD is now clean
+
+    expect(run(dir).status).toBe(0) // no stdin → HEAD only → misses it
+    const pushed = run(dir, `refs/heads/dirty ${dirtySha} refs/heads/other ${ZERO}\n`)
+    expect(pushed.status).toBe(1)
+    expect(pushed.stderr).toContain(key(9999))
+  })
+
+  test("a deletion-only push scans nothing rather than falling back to HEAD", () => {
+    const dir = repo()
+    baseline(dir)
+    git(dir, "checkout", "-qb", "dirty")
+    commit(dir, `hidden ${key(4242)}`, "leaky work") // HEAD is dirty on purpose
+    const r = run(dir, `(delete) ${ZERO} refs/heads/gone ${"1".repeat(40)}\n`)
+    expect(r.status).toBe(0)
   })
 })

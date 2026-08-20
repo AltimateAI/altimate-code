@@ -136,12 +136,23 @@ export namespace ModelsDev {
       // parse failure, log and return empty — same graceful-degradation path
       // as the non-2xx branch, and we don't poison the disk cache with junk.
       if (!result2.ok) return {}
-      let parsed: Record<string, unknown>
+      let parsed: unknown
       try {
         parsed = JSON.parse(result2.text)
       } catch (e) {
         log.error("models.dev returned non-JSON body; not caching", {
           error: e,
+          firstBytes: result2.text.slice(0, 120),
+        })
+        return {}
+      }
+      // Bot-review follow-up: syntactically valid JSON is not necessarily the
+      // catalog. `null`, `[]` and scalars all survive JSON.parse — a shape a
+      // misconfigured proxy returns with a JSON content-type. Caching one of
+      // those poisons the disk cache for the whole TTL, and `get()` casts it to
+      // `Record<string, Provider>` for `fromModelsDevProvider` to iterate.
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        log.error("models.dev returned JSON that is not a catalog object; not caching", {
           firstBytes: result2.text.slice(0, 120),
         })
         return {}
@@ -195,18 +206,22 @@ if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-c
   // via the hourly `setInterval` below (`.unref()`'d so it never blocks exit).
   //
   // Trade-off: without an eager fetch, models added to models.dev between
-  // releases would not appear until the hourly interval below fires. The
-  // fire-and-forget refresh() below narrows that window without holding the
-  // event loop — a microtask can't itself keep Bun alive, and if the fetch it
-  // schedules is still in flight at process-exit, the snapshot covers callers
-  // on the next run. The load-bearing part of the D14 fix (removing the
-  // setTimeout(...,0)-wrapped fetch that kept the loop alive) is preserved.
+  // releases do not appear until a long-running process's hourly interval
+  // fires, or until the disk cache expires and a caller loads on demand. That
+  // is accepted deliberately.
   //
-  // If this reintroduces the unshare-net hang on CI, drop the Promise.then
-  // line — the snapshot alone still keeps release binaries functional offline.
-  Promise.resolve().then(() => ModelsDev.refresh().catch(() => {}))
-  setInterval(async () => {
-    await ModelsDev.refresh()
-  }, 60 * 60 * 1000).unref()
+  // An earlier revision tried to narrow that window with
+  // `Promise.resolve().then(() => ModelsDev.refresh())`, reasoning that a
+  // microtask cannot keep Bun alive. The microtask cannot — but the `fetch()`
+  // it starts can, and that is the whole failure. On a cold cache `refresh()`
+  // reaches `fetchApi()`, whose `AbortSignal.timeout(10000)` still cannot
+  // cancel a blocking `getaddrinfo()`. That is the D14 shape exactly, so the
+  // eager refresh is gone rather than rescheduled.
+  setInterval(
+    async () => {
+      await ModelsDev.refresh()
+    },
+    60 * 60 * 1000,
+  ).unref()
   // altimate_change end
 }

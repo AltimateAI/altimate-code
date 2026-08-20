@@ -17,6 +17,7 @@ process.chdir(dir)
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+import { walkInputs } from "./stamp-inputs"
 
 // Python engine has been eliminated — all methods run natively in TypeScript.
 // ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
@@ -147,43 +148,49 @@ const allTargets: {
 ]
 
 // If --targets is provided, filter to only matching OS values
-const validOsValues = new Set(allTargets.map(t => t.os))
-const targetsFlag = process.argv.find(a => a.startsWith('--targets='))?.split('=')[1]?.split(',')
+const validOsValues = new Set(allTargets.map((t) => t.os))
+const targetsFlag = process.argv
+  .find((a) => a.startsWith("--targets="))
+  ?.split("=")[1]
+  ?.split(",")
 if (targetsFlag) {
-  const invalid = targetsFlag.filter(t => !validOsValues.has(t))
+  const invalid = targetsFlag.filter((t) => !validOsValues.has(t))
   if (invalid.length > 0) {
-    console.error(`error: invalid --targets value(s): ${invalid.join(', ')}. Valid values: ${[...validOsValues].join(', ')}`)
+    console.error(
+      `error: invalid --targets value(s): ${invalid.join(", ")}. Valid values: ${[...validOsValues].join(", ")}`,
+    )
     process.exit(1)
   }
 }
 
 // --target-index=N builds a single target by index (for parallel CI matrix)
-const targetIndexFlag = process.argv.find(a => a.startsWith('--target-index='))?.split('=')[1]
+const targetIndexFlag = process.argv.find((a) => a.startsWith("--target-index="))?.split("=")[1]
 
-const targets = targetIndexFlag !== undefined
-  ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
-  : singleFlag
-  ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
-        return false
-      }
+const targets =
+  targetIndexFlag !== undefined
+    ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
+    : singleFlag
+      ? allTargets.filter((item) => {
+          if (item.os !== process.platform || item.arch !== process.arch) {
+            return false
+          }
 
-      // When building for the current platform, prefer a single native binary by default.
-      // Baseline binaries require additional Bun artifacts and can be flaky to download.
-      if (item.avx2 === false) {
-        return baselineFlag
-      }
+          // When building for the current platform, prefer a single native binary by default.
+          // Baseline binaries require additional Bun artifacts and can be flaky to download.
+          if (item.avx2 === false) {
+            return baselineFlag
+          }
 
-      // also skip abi-specific builds for the same reason
-      if (item.abi !== undefined) {
-        return false
-      }
+          // also skip abi-specific builds for the same reason
+          if (item.abi !== undefined) {
+            return false
+          }
 
-      return true
-    })
-  : targetsFlag
-    ? allTargets.filter(t => targetsFlag.includes(t.os))
-    : allTargets
+          return true
+        })
+      : targetsFlag
+        ? allTargets.filter((t) => targetsFlag.includes(t.os))
+        : allTargets
 
 // Defense in depth: refuse to produce no artifacts at all, and refuse to build
 // the glibc target on a musl host where the binary would crash at startup.
@@ -196,13 +203,14 @@ const targets = targetIndexFlag !== undefined
 //     `linux-x64` (glibc), produces a glibc binary that the musl host can't
 //     load, and dies later with a cryptic linker error.
 if (targets.length === 0) {
-  const reason = targetIndexFlag !== undefined
-    ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
-    : singleFlag
-      ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
-      : targetsFlag
-        ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
-        : "allTargets is empty."
+  const reason =
+    targetIndexFlag !== undefined
+      ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
+      : singleFlag
+        ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
+        : targetsFlag
+          ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
+          : "allTargets is empty."
   console.error(`error: no build targets selected. ${reason}`)
   process.exit(1)
 }
@@ -221,8 +229,12 @@ if (singleFlag && process.platform === "linux") {
     return false
   })()
   if (isMuslHost) {
-    console.error("error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.")
-    console.error("       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.")
+    console.error(
+      "error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.",
+    )
+    console.error(
+      "       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.",
+    )
     process.exit(1)
   }
 }
@@ -240,10 +252,18 @@ await $`rm -rf dist`
 const requiredExternals: string[] = []
 const optionalExternals = [
   // Database drivers — native addons, users install on demand per warehouse
-  "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
-  "mysql2", "mssql", "oracledb", "duckdb",
+  "pg",
+  "snowflake-sdk",
+  "@google-cloud/bigquery",
+  "@databricks/sql",
+  "mysql2",
+  "mssql",
+  "oracledb",
+  "duckdb",
   // Optional infra packages — native addons or heavy optional deps
-  "keytar", "ssh2", "dockerode",
+  "keytar",
+  "ssh2",
+  "dockerode",
 ]
 
 const binaries: Record<string, string> = {}
@@ -267,7 +287,9 @@ function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?
   platformTag: string
 } {
   if (item.abi === "musl") {
-    throw new Error(`No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`)
+    throw new Error(
+      `No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`,
+    )
   }
   if (item.os === "darwin") {
     const tag = `darwin-${item.arch}`
@@ -282,7 +304,9 @@ function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?
       const tag = "win32-x64-msvc"
       return { pkg: `@altimateai/altimate-core-${tag}`, nodeFile: `altimate-core.${tag}.node`, platformTag: tag }
     }
-    throw new Error(`No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`)
+    throw new Error(
+      `No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`,
+    )
   }
   throw new Error(`Unsupported build target: ${item.os}-${item.arch}`)
 }
@@ -299,9 +323,7 @@ const altimateCoreLoaderDir = fs.realpathSync(path.dirname(altimateCoreLoaderPkg
 // .node into today's release archive.
 {
   const expected = pkg.dependencies["@altimateai/altimate-core"]
-  const resolvedVersion = JSON.parse(
-    fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8"),
-  ).version
+  const resolvedVersion = JSON.parse(fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8")).version
   if (resolvedVersion !== expected) {
     throw new Error(
       `build.ts: resolved @altimateai/altimate-core version ${resolvedVersion} ` +
@@ -568,33 +590,24 @@ for (const item of targets) {
   // altimate_change — #1052 D10 review-fix (M2): package.json + bun.lock cover
   // dependency-version bumps that change what Bun.build embeds. Without these,
   // `bun install` bumping a bundled dep would leave the stamp reporting fresh.
-  // Include per-package package.json in the workspace walk below.
+  // Sibling workspace manifests are added in the packages walk below; this
+  // package's own manifest is added here, because that walk skips `opencode`
+  // (its src/ and script/ trees are already covered) and would otherwise leave
+  // `imports`, `exports` and other bundler-relevant fields unstamped.
   addFile(path.join(REPO_ROOT, "package.json"))
   addFile(path.join(REPO_ROOT, "bun.lock"))
+  addFile(path.join(dir, "package.json"))
   // Also include tsconfig files that affect compiled output shape
   // (bot review: tsconfig changes can flip target/moduleResolution).
   addFile(path.join(dir, "tsconfig.json"))
-  // src/ + script/ TypeScript tree — hash every file the compiler actually saw
-  // (same extension filter build.ts globs for embedding).
-  const IGNORED = new Set(["node_modules", ".turbo", ".cache", "dist", "target"])
+  // src/ + script/ TypeScript tree — hash every file the compiler actually saw.
+  // The walk rules live in ./build-inputs so the smoke-test guard can
+  // re-enumerate with identical rules and notice files ADDED after the build.
+  const walkedRoots: string[] = []
   const walk = (root: string): void => {
-    let entries: fs.Dirent[]
-    try {
-      entries = fs.readdirSync(root, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue
-      if (IGNORED.has(entry.name)) continue
-      const full = path.join(root, entry.name)
-      if (entry.isDirectory()) {
-        walk(full)
-        continue
-      }
-      if (!/\.(tsx?|json|txt|md)$/.test(entry.name)) continue
-      addFile(full)
-    }
+    if (!fs.existsSync(root)) return
+    walkedRoots.push(path.relative(REPO_ROOT, root))
+    for (const file of walkInputs(root)) addFile(file)
   }
   walk(path.join(dir, "src"))
   walk(path.join(dir, "script"))
@@ -633,6 +646,9 @@ for (const item of targets) {
         target: name,
         version: Script.version,
         aggregate,
+        // Roots the walk covered, so the read side can detect files added after
+        // the build rather than only rehashing what was present at build time.
+        roots: [...new Set(walkedRoots)].sort(),
         inputs: stampInputs,
       },
       null,

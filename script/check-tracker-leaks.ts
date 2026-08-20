@@ -43,7 +43,8 @@ export const RULES = [
   {
     name: "Jira ticket key (AI-<digits>)",
     pattern: /\bAI-\d+/g,
-    remediation: "Rename branch / rewrite commit / delete text. Track work via GitHub issues on AltimateAI/altimate-code.",
+    remediation:
+      "Rename branch / rewrite commit / delete text. Track work via GitHub issues on AltimateAI/altimate-code.",
   },
   {
     name: "Atlassian instance URL",
@@ -75,10 +76,7 @@ type Hit = {
 // "expected empty result" (mergeBase against a diverged history) from
 // "unexpected failure" (git binary missing, corrupt index) so the latter
 // fails loud rather than reporting the branch as clean.
-async function git(
-  args: string[],
-  opts: { failOnError?: boolean } = { failOnError: true },
-): Promise<string> {
+async function git(args: string[], opts: { failOnError?: boolean } = { failOnError: true }): Promise<string> {
   const r = await $`git ${args}`.quiet().nothrow()
   if (r.exitCode !== 0) {
     if (opts.failOnError) {
@@ -122,25 +120,72 @@ async function main() {
     process.exit(2)
   }
 
-  const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"])
-  // merge-base can legitimately return empty (no shared history) — don't fail loud on that.
-  const mergeBase = await git(["merge-base", "HEAD", base], { failOnError: false })
+  // Bot-review fix: git hands a pre-push hook one line per ref being pushed on
+  // stdin (`<local ref> <local sha> <remote ref> <remote sha>`). Scanning HEAD
+  // regardless meant `git push origin feature:other` — or pushing any branch
+  // that is not the checked-out one — approved refs nobody had looked at.
+  // Prefer the pushed tips when stdin gives them; fall back to HEAD otherwise
+  // (manual runs, CI).
+  const pushed = await readPushedRefs()
+  // Distinguish "git handed us refs" from "no stdin" (manual run / CI). A push
+  // made up only of deletions yields refs but no tips to scan, and must NOT
+  // fall back to HEAD — HEAD is unrelated to the ref being deleted, and would
+  // fail a push that adds no content at all.
+  if (pushed.hadInput && pushed.tips.length === 0) return
+  const tips = pushed.hadInput ? pushed.tips : [{ ref: "HEAD", sha: "HEAD" }]
+
+  // Bot-review fix: an unborn HEAD (freshly `git init`, zero commits) makes
+  // `rev-parse --abbrev-ref HEAD` exit 128. Failing loud there contradicted the
+  // documented "brand-new repo → silent success" path below, so this one lookup
+  // tolerates failure while every other git call still fails hard.
+  const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], { failOnError: false })
+
+  const hits: Hit[] = []
+  if (branch) scanText(branch, "branch name", hits)
+  for (const tip of tips) await scanTip(tip, base, hits)
+  reportAndExit(hits)
+}
+
+/** One `<local ref> <local sha> <remote ref> <remote sha>` line per pushed ref. */
+async function readPushedRefs(): Promise<{ hadInput: boolean; tips: Array<{ ref: string; sha: string }> }> {
+  if (process.stdin.isTTY) return { hadInput: false, tips: [] }
+  try {
+    const raw = await new Response(Bun.stdin.stream()).text()
+    const rows = raw
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => l.split(/\s+/))
+      .filter((parts) => parts.length >= 2 && /^[0-9a-f]{40}$/i.test(parts[1]))
+    return {
+      hadInput: rows.length > 0,
+      // An all-zero local sha means the ref is being DELETED — no content to scan.
+      tips: rows.filter((parts) => !/^0{40}$/.test(parts[1])).map((parts) => ({ ref: parts[0], sha: parts[1] })),
+    }
+  } catch {
+    return { hadInput: false, tips: [] }
+  }
+}
+
+async function scanTip(tip: { ref: string; sha: string }, base: string, hits: Hit[]) {
+  const mergeBase = await git(["merge-base", tip.sha, base], { failOnError: false })
   if (!mergeBase) {
-    // No shared history with base — either brand-new repo or base doesn't exist locally.
-    // Silent success: nothing to check.
+    // No shared history with base — brand-new repo, or base missing locally
+    // (common on a shallow clone). Bot-review fix: say so on stderr instead of
+    // exiting silently, so a guard that has disabled itself is visible rather
+    // than looking like a clean scan.
+    process.stderr.write(
+      `tracker-leak check: no merge-base between ${tip.ref} and ${base}; skipping content scan. ` +
+        `Fetch the base ref (\`git fetch origin main\`) or pass --base=<ref> to enable it.\n`,
+    )
     return
   }
 
-  const ahead = Number(await git(["rev-list", "--count", `${mergeBase}..HEAD`]))
-  const hits: Hit[] = []
-
-  // 1. Branch name
-  scanText(branch, "branch name", hits)
-
+  const ahead = Number(await git(["rev-list", "--count", `${mergeBase}..${tip.sha}`]))
   if (ahead > 0) {
     // 2. Commit messages of local commits
-    const messages = await git(["log", `${mergeBase}..HEAD`, "--format=%B%x00"])
-    scanText(messages, `${ahead} commit message(s) ahead of ${base}`, hits)
+    const messages = await git(["log", `${mergeBase}..${tip.sha}`, "--format=%B%x00"])
+    scanText(messages, `${ahead} commit message(s) on ${tip.ref} ahead of ${base}`, hits)
 
     // 3. Added lines in the pushed diff. `--unified=0` narrows context; only
     //    real content additions count. Every diff line starting with `+`
@@ -151,14 +196,16 @@ async function main() {
     //    filter matches the file header exactly: `+++ ` (with the trailing
     //    space or tab), so content lines whose first non-plus is anything
     //    else — including tracker-shaped strings — still get scanned.
-    const diff = await git(["diff", "--unified=0", `${mergeBase}...HEAD`])
+    const diff = await git(["diff", "--unified=0", `${mergeBase}...${tip.sha}`])
     const added = diff
       .split("\n")
       .filter((l) => l.startsWith("+") && !l.startsWith("+++ ") && !l.startsWith("+++\t"))
       .join("\n")
-    scanText(added, `${ahead}-commit diff vs ${base} (added lines)`, hits)
+    scanText(added, `${tip.ref}: ${ahead}-commit diff vs ${base} (added lines)`, hits)
   }
+}
 
+function reportAndExit(hits: Hit[]) {
   if (hits.length === 0) {
     // Silent on clean runs — pre-push hooks should be quiet on success.
     return

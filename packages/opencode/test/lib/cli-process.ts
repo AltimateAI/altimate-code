@@ -47,7 +47,9 @@ const prebuiltCli = process.env.OPENCODE_TEST_CLI ? path.resolve(process.env.OPE
 // does not complete in the isolated test env (it hangs without exiting), while `bun run src` handles them
 // in ~1s. Those tests opt in via `bunRun: true`; everything else uses the fast prebuilt binary.
 function cliCommand(args: string[], bunRun = false): string[] {
-  return prebuiltCli && !bunRun ? [prebuiltCli, ...args] : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
+  return prebuiltCli && !bunRun
+    ? [prebuiltCli, ...args]
+    : [bunExecutable, "run", "--conditions=browser", cliEntry, ...args]
 }
 
 export const testModelID = "test/test-model"
@@ -330,8 +332,13 @@ export function withCliFixture<A, E>(
                 .filter((e) => /^opencode.*\.db(-wal|-shm)?$/.test(e))
                 .map((e) => fsPromises.rm(path.join(dbDir, e), { force: true })),
             )
-          } catch {
-            // Directory absent or unreadable — nothing to clean. Retry proceeds.
+          } catch (error) {
+            // Bot-review fix: this used to swallow everything, so a permission
+            // error or a failed removal let the retry start on half-written
+            // SQLite state — the exact condition the scrub exists to prevent.
+            // A missing directory is the one benign case: nothing to clean.
+            const code = error && typeof error === "object" && "code" in error ? Reflect.get(error, "code") : undefined
+            if (code !== "ENOENT") throw error
           }
         })
         const elapsed = Date.now() - startedAt
