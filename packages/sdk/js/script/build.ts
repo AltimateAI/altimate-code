@@ -58,6 +58,36 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
+// Re-apply the JSON-parse guard: `clean: true` above wipes src/v2/gen, so an
+// edit inside client.gen.ts alone would be deleted on every release build
+// (script/publish.ts runs this file in prepareReleaseFiles). A 200 whose body
+// is an HTML error page from a proxy/gateway/CDN otherwise crashes with a raw
+// "JSON Parse error: Unrecognized token '<'".
+const jsonGuardPath = "./src/v2/gen/client/client.gen.ts"
+const jsonGuardFile = Bun.file(jsonGuardPath)
+const jsonGuardSource = await jsonGuardFile.text()
+const jsonGuardNeedle = "          data = text ? JSON.parse(text) : {};"
+const jsonGuardBlock = [
+  "          // altimate_change start — upstream_fix: guard JSON parse against non-JSON (HTML) response bodies",
+  "          // Re-applied by script/build.ts after codegen; edit it THERE, not here.",
+  "          try {",
+  "            data = text ? JSON.parse(text) : {}",
+  "          } catch (cause) {",
+  "            throw new Error(",
+  "              \`Expected a JSON response from \${request.method} \${request.url} but the body was not JSON \` +",
+  "                \`(HTTP \${response.status}, content-type \${response.headers.get(\"content-type\") ?? \"unset\"}). \` +",
+  "                \`This is usually a proxy or gateway error page, not the API.\`,",
+  "              { cause: { parseError: cause, status: response.status, body: text.slice(0, 200) } },",
+  "            )",
+  "          }",
+  "          // altimate_change end",
+].join("\n")
+const jsonGuardPatched = jsonGuardSource.replace(jsonGuardNeedle, jsonGuardBlock)
+if (jsonGuardPatched === jsonGuardSource) {
+  throw new Error(`json-guard patch did not apply; @hey-api/client-fetch output may have changed (${jsonGuardPath})`)
+}
+await Bun.write(jsonGuardPath, jsonGuardPatched)
+
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`

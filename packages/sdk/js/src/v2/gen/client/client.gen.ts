@@ -172,13 +172,15 @@ export const createClient = (config: Config = {}): Client => {
           // altimate_change start — upstream_fix: guard JSON parse against non-JSON (HTML) response bodies
           // A 200 whose body is an HTML error page from a proxy/gateway/CDN otherwise crashes with a
           // raw "JSON Parse error: Unrecognized token '<'". Surface an actionable error instead.
+          // Re-applied by script/build.ts after codegen (clean: true wipes this tree); edit it THERE.
           try {
             data = text ? JSON.parse(text) : {}
           } catch (cause) {
             throw new Error(
-              `Expected a JSON response but received ${response.headers.get("content-type") || "an unknown content type"} ` +
-                `(HTTP ${response.status}). This is usually a proxy or gateway error page, not the API.`,
-              { cause },
+              `Expected a JSON response from ${request.method} ${request.url} but the body was not JSON ` +
+                `(HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "unset"}). ` +
+                `This is usually a proxy or gateway error page, not the API.`,
+              { cause: { parseError: cause, status: response.status, body: text.slice(0, 200) } },
             )
           }
           // altimate_change end
