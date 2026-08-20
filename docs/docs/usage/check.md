@@ -1,3 +1,8 @@
+---
+title: "SQL Check (Headless) — Altimate Code"
+description: "Run deterministic SQL checks without an LLM in Altimate Code. CI/CD-ready with exit codes and JSON output."
+---
+
 # SQL Check (Headless)
 
 Run deterministic SQL checks without an LLM. Ideal for CI/CD pipelines, pre-commit hooks, and GitHub Actions.

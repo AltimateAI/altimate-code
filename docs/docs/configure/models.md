@@ -1,3 +1,8 @@
+---
+title: LLM Model Configuration — Altimate Code
+description: "Configure which LLM models Altimate Code uses for primary and small tasks across all supported providers."
+---
+
 # Models
 
 altimate supports models from all configured providers. Use the `model` and `small_model` fields to set defaults.

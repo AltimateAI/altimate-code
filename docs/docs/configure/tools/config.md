@@ -1,3 +1,8 @@
+---
+title: Tool Configuration Reference — Altimate Code
+description: "Configuration reference for Altimate Code tools including built-in and custom tool settings."
+---
+
 # Tools
 
 altimate includes built-in tools that agents use to interact with your codebase and environment.

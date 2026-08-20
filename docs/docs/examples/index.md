@@ -1,3 +1,8 @@
+---
+title: "Showcase & Real-World Examples — Altimate Code"
+description: "End-to-end automation examples built with Altimate Code, from dbt peer review to full data product pipelines."
+---
+
 # Showcase
 
 Real-world examples showing what altimate can do across data engineering workflows. Each example demonstrates end-to-end automation — from discovery to implementation.

@@ -1,3 +1,8 @@
+---
+title: Custom Tools (TypeScript Plugins) — Altimate Code
+description: "Extend Altimate Code with custom TypeScript plugins. Quick start guide for building and registering your own tools."
+---
+
 # Custom Tools
 
 Create custom tools using TypeScript and the altimate plugin system.

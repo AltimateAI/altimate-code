@@ -1,3 +1,8 @@
+---
+title: LLM Providers — Altimate Code
+description: "Altimate Code supports 35+ LLM providers. Configure your provider, API key, and base URL in altimate-code.json."
+---
+
 # Providers
 
 altimate supports 35+ LLM providers. Configure them in the `provider` section of your config file.

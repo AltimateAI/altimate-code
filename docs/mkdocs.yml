@@ -41,8 +41,9 @@ theme:
     - content.tooltips
 
 extra_css:
-  - assets/css/extra.css
-
+  - assets/stylesheets/neoteroi-cards.css
+  - assets/stylesheets/extra.css
+  - assets/stylesheets/copy-page.css
 extra:
   social:
     - icon: fontawesome/brands/github
@@ -73,84 +74,84 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 nav:
-  - Getting Started:
-      - Overview: getting-started/index.md
-      - Quickstart: getting-started/quickstart-new.md
-      - Setup: getting-started/quickstart.md
-  - Examples:
-      - Showcase: examples/index.md
-  - Use:
-      - Agents:
-          - Agent Modes: data-engineering/agent-modes.md
-          - Agent Config: configure/agents.md
-      - Tools:
-          - Overview: configure/tools/index.md
-          - Built-in Tools: configure/tools/config.md
-          - Core Tools: configure/tools/core-tools.md
-          - SQL Tools: data-engineering/tools/sql-tools.md
-          - Schema Tools: data-engineering/tools/schema-tools.md
-          - FinOps Tools: data-engineering/tools/finops-tools.md
-          - Lineage Tools: data-engineering/tools/lineage-tools.md
-          - dbt Tools: data-engineering/tools/dbt-tools.md
-          - Warehouse Tools: data-engineering/tools/warehouse-tools.md
-          - Memory Tools: data-engineering/tools/memory-tools.md
-          - Custom Tools: configure/tools/custom.md
-      - Skills: configure/skills.md
-      - Commands: configure/commands.md
-      - Validators: data-engineering/validators.md
-      - Trace: configure/trace.md
-      - Interfaces:
-          - TUI: usage/tui.md
-          - CLI: usage/cli.md
-          - SQL Check: usage/check.md
-          - Web UI: usage/web.md
-          - CI: usage/ci-headless.md
-          - IDE: usage/ide.md
-          - GitHub: usage/github.md
-          - GitLab: usage/gitlab.md
-          - dbt PR Review: usage/dbt-pr-review.md
-          - dbt PR Review — Issue Corpus: usage/dbt-pr-review-corpus.md
-      - Guides:
-          - Cost Optimization: data-engineering/guides/cost-optimization.md
-          - Migration: data-engineering/guides/migration.md
-          - Data Parity: data-engineering/guides/data-parity.md
-          - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
-          - Using with Codex: data-engineering/guides/using-with-codex.md
-          - ClickHouse: data-engineering/guides/clickhouse.md
-  - Configure:
-      - Overview: configure/index.md
-      - Warehouses: configure/warehouses.md
-      - LLMs:
-          - Providers: configure/providers.md
-          - Models: configure/models.md
-          - Bedrock Custom Endpoints: configure/bedrock-custom-endpoints.md
-      - MCPs & ACPs:
-          - MCP Servers: configure/mcp-servers.md
-          - ACP Support: configure/acp.md
-      - Appearance:
-          - Themes: configure/themes.md
-          - Keybinds: configure/keybinds.md
-      - Training:
-          - Overview: data-engineering/training/index.md
-          - Team Deployment: data-engineering/training/team-deployment.md
-      - Additional Config:
-          - LSP Servers: configure/lsp.md
-          - Network: reference/network.md
-          - Windows / WSL: reference/windows-wsl.md
-      - Config File Reference: configure/config.md
-  - Governance:
-      - Overview: configure/governance.md
-      - Rules: configure/rules.md
-      - Permissions: configure/permissions.md
-      - Context Management: configure/context-management.md
-      - Formatters: configure/formatters.md
-  - Reference:
-      - Changelog: reference/changelog.md
-      - Telemetry: reference/telemetry.md
-      - Security FAQ: reference/security-faq.md
-      - Troubleshooting: reference/troubleshooting.md
-      - Extend:
-          - SDK: develop/sdk.md
-          - Server API: develop/server.md
-          - Plugins: develop/plugins.md
-          - Ecosystem: develop/ecosystem.md
+- Overview: index.md
+- Getting Started:
+  - Overview: getting-started/index.md
+  - Quickstart: getting-started/quickstart.md
+- Examples: examples/index.md
+- Use:
+  - Agents:
+    - Agent Modes: data-engineering/agent-modes.md
+    - Agent Config: configure/agents.md
+  - Tools:
+    - Overview: configure/tools/index.md
+    - Built-in Tools: configure/tools/config.md
+    - Core Tools: configure/tools/core-tools.md
+    - SQL Tools: data-engineering/tools/sql-tools.md
+    - Schema Tools: data-engineering/tools/schema-tools.md
+    - FinOps Tools: data-engineering/tools/finops-tools.md
+    - Lineage Tools: data-engineering/tools/lineage-tools.md
+    - dbt Tools: data-engineering/tools/dbt-tools.md
+    - Warehouse Tools: data-engineering/tools/warehouse-tools.md
+    - Memory Tools: data-engineering/tools/memory-tools.md
+    - Custom Tools: configure/tools/custom.md
+  - Skills: configure/skills.md
+  - Commands: configure/commands.md
+  - Validators: data-engineering/validators.md
+  - Trace: configure/trace.md
+  - Interfaces:
+    - TUI: usage/tui.md
+    - CLI: usage/cli.md
+    - SQL Check: usage/check.md
+    - Web UI: usage/web.md
+    - CI: usage/ci-headless.md
+    - IDE: usage/ide.md
+    - GitHub: usage/github.md
+    - GitLab: usage/gitlab.md
+    - dbt PR Review: usage/dbt-pr-review.md
+    - dbt PR Review — Issue Corpus: usage/dbt-pr-review-corpus.md
+  - Guides:
+    - Cost Optimization: data-engineering/guides/cost-optimization.md
+    - Migration: data-engineering/guides/migration.md
+    - Data Parity: data-engineering/guides/data-parity.md
+    - Using with Claude Code: data-engineering/guides/using-with-claude-code.md
+    - Using with Codex: data-engineering/guides/using-with-codex.md
+    - ClickHouse: data-engineering/guides/clickhouse.md
+- Configure:
+  - Overview: configure/index.md
+  - Warehouses: configure/warehouses.md
+  - LLMs:
+    - Providers: configure/providers.md
+    - Models: configure/models.md
+    - Bedrock Custom Endpoints: configure/bedrock-custom-endpoints.md
+  - MCPs & ACPs:
+    - MCP Servers: configure/mcp-servers.md
+    - ACP Support: configure/acp.md
+  - Appearance:
+    - Themes: configure/themes.md
+    - Keybinds: configure/keybinds.md
+  - Training:
+    - Overview: data-engineering/training/index.md
+    - Team Deployment: data-engineering/training/team-deployment.md
+  - Additional Config:
+    - LSP Servers: configure/lsp.md
+    - Network: reference/network.md
+    - Windows / WSL: reference/windows-wsl.md
+  - Config File Reference: configure/config.md
+- Governance:
+  - Overview: configure/governance.md
+  - Rules: configure/rules.md
+  - Permissions: configure/permissions.md
+  - Context Management: configure/context-management.md
+  - Formatters: configure/formatters.md
+- Reference:
+  - Changelog: reference/changelog.md
+  - Telemetry: reference/telemetry.md
+  - Security FAQ: reference/security-faq.md
+  - Troubleshooting: reference/troubleshooting.md
+  - Extend:
+    - SDK: develop/sdk.md
+    - Server API: develop/server.md
+    - Plugins: develop/plugins.md
+    - Ecosystem: develop/ecosystem.md
+- Altimate MCP: https://help.altimate.ai/datamates/

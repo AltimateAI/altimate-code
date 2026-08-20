@@ -1,6 +1,11 @@
+---
+title: Getting Started with Altimate Code
+description: "Overview of Altimate Code — the open-source data engineering harness with 100+ deterministic tools for dbt, SQL, and warehouse workflows."
+---
+
 # Getting Started
 
-> **New to altimate?** [Start with the 5-minute quickstart](quickstart.md) to go from install to your first analysis in minutes.
+> **New to altimate?** [Start with the 5-minute quickstart](getting-started/quickstart.md) to go from install to your first analysis in minutes.
 
 ## Why altimate?
 

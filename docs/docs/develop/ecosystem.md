@@ -1,3 +1,8 @@
+---
+title: "Ecosystem & Integrations — Altimate Code"
+description: "Official Altimate Code packages and integrations, including the GitHub Actions connector for CI/CD workflows."
+---
+
 # Ecosystem
 
 altimate has a growing ecosystem of plugins, tools, and integrations.
@@ -14,8 +19,8 @@ altimate has a growing ecosystem of plugins, tools, and integrations.
 
 - **GitHub Actions**: Automated PR review and issue triage
 - **GitLab CI**: Merge request analysis
-- **VS Code / Cursor / Windsurf**: [IDE integration](../usage/ide.md) via the Datamates extension
-- **[Datamates](https://help.altimate.ai/datamates/)**: AI teammates platform with MCP integrations, Knowledge Hub, Memory, and Guardrails
+- **VS Code / Cursor / Windsurf**: [IDE integration](../usage/ide.md) via the Datamates extension (branded **Altimate MCP** in-editor)
+- **[Altimate MCP](https://help.altimate.ai/datamates/)**: AI teammates platform with MCP integrations, Knowledge Hub, Memory, and Guardrails
 - **MCP**: Model Context Protocol servers
 - **ACP**: Agent Communication Protocol for editors
 

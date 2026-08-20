@@ -1,3 +1,8 @@
+---
+title: Warehouse Connections — Altimate Code
+description: "Connect Altimate Code to 13 warehouse types including Snowflake, BigQuery, Databricks, and DuckDB."
+---
+
 # Warehouses
 
 Altimate Code connects to 13 warehouse types. Configure them in `.altimate-code/connections.json` (project-local) or `~/.altimate-code/connections.json` (global).
