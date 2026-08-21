@@ -42,6 +42,15 @@ function projectDir(directory?: string): string {
 }
 // altimate_change end
 
+/** The current instance directory, or undefined outside an instance context. */
+function safeDirectory(): string | undefined {
+  try {
+    return Instance.directory
+  } catch {
+    return undefined
+  }
+}
+
 function dirForScope(scope: "global" | "project", directory?: string): string {
   return scope === "global" ? globalDir() : projectDir(directory)
 }
@@ -303,7 +312,13 @@ export namespace MemoryStore {
     // already durable here, so a cloud failure must not surface as a failed
     // memory write. No-ops unless the pilot flag is on, the project is bound,
     // and the workspace has memory enabled.
-    void mirrorBlock(block).catch((e) => {
+    // The directory is captured HERE, while the writing context is still
+    // current. `mirrorBlock` is fire-and-forget, so by the time it runs the
+    // ambient instance may be a different project -- and the mirror's
+    // local-existence check would then look for this block in the wrong tree
+    // and skip it as deleted.
+    const owningDirectory = block.scope === "project" ? safeDirectory() : undefined
+    void mirrorBlock(block, owningDirectory).catch((e) => {
       mirrorLog.warn("failed to mirror memory block to workspace", {
         id: block.id,
         scope: block.scope,

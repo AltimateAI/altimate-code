@@ -73,6 +73,9 @@ interface SessionMemory {
   touchedAt: number
   /** Set once a bounded wait expired, so later injections do not re-wait. */
   waitTimedOut?: boolean
+  /** Set when the last fetch for this session failed, so a caller can tell an
+   * empty workspace apart from an unreadable one. */
+  hydrateFailed?: boolean
 }
 
 const sessions = new Map<string, SessionMemory>()
@@ -107,7 +110,7 @@ export function isEnabled(): boolean {
 export const syncInternals: {
   resolveBinding?: () => Promise<CachedBinding | null>
   /** Test seam for the local-existence check. Production reads the store. */
-  blockExists?: (block: MemoryBlock) => Promise<boolean>
+  blockExists?: (block: MemoryBlock, directory?: string) => Promise<boolean>
 } = {}
 
 /** Instance.directory throws synchronously with no instance context, so a
@@ -304,11 +307,14 @@ type PushOutcome = "stored" | "unchanged" | "declined" | "skipped"
  * a static import would close an eval-order cycle (see ./memory-backfill.ts).
  * A read failure answers "yes" — refusing to mirror on a transient read error
  * would silently drop a memory the user does have. */
-async function existsLocally(block: MemoryBlock): Promise<boolean> {
-  if (syncInternals.blockExists) return syncInternals.blockExists(block)
+async function existsLocally(block: MemoryBlock, directory?: string): Promise<boolean> {
+  if (syncInternals.blockExists) return syncInternals.blockExists(block, directory)
   try {
     const { MemoryStore } = await import("@/memory/store")
-    return !!(await MemoryStore.read(block.scope, block.id))
+    // ``directory`` is the tree that owned the write. Without it this resolves
+    // project scope from the ambient instance, which for a fire-and-forget
+    // mirror can be a different project entirely.
+    return !!(await MemoryStore.read(block.scope, block.id, directory))
   } catch (err) {
     log.warn("could not confirm a block still exists locally; mirroring anyway", {
       id: block.id,
@@ -322,6 +328,7 @@ async function push(
   block: MemoryBlock,
   binding: CachedBinding | null,
   known?: KnownRecords,
+  directory?: string,
 ): Promise<PushOutcome> {
   const key = indexKey({
     scope: block.scope,
@@ -358,7 +365,7 @@ async function push(
   // dequeues it, so a delete issued mid-sweep runs first and this push would
   // otherwise undo it -- recreating a record the user deleted, or reviving an
   // archived one, and then marking it synced so no later sweep re-archives it.
-  if (!(await existsLocally(block))) {
+  if (!(await existsLocally(block, directory))) {
     log.warn("skipping mirror for a block that no longer exists locally", {
       id: block.id,
       scope: block.scope,
@@ -457,7 +464,7 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * the pilot flag is off, the project is unbound, or the workspace has memory
  * disabled. */
-export async function mirrorBlock(block: MemoryBlock): Promise<void> {
+export async function mirrorBlock(block: MemoryBlock, directory?: string): Promise<void> {
   if (!isEnabled()) return
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
@@ -472,7 +479,7 @@ export async function mirrorBlock(block: MemoryBlock): Promise<void> {
     const binding = await currentBinding()
     if (!binding) return
     if (!(await memoryEnabled(binding))) return
-    await push(block, binding)
+    await push(block, binding, undefined, directory)
   })
 }
 
@@ -592,6 +599,7 @@ async function runQueue<T>(
 export async function backfill(
   blocks: MemoryBlock[],
   explicitBinding?: CachedBinding,
+  sweepDirectory?: string,
 ): Promise<{ ok: number; failed: number; skipped: number; declined: number; gated: boolean }> {
   // ``gated`` says the sweep never ran, as opposed to running and storing
   // nothing. A caller recording "this binding is seeded" must be able to tell
@@ -604,7 +612,7 @@ export async function backfill(
     return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, gated: true }
   const index = await readIndex()
 
-  const pending: { block: MemoryBlock; binding: CachedBinding | null }[] = []
+  const pending: { block: MemoryBlock; binding: CachedBinding | null; directory?: string }[] = []
   let skipped = 0
   for (const block of blocks) {
     const target = block.scope === "project" ? binding : null
@@ -622,7 +630,7 @@ export async function backfill(
       skipped++
       continue
     }
-    pending.push({ block, binding: target })
+    pending.push({ block, binding: target, directory: sweepDirectory })
   }
 
   if (pending.length === 0) return { ok: 0, failed: 0, skipped, declined: 0, gated: false }
@@ -642,7 +650,10 @@ export async function backfill(
   log.info("workspace memory backfill starting", { pending: pending.length, skipped })
   const result = await runQueue(
     pending,
-    (item) => serialize(item.block.scope, item.block.id, () => push(item.block, item.binding, known)),
+    (item) =>
+      serialize(item.block.scope, item.block.id, () =>
+        push(item.block, item.binding, known, item.directory),
+      ),
     BACKFILL_CONCURRENCY,
   )
   // `skipped` combines blocks filtered before the queue (already synced, or
@@ -790,13 +801,17 @@ async function doHydrate(sessionID: string): Promise<void> {
       blocks.push(block)
     }
 
-    sessionState(sessionID).overlay = blocks
+    const done = sessionState(sessionID)
+    done.overlay = blocks
+    done.hydrateFailed = false
     if (blocks.length > 0) {
       log.info("workspace memory hydrated", { blocks: blocks.length, workspace: binding?.datamateName })
     }
   } catch (err) {
     log.warn("workspace memory hydration failed", { err: String(err) })
-    sessionState(sessionID).overlay = []
+    const failed = sessionState(sessionID)
+    failed.overlay = []
+    failed.hydrateFailed = true
   }
 }
 
@@ -813,12 +828,22 @@ export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
  * (or this user on another machine) wrote a block never sees it. This is the
  * on-demand path: drop the session's state so the next hydrate genuinely
  * refetches. Returns how many blocks the session now holds. */
-export async function refresh(sessionID: string): Promise<number> {
-  if (!isEnabled()) return 0
+export async function refresh(sessionID: string): Promise<{ count: number; ok: boolean }> {
+  if (!isEnabled()) return { count: 0, ok: false }
+  // Keep what the session already has. A failed fetch empties the overlay
+  // (hydration failure is indistinguishable from an empty workspace at session
+  // start, where [] is correct) -- but mid-session that would silently destroy
+  // working memory because the user asked to reload and the network hiccuped.
+  const previous = overlayBlocks(sessionID)
   // Clears overlay, hydration promise and the timed-out latch together.
   sessions.delete(sessionID)
   await hydrate(sessionID)
-  return overlayBlocks(sessionID).length
+  const state = sessions.get(sessionID)
+  if (state?.hydrateFailed) {
+    state.overlay = previous
+    return { count: previous.length, ok: false }
+  }
+  return { count: overlayBlocks(sessionID).length, ok: true }
 }
 
 /** Forget a session's hydration, or all of them.

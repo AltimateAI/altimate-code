@@ -407,6 +407,30 @@ describe("mirrorBlock", () => {
     expect(callsTo("/datamates/memory/mem-collide", "PATCH").length).toBe(1)
   })
 
+  test("the local-existence check uses the writing project, not the ambient one", async () => {
+    // `mirrorBlock` is fire-and-forget: by the time it runs, the ambient
+    // instance may be a different project. Resolving project scope from the
+    // ambient directory then finds nothing and skips a perfectly good write as
+    // "deleted". The directory captured at write time has to win.
+    const seen: (string | undefined)[] = []
+    syncInternals.blockExists = async () => true
+    const b = block({ id: "owned-elsewhere", scope: "project" })
+    const { MemoryStore } = await import("../../../src/memory/store")
+    const origRead = MemoryStore.read
+    ;(MemoryStore as any).read = async (_s: string, _i: string, dir?: string) => {
+      seen.push(dir)
+      return b
+    }
+    delete syncInternals.blockExists
+    try {
+      await mirrorBlock(b, "/work/the-writing-project")
+      expect(seen).toContain("/work/the-writing-project")
+    } finally {
+      ;(MemoryStore as any).read = origRead
+      syncInternals.blockExists = async () => true
+    }
+  })
+
   test("a block deleted mid-sweep is not recreated", async () => {
     // `backfill` registers a block on the serialize queue only when a worker
     // dequeues it, so a delete issued during the sweep runs first. Without the

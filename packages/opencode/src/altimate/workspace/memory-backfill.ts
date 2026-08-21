@@ -33,7 +33,7 @@ export async function backfillOnBind(directory: string, binding: CachedBinding):
     // CLI still prints "Linked". Reading project memory was the entire point.
     const blocks = await MemoryStore.listAll({ directory })
     if (blocks.length === 0) return true
-    const result = await backfill(blocks, binding)
+    const result = await backfill(blocks, binding, directory)
     log.info("workspace memory seeded after bind", result)
     // Only a sweep that stored everything it meant to counts as seeded. A
     // failure here must leave the binding eligible for a retry, or local blocks

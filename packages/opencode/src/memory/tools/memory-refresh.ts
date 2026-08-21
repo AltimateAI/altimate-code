@@ -39,7 +39,16 @@ export const MemoryRefreshTool = Tool.define("altimate_memory_refresh", {
       }
     }
     try {
-      const count = await refresh(ctx.sessionID)
+      const { count, ok } = await refresh(ctx.sessionID)
+      if (!ok) {
+        // The session keeps whatever it already had -- say so rather than
+        // reporting a count the user might read as a successful reload.
+        return {
+          title: "Memory: could not reach the workspace",
+          metadata: { count, refreshed: false },
+          output: `Could not reach the workspace, so memory was not reloaded. This session still has its existing ${count} block(s).`,
+        }
+      }
       return {
         title: `Memory: reloaded ${count} workspace block(s)`,
         metadata: { count, refreshed: true },

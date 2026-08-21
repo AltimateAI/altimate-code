@@ -165,9 +165,32 @@ describe("on-demand reload", () => {
     await hydrate(SES)
     expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["warehouse/one"])
 
-    const count = await refresh(SES)
+    const { count, ok } = await refresh(SES)
+    expect(ok).toBe(true)
     expect(count).toBe(2)
     expect(overlayBlocks(SES).map((b) => b.id).sort()).toEqual(["warehouse/one", "warehouse/two"])
+  })
+
+  test("a failed refresh keeps the memory the session already had", async () => {
+    // A hydration failure empties the overlay -- correct at session start,
+    // where there was nothing, but mid-session it would silently destroy
+    // working memory precisely because the user asked to reload.
+    listResponse = [remote("keep/me", "STILL HERE")]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/me"])
+
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_i?: unknown, _n?: unknown) => {
+      throw new Error("network down")
+    }) as unknown as typeof fetch
+    try {
+      const { count, ok } = await refresh(SES)
+      expect(ok).toBe(false)
+      expect(count).toBe(1)
+      expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/me"])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   test("refresh drops a block that was archived in the workspace", async () => {
