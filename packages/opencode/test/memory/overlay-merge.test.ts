@@ -212,6 +212,27 @@ describe("the memory read tool", () => {
     expect(String(res.output ?? "")).not.toContain("EXPIRES SOON")
   })
 
+  test("an explicitly requested scope that cannot be read is an error, not 'not found'", async () => {
+    // Probing both scopes is our choice when scope=all, so a project-scope
+    // failure there is suppressed. When the caller names a scope, swallowing
+    // the failure would report missing memory for a store that is merely
+    // unreadable.
+    const { MemoryStore } = await import("../../src/memory/store")
+    const original = MemoryStore.read
+    ;(MemoryStore as any).read = async () => {
+      throw new Error("store unreadable")
+    }
+    try {
+      const tool = await initTool(MemoryReadTool)
+      const res: any = await tool.execute({ id: "x", scope: "project" }, { sessionID: SES, agent: "build" })
+      const text = String(res.output ?? "")
+      expect(text).not.toContain("No memory block found")
+      expect(text).toContain("store unreadable")
+    } finally {
+      ;(MemoryStore as any).read = original
+    }
+  })
+
   test("surfaces workspace memory, not just the local store", async () => {
     // The tool read MemoryStore only, so it disagreed with what the model was
     // actually given -- injection merges the overlay and the tool did not.

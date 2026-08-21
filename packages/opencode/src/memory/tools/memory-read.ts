@@ -45,15 +45,17 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
 
         const matches: (MemoryBlock & { origin?: string })[] = []
         for (const scope of scopes) {
-          // One scope failing must not take the others down with it. Project
-          // scope throws outside an instance context, which would otherwise
-          // turn an id lookup into a tool error instead of returning the
-          // global and workspace matches. `listAll` already behaves this way.
+          // Narrowly suppressed: probing BOTH scopes is our choice, not the
+          // caller's, and project scope throws outside an instance context --
+          // that must not hide a global or workspace match. A scope the caller
+          // asked for explicitly failing is a real error they need to see,
+          // rather than a misleading "not found".
           let block: MemoryBlock | undefined
           try {
             block = await MemoryStore.read(scope, args.id)
-          } catch {
-            continue
+          } catch (e) {
+            if (args.scope === "all" && scope === "project") continue
+            throw e
           }
           if (!block) continue
           // Respect include_expired for ID reads
