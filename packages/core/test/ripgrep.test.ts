@@ -428,6 +428,23 @@ describe("Ripgrep", () => {
     expect(matches[0].submatches[0].text.endsWith("...")).toBe(true)
   })
 
+  // A canonical multi-MiB bytes field must still decode. The earlier repeated-group
+  // base64 regex returned false for it on Bun and threw RangeError on Node — the
+  // second of which escapes as a defect and aborts the entire search.
+  stubTest(
+    "decodes a multi-megabyte bytes field rather than discarding the record",
+    async () => {
+      const raw = Buffer.concat([Buffer.from([0xff]), Buffer.alloc(5 * 1024 * 1024, 0x61), Buffer.from("needle")])
+      const matches = await Effect.runPromise(
+        grepWithStubbedRecords([matchRecord("big.txt", { lines: { bytes: raw.toString("base64") }, submatches: [] })]),
+      )
+
+      expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("big.txt")])
+      expect(matches[0].text.endsWith("...")).toBe(true)
+    },
+    30_000,
+  )
+
   stubTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
     const matches = await Effect.runPromise(
       grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "" } })]),

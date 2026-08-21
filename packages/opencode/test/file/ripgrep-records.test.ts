@@ -154,6 +154,29 @@ describe("RipgrepRecords.parseRecords", () => {
     expect(parsed[0].submatches).toHaveLength(100)
   })
 
+  // The earlier repeated-group base64 regex backtracked catastrophically: on Bun a
+  // canonical 4 MiB body tested FALSE (valid data silently discarded) and on Node
+  // it raised RangeError, which escaped and aborted the whole search.
+  test("decodes a multi-megabyte bytes field instead of discarding it", () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.alloc(5 * 1024 * 1024, 0x61), Buffer.from("needle")])
+    const parsed = RipgrepRecords.parseRecords([
+      record("big.txt", { lines: { bytes: raw.toString("base64") }, submatches: [] }),
+    ])
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].lines.text.endsWith("...")).toBe(true)
+  })
+
+  test("a record that throws during normalization is skipped, not fatal", () => {
+    // A getter that throws stands in for any defect inside normalization; the
+    // point is that it must not escape parseRecords.
+    const hostile = JSON.stringify({ type: "match", data: { path: { text: "./x" } } }).replace(
+      '"data":{',
+      '"data":{"submatches":1e999,',
+    )
+    expect(() => RipgrepRecords.parseRecords([hostile, record("a.txt")])).not.toThrow()
+    expect(paths([hostile, record("a.txt")])).toEqual(["./a.txt"])
+  })
+
   test("returns an empty array when every record is unusable, rather than throwing", () => {
     expect(RipgrepRecords.parseRecords(["{oops", "{also oops"])).toEqual([])
   })

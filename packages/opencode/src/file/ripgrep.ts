@@ -304,9 +304,18 @@ export namespace Ripgrep {
       cwd: input.cwd,
       nothrow: true,
     })
-    if (result.code !== 0) {
+    // altimate_change start — upstream_fix: exit 2 is PARTIAL, not fatal.
+    // ripgrep exits 2 when it could not read something (an unreadable file, a
+    // broken symlink) while still searching everything else — verified: with one
+    // `chmod 000` file present it emits a full match record for the readable
+    // file and exits 2. Discarding stdout on any non-zero code therefore threw
+    // away real matches because one unrelated file was unreadable, which is the
+    // same "one bad thing kills the whole search" failure this change removes.
+    // 0 = matches, 1 = no matches, 2 = partial; anything else is a real failure.
+    if (result.code !== 0 && result.code !== 1 && result.code !== 2) {
       return []
     }
+    // altimate_change end
 
     // Handle both Unix (\n) and Windows (\r\n) line endings
     const lines = result.text.trim().split(/\r?\n/).filter(Boolean)

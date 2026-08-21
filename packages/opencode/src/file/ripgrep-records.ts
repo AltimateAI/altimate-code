@@ -98,7 +98,14 @@ const Result = z.union([Begin, Match, End, Summary])
 // stdout up front and hands its records straight to the `/find` response, where the raw ripgrep
 // shape is the published contract — so it normalises and skips, and leaves the shape alone. Both
 // report skipped records once per search rather than once per record.
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+// Linear canonical-base64 pre-filter. The earlier repeated-group expression
+// backtracked catastrophically on a large field: on Bun a canonical 4 MiB body
+// returned FALSE (valid data silently discarded) and on Node it raised
+// `RangeError`, which escaped and aborted the whole search. Length-mod-4
+// restores what the `{4}` grouping guaranteed; the round-trip check below is
+// what actually enforces canonical form. Mirrors packages/core/src/ripgrep.ts.
+const BASE64_SHAPE = /^[A-Za-z0-9+/]*={0,2}$/
+const isBase64 = (value: string) => value.length % 4 === 0 && BASE64_SHAPE.test(value)
 
 /** Mirrors packages/core/src/ripgrep.ts. Bounds parse cost per record on this path too. */
 const MAX_RECORD_BYTES = 16 * 1024 * 1024
@@ -138,7 +145,7 @@ const normalizeRecord = (line: string): unknown => {
     // instead of throwing, which would turn a corrupt record into a schema-valid empty match:
     // reject the empty string (a matched line is never empty), check the spelling, then require
     // a round-trip so non-canonical padding ("Zh==" and "Zg==" both decode to "f") is rejected.
-    if (typeof bytes !== "string" || bytes.length === 0 || !BASE64.test(bytes)) return undefined
+    if (typeof bytes !== "string" || bytes.length === 0 || !isBase64(bytes)) return undefined
     const decoded = Buffer.from(bytes, "base64")
     if (decoded.toString("base64") !== bytes) return undefined
     return { text: decoded.toString("utf8"), raw: decoded }
@@ -220,8 +227,15 @@ export function parseRecords(lines: string[]): Match["data"][] {
   for (const line of lines) {
     // Bounds parse cost per record. This path buffers all of stdout before splitting, so it does
     // not bound total memory — that needs streaming, tracked separately.
-    const parsed =
-      Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES ? undefined : Result.safeParse(normalizeRecord(line))
+    // `normalizeRecord` runs before `safeParse` and outside any try/catch of its
+    // own, so a throw inside it would escape `parseRecords` and take the whole
+    // search down — the failure mode this module exists to prevent.
+    let parsed: ReturnType<typeof Result.safeParse> | undefined
+    try {
+      parsed = Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES ? undefined : Result.safeParse(normalizeRecord(line))
+    } catch {
+      parsed = undefined
+    }
     if (!parsed?.success) {
       skipped++
       continue

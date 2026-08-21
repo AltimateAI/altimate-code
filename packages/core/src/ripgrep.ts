@@ -75,8 +75,21 @@ type RawMatchData = (typeof RawMatch.Type)["data"]
 // `Stream.mapEffect` — took the whole search down with it, exactly like the oversized record did.
 // Normalising to the `text` arm up front keeps the schema single-shape and keeps the match usable;
 // `toString("utf8")` substitutes U+FFFD for the undecodable bytes rather than dropping the match.
-/** Canonical base64, so a corrupt field is left to fail decoding rather than silently becoming "". */
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+/**
+ * Canonical-base64 pre-filter, deliberately linear.
+ *
+ * The earlier `/^(?:[A-Za-z0-9+/]{4})*(?:..)?$/` backtracked catastrophically on
+ * a large field: measured on Bun, a canonical 4 MiB body returns FALSE (valid
+ * data silently discarded) and on Node it raises `RangeError`, which escapes as
+ * a defect and aborts the whole search — the exact failure this change exists to
+ * remove, reintroduced for large non-UTF-8 lines. A single character class with
+ * one quantifier has no nested repetition to backtrack: 16 MiB in ~10ms.
+ *
+ * Length-mod-4 restores what the `{4}` grouping guaranteed. Exact canonical form
+ * is still enforced by the round-trip check in the decoder below.
+ */
+const BASE64_SHAPE = /^[A-Za-z0-9+/]*={0,2}$/
+const isBase64 = (value: string) => value.length % 4 === 0 && BASE64_SHAPE.test(value)
 
 /** ripgrep's control records. Anything else with an unrecognised `type` is a protocol surprise. */
 const CONTROL_TYPES = new Set(["begin", "end", "summary"])
@@ -102,7 +115,7 @@ const decodeField = (value: unknown): { text: string; raw?: Buffer } | undefined
   const text = readProp(value, "text")
   if (typeof text === "string") return { text }
   const bytes = readProp(value, "bytes")
-  if (typeof bytes !== "string" || bytes.length === 0 || !BASE64.test(bytes)) return undefined
+  if (typeof bytes !== "string" || bytes.length === 0 || !isBase64(bytes)) return undefined
   const raw = Buffer.from(bytes, "base64")
   if (raw.toString("base64") !== bytes) return undefined
   return { text: raw.toString("utf8"), raw }
@@ -449,7 +462,14 @@ export const layer = Layer.effect(
                   return typeof json.type === "string" && CONTROL_TYPES.has(json.type)
                     ? undefined
                     : yield* Effect.fail(failure(`unrecognised record type ${JSON.stringify(json.type)}`))
-                const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalizeMatch(json)).pipe(
+                // `normalizeMatch` is plain synchronous code. A throw there would be a DEFECT,
+                // which `Effect.catch` deliberately does not catch — so it would abort the
+                // stream rather than skip one record, defeating the point of this change.
+                const normalized = yield* Effect.try({
+                  try: () => normalizeMatch(json),
+                  catch: (cause) => failure("record could not be normalized", cause),
+                })
+                const match = yield* Schema.decodeUnknownEffect(RawMatch)(normalized).pipe(
                   Effect.mapError((cause) => failure("unexpected match shape", cause)),
                 )
                 // `normalizeMatch` already caps submatches and line text, so nothing is re-trimmed.
