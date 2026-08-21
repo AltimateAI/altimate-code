@@ -317,7 +317,7 @@ export namespace MemoryStore {
     // ambient instance may be a different project -- and the mirror's
     // local-existence check would then look for this block in the wrong tree
     // and skip it as deleted.
-    const owningDirectory = block.scope === "project" ? safeDirectory() : undefined
+    const owningDirectory = safeDirectory()
     void mirrorBlock(block, owningDirectory).catch((e) => {
       mirrorLog.warn("failed to mirror memory block to workspace", {
         id: block.id,
@@ -355,8 +355,12 @@ export namespace MemoryStore {
         tags_count: 0,
       })
       // altimate_change start - archive rather than delete the cloud record so
-      // the workspace keeps the history. Fire-and-forget, as with write.
-      void archiveBlock(scope, id).catch((e) => {
+      // the workspace keeps the history. Fire-and-forget, as with write, so the
+      // deleting project's directory is captured here while its context is
+      // still current — otherwise the archive resolves another project's
+      // binding and can hit that workspace's same-id record.
+      const deletingDirectory = safeDirectory()
+      void archiveBlock(scope, id, deletingDirectory).catch((e) => {
         mirrorLog.warn("failed to archive workspace memory record", {
           id,
           scope,

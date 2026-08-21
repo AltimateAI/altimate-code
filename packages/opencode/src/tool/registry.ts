@@ -134,6 +134,7 @@ import { SampleSetupTool } from "../altimate/tools/sample-setup"
 // altimate_change start - import altimate persistent memory tools
 import { MemoryReadTool } from "../memory/tools/memory-read"
 import { MemoryRefreshTool } from "../memory/tools/memory-refresh"
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { MemoryWriteTool } from "../memory/tools/memory-write"
 import { MemoryDeleteTool } from "../memory/tools/memory-delete"
 import { MemoryAuditTool } from "../memory/tools/memory-audit"
@@ -469,7 +470,10 @@ export namespace ToolRegistry {
       ...(!Flag.ALTIMATE_DISABLE_MEMORY
         ? [
             MemoryReadTool,
-            MemoryRefreshTool,
+            // Workspace-only: `refresh` no-ops without the pilot flag, so
+            // shipping its description to every user costs a tool slot and
+            // invites a wasted call that can only answer "not enabled".
+            ...(CoreFlag.ALTIMATE_WORKSPACE ? [MemoryRefreshTool] : []),
             MemoryWriteTool,
             MemoryDeleteTool,
             MemoryAuditTool,

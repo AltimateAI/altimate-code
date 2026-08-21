@@ -27,31 +27,43 @@ export const MemoryRefreshTool = Tool.define("altimate_memory_refresh", {
     if (!isEnabled()) {
       return {
         title: "Memory: workspace sync off",
-        metadata: { count: 0, refreshed: false },
+        metadata: { success: false, refreshed: false, count: 0, reason: "off" },
         output: "Workspace memory is not enabled, so there is nothing to reload.",
       }
     }
     if (!ctx?.sessionID) {
       return {
         title: "Memory: no session",
-        metadata: { count: 0, refreshed: false },
+        metadata: { success: false, refreshed: false, count: 0, reason: "no-session" },
         output: "No session context, so there is no memory overlay to reload.",
       }
     }
     try {
-      const { count, ok } = await refresh(ctx.sessionID)
+      const { count, ok, status } = await refresh(ctx.sessionID)
       if (!ok) {
-        // The session keeps whatever it already had -- say so rather than
-        // reporting a count the user might read as a successful reload.
+        // Each of these is a distinct thing to tell the user. Collapsing them
+        // into "reloaded, nothing here" is how an unreachable workspace reads
+        // as an empty one.
+        const message =
+          status === "error"
+            ? `Could not reach the workspace, so memory was not reloaded. This session still has its existing ${count} block(s).`
+            : status === "unlinked"
+              ? "This project is not linked to a workspace, so there is no workspace memory to load."
+              : "This workspace has memory turned off, so there is nothing to load."
         return {
-          title: "Memory: could not reach the workspace",
-          metadata: { count, refreshed: false },
-          output: `Could not reach the workspace, so memory was not reloaded. This session still has its existing ${count} block(s).`,
+          title:
+            status === "error"
+              ? "Memory: could not reach the workspace"
+              : status === "unlinked"
+                ? "Memory: project not linked"
+                : "Memory: workspace memory disabled",
+          metadata: { success: false, refreshed: false, count, reason: status },
+          output: message,
         }
       }
       return {
         title: `Memory: reloaded ${count} workspace block(s)`,
-        metadata: { count, refreshed: true },
+        metadata: { success: true, refreshed: true, count, reason: status },
         output:
           count === 0
             ? "Reloaded workspace memory. This workspace has no memory blocks visible to this project."
@@ -61,7 +73,7 @@ export const MemoryRefreshTool = Tool.define("altimate_memory_refresh", {
       // Never fail the turn over a refresh — the session keeps whatever it had.
       return {
         title: "Memory: reload failed",
-        metadata: { count: 0, refreshed: false },
+        metadata: { success: false, refreshed: false, count: 0, reason: "exception" },
         output: `Could not reload workspace memory: ${e instanceof Error ? e.message : String(e)}`,
       }
     }

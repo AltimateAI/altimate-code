@@ -413,7 +413,6 @@ describe("mirrorBlock", () => {
     // ambient directory then finds nothing and skips a perfectly good write as
     // "deleted". The directory captured at write time has to win.
     const seen: (string | undefined)[] = []
-    syncInternals.blockExists = async () => true
     const b = block({ id: "owned-elsewhere", scope: "project" })
     const { MemoryStore } = await import("../../../src/memory/store")
     const origRead = MemoryStore.read

@@ -127,9 +127,13 @@ export function projectKeyFor(binding: CachedBinding): string {
   return binding.repoRemote ?? binding.projectPath ?? "unknown"
 }
 
-async function currentBinding(): Promise<CachedBinding | null> {
+/** ``directory`` is the tree that owned the operation. Fire-and-forget mirrors
+ * and archives run after their writing context has gone, so resolving the
+ * binding from the ambient instance can attribute one project's memory to
+ * another project's workspace. */
+async function currentBinding(directory?: string): Promise<CachedBinding | null> {
   if (syncInternals.resolveBinding) return syncInternals.resolveBinding()
-  const directory = currentDirectory()
+  directory = directory ?? currentDirectory() ?? undefined
   if (!directory) return null
   try {
     return await readLocalBinding(directory)
@@ -150,7 +154,8 @@ async function currentBinding(): Promise<CachedBinding | null> {
  * anyway. */
 const MEMORY_ENABLED_TTL_MS = 60_000
 
-const memoryEnabledCache = new Map<number, { checkedAt: number }>()
+/** Exported for tests: the positive TTL is why a failing read can look fine. */
+export const memoryEnabledCache = new Map<number, { checkedAt: number }>()
 
 /** Warn once per workspace, not once per write. */
 const missingFieldWarned = new Set<number>()
@@ -160,9 +165,19 @@ const missingFieldWarned = new Set<number>()
  * The workspace app exposes this as a user-facing toggle, so mirroring into a
  * workspace with memory disabled would contradict what the user is shown.
  * Fails closed: if the check cannot be made, nothing is mirrored. */
+/** Fail-closed answer for the WRITE path: an unreachable service must not let a
+ * mirror through. Reads need to tell "off" from "unreachable" — see
+ * {@link memoryStatus}. */
 async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
+  return (await memoryStatus(binding)) === "enabled"
+}
+
+/** Three-way, because a read that cannot reach the service must not be reported
+ * as "this workspace has no memory" — that reads as success while destroying
+ * whatever the session already had. */
+async function memoryStatus(binding: CachedBinding): Promise<"enabled" | "disabled" | "error"> {
   const cached = memoryEnabledCache.get(binding.datamateId)
-  if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return true
+  if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
   try {
     const workspaces = await WorkspaceApi.listDatamates()
     const match = workspaces.find((w) => w.id === binding.datamateId)
@@ -177,13 +192,12 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
     const value = match?.memoryEnabled === true
     if (value) memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
     else memoryEnabledCache.delete(binding.datamateId)
-    return value
+    return value ? "enabled" : "disabled"
   } catch (err) {
-    log.warn("could not confirm workspace memory setting, skipping mirror", { err: String(err) })
+    log.warn("could not confirm workspace memory setting", { err: String(err) })
     // Not cached either way: a transient failure should neither disable the
-    // mirror for a minute nor keep it enabled. Failing closed already prevents
-    // this particular write.
-    return false
+    // mirror for a minute nor keep it enabled.
+    return "error"
   }
 }
 
@@ -476,7 +490,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     // with nothing to consult and nothing to attribute it to. Global blocks still
     // carry no workspace themselves, so they apply everywhere on read; the
     // binding governs only whether we upload at all.
-    const binding = await currentBinding()
+    const binding = await currentBinding(directory)
     if (!binding) return
     if (!(await memoryEnabled(binding))) return
     await push(block, binding, undefined, directory)
@@ -486,13 +500,19 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
 /** Archive a block's cloud record rather than deleting it, so the workspace
  * keeps the history. Only this client filters the marker — other readers do
  * not — so an archived record stays visible elsewhere. */
-export async function archiveBlock(scope: "global" | "project", blockId: string): Promise<void> {
+export async function archiveBlock(
+  scope: "global" | "project",
+  blockId: string,
+  directory?: string,
+): Promise<void> {
   if (!isEnabled()) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
   // run before the create it is meant to undo. The binding lookup happens
   // inside the queued op for the same reason as in `mirrorBlock`.
   return serialize(scope, blockId, async () => {
-    const binding = await currentBinding()
+    // Same capture as the mirror: the delete's own project decides which
+    // workspace record is archived, not whichever instance is current now.
+    const binding = await currentBinding(directory)
     if (!binding) return
     if (!(await memoryEnabled(binding))) return
     await archiveNow(scope, blockId, binding)
@@ -612,7 +632,7 @@ export async function backfill(
     return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, gated: true }
   const index = await readIndex()
 
-  const pending: { block: MemoryBlock; binding: CachedBinding | null; directory?: string }[] = []
+  const pending: { block: MemoryBlock; binding: CachedBinding | null }[] = []
   let skipped = 0
   for (const block of blocks) {
     const target = block.scope === "project" ? binding : null
@@ -630,7 +650,7 @@ export async function backfill(
       skipped++
       continue
     }
-    pending.push({ block, binding: target, directory: sweepDirectory })
+    pending.push({ block, binding: target })
   }
 
   if (pending.length === 0) return { ok: 0, failed: 0, skipped, declined: 0, gated: false }
@@ -652,7 +672,7 @@ export async function backfill(
     pending,
     (item) =>
       serialize(item.block.scope, item.block.id, () =>
-        push(item.block, item.binding, known, item.directory),
+        push(item.block, item.binding, known, sweepDirectory),
       ),
     BACKFILL_CONCURRENCY,
   )
@@ -740,7 +760,9 @@ export async function hydrate(sessionID: string): Promise<void> {
   if (!isEnabled()) return
   const state = sessionState(sessionID)
   if (state.hydration) return state.hydration
-  state.hydration = doHydrate(sessionID)
+  // The overlay is deliberately NOT cleared before loading: clearing first made
+  // workspace memory blink out of the prompt whenever a fetch ran long.
+  state.hydration = loadWorkspaceMemory().then((outcome) => commitLoad(sessionID, state, outcome))
   return state.hydration
 }
 
@@ -776,16 +798,29 @@ export async function whenHydrated(
   }
 }
 
-async function doHydrate(sessionID: string): Promise<void> {
+/** What a load attempt actually concluded.
+ *
+ * "nothing to load" and "could not load" must stay distinguishable: collapsing
+ * them is how a transient failure gets reported as a successful reload of an
+ * empty workspace, taking the session's real memory with it. */
+type LoadOutcome =
+  | { status: "loaded"; blocks: RemoteMemoryBlock[] }
+  | { status: "unlinked" }
+  | { status: "disabled" }
+  | { status: "error" }
+
+/** Read this project's workspace memory. Pure: it publishes nothing, so a slow
+ * load that has been superseded cannot write over a newer result. */
+async function loadWorkspaceMemory(): Promise<LoadOutcome> {
   try {
     const binding = await currentBinding()
-    if (!binding || !(await memoryEnabled(binding))) {
-      sessionState(sessionID).overlay = []
-      return
-    }
-    const ownProjectKey = binding ? projectKeyFor(binding) : undefined
-    const ownWorkspace = binding ? String(binding.datamateId) : undefined
+    if (!binding) return { status: "unlinked" }
+    const enabled = await memoryStatus(binding)
+    if (enabled === "error") return { status: "error" }
+    if (enabled === "disabled") return { status: "disabled" }
 
+    const ownProjectKey = projectKeyFor(binding)
+    const ownWorkspace = String(binding.datamateId)
     const records = await MemoryApi.list()
 
     const blocks: RemoteMemoryBlock[] = []
@@ -800,18 +835,27 @@ async function doHydrate(sessionID: string): Promise<void> {
       if (block.expires && new Date(block.expires) <= new Date()) continue
       blocks.push(block)
     }
-
-    const done = sessionState(sessionID)
-    done.overlay = blocks
-    done.hydrateFailed = false
-    if (blocks.length > 0) {
-      log.info("workspace memory hydrated", { blocks: blocks.length, workspace: binding?.datamateName })
-    }
+    return { status: "loaded", blocks }
   } catch (err) {
-    log.warn("workspace memory hydration failed", { err: String(err) })
-    const failed = sessionState(sessionID)
-    failed.overlay = []
-    failed.hydrateFailed = true
+    log.warn("workspace memory load failed", { err: String(err) })
+    return { status: "error" }
+  }
+}
+
+/** Publish a load result into the state that launched it.
+ *
+ * The generation check is the point: ``refresh`` replaces a session's state, and
+ * an older in-flight load must not write into the newer one. */
+function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcome): void {
+  if (sessions.get(sessionID) !== state) return
+  if (outcome.status === "error") {
+    state.hydrateFailed = true
+    return
+  }
+  state.hydrateFailed = false
+  state.overlay = outcome.status === "loaded" ? outcome.blocks : []
+  if (outcome.status === "loaded" && outcome.blocks.length > 0) {
+    log.info("workspace memory hydrated", { blocks: outcome.blocks.length })
   }
 }
 
@@ -828,22 +872,47 @@ export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
  * (or this user on another machine) wrote a block never sees it. This is the
  * on-demand path: drop the session's state so the next hydrate genuinely
  * refetches. Returns how many blocks the session now holds. */
-export async function refresh(sessionID: string): Promise<{ count: number; ok: boolean }> {
-  if (!isEnabled()) return { count: 0, ok: false }
-  // Keep what the session already has. A failed fetch empties the overlay
-  // (hydration failure is indistinguishable from an empty workspace at session
-  // start, where [] is correct) -- but mid-session that would silently destroy
-  // working memory because the user asked to reload and the network hiccuped.
-  const previous = overlayBlocks(sessionID)
-  // Clears overlay, hydration promise and the timed-out latch together.
-  sessions.delete(sessionID)
-  await hydrate(sessionID)
-  const state = sessions.get(sessionID)
-  if (state?.hydrateFailed) {
-    state.overlay = previous
-    return { count: previous.length, ok: false }
-  }
-  return { count: overlayBlocks(sessionID).length, ok: true }
+export type RefreshResult = {
+  count: number
+  ok: boolean
+  status: "loaded" | "unlinked" | "disabled" | "error" | "off"
+}
+
+/** Re-read this session's workspace memory, discarding what it already holds.
+ *
+ * ``hydrate`` is idempotent for the life of a session, which keeps the per-turn
+ * call cheap -- but it also means a session started before a teammate (or this
+ * user on another machine) wrote a block never sees it. This is the on-demand
+ * path.
+ *
+ * Serialized per session: two refreshes racing would otherwise let the second
+ * capture the first's not-yet-filled state as "previous" and, on failure,
+ * restore emptiness over real memory. */
+export async function refresh(sessionID: string): Promise<RefreshResult> {
+  if (!isEnabled()) return { count: 0, ok: false, status: "off" }
+  return serialize("global", `refresh:${sessionID}`, async () => {
+    const previous = overlayBlocks(sessionID)
+    const outcome = await loadWorkspaceMemory()
+    if (outcome.status === "error") {
+      // Keep what the session had. Emptying it because the network hiccuped is
+      // strictly worse than not reloading, and the user asked for a reload.
+      const state = sessionState(sessionID)
+      state.overlay = previous
+      state.hydrateFailed = true
+      return { count: previous.length, ok: false, status: "error" }
+    }
+    // Replace the session's state so any older in-flight hydration is orphaned
+    // by commitLoad's generation check rather than overwriting this result.
+    sessions.delete(sessionID)
+    const state = sessionState(sessionID)
+    state.hydration = Promise.resolve()
+    commitLoad(sessionID, state, outcome)
+    return {
+      count: state.overlay.length,
+      ok: outcome.status === "loaded",
+      status: outcome.status,
+    }
+  })
 }
 
 /** Forget a session's hydration, or all of them.

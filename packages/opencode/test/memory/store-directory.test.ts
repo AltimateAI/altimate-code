@@ -7,7 +7,6 @@ import fs from "fs/promises"
 import path from "path"
 import os from "os"
 import { MemoryStore } from "@/memory/store"
-import { Instance } from "@/project/instance"
 
 // Exercises the REAL store, unlike store.test.ts which re-implements its logic
 // and so cannot catch path-resolution bugs. Callers outside an Instance context

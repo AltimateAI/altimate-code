@@ -34,9 +34,10 @@ afterAll(() => {
 const { MemoryPrompt, mergeOverlay } = await import("../../src/memory/prompt")
 const { MemoryStore } = await import("../../src/memory/store")
 const { MemoryReadTool } = await import("../../src/memory/tools/memory-read")
+const { MemoryRefreshTool } = await import("../../src/memory/tools/memory-refresh")
 const { initTool } = await import("../altimate/tool-fixture")
 const { MIRROR_SOURCE } = await import("../../src/altimate/workspace/memory-api")
-const { hydrate, refresh, resetOverlay, overlayBlocks, syncInternals } = await import(
+const { hydrate, refresh, resetOverlay, overlayBlocks, syncInternals, memoryEnabledCache } = await import(
   "../../src/altimate/workspace/memory-sync"
 )
 const { TrainingStore } = await import("../../src/altimate/training/store")
@@ -130,7 +131,87 @@ const remote = (id: string, content: string, extra: Record<string, unknown> = {}
   metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "global", ...extra },
 })
 
+describe("the memory refresh tool", () => {
+  test("reports what it reloaded", async () => {
+    listResponse = [remote("a/one", "ONE"), remote("a/two", "TWO")]
+    const tool = await initTool(MemoryRefreshTool)
+    const res: any = await tool.execute({}, { sessionID: SES, agent: "build" })
+    expect(res.metadata.success).toBe(true)
+    expect(res.metadata.count).toBe(2)
+    expect(res.output).toContain("2 block(s)")
+  })
+
+  test("says the workspace is unreachable rather than reporting an empty reload", async () => {
+    listResponse = [remote("keep/one", "KEEP")]
+    await hydrate(SES)
+    memoryEnabledCache.clear()
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_i?: unknown, _n?: unknown) => {
+      throw new Error("unreachable")
+    }) as unknown as typeof fetch
+    try {
+      const tool = await initTool(MemoryRefreshTool)
+      const res: any = await tool.execute({}, { sessionID: SES, agent: "build" })
+      expect(res.metadata.success).toBe(false)
+      expect(res.metadata.reason).toBe("error")
+      expect(res.output).toContain("Could not reach the workspace")
+      // and the memory is still there
+      expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/one"])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test("says the project is not linked", async () => {
+    syncInternals.resolveBinding = async () => null
+    try {
+      const tool = await initTool(MemoryRefreshTool)
+      const res: any = await tool.execute({}, { sessionID: SES, agent: "build" })
+      expect(res.metadata.success).toBe(false)
+      expect(res.metadata.reason).toBe("unlinked")
+      expect(res.output).toContain("not linked to a workspace")
+    } finally {
+      syncInternals.resolveBinding = async () => BINDING as any
+    }
+  })
+
+  test("without a session there is no overlay to reload", async () => {
+    const tool = await initTool(MemoryRefreshTool)
+    const res: any = await tool.execute({}, { agent: "build" })
+    expect(res.metadata.success).toBe(false)
+    expect(res.metadata.reason).toBe("no-session")
+  })
+})
+
 describe("the memory read tool", () => {
+  test("finds a workspace-only block by id, instead of answering 'not found'", async () => {
+    // The model sees workspace blocks in its prompt, so it looks them up by id.
+    // Answering "not found" for a block it is holding is the exact
+    // disagreement this change set out to close.
+    listResponse = [remote("warehouse/sizing", "REMOTE ONLY BLOCK")]
+    await hydrate(SES)
+    const tool = await initTool(MemoryReadTool)
+    const res: any = await tool.execute({ id: "warehouse/sizing", scope: "all" }, { sessionID: SES, agent: "build" })
+    expect(res.metadata.count).toBe(1)
+    expect(String(res.output)).toContain("REMOTE ONLY BLOCK")
+  })
+
+  test("a workspace block that expired mid-session is filtered on read", async () => {
+    // Overlay blocks are expiry-checked once at hydrate time and never again,
+    // so a block whose TTL passes mid-session would otherwise show up under
+    // both settings of include_expired.
+    listResponse = [remote("ttl/soon", "EXPIRES SOON", { block_expires: "2099-01-01T00:00:00.000Z" })]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["ttl/soon"])
+    // Age it past its TTL without a refetch, exactly as wall-clock would.
+    ;(overlayBlocks(SES)[0] as any).expires = "2020-01-01T00:00:00.000Z"
+    const state = (await import("../../src/altimate/workspace/memory-sync")) as any
+    void state
+    const tool = await initTool(MemoryReadTool)
+    const res: any = await tool.execute({ scope: "all" }, { sessionID: SES, agent: "build" })
+    expect(String(res.output ?? "")).not.toContain("EXPIRES SOON")
+  })
+
   test("surfaces workspace memory, not just the local store", async () => {
     // The tool read MemoryStore only, so it disagreed with what the model was
     // actually given -- injection merges the overlay and the tool did not.
@@ -188,6 +269,99 @@ describe("on-demand reload", () => {
       expect(ok).toBe(false)
       expect(count).toBe(1)
       expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/me"])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test("a workspace that cannot be reached keeps the session's memory and reports failure", async () => {
+    // The killer case: `memoryEnabled` fails CLOSED on a transport error, and
+    // that path never threw — so refresh used to report a successful reload of
+    // an empty workspace while destroying what the session held.
+    listResponse = [remote("keep/me", "STILL HERE")]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/me"])
+
+    memoryEnabledCache.clear()   // past the 60s positive-cache TTL
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_i?: unknown, _n?: unknown) => {
+      throw new Error("workspace unreachable")
+    }) as unknown as typeof fetch
+    try {
+      const res = await refresh(SES)
+      expect(res.ok).toBe(false)
+      expect(res.status).toBe("error")
+      expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/me"])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test("an unlinked project reports 'unlinked', not an empty reload", async () => {
+    syncInternals.resolveBinding = async () => null
+    try {
+      const res = await refresh(SES)
+      expect(res.ok).toBe(false)
+      expect(res.status).toBe("unlinked")
+    } finally {
+      syncInternals.resolveBinding = async () => BINDING as any
+    }
+  })
+
+  test("a stale in-flight load cannot overwrite a newer refresh", async () => {
+    // hydrate A stalls; refresh replaces the session's state; A then resolves.
+    // Without the generation check A publishes its stale blocks over B's.
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const originalFetch = globalThis.fetch
+    let firstCall = true
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (firstCall && String(input).includes("/datamates/memory/list")) {
+        firstCall = false
+        await gate
+        return new Response(JSON.stringify([remote("stale/one", "STALE")]), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        })
+      }
+      return originalFetch(input, init)
+    }) as typeof fetch
+
+    try {
+      void hydrate(SES)                        // A — stalls on the gate
+      await new Promise((r) => setTimeout(r, 20))
+      listResponse = [remote("fresh/one", "FRESH")]
+      const res = await refresh(SES)           // B — completes first
+      expect(res.status).toBe("loaded")
+      expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["fresh/one"])
+
+      release?.()                              // A resolves late
+      await new Promise((r) => setTimeout(r, 50))
+      expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["fresh/one"])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test("two concurrent refreshes cannot discard the real overlay", async () => {
+    listResponse = [remote("real/one", "REAL")]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["real/one"])
+
+    // One succeeds, one fails; the failing one must restore REAL memory, not
+    // the other's not-yet-filled empty state.
+    const originalFetch = globalThis.fetch
+    let n = 0
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/memory/list")) {
+        n++
+        if (n === 2) throw new Error("second refresh fails")
+      }
+      return originalFetch(input, init)
+    }) as typeof fetch
+    try {
+      const [a, b] = await Promise.all([refresh(SES), refresh(SES)])
+      expect([a.ok, b.ok].filter(Boolean).length).toBeGreaterThanOrEqual(1)
+      expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["real/one"])
     } finally {
       globalThis.fetch = originalFetch
     }
