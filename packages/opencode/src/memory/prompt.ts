@@ -66,7 +66,7 @@ function isRemote(block: MemoryBlock): block is RemoteMemoryBlock {
   return (block as RemoteMemoryBlock).remote === true
 }
 
-function mergeOverlay(local: MemoryBlock[], remote: RemoteMemoryBlock[]): MemoryBlock[] {
+export function mergeOverlay(local: MemoryBlock[], remote: RemoteMemoryBlock[]): MemoryBlock[] {
   if (remote.length === 0) return local
   const localKeys = new Set(local.map((b) => `${b.scope}:${b.id}`))
   const merged: MemoryBlock[] = [...local]

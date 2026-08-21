@@ -31,9 +31,12 @@ afterAll(() => {
   }
 })
 
-const { MemoryPrompt } = await import("../../src/memory/prompt")
+const { MemoryPrompt, mergeOverlay } = await import("../../src/memory/prompt")
+const { MemoryStore } = await import("../../src/memory/store")
+const { MemoryReadTool } = await import("../../src/memory/tools/memory-read")
+const { initTool } = await import("../altimate/tool-fixture")
 const { MIRROR_SOURCE } = await import("../../src/altimate/workspace/memory-api")
-const { hydrate, resetOverlay, syncInternals } = await import(
+const { hydrate, refresh, resetOverlay, overlayBlocks, syncInternals } = await import(
   "../../src/altimate/workspace/memory-sync"
 )
 const { TrainingStore } = await import("../../src/altimate/training/store")
@@ -125,6 +128,57 @@ const remote = (id: string, content: string, extra: Record<string, unknown> = {}
   created_at: NOW,
   updated_at: NOW,
   metadata: { source: MIRROR_SOURCE, block_id: id, block_scope: "global", ...extra },
+})
+
+describe("the memory read tool", () => {
+  test("surfaces workspace memory, not just the local store", async () => {
+    // The tool read MemoryStore only, so it disagreed with what the model was
+    // actually given -- injection merges the overlay and the tool did not.
+    writeLocalBlock("local/only", "A LOCAL FACT")
+    listResponse = [remote("remote/only", "A WORKSPACE FACT")]
+    await hydrate(SES)
+
+    const local = (await MemoryStore.listAll()).map((b) => b.id)
+    expect(local).toContain("local/only")
+    expect(local).not.toContain("remote/only")
+
+    // Drive the real tool, not mergeOverlay directly — asserting on the helper
+    // would pass even if the tool stopped calling it.
+    const tool = await initTool(MemoryReadTool)
+    const res = await tool.execute({ scope: "all" }, { sessionID: SES, agent: "build" })
+    const out = String((res as any).output ?? "")
+    expect(out).toContain("A LOCAL FACT")
+    expect(out).toContain("A WORKSPACE FACT")
+  })
+})
+
+describe("on-demand reload", () => {
+  test("refresh picks up memory written after the session hydrated", async () => {
+    // `hydrate` is idempotent for the life of a session, so without `refresh`
+    // a live session never sees anything written after it started.
+    listResponse = [remote("warehouse/one", "FIRST FACT")]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["warehouse/one"])
+
+    // A teammate writes while this session is running.
+    listResponse = [remote("warehouse/one", "FIRST FACT"), remote("warehouse/two", "SECOND FACT")]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["warehouse/one"])
+
+    const count = await refresh(SES)
+    expect(count).toBe(2)
+    expect(overlayBlocks(SES).map((b) => b.id).sort()).toEqual(["warehouse/one", "warehouse/two"])
+  })
+
+  test("refresh drops a block that was archived in the workspace", async () => {
+    listResponse = [remote("gone", "WILL BE ARCHIVED")]
+    await hydrate(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["gone"])
+
+    listResponse = [remote("gone", "WILL BE ARCHIVED", { archived: "true" })]
+    await refresh(SES)
+    expect(overlayBlocks(SES).map((b) => b.id)).toEqual([])
+  })
 })
 
 describe("workspace memory in the injected prompt", () => {

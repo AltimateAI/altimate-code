@@ -806,6 +806,21 @@ export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
   return [...(sessions.get(sessionID)?.overlay ?? [])]
 }
 
+/** Re-read this session's workspace memory, discarding what it already holds.
+ *
+ * ``hydrate`` is idempotent for the life of a session, which is what keeps the
+ * per-turn call cheap -- but it also means a session started before a teammate
+ * (or this user on another machine) wrote a block never sees it. This is the
+ * on-demand path: drop the session's state so the next hydrate genuinely
+ * refetches. Returns how many blocks the session now holds. */
+export async function refresh(sessionID: string): Promise<number> {
+  if (!isEnabled()) return 0
+  // Clears overlay, hydration promise and the timed-out latch together.
+  sessions.delete(sessionID)
+  await hydrate(sessionID)
+  return overlayBlocks(sessionID).length
+}
+
 /** Forget a session's hydration, or all of them.
  *
  * Not called per turn: doing so defeated ``hydrate``'s idempotence and made

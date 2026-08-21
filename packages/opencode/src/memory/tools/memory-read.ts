@@ -1,7 +1,9 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { MemoryStore, isExpired } from "../store"
-import { MemoryPrompt } from "../prompt"
+import { MemoryPrompt, mergeOverlay } from "../prompt"
+// altimate_change - workspace memory overlay
+import { overlayBlocks, whenHydrated } from "@/altimate/workspace/memory-sync"
 import { MemoryBlockSchema } from "../types"
 
 export const MemoryReadTool = Tool.define("altimate_memory_read", {
@@ -51,6 +53,19 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
         args.scope === "all"
           ? await MemoryStore.listAll(listOpts)
           : await MemoryStore.list(args.scope as "global" | "project", listOpts)
+
+      // altimate_change start — fold in this session's workspace memory. Reading
+      // only the local store made this tool disagree with what the model was
+      // actually given: injection merges the overlay, so a user asking "what do
+      // you remember?" saw strictly less than the prompt contained.
+      if (ctx?.sessionID) {
+        await whenHydrated(ctx.sessionID)
+        const remote = overlayBlocks(ctx.sessionID).filter(
+          (b) => args.scope === "all" || b.scope === args.scope,
+        )
+        blocks = mergeOverlay(blocks, remote)
+      }
+      // altimate_change end
 
       if (args.tags && args.tags.length > 0) {
         blocks = blocks.filter((b) => args.tags!.every((tag) => b.tags.includes(tag)))

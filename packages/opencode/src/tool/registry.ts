@@ -133,6 +133,7 @@ import { SampleSetupTool } from "../altimate/tools/sample-setup"
 
 // altimate_change start - import altimate persistent memory tools
 import { MemoryReadTool } from "../memory/tools/memory-read"
+import { MemoryRefreshTool } from "../memory/tools/memory-refresh"
 import { MemoryWriteTool } from "../memory/tools/memory-write"
 import { MemoryDeleteTool } from "../memory/tools/memory-delete"
 import { MemoryAuditTool } from "../memory/tools/memory-audit"
@@ -468,6 +469,7 @@ export namespace ToolRegistry {
       ...(!Flag.ALTIMATE_DISABLE_MEMORY
         ? [
             MemoryReadTool,
+            MemoryRefreshTool,
             MemoryWriteTool,
             MemoryDeleteTool,
             MemoryAuditTool,
