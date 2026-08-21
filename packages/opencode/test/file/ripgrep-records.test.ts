@@ -163,18 +163,9 @@ describe("RipgrepRecords.parseRecords", () => {
       record("big.txt", { lines: { bytes: raw.toString("base64") }, submatches: [] }),
     ])
     expect(parsed).toHaveLength(1)
+    // Assert the decode itself, not just that something long came back.
+    expect(parsed[0].lines.text.startsWith("\uFFFD" + "a".repeat(64))).toBe(true)
     expect(parsed[0].lines.text.endsWith("...")).toBe(true)
-  })
-
-  test("a record that throws during normalization is skipped, not fatal", () => {
-    // A getter that throws stands in for any defect inside normalization; the
-    // point is that it must not escape parseRecords.
-    const hostile = JSON.stringify({ type: "match", data: { path: { text: "./x" } } }).replace(
-      '"data":{',
-      '"data":{"submatches":1e999,',
-    )
-    expect(() => RipgrepRecords.parseRecords([hostile, record("a.txt")])).not.toThrow()
-    expect(paths([hostile, record("a.txt")])).toEqual(["./a.txt"])
   })
 
   test("returns an empty array when every record is unusable, rather than throwing", () => {

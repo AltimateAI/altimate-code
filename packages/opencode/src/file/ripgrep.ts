@@ -64,6 +64,20 @@ export namespace Ripgrep {
     }),
   )
 
+  // altimate_change start — upstream_fix: distinguish an invalid pattern from a
+  // partial search. Mirrors packages/core/src/ripgrep.ts.
+  const isInvalidPattern = (stderr: string) =>
+    stderr.includes("regex parse error") || stderr.includes("error parsing regex")
+
+  export const InvalidPatternError = NamedError.create(
+    "RipgrepInvalidPatternError",
+    z.object({
+      pattern: z.string(),
+      message: z.string(),
+    }),
+  )
+  // altimate_change end
+
   export const DownloadFailedError = NamedError.create(
     "RipgrepDownloadFailedError",
     z.object({
@@ -312,6 +326,16 @@ export namespace Ripgrep {
     // away real matches because one unrelated file was unreadable, which is the
     // same "one bad thing kills the whole search" failure this change removes.
     // 0 = matches, 1 = no matches, 2 = partial; anything else is a real failure.
+    //
+    // Exit 2 is overloaded: ripgrep also uses it for an INVALID PATTERN, where
+    // stdout is empty and stderr carries a regex diagnostic. Accepting that as
+    // "partial" would answer a bad pattern with an empty success and hide the
+    // real error, so stderr is inspected first — the same distinction core's
+    // `run()` makes via `isInvalidPattern`.
+    const stderr = result.stderr?.toString() ?? ""
+    if (result.code === 2 && isInvalidPattern(stderr)) {
+      throw new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
+    }
     if (result.code !== 0 && result.code !== 1 && result.code !== 2) {
       return []
     }

@@ -440,6 +440,11 @@ describe("Ripgrep", () => {
       )
 
       expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("big.txt")])
+      // Assert the DECODE, not merely that something long came back: the leading
+      // invalid byte becomes U+FFFD and the body decodes to the filler it was built
+      // from. Checking only the elision marker would pass on any long wrong string.
+      expect(matches[0].text.startsWith("\uFFFD" + "a".repeat(64))).toBe(true)
+      expect(matches[0].text).toHaveLength(2_003)
       expect(matches[0].text.endsWith("...")).toBe(true)
     },
     30_000,

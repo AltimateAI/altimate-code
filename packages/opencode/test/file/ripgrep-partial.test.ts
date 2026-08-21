@@ -37,5 +37,27 @@ describe("legacy Ripgrep.search partial failures", () => {
     },
     120_000,
   )
+
+  // Exit 2 is overloaded: partial failure AND invalid pattern. Accepting every 2
+  // as partial would answer a bad regex with an empty success and swallow the
+  // real diagnostic.
+  test("surfaces an invalid pattern rather than reporting an empty result", async () => {
+    const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "rg-badpattern-")))
+    try {
+      await fs.writeFile(path.join(dir, "a.txt"), "needle here\n")
+      // Asserted by catching rather than `.rejects`, which oxlint flags here as a
+      // non-thenable await under this matcher setup.
+      let thrown: unknown
+      try {
+        await Ripgrep.search({ cwd: dir, pattern: "needle[", limit: 10 })
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeDefined()
+      expect(String(thrown)).toMatch(/regex|pattern/i)
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  }, 120_000)
 })
 // altimate_change end
