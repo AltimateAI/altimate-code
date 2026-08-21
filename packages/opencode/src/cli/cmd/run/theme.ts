@@ -8,6 +8,8 @@
 import { RGBA, SyntaxStyle, type CliRenderer, type ColorInput, type TerminalColors } from "@opentui/core"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { EntryKind } from "./types"
+// Shared with the full-screen TUI so both renderers agree on how a mode is chosen.
+import { resolveInitialMode } from "@opencode-ai/tui/terminal-detection"
 
 type Tone = {
   body: ColorInput
@@ -581,14 +583,25 @@ function map(
   }
 }
 
-const seed = {
-  highlight: RGBA.fromIndex(6, rgba("#38bdf8")),
-  muted: RGBA.fromIndex(8, rgba("#64748b")),
-  text: RGBA.defaultForeground(rgba("#f8fafc")),
-  panel: rgba("#0f172a"),
-  success: RGBA.fromIndex(2, rgba("#22c55e")),
-  warning: RGBA.fromIndex(3, rgba("#f59e0b")),
-  error: RGBA.fromIndex(1, rgba("#ef4444")),
+/**
+ * Seed colours for the direct-run fallback theme.
+ *
+ * `text` deliberately prefers the terminal's own default foreground, which on a
+ * light terminal resolves to black. The panel therefore has to follow the
+ * detected mode: a hardcoded dark panel plus a black resolved foreground is
+ * literally dark text in a dark box, the symptom reported in #809.
+ */
+function fallbackSeed(mode: "dark" | "light") {
+  const dark = mode === "dark"
+  return {
+    highlight: RGBA.fromIndex(6, rgba("#38bdf8")),
+    muted: RGBA.fromIndex(8, rgba(dark ? "#64748b" : "#52606d")),
+    text: RGBA.defaultForeground(rgba(dark ? "#f8fafc" : "#0f172a")),
+    panel: rgba(dark ? "#0f172a" : "#eef2f7"),
+    success: RGBA.fromIndex(2, rgba(dark ? "#22c55e" : "#15803d")),
+    warning: RGBA.fromIndex(3, rgba(dark ? "#f59e0b" : "#b45309")),
+    error: RGBA.fromIndex(1, rgba(dark ? "#ef4444" : "#b91c1c")),
+  }
 }
 
 function tone(body: ColorInput, start?: ColorInput): Tone {
@@ -602,7 +615,19 @@ const fallbackSplashIndexed = Array.from({ length: 256 }, (_, index) => RGBA.fro
 const fallbackSplashLeft = RGBA.fromIndex(67)
 const fallbackSplashRight = RGBA.fromIndex(110)
 
-export const RUN_THEME_FALLBACK: RunTheme = {
+const fallbackByMode = new Map<"dark" | "light", RunTheme>()
+
+/**
+ * Direct-run fallback theme for a known terminal mode.
+ *
+ * Memoized per mode: the theme is large, this sits on a failure path that can
+ * be hit repeatedly, and callers compare the dark instance by identity.
+ */
+export function runThemeFallback(mode: "dark" | "light"): RunTheme {
+  const cached = fallbackByMode.get(mode)
+  if (cached) return cached
+  const seed = fallbackSeed(mode)
+  const theme: RunTheme = {
   background: RGBA.fromValues(0, 0, 0, 0),
   footer: {
     highlight: seed.highlight,
@@ -651,6 +676,27 @@ export const RUN_THEME_FALLBACK: RunTheme = {
     diffAddedLineNumberBg: alpha(seed.success, 0.12),
     diffRemovedLineNumberBg: alpha(seed.error, 0.12),
   },
+  }
+  fallbackByMode.set(mode, theme)
+  return theme
+}
+
+/** Dark instance, kept as the default for callers with no mode to hand. */
+export const RUN_THEME_FALLBACK: RunTheme = runThemeFallback("dark")
+
+/**
+ * Best guess at terminal mode when the palette query gives us nothing.
+ *
+ * Both exits below used to return the dark fallback unconditionally, so a light
+ * terminal whose palette query failed got dark panels regardless. This is the
+ * higher-traffic sibling of the startup detection in packages/tui — it drives
+ * the direct-run and scrollback renderer.
+ */
+function fallbackMode(renderer: CliRenderer): "dark" | "light" {
+  return resolveInitialMode({
+    colorfgbg: process.env["COLORFGBG"],
+    osc: renderer.themeMode ?? null,
+  })
 }
 
 export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> {
@@ -660,7 +706,7 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
     })
     const bg = colors.defaultBackground ?? colors.palette[0]
     if (!bg) {
-      return RUN_THEME_FALLBACK
+      return runThemeFallback(fallbackMode(renderer))
     }
 
     // Palette-only terminal reloads can leave renderer.themeMode stale, but
@@ -685,6 +731,6 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
       shared.generateSubtleSyntax(syntaxTheme),
     )
   } catch {
-    return RUN_THEME_FALLBACK
+    return runThemeFallback(fallbackMode(renderer))
   }
 }

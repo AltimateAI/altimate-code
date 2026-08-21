@@ -271,8 +271,12 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         // Only when the terminal answers neither do we ask the OS, which is the
         // case Apple Terminal users kept hitting.
         const envMode = detectModeFromCOLORFGBG(process.env.COLORFGBG)
-        const oscMode = envMode ? null : ((await renderer.waitForThemeMode(1000)) ?? null)
-        const appearance = envMode || oscMode ? null : await detectSystemAppearance()
+        // Always ask the terminal — it is the only signal describing this window
+        // now. COLORFGBG only buys a shorter wait: with a usable hint in hand we
+        // can stop waiting sooner, which keeps #704's startup win without
+        // letting a stale env var override a live answer.
+        const oscMode = (await renderer.waitForThemeMode(envMode ? 250 : 1000)) ?? null
+        const appearance = oscMode || envMode ? null : await detectSystemAppearance()
         const mode = resolveInitialMode({ colorfgbg: process.env.COLORFGBG, osc: oscMode, appearance })
         // altimate_change end
         if (renderer.isDestroyed) return

@@ -47,11 +47,13 @@ export interface ModeSignals {
  * chain ended in a guess with no way to be right.
  */
 export function resolveInitialMode(signals: ModeSignals): "dark" | "light" {
-  const fromEnv = detectModeFromCOLORFGBG(signals.colorfgbg)
-  // Honour both directions. The previous call site kept only "light", so a
-  // terminal that reported a dark background still paid for the OSC timeout.
-  if (fromEnv) return fromEnv
+  // OSC 11 first: it reports the background of *this* window, right now.
+  // COLORFGBG is inherited, so it survives ssh, tmux, sudo and profile changes
+  // and can describe a terminal the user is no longer looking at. Letting it
+  // outrank a live answer trades correctness for a little startup latency.
   if (signals.osc) return signals.osc
+  const fromEnv = detectModeFromCOLORFGBG(signals.colorfgbg)
+  if (fromEnv) return fromEnv
   if (signals.appearance) return signals.appearance
   return "dark"
 }
@@ -64,28 +66,51 @@ export function resolveInitialMode(signals: ModeSignals): "dark" | "light" {
  * This is the signal that was missing: every report of this bug came from
  * darwin, on a terminal that answers neither of the cheaper probes.
  */
+/** Minimal shape of `child_process.execFile`, injectable so tests can drive every branch. */
+export type ExecFileLike = (
+  file: string,
+  args: string[],
+  options: { timeout: number; encoding: "utf8" },
+  callback: (error: unknown, stdout: string) => void,
+) => unknown
+
 export function detectSystemAppearance(
   platform: NodeJS.Platform = process.platform,
   timeoutMs = 400,
+  env: NodeJS.ProcessEnv = process.env,
+  exec: ExecFileLike = execFile as unknown as ExecFileLike,
 ): Promise<"dark" | "light" | null> {
   if (platform !== "darwin") return Promise.resolve(null)
 
+  // Over ssh the OS appearance belongs to the remote machine, not to the
+  // terminal the user is actually looking at. Answering from it would be
+  // confidently wrong, which is worse than admitting we do not know.
+  if (env["SSH_CONNECTION"] || env["SSH_TTY"] || env["SSH_CLIENT"]) return Promise.resolve(null)
+  // CI has no human looking at a terminal; skip the spawn entirely.
+  if (env["CI"]) return Promise.resolve(null)
+
   return new Promise((resolve) => {
     try {
-      execFile(
-        "defaults",
+      exec(
+        // Absolute path: a different `defaults` earlier on PATH must not get to
+        // answer a question about macOS appearance.
+        "/usr/bin/defaults",
         ["read", "-g", "AppleInterfaceStyle"],
         { timeout: timeoutMs, encoding: "utf8" },
         (error, stdout) => {
-          if (error) {
-            // `defaults` exits non-zero when the key is unset, which is exactly
-            // how macOS represents light mode. Distinguish that from a real
-            // failure: a timeout or a missing binary tells us nothing.
-            const failed = (error as NodeJS.ErrnoException).code === "ENOENT" || (error as any).killed === true
-            resolve(failed ? null : "light")
+          if (!error) {
+            resolve(stdout.trim().toLowerCase() === "dark" ? "dark" : "light")
             return
           }
-          resolve(stdout.trim().toLowerCase() === "dark" ? "dark" : "light")
+          // macOS leaves AppleInterfaceStyle unset in light mode, so `defaults`
+          // exits 1 with a "does not exist" diagnostic. That is the light
+          // answer. Everything else — ENOENT, EACCES, sandbox denial, a signal,
+          // a spawn failure, a timeout — tells us nothing, and must not be
+          // silently reported as light.
+          const err = error as NodeJS.ErrnoException & { killed?: boolean; status?: number | null; stderr?: string }
+          const notFound = /does not exist/i.test(String(err.stderr ?? err.message ?? ""))
+          const clean = err.code === undefined && err.killed !== true
+          resolve(notFound || clean ? "light" : null)
         },
       )
     } catch {

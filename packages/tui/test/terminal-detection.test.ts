@@ -44,37 +44,30 @@ describe("detectModeFromCOLORFGBG", () => {
 })
 
 describe("resolveInitialMode", () => {
-  test("COLORFGBG wins — it describes this window and costs nothing", () => {
-    expect(resolveInitialMode({ colorfgbg: "0;15", osc: "dark", appearance: "dark" })).toBe("light")
-    expect(resolveInitialMode({ colorfgbg: "15;0", osc: "light", appearance: "light" })).toBe("dark")
+  test("the terminal's own OSC answer outranks the inherited env var", () => {
+    // COLORFGBG survives ssh, tmux, sudo and profile switches, so it can
+    // describe a terminal the user is no longer looking at. A live OSC reply
+    // cannot.
+    expect(resolveInitialMode({ colorfgbg: "15;0", osc: "light" })).toBe("light")
+    expect(resolveInitialMode({ colorfgbg: "0;15", osc: "dark" })).toBe("dark")
   })
 
-  test("honours a dark COLORFGBG instead of discarding it", () => {
-    // The previous call site kept only "light", so a terminal reporting a dark
-    // background still paid the full OSC timeout before agreeing.
-    expect(resolveInitialMode({ colorfgbg: "15;0" })).toBe("dark")
+  test("uses COLORFGBG in both directions when the terminal stays silent", () => {
+    expect(resolveInitialMode({ colorfgbg: "0;15", osc: null })).toBe("light")
+    // Previously a dark reading here was discarded and the caller waited anyway.
+    expect(resolveInitialMode({ colorfgbg: "15;0", osc: null })).toBe("dark")
   })
 
-  test("falls back to the OSC 11 answer when COLORFGBG is absent", () => {
-    expect(resolveInitialMode({ osc: "light", appearance: "dark" })).toBe("light")
+  test("OS appearance is consulted only when the terminal says nothing at all", () => {
     expect(resolveInitialMode({ osc: "dark", appearance: "light" })).toBe("dark")
-  })
-
-  test("prefers the terminal's own background over the OS preference", () => {
-    // A dark-profile terminal under a light system theme must stay dark.
-    expect(resolveInitialMode({ osc: "dark", appearance: "light" })).toBe("dark")
-  })
-
-  test("uses OS appearance only when the terminal says nothing", () => {
+    expect(resolveInitialMode({ colorfgbg: "15;0", appearance: "light" })).toBe("dark")
     expect(resolveInitialMode({ appearance: "light" })).toBe("light")
-    expect(resolveInitialMode({ appearance: "dark" })).toBe("dark")
   })
 
-  test("REGRESSION #736: light Apple Terminal with no COLORFGBG and no OSC reply", () => {
-    // Exactly the reported environment: darwin, macOS appearance Light,
-    // TERM_PROGRAM=Apple_Terminal. No COLORFGBG is set and OSC 11 goes
-    // unanswered, so both cheap signals are absent. Before this change the
-    // chain returned "dark" and rendered pale code on a pale background.
+  test("#736 shape: no COLORFGBG, no OSC reply, light macOS appearance", () => {
+    // Named for the shape it covers, not for the whole bug: this asserts the
+    // resolver's contract only. Whether app.tsx supplies these signals is a
+    // separate question, exercised by the probe tests below.
     expect(resolveInitialMode({ colorfgbg: undefined, osc: null, appearance: "light" })).toBe("light")
   })
 
@@ -85,22 +78,73 @@ describe("resolveInitialMode", () => {
 })
 
 describe("detectSystemAppearance", () => {
-  test("returns null off macOS without spawning anything", async () => {
-    expect(await detectSystemAppearance("linux")).toBeNull()
-    expect(await detectSystemAppearance("win32")).toBeNull()
+  /** Records what was spawned so "does not spawn" can be asserted, not assumed. */
+  function spy(behaviour: (cb: (err: unknown, stdout: string) => void) => void) {
+    const spawned: string[] = []
+    const exec = (file: string, _a: string[], _o: unknown, cb: (e: unknown, s: string) => void) => {
+      spawned.push(file)
+      behaviour(cb)
+      return undefined
+    }
+    return { spawned, exec: exec as any }
+  }
+
+  test("does not spawn anything off macOS", async () => {
+    const { spawned, exec } = spy((cb) => cb(null, "Dark"))
+
+    expect(await detectSystemAppearance("linux", 400, {}, exec)).toBeNull()
+    expect(await detectSystemAppearance("win32", 400, {}, exec)).toBeNull()
+    // The point of the test is the absence of the spawn, so assert it directly.
+    expect(spawned).toEqual([])
   })
 
-  test("on macOS reports a usable answer", async () => {
-    // `AppleInterfaceStyle` is absent in light mode, so `defaults` exits
-    // non-zero — that is the light answer, not a failure. The distinction is
-    // the whole point of the probe, so assert we never turn it into null.
-    const result = await detectSystemAppearance("darwin")
+  test("does not spawn over ssh — that appearance belongs to the remote host", async () => {
+    const { spawned, exec } = spy((cb) => cb(null, "Dark"))
 
-    if (process.platform === "darwin") {
-      expect(result === "dark" || result === "light").toBe(true)
-    } else {
-      // Off-platform the binary is missing; that genuinely tells us nothing.
-      expect(result).toBeNull()
+    expect(await detectSystemAppearance("darwin", 400, { SSH_CONNECTION: "1.2.3.4 22" }, exec)).toBeNull()
+    expect(spawned).toEqual([])
+  })
+
+  test("does not spawn in CI", async () => {
+    const { spawned, exec } = spy((cb) => cb(null, "Dark"))
+
+    expect(await detectSystemAppearance("darwin", 400, { CI: "true" }, exec)).toBeNull()
+    expect(spawned).toEqual([])
+  })
+
+  test("reads Dark from stdout", async () => {
+    const { exec } = spy((cb) => cb(null, "Dark\n"))
+    expect(await detectSystemAppearance("darwin", 400, {}, exec)).toBe("dark")
+  })
+
+  test("treats the documented missing-key failure as light", async () => {
+    // macOS leaves the key unset in light mode; `defaults` exits 1 saying so.
+    const { exec } = spy((cb) =>
+      cb(Object.assign(new Error("x"), { stderr: "The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist" }), ""),
+    )
+    expect(await detectSystemAppearance("darwin", 400, {}, exec)).toBe("light")
+  })
+
+  test("does NOT call a permission or spawn failure light", async () => {
+    // The distinction codex flagged: only the missing-key diagnostic means
+    // light. Everything else is unknown, and guessing light on a dark terminal
+    // produces the inverse of the bug being fixed.
+    for (const code of ["EACCES", "EMFILE", "ENOENT", "ENOMEM"]) {
+      const { exec } = spy((cb) => cb(Object.assign(new Error("boom"), { code }), ""))
+      expect(await detectSystemAppearance("darwin", 400, {}, exec)).toBeNull()
     }
+  })
+
+  test("does NOT call a timeout light", async () => {
+    const { exec } = spy((cb) => cb(Object.assign(new Error("timed out"), { killed: true, code: null }), ""))
+    expect(await detectSystemAppearance("darwin", 400, {}, exec)).toBeNull()
+  })
+
+  test("invokes an absolute path, not whatever PATH resolves", async () => {
+    // A stray executable named `defaults` must not get to answer this.
+    const { spawned, exec } = spy((cb) => cb(null, "Dark"))
+    await detectSystemAppearance("darwin", 400, {}, exec)
+
+    expect(spawned).toEqual(["/usr/bin/defaults"])
   })
 })

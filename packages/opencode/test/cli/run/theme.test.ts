@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
-import { RGBA, type CliRenderer, type TerminalColors } from "@opentui/core"
-import { RUN_THEME_FALLBACK, generateSystem, resolveRunTheme, resolveTheme } from "@/cli/cmd/run/theme"
+import { type ColorInput, RGBA, type CliRenderer, type TerminalColors } from "@opentui/core"
+import { RUN_THEME_FALLBACK,
+  runThemeFallback, generateSystem, resolveRunTheme, resolveTheme } from "@/cli/cmd/run/theme"
 
 const palette = ["#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5"] as const
 
@@ -60,6 +61,25 @@ function spread(color: RGBA) {
 
 test("falls back when palette lookup fails", async () => {
   expect(await resolveRunTheme(renderer({ fail: true }))).toBe(RUN_THEME_FALLBACK)
+})
+
+test("the fallback follows a light terminal instead of always going dark", async () => {
+  // The direct-run fallback used to be unconditionally dark while its `text`
+  // preferred the terminal's own default foreground. On a light terminal that
+  // foreground resolves to black, so a dark panel produced black-on-black —
+  // the class of symptom reported in #809.
+  const light = await resolveRunTheme(renderer({ fail: true, themeMode: "light" }))
+
+  expect(light).not.toBe(RUN_THEME_FALLBACK)
+  expect(light).toBe(runThemeFallback("light"))
+
+  // The panel must actually be light, or the fix is cosmetic.
+  const sum = (color: ColorInput) => (color as RGBA).toInts().slice(0, 3).reduce((a, b) => a + b, 0)
+  expect(sum(light.block.diffContextBg)).toBeGreaterThan(sum(RUN_THEME_FALLBACK.block.diffContextBg))
+})
+
+test("a dark terminal still gets the dark fallback", async () => {
+  expect(await resolveRunTheme(renderer({ fail: true, themeMode: "dark" }))).toBe(runThemeFallback("dark"))
 })
 
 test("returns syntax styles and indexed splash colors", async () => {
