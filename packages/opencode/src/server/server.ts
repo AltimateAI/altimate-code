@@ -71,10 +71,7 @@ export namespace Server {
   const httpApiBridge = lazy(async () => {
     const { HttpApiApp } = await import("./routes/instance/httpapi/server")
     return {
-      handler: HttpApiApp.webHandler().handler as (
-        request: Request,
-        context: unknown,
-      ) => Response | Promise<Response>,
+      handler: HttpApiApp.webHandler().handler as (request: Request, context: unknown) => Response | Promise<Response>,
       context: HttpApiApp.context,
     }
   })
@@ -100,554 +97,558 @@ export namespace Server {
       return bridge.handler(c.req.raw, bridge.context)
     }
     // altimate_change end
-    return app
-      .onError((err, c) => {
-        log.error("failed", {
-          error: err,
+    return (
+      app
+        .onError((err, c) => {
+          log.error("failed", {
+            error: err,
+          })
+          if (err instanceof NamedError) {
+            let status: ContentfulStatusCode
+            if (err instanceof NotFoundError) status = 404
+            else if (err instanceof Provider.ModelNotFoundError) status = 400
+            else if (err.name.startsWith("Worktree")) status = 400
+            // altimate_change — a malformed search regex is bad user input, not a
+            // server fault; without this it surfaced from /find as a 500.
+            else if (err.name === "RipgrepInvalidPatternError") status = 400
+            else status = 500
+            return c.json(err.toObject(), { status })
+          }
+          // altimate_change start — preserve legacy zod NamedError wire/status shape.
+          if (namedErrorLike(err)) {
+            let status: ContentfulStatusCode
+            if (err.name === "NotFoundError") status = 404
+            else if (err.name.startsWith("Worktree")) status = 400
+            // altimate_change — see above: invalid search pattern is a client error.
+            else if (err.name === "RipgrepInvalidPatternError") status = 400
+            else status = 500
+            return c.json(err.toObject(), { status })
+          }
+          // altimate_change end
+          if (err instanceof HTTPException) return err.getResponse()
+          const message = err instanceof Error && err.stack ? err.stack : err.toString()
+          return c.json(new NamedError.Unknown({ message }).toObject(), {
+            status: 500,
+          })
         })
-        if (err instanceof NamedError) {
-          let status: ContentfulStatusCode
-          if (err instanceof NotFoundError) status = 404
-          else if (err instanceof Provider.ModelNotFoundError) status = 400
-          else if (err.name.startsWith("Worktree")) status = 400
-          else status = 500
-          return c.json(err.toObject(), { status })
-        }
-        // altimate_change start — preserve legacy zod NamedError wire/status shape.
-        if (namedErrorLike(err)) {
-          let status: ContentfulStatusCode
-          if (err.name === "NotFoundError") status = 404
-          else if (err.name.startsWith("Worktree")) status = 400
-          else status = 500
-          return c.json(err.toObject(), { status })
-        }
-        // altimate_change end
-        if (err instanceof HTTPException) return err.getResponse()
-        const message = err instanceof Error && err.stack ? err.stack : err.toString()
-        return c.json(new NamedError.Unknown({ message }).toObject(), {
-          status: 500,
+        .use((c, next) => {
+          // Allow CORS preflight requests to succeed without auth.
+          // Browser clients sending Authorization headers will preflight with OPTIONS.
+          if (c.req.method === "OPTIONS") return next()
+          const password = Flag.OPENCODE_SERVER_PASSWORD
+          if (!password) return next()
+          // altimate_change start — upstream_fix: align the Hono guard's default username with the
+          // HttpApi /api/* auth (ServerAuth, auth.ts) and every client (ServerAuth.header, plugin,
+          // run, attach, trace-consumer), which all default to "opencode". A branded "altimate" here
+          // made the guard reject the TUI worker's `opencode:<password>` header (and "altimate:<pwd>"
+          // was then rejected by the HttpApi auth), breaking authenticated server/TUI API calls
+          // unless OPENCODE_SERVER_USERNAME was set explicitly.
+          const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
+          // altimate_change end
+          return basicAuth({ username, password })(c, next)
         })
-      })
-      .use((c, next) => {
-        // Allow CORS preflight requests to succeed without auth.
-        // Browser clients sending Authorization headers will preflight with OPTIONS.
-        if (c.req.method === "OPTIONS") return next()
-        const password = Flag.OPENCODE_SERVER_PASSWORD
-        if (!password) return next()
-        // altimate_change start — upstream_fix: align the Hono guard's default username with the
-        // HttpApi /api/* auth (ServerAuth, auth.ts) and every client (ServerAuth.header, plugin,
-        // run, attach, trace-consumer), which all default to "opencode". A branded "altimate" here
-        // made the guard reject the TUI worker's `opencode:<password>` header (and "altimate:<pwd>"
-        // was then rejected by the HttpApi auth), breaking authenticated server/TUI API calls
-        // unless OPENCODE_SERVER_USERNAME was set explicitly.
-        const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
-        // altimate_change end
-        return basicAuth({ username, password })(c, next)
-      })
-      .use(async (c, next) => {
-        const skipLogging = c.req.path === "/log"
-        if (!skipLogging) {
-          log.info("request", {
+        .use(async (c, next) => {
+          const skipLogging = c.req.path === "/log"
+          if (!skipLogging) {
+            log.info("request", {
+              method: c.req.method,
+              path: c.req.path,
+            })
+          }
+          const timer = log.time("request", {
             method: c.req.method,
             path: c.req.path,
           })
-        }
-        const timer = log.time("request", {
-          method: c.req.method,
-          path: c.req.path,
-        })
-        await next()
-        if (!skipLogging) {
-          timer.stop()
-        }
-      })
-      .use(
-        cors({
-          origin(input) {
-            if (!input) return
-
-            if (input.startsWith("http://localhost:")) return input
-            if (input.startsWith("http://127.0.0.1:")) return input
-            if (
-              input === "tauri://localhost" ||
-              input === "http://tauri.localhost" ||
-              input === "https://tauri.localhost"
-            )
-              return input
-
-            // *.altimate.ai (https only, adjust if needed)
-            if (/^https:\/\/([a-z0-9-]+\.)*altimate\.ai$/.test(input)) {
-              return input
-            }
-            if (opts?.cors?.includes(input)) {
-              return input
-            }
-
-            return
-          },
-        }),
-      )
-      // altimate_change start — upstream_fix: route v2 SDK/TUI /api requests before legacy instance/UI routes.
-      .all("/api/*", forwardHttpApiBridge)
-      // altimate_change end
-      // altimate_change start — upstream_fix: bridge non-/api HttpApi routes declared outside /api/*.
-      // The TUI calls these generated SDK groups directly: workspace sync/list/status/adapter/warp,
-      // sync.start, control-plane move-session, project copy management/name generation, and project
-      // directories. Mount them before the legacy Hono route trees so they do not fall through to the
-      // app.altimate.ai catch-all proxy or a partial legacy route.
-      .all("/experimental/workspace", forwardHttpApiBridge)
-      .all("/experimental/workspace/*", forwardHttpApiBridge)
-      .all("/sync/*", forwardHttpApiBridge)
-      .all("/experimental/control-plane/move-session", forwardHttpApiBridge)
-      .all("/experimental/project/:projectID/copy", forwardHttpApiBridge)
-      .all("/experimental/project/:projectID/copy/*", forwardHttpApiBridge)
-      .all("/project/:projectID/directories", forwardHttpApiBridge)
-      // altimate_change end
-      .route("/global", GlobalRoutes())
-      .put(
-        "/auth/:providerID",
-        describeRoute({
-          summary: "Set auth credentials",
-          description: "Set authentication credentials",
-          operationId: "auth.set",
-          responses: {
-            200: {
-              description: "Successfully set authentication credentials",
-              content: {
-                "application/json": {
-                  schema: resolver(z.boolean()),
-                },
-              },
-            },
-            ...errors(400),
-          },
-        }),
-        validator(
-          "param",
-          z.object({
-            providerID: ProviderID.zod,
-          }),
-        ),
-        // altimate_change start — Auth.Info migrated to Effect Schema; convert to zod for the validator
-        validator("json", zod(Auth.Info)),
-        // altimate_change end
-        async (c) => {
-          const providerID = c.req.valid("param").providerID
-          const info = c.req.valid("json")
-          await Auth.set(providerID, info)
-          return c.json(true)
-        },
-      )
-      .delete(
-        "/auth/:providerID",
-        describeRoute({
-          summary: "Remove auth credentials",
-          description: "Remove authentication credentials",
-          operationId: "auth.remove",
-          responses: {
-            200: {
-              description: "Successfully removed authentication credentials",
-              content: {
-                "application/json": {
-                  schema: resolver(z.boolean()),
-                },
-              },
-            },
-            ...errors(400),
-          },
-        }),
-        validator(
-          "param",
-          z.object({
-            providerID: ProviderID.zod,
-          }),
-        ),
-        async (c) => {
-          const providerID = c.req.valid("param").providerID
-          await Auth.remove(providerID)
-          return c.json(true)
-        },
-      )
-      .use(async (c, next) => {
-        if (c.req.path === "/log") return next()
-        const rawWorkspaceID = c.req.query("workspace") || c.req.header("x-opencode-workspace")
-        const raw = c.req.query("directory") || c.req.header("x-opencode-directory") || process.cwd()
-        const directory = Filesystem.resolve(
-          (() => {
-            try {
-              return decodeURIComponent(raw)
-            } catch {
-              return raw
-            }
-          })(),
-        )
-
-        return WorkspaceContext.provide({
-          workspaceID: rawWorkspaceID ? WorkspaceID.make(rawWorkspaceID) : undefined,
-          async fn() {
-            return Instance.provide({
-              directory,
-              init: InstanceBootstrap,
-              async fn() {
-                return next()
-              },
-            })
-          },
-        })
-      })
-      .use(WorkspaceRouterMiddleware)
-      .get(
-        "/doc",
-        openAPIRouteHandler(app, {
-          documentation: {
-            info: {
-              title: "altimate-code",
-              version: "0.0.3",
-              description: "altimate-code api",
-            },
-            openapi: "3.1.1",
-          },
-        }),
-      )
-      .use(
-        validator(
-          "query",
-          z.object({
-            directory: z.string().optional(),
-            workspace: z.string().optional(),
-          }),
-        ),
-      )
-      .route("/project", ProjectRoutes())
-      .route("/pty", PtyRoutes())
-      .route("/config", ConfigRoutes())
-      .route("/experimental", ExperimentalRoutes())
-      .route("/session", SessionRoutes())
-      .route("/permission", PermissionRoutes())
-      .route("/question", QuestionRoutes())
-      .route("/provider", ProviderRoutes())
-      .route("/", FileRoutes())
-      .route("/mcp", McpRoutes())
-      .route("/tui", TuiRoutes())
-      .post(
-        "/instance/dispose",
-        describeRoute({
-          summary: "Dispose instance",
-          description: "Clean up and dispose the current Altimate Code instance, releasing all resources.",
-          operationId: "instance.dispose",
-          responses: {
-            200: {
-              description: "Instance disposed",
-              content: {
-                "application/json": {
-                  schema: resolver(z.boolean()),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          await Instance.dispose()
-          return c.json(true)
-        },
-      )
-      .get(
-        "/path",
-        describeRoute({
-          summary: "Get paths",
-          description:
-            "Retrieve the current working directory and related path information for the Altimate Code instance.",
-          operationId: "path.get",
-          responses: {
-            200: {
-              description: "Path",
-              content: {
-                "application/json": {
-                  schema: resolver(
-                    z
-                      .object({
-                        home: z.string(),
-                        state: z.string(),
-                        config: z.string(),
-                        worktree: z.string(),
-                        directory: z.string(),
-                      })
-                      .meta({
-                        ref: "Path",
-                      }),
-                  ),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          return c.json({
-            home: Global.Path.home,
-            state: Global.Path.state,
-            config: Global.Path.config,
-            worktree: Instance.worktree,
-            directory: Instance.directory,
-          })
-        },
-      )
-      .get(
-        "/vcs",
-        describeRoute({
-          summary: "Get VCS info",
-          description: "Retrieve version control system (VCS) information for the current project, such as git branch.",
-          operationId: "vcs.get",
-          responses: {
-            200: {
-              description: "VCS info",
-              content: {
-                "application/json": {
-                  schema: resolver(zod(Vcs.Info)),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          const branch = await Vcs.branch()
-          return c.json({
-            branch,
-          })
-        },
-      )
-      .get(
-        "/command",
-        describeRoute({
-          summary: "List commands",
-          description: "Get a list of all available commands in the Altimate Code system.",
-          operationId: "command.list",
-          responses: {
-            200: {
-              description: "List of commands",
-              content: {
-                "application/json": {
-                  schema: resolver(z.array(zod(Command.Info))),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          const commands = await Command.list()
-          return c.json(commands)
-        },
-      )
-      .post(
-        "/log",
-        describeRoute({
-          summary: "Write log",
-          description: "Write a log entry to the server logs with specified level and metadata.",
-          operationId: "app.log",
-          responses: {
-            200: {
-              description: "Log entry written successfully",
-              content: {
-                "application/json": {
-                  schema: resolver(z.boolean()),
-                },
-              },
-            },
-            ...errors(400),
-          },
-        }),
-        validator(
-          "json",
-          z.object({
-            service: z.string().meta({ description: "Service name for the log entry" }),
-            level: z.enum(["debug", "info", "error", "warn"]).meta({ description: "Log level" }),
-            message: z.string().meta({ description: "Log message" }),
-            extra: z
-              .record(z.string(), z.any())
-              .optional()
-              .meta({ description: "Additional metadata for the log entry" }),
-          }),
-        ),
-        async (c) => {
-          const { service, level, message, extra } = c.req.valid("json")
-          const logger = Log.create({ service })
-
-          switch (level) {
-            case "debug":
-              logger.debug(message, extra)
-              break
-            case "info":
-              logger.info(message, extra)
-              break
-            case "error":
-              logger.error(message, extra)
-              break
-            case "warn":
-              logger.warn(message, extra)
-              break
+          await next()
+          if (!skipLogging) {
+            timer.stop()
           }
+        })
+        .use(
+          cors({
+            origin(input) {
+              if (!input) return
 
-          return c.json(true)
-        },
-      )
-      .get(
-        "/agent",
-        describeRoute({
-          summary: "List agents",
-          description: "Get a list of all available AI agents in the Altimate Code system.",
-          operationId: "app.agents",
-          responses: {
-            200: {
-              description: "List of agents",
-              content: {
-                "application/json": {
-                  schema: resolver(z.array(zod(Agent.Info))),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          const modes = await Agent.list()
-          return c.json(modes)
-        },
-      )
-      .get(
-        "/skill",
-        describeRoute({
-          summary: "List skills",
-          description: "Get a list of all available skills in the Altimate Code system.",
-          operationId: "app.skills",
-          responses: {
-            200: {
-              description: "List of skills",
-              content: {
-                "application/json": {
-                  schema: resolver(Skill.Info.array()),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          // altimate_change start — support cache invalidation via query param
-          const reload = c.req.query("reload")
-          if (reload === "true") {
-            Skill.invalidate()
-          }
-          // altimate_change end
-          const skills = await Skill.all()
-          return c.json(skills)
-        },
-      )
-      .get(
-        "/lsp",
-        describeRoute({
-          summary: "Get LSP status",
-          description: "Get LSP server status",
-          operationId: "lsp.status",
-          responses: {
-            200: {
-              description: "LSP server status",
-              content: {
-                "application/json": {
-                  schema: resolver(LSP.Status.array()),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          return c.json(await LSP.status())
-        },
-      )
-      .get(
-        "/formatter",
-        describeRoute({
-          summary: "Get formatter status",
-          description: "Get formatter status",
-          operationId: "formatter.status",
-          responses: {
-            200: {
-              description: "Formatter status",
-              content: {
-                "application/json": {
-                  schema: resolver(z.array(zod(Format.Status))),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          return c.json(await Format.status())
-        },
-      )
-      .get(
-        "/event",
-        describeRoute({
-          summary: "Subscribe to events",
-          description: "Get events",
-          operationId: "event.subscribe",
-          responses: {
-            200: {
-              description: "Event stream",
-              content: {
-                "text/event-stream": {
-                  schema: resolver(BusEvent.payloads()),
-                },
-              },
-            },
-          },
-        }),
-        async (c) => {
-          log.info("event connected")
-          c.header("X-Accel-Buffering", "no")
-          c.header("X-Content-Type-Options", "nosniff")
-          return streamSSE(c, async (stream) => {
-            stream.writeSSE({
-              data: JSON.stringify({
-                type: "server.connected",
-                properties: {},
-              }),
-            })
-            const unsub = Bus.subscribeAll(async (event) => {
-              await stream.writeSSE({
-                data: JSON.stringify(event),
-              })
-              if (event.type === Bus.InstanceDisposed.type) {
-                stream.close()
+              if (input.startsWith("http://localhost:")) return input
+              if (input.startsWith("http://127.0.0.1:")) return input
+              if (
+                input === "tauri://localhost" ||
+                input === "http://tauri.localhost" ||
+                input === "https://tauri.localhost"
+              )
+                return input
+
+              // *.altimate.ai (https only, adjust if needed)
+              if (/^https:\/\/([a-z0-9-]+\.)*altimate\.ai$/.test(input)) {
+                return input
               }
-            })
+              if (opts?.cors?.includes(input)) {
+                return input
+              }
 
-            // Send heartbeat every 10s to prevent stalled proxy streams.
-            const heartbeat = setInterval(() => {
+              return
+            },
+          }),
+        )
+        // altimate_change start — upstream_fix: route v2 SDK/TUI /api requests before legacy instance/UI routes.
+        .all("/api/*", forwardHttpApiBridge)
+        // altimate_change end
+        // altimate_change start — upstream_fix: bridge non-/api HttpApi routes declared outside /api/*.
+        // The TUI calls these generated SDK groups directly: workspace sync/list/status/adapter/warp,
+        // sync.start, control-plane move-session, project copy management/name generation, and project
+        // directories. Mount them before the legacy Hono route trees so they do not fall through to the
+        // app.altimate.ai catch-all proxy or a partial legacy route.
+        .all("/experimental/workspace", forwardHttpApiBridge)
+        .all("/experimental/workspace/*", forwardHttpApiBridge)
+        .all("/sync/*", forwardHttpApiBridge)
+        .all("/experimental/control-plane/move-session", forwardHttpApiBridge)
+        .all("/experimental/project/:projectID/copy", forwardHttpApiBridge)
+        .all("/experimental/project/:projectID/copy/*", forwardHttpApiBridge)
+        .all("/project/:projectID/directories", forwardHttpApiBridge)
+        // altimate_change end
+        .route("/global", GlobalRoutes())
+        .put(
+          "/auth/:providerID",
+          describeRoute({
+            summary: "Set auth credentials",
+            description: "Set authentication credentials",
+            operationId: "auth.set",
+            responses: {
+              200: {
+                description: "Successfully set authentication credentials",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.boolean()),
+                  },
+                },
+              },
+              ...errors(400),
+            },
+          }),
+          validator(
+            "param",
+            z.object({
+              providerID: ProviderID.zod,
+            }),
+          ),
+          // altimate_change start — Auth.Info migrated to Effect Schema; convert to zod for the validator
+          validator("json", zod(Auth.Info)),
+          // altimate_change end
+          async (c) => {
+            const providerID = c.req.valid("param").providerID
+            const info = c.req.valid("json")
+            await Auth.set(providerID, info)
+            return c.json(true)
+          },
+        )
+        .delete(
+          "/auth/:providerID",
+          describeRoute({
+            summary: "Remove auth credentials",
+            description: "Remove authentication credentials",
+            operationId: "auth.remove",
+            responses: {
+              200: {
+                description: "Successfully removed authentication credentials",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.boolean()),
+                  },
+                },
+              },
+              ...errors(400),
+            },
+          }),
+          validator(
+            "param",
+            z.object({
+              providerID: ProviderID.zod,
+            }),
+          ),
+          async (c) => {
+            const providerID = c.req.valid("param").providerID
+            await Auth.remove(providerID)
+            return c.json(true)
+          },
+        )
+        .use(async (c, next) => {
+          if (c.req.path === "/log") return next()
+          const rawWorkspaceID = c.req.query("workspace") || c.req.header("x-opencode-workspace")
+          const raw = c.req.query("directory") || c.req.header("x-opencode-directory") || process.cwd()
+          const directory = Filesystem.resolve(
+            (() => {
+              try {
+                return decodeURIComponent(raw)
+              } catch {
+                return raw
+              }
+            })(),
+          )
+
+          return WorkspaceContext.provide({
+            workspaceID: rawWorkspaceID ? WorkspaceID.make(rawWorkspaceID) : undefined,
+            async fn() {
+              return Instance.provide({
+                directory,
+                init: InstanceBootstrap,
+                async fn() {
+                  return next()
+                },
+              })
+            },
+          })
+        })
+        .use(WorkspaceRouterMiddleware)
+        .get(
+          "/doc",
+          openAPIRouteHandler(app, {
+            documentation: {
+              info: {
+                title: "altimate-code",
+                version: "0.0.3",
+                description: "altimate-code api",
+              },
+              openapi: "3.1.1",
+            },
+          }),
+        )
+        .use(
+          validator(
+            "query",
+            z.object({
+              directory: z.string().optional(),
+              workspace: z.string().optional(),
+            }),
+          ),
+        )
+        .route("/project", ProjectRoutes())
+        .route("/pty", PtyRoutes())
+        .route("/config", ConfigRoutes())
+        .route("/experimental", ExperimentalRoutes())
+        .route("/session", SessionRoutes())
+        .route("/permission", PermissionRoutes())
+        .route("/question", QuestionRoutes())
+        .route("/provider", ProviderRoutes())
+        .route("/", FileRoutes())
+        .route("/mcp", McpRoutes())
+        .route("/tui", TuiRoutes())
+        .post(
+          "/instance/dispose",
+          describeRoute({
+            summary: "Dispose instance",
+            description: "Clean up and dispose the current Altimate Code instance, releasing all resources.",
+            operationId: "instance.dispose",
+            responses: {
+              200: {
+                description: "Instance disposed",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.boolean()),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            await Instance.dispose()
+            return c.json(true)
+          },
+        )
+        .get(
+          "/path",
+          describeRoute({
+            summary: "Get paths",
+            description:
+              "Retrieve the current working directory and related path information for the Altimate Code instance.",
+            operationId: "path.get",
+            responses: {
+              200: {
+                description: "Path",
+                content: {
+                  "application/json": {
+                    schema: resolver(
+                      z
+                        .object({
+                          home: z.string(),
+                          state: z.string(),
+                          config: z.string(),
+                          worktree: z.string(),
+                          directory: z.string(),
+                        })
+                        .meta({
+                          ref: "Path",
+                        }),
+                    ),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            return c.json({
+              home: Global.Path.home,
+              state: Global.Path.state,
+              config: Global.Path.config,
+              worktree: Instance.worktree,
+              directory: Instance.directory,
+            })
+          },
+        )
+        .get(
+          "/vcs",
+          describeRoute({
+            summary: "Get VCS info",
+            description:
+              "Retrieve version control system (VCS) information for the current project, such as git branch.",
+            operationId: "vcs.get",
+            responses: {
+              200: {
+                description: "VCS info",
+                content: {
+                  "application/json": {
+                    schema: resolver(zod(Vcs.Info)),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            const branch = await Vcs.branch()
+            return c.json({
+              branch,
+            })
+          },
+        )
+        .get(
+          "/command",
+          describeRoute({
+            summary: "List commands",
+            description: "Get a list of all available commands in the Altimate Code system.",
+            operationId: "command.list",
+            responses: {
+              200: {
+                description: "List of commands",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.array(zod(Command.Info))),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            const commands = await Command.list()
+            return c.json(commands)
+          },
+        )
+        .post(
+          "/log",
+          describeRoute({
+            summary: "Write log",
+            description: "Write a log entry to the server logs with specified level and metadata.",
+            operationId: "app.log",
+            responses: {
+              200: {
+                description: "Log entry written successfully",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.boolean()),
+                  },
+                },
+              },
+              ...errors(400),
+            },
+          }),
+          validator(
+            "json",
+            z.object({
+              service: z.string().meta({ description: "Service name for the log entry" }),
+              level: z.enum(["debug", "info", "error", "warn"]).meta({ description: "Log level" }),
+              message: z.string().meta({ description: "Log message" }),
+              extra: z
+                .record(z.string(), z.any())
+                .optional()
+                .meta({ description: "Additional metadata for the log entry" }),
+            }),
+          ),
+          async (c) => {
+            const { service, level, message, extra } = c.req.valid("json")
+            const logger = Log.create({ service })
+
+            switch (level) {
+              case "debug":
+                logger.debug(message, extra)
+                break
+              case "info":
+                logger.info(message, extra)
+                break
+              case "error":
+                logger.error(message, extra)
+                break
+              case "warn":
+                logger.warn(message, extra)
+                break
+            }
+
+            return c.json(true)
+          },
+        )
+        .get(
+          "/agent",
+          describeRoute({
+            summary: "List agents",
+            description: "Get a list of all available AI agents in the Altimate Code system.",
+            operationId: "app.agents",
+            responses: {
+              200: {
+                description: "List of agents",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.array(zod(Agent.Info))),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            const modes = await Agent.list()
+            return c.json(modes)
+          },
+        )
+        .get(
+          "/skill",
+          describeRoute({
+            summary: "List skills",
+            description: "Get a list of all available skills in the Altimate Code system.",
+            operationId: "app.skills",
+            responses: {
+              200: {
+                description: "List of skills",
+                content: {
+                  "application/json": {
+                    schema: resolver(Skill.Info.array()),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            // altimate_change start — support cache invalidation via query param
+            const reload = c.req.query("reload")
+            if (reload === "true") {
+              Skill.invalidate()
+            }
+            // altimate_change end
+            const skills = await Skill.all()
+            return c.json(skills)
+          },
+        )
+        .get(
+          "/lsp",
+          describeRoute({
+            summary: "Get LSP status",
+            description: "Get LSP server status",
+            operationId: "lsp.status",
+            responses: {
+              200: {
+                description: "LSP server status",
+                content: {
+                  "application/json": {
+                    schema: resolver(LSP.Status.array()),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            return c.json(await LSP.status())
+          },
+        )
+        .get(
+          "/formatter",
+          describeRoute({
+            summary: "Get formatter status",
+            description: "Get formatter status",
+            operationId: "formatter.status",
+            responses: {
+              200: {
+                description: "Formatter status",
+                content: {
+                  "application/json": {
+                    schema: resolver(z.array(zod(Format.Status))),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            return c.json(await Format.status())
+          },
+        )
+        .get(
+          "/event",
+          describeRoute({
+            summary: "Subscribe to events",
+            description: "Get events",
+            operationId: "event.subscribe",
+            responses: {
+              200: {
+                description: "Event stream",
+                content: {
+                  "text/event-stream": {
+                    schema: resolver(BusEvent.payloads()),
+                  },
+                },
+              },
+            },
+          }),
+          async (c) => {
+            log.info("event connected")
+            c.header("X-Accel-Buffering", "no")
+            c.header("X-Content-Type-Options", "nosniff")
+            return streamSSE(c, async (stream) => {
               stream.writeSSE({
                 data: JSON.stringify({
-                  type: "server.heartbeat",
+                  type: "server.connected",
                   properties: {},
                 }),
               })
-            }, 10_000)
+              const unsub = Bus.subscribeAll(async (event) => {
+                await stream.writeSSE({
+                  data: JSON.stringify(event),
+                })
+                if (event.type === Bus.InstanceDisposed.type) {
+                  stream.close()
+                }
+              })
 
-            await new Promise<void>((resolve) => {
-              stream.onAbort(() => {
-                clearInterval(heartbeat)
-                unsub()
-                resolve()
-                log.info("event disconnected")
+              // Send heartbeat every 10s to prevent stalled proxy streams.
+              const heartbeat = setInterval(() => {
+                stream.writeSSE({
+                  data: JSON.stringify({
+                    type: "server.heartbeat",
+                    properties: {},
+                  }),
+                })
+              }, 10_000)
+
+              await new Promise<void>((resolve) => {
+                stream.onAbort(() => {
+                  clearInterval(heartbeat)
+                  unsub()
+                  resolve()
+                  log.info("event disconnected")
+                })
               })
             })
-          })
-        },
-      )
-      // altimate_change start — POST /altimate/prompt/enhance
-      // Keep the fork-owned LLM/config prompt enhancement on the opencode side while letting the
-      // extracted upstream TUI call it from the submit path. The endpoint is intentionally a no-op
-      // unless experimental.auto_enhance_prompt is true, and failures return the original prompt so
-      // submit is never blocked by the rewrite path.
-      .post(
-        "/altimate/prompt/enhance",
-        validator("json", z.object({ text: z.string() })),
-        async (c) => {
+          },
+        )
+        // altimate_change start — POST /altimate/prompt/enhance
+        // Keep the fork-owned LLM/config prompt enhancement on the opencode side while letting the
+        // extracted upstream TUI call it from the submit path. The endpoint is intentionally a no-op
+        // unless experimental.auto_enhance_prompt is true, and failures return the original prompt so
+        // submit is never blocked by the rewrite path.
+        .post("/altimate/prompt/enhance", validator("json", z.object({ text: z.string() })), async (c) => {
           const { text } = c.req.valid("json")
           try {
             if (!(await isAutoEnhanceEnabled())) {
@@ -659,79 +660,79 @@ export namespace Server {
             log.error("prompt enhance failed; using original prompt", { error: err })
             return c.json({ text, enabled: true, enhanced: false })
           }
-        },
-      )
-      // altimate_change end
-      // altimate_change start — POST /altimate/mcp/reload-datamate
-      // Updates the datamate MCP server config from IDE MCP config files and reconnects
-      // the live MCP client so the new transport takes effect without a server restart.
-      //
-      // Bug-fix: the previous implementation called MCP.disconnect(name) + MCP.connect(name).
-      // MCP.disconnect calls persistMcpEnabled(name, false), which reads the stale in-memory
-      // Config singleton (not yet updated by syncDatamateUrlFromVscodeMcp) and writes
-      // { ...stale_entry, enabled: false } back to disk, overwriting the fresh config.
-      // MCP.connect then re-reads the same stale singleton and reconnects with the old transport.
-      //
-      // Fix: read the freshly-written entry directly from disk via readMcpEntryFromDisk
-      // (bypasses Config singleton), then call MCP.add(name, freshEntry) which takes a
-      // config directly and never calls persistMcpEnabled.
-      .post("/altimate/mcp/reload-datamate", async (c) => {
-        try {
-          const directory = Instance.directory
-          log.info("reload-datamate: syncing IDE MCP config", { directory })
-
-          // Sync IDE MCP config → altimate-code.json; returns updated server names.
-          const updatedNames = await syncDatamateUrlFromVscodeMcp(directory)
-          const updated = updatedNames.length > 0
-
-          if (updated) {
-            log.info("reload-datamate: config updated, reconnecting MCP servers", { updatedNames })
-            // Reconnect each updated server using the freshly-written disk entry.
-            // Bypass Config.get() (stale singleton) by reading the file directly.
-            const configPath = await resolveConfigPath(directory)
-            const currentStatus = await MCP.status()
-            for (const name of updatedNames) {
-              const freshEntry = await readMcpEntryFromDisk(name, configPath)
-              if (!freshEntry) {
-                log.warn("reload-datamate: fresh config entry not found on disk", { name, configPath })
-                continue
-              }
-              log.info("reload-datamate: reconnecting with fresh config", {
-                name,
-                type: freshEntry.type,
-                wasConnected: currentStatus[name]?.status === "connected",
-              })
-              // MCP.add takes a config directly — no Config.get() call, no persistMcpEnabled.
-              await MCP.add(name, freshEntry)
-            }
-          } else {
-            log.info("reload-datamate: no config changes detected")
-          }
-
-          return c.json({ ok: true, updated })
-        } catch (err) {
-          const error = err instanceof Error ? err.message : String(err)
-          log.error("reload-datamate: failed", { error })
-          return c.json({ ok: false, error }, 500)
-        }
-      })
-      // altimate_change end
-      .all("/*", async (c) => {
-        const path = c.req.path
-
-        const response = await proxy(`https://app.altimate.ai${path}`, {
-          ...c.req,
-          headers: {
-            ...c.req.raw.headers,
-            host: "app.altimate.ai",
-          },
         })
-        response.headers.set(
-          "Content-Security-Policy",
-          "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:",
-        )
-        return response
-      })
+        // altimate_change end
+        // altimate_change start — POST /altimate/mcp/reload-datamate
+        // Updates the datamate MCP server config from IDE MCP config files and reconnects
+        // the live MCP client so the new transport takes effect without a server restart.
+        //
+        // Bug-fix: the previous implementation called MCP.disconnect(name) + MCP.connect(name).
+        // MCP.disconnect calls persistMcpEnabled(name, false), which reads the stale in-memory
+        // Config singleton (not yet updated by syncDatamateUrlFromVscodeMcp) and writes
+        // { ...stale_entry, enabled: false } back to disk, overwriting the fresh config.
+        // MCP.connect then re-reads the same stale singleton and reconnects with the old transport.
+        //
+        // Fix: read the freshly-written entry directly from disk via readMcpEntryFromDisk
+        // (bypasses Config singleton), then call MCP.add(name, freshEntry) which takes a
+        // config directly and never calls persistMcpEnabled.
+        .post("/altimate/mcp/reload-datamate", async (c) => {
+          try {
+            const directory = Instance.directory
+            log.info("reload-datamate: syncing IDE MCP config", { directory })
+
+            // Sync IDE MCP config → altimate-code.json; returns updated server names.
+            const updatedNames = await syncDatamateUrlFromVscodeMcp(directory)
+            const updated = updatedNames.length > 0
+
+            if (updated) {
+              log.info("reload-datamate: config updated, reconnecting MCP servers", { updatedNames })
+              // Reconnect each updated server using the freshly-written disk entry.
+              // Bypass Config.get() (stale singleton) by reading the file directly.
+              const configPath = await resolveConfigPath(directory)
+              const currentStatus = await MCP.status()
+              for (const name of updatedNames) {
+                const freshEntry = await readMcpEntryFromDisk(name, configPath)
+                if (!freshEntry) {
+                  log.warn("reload-datamate: fresh config entry not found on disk", { name, configPath })
+                  continue
+                }
+                log.info("reload-datamate: reconnecting with fresh config", {
+                  name,
+                  type: freshEntry.type,
+                  wasConnected: currentStatus[name]?.status === "connected",
+                })
+                // MCP.add takes a config directly — no Config.get() call, no persistMcpEnabled.
+                await MCP.add(name, freshEntry)
+              }
+            } else {
+              log.info("reload-datamate: no config changes detected")
+            }
+
+            return c.json({ ok: true, updated })
+          } catch (err) {
+            const error = err instanceof Error ? err.message : String(err)
+            log.error("reload-datamate: failed", { error })
+            return c.json({ ok: false, error }, 500)
+          }
+        })
+        // altimate_change end
+        .all("/*", async (c) => {
+          const path = c.req.path
+
+          const response = await proxy(`https://app.altimate.ai${path}`, {
+            ...c.req,
+            headers: {
+              ...c.req.raw.headers,
+              host: "app.altimate.ai",
+            },
+          })
+          response.headers.set(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:",
+          )
+          return response
+        })
+    )
   }
 
   export async function openapi() {
