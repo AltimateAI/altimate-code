@@ -110,17 +110,15 @@ export const TuiThreadCommand = cmd({
         type: "string",
         describe: "prompt to use",
       })
-      .option("agent", {
-        type: "string",
-        describe: "agent to use",
-      })
-      // altimate_change — AI-8504 item 1: launch flag that pins this session
-      // to the workspace this directory is linked to. Resolved same-directory-
-      // only (no backend name search, no fuzzy match) — see
-      // altimate/workspace/launch-resolve.ts.
+      // altimate_change start — --workspace launch flag (AI-8504 item 1); see altimate/workspace/launch-resolve.ts
       .option("workspace", {
         type: "string",
         describe: "attach this session to the workspace linked in this directory, by name",
+      })
+      // altimate_change end
+      .option("agent", {
+        type: "string",
+        describe: "agent to use",
       }),
   handler: async (args) => {
     const unguard = win32InstallCtrlCGuard()
