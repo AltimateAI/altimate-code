@@ -152,6 +152,38 @@ describe("runHandoffWithOpener end-to-end", () => {
     if (!result.ok) expect(result.reason).toBe("tenant_mismatch")
   })
 
+  test("wrong CSRF state is silently rejected — legitimate callback still wins", async () => {
+    // The state check (``pending.state !== state``) is the primary guard
+    // against a local rogue process forging a callback with an
+    // attacker-chosen workspace id. A wrong-state hit returns 400 and the
+    // listener keeps waiting, so a legitimate follow-up callback can still
+    // resolve the flow correctly. Fire the impersonation attempt first,
+    // then the correct one, and verify the correct one wins — not the
+    // attacker's workspace id 999.
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        const { state, redirect } = parseHandoffUrl(url)
+        // Rogue process attempts to inject workspace 999 with a guessed state.
+        await fireCallback(redirect, {
+          workspace_id: "999",
+          state: "wrong-state",
+          tenant: "acme",
+        })
+        // Legitimate callback with the real state — this one wins.
+        await fireCallback(redirect, { workspace_id: "1", state, tenant: "acme" })
+      },
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      // The critical assertion: the attacker's workspace id (999) never
+      // resolved the promise — only the legitimate callback's workspace
+      // id (1) did.
+      expect(result.workspaceId).toBe(1)
+      expect(result.tenant).toBe("acme")
+    }
+  })
+
   test("?error=cancelled callback resolves as {cancelled}", async () => {
     const result = await runHandoffWithOpener(
       { identifier: { projectPath: "/x" }, projectName: "x" },
