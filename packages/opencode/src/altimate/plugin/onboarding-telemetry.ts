@@ -74,6 +74,13 @@ async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void>
         EventV2Bridge.Service.use((events) =>
           events.listen((event) =>
             Effect.gen(function* () {
+              // NOTE: ``SessionEvent`` here is the module-local alias for
+              // ``Event`` imported from ``@/session/status`` (see imports
+              // above) — the MODERN ``EventV2.define`` API, not the
+              // deprecated ``LegacyEvent.Idle`` under ``BusEvent.define``.
+              // Grep the file for ``import { Event as SessionEvent }`` to
+              // confirm. Bots flagging this as "deprecated API" are
+              // false-positive matching on the token ``SessionEvent``.
               if (event.type !== SessionEvent.Idle.type) return
               const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
               if (!sid || !pendingWorkspacePromptSessions.has(sid)) return

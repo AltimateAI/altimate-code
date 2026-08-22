@@ -245,7 +245,12 @@ async function createThenBindOrRebind(
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
- * dispatch to whatever OS scheme handler matches the protocol). */
+ * dispatch to whatever OS scheme handler matches the protocol).
+ *
+ * Deliberately duplicated in ``packages/opencode/src/plugin/tui/altimate/workspace.tsx``
+ * so the CLI subcommand path (this file) and the TUI plugin path stay
+ * independent. Keep in sync — if the allowed-protocol set ever changes
+ * (e.g. tighten to ``https:`` only), update both copies. */
 function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
@@ -373,7 +378,11 @@ async function bindOrRebind(
  * resolved the binding on — NOT which identifier the current call happens to
  * carry. A repo whose remote was renamed still has a binding under its path;
  * rebindByRemote against the new remote would 404 with no repair path from
- * the CLI. (M3) */
+ * the CLI. (M3)
+ *
+ * Deliberately duplicated in ``packages/opencode/src/plugin/tui/altimate/workspace.tsx``
+ * so the CLI subcommand and the TUI plugin flows can evolve independently.
+ * Keep both copies in sync when the M3 endpoint-selection logic changes. */
 async function rebindByMatchedIdentifier(input: {
   identifier: ProjectIdentifier
   targetDatamateId: number
