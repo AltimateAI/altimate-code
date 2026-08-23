@@ -1112,6 +1112,56 @@ describe("check command E2E", () => {
 // ===========================================================================
 
 describe("check command adversarial", () => {
+  test("handler filters non-SQL files from positional args — no content parsed or echoed", async () => {
+    // Handler-level integration test (cubic P2 catch on the pure-helper-only
+    // test coverage). This test would fail if CheckCommand.handler stopped
+    // calling isSqlFile — proving the filter is wired end-to-end, not just
+    // present as an unused helper. Reproduces the exact regression path:
+    // a non-SQL file containing "root:x:0" must NOT flow through the engine
+    // path where a rule message could echo its content to stdout.
+    const sqlFile = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
+    const nonSql = path.join(tmpDir.dir, "fake-passwd-no-ext")
+    await fs.writeFile(nonSql, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    const r = await runHandler(baseArgs({ files: [sqlFile, nonSql], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    // Only the .sql file made it through.
+    expect(j.files_checked).toBe(1)
+    // The non-SQL file was rejected with a clear warning on stderr.
+    expect(r.stderr).toMatch(/not a SQL file.*fake-passwd-no-ext/)
+    // Critically: no content leak. Neither the SQL output nor the warning
+    // contains any part of the non-SQL file's content.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
+  test("handler rejects a directory whose name ends in .sql", async () => {
+    // cubic P2: extension check alone would accept ``foo.sql/`` as a file.
+    // The isFile() stat gate must reject it. When ALL positional files
+    // are rejected, check.ts's early "No SQL files found" bail-out fires
+    // and there is no JSON body — assert on stderr instead of parseJson.
+    const dirLikeFile = path.join(tmpDir.dir, "not-a-file.sql")
+    await fs.mkdir(dirLikeFile, { recursive: true })
+    const r = await runHandler(baseArgs({ files: [dirLikeFile], checks: "safety" }))
+    expect(r.stderr).toMatch(/not a regular file.*not-a-file\.sql/)
+    expect(r.stderr).toContain("No SQL files found to check")
+    // No content-leak surface at all when the file is rejected.
+    expect(r.stdout).not.toContain("not-a-file")
+  })
+
+  test("handler rejects a dotfile named exactly '.sql'", async () => {
+    // cubic P2: ``.sql`` as a filename is a dotfile with no extension,
+    // not a SQL file. Must be rejected before reaching the engine.
+    const dotSql = path.join(tmpDir.dir, ".sql")
+    await fs.writeFile(dotSql, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    const r = await runHandler(baseArgs({ files: [dotSql], checks: "safety" }))
+    // Same as above — all files rejected → "No SQL files found" bail-out.
+    expect(r.stderr).toMatch(/not a SQL file.*\.sql$/m)
+    expect(r.stderr).toContain("No SQL files found to check")
+    // Critical: the file's content NEVER reaches stdout or stderr.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
   test("handles SQL with embedded null bytes", async () => {
     const file = await writeSql(tmpDir.dir, "null.sql", "SELECT 1;\0DROP TABLE users;")
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
@@ -1294,14 +1344,19 @@ describe("check command adversarial", () => {
   })
 
   test("handles directory with .sql extension", async () => {
+    // Extension filter passes ``dir.sql`` (name ends in .sql) but the
+    // stat/isFile gate rejects it as "not a regular file" before it ever
+    // reaches the readFileSync call. The good.sql file still processes.
+    // (v0.9.6 hotfix: added statSync isFile() check.)
     const good = await writeSql(tmpDir.dir, "good.sql", "SELECT 1;")
     const dir = path.join(tmpDir.dir, "dir.sql")
     await fs.mkdir(dir)
 
     const r = await runHandler(baseArgs({ files: [good, dir], checks: "lint" }))
-    expect(r.stderr).toContain("Error reading")
+    expect(r.stderr).toContain("not a regular file")
+    expect(r.stderr).toContain("dir.sql")
     const j = parseJson(r.stdout)
-    expect(j.files_checked).toBe(2)
+    expect(j.files_checked).toBe(1)
   })
 
   test("processes duplicate file args (each checked separately)", async () => {
@@ -1452,6 +1507,15 @@ describe("isSqlFile — extension filter (v0.9.6 sanity regression)", () => {
   test("dotfiles with a SQL extension ARE accepted", () => {
     // Edge case: ``.query.sql`` is a hidden file with a real .sql extension.
     expect(isSqlFile(".query.sql")).toBe(true)
+  })
+  test("basename that is JUST the extension (bare dotfile) is NOT SQL", () => {
+    // ``.sql`` and ``.ddl`` as filenames are dotfiles per node's
+    // ``path.extname`` — they have NO extension, they're just dot-prefixed
+    // names. Must not be accepted. (cubic P2 catch on release/v0.9.6 hotfix.)
+    expect(isSqlFile(".sql")).toBe(false)
+    expect(isSqlFile(".ddl")).toBe(false)
+    expect(isSqlFile("/some/dir/.sql")).toBe(false)
+    expect(isSqlFile("/some/dir/.ddl")).toBe(false)
   })
   test("directory paths (trailing slash) are not SQL files", () => {
     expect(isSqlFile("/path/to/dir/")).toBe(false)

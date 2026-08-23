@@ -2,7 +2,7 @@
 import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { Dispatcher } from "../../altimate/native"
-import { readFileSync, existsSync } from "fs"
+import { readFileSync, existsSync, statSync } from "fs"
 import { Glob } from "../../util/glob"
 import path from "path"
 import {
@@ -461,8 +461,10 @@ export const CheckCommand = cmd({
     // 3. Resolve files
     let files: string[] = args.files ?? []
     if (files.length === 0) {
-      console.error("No files specified, searching for **/*.sql in current directory...")
-      files = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true })
+      console.error("No files specified, searching for **/*.{sql,ddl} in current directory...")
+      const sqls = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true })
+      const ddls = await Glob.scan("**/*.ddl", { cwd: process.cwd(), absolute: true })
+      files = [...new Set([...sqls, ...ddls])]
     } else {
       // Expand globs in positional args
       const expanded: string[] = []
@@ -495,6 +497,20 @@ export const CheckCommand = cmd({
       if (!isSqlFile(f)) {
         const ext = path.extname(f).toLowerCase() || "none"
         console.error(`Warning: not a SQL file (extension "${ext}"), skipping: ${f}`)
+        return false
+      }
+      // Reject directories (and symlinks-to-directories) whose name happens
+      // to end in .sql / .ddl — statSync follows symlinks, so a symlink to
+      // a dir is rejected. (cubic P2 round on release/v0.9.6 hotfix.)
+      let st
+      try {
+        st = statSync(f)
+      } catch (e) {
+        console.error(`Warning: stat failed, skipping: ${f} (${(e as Error).message})`)
+        return false
+      }
+      if (!st.isFile()) {
+        console.error(`Warning: not a regular file (directory or other), skipping: ${f}`)
         return false
       }
       return true

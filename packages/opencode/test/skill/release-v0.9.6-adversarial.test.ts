@@ -29,25 +29,15 @@
  * hit ``await _registrationPromise`` by the time control returns to us —
  * we can immediately act on shared state without racing the call's setup.
  */
-import { afterEach, beforeAll, afterAll, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-let _priorTelemetryDisabled: string | undefined
-beforeAll(() => {
-  _priorTelemetryDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
-  process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
-})
-afterAll(() => {
-  // Restore any pre-existing value rather than unconditionally deleting —
-  // an outer suite may have set it and expects to see its own value after
-  // this file runs. (cubic P2 round 3.)
-  if (_priorTelemetryDisabled === undefined) {
-    delete process.env.ALTIMATE_TELEMETRY_DISABLED
-  } else {
-    process.env.ALTIMATE_TELEMETRY_DISABLED = _priorTelemetryDisabled
-  }
-})
+// No process.env mutation — Dispatcher.call already wraps every
+// Telemetry.track in try/catch that swallows errors, so telemetry firing
+// during a test cannot fail the test. Prior save/restore of
+// ALTIMATE_TELEMETRY_DISABLED wasn't parallel-safe under bun test
+// (coderabbit MAJOR on v0.9.6 hotfix, issue #1130). Removed cleanly here.
 
 describe("v0.9.6 release: Dispatcher registration retry", () => {
   beforeEach(() => {

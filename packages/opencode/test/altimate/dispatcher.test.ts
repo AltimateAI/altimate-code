@@ -1,13 +1,11 @@
-import { describe, expect, test, beforeEach, beforeAll, afterAll, mock } from "bun:test"
+import { describe, expect, test, beforeEach, mock } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// Disable telemetry via env var instead of mock.module
-beforeAll(() => {
-  process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
-})
-afterAll(() => {
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
-})
+// No telemetry disable needed — Dispatcher.call already wraps every
+// Telemetry.track call in try/catch that swallows all errors, so telemetry
+// firing during a test cannot fail the test. The previous env-var
+// mutation was defensive against nothing and wasn't parallel-safe (issue
+// #1130 — https://github.com/AltimateAI/altimate-code/issues/1130).
 
 describe("Dispatcher", () => {
   beforeEach(() => {

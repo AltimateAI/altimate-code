@@ -52,13 +52,19 @@ export const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pi
  * parsed and echoed back through engine error messages (v0.9.6 fix). */
 export const SQL_EXTENSIONS = new Set([".sql", ".ddl"])
 
-/** Case-insensitive SQL-extension test. Path.extname returns "" for
- * files without a dot, which correctly resolves to "not a SQL file". */
+/** Case-insensitive SQL-extension test. Matches node's ``path.extname``
+ * semantics: a filename whose only dot is the FIRST character (e.g.
+ * ``.sql`` or ``.ddl``) is a dotfile with NO extension, not a SQL file.
+ * ``.query.sql`` is a dotfile with a real ``.sql`` extension (accepted).
+ * ``foo.bar/baz`` is not SQL (the dot is in the directory, not the
+ * filename). (cubic P2 round on release/v0.9.6 hotfix.) */
 export function isSqlFile(filePath: string): boolean {
-  const dot = filePath.lastIndexOf(".")
   const slash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"))
-  if (dot <= slash) return false
-  return SQL_EXTENSIONS.has(filePath.slice(dot).toLowerCase())
+  const basename = slash === -1 ? filePath : filePath.slice(slash + 1)
+  const dot = basename.lastIndexOf(".")
+  // dot === -1: no extension. dot === 0: dotfile with no extension (e.g. ``.sql``).
+  if (dot <= 0) return false
+  return SQL_EXTENSIONS.has(basename.slice(dot).toLowerCase())
 }
 
 // ---------------------------------------------------------------------------
