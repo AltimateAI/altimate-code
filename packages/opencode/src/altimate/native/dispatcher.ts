@@ -67,7 +67,18 @@ export async function call<M extends BridgeMethod>(
       const generation = ++_registrationGeneration
       _registrationPromise = fn().then(
         () => {
-          if (generation === _registrationGeneration) _ensureRegistered = null
+          // Generation advanced while this attempt was in flight (concurrent
+          // ``reset()``/``setRegistrationHook()`` + another call arrived).
+          // The stale hook body may have written stale entries into
+          // ``nativeHandlers`` via late ``register()`` calls, clobbering the
+          // newer hook's. Clear ``_registrationPromise`` so the NEXT
+          // ``Dispatcher.call`` re-runs the current hook — its ``register()``
+          // calls then overwrite whatever the stale hook wrote. Hook bodies
+          // must be idempotent (they are today — ``register`` is a plain
+          // ``Map.set``). Successful current-generation attempts leave the
+          // resolved promise memoized so subsequent calls fast-path through
+          // an already-settled ``await``. (cubic round 2 on release/v0.9.6.)
+          if (generation !== _registrationGeneration) _registrationPromise = null
         },
         (err) => {
           if (generation === _registrationGeneration) _registrationPromise = null
