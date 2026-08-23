@@ -255,3 +255,15 @@ describe("findDownstream: BFS depth semantics (multi-seed)", () => {
     expect(result[0].unique_id).toBe("model.pkg_a.rpt")
   })
 })
+
+describe("findDownstream: unique_id entry", () => {
+  test("seeding by unique_id scopes to that package's downstream", () => {
+    const models = [
+      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+      { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
+      { name: "rpt_a", unique_id: "model.pkg_a.rpt_a", depends_on: ["model.pkg_a.orders"] },
+      { name: "rpt_b", unique_id: "model.pkg_b.rpt_b", depends_on: ["model.pkg_b.orders"] },
+    ]
+    expect(findDownstream("model.pkg_a.orders", models).map((m) => m.name)).toEqual(["rpt_a"])
+  })
+})

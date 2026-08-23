@@ -106,11 +106,12 @@ function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): strin
   // arbitrary side-effecting UDFs cannot be proven safe from text alone.
   const alwaysWrite =
     /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into|nextval|setval)\b/i
-  // replace/copy/call/set double as read-only functions (REPLACE(str,..)); the
-  // function form abuts `(`, the statement form (CALL proc(..), COPY t FROM,
-  // SET x=1) never does — so only the non-`(` form counts as a write.
-  const statementFormOnly = /\b(replace|copy|call|set)\b(?!\s*\()/i
-  if (!readOnlyStart || alwaysWrite.test(stripped) || statementFormOnly.test(stripped)) return blocked
+  // No separate check for the statement forms of REPLACE/COPY/CALL/SET: a single
+  // statement (multi-statement already rejected above) that begins with one of
+  // them fails readOnlyStart, and one beginning with a read keyword cannot ALSO
+  // be their statement form — so `!readOnlyStart` covers them. Scanning the
+  // whole body would wrongly block a read projecting a column named `set`.
+  if (!readOnlyStart || alwaysWrite.test(stripped)) return blocked
   return null
 }
 

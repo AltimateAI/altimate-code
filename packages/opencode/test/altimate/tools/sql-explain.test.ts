@@ -640,3 +640,16 @@ describe("SqlExplainTool.execute", () => {
     expect(result.metadata.analyzed).toBe(true)
   })
 })
+
+describe("round-13: analyze guard does not false-positive dual-use column names", () => {
+  const { validateAnalyzeSafety } = toolInternals
+  test("a SELECT projecting columns named set/replace/copy/call is allowed", () => {
+    expect(validateAnalyzeSafety("SELECT set, replace, copy, call FROM options", true)).toBeNull()
+    expect(validateAnalyzeSafety("WITH x AS (SELECT set FROM t) SELECT * FROM x", true)).toBeNull()
+  })
+  test("statement forms still blocked (they never start with a read keyword)", () => {
+    expect(validateAnalyzeSafety("CALL my_proc(1)", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("COPY t FROM 's3://b'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SET search_path TO public", true)).not.toBeNull()
+  })
+})

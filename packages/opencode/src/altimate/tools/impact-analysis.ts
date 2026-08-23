@@ -51,7 +51,8 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       // and the affected-id set both derive from this list, so the matching
       // rule cannot silently drift between them.
       const targetMatches = manifest.models.filter(
-        (m: { name: string }) => m.name === args.model || m.name.endsWith(`.${args.model}`),
+        (m: { name: string; unique_id?: string }) =>
+          m.name === args.model || m.name.endsWith(`.${args.model}`) || m.unique_id === args.model,
       )
 
       if (targetMatches.length === 0) {
