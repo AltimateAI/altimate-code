@@ -23,17 +23,28 @@ let _ensureRegistered: (() => Promise<void>) | null = null
 /** In-flight registration promise (deduped across concurrent callers). */
 let _registrationPromise: Promise<void> | null = null
 
+/** Generation counter — bumped whenever the hook or in-flight promise is
+ * replaced. An in-flight attempt captures its generation at start; if the
+ * counter advanced by the time its settle handler fires, another caller
+ * (reset / setRegistrationHook / a distinct new attempt after failure)
+ * has already installed replacement state, and the stale attempt must NOT
+ * mutate it. Prevents a stale success from clobbering a replacement hook,
+ * and a stale failure from clobbering a newer in-flight promise. */
+let _registrationGeneration = 0
+
 /** Clear all registered handlers and lazy registration hook (for test isolation). */
 export function reset(): void {
   nativeHandlers.clear()
   _ensureRegistered = null
   _registrationPromise = null
+  _registrationGeneration++
 }
 
 /** Called by native/index.ts to set the lazy registration function. */
 export function setRegistrationHook(fn: () => Promise<void>): void {
   _ensureRegistered = fn
   _registrationPromise = null
+  _registrationGeneration++
 }
 
 /** Dispatch a method call to the registered native handler. */
@@ -47,16 +58,19 @@ export async function call<M extends BridgeMethod>(
   // ``_ensureRegistered`` was nulled BEFORE the await, so a transient NAPI
   // load failure poisoned the bridge for the process lifetime — every
   // subsequent ``call`` threw ``No native handler for X`` with no way to
-  // recover without restarting the CLI.
+  // recover without restarting the CLI. Generation guard prevents a stale
+  // attempt from mutating state a concurrent ``reset()``/``setRegistrationHook()``
+  // has since replaced. (coderabbit round 1 — release/v0.9.6 review.)
   if (_ensureRegistered) {
     if (!_registrationPromise) {
       const fn = _ensureRegistered
+      const generation = ++_registrationGeneration
       _registrationPromise = fn().then(
         () => {
-          _ensureRegistered = null
+          if (generation === _registrationGeneration) _ensureRegistered = null
         },
         (err) => {
-          _registrationPromise = null
+          if (generation === _registrationGeneration) _registrationPromise = null
           throw err
         },
       )
