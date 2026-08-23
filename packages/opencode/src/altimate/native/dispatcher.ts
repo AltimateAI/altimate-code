@@ -20,15 +20,20 @@ export function register(method: BridgeMethod, handler: NativeHandler): void {
 /** Lazy registration hook — set by native/index.ts */
 let _ensureRegistered: (() => Promise<void>) | null = null
 
+/** In-flight registration promise (deduped across concurrent callers). */
+let _registrationPromise: Promise<void> | null = null
+
 /** Clear all registered handlers and lazy registration hook (for test isolation). */
 export function reset(): void {
   nativeHandlers.clear()
   _ensureRegistered = null
+  _registrationPromise = null
 }
 
 /** Called by native/index.ts to set the lazy registration function. */
 export function setRegistrationHook(fn: () => Promise<void>): void {
   _ensureRegistered = fn
+  _registrationPromise = null
 }
 
 /** Dispatch a method call to the registered native handler. */
@@ -36,11 +41,27 @@ export async function call<M extends BridgeMethod>(
   method: M,
   params: (typeof BridgeMethods)[M] extends { params: infer P } ? P : never,
 ): Promise<(typeof BridgeMethods)[M] extends { result: infer R } ? R : never> {
-  // Lazy registration: load all handler modules on first call
+  // Lazy registration: load all handler modules on first call. Cache the
+  // in-flight promise so concurrent callers share one attempt; on failure
+  // clear the cached promise so a subsequent call can retry. Previously
+  // ``_ensureRegistered`` was nulled BEFORE the await, so a transient NAPI
+  // load failure poisoned the bridge for the process lifetime — every
+  // subsequent ``call`` threw ``No native handler for X`` with no way to
+  // recover without restarting the CLI.
   if (_ensureRegistered) {
-    const fn = _ensureRegistered
-    _ensureRegistered = null
-    await fn()
+    if (!_registrationPromise) {
+      const fn = _ensureRegistered
+      _registrationPromise = fn().then(
+        () => {
+          _ensureRegistered = null
+        },
+        (err) => {
+          _registrationPromise = null
+          throw err
+        },
+      )
+    }
+    await _registrationPromise
   }
 
   const native = nativeHandlers.get(method as string)
