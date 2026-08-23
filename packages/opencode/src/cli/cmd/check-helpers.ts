@@ -47,6 +47,20 @@ export const SEVERITY_RANK: Record<Severity, number> = { error: 2, warning: 1, i
 
 export const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pii", "semantic", "grade"])
 
+/** Extensions the ``check`` command will treat as SQL. Anything else is
+ * skipped before it reaches the engine, so non-SQL content cannot be
+ * parsed and echoed back through engine error messages (v0.9.6 fix). */
+export const SQL_EXTENSIONS = new Set([".sql", ".ddl"])
+
+/** Case-insensitive SQL-extension test. Path.extname returns "" for
+ * files without a dot, which correctly resolves to "not a SQL file". */
+export function isSqlFile(filePath: string): boolean {
+  const dot = filePath.lastIndexOf(".")
+  const slash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"))
+  if (dot <= slash) return false
+  return SQL_EXTENSIONS.has(filePath.slice(dot).toLowerCase())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import {
   formatText,
   buildCheckOutput,
   VALID_CHECKS,
+  isSqlFile,
   type Finding,
   type CheckCategoryResult,
 } from "../../src/cli/cmd/check-helpers"
@@ -1399,6 +1400,67 @@ describe("check command adversarial", () => {
     const r = await runHandler(baseArgs({ files, checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.files_checked).toBe(50)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isSqlFile — SQL-extension filter (v0.9.6 sanity regression)
+// ---------------------------------------------------------------------------
+//
+// v0.9.6 shipped an ``altimate-core`` 0.7.0 upgrade whose new
+// ``multi_statement`` safety rule echoes the offending statement text in
+// its error message. When ``check`` was invoked on a non-SQL file (e.g.
+// ``altimate check /etc/passwd``), the engine parsed each line as SQL,
+// failed, and echoed the line back — leaking file content to stdout.
+// The sanity test at ``test/sanity/phases/security.sh:96-103`` has been
+// present + passing since PR #844 (June 2026); v0.9.6's engine upgrade
+// regressed it. Fix: reject non-SQL files by extension BEFORE they
+// reach the engine, so no content is ever parsed and echoed.
+describe("isSqlFile — extension filter (v0.9.6 sanity regression)", () => {
+  test("accepts .sql (both cases)", () => {
+    expect(isSqlFile("query.sql")).toBe(true)
+    expect(isSqlFile("QUERY.SQL")).toBe(true)
+    expect(isSqlFile("/absolute/path/to/query.sql")).toBe(true)
+    expect(isSqlFile("relative/path/query.sql")).toBe(true)
+  })
+  test("accepts .ddl (both cases)", () => {
+    expect(isSqlFile("schema.ddl")).toBe(true)
+    expect(isSqlFile("SCHEMA.DDL")).toBe(true)
+  })
+  test("rejects the exact sanity-test path (system file, no extension)", () => {
+    // The exact input the sanity test at test/sanity/phases/security.sh:96
+    // was leaking through before the fix.
+    expect(isSqlFile("../../../../etc/passwd")).toBe(false)
+    expect(isSqlFile("/etc/passwd")).toBe(false)
+  })
+  test("rejects extensionless files", () => {
+    expect(isSqlFile("passwd")).toBe(false)
+    expect(isSqlFile("/tmp/no-extension")).toBe(false)
+  })
+  test("rejects unrelated extensions", () => {
+    expect(isSqlFile("foo.txt")).toBe(false)
+    expect(isSqlFile("query.yml")).toBe(false)
+    expect(isSqlFile("script.sh")).toBe(false)
+    expect(isSqlFile("archive.tar.gz")).toBe(false)
+  })
+  test("dotfiles without an extension are not SQL", () => {
+    // ``.hidden`` has a leading dot but no proper extension — the
+    // filename ``.hidden`` has ``extname === ""`` under Node's rules.
+    expect(isSqlFile(".hidden")).toBe(false)
+    expect(isSqlFile("/etc/.passwd")).toBe(false)
+  })
+  test("dotfiles with a SQL extension ARE accepted", () => {
+    // Edge case: ``.query.sql`` is a hidden file with a real .sql extension.
+    expect(isSqlFile(".query.sql")).toBe(true)
+  })
+  test("directory paths (trailing slash) are not SQL files", () => {
+    expect(isSqlFile("/path/to/dir/")).toBe(false)
+    expect(isSqlFile("relative/dir/")).toBe(false)
+  })
+  test("path with dots in directory names but no extension on the file", () => {
+    // ``foo.bar/baz`` — the ``.`` is in the directory, not the file.
+    expect(isSqlFile("foo.bar/baz")).toBe(false)
+    expect(isSqlFile("foo.bar/baz.sql")).toBe(true)
   })
 })
 // altimate_change end

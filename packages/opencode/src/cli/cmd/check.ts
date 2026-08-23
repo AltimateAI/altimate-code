@@ -10,6 +10,7 @@ import {
   type CheckCategoryResult,
   type Severity,
   VALID_CHECKS,
+  isSqlFile,
   normalizeSeverity,
   filterBySeverity,
   toCategoryResult,
@@ -476,10 +477,24 @@ export const CheckCommand = cmd({
       files = expanded
     }
 
-    // Filter to only existing .sql files
+    // Filter to only existing SQL files by extension. The prior version
+    // only checked existence — the "SQL" filter was a lie in the comment.
+    // Feeding a non-SQL file (e.g. ``altimate check /etc/passwd``) meant
+    // the engine parsed each line as a SQL statement; the 0.7.0 engine's
+    // ``multi_statement`` safety rule then echoed the offending line
+    // (uppercased) in its error message, leaking the file's first line
+    // into stdout. Rejecting by extension keeps non-SQL content from
+    // reaching the engine at all — no message, no leak. (v0.9.6 sanity
+    // regression; sanity test at test/sanity/phases/security.sh:96-103
+    // has been present + passing since PR #844.)
     files = files.filter((f) => {
       if (!existsSync(f)) {
         console.error(`Warning: file not found, skipping: ${f}`)
+        return false
+      }
+      if (!isSqlFile(f)) {
+        const ext = path.extname(f).toLowerCase() || "none"
+        console.error(`Warning: not a SQL file (extension "${ext}"), skipping: ${f}`)
         return false
       }
       return true
