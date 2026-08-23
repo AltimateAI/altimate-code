@@ -33,11 +33,20 @@ import { afterEach, beforeAll, afterAll, beforeEach, describe, expect, test } fr
 
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
+let _priorTelemetryDisabled: string | undefined
 beforeAll(() => {
+  _priorTelemetryDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
 afterAll(() => {
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  // Restore any pre-existing value rather than unconditionally deleting —
+  // an outer suite may have set it and expects to see its own value after
+  // this file runs. (cubic P2 round 3.)
+  if (_priorTelemetryDisabled === undefined) {
+    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  } else {
+    process.env.ALTIMATE_TELEMETRY_DISABLED = _priorTelemetryDisabled
+  }
 })
 
 describe("v0.9.6 release: Dispatcher registration retry", () => {
@@ -99,6 +108,35 @@ describe("v0.9.6 release: Dispatcher registration retry", () => {
     expect(results).toHaveLength(20)
     for (const r of results) expect(r).toEqual({ status: "ok" })
     // Critical: the hook fired exactly ONCE despite 20 concurrent callers.
+    expect(attempts).toBe(1)
+  })
+
+  test("concurrent calls share ONE registration attempt on failure — all reject with the SAME error", async () => {
+    // Companion to the success case: assert dedup also holds when the
+    // hook fails. All N concurrent callers must reject with the same
+    // error object (proving they awaited the same in-flight promise),
+    // and the hook body must have run exactly once. (cubic P2 round 3.)
+    let attempts = 0
+    let rejectGate: (err: Error) => void = () => {}
+    const gate = new Promise<void>((_, rej) => (rejectGate = rej))
+    Dispatcher.setRegistrationHook(async () => {
+      attempts += 1
+      await gate
+    })
+
+    const calls = Array.from({ length: 20 }, () => Dispatcher.call("ping", {} as any))
+    const failure = new Error("shared-failure")
+    rejectGate(failure)
+
+    const results = await Promise.allSettled(calls)
+    expect(results.length).toBe(20)
+    for (const r of results) {
+      expect(r.status).toBe("rejected")
+      if (r.status === "rejected") {
+        // Same error instance = same underlying promise = dedup held.
+        expect(r.reason).toBe(failure)
+      }
+    }
     expect(attempts).toBe(1)
   })
 
