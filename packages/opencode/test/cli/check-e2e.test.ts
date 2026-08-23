@@ -1153,37 +1153,41 @@ describe("check command adversarial", () => {
     expect(r.stdout).not.toContain("not-a-file")
   })
 
-  test("handler rejects symlink whose target is NOT a SQL file", async () => {
-    // coderabbit MAJOR: statSync follows symlinks; without a lstat check the
-    // extension filter would accept `passwd.sql -> /etc/passwd` because the
-    // LINK's name ends in .sql, and readFileSync would then dutifully read
-    // /etc/passwd's content — the exact leak class this PR closes. Fix uses
-    // lstatSync + realpathSync to require the resolved target's extension
-    // to also be SQL.
+  test("handler rejects ALL symlinks (TOCTOU-safe)", async () => {
+    // coderabbit MAJOR: even a "resolve target + extension check" approach
+    // opens a TOCTOU race — an attacker can swap the symlink target
+    // between validation and readFileSync. Simpler + fully safe: refuse
+    // symlinks entirely. Rejects both attack cases and previously-legit
+    // symlink-to-SQL — users pass the resolved target directly instead.
     const target = path.join(tmpDir.dir, "fake-passwd.txt")
     const link = path.join(tmpDir.dir, "passwd.sql")
     await fs.writeFile(target, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
     await fs.symlink(target, link)
     const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
-    expect(r.stderr).toMatch(/symlink target is not a SQL file/)
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
     expect(r.stderr).toContain("passwd.sql")
-    expect(r.stderr).toContain("fake-passwd.txt")
     expect(r.stderr).toContain("No SQL files found to check")
     // Critical: no content leak — the file was never read.
     expect(r.stdout).not.toMatch(/root:x:0/i)
     expect(r.stderr).not.toMatch(/root:x:0/i)
   })
 
-  test("handler ACCEPTS symlink whose target IS a SQL file", async () => {
-    // Sibling of the above — symlink-to-SQL is a legitimate use case
-    // (e.g. `link.sql -> real.sql`) and must still flow through.
+  test("handler rejects symlink-to-SQL too (blanket ban is intentional)", async () => {
+    // Deliberate revert of an earlier round's behavior: cubic asked to
+    // accept `link.sql -> real.sql` in a prior round, then coderabbit
+    // flagged the TOCTOU race. Blanket-rejecting closes the race
+    // completely at the cost of legitimate symlink-to-SQL, which users
+    // can work around by passing the resolved target path directly.
     const target = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
     const link = path.join(tmpDir.dir, "link.sql")
     await fs.symlink(target, link)
     const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
-    const j = parseJson(r.stdout)
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("link.sql")
+    // The user can still check the resolved target directly.
+    const r2 = await runHandler(baseArgs({ files: [target], checks: "safety" }))
+    const j = parseJson(r2.stdout)
     expect(j.files_checked).toBe(1)
-    expect(r.stderr).not.toMatch(/symlink target is not/)
   })
 
   test("handler rejects a dotfile named exactly '.sql'", async () => {
@@ -1464,14 +1468,20 @@ describe("check command adversarial", () => {
     expect(j.checks_run).toEqual(["lint", "safety"])
   })
 
-  test("handles symlinked SQL files", async () => {
+  test("symlinks are rejected (superseded by TOCTOU-safe policy)", async () => {
+    // Was: "handles symlinked SQL files" — asserted files_checked===1 when
+    // check followed a symlink. Behavior changed in the v0.9.6 hotfix:
+    // symlinks are blanket-rejected to close a TOCTOU race where an
+    // attacker could swap the symlink target between validate and read.
+    // See handler adversarial cases above.
     const real = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
     const link = path.join(tmpDir.dir, "link.sql")
     await fs.symlink(real, link)
 
     const r = await runHandler(baseArgs({ files: [link], checks: "lint" }))
-    const j = parseJson(r.stdout)
-    expect(j.files_checked).toBe(1)
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("link.sql")
+    expect(r.stderr).toContain("No SQL files found to check")
   })
 
   test("handles binary content in .sql file without crashing", async () => {

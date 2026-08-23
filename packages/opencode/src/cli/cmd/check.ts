@@ -513,16 +513,21 @@ export const CheckCommand = cmd({
         console.error(`Warning: not a regular file (directory or other), skipping: ${f}`)
         return false
       }
-      // Reject symlinks whose target does NOT itself have a SQL extension.
-      // The extension filter above only inspects the LINK name, and
-      // statSync follows the link — so ``ln -s /etc/passwd passwd.sql``
-      // sails through with statIsFile=true and readFileSync then reads
-      // /etc/passwd's content, which the safety renderer echoes back
-      // (the same class of leak this whole PR exists to close). Detect
-      // symlinks with lstat and re-validate the resolved target's
-      // extension. Preserves ``link.sql -> real.sql`` (both are SQL) but
-      // rejects ``passwd.sql -> /etc/passwd``. (coderabbit MAJOR round
-      // on release/v0.9.6 hotfix.)
+      // Reject symlinks entirely. An earlier attempt validated the
+      // symlink target's extension and then let the flow continue to
+      // ``readFileSync(f)``, but that opens a TOCTOU race: between
+      // validation and read, an attacker with write access to the
+      // parent directory can swap the symlink to point at a non-SQL
+      // file (e.g. /etc/passwd), which readFileSync would then dutifully
+      // read — reopening the same leak class this PR closes. Closing
+      // the race properly requires opening the file once, fstat'ing the
+      // fd, and passing the fd (not the path) through to every
+      // downstream reader — a large refactor for a CLI most invocations
+      // don't hit. Simpler + safer: refuse symlinks. Users who need to
+      // check a linked file can pass the resolved target directly.
+      // (coderabbit MAJOR TOCTOU on release/v0.9.6 hotfix; reverses the
+      // "accept link-to-SQL" behavior cubic asked for in the prior round
+      // — noted in the thread.)
       let lst
       try {
         lst = lstatSync(f)
@@ -531,19 +536,16 @@ export const CheckCommand = cmd({
         return false
       }
       if (lst.isSymbolicLink()) {
-        let resolved: string
+        let target = ""
         try {
-          resolved = realpathSync(f)
-        } catch (e) {
-          console.error(`Warning: symlink resolve failed, skipping: ${f} (${(e as Error).message})`)
-          return false
+          target = realpathSync(f)
+        } catch {
+          // If we can't even resolve, just report the link path.
         }
-        if (!isSqlFile(resolved)) {
-          console.error(
-            `Warning: symlink target is not a SQL file, skipping: ${f} -> ${resolved}`,
-          )
-          return false
-        }
+        console.error(
+          `Warning: symlinks are not accepted (TOCTOU-safe), skipping: ${f}${target ? ` -> ${target}` : ""}`,
+        )
+        return false
       }
       return true
     })
