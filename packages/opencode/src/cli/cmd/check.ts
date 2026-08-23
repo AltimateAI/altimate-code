@@ -2,7 +2,7 @@
 import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { Dispatcher } from "../../altimate/native"
-import { readFileSync, existsSync, statSync } from "fs"
+import { readFileSync, existsSync, statSync, lstatSync, realpathSync } from "fs"
 import { Glob } from "../../util/glob"
 import path from "path"
 import {
@@ -512,6 +512,38 @@ export const CheckCommand = cmd({
       if (!st.isFile()) {
         console.error(`Warning: not a regular file (directory or other), skipping: ${f}`)
         return false
+      }
+      // Reject symlinks whose target does NOT itself have a SQL extension.
+      // The extension filter above only inspects the LINK name, and
+      // statSync follows the link — so ``ln -s /etc/passwd passwd.sql``
+      // sails through with statIsFile=true and readFileSync then reads
+      // /etc/passwd's content, which the safety renderer echoes back
+      // (the same class of leak this whole PR exists to close). Detect
+      // symlinks with lstat and re-validate the resolved target's
+      // extension. Preserves ``link.sql -> real.sql`` (both are SQL) but
+      // rejects ``passwd.sql -> /etc/passwd``. (coderabbit MAJOR round
+      // on release/v0.9.6 hotfix.)
+      let lst
+      try {
+        lst = lstatSync(f)
+      } catch (e) {
+        console.error(`Warning: lstat failed, skipping: ${f} (${(e as Error).message})`)
+        return false
+      }
+      if (lst.isSymbolicLink()) {
+        let resolved: string
+        try {
+          resolved = realpathSync(f)
+        } catch (e) {
+          console.error(`Warning: symlink resolve failed, skipping: ${f} (${(e as Error).message})`)
+          return false
+        }
+        if (!isSqlFile(resolved)) {
+          console.error(
+            `Warning: symlink target is not a SQL file, skipping: ${f} -> ${resolved}`,
+          )
+          return false
+        }
       }
       return true
     })

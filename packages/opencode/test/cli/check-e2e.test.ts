@@ -3,7 +3,7 @@
 // IMPORTANT: This file uses Dispatcher.register() / Dispatcher.reset() instead
 // of mock.module("@/altimate/native") to avoid Bun's mock.module leaking across
 // test files and breaking Glob/Dispatcher for all subsequent tests in CI.
-import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test"
 import * as fs from "fs/promises"
 import path from "path"
 import os from "os"
@@ -153,6 +153,11 @@ beforeEach(async () => {
 afterEach(async () => {
   process.exit = origExit
   process.exitCode = 0
+  // Restore all spies (process.stdout.write, process.stderr.write,
+  // console.error) — Bun doesn't auto-restore spyOn mocks across test
+  // files, so without this the mocks leak into subsequent files' output.
+  // (coderabbit MAJOR on v0.9.6 hotfix.)
+  mock.restore()
   // Restore Dispatcher: clear our mocks and re-enable lazy registration
   Dispatcher.reset()
   // Re-install the registration hook so subsequent tests get real handlers
@@ -1146,6 +1151,39 @@ describe("check command adversarial", () => {
     expect(r.stderr).toContain("No SQL files found to check")
     // No content-leak surface at all when the file is rejected.
     expect(r.stdout).not.toContain("not-a-file")
+  })
+
+  test("handler rejects symlink whose target is NOT a SQL file", async () => {
+    // coderabbit MAJOR: statSync follows symlinks; without a lstat check the
+    // extension filter would accept `passwd.sql -> /etc/passwd` because the
+    // LINK's name ends in .sql, and readFileSync would then dutifully read
+    // /etc/passwd's content — the exact leak class this PR closes. Fix uses
+    // lstatSync + realpathSync to require the resolved target's extension
+    // to also be SQL.
+    const target = path.join(tmpDir.dir, "fake-passwd.txt")
+    const link = path.join(tmpDir.dir, "passwd.sql")
+    await fs.writeFile(target, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    await fs.symlink(target, link)
+    const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
+    expect(r.stderr).toMatch(/symlink target is not a SQL file/)
+    expect(r.stderr).toContain("passwd.sql")
+    expect(r.stderr).toContain("fake-passwd.txt")
+    expect(r.stderr).toContain("No SQL files found to check")
+    // Critical: no content leak — the file was never read.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
+  test("handler ACCEPTS symlink whose target IS a SQL file", async () => {
+    // Sibling of the above — symlink-to-SQL is a legitimate use case
+    // (e.g. `link.sql -> real.sql`) and must still flow through.
+    const target = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
+    const link = path.join(tmpDir.dir, "link.sql")
+    await fs.symlink(target, link)
+    const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    expect(j.files_checked).toBe(1)
+    expect(r.stderr).not.toMatch(/symlink target is not/)
   })
 
   test("handler rejects a dotfile named exactly '.sql'", async () => {
