@@ -61,15 +61,23 @@ export async function call<M extends BridgeMethod>(
   // recover without restarting the CLI. Generation guard prevents a stale
   // attempt from mutating state a concurrent ``reset()``/``setRegistrationHook()``
   // has since replaced. (coderabbit round 1 — release/v0.9.6 review.)
-  // Test-isolation contract: ``reset()`` and ``setRegistrationHook()`` MUST
-  // NOT be called while a ``Dispatcher.call`` is in flight — if they are,
-  // any late ``register()`` calls from the stale hook body may clobber
-  // fresh entries the new hook wrote, and there is no in-band signal we
-  // can use to self-heal it without introducing a second race (see the
-  // coderabbit + cubic round-2 exchange on release/v0.9.6). Production
-  // never triggers this: ``setRegistrationHook`` is called exactly once
-  // at startup by native/index.ts, and ``reset()`` is test-only. Tests
-  // must ``await`` outstanding calls before mutating hook state.
+  // Concurrency contract:
+  //   • ``reset()`` / ``setRegistrationHook()`` MAY be called while an
+  //     older ``Dispatcher.call`` is in flight — the generation guard below
+  //     blocks the stale attempt's ``.then`` handler from mutating shared
+  //     state (``_ensureRegistered`` / ``_registrationPromise``) that the
+  //     replacement installed. Adversarial tests below exercise both races.
+  //   • What we DO NOT guarantee: if the stale hook body itself resumes
+  //     after replacement and calls ``Dispatcher.register(...)`` late,
+  //     that late write overwrites whatever the newer hook wrote — and
+  //     no in-band signal lets us self-heal it without recreating the
+  //     shared-state race the round-1 guard is meant to prevent (see the
+  //     coderabbit + cubic round-2 exchange on release/v0.9.6). Callers
+  //     that need late-write safety must serialise hook mutations
+  //     against outstanding calls themselves.
+  //   • Production never triggers late-write clobber: ``setRegistrationHook``
+  //     is called exactly once at startup by ``native/index.ts``, and
+  //     ``reset()`` is test-only.
   if (_ensureRegistered) {
     if (!_registrationPromise) {
       const fn = _ensureRegistered
