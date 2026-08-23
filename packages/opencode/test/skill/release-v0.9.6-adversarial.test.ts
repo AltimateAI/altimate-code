@@ -3,8 +3,17 @@
  *
  * Focus: fixes that landed IN this release (not the whole PR history) —
  *  1. Dispatcher retry-after-registration-failure (v0.9.6 review gremlin fix)
- *  2. Dispatcher generation guard (coderabbit round 1)
- *  3. Dispatcher stale-register self-heal (cubic round 2)
+ *  2. Dispatcher generation guard on shared-state mutations from stale
+ *     .then handlers (coderabbit round 1)
+ *
+ * Explicitly NOT covered (test-isolation contract, see dispatcher.ts):
+ *  - Late ``register()`` from a stale hook body after a replacement hook
+ *    has already run. That scenario requires calling ``reset()`` /
+ *    ``setRegistrationHook()`` while a call is still in flight — a
+ *    production impossibility (hook is set once at startup, reset is
+ *    test-only) and a violation of the test-isolation contract. See
+ *    ``dispatcher.ts`` for the design decision and the coderabbit/cubic
+ *    round-2 exchange that arrived at it.
  *
  * Not covered here (existing test suites are authoritative):
  *  - altimate-core 0.7.0 shape corrections — see
@@ -177,50 +186,6 @@ describe("v0.9.6 release: Dispatcher registration retry", () => {
     // Critical: new hook fired ONCE despite second + third both dedup-sharing
     // its promise — proving the stale failure handler didn't null the cache.
     expect(newHookAttempts).toBe(1)
-  })
-
-  test("stale hook's LATE register() call is self-healed by a re-run on the next call", async () => {
-    // cubic round 2 on release/v0.9.6: the generation guard prevented a
-    // stale success handler from mutating _ensureRegistered / _registrationPromise,
-    // but the old HOOK BODY itself could still write stale entries into
-    // nativeHandlers via late register() calls after a new hook had already
-    // filled them. Fix: on stale-generation success, clear _registrationPromise
-    // so the next Dispatcher.call re-runs the CURRENT hook and its idempotent
-    // register() calls overwrite whatever the stale hook wrote.
-    let resolveOld: () => void = () => {}
-    const oldPending = new Promise<void>((r) => (resolveOld = r))
-    Dispatcher.setRegistrationHook(async () => {
-      await oldPending
-      Dispatcher.register("ping", async () => ({ status: "stale-old" }))
-    })
-    const firstCall = Dispatcher.call("ping", {} as any)
-
-    Dispatcher.reset()
-    let newRunCount = 0
-    Dispatcher.setRegistrationHook(async () => {
-      newRunCount += 1
-      Dispatcher.register("ping", async () => ({ status: "fresh-new" }))
-    })
-
-    // Second call runs the new (fast) hook to completion — registers
-    // "ping" -> fresh-new, memoized as the resolved promise.
-    const r1 = await Dispatcher.call("ping", {} as any)
-    expect(r1).toEqual({ status: "fresh-new" })
-    expect(newRunCount).toBe(1)
-
-    // Now the old hook wakes up and belatedly overwrites "ping" with
-    // stale-old via its own register() call. Without the self-heal, the
-    // next Dispatcher.call would silently return the stale handler because
-    // registration is memoized "done" and never re-runs.
-    resolveOld()
-    await firstCall.catch(() => {})
-
-    // Third call: the fix detects the stale-generation success, clears
-    // the memoized promise so the CURRENT hook re-runs and overwrites
-    // "ping" back to fresh-new.
-    const r2 = await Dispatcher.call("ping", {} as any)
-    expect(r2).toEqual({ status: "fresh-new" })
-    expect(newRunCount).toBe(2) // re-ran to self-heal the stale register()
   })
 
   test("reset() clears both the hook and the cached in-flight promise", async () => {

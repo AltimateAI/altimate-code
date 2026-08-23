@@ -61,26 +61,29 @@ export async function call<M extends BridgeMethod>(
   // recover without restarting the CLI. Generation guard prevents a stale
   // attempt from mutating state a concurrent ``reset()``/``setRegistrationHook()``
   // has since replaced. (coderabbit round 1 — release/v0.9.6 review.)
+  // Test-isolation contract: ``reset()`` and ``setRegistrationHook()`` MUST
+  // NOT be called while a ``Dispatcher.call`` is in flight — if they are,
+  // any late ``register()`` calls from the stale hook body may clobber
+  // fresh entries the new hook wrote, and there is no in-band signal we
+  // can use to self-heal it without introducing a second race (see the
+  // coderabbit + cubic round-2 exchange on release/v0.9.6). Production
+  // never triggers this: ``setRegistrationHook`` is called exactly once
+  // at startup by native/index.ts, and ``reset()`` is test-only. Tests
+  // must ``await`` outstanding calls before mutating hook state.
   if (_ensureRegistered) {
     if (!_registrationPromise) {
       const fn = _ensureRegistered
       const generation = ++_registrationGeneration
       _registrationPromise = fn().then(
         () => {
-          // Generation advanced while this attempt was in flight (concurrent
-          // ``reset()``/``setRegistrationHook()`` + another call arrived).
-          // The stale hook body may have written stale entries into
-          // ``nativeHandlers`` via late ``register()`` calls, clobbering the
-          // newer hook's. Clear ``_registrationPromise`` so the NEXT
-          // ``Dispatcher.call`` re-runs the current hook — its ``register()``
-          // calls then overwrite whatever the stale hook wrote. Hook bodies
-          // must be idempotent (they are today — ``register`` is a plain
-          // ``Map.set``). Successful current-generation attempts leave the
-          // resolved promise memoized so subsequent calls fast-path through
-          // an already-settled ``await``. (cubic round 2 on release/v0.9.6.)
-          if (generation !== _registrationGeneration) _registrationPromise = null
+          // Only clear _ensureRegistered if our generation is still current
+          // — otherwise a concurrent reset()/setRegistrationHook() already
+          // installed a replacement, and clearing would clobber it.
+          if (generation === _registrationGeneration) _ensureRegistered = null
         },
         (err) => {
+          // Same guard on the failure path: don't null a newer in-flight
+          // promise from another attempt.
           if (generation === _registrationGeneration) _registrationPromise = null
           throw err
         },
