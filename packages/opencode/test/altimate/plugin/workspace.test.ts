@@ -226,8 +226,30 @@ describe("workspace binding cache", () => {
 
     let calls = 0
     const originalFetch = globalThis.fetch
+    // Return URL-shaped responses. The mem-POST endpoint must return the
+    // ``{result:{results:[{id}]}}`` envelope the mirror code expects — a
+    // response without an id classifies as ``declined``, which by design
+    // leaves the seed unfinished and forces a retry on the next warm.
+    // (harness-bot #1116 comment 3840503346 hardened that gate.)
+    let memPostSerial = 0
     globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
       calls++
+      const url = String(_input)
+      if (url.includes("/datamates/memory/") && !url.includes("/list")) {
+        memPostSerial += 1
+        return new Response(
+          JSON.stringify({
+            result: { results: [{ id: `mock-mem-${memPostSerial}`, event: "ADD" }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      }
+      if (url.includes("/datamates/memory/list")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
       return new Response(JSON.stringify({ datamates: [{ id: 9, name: "Warm", memory_enabled: true }] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
