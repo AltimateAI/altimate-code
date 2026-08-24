@@ -505,10 +505,13 @@ async function archiveNow(
   })
   const entry = await readIndexEntry(key)
 
-  // The read exists to recover the record's current text so the archive can
-  // preserve it, and to find the record at all when the index cannot answer.
-  // It is also why archiving fails when the result is truncated.
-  const records = await MemoryApi.list()
+  // Read through ``fetchKnownRecords`` so a truncated response is detectable
+  // — a workspace with >= LIST_LIMIT records that includes the target block
+  // beyond the window would silently fall through the ``!current`` branch and
+  // the delete would no-op. The block then stays live in the cloud and gets
+  // re-injected on every session with no diagnostic trace. (altimate-harness-
+  // bot #1116 comment 3841102064.)
+  const { records, truncated } = await fetchKnownRecords()
 
   // The index is per-machine and is discarded on account switch, corruption or
   // a wiped state directory. Without a fallback, deleting a block on a machine
@@ -524,7 +527,18 @@ async function archiveNow(
       records.find((r) =>
         isSameBlock(r, { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock, binding),
       )
-  if (!current) return
+  if (!current) {
+    if (truncated) {
+      // Distinguish "record isn't there" (silent no-op is correct) from
+      // "record is beyond the LIST_LIMIT window" (silent no-op leaves a
+      // live block whose delete looks successful client-side).
+      log.warn(
+        "could not archive block — record set is truncated at LIST_LIMIT; the block may still be live in the cloud",
+        { blockId, scope, limit: LIST_LIMIT },
+      )
+    }
+    return
+  }
 
   const now = new Date().toISOString()
   const metadata: MirrorMetadata = {
