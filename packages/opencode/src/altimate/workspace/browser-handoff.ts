@@ -201,6 +201,19 @@ function markReason<E extends Error>(err: E, reason: HandoffFailureReason): E & 
 async function startListener(pending: HandoffPending): Promise<{ server: Server; port: number }> {
   const server = createServer((req, res) => {
     const port = (server.address() as { port?: number } | null)?.port ?? CALLBACK_PORT_MIN
+    // DNS-rebinding guard — bind to 127.0.0.1 is not enough on its own. A
+    // malicious page can point its own hostname at 127.0.0.1, drive the
+    // browser to ``http://attacker.com:7317/workspace-bound?state=...&
+    // workspace_id=...``, and the connection lands here. The Host header
+    // it sends is ``attacker.com``, so refusing anything except our own
+    // loopback authorities kills the attack before state validation runs.
+    // (altimate-harness-bot round 8.)
+    const reqHost = (req.headers.host ?? "").toLowerCase()
+    if (reqHost !== `127.0.0.1:${port}` && reqHost !== `localhost:${port}`) {
+      res.writeHead(400)
+      res.end("Bad request")
+      return
+    }
     const url = new URL(req.url || "/", `http://127.0.0.1:${port}`)
     if (url.pathname !== "/workspace-bound") {
       res.writeHead(404)
@@ -333,6 +346,12 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
   }
 
   server.close()
+  // server.close() only stops accepting new connections — any keep-alive
+  // socket still open in the port-exhaustion / squatter case keeps the
+  // port bound until the peer drops. Force-terminate here so the next
+  // ``altimate-code link`` doesn't skip this port needlessly. Guard with
+  // ``?.()`` for Node <18.2. (altimate-harness-bot round 8.)
+  server.closeAllConnections?.()
   const code = lastErr?.code
   throw markReason(
     new Error(
@@ -409,6 +428,11 @@ export async function runHandoffWithOpener(
     if (listenerHandle) {
       try {
         listenerHandle.server.close()
+        // Force-terminate lingering keep-alive sockets — otherwise the
+        // port can stay bound for minutes after abort/timeout and the
+        // next ``altimate-code link`` walks past it needlessly. Guard
+        // with ``?.()`` for Node <18.2. (altimate-harness-bot round 8.)
+        listenerHandle.server.closeAllConnections?.()
       } catch {
         /* best effort */
       }

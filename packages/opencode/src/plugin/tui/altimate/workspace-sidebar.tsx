@@ -99,6 +99,19 @@ function View(props: { api: TuiPluginApi }) {
           <>
             <text fg={theme().textMuted}>
               {b().datamateName}
+              {/* ``pinned via --workspace`` means "this SESSION was launched
+                * with --workspace and it resolved to this id". It does NOT
+                * mean "the current binding was set by --workspace" — if the
+                * user relinks mid-session to a different workspace, the pin
+                * disappears (id mismatch); if they relink to the same id,
+                * the pin correctly stays because the launch fact is
+                * unchanged. Known imprecision: relink-to-same-id looks
+                * indistinguishable from "never relinked". Accepted per
+                * altimate-harness-bot round 8 (option b of the review).
+                * ``getResolvedWorkspaceId`` returns null when the launch
+                * had no --workspace flag or the flag failed to resolve,
+                * so the pin never falsely appears for a session that
+                * wasn't launched with the flag. */}
               <Show when={getResolvedWorkspaceId() === b().datamateId}>
                 {" (pinned via --workspace)"}
               </Show>
