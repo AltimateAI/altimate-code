@@ -1,16 +1,19 @@
 // Regression coverage for the ChatGPT-subscription (OAuth) model filter
-// in packages/opencode/src/plugin/codex.ts (the ACTIVE plugin wired via
-// plugin/index.ts). The sibling file plugin/openai/codex.ts is an
-// in-progress refactor that reuses ``shouldAllowOAuthModel`` from this
-// same module — so the filter behavior is tested once here.
+// in packages/opencode/src/plugin/codex.ts — the ACTIVE plugin wired
+// via plugin/index.ts.
 //
 // Filed as issue #1132: GPT 5.6 was released but the allowlist stopped
 // at 5.4, so users on ChatGPT Pro/Plus (Codex tier) couldn't pick it in
 // the model picker even though the underlying models.dev catalog had it.
 //
-// Sibling test file test/plugin/codex.test.ts covers the OAuth-flow +
-// JWT parsing internals of plugin/openai/codex.ts. This file covers
-// only the OAuth model-filter policy shared by both files.
+// Sibling file plugin/openai/codex.ts is an in-progress refactor of the
+// same plugin, currently NOT wired via plugin/index.ts, and NOT covered
+// by this file — it has its own separate ``ALLOWED_MODELS`` + a
+// ``parseFloat > 5.4`` fallback in its ``models()`` filter, and its
+// existing test file (test/plugin/codex.test.ts) already covers its
+// OAuth-flow + JWT parsing internals. When that refactor is wired,
+// adopting ``shouldAllowOAuthModel`` here (and expanding this file's
+// coverage to the newly-active filter) is followup work.
 import { describe, expect, test } from "bun:test"
 import { OAUTH_ALLOWED_MODELS, shouldAllowOAuthModel } from "../../src/plugin/codex"
 

@@ -30,12 +30,17 @@ export const OAUTH_ALLOWED_MODELS = new Set([
   "gpt-5.6",
 ])
 
-/** Single source of truth for OAuth (ChatGPT-subscription) model filtering.
- * A model is kept if either (a) its id contains ``"codex"`` (all codex
- * variants ship on the subscription), or (b) its id is an exact member of
- * ``OAUTH_ALLOWED_MODELS`` (the curated non-codex releases). Reused across
- * plugin/codex.ts and plugin/openai/codex.ts to prevent drift between the
- * two implementations during the in-flight refactor. */
+/** OAuth (ChatGPT-subscription) model-filter policy for the ACTIVE plugin
+ * (this file — wired via plugin/index.ts). A model is kept if either
+ * (a) its id contains ``"codex"`` (all codex variants ship on the
+ * subscription), or (b) its id is an exact member of
+ * ``OAUTH_ALLOWED_MODELS`` (the curated non-codex releases).
+ *
+ * The sibling file plugin/openai/codex.ts (an in-progress refactor,
+ * currently NOT wired) has its own separate filter with a
+ * ``parseFloat(match[1]) > 5.4`` fallback. Adopting this helper is
+ * followup work on that refactor — do NOT assume the two files share
+ * this policy today. */
 export function shouldAllowOAuthModel(modelId: string): boolean {
   if (modelId.includes("codex")) return true
   return OAUTH_ALLOWED_MODELS.has(modelId)
