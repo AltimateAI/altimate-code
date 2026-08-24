@@ -1,4 +1,5 @@
 import path from "path"
+import fs from "fs"
 import { Instance } from "../../project/instance"
 import { assertExternalDirectoryLegacy } from "../../tool/external-directory"
 
@@ -32,7 +33,22 @@ export async function guardExternalFile(
   } catch {
     return path.resolve(p)
   }
-  const resolved = path.isAbsolute(p) ? p : path.resolve(base, p)
+  let resolved = path.isAbsolute(p) ? p : path.resolve(base, p)
+  // Canonicalize symlinks BEFORE the gate: `path.resolve` leaves an in-project
+  // symlink lexically inside the instance, so the containment check would not
+  // prompt while the native loader (realpathSync) reads the external target.
+  // Gate — and return — the real path so the read hits exactly what was gated.
+  // realpathSync throws if the leaf doesn't exist yet (manifests may be
+  // pre-build), so fall back to canonicalizing the nearest existing ancestor.
+  try {
+    resolved = fs.realpathSync(resolved)
+  } catch {
+    try {
+      resolved = path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved))
+    } catch {
+      /* neither leaf nor parent exists — gate the lexical path as-is */
+    }
+  }
   await assertExternalDirectoryLegacy(ctx as any, resolved, { kind })
   return resolved
 }

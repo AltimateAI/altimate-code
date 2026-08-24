@@ -961,11 +961,23 @@ it.instance(
       const runtime = Permission.merge(
         optimizer!.permission,
         session,
-        optimizer!.permission.filter((r) => r.action === "deny" && r.permission !== "*"),
+        optimizer!.permission.filter(
+          (r) =>
+            r.action === "deny" &&
+            r.permission !== "*" &&
+            Permission.evaluate(r.permission, r.pattern, optimizer!.permission).action === "deny",
+        ),
       )
+      // These three EXERCISE the re-apply mechanism (they change if it regresses):
+      //  - grep stays allow: the catch-all `"*": "deny"` must NOT be re-appended.
+      //  - question stays allow: a default deny the agent overrode must NOT be
+      //    resurrected (effective-deny filter) — the round-15 fix.
+      //  - sql_execute_write stays deny: the immutable deny beats the session allow.
       expect(Permission.evaluate("grep", "*", runtime).action).toBe("allow")
-      expect(Permission.evaluate("read", "*", runtime).action).toBe("deny")
+      expect(Permission.evaluate("question", "*", runtime).action).toBe("allow")
       expect(Permission.evaluate("sql_execute_write", "*", runtime).action).toBe("deny")
+      // These two are documentation (deny lives in agent perm / session already):
+      expect(Permission.evaluate("read", "*", runtime).action).toBe("deny")
       expect(Permission.evaluate("bash", "DROP DATABASE prod", runtime).action).toBe("deny")
     }),
 )

@@ -85,7 +85,15 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             // DDL bash patterns), NOT the deny-by-default catch-all
             // (`"*": "deny"`) — appending that after the agent's own allowlist
             // would deny read/grep/etc. at runtime and break the scan.
-            input.agent.permission.filter((r) => r.action === "deny" && r.permission !== "*"),
+            input.agent.permission.filter(
+              (r) =>
+                r.action === "deny" &&
+                r.permission !== "*" &&
+                // Re-apply a deny only if it is the agent's EFFECTIVE decision —
+                // a default deny the agent later overrode with its own allow
+                // (e.g. `question`) must not be resurrected past that allow.
+                Permission.evaluate(r.permission, r.pattern, input.agent.permission).action === "deny",
+            ),
           ),
           // altimate_change end
         })

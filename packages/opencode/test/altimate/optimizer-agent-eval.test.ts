@@ -112,8 +112,12 @@ async function snapshotTree(dir: string): Promise<Map<string, string>> {
   const entries = (await fs.readdir(dir, { recursive: true, withFileTypes: true })) as any[]
   for (const e of entries) {
     if (!e.isFile()) continue
-    const p = path.join(e.parentPath ?? e.path, e.name)
-    out.set(path.relative(dir, p), await fs.readFile(p, "utf8"))
+    // Dirent.parentPath (Node20+/Bun) is absolute; the legacy .path fallback
+    // may be relative. Only prepend `dir` when the parent is NOT already
+    // absolute — prepending an absolute parent would duplicate the path.
+    const parent = e.parentPath ?? e.path
+    const full = path.isAbsolute(parent) ? path.join(parent, e.name) : path.join(dir, parent, e.name)
+    out.set(path.relative(dir, full), await fs.readFile(full, "utf8"))
   }
   return out
 }

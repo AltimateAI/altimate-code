@@ -230,8 +230,7 @@ export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] 
 }
 
 export function disabled(tools: string[], ruleset: PermissionV1.Ruleset): Set<string> {
-  // Keep in sync with PermissionNext.disabled (next.ts).
-  const edits = ["edit", "write", "apply_patch", "patch", "multiedit"]
+  const edits = ["edit", "write", "apply_patch"]
   return new Set(
     tools.filter((tool) => {
       const permission = edits.includes(tool) ? "edit" : tool
