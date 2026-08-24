@@ -73,9 +73,6 @@ interface SessionMemory {
   touchedAt: number
   /** Set once a bounded wait expired, so later injections do not re-wait. */
   waitTimedOut?: boolean
-  /** Set when the last fetch for this session failed, so a caller can tell an
-   * empty workspace apart from an unreadable one. */
-  hydrateFailed?: boolean
 }
 
 const sessions = new Map<string, SessionMemory>()
@@ -848,11 +845,7 @@ async function loadWorkspaceMemory(): Promise<LoadOutcome> {
  * an older in-flight load must not write into the newer one. */
 function commitLoad(sessionID: string, state: SessionMemory, outcome: LoadOutcome): void {
   if (sessions.get(sessionID) !== state) return
-  if (outcome.status === "error") {
-    state.hydrateFailed = true
-    return
-  }
-  state.hydrateFailed = false
+  if (outcome.status === "error") return
   state.overlay = outcome.status === "loaded" ? outcome.blocks : []
   if (outcome.status === "loaded" && outcome.blocks.length > 0) {
     log.info("workspace memory hydrated", { blocks: outcome.blocks.length })
@@ -865,13 +858,6 @@ export function overlayBlocks(sessionID: string): RemoteMemoryBlock[] {
   return [...(sessions.get(sessionID)?.overlay ?? [])]
 }
 
-/** Re-read this session's workspace memory, discarding what it already holds.
- *
- * ``hydrate`` is idempotent for the life of a session, which is what keeps the
- * per-turn call cheap -- but it also means a session started before a teammate
- * (or this user on another machine) wrote a block never sees it. This is the
- * on-demand path: drop the session's state so the next hydrate genuinely
- * refetches. Returns how many blocks the session now holds. */
 export type RefreshResult = {
   count: number
   ok: boolean
@@ -898,7 +884,6 @@ export async function refresh(sessionID: string): Promise<RefreshResult> {
       // strictly worse than not reloading, and the user asked for a reload.
       const state = sessionState(sessionID)
       state.overlay = previous
-      state.hydrateFailed = true
       return { count: previous.length, ok: false, status: "error" }
     }
     // Replace the session's state so any older in-flight hydration is orphaned
