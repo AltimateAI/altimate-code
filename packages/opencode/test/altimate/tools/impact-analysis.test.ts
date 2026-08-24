@@ -256,14 +256,56 @@ describe("findDownstream: BFS depth semantics (multi-seed)", () => {
   })
 })
 
-describe("findDownstream: unique_id entry", () => {
-  test("seeding by unique_id scopes to that package's downstream", () => {
-    const models = [
-      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
-      { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
-      { name: "rpt_a", unique_id: "model.pkg_a.rpt_a", depends_on: ["model.pkg_a.orders"] },
-      { name: "rpt_b", unique_id: "model.pkg_b.rpt_b", depends_on: ["model.pkg_b.orders"] },
-    ]
-    expect(findDownstream("model.pkg_a.orders", models).map((m) => m.name)).toEqual(["rpt_a"])
+// Tool-level regression: the round-13 fix was in the tool's targetMatches, not
+// in findDownstream (which already matched unique_id). A dedicated test guards
+// the tool path so a revert of `m.unique_id === args.model` is caught here.
+import { initTool } from "../tool-fixture"
+import * as Dispatcher from "../../../src/altimate/native/dispatcher"
+import { Instance } from "../../../src/project/instance"
+import { tmpdir } from "../../fixture/fixture"
+import { ImpactAnalysisTool } from "../../../src/altimate/tools/impact-analysis"
+import { SessionID, MessageID } from "../../../src/session/schema"
+
+describe("ImpactAnalysisTool: unique_id model arg reaches traversal", () => {
+  const ctx = {
+    sessionID: SessionID.make("ses_test"),
+    messageID: MessageID.make("msg_test"),
+    callID: "call_test",
+    agent: "test",
+    abort: AbortSignal.any([]),
+    messages: [],
+    metadata: () => {},
+    ask: async () => {},
+  } as any
+
+  test("passing a package-qualified unique_id is not MODEL NOT FOUND", async () => {
+    Dispatcher.reset()
+    Dispatcher.register("dbt.manifest" as any, async () => ({
+      model_count: 4,
+      models: [
+        { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+        { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
+        { name: "rpt_a", unique_id: "model.pkg_a.rpt_a", depends_on: ["model.pkg_a.orders"] },
+        { name: "rpt_b", unique_id: "model.pkg_b.rpt_b", depends_on: ["model.pkg_b.orders"] },
+      ],
+      tests: [],
+    }))
+    try {
+      await using tmp = await tmpdir()
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const tool = await initTool(ImpactAnalysisTool)
+          const result = await tool.execute(
+            { model: "model.pkg_a.orders", change_type: "modify", manifest_path: "target/manifest.json" } as any,
+            ctx,
+          )
+          expect(result.title).not.toContain("MODEL NOT FOUND")
+          expect(result.metadata.success).toBe(true)
+        },
+      })
+    } finally {
+      Dispatcher.reset()
+    }
   })
 })

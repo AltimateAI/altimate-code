@@ -268,7 +268,9 @@ export namespace PermissionNext {
     return match ?? { action: "ask", permission, pattern: "*" }
   }
 
-  const EDIT_TOOLS = ["edit", "write", "patch", "multiedit"]
+  // Keep in sync with Permission.disabled (index.ts) — apply_patch is the
+  // GPT-model edit tool and must remap to the `edit` permission.
+  const EDIT_TOOLS = ["edit", "write", "apply_patch", "patch", "multiedit"]
 
   export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
     const result = new Set<string>()

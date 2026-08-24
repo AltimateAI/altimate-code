@@ -81,7 +81,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           ruleset: Permission.merge(
             input.agent.permission,
             input.session.permission ?? [],
-            input.agent.permission.filter((r) => r.action === "deny"),
+            // Re-apply only PERMISSION-SPECIFIC agent denies (sql_execute_write,
+            // DDL bash patterns), NOT the deny-by-default catch-all
+            // (`"*": "deny"`) — appending that after the agent's own allowlist
+            // would deny read/grep/etc. at runtime and break the scan.
+            input.agent.permission.filter((r) => r.action === "deny" && r.permission !== "*"),
           ),
           // altimate_change end
         })

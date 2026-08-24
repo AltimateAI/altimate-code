@@ -951,3 +951,21 @@ it.instance(
     },
   },
 )
+
+it.instance(
+  "dbt-optimizer: session-grant deny-reapply keeps allowlist reachable, immutable denies hold",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      const session = Permission.fromConfig({ sql_execute_write: "allow", read: "deny" })
+      const runtime = Permission.merge(
+        optimizer!.permission,
+        session,
+        optimizer!.permission.filter((r) => r.action === "deny" && r.permission !== "*"),
+      )
+      expect(Permission.evaluate("grep", "*", runtime).action).toBe("allow")
+      expect(Permission.evaluate("read", "*", runtime).action).toBe("deny")
+      expect(Permission.evaluate("sql_execute_write", "*", runtime).action).toBe("deny")
+      expect(Permission.evaluate("bash", "DROP DATABASE prod", runtime).action).toBe("deny")
+    }),
+)
