@@ -248,7 +248,13 @@ async function runBrowserHandoff(
   bindSpin.start("Linking workspace...")
   try {
     const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
-    await recordApprovedBinding(directory, {
+    // Match the two other recordApprovedBinding call sites in this file
+    // (lines 377 and 496) which cache under ``identifier.projectPath ??
+    // directory``. The raw ``directory`` here caches under a different key
+    // when the caller passes a relative or symlinked ``-d`` path, so a
+    // later readLocalBinding from the TUI sidebar can miss the binding.
+    // (coderabbitai #1100 comment 3841173342.)
+    await recordApprovedBinding(identifier.projectPath ?? directory, {
       datamateId: res.binding.datamate_id,
       datamateName: res.binding.datamate_name,
       repoRemote: res.binding.repo_remote,

@@ -283,7 +283,13 @@ async function startListener(pending: HandoffPending): Promise<{ server: Server;
       return
     }
     const workspaceId = Number(workspaceIdRaw)
-    if (!Number.isInteger(workspaceId) || workspaceId <= 0) {
+    // isSafeInteger, not isInteger: ``Number("9007199254740993")`` rounds
+    // to ``9007199254740992``, which passes ``isInteger`` and is still
+    // positive — the CLI would then bind to a different workspace than
+    // the SaaS actually created. Unreachable today (auto-increment IDs
+    // stay far below 2^53) but a one-word hardening. (kilo-code-bot #1100
+    // comment 3841208550.)
+    if (!Number.isSafeInteger(workspaceId) || workspaceId <= 0) {
       const msg = `Invalid workspace_id: ${workspaceIdRaw}`
       respond(400, htmlError(msg))
       pending.reject(markReason(new Error(msg), "error"))

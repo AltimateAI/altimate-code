@@ -113,7 +113,20 @@ function migrateToCanonicalKeys(cache: CacheFile): CacheFile {
     if (!existing || existing.linkedAt <= v.linkedAt) migrated[canon] = v
   }
   const next: CacheFile = { ...cache, bindings: migrated }
-  writeCache(next)
+  // Best-effort — a failing write (read-only state dir, full disk, EACCES)
+  // must not throw out of ``readLocalBinding``. The migrated shape is
+  // still returned in-memory for THIS call, and the next successful
+  // ``recordApprovedBinding`` will persist the canonical form. Without
+  // this wrap, the offline-fallback path (``workspace.tsx`` runFlow →
+  // readLocalBinding) surfaces a "Workspace setup failed" toast for a
+  // perfectly-readable binding. (kilo-code-bot #1100 comment 3841208552.)
+  try {
+    writeCache(next)
+  } catch (err) {
+    log.warn("could not persist canonical-key migration; retry on next write", {
+      err: String(err),
+    })
+  }
   return next
 }
 

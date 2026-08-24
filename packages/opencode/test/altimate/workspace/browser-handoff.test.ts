@@ -64,7 +64,25 @@ async function fireCallback(redirect: string, params: Record<string, string>): P
 // resolveWorkspaceWebUrl — the deployment-support gate
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ``ALTIMATE_WORKSPACE_WEB_URL`` short-circuits resolveWorkspaceWebUrl and
+// re-routes the loopback callback base URL. Devs set it for local testing,
+// and CI shells sometimes carry it too. Save/restore around every test so
+// the assertions below aren't at the mercy of the surrounding environment.
+// (coderabbitai #1100 review 5005112438.)
+function isolateWebUrlOverride() {
+  let saved: string | undefined
+  beforeEach(() => {
+    saved = process.env["ALTIMATE_WORKSPACE_WEB_URL"]
+    delete process.env["ALTIMATE_WORKSPACE_WEB_URL"]
+  })
+  afterEach(() => {
+    if (saved === undefined) delete process.env["ALTIMATE_WORKSPACE_WEB_URL"]
+    else process.env["ALTIMATE_WORKSPACE_WEB_URL"] = saved
+  })
+}
+
 describe("resolveWorkspaceWebUrl", () => {
+  isolateWebUrlOverride()
   test("freemium API host resolves to <tenant>.ws.myaltimate.com", () => {
     const url = resolveWorkspaceWebUrl("https://api.myaltimate.com", "acme")
     expect(url).not.toBeNull()
@@ -119,6 +137,7 @@ describe("openWorkspaceBrowserHandoff pre-flight", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("runHandoffWithOpener end-to-end", () => {
+  isolateWebUrlOverride()
   beforeEach(() => stubCreds("acme", "https://api.myaltimate.com"))
   afterEach(() => unstubCreds())
 
@@ -274,6 +293,7 @@ describe("runHandoffWithOpener end-to-end", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("port walk", () => {
+  isolateWebUrlOverride()
   beforeEach(() => stubCreds("acme", "https://api.myaltimate.com"))
   afterEach(() => unstubCreds())
 

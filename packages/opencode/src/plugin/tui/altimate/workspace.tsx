@@ -322,6 +322,12 @@ async function showLinkedConfirmation(
   ))
 }
 
+/** Held across ``runBrowserHandoff`` invocations so a second handoff can
+ * supersede a still-open first one — otherwise the first loopback listener
+ * stays bound for its full 15-minute callback window and the second flow
+ * walks past its port. (coderabbitai #1100 review 5005112438.) */
+let activeHandoffAbort: AbortController | null = null
+
 /** Post-scan / on-demand browser-handoff runner. Opens the SaaS approval
  * modal, waits for the callback, and binds the current project to the
  * returned workspace via the existing ``POST /bind`` endpoint. Every failure
@@ -337,7 +343,11 @@ async function runBrowserHandoff(
     variant: "info",
     message: "Opening browser to set up your workspace — approve there, then check back here for the confirmation.",
   })
-  const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
+  // Supersede any still-open handoff before starting a new one.
+  if (activeHandoffAbort) activeHandoffAbort.abort()
+  activeHandoffAbort = new AbortController()
+  const signal = activeHandoffAbort.signal
+  const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName, signal })
   if (!result.ok) {
     toastHandoffFailure(api, result)
     return
