@@ -429,10 +429,15 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         if (auth.type !== "oauth") return {}
 
         // Filter models to only those the ChatGPT-subscription (Codex) tier
-        // accepts. Delegates to ``shouldAllowOAuthModel`` (module-level, above)
-        // so this filter and the sibling in plugin/openai/codex.ts share one
-        // source of truth. See OAUTH_ALLOWED_MODELS + shouldAllowOAuthModel
-        // for the criteria + how to add new gpt-5.N releases.
+        // accepts. Delegates to ``shouldAllowOAuthModel`` (module-level,
+        // above). See OAUTH_ALLOWED_MODELS + shouldAllowOAuthModel for the
+        // criteria + how to add new gpt-5.N releases.
+        //
+        // NOTE: this file is the ACTIVE plugin (wired via plugin/index.ts).
+        // The sibling plugin/openai/codex.ts is an unwired in-progress
+        // refactor that keeps its OWN ALLOWED_MODELS + parseFloat > 5.4
+        // fallback — this filter does NOT share a source of truth with it.
+        // Adopting shouldAllowOAuthModel there is followup on that refactor.
         // (Closes #1132 — GPT 5.6 missing from picker.)
         for (const modelId of Object.keys(provider.models)) {
           if (!shouldAllowOAuthModel(modelId)) delete provider.models[modelId]
