@@ -38,6 +38,11 @@ import {
   type ProjectIdentifier,
 } from "@/altimate/workspace/api-client"
 import {
+  openWorkspaceBrowserHandoff,
+  resolveWorkspaceWebUrl,
+  type HandoffResult,
+} from "@/altimate/workspace/browser-handoff"
+import {
   projectNameFromPath,
   projectNameFromRemote,
   resolveProjectIdentifier,
@@ -49,6 +54,24 @@ import { Log } from "@/altimate/util/log"
 const PLUGIN_ID = "altimate:workspace"
 
 const log = Log.create({ service: "altimate-workspace" })
+
+/** True when the browser-based workspace-creation handoff is available for
+ * the current credentials (freemium only today). Wrapped so both the post-scan
+ * flow and the on-demand `altimate-code link` picker can hide the option
+ * consistently when the deployment isn't supported. */
+async function isBrowserHandoffAvailable(): Promise<boolean> {
+  // Both credential calls can throw (corrupt JSON, schema drift, unresolved
+  // ``${env:...}`` reference). Callers use this in the sync arm of dialog
+  // rendering, so an unhandled rejection would take the TUI down. Fail
+  // closed — treat any credential error as "handoff unavailable". (CR cycle 6.)
+  try {
+    if (!(await AltimateApi.isConfigured().catch(() => false))) return false
+    const creds = await AltimateApi.getCredentials()
+    return resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
+  } catch {
+    return false
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Skip latch (TUI-only). Uses TuiPluginApi.kv — persistent across sessions
@@ -132,6 +155,12 @@ interface OfferProps {
   api: TuiPluginApi
   identifier: ProjectIdentifier
   defaultName: string
+  /** True when this deployment supports the browser-based workspace-creation
+   * handoff (i.e. ``resolveWorkspaceWebUrl`` returned non-null for the current
+   * credentials). Resolved by the caller so the dialog doesn't need to await
+   * on mount. When false, the "Set up in browser" option is hidden and the
+   * dialog falls back to the pre-browser-handoff behavior. */
+  browserAvailable: boolean
   /** (tenant, apiUrl) scope for the Skip latch. Resolved once by the caller
    * so the sync ``onSelect`` handler can call ``recordSkip`` without a
    * mid-render await. Null when creds are unavailable — latch falls back
@@ -141,36 +170,52 @@ interface OfferProps {
 
 function OfferDialog(props: OfferProps) {
   const identLabel = () => props.identifier.repoRemote ?? props.identifier.projectPath ?? "this project"
+  const options = [
+    ...(props.browserAvailable
+      ? [
+          {
+            title: "Set up in browser (recommended)",
+            value: "browser",
+            description: `Approve and name "${props.defaultName}" in the Altimate SaaS; the CLI links your project automatically.`,
+          },
+        ]
+      : []),
+    {
+      title: "Create quick workspace here",
+      value: "create",
+      description: `Auto-named "${props.defaultName}" from this repo — no browser step. Configure integrations later in the SaaS.`,
+    },
+    {
+      title: "Link to an existing workspace",
+      value: "link",
+      description: "Attach this project to a workspace you already own.",
+    },
+    {
+      title: "Skip for now",
+      value: "skip",
+      description: "Won't ask again for 7 days.",
+    },
+  ]
+  const defaultValue = props.browserAvailable ? "browser" : "create"
   return (
     <props.api.ui.DialogSelect
       title={`Set up a workspace for this project? (${identLabel()})`}
-      options={[
-        {
-          title: "Create a new workspace",
-          value: "create",
-          description: `Auto-named "${props.defaultName}" from this repo — rename in the SaaS.`,
-        },
-        {
-          title: "Link to an existing workspace",
-          value: "link",
-          description: "Attach this project to a workspace you already own.",
-        },
-        {
-          title: "Skip for now",
-          value: "skip",
-          description: "Won't ask again for 7 days.",
-        },
-      ]}
-      current="create"
+      options={options}
+      current={defaultValue}
       onSelect={(option) => {
         if (option.value === "skip") {
           recordSkip(props.api, props.identifier, props.latchScope, Date.now())
           props.api.ui.dialog.clear()
           return
         }
+        if (option.value === "browser") {
+          void runBrowserHandoff(props.api, props.identifier, props.defaultName)
+          return
+        }
         if (option.value === "create") {
-          // Auto-name from git repo — no name prompt. The SaaS UI is the place to
-          // rename / configure; the CLI's job is just to establish the binding.
+          // Local direct-create — the CLI-only fallback. The SaaS UI is the
+          // place to rename / configure; this branch establishes the binding
+          // without a browser round-trip.
           void createAndBindInline(props.api, props.identifier, props.defaultName)
           return
         }
@@ -181,6 +226,256 @@ function OfferDialog(props: OfferProps) {
       }}
     />
   )
+}
+
+/** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
+ * from tenant + id, so any caller can construct it without an extra round-trip.
+ * Returns null when the current deployment isn't the freemium web (BYOK or
+ * unresolvable) — the confirmation dialog degrades to id-only in that case. */
+async function buildManageUrl(workspaceId: number): Promise<string | null> {
+  try {
+    const creds = await AltimateApi.getCredentials()
+    const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    if (!base) return null
+    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+  } catch {
+    return null
+  }
+}
+
+interface LinkedProps {
+  api: TuiPluginApi
+  workspaceName: string
+  manageUrl: string | null
+  /** Verb for the title — "Linked" / "Re-linked" / "Created". Keeps the
+   * three success paths visually consistent while still labelling what
+   * just happened. */
+  verb: "Linked" | "Re-linked" | "Created"
+}
+
+/** Persistent confirmation card shown after a successful bind. Replaces the
+ * transient success toast so the user has an unmissable "yes, it worked" and
+ * a stable CTA back to the browser. Dismissable via Done or Esc. */
+function WorkspaceLinkedDialog(props: LinkedProps) {
+  const title = () => {
+    const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
+    return `${props.verb} workspace "${props.workspaceName}"${suffix}`
+  }
+  const options = () => {
+    if (props.manageUrl) {
+      return [
+        {
+          title: "Continue editing in browser",
+          value: "open",
+          description: "Open the workspace in your browser.",
+        },
+        { title: "Done", value: "done", description: "Close this dialog." },
+      ]
+    }
+    return [{ title: "Done", value: "done", description: "Close this dialog." }]
+  }
+  return (
+    <props.api.ui.DialogSelect
+      title={title()}
+      options={options()}
+      current={props.manageUrl ? "open" : "done"}
+      onSelect={(option) => {
+        if (option.value === "open" && props.manageUrl) {
+          const url = props.manageUrl
+          // Guard before delegating to open() — a rogue manage_url with a
+          // non-http protocol would otherwise dispatch to an unrelated OS
+          // scheme handler. buildManageUrl only ever emits http(s) URLs from
+          // resolveWorkspaceWebUrl, but the guard survives future changes.
+          if (!isSafeHttpUrl(url)) {
+            props.api.ui.toast({
+              variant: "warning",
+              message: `Refused to open a non-http URL: ${url}`,
+              duration: 15_000,
+            })
+          } else {
+            open(url).catch(() => {
+              props.api.ui.toast({
+                variant: "warning",
+                message: `Could not open browser. Copy this URL: ${url}`,
+                duration: 15_000,
+              })
+            })
+          }
+        }
+        props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** Show the persistent linked-confirmation dialog. Builds the manage URL
+ * best-effort; degrades gracefully on BYOK/unresolvable. */
+async function showLinkedConfirmation(
+  api: TuiPluginApi,
+  verb: LinkedProps["verb"],
+  workspaceId: number,
+  workspaceName: string,
+): Promise<void> {
+  const manageUrl = await buildManageUrl(workspaceId)
+  api.ui.dialog.replace(() => (
+    <WorkspaceLinkedDialog api={api} workspaceName={workspaceName} manageUrl={manageUrl} verb={verb} />
+  ))
+}
+
+/** Held across ``runBrowserHandoff`` invocations so a second handoff can
+ * supersede a still-open first one — otherwise the first loopback listener
+ * stays bound for its full 15-minute callback window and the second flow
+ * walks past its port. (coderabbitai #1100 review 5005112438.) */
+let activeHandoffAbort: AbortController | null = null
+
+/** Post-scan / on-demand browser-handoff runner. Opens the SaaS approval
+ * modal, waits for the callback, and binds the current project to the
+ * returned workspace via the existing ``POST /bind`` endpoint. Every failure
+ * mode surfaces as a toast; the user can always fall back to another option
+ * by re-invoking the dialog. */
+async function runBrowserHandoff(
+  api: TuiPluginApi,
+  identifier: ProjectIdentifier,
+  projectName: string,
+): Promise<void> {
+  api.ui.dialog.clear()
+  api.ui.toast({
+    variant: "info",
+    message: "Opening browser to set up your workspace — approve there, then check back here for the confirmation.",
+  })
+  // Supersede any still-open handoff before starting a new one.
+  if (activeHandoffAbort) activeHandoffAbort.abort()
+  activeHandoffAbort = new AbortController()
+  const signal = activeHandoffAbort.signal
+  const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName, signal })
+  if (!result.ok) {
+    // A superseded handoff (``activeHandoffAbort.abort()`` above, fired when
+    // the user re-triggers the flow) settles as ``reason: "aborted"``. That
+    // is not a failure the user caused, and the newer flow already emitted
+    // its "Opening browser..." toast — surfacing a red "Handoff aborted"
+    // on top would look like the second attempt failed. Silent return.
+    // (kilo-code-bot #1100 comment 3841282737.)
+    if (result.reason === "aborted") return
+    toastHandoffFailure(api, result)
+    return
+  }
+  // M6 in the consensus review: the browser window can stay open for up to
+  // 15 minutes. If the user signs out or switches tenant mid-flow, the
+  // WorkspaceApi client re-reads credentials on every call — so a callback
+  // validated for tenant A would then bind under tenant B, and workspace
+  // ids are tenant-schema-local (same integer, different workspace). Compare
+  // the credential fingerprint the handoff was validated against with the
+  // credentials we're about to bind under, and refuse if either drifted.
+  try {
+    const fresh = await AltimateApi.getCredentials()
+    if (
+      fresh.altimateInstanceName !== result.credentials.tenant ||
+      fresh.altimateUrl !== result.credentials.apiUrl
+    ) {
+      api.ui.toast({
+        variant: "error",
+        message: `Your Altimate credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
+        duration: 15_000,
+      })
+      return
+    }
+  } catch {
+    api.ui.toast({
+      variant: "error",
+      message: "Lost Altimate credentials while the browser was open — sign in and re-run.",
+    })
+    return
+  }
+  // Handoff succeeded and credentials are still consistent — bind the project
+  // to the returned workspace via the existing bind endpoint. Same code path
+  // as PickerDialog's attach mode.
+  try {
+    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
+    await recordApprovedBinding(api.state.path.directory, {
+      datamateId: res.binding.datamate_id,
+      datamateName: res.binding.datamate_name,
+      repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
+      linkedAt: Date.now(),
+    })
+    await showLinkedConfirmation(api, "Linked", res.binding.datamate_id, res.binding.datamate_name)
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      api.ui.toast({
+        variant: "warning",
+        message: `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Run \`altimate-code link\` to change.`,
+      })
+    } else if (err instanceof NotFoundError) {
+      api.ui.toast({
+        variant: "error",
+        message: "Workspace not found — the tenant or workspace may have changed. Try again.",
+      })
+    } else if (err instanceof ForbiddenError) {
+      api.ui.toast({
+        variant: "error",
+        message: "Only the workspace owner can bind projects to it.",
+      })
+    } else {
+      api.ui.toast({
+        variant: "error",
+        message: err instanceof Error ? err.message : "Failed to bind workspace",
+      })
+    }
+  }
+}
+
+function toastHandoffFailure(api: TuiPluginApi, result: Extract<HandoffResult, { ok: false }>): void {
+  switch (result.reason) {
+    case "unavailable":
+      // Should not happen if browserAvailable was checked, but guard anyway.
+      api.ui.toast({
+        variant: "warning",
+        message: "Browser-based workspace setup isn't available for this deployment. Use \"Create quick workspace here\" instead.",
+      })
+      break
+    case "not_configured":
+      api.ui.toast({
+        variant: "error",
+        message: "Altimate credentials not configured — sign in first, then re-run.",
+      })
+      break
+    case "timeout":
+      api.ui.toast({
+        variant: "warning",
+        message: "Workspace setup timed out (15 min). Re-run when you're ready.",
+      })
+      break
+    case "cancelled":
+      api.ui.toast({
+        variant: "info",
+        message: "Workspace setup cancelled.",
+      })
+      break
+    case "tenant_mismatch":
+      api.ui.toast({
+        variant: "error",
+        message: result.message ?? "Workspace was set up under a different account than the CLI is signed into.",
+      })
+      break
+    case "port_exhausted":
+      api.ui.toast({
+        variant: "error",
+        message: result.message ?? "Local ports 7317-7325 all in use — free one and try again.",
+      })
+      break
+    case "browser_open_failed":
+      api.ui.toast({
+        variant: "error",
+        message: `Could not open browser. ${result.authorizeUrl ? `Open this URL manually: ${result.authorizeUrl}` : ""}`,
+        duration: 15_000,
+      })
+      break
+    default:
+      api.ui.toast({
+        variant: "error",
+        message: result.message ?? "Workspace setup failed.",
+      })
+  }
 }
 
 async function createAndBindInline(
@@ -238,10 +533,11 @@ async function createAndBindInline(
   // Post-success tail — this function is invoked fire-and-forget
   // (``void createAndBindInline(...)``), so a bare rejection here would
   // surface as an unhandled promise and terminate the TUI. Contain the
-  // fallout inside the function itself: ``recordApprovedBinding`` already
-  // swallows its own errors (state.ts is best-effort), but ``open()`` and
-  // the toast APIs can reject unexpectedly. Fall back to a plain info
-  // toast so the user still sees the URL. (Kilo cycle 5.)
+  // fallout inside the function itself. ``recordApprovedBinding`` already
+  // swallows its own errors (state.ts is best-effort), but
+  // ``showLinkedConfirmation`` can reject on dialog-teardown races — the
+  // toast fallback keeps the user informed without taking the process down.
+  // (Kilo cycle 5.)
   try {
     await recordApprovedBinding(api.state.path.directory, {
       datamateId: res.datamate.id,
@@ -250,39 +546,24 @@ async function createAndBindInline(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
-    // Guard against a non-http(s) manage_url — ``open`` dispatches to whatever
-    // OS handler matches the protocol, so a rogue value could launch an
-    // unrelated app. Fall through to the info toast (with the URL for manual
-    // copy) if the URL isn't a safe http/https link.
-    if (isSafeHttpUrl(res.manage_url)) {
-      try {
-        await open(res.manage_url)
-        api.ui.toast({
-          variant: "success",
-          message: `Workspace "${res.datamate.name}" created. Opened ${res.manage_url} in your browser.`,
-        })
-        return
-      } catch {
-        /* fall through to the "open manually" toast below */
-      }
-    }
-    api.ui.toast({
-      variant: "info",
-      message: `Workspace "${res.datamate.name}" created. Open ${res.manage_url} to configure it.`,
-      duration: 10_000,
-    })
+    await showLinkedConfirmation(api, "Created", res.datamate.id, res.datamate.name)
   } catch (err) {
+    // Log the failure so a regression in ``showLinkedConfirmation`` doesn't
+    // vanish silently, then fall back to a plain toast. Previously ``void err``
+    // discarded the diagnostic — Kilo cycle 6 called it out.
+    log.warn("workspace post-create confirmation failed", { err: String(err) })
     api.ui.toast({
       variant: "info",
       message: `Workspace "${res.datamate.name}" created and linked.`,
     })
-    void err
   }
 }
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
- * dispatch to whatever OS scheme handler matches the protocol). */
+ * dispatch to whatever OS scheme handler matches the protocol). Kept exported
+ * as a top-level helper because both ``showLinkedConfirmation`` (below) and
+ * the on-demand link paths need the same guard. */
 function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
@@ -438,10 +719,13 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        props.api.ui.toast({
-          variant: "success",
-          message: `Linked to workspace "${res.binding.datamate_name}".`,
-        })
+        await showLinkedConfirmation(
+          props.api,
+          "Linked",
+          res.binding.datamate_id,
+          res.binding.datamate_name,
+        )
+        return
       } else {
         // Rebind: pick the endpoint that matches which identifier the
         // pre-check RESOLVED the binding on — not what the current identifier
@@ -464,12 +748,14 @@ function PickerDialog(props: PickerProps) {
           projectPath: res.binding.project_path,
           linkedAt: Date.now(),
         })
-        props.api.ui.toast({
-          variant: "success",
-          message: `Re-linked to workspace "${res.binding.datamate_name}".`,
-        })
+        await showLinkedConfirmation(
+          props.api,
+          "Re-linked",
+          res.binding.datamate_id,
+          res.binding.datamate_name,
+        )
+        return
       }
-      props.api.ui.dialog.clear()
     } catch (err) {
       // Surface as a toast so the user sees the specific failure. Dialog
       // closes either way — the palette command ``altimate.workspace.link``
@@ -666,12 +952,12 @@ async function bindOrRebindInline(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     })
-    api.ui.toast({
-      variant: "success",
-      message: isRebind
-        ? `Re-linked to workspace "${res.binding.datamate_name}".`
-        : `Linked to workspace "${res.binding.datamate_name}".`,
-    })
+    await showLinkedConfirmation(
+      api,
+      isRebind ? "Re-linked" : "Linked",
+      res.binding.datamate_id,
+      res.binding.datamate_name,
+    )
   } catch (err) {
     let msg: string
     if (err instanceof ConflictError) {
@@ -747,6 +1033,12 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     ? projectNameFromRemote(identifier.repoRemote)
     : projectNameFromPath(identifier.projectPath)
 
+  // Whether the browser-based handoff is available for this deployment. The
+  // OfferDialog hides the "Set up in browser" option when false, silently
+  // falling back to the pre-browser-handoff behavior. Compute here (once,
+  // async) so the dialog itself stays sync.
+  const browserAvailable = await isBrowserHandoffAvailable()
+
   let serverBinding: ProjectBindingLookup | null | undefined
   try {
     serverBinding = await WorkspaceApi.getBindingForProject(identifier)
@@ -799,6 +1091,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         api={api}
         identifier={identifier}
         defaultName={defaultName}
+        browserAvailable={browserAvailable}
         latchScope={latchScope}
       />
     ))
@@ -840,6 +1133,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
       api={api}
       identifier={identifier}
       defaultName={defaultName}
+      browserAvailable={browserAvailable}
       latchScope={latchScope}
     />
   ))

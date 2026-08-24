@@ -32,9 +32,15 @@ import {
   projectNameFromRemote,
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
+import {
+  openWorkspaceBrowserHandoff,
+  resolveWorkspaceWebUrl,
+  type HandoffResult,
+} from "@/altimate/workspace/browser-handoff"
 import { recordApprovedBinding } from "@/altimate/workspace/state"
 
 const CREATE_NEW_SENTINEL = "__create_new__"
+const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
 
 export const LinkCommand = cmd({
   command: "link",
@@ -118,13 +124,41 @@ export const LinkCommand = cmd({
     const currentId = existing?.datamate.id
     const currentName = existing?.datamate.name
 
+    // Only offer the browser-based handoff when the deployment supports it
+    // (freemium only today). Enterprise / localhost / custom-domain callers
+    // silently fall back to the CLI-side quick create.
+    const creds = await AltimateApi.getCredentials()
+    const browserAvailable =
+      resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
+
     const options: Array<{ value: string; label: string; hint?: string }> = [
+      // Only offer browser handoff for UNLINKED projects (CodeRabbit cycle 5).
+      // ``runBrowserHandoff`` creates a fresh workspace and calls
+      // ``bindExisting``, which 409s when there's already an active binding —
+      // leaving the browser-created workspace stranded and no rebind actually
+      // happening. If the project is already linked, the caller wants a
+      // rebind path (offered elsewhere in this menu), not create-and-bind.
+      //
+      // Also gate on ``preCheckOk`` (Kilo cycle 6): when the pre-check itself
+      // failed (network / 5xx), ``existing`` stays null but the project MAY
+      // be linked server-side. Offering the browser flow then would run the
+      // same 409 → stranded-workspace path. Better to hide the option until
+      // the caller can confirm the binding state.
+      ...(browserAvailable && !existing && preCheckOk
+        ? [
+            {
+              value: SET_UP_IN_BROWSER_SENTINEL,
+              label: `＋ Set up in browser "${autoName}"`,
+              hint: "Approve in the Altimate SaaS; CLI links your project automatically.",
+            },
+          ]
+        : []),
       {
         value: CREATE_NEW_SENTINEL,
-        label: `＋ Create a new workspace "${autoName}"`,
+        label: `＋ Create a quick workspace "${autoName}" here`,
         hint: existing
-          ? "Creates a new workspace and repoints this project to it."
-          : "Named from this project; rename in the SaaS after.",
+          ? "Creates a new workspace and repoints this project to it (no browser step)."
+          : "No browser step; configure integrations later in the SaaS.",
       },
       ...list.map((dm) => ({
         value: String(dm.id),
@@ -146,6 +180,11 @@ export const LinkCommand = cmd({
       return
     }
 
+    if (pick === SET_UP_IN_BROWSER_SENTINEL) {
+      await runBrowserHandoff(identifier, autoName, args.directory)
+      return
+    }
+
     if (pick === CREATE_NEW_SENTINEL) {
       await createThenBindOrRebind(identifier, autoName, args.directory, existing)
       return
@@ -161,12 +200,130 @@ export const LinkCommand = cmd({
   },
 })
 
-/** "＋ Create a new workspace" flow. When the project is already linked, this
- * MUST rebind after create — otherwise the new workspace is a real (billable)
- * SaaS resource the CLI knows nothing about and the project is still bound to
- * the old workspace (M2 in the consensus review). When rebind fails, the
- * error message tells the user the workspace was created and how to recover;
- * we do NOT silently swallow the orphan. */
+/** Browser-based create-and-bind flow. Same handoff module the TUI post-scan
+ * dialog uses; on success, the CLI calls the existing bind endpoint to link
+ * the current project to the newly-created workspace. When the project is
+ * already linked, bindExisting will 409; the caller re-runs and picks
+ * "＋ Create a quick workspace here" instead to trigger the create-and-rebind
+ * path. (Full create-then-rebind via the browser flow is deferred — the
+ * SaaS approval screen doesn't yet know how to receive a "rebind after
+ * create" instruction from the CLI.) */
+async function runBrowserHandoff(
+  identifier: ProjectIdentifier,
+  projectName: string,
+  directory: string,
+): Promise<void> {
+  const spin = prompts.spinner()
+  spin.start("Waiting for browser approval...")
+  const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
+  if (!result.ok) {
+    spin.stop(handoffFailureMessage(result), 1)
+    process.exitCode = 1
+    return
+  }
+  // M6 in the consensus review: re-verify credentials before binding. The
+  // browser window can stay open for up to 15 minutes; an account switch in
+  // that window would otherwise bind a callback validated for tenant A
+  // under tenant B (workspace ids are tenant-schema-local).
+  try {
+    const fresh = await AltimateApi.getCredentials()
+    if (
+      fresh.altimateInstanceName !== result.credentials.tenant ||
+      fresh.altimateUrl !== result.credentials.apiUrl
+    ) {
+      spin.stop(
+        `Credentials changed while the browser was open (was ${result.credentials.tenant}, now ${fresh.altimateInstanceName}). Re-run to link this project.`,
+        1,
+      )
+      process.exitCode = 1
+      return
+    }
+  } catch {
+    spin.stop("Lost Altimate credentials while the browser was open — sign in and re-run.", 1)
+    process.exitCode = 1
+    return
+  }
+  spin.stop(`Workspace approved. Binding to project...`)
+  const bindSpin = prompts.spinner()
+  bindSpin.start("Linking workspace...")
+  try {
+    const res = await WorkspaceApi.bindExisting(result.workspaceId, identifier)
+    // Match the two other recordApprovedBinding call sites in this file
+    // (lines 377 and 496) which cache under ``identifier.projectPath ??
+    // directory``. The raw ``directory`` here caches under a different key
+    // when the caller passes a relative or symlinked ``-d`` path, so a
+    // later readLocalBinding from the TUI sidebar can miss the binding.
+    // (coderabbitai #1100 comment 3841173342.)
+    await recordApprovedBinding(identifier.projectPath ?? directory, {
+      datamateId: res.binding.datamate_id,
+      datamateName: res.binding.datamate_name,
+      repoRemote: res.binding.repo_remote,
+      projectPath: res.binding.project_path,
+      linkedAt: Date.now(),
+    })
+    bindSpin.stop(`Linked to "${res.binding.datamate_name}".`)
+    const manageUrl = await manageUrlFor(res.binding.datamate_id)
+    if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
+    prompts.outro("Done.")
+  } catch (err) {
+    bindSpin.stop("Link failed.", 1)
+    if (err instanceof ConflictError) {
+      prompts.log.error(
+        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
+      )
+    } else if (err instanceof NotFoundError) {
+      prompts.log.error("Workspace not found — the tenant or workspace may have changed.")
+    } else if (err instanceof ForbiddenError) {
+      prompts.log.error("Only the workspace owner can bind projects to it.")
+    } else {
+      prompts.log.error(err instanceof Error ? err.message : String(err))
+    }
+    process.exitCode = 1
+  }
+}
+
+/** Best-effort manage-workspace URL for the current credentials. Returns null
+ * on BYOK / unresolvable deployments — callers omit the "Manage it at" line. */
+async function manageUrlFor(workspaceId: number): Promise<string | null> {
+  try {
+    const creds = await AltimateApi.getCredentials()
+    const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    if (!base) return null
+    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+  } catch {
+    return null
+  }
+}
+
+function handoffFailureMessage(result: Extract<HandoffResult, { ok: false }>): string {
+  switch (result.reason) {
+    case "unavailable":
+      return "Browser handoff isn't available for this deployment."
+    case "not_configured":
+      return "Altimate credentials not configured — sign in first."
+    case "timeout":
+      return "Timed out waiting for browser approval (15 min)."
+    case "cancelled":
+      return "Cancelled by user."
+    case "tenant_mismatch":
+      return result.message ?? "Workspace was set up in a different tenant than the CLI's credentials."
+    case "port_exhausted":
+      return result.message ?? "Loopback ports 7317-7325 all in use."
+    case "browser_open_failed":
+      return `Could not open browser${result.authorizeUrl ? `. Open manually: ${result.authorizeUrl}` : "."}`
+    case "aborted":
+      return result.message ?? "Browser handoff was cancelled."
+    default:
+      return result.message ?? "Browser handoff failed."
+  }
+}
+
+/** "＋ Create a quick workspace here" flow. When the project is already
+ * linked, this MUST rebind after create — otherwise the new workspace is a
+ * real (billable) SaaS resource the CLI knows nothing about and the project
+ * is still bound to the old workspace (M2 in the consensus review). When
+ * rebind fails, the error message tells the user the workspace was created
+ * and how to recover; we do NOT silently swallow the orphan. */
 async function createThenBindOrRebind(
   identifier: ProjectIdentifier,
   name: string,
@@ -354,6 +511,8 @@ async function bindOrRebind(
         ? `Re-linked to "${res.binding.datamate_name}".`
         : `Linked to "${res.binding.datamate_name}".`,
     )
+    const manageUrl = await manageUrlFor(res.binding.datamate_id)
+    if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
     prompts.outro("Done.")
   } catch (err) {
     spin.stop(isRebind ? `Re-link failed.` : `Link failed.`, 1)

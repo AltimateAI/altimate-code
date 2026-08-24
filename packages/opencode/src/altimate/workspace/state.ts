@@ -21,24 +21,6 @@ const CACHE_VERSION = 1
 
 const log = Log.create({ service: "altimate-workspace-state" })
 
-/** Canonicalize a directory into a stable cache key so callers passing
- * ``/tmp/foo``, ``/private/tmp/foo`` (macOS symlink), ``/tmp/foo/``, or a
- * relative path all read/write the same row. Uses ``path.resolve`` first so
- * relative inputs anchor to cwd, then ``realpathSync`` to collapse symlinks
- * and trailing separators. Falls back to the resolved-only form when the
- * path doesn't exist on disk (e.g. cache written for a repo that has since
- * moved) — better a stable-if-unresolved key than an exception that skips
- * the cache entirely. (cubic + kilo cycle 6 — different clients keyed the
- * same project under different paths.) */
-function canonicalDirKey(directory: string): string {
-  const resolved = path.resolve(directory)
-  try {
-    return realpathSync(resolved)
-  } catch {
-    return resolved
-  }
-}
-
 export interface CachedBinding {
   datamateId: number
   datamateName: string
@@ -109,6 +91,45 @@ function readCache(): CacheFile | null {
   }
 }
 
+/** True when every key in the cache is already the canonical form of itself
+ * (i.e. no earlier-CLI-build unresolved keys remain). Cheap side condition
+ * so we can skip the per-read migration once the cache has been rewritten. */
+function isCanonicalized(cache: CacheFile): boolean {
+  for (const k of Object.keys(cache.bindings)) {
+    if (canonicalizeKey(k) !== k) return false
+  }
+  return true
+}
+
+/** One-shot migration: rewrite the cache with canonical keys, collapsing any
+ * pair that resolves to the same target (last-writer-wins by ``linkedAt``).
+ * After this runs the O(n) lookup-time rescan in ``readLocalBinding`` is
+ * dead code — every subsequent read hits the direct key lookup. */
+function migrateToCanonicalKeys(cache: CacheFile): CacheFile {
+  const migrated: Record<string, CachedBinding> = {}
+  for (const [k, v] of Object.entries(cache.bindings)) {
+    const canon = canonicalizeKey(k)
+    const existing = migrated[canon]
+    if (!existing || existing.linkedAt <= v.linkedAt) migrated[canon] = v
+  }
+  const next: CacheFile = { ...cache, bindings: migrated }
+  // Best-effort — a failing write (read-only state dir, full disk, EACCES)
+  // must not throw out of ``readLocalBinding``. The migrated shape is
+  // still returned in-memory for THIS call, and the next successful
+  // ``recordApprovedBinding`` will persist the canonical form. Without
+  // this wrap, the offline-fallback path (``workspace.tsx`` runFlow →
+  // readLocalBinding) surfaces a "Workspace setup failed" toast for a
+  // perfectly-readable binding. (kilo-code-bot #1100 comment 3841208552.)
+  try {
+    writeCache(next)
+  } catch (err) {
+    log.warn("could not persist canonical-key migration; retry on next write", {
+      err: String(err),
+    })
+  }
+  return next
+}
+
 function writeCache(cache: CacheFile): void {
   const p = cachePath()
   Filesystem.writeJsonAtomic(p, cache)
@@ -121,6 +142,18 @@ function writeCache(cache: CacheFile): void {
     log.warn("could not chmod workspace binding cache", {
       code: (err as NodeJS.ErrnoException)?.code,
     })
+  }
+}
+
+/** Canonicalize a directory path so cache lookups survive symlink differences
+ * (macOS ``/tmp`` → ``/private/tmp`` is the common case). Writers and readers
+ * must both funnel through this or a shell-cwd write silently misses when the
+ * TUI's canonicalized ``state.path.directory`` looks it back up. */
+function canonicalizeKey(directory: string): string {
+  try {
+    return realpathSync(path.resolve(directory))
+  } catch {
+    return path.resolve(directory)
   }
 }
 
@@ -145,15 +178,27 @@ async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
 }
 
 /** Read the local binding for ``directory`` — only returns a hit when the
- * cache's stored (tenant, apiUrl) matches the current credentials. Directory
- * is canonicalized so raw / symlink / trailing-slash variants collide. */
+ * cache's stored (tenant, apiUrl) matches the current credentials. Runs a
+ * one-shot migration to canonical keys on the first read that finds an
+ * unresolved key (macOS ``/tmp`` → ``/private/tmp``), then relies on direct
+ * lookup for the process's remaining lifetime. */
 export async function readLocalBinding(directory: string): Promise<CachedBinding | null> {
   const key = await tenantKey()
   if (!key) return null
-  const cache = readCache()
+  let cache = readCache()
   if (!cache) return null
   if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
-  return cache.bindings[canonicalDirKey(directory)] ?? null
+  const canon = canonicalizeKey(directory)
+  const direct = cache.bindings[canon]
+  if (direct) return direct
+  // Cache miss: check if the cache still has any non-canonical keys and
+  // migrate the whole file once. After migration the lookup is a plain
+  // property access on every future read.
+  if (!isCanonicalized(cache)) {
+    cache = migrateToCanonicalKeys(cache)
+    return cache.bindings[canon] ?? null
+  }
+  return null
 }
 
 export async function recordApprovedBinding(
@@ -166,14 +211,15 @@ export async function recordApprovedBinding(
   // truth (the server-side binding is). If the state directory is read-only
   // or the disk is full, callers otherwise report "link failed" and prompt
   // duplicate retries against a workspace that IS bound server-side.
-  // (cubic round 3.)
+  // (cubic round 3.) canonicalizeKey resolves symlinks so writes and reads
+  // funnel through the same key (macOS ``/tmp`` → ``/private/tmp``).
   try {
     const existing = readCache()
     const cache: CacheFile =
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-    cache.bindings[canonicalDirKey(directory)] = binding
+    cache.bindings[canonicalizeKey(directory)] = binding
     writeCache(cache)
   } catch (err) {
     log.warn("could not persist workspace binding cache", {
