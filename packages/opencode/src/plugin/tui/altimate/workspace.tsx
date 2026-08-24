@@ -349,6 +349,13 @@ async function runBrowserHandoff(
   const signal = activeHandoffAbort.signal
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName, signal })
   if (!result.ok) {
+    // A superseded handoff (``activeHandoffAbort.abort()`` above, fired when
+    // the user re-triggers the flow) settles as ``reason: "aborted"``. That
+    // is not a failure the user caused, and the newer flow already emitted
+    // its "Opening browser..." toast — surfacing a red "Handoff aborted"
+    // on top would look like the second attempt failed. Silent return.
+    // (kilo-code-bot #1100 comment 3841282737.)
+    if (result.reason === "aborted") return
     toastHandoffFailure(api, result)
     return
   }
