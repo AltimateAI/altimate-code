@@ -12,17 +12,7 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
-// Non-codex ChatGPT-subscription (OAuth) allowlist. Keep in sync with
-// the sibling ALLOWED_MODELS in ../codex.ts — both files exist during a
-// refactor in flight; whichever is wired via plugin/index.ts is the
-// active one. (Closes #1132 — GPT 5.6 missing from picker.)
-const ALLOWED_MODELS = new Set([
-  "gpt-5.3-codex-spark",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.5",
-  "gpt-5.6",
-])
+const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"])
 
 interface PkceCodes {
   verifier: string
