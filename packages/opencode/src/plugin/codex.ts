@@ -16,6 +16,24 @@ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 
+/** Non-codex ChatGPT-subscription (OAuth) allowlist. Any modelId
+ * containing "codex" is auto-allowed elsewhere; this set only enumerates
+ * the plain main/mini variants OpenAI exposes on Codex-tier accounts.
+ * Bump whenever a new gpt-5.N is generally available on the subscription.
+ * Exported for unit-test coverage — see test/plugin/codex-allowlist.test.ts. */
+export const OAUTH_ALLOWED_MODELS = new Set([
+  "gpt-5.1-codex",
+  "gpt-5.1-codex-max",
+  "gpt-5.1-codex-mini",
+  "gpt-5.2",
+  "gpt-5.2-codex",
+  "gpt-5.3-codex",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.5",
+  "gpt-5.6",
+])
+
 interface PkceCodes {
   verifier: string
   challenge: string
@@ -398,17 +416,14 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
 
-        // Filter models to only allowed Codex models for OAuth
-        const allowedModels = new Set([
-          "gpt-5.1-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.1-codex-mini",
-          "gpt-5.2",
-          "gpt-5.2-codex",
-          "gpt-5.3-codex",
-          "gpt-5.4",
-          "gpt-5.4-mini",
-        ])
+        // Filter models to only allowed Codex models for OAuth. Any modelId
+        // whose id includes "codex" is auto-allowed by the loop below, so
+        // this set only enumerates the non-codex ChatGPT-subscription
+        // main/mini variants. Keep in sync with what OpenAI's ChatGPT
+        // Pro/Plus subscription actually accepts — bump when a new
+        // release (gpt-5.5, 5.6, 5.7, ...) is available on the
+        // subscription tier. (Closes #1132 — GPT 5.6 missing from picker.)
+        const allowedModels = OAUTH_ALLOWED_MODELS
         for (const modelId of Object.keys(provider.models)) {
           if (modelId.includes("codex")) continue
           if (allowedModels.has(modelId)) continue
