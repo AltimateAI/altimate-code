@@ -61,28 +61,25 @@ async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void>
   if (workspacePromptUnsubscribe) return
   if (workspacePromptInstall) return workspacePromptInstall
 
-  // Capture the set of pending sessions at install-time so an install
-  // failure drains EVERY caller that awaited this install, not just the
-  // one whose sessionID we happen to be handling. Later waiters would
-  // otherwise see success from the shared promise and stop retrying,
-  // leaving permanently-stale entries in the pending set. (cubic round 3.)
-  const armingSessions = new Set(pendingWorkspacePromptSessions)
-
   workspacePromptInstall = (async () => {
     try {
       const unsubscribe = await AppRuntime.runPromise(
         EventV2Bridge.Service.use((events) =>
           events.listen((event) =>
             Effect.gen(function* () {
-              // NOTE: ``SessionEvent`` here is the module-local alias for
-              // ``Event`` imported from ``@/session/status`` (see imports
-              // above) — the MODERN ``EventV2.define`` API, not the
-              // deprecated ``LegacyEvent.Idle`` under ``BusEvent.define``.
-              // Grep the file for ``import { Event as SessionEvent }`` to
-              // confirm. Bots flagging this as "deprecated API" are
-              // false-positive matching on the token ``SessionEvent``.
-              if (event.type !== SessionEvent.Idle.type) return
-              const sid = (event.data as { sessionID?: string } | undefined)?.sessionID
+              // Subscribe to ``Event.Status`` (session/status.ts:42, defined
+              // via ``EventV2.define``) rather than ``Event.Idle`` — the
+              // latter is marked ``// deprecated`` at session/status.ts:49
+              // and is only kept around for the legacy Bus SSE mirror at
+              // session/status.ts:176. Filtering ``event.data.status.type
+              // === "idle"`` gives us the same trigger without riding the
+              // deprecated event. (harness-bot round 8.)
+              if (event.type !== SessionEvent.Status.type) return
+              const data = event.data as
+                | { sessionID?: string; status?: { type?: string } }
+                | undefined
+              if (data?.status?.type !== "idle") return
+              const sid = data.sessionID
               if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
               pendingWorkspacePromptSessions.delete(sid)
               yield* events.publish(TuiEvent.CommandExecute, {
@@ -107,12 +104,12 @@ async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void>
       )
       workspacePromptUnsubscribe = unsubscribe
     } catch (err) {
-      // Install failed — drop every session that was waiting on this install
-      // so the next scan retries from scratch. Dropping only the current
-      // caller's ID would leave later waiters (already resolved by the
-      // shared install promise) with permanently-stale pending entries.
-      // (cubic round 3.)
-      for (const sid of armingSessions) pendingWorkspacePromptSessions.delete(sid)
+      // Install failed — drain EVERY pending session, not just the ones
+      // snapshotted at install-time. A late-arriving ``armWorkspacePromptOn
+      // SessionIdle`` between the snapshot and the failure would otherwise
+      // be a permanent orphan (its sessionID stays in the pending set but
+      // no listener will ever fire for it). (harness-bot round 8.)
+      pendingWorkspacePromptSessions.clear()
       workspaceLog.warn("session-idle listener install failed", { err: String(err) })
     } finally {
       workspacePromptInstall = null
