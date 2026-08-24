@@ -38,7 +38,12 @@ export async function backfillOnBind(directory: string, binding: CachedBinding):
     // Only a sweep that stored everything it meant to counts as seeded. A
     // failure here must leave the binding eligible for a retry, or local blocks
     // stay absent from the workspace until a rebind or an unrelated edit.
-    return !result.gated && result.failed === 0
+    // ``declined`` counts too — a block the service explicitly refused (quota,
+    // permissions) is still absent from the workspace and the binding should
+    // stay unseeded so a later rebind retries it. Without this a partially-
+    // rejected backfill left the binding treated as fully seeded. (altimate-
+    // harness-bot #1116 comment 3840503346.)
+    return !result.gated && result.failed === 0 && result.declined === 0
   } catch (err) {
     log.warn("workspace memory backfill after bind failed", { err: String(err) })
     return false
