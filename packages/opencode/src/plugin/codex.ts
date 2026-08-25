@@ -16,6 +16,36 @@ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 
+/** Non-codex ChatGPT-subscription (OAuth) allowlist. Any modelId
+ * containing "codex" is auto-allowed by ``shouldAllowOAuthModel`` below,
+ * so this set only enumerates the plain non-codex main/mini variants
+ * OpenAI exposes on Codex-tier accounts. Bump whenever a new gpt-5.N
+ * is generally available on the subscription. Exported for unit-test
+ * coverage — see test/plugin/codex-allowlist.test.ts. */
+export const OAUTH_ALLOWED_MODELS = new Set([
+  "gpt-5.2",
+  "gpt-5.4",
+  "gpt-5.4-mini",
+  "gpt-5.5",
+  "gpt-5.6",
+])
+
+/** OAuth (ChatGPT-subscription) model-filter policy for the ACTIVE plugin
+ * (this file — wired via plugin/index.ts). A model is kept if either
+ * (a) its id contains ``"codex"`` (all codex variants ship on the
+ * subscription), or (b) its id is an exact member of
+ * ``OAUTH_ALLOWED_MODELS`` (the curated non-codex releases).
+ *
+ * The sibling file plugin/openai/codex.ts (an in-progress refactor,
+ * currently NOT wired) has its own separate filter with a
+ * ``parseFloat(match[1]) > 5.4`` fallback. Adopting this helper is
+ * followup work on that refactor — do NOT assume the two files share
+ * this policy today. */
+export function shouldAllowOAuthModel(modelId: string): boolean {
+  if (modelId.includes("codex")) return true
+  return OAUTH_ALLOWED_MODELS.has(modelId)
+}
+
 interface PkceCodes {
   verifier: string
   challenge: string
@@ -398,21 +428,19 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
 
-        // Filter models to only allowed Codex models for OAuth
-        const allowedModels = new Set([
-          "gpt-5.1-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.1-codex-mini",
-          "gpt-5.2",
-          "gpt-5.2-codex",
-          "gpt-5.3-codex",
-          "gpt-5.4",
-          "gpt-5.4-mini",
-        ])
+        // Filter models to only those the ChatGPT-subscription (Codex) tier
+        // accepts. Delegates to ``shouldAllowOAuthModel`` (module-level,
+        // above). See OAUTH_ALLOWED_MODELS + shouldAllowOAuthModel for the
+        // criteria + how to add new gpt-5.N releases.
+        //
+        // NOTE: this file is the ACTIVE plugin (wired via plugin/index.ts).
+        // The sibling plugin/openai/codex.ts is an unwired in-progress
+        // refactor that keeps its OWN ALLOWED_MODELS + parseFloat > 5.4
+        // fallback — this filter does NOT share a source of truth with it.
+        // Adopting shouldAllowOAuthModel there is followup on that refactor.
+        // (Closes #1132 — GPT 5.6 missing from picker.)
         for (const modelId of Object.keys(provider.models)) {
-          if (modelId.includes("codex")) continue
-          if (allowedModels.has(modelId)) continue
-          delete provider.models[modelId]
+          if (!shouldAllowOAuthModel(modelId)) delete provider.models[modelId]
         }
 
         // Zero out costs for Codex (included with ChatGPT subscription)
