@@ -22,6 +22,8 @@ import { Discovery } from "./discovery"
 import { isRecord } from "@/util/record"
 // altimate_change start — upstream_fix: builtin DE-skill loading (dropped by the v1.17.9 rewrite; see make())
 import matter from "gray-matter"
+// altimate_change — shared code-point comparator (see core util/collate.ts)
+import { byCodePoints } from "@opencode-ai/core/util/collate"
 declare const OPENCODE_BUILTIN_SKILLS: { name: string; content: string }[] | undefined
 // altimate_change end
 
@@ -374,7 +376,14 @@ export const layer = Layer.effect(
 
     const available = Effect.fn("Skill.available")(function* (agent?: Agent.Info) {
       const s = yield* InstanceState.get(state)
-      const list = Object.values(s.skills).toSorted((a, b) => a.name.localeCompare(b.name))
+      // altimate_change start — codepoint order, not locale order. `Object.values` iteration
+      // order is insertion order from discovery, so this sort is what makes the list stable at
+      // all; making it locale-independent is what makes it stable ACROSS MACHINES. This matters
+      // beyond byte-for-byte prompt caching: tool/skill.ts slices the first MAX_DISPLAY_SKILLS
+      // off this list, so with more skills than that limit the runtime's LANG or ICU data
+      // decides WHICH skills the model is offered, not merely what order they appear in.
+      const list = Object.values(s.skills).toSorted(byCodePoints((s) => s.name))
+      // altimate_change end
       if (!agent) return list
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
     })
@@ -401,7 +410,13 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
     return [
       "<available_skills>",
       ...described
-        .toSorted((a, b) => a.name.localeCompare(b.name))
+        // altimate_change start — codepoint order, not locale order. This block renders into
+        // the system prompt ahead of instructions and memory, and exact-prefix caches stop at
+        // the first differing byte, so an order that follows the runtime's LANG or ICU data
+        // means two machines share no prefix at all. Sorting upstream in SystemPrompt.skills()
+        // is not enough on its own — this sort is the one that reaches the prompt.
+        .toSorted(byCodePoints((s) => s.name))
+        // altimate_change end
         .flatMap((skill) => [
           "  <skill>",
           `    <name>${skill.name}</name>`,
@@ -416,7 +431,9 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
   return [
     "## Available Skills",
     ...described
-      .toSorted((a, b) => a.name.localeCompare(b.name))
+      // altimate_change start — codepoint order; this branch is prompt-facing too
+      .toSorted(byCodePoints((s) => s.name))
+      // altimate_change end
       .map((skill) => `- **${skill.name}**: ${skill.description}`),
   ].join("\n")
 }

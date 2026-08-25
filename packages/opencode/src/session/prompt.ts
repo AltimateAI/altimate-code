@@ -1178,13 +1178,18 @@ export namespace SessionPrompt {
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
           })
       // altimate_change end
-      const system = [
-        ...(await SystemPrompt.environment(model)),
-        ...(skills ? [skills] : []),
-        ...(knowledgeInjection ? [knowledgeInjection] : []),
-        ...(await InstructionPrompt.system()),
-        ...hoistedReminders,
-      ]
+      // altimate_change start — SystemPrompt.assemble() orders these segments stable→volatile
+      // so exact-prefix caches (Vertex/Gemini, OpenAI) share the longest possible prefix.
+      // <env> used to be FIRST here, which truncated the shared prefix ~6k tokens in.
+      // See the doc comment on assemble() in session/system.ts for the full rationale.
+      const system = SystemPrompt.assemble({
+        skills,
+        instructions: await InstructionPrompt.system(),
+        knowledge: knowledgeInjection,
+        environment: await SystemPrompt.environment(model),
+        hoistedReminders,
+      })
+      // altimate_change end
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)

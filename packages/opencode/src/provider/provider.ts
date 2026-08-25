@@ -28,6 +28,9 @@ import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
 import { AltimateApi } from "../altimate/api/client"
+// altimate_change start — free-tier gateway credentials for the altimate-free loader
+import { FreeTier } from "../altimate/free/client"
+// altimate_change end
 
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
@@ -371,6 +374,25 @@ export namespace Provider {
         await Auth.remove(ProviderID.make("altimate-backend")).catch(() => {})
       }
       return { autoload: false }
+    },
+    // altimate_change end
+    // altimate_change start — free-tier gateway provider: READ-ONLY. Registration is
+    // consent-gated in the TUI disclosure dialog, so this never mints an identifier or
+    // makes a network call for an unregistered install. Returning autoload:false leaves the
+    // provider available for the picker's NEEDS-SETUP list.
+    "altimate-free": async () => {
+      const creds = await FreeTier.credentialsForLoad().catch(() => undefined)
+      if (!creds) return { autoload: false }
+      return {
+        autoload: true,
+        options: {
+          baseURL: `${creds.baseURL}/v1`,
+          apiKey: creds.apiKey,
+          // Keys are short-lived, and the SDK captures the one it was built with. The wrapper
+          // re-reads the stored credential per request and rotates on a 401.
+          fetch: FreeTier.authorizedFetch,
+        },
+      }
     },
     // altimate_change end
     openai: async () => {
@@ -1139,7 +1161,42 @@ export namespace Provider {
 
     log.info("init")
 
-    const configProviders = Object.entries(config.provider ?? {})
+    // altimate_change start — free-tier config is dropped AT INGESTION, not at each consumer.
+    //
+    // A project-local `opencode.json` is attacker-controlled: any repository the user opens ships
+    // one. For `altimate-free` that config would steer a stored credential — where it is sent
+    // (`options.baseURL`, `headers`), which MODULE receives it (`npm`, `model.provider.npm`, which
+    // `getSDK()` imports, so arbitrary code execution), and which model it is spent on (`models`,
+    // `variants`).
+    //
+    // This reopened twice, each time through a field nobody had denied yet: round 1 closed
+    // `options.baseURL`, and it came back through `npm`. Guarding consumers one at a time loses
+    // that race by construction — while writing this fix a THIRD consumer turned up (the
+    // variants/blacklist merge below) that both earlier guards had missed, and the adversarial
+    // test caught it only because it asserts the whole class rather than the reported field.
+    //
+    // So the denial happens here, once, where config is read. Everything downstream inherits it,
+    // including consumers that do not exist yet. `configFor` covers the one place that indexes
+    // `config.provider` directly instead of iterating this list.
+    //
+    // Nothing legitimate is lost: the endpoint, model and module all come from the gateway at
+    // registration, and local development points at a different gateway via
+    // ALTIMATE_FREE_GATEWAY_URL — process environment, which a checked-in file cannot set.
+    //
+    // ONE denial, and every consumer derives from it. The consumers used to carry their own
+    // `if (id === PROVIDER_ID) continue` guards as well, which made the arrangement untestable:
+    // reverting this filter left every adversarial assertion green because the guards caught the
+    // entry anyway, so the structural fix was held up by belt-and-braces rather than proven. Those
+    // guards were also unreachable — the loops below iterate `configProviders`, which by then
+    // cannot contain the id. `configFor` reads the same filtered map instead of `config.provider`,
+    // so the single indexing consumer inherits the denial too rather than restating it.
+    const configProviderEntries = Object.entries(config.provider ?? {})
+    const configProviders = configProviderEntries.filter(([id]) => id !== FreeTier.PROVIDER_ID)
+    if (configProviders.length !== configProviderEntries.length)
+      log.warn("ignoring config for the free tier provider", { providerID: FreeTier.PROVIDER_ID })
+    const configProviderMap = Object.fromEntries(configProviders)
+    const configFor = (providerID: string) => configProviderMap[providerID]
+    // altimate_change end
 
     // Add GitHub Copilot Enterprise provider that inherits from GitHub Copilot
     if (database["github-copilot"]) {
@@ -1464,6 +1521,54 @@ export namespace Provider {
     }
     // altimate_change end
 
+    // altimate_change start — register altimate-free, the $0 hosted Gemini Flash tier.
+    // Cost is zero everywhere: the model is funded by us, so a non-zero entry would show
+    // users a spend figure for tokens they are not billed for.
+    //
+    // UNCONDITIONAL, deliberately. This used to be `if (!database["altimate-free"])`, which let
+    // a ModelsDev/registry record of that name win and define the provider instead — supplying
+    // `npm` (the module getSDK() imports and hands the stored free key to), the API url, headers,
+    // options, models or env. Same credential-exfiltration class as the project-config route,
+    // arriving from the other input: the bundled snapshot has no such record today, but this data
+    // is refreshed from the network at runtime, so "no collision today" is not a property we
+    // control. Ours is the pinned record and it always wins.
+    {
+      const freeModels: Record<string, Model> = {
+        [FreeTier.MODEL_ID]: {
+          id: ModelID.make(FreeTier.MODEL_ID),
+          providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+          name: "Gemini Flash (Free)",
+          family: "openai",
+          api: { id: FreeTier.MODEL_ID, url: "", npm: "@ai-sdk/openai-compatible" },
+          status: "active",
+          headers: {},
+          options: {},
+          cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+          limit: { context: 1_048_576, output: 16_384 },
+          capabilities: {
+            temperature: true,
+            reasoning: false,
+            attachment: false,
+            toolcall: true,
+            input: { text: true, audio: false, image: true, video: false, pdf: false },
+            output: { text: true, audio: false, image: false, video: false, pdf: false },
+            interleaved: false,
+          },
+          release_date: "2026-08-06",
+          variants: {},
+        },
+      }
+      database["altimate-free"] = {
+        id: ProviderID.make(FreeTier.PROVIDER_ID),
+        name: "Altimate Free",
+        source: "custom",
+        env: [],
+        options: {},
+        models: freeModels,
+      }
+    }
+    // altimate_change end
+
     function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
       const existing = providers[providerID]
       if (existing) {
@@ -1479,6 +1584,32 @@ export namespace Provider {
 
     // extend database from config
     for (const [providerID, provider] of configProviders) {
+      // altimate_change start — the free tier is not configurable, and this is the FIRST place
+      // that has to enforce it. The guard further down (the "load config" loop) runs after the
+      // loaders and only covers env/name/options; this loop builds the whole database entry, so
+      // everything below was reachable from a project-local config file:
+      //
+      //   provider.npm / model.provider.npm   the MODULE getSDK() imports and hands the stored
+      //                                       API key to — arbitrary code execution plus
+      //                                       credential disclosure, no URL involved
+      //   api url / headers / options         where the key and the prompt are sent
+      //   models / variants                   which model id the credential is spent on
+      //
+      // Round 1 closed the baseURL route and round 2 closed nothing here, so the same
+      // vulnerability reopened through `npm`. Denying named fields one at a time loses that race
+      // by construction: the correct unit is the provider id, and the answer is that NO config
+      // input reaches this entry at all. The record is built solely from the gateway's
+      // registration response (see the loader above).
+      //
+      // Nothing legitimate is lost. The endpoint and model come from the gateway at
+      // registration; local development points at a different gateway with
+      // ALTIMATE_FREE_GATEWAY_URL, which is process environment and cannot be set by a
+      // checked-in file.
+      if (providerID === FreeTier.PROVIDER_ID) {
+        log.warn("ignoring config override for the free tier provider", { providerID, stage: "database" })
+        continue
+      }
+      // altimate_change end
       const existing = database[providerID]
       const parsed: Info = {
         id: ProviderID.make(providerID),
@@ -1608,6 +1739,19 @@ export namespace Provider {
       const providerID = ProviderID.make(id)
       if (disabled.has(providerID)) continue
       if (provider.type === "api") {
+        // altimate_change start — an empty key is not a credential, and for the free tier it is
+        // a specific, expected state: the install secret is persisted BEFORE registration so a
+        // lost response can be retried against the same gateway principal, which leaves
+        // `{ key: "", metadata: { install_secret } }` behind whenever registration fails.
+        //
+        // Merging that here created `providers["altimate-free"]`, and once the entry exists the
+        // CUSTOM_LOADERS block below merges it regardless of `autoload`, because its condition
+        // is `result.autoload || providers[providerID]`. The loader's "no, I am not registered"
+        // answer could no longer remove it, so a user whose registration got a 503 saw the free
+        // provider listed as connected after the next restart — and selecting it would send an
+        // empty bearer token.
+        if (!provider.key) continue
+        // altimate_change end
         mergeProvider(providerID, {
           source: "api",
           key: provider.key,
@@ -1683,6 +1827,19 @@ export namespace Provider {
     // load config
     for (const [id, provider] of configProviders) {
       const providerID = ProviderID.make(id)
+      // altimate_change start — the free tier is not configurable, and this merge is why.
+      // It runs AFTER the loaders, so a `provider["altimate-free"].options.baseURL` in a config
+      // file overrides the endpoint the credential was issued for — and a config file can be
+      // project-local, i.e. supplied by any repository the user opens. The stored key, the
+      // prompt and the session id would then be sent to whatever origin that repo chose.
+      // Nothing legitimate needs this: the endpoint comes from the gateway at registration, and
+      // local development points at another gateway with ALTIMATE_FREE_GATEWAY_URL, which a
+      // checked-in file cannot set.
+      if (id === FreeTier.PROVIDER_ID) {
+        log.warn("ignoring config override for the free tier provider", { providerID })
+        continue
+      }
+      // altimate_change end
       const partial: Partial<Info> = { source: "config" }
       if (provider.env) partial.env = provider.env
       if (provider.name) partial.name = provider.name
@@ -1697,7 +1854,11 @@ export namespace Provider {
         continue
       }
 
-      const configProvider = config.provider?.[providerID]
+      // altimate_change start — configFor, not config.provider: the free tier is denied at
+      // ingestion and this is the one consumer that indexes the map directly. Covers blacklist,
+      // whitelist and the per-model variants merge below.
+      const configProvider = configFor(providerID)
+      // altimate_change end
 
       for (const [modelID, model] of Object.entries(provider.models)) {
         model.api.id = model.api.id ?? model.id ?? modelID
@@ -2077,7 +2238,22 @@ export namespace Provider {
     }
     // altimate_change end
 
-    const provider = Object.values(providers).find((p) => !cfg.provider || Object.keys(cfg.provider).includes(p.id))
+    // altimate_change start — pick from the SANITIZED config view, same as everywhere else.
+    // This predicate reads `cfg.provider` raw, and it is the one place free-tier config still had
+    // an effect: a repo shipping nothing but a `provider["altimate-free"]` entry — ignored for
+    // npm/url/headers/models — still narrowed this list to that one id and made the free provider
+    // the automatic default, routing the user's prompts through it without them choosing it.
+    // Excluding it here restores the intent: a config entry for the free tier does nothing at all.
+    //
+    // An empty list after the exclusion means "no usable provider config", which must behave the
+    // same as no `provider` block at all — otherwise this find returns nothing and the caller
+    // throws "no providers found". The free provider can still be chosen when it is simply the
+    // only one present; what it can no longer do is be SELECTED BY config.
+    const configuredProviderIDs = Object.keys(cfg.provider ?? {}).filter((id) => id !== FreeTier.PROVIDER_ID)
+    const provider = Object.values(providers).find(
+      (p) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(p.id),
+    )
+    // altimate_change end
     if (!provider) throw new Error("no providers found")
     const [model] = sort(Object.values(provider.models))
     if (!model) throw new Error("no models found")

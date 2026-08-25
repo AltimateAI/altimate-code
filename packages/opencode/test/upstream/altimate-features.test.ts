@@ -388,10 +388,16 @@ describe("altimate features: Skill.invalidate cache hook", () => {
 // 8. SystemPrompt.skills() output is sorted alphabetically (altimate change)
 // ===========================================================================
 describe("altimate features: SystemPrompt.skills sorting", () => {
-  test("system.ts sorts the filtered skill list alphabetically by name", async () => {
+  test("system.ts sorts the filtered skill list by code point, not by locale", async () => {
     const src = await readSrc("session", "system.ts")
-    // The exact altimate sort line that must survive the merge.
-    expect(src).toMatch(/sort\(\(a, b\)\s*=>\s*a\.name\.localeCompare\(b\.name\)\)/)
+    // The sort must survive an upstream merge, and it must stay LOCALE-INDEPENDENT.
+    // `localeCompare` without an explicit locale follows the runtime's LANG/ICU data, so two
+    // machines emit the skills block in a different order — and this block sits near the head of
+    // the system prompt, where an exact-prefix cache stops at the first differing byte. This
+    // guard used to pin the literal `localeCompare` line it was written against; it now pins the
+    // property, so a future rewrite is free as long as ordering stays machine-independent.
+    expect(src).toMatch(/filtered\s*=\s*\[\.\.\.filtered\]\.sort\(byCodePoints\(/)
+    expect(src).not.toMatch(/sort\(\(a, b\)\s*=>\s*a\.name\.localeCompare\(b\.name\)\)/)
   })
 })
 

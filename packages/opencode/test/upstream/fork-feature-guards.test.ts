@@ -177,6 +177,30 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(skill).toMatch(/key:\s*"<leader>k",\s*cmd:\s*"altimate\.skill\.list"/)
   })
 
+  test("free-tier gateway keeps its loader, route, session header, and disclosure", async () => {
+    // Four hooks in four files, each independently droppable by a merge, and each failing
+    // silently: the model would still appear and still answer, while the gateway loses the
+    // ability to enforce budgets (loader), register anyone (route), or group traces by session
+    // (header) — and the disclosure is the consent gate the whole tier rests on.
+    const provider = await read("src/provider/provider.ts")
+    expect(provider).toMatch(/"altimate-free":\s*async\s*\(\)/)
+    expect(provider).toContain("FreeTier.authorizedFetch")
+
+    const server = await read("src/server/server.ts")
+    expect(server).toContain("/altimate/free/register")
+
+    // The live request path is session/llm.ts; llm/request.ts is the unwired Effect-era variant,
+    // so a merge that "keeps" the header there would ship nothing.
+    const llm = await read("src/session/llm.ts")
+    expect(llm).toMatch(/providerID === "altimate-free"[\s\S]{0,80}"X-Session-Id"/)
+
+    const onboarding = await read("src/component/altimate-onboarding.tsx", MONO + "/tui")
+    expect(onboarding).toContain(
+      "Free model — requests and responses are logged and may be used to improve Altimate's products and services. Don't send secrets or confidential code. No signup required.",
+    )
+    expect(onboarding).toContain("/altimate/free/register")
+  })
+
   test("re-homed TUI fork features keep their submit/provider/cache handoffs", async () => {
     const prompt = await read("src/component/prompt/index.tsx", MONO + "/tui")
     expect(prompt).toContain("/altimate/prompt/enhance")
@@ -274,3 +298,76 @@ describe("fork feature presence guards (merge drop detection)", () => {
     expect(promptTsx).toMatch(/phaseLabel\(phase\(\)\)/)
   })
 })
+
+// altimate_change start — `src/session/llm/request.ts` is the UNWIRED Effect-era request builder.
+//
+// The live wire path is `src/session/llm.ts`. Several review rounds disagreed about this, and the
+// disagreement mattered: `request.ts` re-sorts the tool record with `localeCompare` right before
+// returning it, which would undo the deterministic code-point ordering the rest of the tree is
+// careful to produce, and it sets its own request headers. If it were live, both would be bugs on
+// the wire. Reading the file cannot settle it — only reachability can.
+//
+// So this walks the real import graph from the CLI entrypoint and asserts the module is not in it.
+// The day somebody imports it from production code, this test fails and forces the comparator and
+// the headers to be dealt with before it can ship, rather than leaving a dormant landmine.
+describe("session/llm/request.ts stays off the wire path", () => {
+  const SRC = path.join(REPO, "src")
+
+  async function reachableFromEntrypoint(): Promise<Set<string>> {
+    // `export ... from`, `import ... from`, bare `import "x"`, and dynamic `import("x")`.
+    const importRe =
+      /(?:^|\n)\s*(?:import|export)\s[^;\n]*?from\s*["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)|(?:^|\n)\s*import\s*["']([^"']+)["']/g
+
+    async function resolve(spec: string, fromFile: string): Promise<string | undefined> {
+      let base: string
+      if (spec.startsWith("@/")) base = path.join(SRC, spec.slice(2))
+      else if (spec.startsWith(".")) base = path.resolve(path.dirname(fromFile), spec)
+      else return undefined // package import — outside this package's own graph
+      for (const candidate of [base, base + ".ts", base + ".tsx", path.join(base, "index.ts")]) {
+        const stat = await fs.stat(candidate).catch(() => undefined)
+        if (stat?.isFile()) return candidate
+      }
+      return undefined
+    }
+
+    const entry = path.join(SRC, "index.ts")
+    const seen = new Set([entry])
+    const queue = [entry]
+    while (queue.length > 0) {
+      const file = queue.pop()!
+      const source = await fs.readFile(file, "utf-8").catch(() => undefined)
+      if (source === undefined) continue
+      for (const match of source.matchAll(importRe)) {
+        const spec = match[1] ?? match[2] ?? match[3]
+        if (spec === undefined) continue
+        const resolved = await resolve(spec, file)
+        if (resolved === undefined || seen.has(resolved)) continue
+        seen.add(resolved)
+        queue.push(resolved)
+      }
+    }
+    return seen
+  }
+
+  test("the entrypoint reaches session/llm.ts but never session/llm/request.ts", async () => {
+    const reachable = await reachableFromEntrypoint()
+
+    // Guards the walker itself: a resolver that silently returned nothing would make the real
+    // assertion below vacuously true, which is exactly the false-green this test exists to avoid.
+    expect(reachable.size).toBeGreaterThan(400)
+    expect(reachable).toContain(path.join(SRC, "session/llm.ts"))
+    expect(reachable).toContain(path.join(SRC, "provider/provider.ts"))
+    expect(reachable).toContain(path.join(SRC, "mcp/index.ts"))
+
+    expect(reachable).not.toContain(path.join(SRC, "session/llm/request.ts"))
+  })
+
+  test("the live path does not re-sort tools, so upstream ordering survives to the wire", async () => {
+    // The deterministic ordering is produced upstream of here (skills, MCP catalog). A sort added
+    // to the live path would silently replace it, so assert there is none rather than trusting it.
+    const live = await read("src/session/llm.ts")
+    expect(live).not.toContain("localeCompare")
+    expect(live).not.toMatch(/tools[^\n]*\.(?:toSorted|sort)\s*\(/)
+  })
+})
+// altimate_change end

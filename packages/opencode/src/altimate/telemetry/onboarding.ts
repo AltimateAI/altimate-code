@@ -31,6 +31,7 @@ export const ONBOARDING_STAGES = [
   "model_picker",
   "provider_setup",
   "big_pickle_confirm",
+  "free_gemini_confirm",
   "gateway_auth",
   // NOTE: reaching this stage means the run completed, and emitAbandonedIfIncomplete() returns
   // early on `completed`. So "connected" is a valid funnel position but never a `last_stage` on
@@ -50,6 +51,9 @@ type OnboardingEventInput = Extract<
       | "provider_selected"
       | "big_pickle_confirm_shown"
       | "big_pickle_choice"
+      | "free_gemini_confirm_shown"
+      | "free_gemini_choice"
+      | "free_gemini_register_result"
       | "gateway_device_code_issued"
       | "gateway_auth_completed"
       | "gateway_auth_failed"
@@ -92,6 +96,7 @@ const STAGE_FOR_EVENT: Partial<Record<OnboardingEventInput["type"], OnboardingSt
   // key entry is reported as abandoning at `model_picker` — as if they never chose anything.
   provider_selected: "provider_setup",
   big_pickle_confirm_shown: "big_pickle_confirm",
+  free_gemini_confirm_shown: "free_gemini_confirm",
   gateway_device_code_issued: "gateway_auth",
   instance_connected: "connected",
   onboarding_completed: "connected",

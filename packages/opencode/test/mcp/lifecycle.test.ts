@@ -1236,3 +1236,189 @@ it.instance(
     ),
   { config: { mcp: {} } },
 )
+
+// ========================================================================
+// altimate_change start — deterministic tool ordering across process restarts
+//
+// `s.clients[key]` is assigned as each server's connection COMPLETES (the
+// `Effect.forEach(..., { concurrency: "unbounded" })` in state), so with 2+ MCP
+// servers the object's natural insertion order is a race. Tool definitions are
+// part of the exact-match prefix that Vertex/Gemini and OpenAI cache, and the
+// record's key order is what reaches the wire, so a reshuffle invalidates the
+// whole cached prefix. tools() now iterates clients in sorted name order.
+// ========================================================================
+
+it.instance(
+  "tools() emits servers in sorted name order regardless of connect order",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Connect in deliberately reverse-alphabetical order: without the sort,
+        // insertion order would put zeta's tools first.
+        for (const name of ["zeta", "middle", "alpha"]) {
+          lastCreatedClientName = name
+          const state = getOrCreateClientState(name)
+          state.tools = [{ name: "run", inputSchema: { type: "object", properties: {} } }]
+          yield* mcp.add(name, { type: "local", command: ["echo", "test"] })
+        }
+
+        expect(Object.keys(yield* mcp.tools())).toEqual(["alpha_run", "middle_run", "zeta_run"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "tools() order is stable across repeated calls",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        for (const name of ["b-server", "a-server"]) {
+          lastCreatedClientName = name
+          const state = getOrCreateClientState(name)
+          state.tools = [
+            { name: "second", inputSchema: { type: "object", properties: {} } },
+            { name: "first", inputSchema: { type: "object", properties: {} } },
+          ]
+          yield* mcp.add(name, { type: "local", command: ["echo", "test"] })
+        }
+
+        const first = Object.keys(yield* mcp.tools())
+        const second = Object.keys(yield* mcp.tools())
+        expect(first).toEqual(second)
+        // Sorted by server name, then by tool name WITHIN each server. The fixtures report
+        // "second" before "first" via tools/list; a server is free to vary that order between
+        // calls, so leaving it untouched would still reshuffle the wire payload.
+        expect(first).toEqual(["a-server_first", "a-server_second", "b-server_first", "b-server_second"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
+
+// altimate_change start — sanitized-name collisions resolve deterministically.
+// `McpCatalog.sanitize` collapses every character outside [A-Za-z0-9_-] to `_`, so `do.thing`
+// and `do_thing` produce the same key. Previously the LAST one to arrive overwrote the first,
+// making the implementation the model actually got a function of server ordering. First wins
+// now, chosen by the sanitized-then-raw sort, so it depends only on the names.
+it.instance(
+  "resolves sanitized tool-name collisions to the same winner in EITHER reported order",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Asserting one fixed order proves nothing: with `tools/list` returning
+        // [do_thing, do.thing], the OLD last-write-wins behaviour also selects "do.thing",
+        // so the obvious version of this test passes against the bug it targets. The property
+        // that actually distinguishes them is order-INDEPENDENCE — the same winner whichever
+        // order the server reports, which is exactly what a server is free to vary.
+        const dot = { name: "do.thing", description: "dot", inputSchema: { type: "object", properties: {} } }
+        const underscore = {
+          name: "do_thing",
+          description: "underscore",
+          inputSchema: { type: "object", properties: {} },
+        }
+
+        lastCreatedClientName = "clasha"
+        getOrCreateClientState("clasha").tools = [underscore, dot]
+        yield* mcp.add("clasha", { type: "local", command: ["echo", "test"] })
+
+        lastCreatedClientName = "clashb"
+        getOrCreateClientState("clashb").tools = [dot, underscore]
+        yield* mcp.add("clashb", { type: "local", command: ["echo", "test"] })
+
+        const tools = yield* mcp.tools()
+
+        // One survivor per server, and the SAME raw name wins in both. Under last-write-wins
+        // clasha would yield "dot" and clashb "underscore", so this fails against the old code.
+        expect(Object.keys(tools).sort()).toEqual(["clasha_do_thing", "clashb_do_thing"])
+        expect(tools["clasha_do_thing"]!.description).toBe("dot")
+        expect(tools["clashb_do_thing"]!.description).toBe("dot")
+
+        // Stable across calls rather than alternating.
+        const again = yield* mcp.tools()
+        expect(again["clasha_do_thing"]!.description).toBe("dot")
+        expect(again["clashb_do_thing"]!.description).toBe("dot")
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
+
+// altimate_change start — the two sorts above must order by CODE POINT, not by UTF-16 code unit.
+//
+// `<` on strings compares UTF-16 code units. Astral characters (U+10000 and above) are stored as
+// surrogate pairs in 0xD800-0xDBFF, which sit BELOW the private-use area at 0xE000-0xF8FF, so an
+// emoji compares as LESS than a PUA glyph by code unit and GREATER by scalar value. Every other
+// prompt-facing sort in the tree uses `compareCodePoints`, so leaving `<` here meant two sorted
+// lists in the same request could disagree about the same pair of names.
+//
+// Both fixtures below are built so the two orderings give DIFFERENT answers — a name set that
+// sorts identically under either comparator cannot tell them apart, and asserting on one would
+// be another green test that proves nothing.
+//
+// Note `McpCatalog.sanitize` has no `u` flag, so it rewrites per code unit: one astral character
+// becomes TWO underscores and one PUA character becomes one. Pairing one astral against two PUA
+// keeps the sanitized names the same length, which is what puts the raw-name tiebreak in play.
+
+const ASTRAL = "\u{1F600}" // U+1F600, surrogates D83D DE00
+const PUA_PAIR = "\uE000\uE000" // two code units, same sanitized width as one astral
+
+it.instance(
+  "orders MCP servers by code point, not by UTF-16 code unit",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Sanitize to `srv__x` and `srv__y`, so the emitted keys are distinct and the only
+        // question is which comes first. By code unit the astral name leads (0xD83D < 0xE000);
+        // by code point the PUA name leads (0xE000 < 0x1F600).
+        for (const name of ["srv" + ASTRAL + "x", "srv" + PUA_PAIR + "y"]) {
+          lastCreatedClientName = name
+          getOrCreateClientState(name).tools = [{ name: "run", inputSchema: { type: "object", properties: {} } }]
+          yield* mcp.add(name, { type: "local", command: ["echo", "test"] })
+        }
+
+        // Exact sequence, not a containment check: the bug reverses these two and nothing else.
+        expect(Object.keys(yield* mcp.tools())).toEqual(["srv__y_run", "srv__x_run"])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "breaks sanitized tool-name ties by code point, deciding which colliding tool survives",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Both sanitize to `t__`, so they collide on one key and FIRST WINS — which makes the
+        // raw-name tiebreak observable as the surviving tool's description rather than as an
+        // order. By code unit the astral name wins; by code point the PUA name wins.
+        const astralTool = {
+          name: "t" + ASTRAL,
+          description: "astral",
+          inputSchema: { type: "object", properties: {} },
+        }
+        const puaTool = {
+          name: "t" + PUA_PAIR,
+          description: "pua",
+          inputSchema: { type: "object", properties: {} },
+        }
+
+        // Reported in both orders across two servers: the winner must depend on the names alone,
+        // not on the order `tools/list` happened to return them in.
+        lastCreatedClientName = "one"
+        getOrCreateClientState("one").tools = [astralTool, puaTool]
+        yield* mcp.add("one", { type: "local", command: ["echo", "test"] })
+
+        lastCreatedClientName = "two"
+        getOrCreateClientState("two").tools = [puaTool, astralTool]
+        yield* mcp.add("two", { type: "local", command: ["echo", "test"] })
+
+        const tools = yield* mcp.tools()
+        expect(Object.keys(tools).sort()).toEqual(["one_t__", "two_t__"])
+        expect(tools["one_t__"]!.description).toBe("pua")
+        expect(tools["two_t__"]!.description).toBe("pua")
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end

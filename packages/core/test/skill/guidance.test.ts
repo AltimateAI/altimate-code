@@ -152,3 +152,50 @@ describe("SkillGuidance", () => {
     }).pipe(Effect.provide(layer(() => [effect])))
   })
 })
+
+// altimate_change start — ordering here must be machine-independent AND representation-stable.
+//
+// This list renders into the core session runner's system context, and exact-prefix caches stop
+// at the first differing byte, so two machines emitting different bytes share no prefix.
+//
+// Two distinct hazards, and the previous test caught neither: it asserted the OPENCODE
+// SystemPrompt sort, a different implementation, so reverting THIS comparator left it green.
+//
+//   locale     `localeCompare` without an explicit locale follows the runtime's LANG/ICU data
+//   surrogates `<` compares UTF-16 code UNITS. Astral characters are stored as surrogate pairs
+//              in 0xD800-0xDFFF, BELOW the private-use area at 0xE000, so `"\u{10000}" < ""`
+//              is true by code unit and false by Unicode scalar value.
+describe("SkillGuidance ordering", () => {
+  const named = (name: string) =>
+    new SkillV2.Info({
+      name,
+      description: `desc ${name}`,
+      location: AbsolutePath.make(path.resolve(`/skills/x/SKILL.md`)),
+      content: "c",
+    })
+
+  const namesFrom = (text: string) => [...text.matchAll(/<name>(.*?)<\/name>/g)].map((m) => m[1])
+
+  it.effect("orders by Unicode code point, not locale and not UTF-16 code unit", () => {
+    const agent = new AgentV2.Info({ ...AgentV2.Info.empty(build) })
+    // "sort-a" vs "sort_a": ICU puts the underscore first, code point puts the hyphen first
+    // (0x2D < 0x5F) — catches a revert to localeCompare.
+    // "" (PUA) vs "\u{10000}" (astral): code point puts PUA first, UTF-16 code units put
+    // the astral pair first because its surrogates are 0xD800-0xDBFF — catches a revert to `<`.
+    const skills = [named("\u{10000}zz"), named("sort_a"), named("aa"), named("sort-a")]
+    return Effect.gen(function* () {
+      const guidance = yield* SkillGuidance.Service
+      const initialized = yield* guidance
+        .load({ id: agent.id, info: agent })
+        .pipe(Effect.flatMap(SystemContext.initialize))
+
+      const names = namesFrom(initialized.baseline)
+      expect(names).toEqual(["sort-a", "sort_a", "aa", "\u{10000}zz"])
+
+      // Guards against the fixtures going vacuous if either assumption ever stops holding.
+      expect("sort-a".localeCompare("sort_a")).toBeGreaterThan(0)
+      expect("\u{10000}zz" < "aa").toBe(true)
+    }).pipe(Effect.provide(layer(() => skills)))
+  })
+})
+// altimate_change end

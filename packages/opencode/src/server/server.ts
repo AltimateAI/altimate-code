@@ -37,6 +37,7 @@ import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
+import { FreeTier } from "../altimate/free/client"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -661,6 +662,38 @@ export namespace Server {
           }
         },
       )
+      // altimate_change end
+      // altimate_change start — POST /altimate/free/register
+      // Free-tier registration runs opencode-side so the install secret is minted and stored by
+      // the process that owns the Auth store. The TUI only reaches it from the affirmative path
+      // of the disclosure dialog, which is what keeps the identifier off the wire until the user
+      // has consented.
+      .post("/altimate/free/register", async (c) => {
+        // Registration mints an identity and spends our budget. Without this, anything that could
+        // reach the server could mint one — and `serve`/`--port` puts that beyond the local
+        // process. The capability lives in the launching process's environment, which the TUI
+        // inherits and a network caller does not; `serve` never sets it, so the route is simply
+        // unavailable there.
+        if (!FreeTier.consentTokenValid(c.req.header(FreeTier.CONSENT_TOKEN_HEADER))) {
+          log.warn("rejected free tier registration without a consent capability")
+          return c.json({ ok: false, message: "Registration is only available from the interactive UI." }, 403)
+        }
+        try {
+          await FreeTier.register()
+          return c.json({ ok: true })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Registration failed"
+          // The gateway's own status is echoed so the dialog can tell "too many sign-ups" from
+          // "temporarily unavailable" without parsing the message. Absent on a network failure.
+          const status = err instanceof FreeTier.RegistrationError ? err.status : undefined
+          log.error("free tier registration failed", { error: err })
+          // 200 with ok:false, not 5xx: the call to THIS server succeeded and is reporting an
+          // outcome. A non-2xx puts the body on the SDK client's `error` channel instead of
+          // `data`, where the caller would lose the status and report every rejection as a
+          // network failure.
+          return c.json({ ok: false, message, status })
+        }
+      })
       // altimate_change end
       // altimate_change start — POST /altimate/mcp/reload-datamate
       // Updates the datamate MCP server config from IDE MCP config files and reconnects

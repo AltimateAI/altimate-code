@@ -266,6 +266,11 @@ export namespace LLM {
                 // altimate_change start — upstream_fix: UA brand
                 "User-Agent": `altimate-code/${Installation.VERSION}`,
                 // altimate_change end
+                // altimate_change start — the free-tier gateway groups traces by session, and
+                // this is the only place the session id reaches an outgoing request. Scoped to
+                // our own gateway: no third-party provider has a reason to receive it.
+                ...(input.model.providerID === "altimate-free" ? { "X-Session-Id": input.sessionID } : {}),
+                // altimate_change end
               }
             : undefined),
         ...input.model.headers,

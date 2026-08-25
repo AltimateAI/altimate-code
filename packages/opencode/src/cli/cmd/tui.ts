@@ -11,6 +11,9 @@ import { withNetworkOptions, resolveNetworkOptions } from "@/cli/network"
 import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
 import { Filesystem } from "@/util/filesystem"
+// altimate_change start — per-launch consent capability for the free-tier registration route
+import { FreeTier } from "@/altimate/free/client"
+// altimate_change end
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
@@ -166,8 +169,19 @@ export const TuiThreadCommand = cmd({
       // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
       // Worker does not see runtime mutations to process.env, so without this the worker mints its
       // own and the TUI-thread and worker-thread halves of the onboarding funnel cannot be joined.
+      //
+      // The free-tier consent capability rides the same channel and for a related reason: it has
+      // to exist in BOTH this thread (which the disclosure dialog runs on, and which presents it)
+      // and the worker (which serves the route and checks it), while never being reachable by an
+      // HTTP caller from outside this process tree. Minted per launch, never persisted.
+      const freeConsentToken = FreeTier.mintConsentToken()
+      process.env[FreeTier.CONSENT_TOKEN_ENV] = freeConsentToken
       const worker = new Worker(file, {
-        env: { ...process.env, ALTIMATE_LAUNCH_ID: Telemetry.launchId() },
+        env: {
+          ...process.env,
+          ALTIMATE_LAUNCH_ID: Telemetry.launchId(),
+          [FreeTier.CONSENT_TOKEN_ENV]: freeConsentToken,
+        },
       } as WorkerOptions)
       // altimate_change end
       const client = Rpc.client<typeof rpc>(worker)

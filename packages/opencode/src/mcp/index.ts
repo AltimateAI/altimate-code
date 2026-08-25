@@ -31,6 +31,8 @@ const execFileAsync = promisify(execFile)
 // altimate_change end
 import { withTimeout } from "@/util/timeout"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+// altimate_change — one code-point comparator for every prompt-facing sort
+import { compareCodePoints } from "@opencode-ai/core/util/collate"
 import { McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
@@ -1016,6 +1018,8 @@ export const layer = Layer.effect(
     const tools = Effect.fn("MCP.tools")(function* () {
       // altimate_change start — values carry the original client name (see Interface.tools).
       const result: Record<string, Tool & { client: string }> = {}
+      // Tracks which `client:tool` claimed each sanitized key, for collision reporting below.
+      const collided = new Map<string, string>()
       // altimate_change end
       const s = yield* InstanceState.get(state)
 
@@ -1023,7 +1027,18 @@ export const layer = Layer.effect(
       const config = cfg.mcp ?? {}
       const defaultTimeout = cfg.experimental?.mcp_timeout
 
-      for (const [clientName, client] of Object.entries(s.clients)) {
+      // altimate_change start — iterate clients in sorted name order so the emitted tool
+      // record has a stable key order across process restarts. `s.clients[key]` is
+      // assigned as each server's connection COMPLETES (see the `concurrency: "unbounded"`
+      // Effect.forEach in state), so with 2+ MCP servers the natural insertion order is a
+      // race. Tool definitions are part of the exact-match prefix that Vertex/Gemini and
+      // OpenAI cache, and the record's key order is what reaches the wire — a reshuffle
+      // invalidates the entire cached prefix for no reason.
+      // `<` compares UTF-16 code units, which orders astral names below the private-use area and
+      // disagrees with every other sort in the prompt path; `compareCodePoints` is the one
+      // comparator for anything whose order reaches a prompt.
+      for (const [clientName, client] of Object.entries(s.clients).sort(([a], [b]) => compareCodePoints(a, b))) {
+        // altimate_change end
         if (s.status[clientName]?.status !== "connected") continue
         const mcpConfig = config[clientName]
         const listed = s.defs[clientName]
@@ -1032,12 +1047,46 @@ export const layer = Layer.effect(
           continue
         }
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
-        for (const mcpTool of listed) {
+        // altimate_change start — order each server's tools deterministically, and resolve
+        // sanitized-name collisions explicitly instead of by arrival order.
+        //
+        // Sorting clients (above) is not sufficient on its own: `listed` is whatever order the
+        // server returned from `tools/list`, which a server is free to vary between calls, so
+        // the wire payload could still reshuffle and cost the whole cached tool prefix.
+        //
+        // Sort key is the SANITIZED name first, then the raw name. Sanitizing collapses every
+        // character outside [A-Za-z0-9_-] to `_`, so distinct tools (`a.b` and `a_b`) can share
+        // one key. Sorting on the sanitized name is what actually fixes the emitted order —
+        // sorting on raw names alone would still interleave collisions unpredictably — and the
+        // raw name breaks ties so the order is total.
+        const ordered = [...listed].sort((a, b) => {
+          const sa = McpCatalog.sanitize(a.name)
+          const sb = McpCatalog.sanitize(b.name)
+          const bySanitized = compareCodePoints(sa, sb)
+          if (bySanitized !== 0) return bySanitized
+          return compareCodePoints(a.name, b.name)
+        })
+        for (const mcpTool of ordered) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
-          // altimate_change start — attach the original client name for source classification downstream.
+          // First wins, deliberately. Previously the LAST colliding tool overwrote the earlier
+          // one, so which implementation the model actually got depended on server ordering —
+          // a silent, non-reproducible choice. Keeping the first makes it a function of the
+          // names alone, and the warning makes it visible rather than silent. Also catches
+          // cross-server collisions, since two client names can sanitize to the same prefix.
+          const clash = collided.get(key)
+          if (clash !== undefined) {
+            yield* Effect.logWarning("mcp tool name collides after sanitization; keeping the first", {
+              key,
+              kept: clash,
+              dropped: `${clientName}:${mcpTool.name}`,
+            })
+            continue
+          }
+          collided.set(key, `${clientName}:${mcpTool.name}`)
+          // attach the original client name for source classification downstream.
           result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
-          // altimate_change end
         }
+        // altimate_change end
       }
       return result
     })

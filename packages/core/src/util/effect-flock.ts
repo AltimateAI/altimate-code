@@ -1,7 +1,7 @@
 import path from "path"
 import os from "os"
 import { randomUUID } from "crypto"
-import { Context, Effect, Function, Layer, Option, Schedule, Schema } from "effect"
+import { Cause, Context, Effect, Exit, Function, Layer, Option, Schedule, Schema } from "effect"
 import type { FileSystem, Scope } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { FSUtil } from "../fs-util"
@@ -112,6 +112,33 @@ export namespace EffectFlock {
         )
 
       const forceRemove = (target: string) => fs.remove(target, { recursive: true }).pipe(Effect.ignore)
+
+      // altimate_change start — release must not report success while still holding the lock.
+      //
+      // `forceRemove` ignores every error, which is right where it is used to break ANOTHER
+      // process's stale lock or drop a breaker file: failing to clean up someone else's mess is
+      // not our operation's failure. It is wrong on the release path. An EPERM or EBUSY on the
+      // final rm left the lock directory in place while the caller was told the write succeeded,
+      // and every other writer then blocked until the 60s stale timeout — for an operation that
+      // had already finished.
+      //
+      // Only NotFound counts as already-released. `isPathGone` also folds in `Unknown`, which is
+      // where an EPERM/EBUSY lands, so reusing it here would swallow exactly the case this is
+      // meant to catch. Transient contention is retried briefly first; a persistent failure is
+      // raised as a defect. Keeping the body's own failure alive alongside this one is NOT
+      // automatic — closing the scope replaced it — so `withLock` below combines the two causes
+      // explicitly. An earlier version of this comment asserted acquireRelease did that for us;
+      // it does not, and a two-failure probe reported only the ReleaseError.
+      const releaseRemove = (target: string) =>
+        fs.remove(target, { recursive: true }).pipe(
+          Effect.catchIf(
+            (e) => e.reason._tag === "NotFound",
+            () => Effect.void,
+          ),
+          Effect.retry(Schedule.exponential(20, 2).pipe(Schedule.while((meta) => meta.elapsed < 1_000))),
+          Effect.catch((cause) => Effect.die(new ReleaseError({ detail: "failed to remove lock directory", cause }))),
+        )
+      // altimate_change end
 
       /** Atomic mkdir — returns true if created, false if already exists, dies on other errors. */
       const atomicMkdir = (dir: string) =>
@@ -245,7 +272,9 @@ export namespace EffectFlock {
 
           if (parsed.token !== handle.token) return yield* Effect.die(new ReleaseError({ detail: "token mismatch" }))
 
-          yield* forceRemove(handle.lockDir)
+          // altimate_change start — releaseRemove, not forceRemove: see the comment on releaseRemove.
+          yield* releaseRemove(handle.lockDir)
+          // altimate_change end
         })
 
       // -- build service --
@@ -268,12 +297,41 @@ export namespace EffectFlock {
       const withLock: Interface["withLock"] = Function.dual(
         (args) => Effect.isEffect(args[0]),
         <A, E, R>(body: Effect.Effect<A, E, R>, key: string, dir?: string): Effect.Effect<A, E | LockError, R> =>
-          Effect.scoped(
-            Effect.gen(function* () {
-              yield* acquire(key, dir)
-              return yield* body
-            }),
-          ),
+          // altimate_change start — a release failure must not REPLACE the body's failure.
+          //
+          // Making release surface its errors (rather than ignoring them) introduced a second
+          // problem: when an auth write failed AND the lock removal then failed, only the
+          // ReleaseError came out and the original write error was gone — the actionable half of
+          // the report replaced by the janitorial half.
+          //
+          // The body's Exit is carried out of the scope as a SUCCESS value, so closing the scope
+          // has nothing of the body's to overwrite. Whatever the scope close fails with then
+          // arrives here separately and is combined with the body's cause instead of standing in
+          // for it.
+          Effect.gen(function* () {
+            let inner: Exit.Exit<A, E> | undefined
+            const outer = yield* Effect.exit(
+              Effect.scoped(
+                Effect.gen(function* () {
+                  yield* acquire(key, dir)
+                  inner = yield* Effect.exit(body)
+                  return inner
+                }),
+              ),
+            )
+
+            // Scope closed cleanly: the body's own outcome is the only outcome.
+            if (Exit.isSuccess(outer)) return yield* outer.value
+
+            // Scope close failed. If the body failed too, report BOTH — body first, since that
+            // is what the caller was actually trying to do.
+            if (inner !== undefined && Exit.isFailure(inner)) {
+              return yield* Effect.failCause(Cause.combine(inner.cause, outer.cause))
+            }
+            // Body succeeded (or acquire itself failed, so there is no body cause to keep).
+            return yield* Effect.failCause(outer.cause)
+          }),
+        // altimate_change end
       )
 
       return Service.of({ acquire, withLock })

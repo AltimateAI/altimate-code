@@ -27,6 +27,8 @@ import { selectSkillsWithLLM } from "../altimate/skill-selector"
 // altimate_change start — Effect Service facade for SystemPrompt.skills (see bottom of namespace)
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+// altimate_change — shared code-point comparator (see core util/collate.ts)
+import { byCodePoints } from "@opencode-ai/core/util/collate"
 // altimate_change end
 // altimate_change end
 
@@ -107,6 +109,76 @@ export namespace SystemPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — stable→volatile system prompt ordering for exact-prefix caches
+  export interface AssembleInput {
+    /** Auto-loaded skill bodies + the <available_skills> catalogue. */
+    skills?: string
+    /** AGENTS.md / CLAUDE.md, from InstructionPrompt.system(). */
+    instructions: string[]
+    /** Memory + training blocks, from MemoryPrompt.inject(). */
+    knowledge?: string
+    /** <env> block, from environment(). */
+    environment: string[]
+    /** Per-turn reminders hoisted out of the message stream for non-Anthropic models. */
+    hoistedReminders: string[]
+  }
+
+  /**
+   * Order the system prompt segments from most stable to most volatile.
+   *
+   * `session/llm.ts` joins the provider prompt, every segment returned here, and the
+   * per-message system prompt into a SINGLE string, so this order is literally byte
+   * order on the wire. Vertex/Gemini and OpenAI do exact prefix matching and stop at
+   * the first differing byte, so any volatile segment placed early truncates the
+   * shared prefix for everything behind it.
+   *
+   * `environment()` used to be FIRST, right after the provider prompt. It carries the
+   * working directory, worktree, platform and today's date, so the first differing
+   * byte landed roughly 6k tokens in. Measured against Vertex on a ~121k-token
+   * payload: 6,142 tokens cached (5.1%) versus 120,804 (99.9%) on a full-prefix hit.
+   *
+   * The date stays inside the ambient <env> block. Carrying it on the trailing user
+   * message (the pre-v1.17.9 approach, see currentDate() above) made models treat it
+   * as user input and echo it back every turn. Placing <env> late preserves the
+   * ambient framing while getting it out of the head of the prefix.
+   *
+   * Ordering, most stable first — EXCEPT that knowledge stays ahead of instructions:
+   *   skills            bundled set; varies only if the project adds its own skills
+   *                     or an applyPaths glob matches
+   *   knowledge         memory/training blocks
+   *   instructions      AGENTS.md/CLAUDE.md
+   *   environment       cwd/worktree/platform/date, the fastest-moving of all
+   *   hoistedReminders  per-turn
+   *
+   * knowledge/instructions is the one pair NOT ordered by volatility. By churn rate
+   * knowledge belongs after instructions — it is re-scored as applied counts and
+   * recency bonuses shift, so it moves faster than the repo's own files. It is placed
+   * before them anyway because ORDER CARRIES PRECEDENCE here, not just bytes: later
+   * text reads as the more specific, later-arriving instruction. Putting stale learned
+   * rules after AGENTS.md let them outweigh the repository's own instructions on a
+   * conflict, which is a behaviour regression, not a caching trade-off. Repository
+   * instructions must win, so they go last of the two. This costs nothing measurable:
+   * the first byte that differs BETWEEN USERS is already upstream of both (the skills
+   * block emits absolute file:// paths), and within one user both segments are stable
+   * for the life of a session, so their relative order never decides a cache hit.
+   *
+   * Applied to every provider, not scoped to Gemini, because it is provably neutral
+   * for Anthropic: ProviderTransform.applyCaching() puts the cache breakpoint at the
+   * END of the system message and llm.ts collapses the system prompt to one message,
+   * so a single breakpoint covers this entire block. Reordering bytes inside a region
+   * cached as one unit cannot change whether it hits.
+   */
+  export function assemble(input: AssembleInput): string[] {
+    return [
+      ...(input.skills ? [input.skills] : []),
+      ...(input.knowledge ? [input.knowledge] : []),
+      ...input.instructions,
+      ...input.environment,
+      ...input.hoistedReminders,
+    ]
+  }
+  // altimate_change end
+
   export async function skills(agent: Agent.Info) {
     if (PermissionNext.disabled(["skill"], agent.permission).has("skill")) return
 
@@ -120,8 +192,14 @@ export namespace SystemPrompt {
     } else {
       filtered = list
     }
-    // Sort by name for stable, deterministic output across calls.
-    filtered = [...filtered].sort((a, b) => a.name.localeCompare(b.name))
+    // Sort by name so the block is byte-identical across machines, not merely stable within
+    // one process. `localeCompare` without an explicit locale follows the runtime's default,
+    // so two machines with different LANG or ICU data can order the same skills differently —
+    // and the skills block sits near the head of the system prompt, ahead of instructions and
+    // memory. Exact-prefix caches (Vertex/Gemini) stop at the first differing byte, so a
+    // locale-dependent order here does not shrink the shared prefix, it can eliminate it
+    // between two users who are otherwise identical. Codepoint order is the same everywhere.
+    filtered = [...filtered].sort(byCodePoints((s) => s.name))
     // altimate_change end
 
     // altimate_change start — auto-load skill bodies for skills marked

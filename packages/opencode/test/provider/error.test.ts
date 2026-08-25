@@ -399,3 +399,119 @@ describe("ProviderError.parseAPICallError: error message extraction", () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// altimate_change — free-tier 429s
+// ---------------------------------------------------------------------------
+// The helper that produces the wording is unit-tested in test/altimate/free-tier.test.ts.
+// These cover the WIRING: that parseAPICallError reaches it for the free provider only, and
+// that an unrecognised body still yields the provider's own message.
+describe("ProviderError.parseAPICallError: free-tier rate limits", () => {
+  const rateLimited = (type: string, message = "", headers?: Record<string, string>) =>
+    makeAPICallError({
+      message: "Too Many Requests",
+      statusCode: 429,
+      responseBody: JSON.stringify({ error: { type, message } }),
+      responseHeaders: headers,
+    })
+
+  test("a throttle is rewritten and stays retryable", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after": "12" }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toContain("Too many requests to Gemini Flash (Free)")
+    expect(result.message).toContain("12s")
+    if (result.type === "api_error") expect(result.isRetryable).toBe(true)
+  })
+
+  test("a spent budget is rewritten and is NOT retryable", () => {
+    // The whole point of the split: retrying a spent daily budget cannot succeed, so the client
+    // must not advertise it as retryable.
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("budget_exceeded", "ExceededBudget: User=free-abc"),
+    })
+    expect(result.message).toContain("resets tomorrow")
+    if (result.type === "api_error") expect(result.isRetryable).toBe(false)
+  })
+
+  test("an unknown discriminator keeps the provider's own message", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("some_new_limit", "the gateway said something new"),
+    })
+    expect(result.message).toContain("the gateway said something new")
+    expect(result.message).not.toContain("Gemini Flash (Free)")
+  })
+
+  test("other providers' 429s are untouched", () => {
+    // Scoped to our own gateway: nothing here should reword an OpenAI or Anthropic rate limit.
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: rateLimited("throttling_error", "openai rate limit"),
+    })
+    expect(result.message).not.toContain("Gemini Flash (Free)")
+    expect(result.message).toContain("openai rate limit")
+  })
+
+  test("a non-429 from the free provider is untouched", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({
+        message: "Internal Server Error",
+        statusCode: 500,
+        responseBody: JSON.stringify({ error: { type: "budget_exceeded" } }),
+      }),
+    })
+    expect(result.message).not.toContain("resets tomorrow")
+  })
+})
+
+// altimate_change — the free tier's 413 is a byte cap, not a context limit
+describe("ProviderError.parseAPICallError: free-tier oversized requests", () => {
+  const body = JSON.stringify({
+    error: {
+      message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",
+      code: "413",
+      provider_specific_fields: {
+        error: { code: "request_too_large", message: "Request is 179608 bytes; the free tier limit is 128000 bytes." },
+      },
+    },
+  })
+
+  test("is terminal, NOT context_overflow", () => {
+    // The bug this guards: classified as overflow, the session compacts and retries, and since
+    // the system prompt and tool schemas alone can exceed the cap, every retry fails identically.
+    // One prompt produced ~90 doomed attempts against a 128KB cap and read as a hang.
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: body }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toContain("too large for Gemini Flash (Free)")
+    if (result.type === "api_error") expect(result.isRetryable).toBe(false)
+  })
+
+  test("a 413 from another provider is still context_overflow", () => {
+    // Elsewhere 413 really does mean "prompt too long", where compaction is the right response.
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: body }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+
+  test("a free-tier 413 we do not recognise falls back to context_overflow", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({
+        message: "Payload Too Large",
+        statusCode: 413,
+        responseBody: JSON.stringify({ error: { code: "context_length_exceeded" } }),
+      }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+})
