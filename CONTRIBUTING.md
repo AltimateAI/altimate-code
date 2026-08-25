@@ -39,6 +39,8 @@ https://github.com/anomalyco/models.dev
   bun dev
   ```
 
+`bun install` sets up the pre-push hook via `husky` — subsequent `git push` runs a bun-version check, `bun typecheck`, and a scan for internal-tracker references. If the tracker scan blocks you legitimately (extremely unlikely on this public repo), bypass with `SKIP_TRACKER_CHECK=1 git push`.
+
 ### Running against a different directory
 
 By default, `bun dev` runs Altimate Code in the `packages/opencode` directory. To run it against a different directory or repository:
