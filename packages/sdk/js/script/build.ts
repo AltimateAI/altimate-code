@@ -58,6 +58,7 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
+// altimate_change start — upstream_fix: re-apply the JSON-parse guard after codegen
 // Re-apply the JSON-parse guard: `clean: true` above wipes src/v2/gen, so an
 // edit inside client.gen.ts alone would be deleted on every release build
 // (script/publish.ts runs this file in prepareReleaseFiles). A 200 whose body
@@ -87,6 +88,7 @@ if (jsonGuardPatched === jsonGuardSource) {
   throw new Error(`json-guard patch did not apply; @hey-api/client-fetch output may have changed (${jsonGuardPath})`)
 }
 await Bun.write(jsonGuardPath, jsonGuardPatched)
+// altimate_change end
 
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
