@@ -1,8 +1,10 @@
-import { describe, expect } from "bun:test"
+import { beforeEach, describe, expect, test as bunTest } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Effect } from "effect"
+import { Effect, Layer, Logger } from "effect"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
+import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
+import { AppProcess } from "@opencode-ai/core/process"
 import { RelativePath } from "@opencode-ai/core/schema"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
@@ -87,5 +89,451 @@ describe("Ripgrep", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
+
+  // upstream_fix: a ripgrep `--json` match record embeds the whole matched line, so a minified
+  // bundle or single-line JSON fixture emits a record far past any per-record ceiling. That used to
+  // fail the stream, taking every unrelated match in the search down with it.
+  it.live("keeps matching unrelated files when one file has an oversized line", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "a-small.txt"), "needle here\n"))
+          // Well past the old 64 KiB ceiling, well under the current sanity limit.
+          yield* Effect.promise(() =>
+            fs.writeFile(path.join(tmp.path, "b-minified.js"), "x".repeat(100_000) + "needle" + "y".repeat(100_000)),
+          )
+
+          const matches = yield* (yield* Ripgrep.Service).grep({ cwd: tmp.path, pattern: "needle", limit: 10 })
+
+          // Both the bystander and the oversized file are reported; neither is lost to a failure.
+          expect(matches.map((item) => item.entry.path).sort()).toEqual([
+            RelativePath.make("a-small.txt"),
+            RelativePath.make("b-minified.js"),
+          ])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // upstream_fix: ripgrep emits `{"bytes": "<base64>"}` instead of `{"text": ...}` for a line that
+  // is not valid UTF-8. The schema modelled only the `text` arm, so one stray byte failed the whole
+  // search — the same abort-everything shape as the oversized record. This drives real ripgrep;
+  // the exact decoding is pinned by the stubbed case below.
+  it.live("returns matches from files containing non-UTF8 lines", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "a-plain.txt"), "needle here\n"))
+          yield* Effect.promise(() =>
+            fs.writeFile(path.join(tmp.path, "b-binary.txt"), Buffer.from("needle \xff\xfe tail\n", "binary")),
+          )
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "c-plain.txt"), "needle here\n"))
+
+          const matches = yield* (yield* Ripgrep.Service).grep({ cwd: tmp.path, pattern: "needle", limit: 10 })
+
+          // The non-UTF8 file is reported like any other rather than dropped or fatal.
+          expect(matches.map((item) => item.entry.path).sort()).toEqual([
+            RelativePath.make("a-plain.txt"),
+            RelativePath.make("b-binary.txt"),
+            RelativePath.make("c-plain.txt"),
+          ])
+          // Undecodable bytes become U+FFFD, so the surrounding text stays readable.
+          const binary = matches.find((item) => item.entry.path === RelativePath.make("b-binary.txt"))
+          expect(binary?.text).toContain("needle")
+          expect(binary?.text).toContain("tail")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  // Real ripgrep cannot be coerced into emitting a chosen bad record — `--` makes the next arg the
+  // pattern — so these cases drive the parser through a stub `rg` that prints exactly the NDJSON
+  // given. Only the executable is stubbed: the real spawn, decode, line splitting, parse, collection
+  // and output mapping all still run. Plain `bunTest` because these supply their own Ripgrep layer,
+  // which the ambient `testEffect(Ripgrep.defaultLayer)` would otherwise shadow.
+  const matchRecord = (file: string, overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      type: "match",
+      data: {
+        path: { text: `./${file}` },
+        lines: { text: "needle\n" },
+        line_number: 1,
+        absolute_offset: 0,
+        submatches: [{ match: { text: "needle" }, start: 0, end: 6 }],
+        ...overrides,
+      },
+    })
+
+  /**
+   * Collected so the skip *count* can be asserted — it is invisible in the returned matches.
+   * `Effect.logWarning(message, data)` puts both into `entry.message` as a tuple, not annotations.
+   */
+  const skipWarnings: Array<{ skipped?: number; reasons?: string[] }> = []
+  const captureWarnings = Logger.layer([
+    Logger.formatStructured.pipe(
+      Logger.map((entry): void => {
+        const parts: unknown[] = Array.isArray(entry.message) ? entry.message : [entry.message]
+        if (parts[0] !== "skipped unusable ripgrep records") return
+        const data = parts[1]
+        if (!data || typeof data !== "object") return
+        const skipped = Reflect.get(data, "skipped")
+        const reasons = Reflect.get(data, "reasons")
+        skipWarnings.push({
+          skipped: typeof skipped === "number" ? skipped : undefined,
+          reasons: Array.isArray(reasons) ? reasons.map(String) : undefined,
+        })
+      }),
+    ),
+  ])
+
+  // The stub is a POSIX shell script and `chmod` is a no-op on win32, so the spawn cannot work
+  // there. Be clear about the cost: this leaves the record-parsing behaviour below — skipping,
+  // decoding, offset rebasing, the size ceiling — WITHOUT Windows coverage. script/windows-
+  // ripgrep-e2e.ts covers only binary resolution, extraction and one real search, not any of this.
+  // Closing the gap needs a `.cmd` stub on win32; the parser itself is platform-independent, so the
+  // risk is a Windows-only spawn/quoting regression going unnoticed rather than a parsing one.
+  const stubTest = bunTest.skipIf(process.platform === "win32")
+
+  const grepWithStubbedRecords = (records: string[]) =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const data = path.join(tmp.path, "records.jsonl")
+          yield* Effect.promise(() => fs.writeFile(data, records.join("\n") + "\n"))
+          const stub = path.join(tmp.path, "rg")
+          yield* Effect.promise(() => fs.writeFile(stub, `#!/bin/sh\ncat ${JSON.stringify(data)}\n`))
+          yield* Effect.promise(() => fs.chmod(stub, 0o755))
+
+          return yield* Effect.gen(function* () {
+            const rg = yield* Ripgrep.Service
+            return yield* rg.grep({ cwd: tmp.path, pattern: "needle", limit: 100 })
+          }).pipe(
+            Effect.provide(
+              Ripgrep.layer.pipe(
+                Layer.provide(
+                  Layer.succeed(RipgrepBinary.Service, RipgrepBinary.Service.of({ filepath: Effect.succeed(stub) })),
+                ),
+                Layer.provide(AppProcess.defaultLayer),
+              ),
+            ),
+            Effect.provide(captureWarnings),
+          )
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    )
+
+  beforeEach(() => {
+    skipWarnings.length = 0
+  })
+
+  /** The single aggregate warning for the last search, or undefined when nothing was skipped. */
+  const lastSkip = () => skipWarnings.at(-1)
+
+  stubTest("skips an unparseable record without failing the search", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt"),
+        '{"type":"match","data":{"path":{"text":"./b.t', // truncated mid-JSON
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    // The malformed middle record is dropped; the records on either side survive.
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+    expect(lastSkip()).toEqual({ skipped: 1, reasons: ["unparseable JSON"] })
+  })
+
+  // The size ceiling is asserted on a record built to exceed it, rather than inferred from a large
+  // file — that keeps the case independent of whether a given ripgrep build emits the match at all.
+  stubTest(
+    "skips an oversized record and keeps parsing the records after it",
+    async () => {
+      const matches = await Effect.runPromise(
+        grepWithStubbedRecords([
+          matchRecord("a.txt"),
+          matchRecord("b-huge.txt", { lines: { text: "needle" + "x".repeat(17 * 1024 * 1024) } }),
+          matchRecord("c.txt"),
+        ]),
+      )
+
+      expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+      // Explicit timeout: this materialises a >16 MiB record, so it is slow enough to trip the default
+      // under load even though the parser rejects the record before parsing it.
+    },
+    30_000,
+  )
+
+  // A path is an identifier the caller reopens, so it must never be lossily decoded. Such a record
+  // is skipped rather than reported under a U+FFFD-mangled path that names no real file.
+  stubTest("skips a match whose path is not valid UTF-8, keeping the rest", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt"),
+        matchRecord("ignored", { path: { bytes: Buffer.from("./b\xff.txt", "binary").toString("base64") } }),
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+  })
+
+  // `Buffer.from` maps unconvertible base64 to an empty buffer instead of throwing, which would turn
+  // a corrupt record into a schema-valid EMPTY match. It must be skipped, not silently emptied.
+  stubTest("skips a record whose bytes field is not valid base64", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt"),
+        matchRecord("b.txt", { lines: { bytes: "!!!not base64!!!" } }),
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+  })
+
+  // Submatch offsets are BYTE offsets into the raw line. A lossy decode widens every undecodable
+  // byte to a 3-byte U+FFFD, so the raw offsets no longer locate the match and must be rebased onto
+  // the decoded text's own UTF-8 encoding. Without this the match reads "��need".
+  stubTest("rebases submatch offsets onto the decoded line after a lossy decode", async () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { bytes: raw.toString("base64") },
+          // "needle" sits at raw bytes [1, 7).
+          submatches: [{ match: { bytes: Buffer.from("needle").toString("base64") }, start: 1, end: 7 }],
+        }),
+      ]),
+    )
+
+    expect(matches).toHaveLength(1)
+    const [{ text, submatches }] = matches
+    expect(submatches[0]).toEqual({ text: "needle", start: 3, end: 9 })
+    // The contract is byte offsets into the returned text, so slice its UTF-8 encoding.
+    expect(Buffer.from(text, "utf8").subarray(submatches[0].start, submatches[0].end).toString("utf8")).toBe("needle")
+  })
+
+  // `Buffer.subarray` clamps an out-of-range end and truncates a fractional one instead of throwing,
+  // so rebasing without a range check would turn a corrupt offset into a plausible-looking one.
+  // The MATCH still survives — only the coordinate we cannot express is dropped.
+  stubTest("drops a submatch whose offset is not addressable, keeping the match", async () => {
+    const raw = Buffer.concat([Buffer.from([0xff]), Buffer.from("needle tail\n")])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("b.txt", {
+          lines: { bytes: raw.toString("base64") },
+          // Well past the end of the raw line — nonsense that must not be silently clamped.
+          submatches: [{ match: { text: "needle" }, start: 1, end: 9_999 }],
+        }),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("b.txt")])
+    expect(matches[0].submatches).toEqual([])
+    expect(matches[0].text).toContain("needle")
+  })
+
+  // A byte-mode pattern can match inside a valid multi-byte character, where the offset is simply not
+  // expressible in the decoded line. Byte-boundary validation catches it; a decoded-string
+  // comparison does not, because an invalid byte followed by a LITERAL U+FFFD aliases — both
+  // prefixes decode to the same replacement text.
+  stubTest("drops a submatch whose offset splits a multi-byte character", async () => {
+    const raw = Buffer.concat([Buffer.from("é"), Buffer.from("needle")])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("b.txt", {
+          lines: { bytes: raw.toString("base64") },
+          submatches: [{ match: { text: "needle" }, start: 1, end: 3 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
+  // The `{text}` arm is not rebased, but an offset still has to be addressable in the line.
+  stubTest("drops a text-arm submatch whose offset is past the end of the line", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { text: "needle\n" },
+          submatches: [{ match: { text: "needle" }, start: 0, end: 999 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
+  stubTest("drops a text-arm submatch whose offset splits a multi-byte character", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", { lines: { text: "éa" }, submatches: [{ match: { text: "a" }, start: 1, end: 3 }] }),
+        matchRecord("b.txt", { lines: { text: "éa" }, submatches: [{ match: { text: "a" }, start: 2, end: 3 }] }),
+      ]),
+    )
+
+    // Offset 1 splits `é`; offset 2 is the character boundary, so that submatch is kept.
+    expect(matches[0].submatches).toEqual([])
+    expect(matches[1].submatches).toHaveLength(1)
+  })
+
+  // Endpoints are rebased independently, so an inverted range can survive both endpoint checks.
+  stubTest("drops a submatch whose range is inverted", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { bytes: Buffer.from("needle tail\n").toString("base64") },
+          submatches: [{ match: { text: "needle" }, start: 6, end: 2 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
+  stubTest("drops a submatch whose offset sits inside a literal replacement character", async () => {
+    // Invalid byte, then the three bytes that spell U+FFFD. Offset 2 is inside that literal
+    // character, but both decoded prefixes read as the same replacement text.
+    const raw = Buffer.from([0xff, 0xef, 0xbf, 0xbd])
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("b.txt", {
+          lines: { bytes: raw.toString("base64") },
+          submatches: [{ match: { text: "x" }, start: 2, end: 4 }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches).toEqual([])
+  })
+
+  // A broad pattern such as `x.*` makes ripgrep repeat nearly the whole line in the submatch text,
+  // which would defeat the retained-memory bound that capping `lines.text` establishes.
+  stubTest("caps the retained submatch text, not just the line", async () => {
+    const huge = "n".repeat(50_000)
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { text: huge },
+          submatches: [{ match: { text: huge }, start: 0, end: huge.length }],
+        }),
+      ]),
+    )
+
+    expect(matches[0].submatches[0].text).toHaveLength(2_003)
+    expect(matches[0].submatches[0].text.endsWith("...")).toBe(true)
+  })
+
+  // A canonical multi-MiB bytes field must still decode. The earlier repeated-group
+  // base64 regex returned false for it on Bun and threw RangeError on Node — the
+  // second of which escapes as a defect and aborts the entire search.
+  stubTest(
+    "decodes a multi-megabyte bytes field rather than discarding the record",
+    async () => {
+      const raw = Buffer.concat([Buffer.from([0xff]), Buffer.alloc(5 * 1024 * 1024, 0x61), Buffer.from("needle")])
+      const matches = await Effect.runPromise(
+        grepWithStubbedRecords([matchRecord("big.txt", { lines: { bytes: raw.toString("base64") }, submatches: [] })]),
+      )
+
+      expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("big.txt")])
+      // Assert the DECODE, not merely that something long came back: the leading
+      // invalid byte becomes U+FFFD and the body decodes to the filler it was built
+      // from. Checking only the elision marker would pass on any long wrong string.
+      expect(matches[0].text.startsWith("\uFFFD" + "a".repeat(64))).toBe(true)
+      expect(matches[0].text).toHaveLength(2_003)
+      expect(matches[0].text.endsWith("...")).toBe(true)
+    },
+    30_000,
+  )
+
+  stubTest("skips a record whose bytes field is empty rather than emitting an empty match", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "" } })]),
+    )
+
+    // "" is spelled like valid base64 but a matched line is never empty, so the record is corrupt.
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
+  })
+
+  stubTest("skips a record whose bytes field uses non-canonical padding", async () => {
+    // "Zh==" and "Zg==" both decode to "f"; only the canonical spelling round-trips.
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([matchRecord("a.txt"), matchRecord("b.txt", { lines: { bytes: "Zh==" } })]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
+  })
+
+  // Control records carry no match and are ignored silently; an unrecognised type is a protocol
+  // surprise and must be counted, or a ripgrep change turns every match into an innocent "no match".
+  stubTest("ignores control records but counts records with an unknown type", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        JSON.stringify({ type: "begin", data: { path: { text: "./a.txt" } } }),
+        matchRecord("a.txt"),
+        JSON.stringify({ type: "match-v2", data: { path: { text: "./b.txt" } } }),
+        JSON.stringify({}),
+        JSON.stringify({ type: "end", data: { path: { text: "./a.txt" } } }),
+        matchRecord("c.txt"),
+      ]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt"), RelativePath.make("c.txt")])
+    // begin/end are silent; the unknown type and the typeless record are counted, not dropped
+    // silently — the whole point being that a protocol change cannot masquerade as "no matches".
+    expect(lastSkip()?.skipped).toBe(2)
+    expect(lastSkip()?.reasons).toEqual([`unrecognised record type "match-v2" (./b.txt)`, "record has no type"])
+  })
+
+  stubTest("returns an empty result when every record is unusable, rather than failing", async () => {
+    const matches = await Effect.runPromise(grepWithStubbedRecords(["{oops", "{also oops", "{still oops"]))
+
+    expect(matches).toEqual([])
+  })
+
+  // Pins the ceiling itself: at the limit the record is kept, one byte over it is skipped.
+  stubTest("accepts a record at exactly the size ceiling and skips one byte over", async () => {
+    const sizeOf = (file: string, padding: number) => matchRecord(file, { lines: { text: "n".repeat(padding) } })
+    const overhead = Buffer.byteLength(sizeOf("a.txt", 0), "utf8")
+    const limit = 16 * 1024 * 1024
+
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([sizeOf("a.txt", limit - overhead), sizeOf("b.txt", limit - overhead + 1)]),
+    )
+
+    expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make("a.txt")])
+  })
+
+  // Pins the OUTPUT contract of the cap. Note it cannot prove the retained-memory improvement that
+  // motivated moving the cap into the parser: capping at parse time and capping at the end produce
+  // byte-identical output, and only the peak heap during collection differs.
+  stubTest("caps the returned line text and keeps the elision marker", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([matchRecord("a.txt", { lines: { text: "needle" + "x".repeat(50_000) } })]),
+    )
+
+    expect(matches[0].text).toHaveLength(2_003)
+    expect(matches[0].text.endsWith("...")).toBe(true)
+  })
+
+  stubTest("decodes a non-UTF8 match line to replacement characters", async () => {
+    const matches = await Effect.runPromise(
+      grepWithStubbedRecords([
+        matchRecord("a.txt", {
+          lines: { bytes: Buffer.from("needle \xff\xfe tail\n", "binary").toString("base64") },
+          submatches: [{ match: { bytes: Buffer.from("needle", "binary").toString("base64") }, start: 0, end: 6 }],
+        }),
+      ]),
+    )
+
+    expect(matches).toHaveLength(1)
+    // Content is display text, so lossy decoding keeps the match usable rather than dropping it.
+    expect(matches[0].text).toBe("needle �� tail\n")
+    expect(matches[0].submatches[0].text).toBe("needle")
+  })
   // altimate_change end
 })
