@@ -119,6 +119,9 @@ const MAX_SUBMATCHES = 100
 // path buffers all of stdout and returns every match, so without a per-field cap a tree of large
 // records still retains — and serialises into the `/find` response — an unbounded amount of text.
 // Same cap and elision marker as the core parser, so the two paths agree on what a match shows.
+/** Distinct skip reasons kept for the aggregate warning; mirrors the core parser. */
+const SKIP_SAMPLES = 5
+
 const LINE_TEXT_CAP = 2_000
 const capText = (text: string) => (text.length > LINE_TEXT_CAP ? text.slice(0, LINE_TEXT_CAP) + "..." : text)
 
@@ -224,27 +227,41 @@ const normalizeRecord = (line: string): unknown => {
 export function parseRecords(lines: string[]): Match["data"][] {
   const matches: Match["data"][] = []
   let skipped = 0
+  const reasons: string[] = []
+  const skip = (reason: string) => {
+    skipped++
+    if (reasons.length < SKIP_SAMPLES) reasons.push(reason)
+  }
   for (const line of lines) {
     // Bounds parse cost per record. This path buffers all of stdout before splitting, so it does
     // not bound total memory — that needs streaming, tracked separately.
-    // `normalizeRecord` runs before `safeParse` and outside any try/catch of its
-    // own, so a throw inside it would escape `parseRecords` and take the whole
-    // search down — the failure mode this module exists to prevent.
+    if (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES) {
+      skip("oversized")
+      continue
+    }
+    // `normalizeRecord` runs before `safeParse` and outside any try/catch of its own, which is why
+    // it is wrapped here: a throw would otherwise escape `parseRecords` and take the whole search
+    // down — the failure mode this module exists to prevent.
     let parsed: ReturnType<typeof Result.safeParse> | undefined
     try {
-      parsed = Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES ? undefined : Result.safeParse(normalizeRecord(line))
-    } catch {
-      parsed = undefined
+      parsed = Result.safeParse(normalizeRecord(line))
+    } catch (error) {
+      skip(`normalization threw: ${error instanceof Error ? error.message : String(error)}`)
+      continue
     }
-    if (!parsed?.success) {
-      skipped++
+    if (!parsed.success) {
+      skip(parsed.error.issues[0]?.message ?? "unexpected record shape")
       continue
     }
     if (parsed.data.type === "match") matches.push(parsed.data.data)
   }
   // Counted and reported once rather than per record: without this a ripgrep protocol change
   // would make `/find` answer `[]`, which is indistinguishable from an honest "no matches".
-  if (skipped > 0) log.warn("skipped unusable ripgrep records", { skipped, total: lines.length })
+  //
+  // The count alone cannot tell those apart, which is the whole point of the warning: `skipped: 47`
+  // could be one odd binary file or every record failing a changed protocol. The sampled reasons
+  // are what distinguish them, so this mirrors what the core parser already reports.
+  if (skipped > 0) log.warn("skipped unusable ripgrep records", { skipped, total: lines.length, reasons })
   return matches
 }
 

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { RipgrepRecords } from "../../src/file/ripgrep-records"
 
 // altimate_change start — upstream_fix: legacy `/find` parsing must survive unusable records.
@@ -166,6 +166,44 @@ describe("RipgrepRecords.parseRecords", () => {
     // Assert the decode itself, not just that something long came back.
     expect(parsed[0].lines.text.startsWith("\uFFFD" + "a".repeat(64))).toBe(true)
     expect(parsed[0].lines.text.endsWith("...")).toBe(true)
+  })
+
+  // The aggregate warning is the only signal that distinguishes one odd binary file from a ripgrep
+  // protocol change rejecting EVERY record — the failure this module exists to prevent, which
+  // otherwise looks like an honest empty result. A bare count cannot tell those apart, so the
+  // sampled reasons are the load-bearing part. Log capture mirrors test/altimate/log-shim.test.ts.
+  describe("skip diagnostics", () => {
+    let writes: string[]
+    let spy: ReturnType<typeof spyOn>
+
+    beforeEach(() => {
+      writes = []
+      process.env["OPENCODE_PRINT_LOGS"] = "1"
+      spy = spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk))
+        return true
+      })
+    })
+    afterEach(() => {
+      spy.mockRestore()
+      delete process.env["OPENCODE_PRINT_LOGS"]
+    })
+
+    test("reports why records were skipped, not just how many", () => {
+      const oversized = record("big.txt", { lines: { text: "n".repeat(17 * 1024 * 1024) } })
+      RipgrepRecords.parseRecords([record("a.txt"), oversized, '{"type":"match","data":{"path":{"text":"./b.t'])
+
+      const logged = writes.join("")
+      expect(logged).toContain("skipped unusable ripgrep records")
+      expect(logged).toContain("oversized")
+      // The malformed line fails the schema rather than throwing, so its reason comes from zod.
+      expect(logged).toMatch(/reasons/)
+    })
+
+    test("stays silent when every record is usable", () => {
+      RipgrepRecords.parseRecords([record("a.txt"), record("b.txt")])
+      expect(writes.join("")).not.toContain("skipped unusable ripgrep records")
+    })
   })
 
   test("returns an empty array when every record is unusable, rather than throwing", () => {
