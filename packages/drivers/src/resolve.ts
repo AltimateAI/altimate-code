@@ -296,9 +296,13 @@ function entryFromManifest(pkgDir: string, specifier: string, pkg: string): stri
  *
  * @throws {DriverNotInstalledError} when the package is genuinely absent.
  */
-export async function loadOptionalDriver(driver: DriverName, specifier: string): Promise<any> {
+export async function loadOptionalDriver(
+  driver: DriverName,
+  specifier: string,
+  importer: (spec: string) => Promise<any> = (spec) => import(/* @vite-ignore */ spec),
+): Promise<any> {
   try {
-    return await import(/* @vite-ignore */ specifier)
+    return await importer(specifier)
   } catch (ambientError) {
     const ambientBroken = !isModuleNotFound(ambientError, specifier)
     const roots = driverSearchRoots()
@@ -311,7 +315,7 @@ export async function loadOptionalDriver(driver: DriverName, specifier: string):
     }
 
     try {
-      return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
+      return await importer(pathToFileURL(resolved).href)
     } catch (loadError) {
       // On disk but will not load — a half-installed copy, or a native addon
       // built for another platform. When an ambient copy was also broken,
@@ -376,6 +380,16 @@ export function isDriverInstalled(driver: DriverName, roots = driverSearchRoots(
   return DRIVER_PACKAGES[driver].every((pkg) => resolveOptionalPackage(pkg, roots) !== undefined)
 }
 
+/** Runs npm. Injectable so install behaviour can be tested without a registry. */
+export type NpmRunner = (args: string[], cwd: string, timeoutMs: number) => Promise<{ code: number; output: string }>
+
+export interface InstallOptions {
+  timeoutMs?: number
+  /** Rebuild even when the package resolves — the caller knows it does not load. */
+  force?: boolean
+  runNpm?: NpmRunner
+}
+
 export interface InstallResult {
   readonly driver: DriverName
   readonly packages: readonly string[]
@@ -414,6 +428,21 @@ function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code:
 }
 
 /**
+ * Delete `packages` from the managed directory so a reinstall genuinely rebuilds
+ * them. Best-effort: a path we cannot remove simply leaves npm to no-op, which
+ * is the behaviour we already had.
+ */
+function removeInstalledPackages(dir: string, packages: readonly string[]): void {
+  for (const pkg of packages) {
+    try {
+      fs.rmSync(path.join(dir, "node_modules", ...pkg.split("/")), { recursive: true, force: true })
+    } catch {
+      // Nothing to gain from failing the install over a stale directory.
+    }
+  }
+}
+
+/**
  * npm arguments for installing `packages` into the managed driver directory.
  *
  * `--save` is required, not incidental: with `--no-save` npm treats already
@@ -434,7 +463,7 @@ export function npmInstallArgs(packages: readonly string[]): string[] {
  */
 export async function installOptionalDriver(
   driver: DriverName,
-  options: { timeoutMs?: number; force?: boolean } = {},
+  options: InstallOptions = {},
 ): Promise<InstallResult> {
   const packages = DRIVER_PACKAGES[driver]
   const dir = driverInstallDir()
@@ -448,10 +477,13 @@ export async function installOptionalDriver(
   }
 
   // Serialize per directory: concurrent npm runs against one manifest can leave
-  // the managed directory inconsistent.
+  // the managed directory inconsistent. Chain onto the current tail rather than
+  // awaiting it first — awaiting released every queued caller at once, so with
+  // three or more installs the second and third still overlapped.
   const pending = installsInFlight.get(dir)
-  if (pending) await pending.catch(() => {})
-  const run = performInstall(driver, packages, dir, options)
+  const run = Promise.resolve(pending)
+    .catch(() => undefined)
+    .then(() => performInstall(driver, packages, dir, options))
   installsInFlight.set(dir, run)
   try {
     return await run
@@ -467,7 +499,7 @@ async function performInstall(
   driver: DriverName,
   packages: readonly string[],
   dir: string,
-  options: { timeoutMs?: number; force?: boolean },
+  options: InstallOptions,
 ): Promise<InstallResult> {
 
   try {
@@ -492,7 +524,15 @@ async function performInstall(
     }
   }
 
-  const { code, output } = await runNpm(npmInstallArgs(packages), dir, options.timeoutMs ?? 180_000)
+  // A repair has to delete the broken copy first. npm compares the manifest to
+  // what is on disk, not the health of it, so with the package already recorded
+  // it answers "up to date" and rewrites nothing — verified on npm 11.12.1
+  // against a deliberately corrupted `pg`. `--force` does not change that; it
+  // forces *fetching*, not overwriting an already-satisfied dependency.
+  if (options.force) removeInstalledPackages(dir, packages)
+
+  const npm = options.runNpm ?? runNpm
+  const { code, output } = await npm(npmInstallArgs(packages), dir, options.timeoutMs ?? 180_000)
 
   if (code === 127) {
     return {

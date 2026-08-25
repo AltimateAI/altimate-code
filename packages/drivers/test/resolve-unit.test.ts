@@ -446,79 +446,124 @@ describe("shellQuote", () => {
 })
 
 describe("repairing a broken install", () => {
-  test("force skips the resolution-only early return", async () => {
+  test("force skips the resolution-only early return and rebuilds", async () => {
     // The bug this pins: installOptionalDriver short-circuited on
-    // isDriverInstalled, a resolution-only check. A caller that had detected a
-    // present-but-unloadable copy asked for a reinstall and got back
-    // `installed: true, alreadyPresent: true` with npm never run — so the
-    // repair path was unreachable.
+    // isDriverInstalled, a resolution-only check, so a caller that had detected
+    // a present-but-unloadable copy got back `installed: true` with npm never
+    // run — the repair path was unreachable.
     installFakePackage(tmpRoot, "oracledb", "module.exports = {}")
     process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
 
-    // Without force: recognised as installed, returns immediately.
-    const asIs = await installOptionalDriver("oracle")
-    expect(asIs.alreadyPresent).toBe(true)
-    expect(asIs.installed).toBe(true)
+    const calls: string[][] = []
+    const runNpm = async (args: string[]) => {
+      calls.push(args)
+      // Re-create what a real install would leave behind.
+      installFakePackage(tmpRoot, "oracledb", "module.exports = { repaired: true }")
+      return { code: 0, output: "" }
+    }
 
-    // With force: must NOT take that early return. npm is unavailable for a
-    // package that does not exist, so this reaches a real attempt and reports
-    // failure rather than a fictitious success.
-    const forced = await installOptionalDriver("oracle", { force: true, timeoutMs: 15_000 })
+    const asIs = await installOptionalDriver("oracle", { runNpm })
+    expect(asIs.alreadyPresent).toBe(true)
+    expect(calls).toEqual([])
+
+    const forced = await installOptionalDriver("oracle", { force: true, runNpm })
     expect(forced.alreadyPresent).toBe(false)
-  }, 60_000)
+    expect(forced.installed).toBe(true)
+    expect(calls.length).toBe(1)
+  })
+
+  test("a repair deletes the broken copy first, because npm will not overwrite it", async () => {
+    // Verified against npm 11.12.1: with the package already recorded in the
+    // manifest, `npm install` answers "up to date" and rewrites nothing, even
+    // with --force. Unless the broken directory is removed, the repair is a
+    // no-op that reports success.
+    installFakePackage(tmpRoot, "oracledb", "throw new Error('corrupt')")
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+    const pkgDir = path.join(tmpRoot, "node_modules", "oracledb")
+
+    let presentWhenNpmRan = true
+    const runNpm = async () => {
+      presentWhenNpmRan = fs.existsSync(pkgDir)
+      installFakePackage(tmpRoot, "oracledb", "module.exports = {}")
+      return { code: 0, output: "" }
+    }
+
+    await installOptionalDriver("oracle", { force: true, runNpm })
+
+    expect(presentWhenNpmRan).toBe(false)
+  })
+
+  test("a failed repair is reported as a failure, not a success", async () => {
+    installFakePackage(tmpRoot, "oracledb", "throw new Error('corrupt')")
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+
+    const result = await installOptionalDriver("oracle", {
+      force: true,
+      runNpm: async () => ({ code: 1, output: "network unreachable" }),
+    })
+
+    expect(result.installed).toBe(false)
+    expect(result.error).toContain("network unreachable")
+  })
+
+  test("concurrent installs against one directory do not overlap", async () => {
+    // Awaiting the in-flight promise released every queued caller at once, so
+    // with three or more installs the later ones still ran npm concurrently.
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+    let active = 0
+    let maxActive = 0
+    const runNpm = async () => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise((r) => setTimeout(r, 15))
+      active -= 1
+      return { code: 0, output: "" }
+    }
+
+    await Promise.all([
+      installOptionalDriver("oracle", { force: true, runNpm }),
+      installOptionalDriver("oracle", { force: true, runNpm }),
+      installOptionalDriver("oracle", { force: true, runNpm }),
+      installOptionalDriver("oracle", { force: true, runNpm }),
+    ])
+
+    expect(maxActive).toBe(1)
+  })
 })
 
 describe("a broken ambient copy does not hide a good one on disk", () => {
-  // This one needs a fixture the ambient resolver can genuinely find, so it is
-  // written into this package's own node_modules and removed afterwards. Every
-  // cheaper version of this test was vacuous: a fixture that only exists under
-  // ALTIMATE_DRIVER_DIR never reaches the ambient branch at all.
-  const AMBIENT = "altimate-ambient-throws"
-  const ambientDir = path.join(import.meta.dir, "..", "node_modules", AMBIENT)
-
-  function installAmbientBroken() {
-    fs.mkdirSync(ambientDir, { recursive: true })
-    fs.writeFileSync(path.join(ambientDir, "package.json"), JSON.stringify({ name: AMBIENT, version: "1.0.0", main: "index.js" }))
-    // A load-time failure, deliberately NOT a resolution error.
-    fs.writeFileSync(path.join(ambientDir, "index.js"), "throw new TypeError('native binding is for another platform')")
-  }
-
-  function removeAmbientBroken() {
-    fs.rmSync(ambientDir, { recursive: true, force: true })
+  // The ambient branch needs an import that resolves and then throws. Injecting
+  // the importer reaches it without writing a throwing package into this
+  // package's real node_modules, which a killed test run would leave behind.
+  const brokenAmbient = async (spec: string) => {
+    if (!spec.startsWith("file:")) throw new TypeError("native binding is for another platform")
+    return import(/* @vite-ignore */ spec)
   }
 
   test("recovers from the managed root when the ambient copy throws on import", async () => {
-    installAmbientBroken()
-    try {
-      installFakePackage(tmpRoot, AMBIENT, "module.exports = { marker: 'managed' }")
-      process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+    installFakePackage(tmpRoot, "altimate-recovered-sdk", "module.exports = { marker: 'managed' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
 
-      const mod: any = await loadOptionalDriver("postgres", AMBIENT)
+    const mod: any = await loadOptionalDriver("postgres", "altimate-recovered-sdk", brokenAmbient)
 
-      expect(mod.marker ?? mod.default?.marker).toBe("managed")
-    } finally {
-      removeAmbientBroken()
-    }
+    expect(mod.marker ?? mod.default?.marker).toBe("managed")
   })
 
   test("reports the ambient load failure when no healthy copy exists", async () => {
-    installAmbientBroken()
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "empty")
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+
+    let error: unknown
     try {
-      process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "empty")
-
-      let error: unknown
-      try {
-        await loadOptionalDriver("postgres", AMBIENT)
-      } catch (e) {
-        error = e
-      }
-
-      // Broken, not absent — the user must not be told to install what they have.
-      expect(error).not.toBeInstanceOf(DriverNotInstalledError)
-      expect((error as Error).message).toContain("native binding is for another platform")
-    } finally {
-      removeAmbientBroken()
+      await loadOptionalDriver("postgres", "altimate-absent-sdk", brokenAmbient)
+    } catch (e) {
+      error = e
     }
+
+    // Broken, not absent — the user must not be told to install what they have.
+    expect(error).not.toBeInstanceOf(DriverNotInstalledError)
+    expect((error as Error).message).toContain("native binding is for another platform")
   })
 })
 
