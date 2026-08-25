@@ -1,6 +1,7 @@
 // altimate_change - Training store wrapping MemoryStore for learned knowledge
 import { MemoryStore, type MemoryBlock } from "../../memory"
 import {
+  TRAINING_META_COMMENT,
   TRAINING_TAG,
   TRAINING_MAX_PATTERNS_PER_KIND,
   TrainingKind,
@@ -164,5 +165,5 @@ export namespace TrainingStore {
 }
 
 function stripTrainingMeta(content: string): string {
-  return content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "").trim()
+  return content.replace(TRAINING_META_COMMENT, "").trim()
 }

@@ -6,7 +6,7 @@
 // This file focuses on the deterministic layer: URL parsing, git detection,
 // state read/write + chmod, latch semantics, and error classification.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, rmSync, statSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
@@ -152,6 +152,173 @@ describe("workspace binding cache", () => {
     expect(read).not.toBeNull()
     expect(read!.datamateId).toBe(42)
     expect(read!.datamateName).toBe("Marketing")
+  })
+
+  test("awaitBackfill holds the bind open until the seed has run", async () => {
+    // `altimate-code link` runs in a plain yargs handler and src/index.ts calls
+    // process.exit() the moment it returns, so a detached seed is killed
+    // mid-flight: the bind reports success having stored nothing.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "seed-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "seed.md"),
+      ["---", "id: seed", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((r) => (release = r))
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
+      await gate
+      return new Response(JSON.stringify({ datamates: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }) as typeof fetch
+
+    try {
+      const binding = {
+        datamateId: 7,
+        datamateName: "Seeded",
+        repoRemote: null,
+        projectPath: proj,
+        linkedAt: 1,
+      }
+      const pending = recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      const outcome = await Promise.race([
+        pending.then(() => "resolved"),
+        new Promise((r) => setTimeout(() => r("still-pending"), 200)),
+      ])
+      expect(outcome).toBe("still-pending")
+      release?.()
+      await pending
+    } finally {
+      release?.()
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
+  test("re-recording an unchanged binding does not re-seed", async () => {
+    // A flow that merely warms the cache must not sweep: the seed is for a new
+    // or changed bind. `link` now awaits the seed, so a redundant one is paid
+    // synchronously by the user.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "warm-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "warm.md"),
+      ["---", "id: warm", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+    const binding = {
+      datamateId: 9,
+      datamateName: "Warm",
+      repoRemote: null,
+      projectPath: proj,
+      linkedAt: 1,
+    }
+
+    let calls = 0
+    const originalFetch = globalThis.fetch
+    // Return URL-shaped responses. The mem-POST endpoint must return the
+    // ``{result:{results:[{id}]}}`` envelope the mirror code expects — a
+    // response without an id classifies as ``declined``, which by design
+    // leaves the seed unfinished and forces a retry on the next warm.
+    // (harness-bot #1116 comment 3840503346 hardened that gate.)
+    let memPostSerial = 0
+    globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
+      calls++
+      const url = String(_input)
+      if (url.includes("/datamates/memory/") && !url.includes("/list")) {
+        memPostSerial += 1
+        return new Response(
+          JSON.stringify({
+            result: { results: [{ id: `mock-mem-${memPostSerial}`, event: "ADD" }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      }
+      if (url.includes("/datamates/memory/list")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({ datamates: [{ id: 9, name: "Warm", memory_enabled: true }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }) as typeof fetch
+
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      const afterFirst = calls
+      expect(afterFirst).toBeGreaterThan(0)
+
+      // Same workspace, same project, later timestamp: a warm, not a rebind.
+      await recordApprovedBinding(proj, { ...binding, linkedAt: 2 }, { awaitBackfill: true })
+      expect(calls).toBe(afterFirst)
+
+      // A genuine rebind to another workspace must still seed.
+      await recordApprovedBinding(proj, { ...binding, datamateId: 10 }, { awaitBackfill: true })
+      expect(calls).toBeGreaterThan(afterFirst)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
+  test("a seed that never ran stays retryable on the next warm", async () => {
+    // Memory disabled at bind time means the sweep is a no-op, not a completed
+    // seed. Treating it as done left the blocks this machine already holds
+    // absent from the workspace until a rebind or an unrelated edit.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "gated-proj")
+    mkdirSync(path.join(proj, ".altimate-code", "memory"), { recursive: true })
+    const now = new Date().toISOString()
+    writeFileSync(
+      path.join(proj, ".altimate-code", "memory", "gated.md"),
+      ["---", "id: gated", "scope: project", `created: ${now}`, `updated: ${now}`, "---", "", "A fact.", ""].join("\n"),
+    )
+    const binding = {
+      datamateId: 11,
+      datamateName: "Gated",
+      repoRemote: null,
+      projectPath: proj,
+      linkedAt: 1,
+    }
+
+    let memoryEnabled = false
+    let calls = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
+      calls++
+      return new Response(
+        JSON.stringify({ datamates: [{ id: 11, name: "Gated", memory_enabled: memoryEnabled }] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      )
+    }) as typeof fetch
+
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      const afterGated = calls
+      // Memory switched on later: the same binding must sweep this time.
+      memoryEnabled = true
+      await recordApprovedBinding(proj, { ...binding, linkedAt: 2 }, { awaitBackfill: true })
+      expect(calls).toBeGreaterThan(afterGated)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
   })
 
   test("chmods the cache file to 0o600 after write", async () => {

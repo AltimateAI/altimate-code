@@ -17,6 +17,10 @@ const REQUEST_TIMEOUT_MS = 15_000
 export interface DatamateRef {
   id: number
   name: string
+  /** Whether the workspace has memory switched on. Surfaced as a user-facing
+   * toggle in the workspace app, so callers that write memory must respect it.
+   * Undefined when the backend omitted the field. */
+  memoryEnabled?: boolean
 }
 
 export interface Binding {
@@ -237,6 +241,13 @@ async function req<T>(
   return json as T
 }
 
+/** Shared wire helper for sibling Altimate routers. Exported so callers that
+ * need the same credential resolution, abort budget and typed-error mapping do
+ * not duplicate any of it — see ./memory-api.ts, which drives
+ * ``/datamates/memory/*`` through this exact path. Always pass an explicit
+ * ``base``; the default is this module's own namespace. */
+export { req as altimateRequest }
+
 export namespace WorkspaceApi {
   /** Server-authoritative pre-check by git remote. Returns null on 404. */
   export async function getBindingForRemote(remote: string): Promise<GetBindingResponse | null> {
@@ -350,7 +361,7 @@ export namespace WorkspaceApi {
     // bare ``[...]``, and a generic ``{data: [...]}`` — so a backend
     // contract change (or compat layer) doesn't silently empty the picker.
     // (cubic-dev-ai round 3.)
-    type Row = { id: number | string; name: string }
+    type Row = { id: number | string; name: string; memory_enabled?: boolean }
     const body = await req<Row[] | { datamates?: Row[]; data?: Row[] }>("GET", "/", {
       base: "/datamates",
     })
@@ -378,7 +389,7 @@ export namespace WorkspaceApi {
     // per-element rather than per-envelope malformed value.
     return rows
       .filter((d): d is Row => d !== null && typeof d === "object")
-      .map((d) => ({ id: Number(d.id), name: d.name }))
+      .map((d) => ({ id: Number(d.id), name: d.name, memoryEnabled: d.memory_enabled }))
       .filter((d) => Number.isInteger(d.id) && d.id > 0 && typeof d.name === "string")
   }
 }

@@ -30,6 +30,10 @@ export interface CachedBinding {
   repoRemote: string | null
   projectPath: string | null
   linkedAt: number
+  /** Set once a bind-time seed completed without failures. Absent means the
+   * seed has not run, errored, or was skipped because memory was off — all of
+   * which must stay retryable, so a later warm sweeps again. */
+  seededAt?: number
 }
 
 interface CacheFile {
@@ -72,6 +76,8 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
       (typeof b.projectPath === "string" && b.projectPath.length > 0)
     if (!hasIdentity) return false
     if (typeof b.linkedAt !== "number") return false
+    // A corrupt marker must not read as "already seeded" and suppress the sweep.
+    if (b.seededAt !== undefined && typeof b.seededAt !== "number") return false
   }
   return true
 }
@@ -195,15 +201,54 @@ export async function readLocalBinding(directory: string): Promise<CachedBinding
   // migrate the whole file once. After migration the lookup is a plain
   // property access on every future read.
   if (!isCanonicalized(cache)) {
-    cache = migrateToCanonicalKeys(cache)
+    // The migration writes, and this is a read path: a read-only or full state
+    // directory would otherwise turn a plain cache lookup into a rejection for
+    // every caller. Degrade to the pre-migration lookup instead.
+    try {
+      cache = migrateToCanonicalKeys(cache)
+    } catch (err) {
+      log.warn("could not migrate workspace binding cache; reading it as-is", {
+        err: String(err),
+      })
+      for (const [k, v] of Object.entries(cache.bindings)) {
+        if (canonicalizeKey(k) === canon) return v
+      }
+      return null
+    }
     return cache.bindings[canon] ?? null
   }
   return null
 }
 
+/** Record that this binding's seed completed, so later warms skip the sweep. */
+function markSeeded(directory: string, binding: CachedBinding): void {
+  try {
+    const cache = readCache()
+    if (!cache) return
+    const key = canonicalizeKey(directory)
+    const current = cache.bindings[key]
+    if (!current || !sameBinding(current, binding)) return
+    cache.bindings[key] = { ...current, seededAt: Date.now() }
+    writeCache(cache)
+  } catch (err) {
+    log.warn("could not record the workspace memory seed marker", { err: String(err) })
+  }
+}
+
+/** Same workspace and same project identity — i.e. nothing to re-seed.
+ * ``linkedAt`` is deliberately ignored: it moves on every warm. */
+function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
+  return (
+    a.datamateId === b.datamateId &&
+    (a.repoRemote ?? null) === (b.repoRemote ?? null) &&
+    (a.projectPath ?? null) === (b.projectPath ?? null)
+  )
+}
+
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
+  opts?: { awaitBackfill?: boolean },
 ): Promise<void> {
   const key = await tenantKey()
   if (!key) return
@@ -213,18 +258,61 @@ export async function recordApprovedBinding(
   // duplicate retries against a workspace that IS bound server-side.
   // (cubic round 3.) canonicalizeKey resolves symlinks so writes and reads
   // funnel through the same key (macOS ``/tmp`` → ``/private/tmp``).
+  // Whether this call actually changes the binding. A flow that merely warms
+  // the cache with the binding already on disk must not trigger a sweep: the
+  // seed exists for a NEW or CHANGED bind, and re-running it on every warm
+  // costs a full read of local memory and a round trip per block -- now paid
+  // synchronously on the `link` path, which awaits the seed.
+  let bindingChanged = true
+  let alreadySeeded = false
   try {
     const existing = readCache()
     const cache: CacheFile =
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-    cache.bindings[canonicalizeKey(directory)] = binding
+    const prior = cache.bindings[canonicalizeKey(directory)]
+    bindingChanged = !prior || !sameBinding(prior, binding)
+    alreadySeeded = !bindingChanged && !!prior?.seededAt
+    // Carry the seed marker across a warm so a completed seed is not repeated.
+    cache.bindings[canonicalizeKey(directory)] =
+      !bindingChanged && prior?.seededAt ? { ...binding, seededAt: prior.seededAt } : binding
     writeCache(cache)
   } catch (err) {
+    // An unreadable cache means the prior binding is unknown, so fall back to
+    // seeding: a missed seed is worse than a redundant one.
+    bindingChanged = true
     log.warn("could not persist workspace binding cache", {
       code: (err as NodeJS.ErrnoException)?.code,
       err: String(err),
     })
   }
+
+  // altimate_change start - seed the workspace with the memory this machine
+  // already holds. Deliberately OUTSIDE the try above: a failed cache write
+  // must not skip the backfill, and a failed backfill must not read as a failed
+  // link. The dynamic import keeps the module graph acyclic — see the header of
+  // ./memory-backfill.ts for why a static import cannot be used.
+  //
+  // ``awaitBackfill`` exists because the CLI calls ``process.exit()`` as soon
+  // as a command handler returns (src/index.ts): a detached sweep is killed
+  // mid-flight there, so a bind that reported success could seed nothing. The
+  // TUI stays resident and leaves it detached so the dialog closes at once.
+  // Skip only when this exact binding has already been seeded successfully. A
+  // warm after a failed or skipped seed must try again, or the blocks this
+  // machine already holds never reach the workspace.
+  if (alreadySeeded) return
+  const seeded = import("./memory-backfill")
+    .then((m) => m.backfillOnBind(canonicalizeKey(directory), binding))
+    .then((ok) => {
+      if (ok) markSeeded(directory, binding)
+      return ok
+    })
+    .catch((err) => {
+      log.warn("could not start workspace memory backfill", { err: String(err) })
+      return false
+    })
+  if (opts?.awaitBackfill) await seeded
+  else void seeded
+  // altimate_change end
 }
