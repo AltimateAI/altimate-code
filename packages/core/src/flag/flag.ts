@@ -61,6 +61,7 @@ export const Flag = {
   OPENCODE_DB: process.env["OPENCODE_DB"],
 
   OPENCODE_WORKSPACE_ID: process.env["OPENCODE_WORKSPACE_ID"],
+  // Unrelated to ALTIMATE_WORKSPACE (SaaS project-binding pilot) — this gates upstream's multi-instance/worktree control plane.
   OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
 
   // altimate_change start — pilot flag for the Workspaces feature (post-scan prompt +
@@ -71,6 +72,7 @@ export const Flag = {
   // ``enabledByExperimental`` would). The pilot ships behind its own explicit
   // gate so users already opted into other experimental features don't get
   // this one turned on for them. (Kilo cycle 6.)
+  // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane) — this gates the SaaS project-binding pilot.
   get ALTIMATE_WORKSPACE() {
     return truthy("ALTIMATE_WORKSPACE")
   },

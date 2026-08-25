@@ -18,21 +18,36 @@
 // cache on it meant nothing was ever cached and every load fell through to a
 // network fetch, which hangs in sandboxed CI. So the check asserts only what
 // consumers actually rely on: a non-empty map whose values are provider objects
-// carrying a `models` map.
+// carrying a string `id` and a `models` map.
 //
 // Module shape follows packages/opencode/AGENTS.md: flat exports plus a
 // self-reexport, not `export namespace`.
+
+// altimate_change start — upstream_fix: `isCatalog` only required one entry in
+// the map to be well-formed before caching (and trusting) the whole catalog.
+// `Provider.state()` then unconditionally maps every entry through
+// `fromModelsDevProvider`, which reads `provider.id` and `provider.models`
+// with no validation of its own — a single malformed entry (e.g. from a
+// misbehaving proxy mixing garbage with real data) crashed `Provider.state()`
+// for every provider, not just the bad one. `isCatalogEntry` is the per-entry
+// predicate, extracted so callers can filter individual entries with the same
+// rule `isCatalog` uses to gate the whole map.
+/** True when `entry` is shaped like a single models.dev provider entry. */
+export function isCatalogEntry(entry: unknown): entry is { id: string; models: Record<string, unknown> } {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false
+  const id = Reflect.get(entry, "id")
+  if (typeof id !== "string") return false
+  const models = Reflect.get(entry, "models")
+  return !!models && typeof models === "object" && !Array.isArray(models)
+}
+// altimate_change end
 
 /** True when `value` is shaped like a models.dev catalog rather than junk. */
 export function isCatalog(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
   const entries = Object.values(value)
   if (entries.length === 0) return false
-  return entries.some((entry) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false
-    const models = Reflect.get(entry, "models")
-    return !!models && typeof models === "object" && !Array.isArray(models)
-  })
+  return entries.some(isCatalogEntry)
 }
 
 /** Parse a models.dev response body, returning undefined unless it is a catalog. */

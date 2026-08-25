@@ -259,7 +259,10 @@ interface LinkedProps {
 function WorkspaceLinkedDialog(props: LinkedProps) {
   const title = () => {
     const suffix = props.manageUrl ? ` — ${props.manageUrl}` : ""
-    return `${props.verb} workspace "${props.workspaceName}"${suffix}`
+    // DialogSelect doesn't take a top-level description block, so the
+    // memory-sync disclosure is packed into the title, matching the
+    // AlreadyLinkedDialog convention above.
+    return `${props.verb} workspace "${props.workspaceName}"${suffix} — Saved memory blocks will sync to this workspace if memory is enabled for it.`
   }
   const options = () => {
     if (props.manageUrl) {
@@ -341,7 +344,8 @@ async function runBrowserHandoff(
   api.ui.dialog.clear()
   api.ui.toast({
     variant: "info",
-    message: "Opening browser to set up your workspace — approve there, then check back here for the confirmation.",
+    message:
+      "Opening browser to set up your workspace (up to 15 min) — approve there, then check back here for the confirmation.",
   })
   // Supersede any still-open handoff before starting a new one.
   if (activeHandoffAbort) activeHandoffAbort.abort()

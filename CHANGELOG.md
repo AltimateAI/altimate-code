@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7] - 2026-08-25
+
+Grep/search reliability fix for everyone, a Codex model-picker unblock, and a first, opt-in look at Workspaces — shared project binding with cloud-synced memory.
+
+### Fixed
+
+- **`grep`/`glob` no longer return nothing because of a single bad match.** One oversized, unparseable, or non-UTF-8 ripgrep record — a minified bundle, a source map, a one-line JSON/CSV fixture, anywhere in the searched tree — used to fail the entire search stream and silently discard every match already found in unrelated files. Telemetry showed 74 machines / 83 sessions over 7 days on v0.9.3/v0.9.4. Records are independent of their neighbours, so a bad one is now logged and skipped instead of aborting the rest of the search; the same fix landed in the legacy `/find` parser, and an invalid search pattern now correctly returns HTTP 400 instead of 500. (#1094)
+- **ChatGPT Pro/Plus (Codex tier) users can pick `gpt-5.5` and `gpt-5.6`.** Both were live on OpenAI's side already, but the fork's OAuth allowlist hadn't been bumped past `gpt-5.4-mini` — any snapshot model not on the allowlist (and not containing "codex") was silently deleted from the picker before it ever reached you. Fixed; API-tier-only variants (`pro`, `luna`, `sol`, `terra`) stay out until confirmed available on the subscription tier. (#1133, closes #1132)
+- **The models.dev catalog cache no longer crashes or poisons itself on a bad response.** A non-JSON or malformed 2xx body is now rejected before it's parsed or cached, instead of throwing mid-load or writing garbage the next run would trust. The unconditional fetch that used to run at module import — the cause of a v0.9.4 CI hang under restricted DNS — is gone; short-lived commands now rely on the bundled snapshot / disk cache rather than a live network call, so models added to models.dev between releases won't show up in short-lived commands until the next release. A narrower hang path can still occur in dev-mode builds without the bundled snapshot (tracked in #1144). (#1085)
+
+### Added
+
+- **Workspaces — pilot, opt-in via `ALTIMATE_WORKSPACE=1`, off by default.** A first look at linking a project to a shared Altimate workspace: a post-scan prompt plus a new `altimate-code link` subcommand to create or bind one, a browser-based setup handoff, and memory blocks that sync to the bound workspace so a team shares context. Nothing about this is visible unless the pilot flag is set — no new prompts, network calls, or CLI surface for anyone not opted in. Binding now explicitly tells you that saved memory blocks sync to the workspace if memory is enabled for it. (#1099, #1100, #1116)
+- **`altimate_memory_refresh` tool.** Ask the CLI mid-session to re-fetch workspace memory instead of waiting for a new session — closes a gap where a running session could never pick up a memory block written after it started. `altimate_memory_read` now shows the same workspace-merged view the model actually sees, rather than local content only. (#1123)
+
+### Changed
+
+- **Public-repo hygiene: a pre-push scan for internal tracker references, and a hardened build-staleness guard.** A local pre-push hook scans branch names, commit messages, and diff content for Jira-key-shaped and known internal-hostname references before they can land in the public repo (no CI-side backstop yet — local hook only, tracked in #1141). The staleness guard behind the release smoke test now hashes every embedded build input — workspace packages, `tsconfig.json`, the lockfile — instead of only walking `src/`/`script/` mtimes, closing several ways a binary could go stale without the guard noticing. (#1085)
+
 ## [0.9.6] - 2026-08-23
 
 Correctness release: `check --checks {validate,semantic,grade,pii,safety,policy}` and the `altimate-core-*` tools (`migration`, `compare`, `track-lineage`, `query-pii`, `classify-pii`) now tell you the truth. Several previously returned false-clean or wrong output — teams gating CI on `check --fail-on error|warning` may see new failures on unchanged SQL. **These are real findings the tool previously missed, not regressions in your code.** Also fixes a data-hygiene bug where truncated tool-output files were being deleted the moment they were written.

@@ -51,6 +51,11 @@ export const RULES = [
     pattern: /\baltimateai\.atlassian\.net\b/g,
     remediation: "Replace with the corresponding GitHub issue link or drop the reference.",
   },
+  {
+    name: "Internal hostname (onealtimate.com)",
+    pattern: /\bonealtimate\.com\b/g,
+    remediation: "Replace with the corresponding GitHub issue link or drop the reference.",
+  },
 ]
 
 type Hit = {

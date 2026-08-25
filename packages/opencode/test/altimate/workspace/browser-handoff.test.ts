@@ -8,7 +8,7 @@
 // 7317..7325, and processes real HTTP requests — this is genuine end-to-end
 // coverage for the callback validation path.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { createServer } from "node:net"
+import { createServer, connect } from "node:net"
 
 import { AltimateApi } from "../../../src/altimate/api/client"
 import {
@@ -58,6 +58,28 @@ async function fireCallback(redirect: string, params: Record<string, string>): P
   // Drain body so the connection can close and let the CLI's `close()`
   // proceed without hanging on lingering sockets.
   await res.text().catch(() => "")
+}
+
+/** Send a raw HTTP/1.1 request with an attacker-controlled ``Host`` header —
+ * ``fetch()`` won't let callers override ``Host``, but a DNS-rebinding
+ * attacker fully controls the request their malicious page's own hostname
+ * sends once resolved to 127.0.0.1, so a raw socket is the only way to
+ * reproduce that request shape in a test. Returns the response status code. */
+function sendRawRequest(port: number, path: string, host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, "127.0.0.1", () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`)
+    })
+    let data = ""
+    socket.on("data", (chunk) => {
+      data += chunk.toString()
+    })
+    socket.on("end", () => {
+      const status = data.match(/^HTTP\/1\.\d (\d+)/)
+      resolve(status ? Number(status[1]) : -1)
+    })
+    socket.on("error", reject)
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +225,31 @@ describe("runHandoffWithOpener end-to-end", () => {
     }
   })
 
+  test("spoofed Host header (DNS rebinding) is rejected without touching the pending flow", async () => {
+    // The Host-header guard must reject before state validation even runs —
+    // a legitimate follow-up callback should still be able to resolve the
+    // flow afterwards.
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x" },
+      async (url) => {
+        const { port, state, redirect } = parseHandoffUrl(url)
+        const status = await sendRawRequest(
+          port,
+          `/workspace-bound?state=${state}&workspace_id=999&tenant=acme`,
+          `attacker.example:${port}`,
+        )
+        expect(status).toBe(400)
+        // Legitimate callback, sent with the correct Host header, still wins.
+        await fireCallback(redirect, { workspace_id: "1", state, tenant: "acme" })
+      },
+    )
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.workspaceId).toBe(1)
+      expect(result.tenant).toBe("acme")
+    }
+  })
+
   test("?error=cancelled callback resolves as {cancelled}", async () => {
     const result = await runHandoffWithOpener(
       { identifier: { projectPath: "/x" }, projectName: "x" },
@@ -255,11 +302,13 @@ describe("runHandoffWithOpener end-to-end", () => {
     }
   })
 
-  test("URL includes project_name in query and project_remote/project_path in fragment", async () => {
+  test("URL keeps project_name, project_remote, project_path out of the query", async () => {
     // Per m6 in the consensus review: project_path + project_remote MUST NOT
     // be sent as query params (they'd land in browser history, SaaS/CDN/WAF
-    // access logs, and REST-log aggregators). Move them to the URL fragment
-    // instead — same reason cli_context lives in the fragment.
+    // access logs, and REST-log aggregators). project_name is just as
+    // sensitive (e.g. named after a customer/internal project), so it goes
+    // in the URL fragment alongside them — same reason cli_context lives
+    // in the fragment.
     let observed = ""
     await runHandoffWithOpener(
       {
@@ -274,14 +323,13 @@ describe("runHandoffWithOpener end-to-end", () => {
       },
     )
     const u = new URL(observed)
-    // project_name is a display-safe label — the SaaS approval screen
-    // renders it in the modal — so it stays in the query.
-    expect(u.searchParams.get("project_name")).toBe("foo")
-    // project_remote + project_path MUST NOT be in the query.
+    // Nothing sensitive lands in the query.
+    expect(u.searchParams.get("project_name")).toBeNull()
     expect(u.searchParams.get("project_remote")).toBeNull()
     expect(u.searchParams.get("project_path")).toBeNull()
-    // They live in the fragment instead.
+    // They all live in the fragment instead.
     const frag = new URLSearchParams(u.hash.replace(/^#/, ""))
+    expect(frag.get("project_name")).toBe("foo")
     expect(frag.get("project_remote")).toBe("git@github.com:acme/foo.git")
     expect(frag.get("project_path")).toBe("/w/foo")
     expect(u.pathname).toBe("/create-and-link")
@@ -320,5 +368,56 @@ describe("port walk", () => {
     } finally {
       await new Promise<void>((r) => squatter.close(() => r()))
     }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AbortSignal cancellation: caller supersedes a stale handoff mid-flight
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("AbortSignal cancellation", () => {
+  isolateWebUrlOverride()
+  beforeEach(() => stubCreds("acme", "https://api.myaltimate.com"))
+  afterEach(() => unstubCreds())
+
+  test("already-aborted signal resolves immediately with {aborted}, no browser open", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    let browserOpened = false
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x", signal: controller.signal },
+      async () => {
+        browserOpened = true
+      },
+    )
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toBe("aborted")
+    expect(browserOpened).toBe(false)
+  })
+
+  test("signal aborted mid-flight (listener already bound) resolves with {aborted} and tears down the listener", async () => {
+    const controller = new AbortController()
+    let boundPort = -1
+    const result = await runHandoffWithOpener(
+      { identifier: { projectPath: "/x" }, projectName: "x", signal: controller.signal },
+      async (url) => {
+        // The loopback listener is already bound by the time openBrowser is
+        // invoked — abort here to simulate a mid-flight cancellation.
+        const { port } = parseHandoffUrl(url)
+        boundPort = port
+        controller.abort()
+        await new Promise((r) => setImmediate(r))
+      },
+    )
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toBe("aborted")
+    // Confirm the listener was actually torn down — the port is free again.
+    await new Promise<void>((resolve, reject) => {
+      const probe = createServer()
+      probe.once("error", reject)
+      probe.listen(boundPort, "127.0.0.1", () => {
+        probe.close(() => resolve())
+      })
+    })
   })
 })

@@ -16,6 +16,7 @@ import { Hash } from "../util/hash"
 import { Plugin } from "../plugin"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { ModelsDev } from "./models"
+import { ModelsCatalog } from "./models-catalog"
 import { Auth } from "../auth"
 import { Env } from "../env"
 // altimate_change start — bridge Effect InstanceRef into legacy Instance ALS for Provider.Service methods
@@ -1116,7 +1117,23 @@ export namespace Provider {
     using _ = log.time("state")
     const config = await Config.get()
     const modelsDev = await ModelsDev.get()
-    const database = mapValues(modelsDev, fromModelsDevProvider)
+    // altimate_change start — upstream_fix: `ModelsCatalog.isCatalog` only
+    // requires ONE entry in the map to be well-formed before the whole
+    // catalog is cached and trusted (see models-catalog.ts). A single
+    // malformed entry alongside otherwise-valid ones (e.g. a misbehaving
+    // proxy mixing garbage with real data) would reach `fromModelsDevProvider`
+    // unvalidated and crash `Provider.state()` for every provider, not just
+    // the bad one. Re-screen each entry here with the same predicate so a
+    // malformed one is dropped instead of taking down the whole map.
+    const validModelsDev = Object.fromEntries(
+      Object.entries(modelsDev).filter(([providerID, entry]) => {
+        if (ModelsCatalog.isCatalogEntry(entry)) return true
+        log.error("models.dev entry is malformed; skipping", { providerID })
+        return false
+      }),
+    ) as typeof modelsDev
+    const database = mapValues(validModelsDev, fromModelsDevProvider)
+    // altimate_change end
 
     const disabled = new Set(config.disabled_providers ?? [])
     const enabled = config.enabled_providers ? new Set(config.enabled_providers) : null

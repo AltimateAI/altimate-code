@@ -156,6 +156,9 @@ export type HandoffResult = HandoffSuccess | HandoffFailure
 export function resolveWorkspaceWebUrl(altimateUrl: string, tenant: string): URL | null {
   const override = process.env["ALTIMATE_WORKSPACE_WEB_URL"]
   if (override) {
+    log.warn("ALTIMATE_WORKSPACE_WEB_URL dev override is set; skipping tenant-scoped URL resolution", {
+      override,
+    })
     try {
       const u = new URL(override)
       if (u.protocol !== "http:" && u.protocol !== "https:") return null
@@ -526,12 +529,12 @@ export async function runHandoffWithOpener(
         target.searchParams.set("client", "altimate-code")
         target.searchParams.set("redirect", redirect)
         target.searchParams.set("state", state)
-        target.searchParams.set("project_name", input.projectName)
-        // Project path + remote go in the URL FRAGMENT, not the query, so
-        // they don't land in SaaS access logs, WAF logs, or browser history
-        // as query params. Same rationale as ``cli_context`` in altimate.ts
-        // (see altimate.ts:135-137). (m6)
+        // project_name, project path, and remote go in the URL FRAGMENT, not
+        // the query, so they don't land in SaaS access logs, WAF logs, or
+        // browser history as query params. Same rationale as ``cli_context``
+        // in altimate.ts (see altimate.ts:135-137). (m6)
         const fragment = new URLSearchParams()
+        fragment.set("project_name", input.projectName)
         if (input.identifier.repoRemote) fragment.set("project_remote", input.identifier.repoRemote)
         if (input.identifier.projectPath) fragment.set("project_path", input.identifier.projectPath)
         if (cliContext) fragment.set("cli_context", cliContext)

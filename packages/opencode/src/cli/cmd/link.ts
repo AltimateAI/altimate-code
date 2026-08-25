@@ -214,7 +214,7 @@ async function runBrowserHandoff(
   directory: string,
 ): Promise<void> {
   const spin = prompts.spinner()
-  spin.start("Waiting for browser approval...")
+  spin.start("Waiting for browser approval (up to 15 min)...")
   const result: HandoffResult = await openWorkspaceBrowserHandoff({ identifier, projectName })
   if (!result.ok) {
     spin.stop(handoffFailureMessage(result), 1)
@@ -262,6 +262,7 @@ async function runBrowserHandoff(
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
     bindSpin.stop(`Linked to "${res.binding.datamate_name}".`)
+    prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
     prompts.outro("Done.")
@@ -387,6 +388,7 @@ async function createThenBindOrRebind(
     projectPath: created.binding.project_path,
     linkedAt: Date.now(),
   }, { awaitBackfill: true })
+  prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
   prompts.log.info(`Manage it at: ${created.manage_url}`)
   // Guard against a server that hands back a non-http(s) manage_url — ``open``
   // delegates to the OS handler, so a rogue value could launch an unrelated
@@ -511,6 +513,7 @@ async function bindOrRebind(
         ? `Re-linked to "${res.binding.datamate_name}".`
         : `Linked to "${res.binding.datamate_name}".`,
     )
+    prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
     prompts.outro("Done.")
