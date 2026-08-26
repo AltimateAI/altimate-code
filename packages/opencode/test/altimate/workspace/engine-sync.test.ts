@@ -19,7 +19,10 @@ import {
   trackedSessionsForTests,
   trackedChainsForTests,
   settledOutcome,
+  attributableEngine,
+  installWouldHelp,
   type LocalMcpConfig,
+  type Outcome,
 } from "../../../src/altimate/workspace/engine-sync"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 import type { ExistingEntry } from "../../../src/altimate/workspace/engine-sync"
@@ -1587,5 +1590,64 @@ describe("INVARIANT — a disabled entry serves nothing", () => {
     expect(await ensure("s1")).toEqual({ kind: "superseded" })
     expect(h.added, "installed an engine for a workspace the project had already left").toHaveLength(0)
     expect(h.persisted, "pinned a workspace the project had already left").toHaveLength(0)
+  })
+})
+
+describe("INVARIANT — every outcome answers both consumer questions deliberately", () => {
+  // Typed by the union on purpose. Adding a state to `Outcome` fails to compile
+  // here until someone decides what it means for BOTH consumers — which is the
+  // point: the bug this guards against is not a wrong answer, it is a state
+  // acquiring an answer nobody chose.
+  const EXPECTED: Record<Outcome["kind"], { serving: boolean; installHelps: boolean }> = {
+    attached: { serving: true, installHelps: false },
+    reused: { serving: true, installHelps: false },
+    disabled: { serving: false, installHelps: false },
+    unbound: { serving: false, installHelps: false },
+    "engine-missing": { serving: false, installHelps: true },
+    "engine-too-old": { serving: false, installHelps: true },
+    "connect-failed": { serving: false, installHelps: false },
+    "entry-disabled": { serving: false, installHelps: false },
+    superseded: { serving: false, installHelps: false },
+  }
+
+  test("attribution and remedy are decided across the whole union, not a sample", () => {
+    for (const [kind, want] of Object.entries(EXPECTED)) {
+      const outcome = { kind } as Outcome
+      expect(attributableEngine(outcome), `attribution for ${kind}`).toBe(want.serving)
+      expect(installWouldHelp(outcome), `install remedy for ${kind}`).toBe(want.installHelps)
+    }
+  })
+
+  test("an unsettled attach answers neither question", () => {
+    // `undefined` means in-flight OR never attached. Both consumers fail open on
+    // it, so it must never be mistaken for a settled verdict.
+    expect(attributableEngine(undefined)).toBe(false)
+    expect(installWouldHelp(undefined)).toBe(false)
+  })
+
+  test("refusing to attach is not the same as being unable to obtain an engine", () => {
+    // The distinction the offer depends on: these refused, but an install fixes
+    // none of them — a user who switched their engine off would be offered the
+    // engine they already have.
+    expect(installWouldHelp({ kind: "entry-disabled" })).toBe(false)
+    expect(installWouldHelp({ kind: "connect-failed", error: "exit 1" })).toBe(false)
+    expect(installWouldHelp({ kind: "superseded" })).toBe(false)
+    // ...and these are exactly the two an install does fix.
+    expect(installWouldHelp({ kind: "engine-missing", declared: 0 })).toBe(true)
+    expect(installWouldHelp({ kind: "engine-too-old", found: "0.6.3" })).toBe(true)
+  })
+
+  test("a superseded attach is never attributed to the session that raced it", () => {
+    // The binding moved mid-flight, so what is connected belongs to a workspace
+    // this project has left. Attributing it would route queries there with its
+    // credentials.
+    expect(attributableEngine({ kind: "superseded" })).toBe(false)
+  })
+
+  test("attribution is keyed to the session, not to the last attach anywhere", async () => {
+    install({ statuses: [{ datamate: { status: "connected" } }], existing: null, which: null })
+    await ensure("s1")
+    expect(settledOutcome("s1")).toBeDefined()
+    expect(settledOutcome("s2"), "a session that never attached inherited another's verdict").toBeUndefined()
   })
 })

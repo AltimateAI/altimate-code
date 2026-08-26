@@ -974,9 +974,70 @@ function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE.has(outcome.kind)
 }
 
+/** What each outcome MEANS, stated once, as tables over the whole union.
+ *
+ * Two different consumers — tool precedence and the install offer — each need a
+ * yes/no answer about an outcome, and each had derived it independently: one by
+ * comparing kinds inline, the other by relying on where its call site sat in the
+ * control flow. Both are the same latent bug, which is that adding a state to
+ * this union silently gives it an answer nobody chose.
+ *
+ * A `Record` keyed by the union is the strongest available guard: a new variant
+ * fails to compile until every table names it, and a removed one fails too. That
+ * holds regardless of tsconfig strictness, which a `switch` with no default does
+ * not. The safe answer is `false` in both tables, so the compiler asks the
+ * question and the reviewer answers it deliberately. */
+const SERVING: Record<Outcome["kind"], boolean> = {
+  attached: true,
+  reused: true,
+  disabled: false,
+  unbound: false,
+  "engine-missing": false,
+  "engine-too-old": false,
+  "connect-failed": false,
+  "entry-disabled": false,
+  // The binding moved while this attach was in flight, so whatever is connected
+  // was established for a workspace this project has already left.
+  superseded: false,
+}
+
+/** Would installing the engine fix this outcome?
+ *
+ * NOT the same question as "did the attach refuse", and the two diverge exactly
+ * where it matters: a user who deliberately disabled their engine would be
+ * offered an install for an engine they already have and switched off, and a
+ * failed connection is not an absence. Only genuine unobtainability qualifies. */
+const INSTALL_HELPS: Record<Outcome["kind"], boolean> = {
+  "engine-missing": true,
+  "engine-too-old": true,
+  attached: false,
+  reused: false,
+  disabled: false,
+  unbound: false,
+  "connect-failed": false,
+  "entry-disabled": false,
+  superseded: false,
+}
+
+/** Is an engine attributable to THIS session serving it?
+ *
+ * The contract for tool precedence: the config pin is the naming signal and this
+ * is the runtime one, and both must agree before queries are routed into a
+ * workspace's credentials. `undefined` means not settled — in flight or never
+ * attached — and must stay distinguishable from a refusal, because the caller
+ * fails open on it. */
+export function attributableEngine(outcome: Outcome | undefined): boolean {
+  return !!outcome && SERVING[outcome.kind]
+}
+
+/** Would offering to install the engine be a remedy for this outcome? */
+export function installWouldHelp(outcome: Outcome | undefined): boolean {
+  return !!outcome && INSTALL_HELPS[outcome.kind]
+}
+
 /** Did this outcome leave an engine serving this session? */
 function wasServing(outcome: Outcome | undefined): boolean {
-  return outcome?.kind === "attached" || outcome?.kind === "reused"
+  return attributableEngine(outcome)
 }
 
 /** Is the engine we attached still connected?
