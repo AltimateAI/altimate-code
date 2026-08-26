@@ -568,4 +568,47 @@ description: A skill in the .opencode/skills directory.
       { git: true },
     ),
   )
+
+  // altimate_change start — coverage for Skill.refresh, added so a workspace bind
+  // can make newly synced skill bundles visible without restarting the session.
+  // The registry is cached per instance in two separate InstanceStates
+  // (`discovered` and `state`); dropping only one leaves a stale read, so this
+  // case fails unless refresh drops both.
+  it.live("refresh picks up a skill added after the registry was first read", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const write = (name: string) =>
+            Effect.promise(() =>
+              Bun.write(
+                path.join(dir, ".opencode", "skill", name, "SKILL.md"),
+                `---\nname: ${name}\ndescription: Skill ${name}.\n---\n\nBody.\n`,
+              ),
+            )
+
+          // Written before the first read so the config directory already exists
+          // and this case is about the skill cache alone, not config discovery.
+          yield* write("refresh-a")
+
+          const skill = yield* Skill.Service
+          const first = (yield* skill.all()).map((s) => s.name)
+          expect(first).toContain("refresh-a")
+          expect(first).not.toContain("refresh-b")
+
+          yield* write("refresh-b")
+
+          // Still invisible: proves the cache under test is real, so the
+          // assertion after refresh cannot pass by accident.
+          expect((yield* skill.all()).map((s) => s.name)).not.toContain("refresh-b")
+
+          yield* skill.refresh()
+
+          const after = (yield* skill.all()).map((s) => s.name)
+          expect(after).toContain("refresh-b")
+          expect(after).toContain("refresh-a")
+        }),
+      { git: true },
+    ),
+  )
+  // altimate_change end
 })

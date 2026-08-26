@@ -272,6 +272,29 @@ export namespace SessionPrompt {
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
 
+    // altimate_change start — pull the bound workspace's custom skills before the
+    // agent is resolved. `createUserMessage` -> `Agent.get` -> `Skill.dirs()` is
+    // what first materialises the skill registry, so syncing here makes skills
+    // synced this turn visible in the same turn. Awaited deliberately: a detached
+    // sync would race that read and land a turn late.
+    //
+    // Only invalidate when the snapshot actually changed — `Config.invalidate()`
+    // rereads config from disk for every instance, which is far too heavy to pay
+    // on every message. Config comes first because the skill scan asks it for the
+    // project config directories, and that list is itself cached: on the very
+    // first sync `.altimate-code/` may not have existed when Config last looked.
+    try {
+      const { syncSkills } = await import("../altimate/workspace/skill-sync")
+      const result = await syncSkills(Instance.directory)
+      if (result.changed) {
+        await Config.invalidate()
+        await import("../skill").then((m) => m.Skill.refresh())
+      }
+    } catch (err) {
+      log.warn("workspace skill sync failed", { err: String(err) })
+    }
+    // altimate_change end
+
     const message = await createUserMessage(input)
     await Session.touch(input.sessionID)
 

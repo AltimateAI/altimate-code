@@ -119,6 +119,12 @@ export interface Interface {
   readonly all: () => Effect.Effect<Info[]>
   readonly dirs: () => Effect.Effect<string[]>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+  // altimate_change start — drop the per-instance discovery/registry caches so the
+  // next read re-scans disk. Needed because skills can appear mid-session (a
+  // workspace bind syncs new bundles under the project config dir), and both
+  // caches below are populated once per instance and never otherwise refreshed.
+  readonly refresh: () => Effect.Effect<void>
+  // altimate_change end
 }
 
 const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
@@ -379,7 +385,16 @@ export const layer = Layer.effect(
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
     })
 
-    return Service.of({ get, require, all, dirs, available })
+    // altimate_change start — see Interface.refresh. `discovered` and `state` are
+    // separate InstanceStates: `state` closes over the discovery result at build
+    // time, so invalidating only `discovered` would leave a stale registry.
+    const refresh = Effect.fn("Skill.refresh")(function* () {
+      yield* InstanceState.invalidate(discovered)
+      yield* InstanceState.invalidate(state)
+    })
+    // altimate_change end
+
+    return Service.of({ get, require, all, dirs, available, refresh })
   }),
 )
 
@@ -443,6 +458,9 @@ export async function get(name: string) {
 }
 export async function available(agent?: Agent.Info) {
   return runSkill((svc) => svc.available(agent))
+}
+export async function refresh() {
+  return runSkill((svc) => svc.refresh())
 }
 // altimate_change end
 

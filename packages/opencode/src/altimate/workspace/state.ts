@@ -298,6 +298,20 @@ export async function recordApprovedBinding(
   // as a command handler returns (src/index.ts): a detached sweep is killed
   // mid-flight there, so a bind that reported success could seed nothing. The
   // TUI stays resident and leaves it detached so the dialog closes at once.
+  // Pull the workspace's custom skills. Deliberately ABOVE the ``alreadySeeded``
+  // return below: that marker tracks the one-shot memory seed, and skills are a
+  // different lifecycle — they must re-sync on every bind, including a rebind to
+  // a workspace this machine has already seeded memory for. Awaited on the same
+  // condition as the backfill, for the same reason: the CLI exits as soon as the
+  // handler returns, so a detached sync there would be killed mid-flight.
+  const skillsSynced = import("./skill-sync")
+    .then((m) => m.syncSkills(canonicalizeKey(directory)))
+    .catch((err) => {
+      log.warn("could not sync workspace skills", { err: String(err) })
+      return { changed: false }
+    })
+  if (opts?.awaitBackfill) await skillsSynced
+
   // Skip only when this exact binding has already been seeded successfully. A
   // warm after a failed or skipped seed must try again, or the blocks this
   // machine already holds never reach the workspace.
