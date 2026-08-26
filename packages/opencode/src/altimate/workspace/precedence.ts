@@ -203,21 +203,27 @@ const announced = new Map<string, { line: string; routed: boolean }>()
 const STOPPED_ROUTING =
   "Workspace integrations: nothing is served by the workspace any more; every connection now runs on the local drivers."
 
-async function announce(line: string): Promise<void> {
-  if (precedenceInternals.announce) return precedenceInternals.announce(line)
+/** Publishes the line and reports whether it actually reached the session. The caller
+ * needs the distinction: a line recorded as said but never delivered is never said
+ * again, because every later turn sees it as unchanged. */
+async function announce(line: string): Promise<boolean> {
   try {
-    await AppRuntime.runPromise(
-      EventV2Bridge.Service.use((events) =>
-        events.publish(TuiEvent.ToastShow, {
-          title: "Workspace integrations",
-          message: line,
-          variant: "info",
-          duration: 10000,
-        }),
-      ),
-    )
+    if (precedenceInternals.announce) await precedenceInternals.announce(line)
+    else
+      await AppRuntime.runPromise(
+        EventV2Bridge.Service.use((events) =>
+          events.publish(TuiEvent.ToastShow, {
+            title: "Workspace integrations",
+            message: line,
+            variant: "info",
+            duration: 10000,
+          }),
+        ),
+      )
+    return true
   } catch (err) {
     log.warn("could not report the workspace precedence inventory", { err: String(err) })
+    return false
   }
 }
 
@@ -302,8 +308,18 @@ export async function refresh(
   // Only a session that was actually routing can be told routing has stopped.
   const line = current || (previous?.routed ? STOPPED_ROUTING : "")
   if (line && previous?.line !== line) {
+    // Record before publishing so a second refresh landing in the same window does not
+    // send the line twice, then put the record back if delivery failed. The bridge can
+    // be briefly unavailable, and that failure is recoverable — but only if the line is
+    // not remembered as delivered, since a later turn with the same inventory would
+    // otherwise skip it as unchanged and the session would never hear it.
     announced.set(sessionID, { line, routed })
-    void announce(line).catch(() => {})
+    void announce(line).then((delivered) => {
+      if (delivered) return
+      if (announced.get(sessionID)?.line !== line) return
+      if (previous) announced.set(sessionID, previous)
+      else announced.delete(sessionID)
+    })
   }
   return result
 }

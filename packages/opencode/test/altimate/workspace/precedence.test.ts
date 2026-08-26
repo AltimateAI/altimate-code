@@ -552,6 +552,51 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(lines.some((l) => l.includes("any more"))).toBe(false)
   })
 
+  test("a line that failed to publish is said again, not remembered as said", async () => {
+    // The toast bridge can be briefly unavailable. Recording the line as announced
+    // regardless would suppress it permanently: every later turn with the same
+    // inventory sees it as unchanged and skips it, so the session is never told what
+    // its calls are doing.
+    const attempts: string[] = []
+    precedenceInternals.announce = async (line) => {
+      attempts.push(line)
+      throw new Error("event bridge unavailable")
+    }
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(attempts).toHaveLength(1)
+
+    // Same inventory, so nothing has changed — but nothing was delivered either.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(attempts).toHaveLength(2)
+
+    // Once it lands, it settles: the retry stops rather than repeating every turn.
+    precedenceInternals.announce = async (line) => void attempts.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(attempts).toHaveLength(3)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(attempts).toHaveLength(3)
+  })
+
+  test("a failed delivery does not corrupt what the session is believed to know", async () => {
+    // The restore has to put back the PREVIOUS record, not clear it: dropping it would
+    // lose whether the session had been routing, and a later stop would go unannounced.
+    const delivered: string[] = []
+    precedenceInternals.announce = async (line) => void delivered.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(delivered).toHaveLength(1)
+
+    // A failing announcement of a DIFFERENT line, which must not erase the routing state.
+    precedenceInternals.announce = async () => {
+      throw new Error("event bridge unavailable")
+    }
+    await refresh(SESSION, BIGQUERY_TOOLS)
+
+    // Routing stops. The session was routing, so it must still be told so.
+    precedenceInternals.announce = async (line) => void delivered.push(line)
+    await refresh(SESSION, {})
+    expect(delivered.some((l) => l.includes("any more"))).toBe(true)
+  })
+
   test("a session that never had routing is still told nothing", async () => {
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)
