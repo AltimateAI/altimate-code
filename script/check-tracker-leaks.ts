@@ -39,6 +39,11 @@ import { $ } from "bun"
 // not caught. Camel-cased inputs remain a known blind spot — accepted; the
 // realistic leak surface is branches, commits, comments, and doc text where
 // the reference is delimited by whitespace, punctuation, or a path separator.
+// Split so this rule's own definition doesn't match the scanner it defines
+// (same technique used for the Jira-key/Atlassian-host fixtures in
+// packages/opencode/test/skill/tracker-leak-check.test.ts).
+const INTERNAL_HOST = "oneal" + "timate.com"
+
 export const RULES = [
   {
     name: "Jira ticket key (AI-<digits>)",
@@ -52,8 +57,8 @@ export const RULES = [
     remediation: "Replace with the corresponding GitHub issue link or drop the reference.",
   },
   {
-    name: "Internal hostname (onealtimate.com)",
-    pattern: /\bonealtimate\.com\b/g,
+    name: `Internal hostname (${INTERNAL_HOST})`,
+    pattern: new RegExp(`\\b${INTERNAL_HOST.replace(/\./g, "\\.")}\\b`, "g"),
     remediation: "Replace with the corresponding GitHub issue link or drop the reference.",
   },
 ]
