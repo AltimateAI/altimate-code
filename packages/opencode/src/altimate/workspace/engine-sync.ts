@@ -939,6 +939,23 @@ function attachOnce(sessionID: string): Promise<Outcome> {
     })
 }
 
+/** The memoised outcome for a session, if its attach has already settled.
+ *
+ * A pure read: it creates no task, registers nothing, awaits nothing, and does
+ * not touch the memo or the project chain. `ensure()` is deliberately unsuitable
+ * for this — it builds a fresh task per call and awaits the binding before
+ * resolving, so a caller polling it would never see an already-settled promise
+ * AND would re-register the session entry once per turn, mutating bookkeeping it
+ * only meant to read. Worse, awaiting it is unbounded, which reintroduces the
+ * prompt hang the bounded `whenAttached` exists to prevent.
+ *
+ * Returns undefined while an attach is still in flight, and for a session that
+ * has never attached. Callers must treat undefined as "not known yet", never as
+ * "no engine". */
+export function settledOutcome(sessionID: string): Outcome | undefined {
+  return sessions.get(sessionID)?.outcome
+}
+
 /** Wait for a session's in-flight attach, capped.
  *
  * A turn resolves its tool list up front, before the per-turn block that starts

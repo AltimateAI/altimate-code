@@ -18,6 +18,7 @@ import {
   MAX_TRACKED_SESSIONS,
   trackedSessionsForTests,
   trackedChainsForTests,
+  settledOutcome,
   type LocalMcpConfig,
 } from "../../../src/altimate/workspace/engine-sync"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
@@ -1035,5 +1036,41 @@ describe("ensure — round 8", () => {
     install({ binding: null })
     await ensure("s1")
     expect(trackedChainsForTests()).toBe(0)
+  })
+})
+
+describe("settledOutcome — a read-only view for other modules", () => {
+  test("undefined before an attach exists, the outcome after it settles", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(settledOutcome("s1")).toBeUndefined() // never attached
+    const outcome = await ensure("s1")
+    expect(settledOutcome("s1")).toEqual(outcome)
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("undefined while the attach is still in flight — never a premature answer", async () => {
+    install({})
+    syncInternals.versionOf = () => new Promise<string | null>(() => {}) // never settles
+    void ensure("s1")
+    expect(settledOutcome("s1")).toBeUndefined()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(settledOutcome("s1")).toBeUndefined()
+  })
+
+  test("reading never mutates the memo or the project chain", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    await ensure("s1")
+    const sessionsBefore = trackedSessionsForTests()
+    const chainsBefore = trackedChainsForTests()
+    for (let i = 0; i < 5; i++) settledOutcome("s1")
+    expect(trackedSessionsForTests()).toBe(sessionsBefore)
+    expect(trackedChainsForTests()).toBe(chainsBefore)
+    expect(h.added).toHaveLength(1) // no attach was triggered by reading
   })
 })
