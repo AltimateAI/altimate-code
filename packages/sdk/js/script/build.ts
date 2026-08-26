@@ -49,13 +49,24 @@ await createClient({
 const sseTypesPath = "./src/v2/gen/client/types.gen.ts"
 const sseTypesFile = Bun.file(sseTypesPath)
 const sseTypesSource = await sseTypesFile.text()
-const sseTypesPatched = sseTypesSource.replace(
+// altimate_change start — upstream_fix: post-codegen patches must apply exactly once
+// String.prototype.replace with a string needle patches the FIRST match only:
+// a template that grows a second site would leave one arm unpatched with a
+// green build, and zero matches is a silent no-op. Assert exactly one.
+const patchOnce = (source: string, needle: string, replacement: string, where: string) => {
+  const matches = source.split(needle).length - 1
+  if (matches !== 1) {
+    throw new Error(`post-codegen patch expects exactly one site, found ${matches} in ${where}: ${needle.trim()}`)
+  }
+  return source.replace(needle, replacement)
+}
+const sseTypesPatched = patchOnce(
+  sseTypesSource,
   "=> Promise<ServerSentEventsResult<TData, TError>>",
   "=> Promise<ServerSentEventsResult<TData>>",
+  sseTypesPath,
 )
-if (sseTypesPatched === sseTypesSource) {
-  throw new Error(`SseFn patch did not apply; @hey-api/openapi-ts output may have changed (${sseTypesPath})`)
-}
+// altimate_change end
 await Bun.write(sseTypesPath, sseTypesPatched)
 
 // altimate_change start — upstream_fix: re-apply the JSON-parse guard after codegen
@@ -76,19 +87,20 @@ const jsonGuardBlock = [
   "          try {",
   "            data = text ? JSON.parse(text) : {}",
   "          } catch (cause) {",
+  "            // The body rides on `cause` only when it looks like markup (the proxy/gateway page this",
+  "            // guard exists for): util/error.ts serializes `cause` into logs, and a truncated or",
+  "            // malformed REAL JSON response must not put its first 200 characters there.",
+  "            const body = text.trimStart().startsWith(\"<\") ? text.slice(0, 200) : undefined",
   "            throw new Error(",
   "              \`Expected a JSON response from \${request.method} \${new URL(request.url).pathname} but the body was not JSON \` +",
   "                \`(HTTP \${response.status}, content-type \${response.headers.get(\"content-type\") ?? \"unset\"}). \` +",
   "                \`This is usually a proxy or gateway error page, not the API.\`,",
-  "              { cause: { parseError: cause, status: response.status, body: text.slice(0, 200) } },",
+  "              { cause: { parseError: cause, status: response.status, body } },",
   "            )",
   "          }",
   "          // altimate_change end",
 ].join("\n")
-const jsonGuardPatched = jsonGuardSource.replace(jsonGuardNeedle, jsonGuardBlock)
-if (jsonGuardPatched === jsonGuardSource) {
-  throw new Error(`json-guard patch did not apply; @hey-api/client-fetch output may have changed (${jsonGuardPath})`)
-}
+const jsonGuardPatched = patchOnce(jsonGuardSource, jsonGuardNeedle, jsonGuardBlock, jsonGuardPath)
 await Bun.write(jsonGuardPath, jsonGuardPatched)
 // altimate_change end
 

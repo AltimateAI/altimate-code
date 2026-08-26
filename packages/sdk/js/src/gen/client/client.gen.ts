@@ -128,11 +128,15 @@ export const createClient = (config: Config = {}): Client => {
           try {
             data = text ? JSON.parse(text) : {}
           } catch (cause) {
+            // The body rides on `cause` only when it looks like markup (the proxy/gateway page this
+            // guard exists for): util/error.ts serializes `cause` into logs, and a truncated or
+            // malformed REAL JSON response must not put its first 200 characters there.
+            const body = text.trimStart().startsWith("<") ? text.slice(0, 200) : undefined
             throw new Error(
               `Expected a JSON response from ${request.method} ${new URL(request.url).pathname} but the body was not JSON ` +
                 `(HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "unset"}). ` +
                 `This is usually a proxy or gateway error page, not the API.`,
-              { cause: { parseError: cause, status: response.status, body: text.slice(0, 200) } },
+              { cause: { parseError: cause, status: response.status, body } },
             )
           }
           break

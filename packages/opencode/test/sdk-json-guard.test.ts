@@ -4,6 +4,7 @@ import { fileURLToPath } from "url"
 import { createClient as createV2Client } from "../../sdk/js/src/v2/gen/client/client.gen"
 import { createClient as createV1Client } from "../../sdk/js/src/gen/client/client.gen"
 import { createOpencodeClient } from "../../sdk/js/src/v2/client"
+import { errorData } from "../src/util/error"
 
 // The JSON-parse guard lives in GENERATED code that `script/build.ts` wipes
 // (clean: true) and re-applies on every release build. These tests pin the
@@ -22,13 +23,15 @@ describe("sdk json guard — codegen drift", () => {
     // generator exports only ".", "./internal" and "./package.json")
     const root = path.dirname(require.resolve("@hey-api/openapi-ts/package.json", { paths: [sdk] }))
     const tpl = await Bun.file(path.join(root, "dist/clients/fetch/client.ts")).text()
-    expect(tpl).toContain("          data = text ? JSON.parse(text) : {};")
+    // exactly one site: build.ts patches the first string match only, and
+    // asserts the count — a second site in a future template must fail here
+    expect(tpl.split("          data = text ? JSON.parse(text) : {};").length - 1).toBe(1)
   })
 
   it("build.ts pins the needle literal and re-applies the guard", async () => {
     const build = await read("script/build.ts")
     expect(build).toContain('const jsonGuardNeedle = "          data = text ? JSON.parse(text) : {};"')
-    expect(build).toContain("json-guard patch did not apply")
+    expect(build).toContain("post-codegen patch expects exactly one site")
     expect(build).toContain("but the body was not JSON")
   })
 
@@ -53,6 +56,11 @@ describe("sdk json guard — live failure shapes", () => {
         const p = new URL(req.url).pathname
         if (p.endsWith("/lying-proxy"))
           return new Response(html, { status: 200, headers: { "content-type": "application/json" } })
+        if (p.endsWith("/truncated-json"))
+          return new Response('{"token":"SENTINEL_SECRET_VALUE","more":', {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
         if (p.endsWith("/plain-text"))
           return new Response("just text", { status: 200, headers: { "content-type": "text/plain" } })
         if (p.endsWith("/empty-chunked")) {
@@ -83,6 +91,22 @@ describe("sdk json guard — live failure shapes", () => {
       expect(err!.message).not.toContain("secret-project")
       expect(err!.message).toContain("content-type application/json")
       expect(err!.cause?.body).toContain("502 Bad Gateway")
+      // the markup case keeps its diagnostic through the repo's error serializer
+      expect(JSON.stringify(errorData(err))).toContain("502 Bad Gateway")
+    })
+
+    it(`${name}: a malformed REAL JSON body never reaches serialized error data`, async () => {
+      const client = make({ baseUrl: base })
+      const err = await client
+        .get({ url: "/truncated-json" })
+        .then(() => null)
+        .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+      expect(err).not.toBeNull()
+      expect(err!.message).toContain("but the body was not JSON")
+      expect(err!.cause?.body).toBeUndefined()
+      // util/error.ts serializes `cause` into structured logs and stderr
+      expect(JSON.stringify(errorData(err))).not.toContain("SENTINEL_SECRET_VALUE")
+      expect(JSON.stringify(err!.cause)).not.toContain("SENTINEL_SECRET_VALUE")
     })
   }
 
