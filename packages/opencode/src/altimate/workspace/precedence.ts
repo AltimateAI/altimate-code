@@ -182,7 +182,12 @@ async function attested(sessionID: string): Promise<boolean> {
 
 /** Sessions whose inventory line has already been reported. Precedence is re-derived
  * every turn, but the inventory is a once-per-session statement of what changed. */
-const announced = new Set<string>()
+/** The last inventory line announced per session, not merely whether one was. The
+ * first turn can announce "shadowing off" — an attach that outran its bounded wait
+ * looks identical to no engine — and precedence is deliberately re-derived every
+ * turn, so the truth can change under a session that has already been told. Comparing
+ * the line means a correction is delivered and an unchanged one stays quiet. */
+const announced = new Map<string, string>()
 
 async function announce(line: string): Promise<void> {
   if (precedenceInternals.announce) return precedenceInternals.announce(line)
@@ -257,12 +262,10 @@ export async function refresh(
   remember(sessionID, result)
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
-  if (!announced.has(sessionID)) {
-    const line = inventoryLine(result)
-    if (line) {
-      announced.add(sessionID)
-      void announce(line).catch(() => {})
-    }
+  const line = inventoryLine(result)
+  if (line && announced.get(sessionID) !== line) {
+    announced.set(sessionID, line)
+    void announce(line).catch(() => {})
   }
   return result
 }
@@ -542,10 +545,18 @@ export function annotate<T extends { metadata?: Record<string, unknown>; output?
  */
 export function describeNativeTool(toolID: string, base: string, precedence?: Precedence): string {
   if (!precedence?.enabled) return base
-  const shadowed = (CAPABILITIES as string[]).includes(toolID) || toolID === "warehouse_list"
-  if (!shadowed) return base
-  // Say nothing about redirection to a caller whose redirects will not happen.
-  if (![...precedence.shadowed.keys()].some((t) => servedFor(precedence, t).length > 0)) return base
+  const isCapability = (CAPABILITIES as string[]).includes(toolID)
+  if (!isCapability && toolID !== "warehouse_list") return base
+  // Claim redirection for THIS tool only if this tool's own capability is served
+  // somewhere. An integration that provides execute alone — bigquery, postgresql,
+  // databricks — leaves explain and inspect running locally, so telling those tools
+  // they redirect would steer the model away from the local tool that does work.
+  // `warehouse_list` describes the listing as a whole, so any served capability
+  // justifies its note.
+  const claims = isCapability
+    ? [...precedence.shadowed.keys()].some((t) => servedFor(precedence, t).includes(toolID as Capability))
+    : [...precedence.shadowed.keys()].some((t) => servedFor(precedence, t).length > 0)
+  if (!claims) return base
   return (
     `${base} Serves local connections; types served by workspace "${precedence.workspaceName}" ` +
     `redirect to that workspace's integration tools.`

@@ -474,6 +474,64 @@ describe("reporting never claims a routing that will not happen", () => {
   })
 })
 
+describe("descriptions are per capability, and corrections are delivered", () => {
+  test("an execute-only integration leaves explain and inspect described as local", async () => {
+    // BigQuery provides execute alone, so sql_explain and schema_inspect really do
+    // stay local. Telling them they redirect would steer the model away from the
+    // local tool that actually works.
+    const p = await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(describeNativeTool("sql_execute", "Run SQL.", p)).toContain("redirect")
+    expect(describeNativeTool("sql_explain", "Explain SQL.", p)).toBe("Explain SQL.")
+    expect(describeNativeTool("schema_inspect", "Inspect.", p)).toBe("Inspect.")
+  })
+
+  test("a full integration describes all three as redirecting", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    for (const id of ["sql_execute", "sql_explain", "schema_inspect"]) {
+      expect(describeNativeTool(id, "Base.", p)).toContain("redirect")
+    }
+  })
+
+  test("warehouse_list still notes the listing whenever anything is served", async () => {
+    const p = await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(describeNativeTool("warehouse_list", "List.", p)).toContain("redirect")
+  })
+
+  test("a corrected inventory is announced, not suppressed", async () => {
+    // The first turn can legitimately announce "shadowing off" — an attach that
+    // outran its bounded wait is indistinguishable from no engine — and precedence is
+    // re-derived every turn, so the session must be told when that changes.
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    precedenceInternals.attachOutcome = async () => undefined
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const afterFirst = lines.length
+
+    precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines.length).toBeGreaterThan(afterFirst)
+    expect(lines[lines.length - 1]).toContain("via workspace")
+  })
+
+  test("an unchanged inventory is not repeated every turn", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines).toHaveLength(1)
+  })
+
+  test("a shrinking engine re-announces the smaller inventory", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, { datamate_snowflake_execute_database_query: {} })
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain("explain/inspect stay local")
+  })
+})
+
 describe("default-target decisions — branch order", () => {
   // Reaching a dbt-sourced target through check() needs a real dbt project, so the
   // order of these branches is only checkable on the pure function. It is also the
