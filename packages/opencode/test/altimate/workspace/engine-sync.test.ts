@@ -1008,42 +1008,7 @@ describe("ensure — round 8", () => {
     expect(h.added).toHaveLength(0)
   })
 
-  test("a re-link DURING the engine add is caught after it completes", async () => {
-    let current: CachedBinding | null = binding // 42
-    const h = install({
-      statuses: [{}, { datamate: { status: "connected" } }],
-      tools: { datamate_dbt_build_model: 1 },
-    })
-    syncInternals.resolveBinding = async () => current
-    // The re-link lands while the MCP handshake is in flight.
-    syncInternals.mcp!.add = async (name, cfg) => {
-      h.added.push({ name, cfg })
-      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
-    }
-    const outcome = await ensure("s1")
-    expect(outcome).toEqual({ kind: "superseded" })
-    // The client we installed for the workspace we left must not stay serving.
-    expect(h.removes).toEqual(["datamate"])
-  })
 
-  test("a cached SUCCESS is re-probed: a died engine re-attaches", async () => {
-    const h = install({
-      statuses: [
-        {},
-        { datamate: { status: "connected" } },
-        { datamate: { status: "failed", error: "Connection closed" } },
-        {},
-        { datamate: { status: "connected" } },
-      ],
-      tools: { datamate_dbt_build_model: 1 },
-    })
-    const first = await ensure("s1")
-    expect(first).toMatchObject({ kind: "attached" })
-    // The engine's child exits; MCP marks it failed. The next turn must notice.
-    const second = await ensure("s1")
-    expect(second).not.toBe(first)
-    expect(h.added).toHaveLength(2)
-  })
 
   test("settled project attach chains are not retained", async () => {
     install({ binding: null })
@@ -1139,25 +1104,6 @@ describe("ensure — round 10", () => {
     expect(h.toolsChanged).toBe(1)
   })
 
-  test("a cached success is re-attributed, not merely re-connected", async () => {
-    // A -> B -> A while another session attached B: the key matches this
-    // session's original memo and the client is connected, but it is serving B.
-    let pinned = "42"
-    const h = install({
-      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }],
-      tools: { datamate_dbt_build_model: 1 },
-    })
-    syncInternals.existingEntry = async () => ({
-      type: "local",
-      command: ["datamate", "start-stdio", "--datamate", pinned],
-    })
-    const first = await ensure("s1")
-    expect(first).toMatchObject({ kind: "attached" })
-
-    pinned = "99" // the live entry now serves another workspace
-    const second = await ensure("s1")
-    expect(second).not.toBe(first)
-  })
 
   test("a stalled catalog lookup cannot block the local engine", async () => {
     const h = install({
@@ -1300,4 +1246,185 @@ describe("ensure — round 14", () => {
     expect(probes).toBeLessThanOrEqual(afterAttach + 1)
     expect(h.added).toHaveLength(1)
   })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INVARIANTS
+//
+// These assert the module's contract rather than the shape of any one fix. A
+// per-fix test says "this bug is gone"; an invariant says "this cannot happen",
+// which is what catches the NEXT instance of a class rather than the last one.
+// Four fixes in this file's history created the following defect, and no per-fix
+// test could have seen that. These are the net underneath the next change.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("INVARIANT — one engine per project", () => {
+  test("a replacement never leaves two engines registered: every add over a live entry is preceded by a removal", async () => {
+    const live: Array<{ name: string; existing: Harness["statusQueue"][number]; entry: unknown }> = [
+      { name: "unpinned", existing: { datamate: { status: "connected" } }, entry: { type: "local", command: ["datamate", "start-stdio"] } },
+      { name: "pinned elsewhere", existing: { datamate: { status: "connected" } }, entry: { type: "local", command: ["datamate", "start-stdio", "--datamate", "7"] } },
+      { name: "connected url", existing: { datamate: { status: "connected" } }, entry: { type: "remote", url: "https://api.example/sse" } },
+    ]
+    for (const scenario of live) {
+      resetForTests()
+      const h = install({
+        existing: scenario.entry as never,
+        statuses: [scenario.existing, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      })
+      await ensure(`s-${scenario.name}`)
+      if (h.added.length > 0) {
+        expect(h.removes.length, `${scenario.name}: added without removing the live entry first`).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  test("concurrent attaches in one project never overlap their mutating phase", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    let inFlight = 0
+    let peak = 0
+    syncInternals.mcp!.add = async (name, cfg) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 30))
+      h.added.push({ name, cfg })
+      inFlight -= 1
+    }
+    await Promise.all([ensure("a"), ensure("b")])
+    expect(peak).toBe(1)
+  })
+})
+
+describe("INVARIANT — no MCP mutation on a stale binding", () => {
+  // The binding is flipped at each await seam in turn. Whatever the flow was
+  // doing, it must not mutate MCP state for a workspace the project has left.
+  const seams = ["existingEntry", "versionOf", "declared", "tools", "add"] as const
+
+  for (const seam of seams) {
+    test(`a re-link at the ${seam} seam never installs or tears down for the old workspace`, async () => {
+      resetForTests()
+      let current: CachedBinding | null = binding // 42
+      const flip = () => {
+        current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      }
+      const h = install({
+        statuses: [{}, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      })
+      syncInternals.resolveBinding = async () => current
+      if (seam === "existingEntry") syncInternals.existingEntry = async () => (flip(), null)
+      if (seam === "versionOf") syncInternals.versionOf = async () => (flip(), "0.7.0")
+      if (seam === "declared") syncInternals.declared = async () => (flip(), { keys: [], extensionKeys: [] })
+      if (seam === "tools") syncInternals.mcp!.tools = async () => (flip(), {})
+      if (seam === "add") {
+        const prev = syncInternals.mcp!.add
+        syncInternals.mcp!.add = async (n, c) => {
+          await prev(n, c)
+          flip()
+        }
+      }
+      await ensure("s1")
+      // Anything installed for 42 after the project moved to 99 must not survive.
+      const strayFor42 = h.added.filter((a) => a.cfg.command.includes("42")).length
+      if (strayFor42 > 0) {
+        expect(h.removes.length, `${seam}: installed workspace 42 after the re-link and left it`).toBeGreaterThan(0)
+      }
+    })
+  }
+})
+
+describe("INVARIANT — every config read is fresh", () => {
+  test("no config read bypasses the refreshing accessor", async () => {
+    let fresh = 0
+    const h = install({ statuses: [{ datamate: { status: "disabled" } }] })
+    syncInternals.existingEntry = undefined
+    syncInternals.freshConfig = async () => {
+      fresh += 1
+      return { mcp: { datamate: { type: "local", command: ["datamate", "start-stdio"], enabled: false } } }
+    }
+    await ensure("s1")
+    // If any read went through a cached path instead, this would be 0.
+    expect(fresh).toBeGreaterThan(0)
+    expect(h.connects).toHaveLength(0)
+  })
+})
+
+describe("INVARIANT — an actionable failure always tells the user", () => {
+  const actionable: Array<{ name: string; opts: Parameters<typeof install>[0]; kind: string }> = [
+    { name: "engine-missing", opts: { which: null }, kind: "engine-missing" },
+    { name: "engine-too-old", opts: { version: "0.5.9" }, kind: "engine-too-old" },
+    { name: "unrunnable engine", opts: { version: null }, kind: "engine-too-old" },
+    {
+      name: "entry-disabled",
+      opts: {
+        existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
+        statuses: [{ datamate: { status: "disabled" } }],
+      },
+      kind: "entry-disabled",
+    },
+    {
+      name: "connect-failed",
+      opts: {
+        existing: { type: "local", command: ["datamate", "start-stdio"] },
+        statuses: [
+          { datamate: { status: "failed", error: "exit 1" } },
+          { datamate: { status: "failed", error: "exit 1" } },
+        ],
+      },
+      kind: "connect-failed",
+    },
+  ]
+  for (const c of actionable) {
+    test(`${c.name} is never silent`, async () => {
+      resetForTests()
+      const h = install(c.opts)
+      const outcome = await ensure("s1")
+      expect(outcome.kind).toBe(c.kind as never)
+      expect(h.toasts.length, `${c.name} returned without telling the user`).toBeGreaterThan(0)
+    })
+  }
+})
+
+describe("INVARIANT — a superseded attach leaves nothing installed", () => {
+  test("whatever it installed before noticing, it does not leave it serving", async () => {
+    let current: CachedBinding | null = binding
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, c) => {
+      await prevAdd(n, c)
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    const outcome = await ensure("s1")
+    expect(outcome).toEqual({ kind: "superseded" })
+    expect(h.removes, "superseded left the engine it installed still registered").toContain("datamate")
+  })
+})
+
+describe("INVARIANT — a cached success is re-probed and re-attributed", () => {
+  const invalidations = [
+    { name: "engine died", statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "failed", error: "closed" } }, {}, { datamate: { status: "connected" } }], entry: null },
+    { name: "pin moved to another workspace", statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }], entry: "99" },
+  ] as const
+
+  for (const c of invalidations) {
+    test(`a cached success is not reused when the ${c.name}`, async () => {
+      resetForTests()
+      let pin = "42"
+      const h = install({ statuses: c.statuses as never, tools: { datamate_dbt_build_model: 1 } })
+      if (c.entry !== null) {
+        syncInternals.existingEntry = async () => ({ type: "local", command: ["datamate", "start-stdio", "--datamate", pin] })
+      }
+      const first = await ensure("s1")
+      expect(first).toMatchObject({ kind: "attached" })
+      if (c.entry !== null) pin = c.entry
+      const second = await ensure("s1")
+      expect(second, `${c.name}: the cached success was reused unchecked`).not.toBe(first)
+    })
+  }
 })

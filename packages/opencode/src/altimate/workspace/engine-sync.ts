@@ -815,19 +815,6 @@ async function run(): Promise<Outcome> {
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
 
-  // `client.add` waits for the MCP handshake, which can run to the connection
-  // timeout — an unchecked window the pre-mutation guard cannot cover. A re-link
-  // inside it leaves us having just installed the workspace this session left,
-  // and serialization means we installed it FIRST, so the replacement queues
-  // behind us while the waiting turn's budget drains. Undo it rather than return.
-  if (!(await stillCurrent())) {
-    log.info("binding changed during the engine handshake; removing what we just installed", { workspaceId })
-    await client.remove(DATAMATE_KEY).catch((err) => {
-      log.warn("could not remove the superseded engine", { err: String(err) })
-    })
-    return { kind: "superseded" }
-  }
-
   // Rule 4 — a failed local engine is reported, never routed around.
   const after = (await client.status())[DATAMATE_KEY]
   if (after?.status !== "connected") {
@@ -840,14 +827,30 @@ async function run(): Promise<Outcome> {
     return { kind: "connect-failed", error }
   }
 
-  // The add succeeded and is ours: announce it, so a turn that had already given
-  // up waiting still learns the tools arrived.
-  await announceToolsChanged()
-
   // Rule 5 — report declared-but-missing.
   const present = engineToolKeys(await client.tools())
   const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
   const available = present.size
+  // ONE guard, placed after every await that follows the install — the handshake
+  // AND the tool listing. Both are windows in which a re-link can land, and the
+  // earlier version guarded only the first, so a flip during the tool read left
+  // the previous workspace installed and reported as attached.
+  //
+  // Late rather than early on purpose: the check is only meaningful at the last
+  // moment before we announce and answer, because everything before that is
+  // still revocable.
+  if (!(await stillCurrent())) {
+    log.info("binding changed before the attach could be reported; removing what we installed", { workspaceId })
+    await client.remove(DATAMATE_KEY).catch((err) => {
+      log.warn("could not remove the superseded engine", { err: String(err) })
+    })
+    return { kind: "superseded" }
+  }
+
+  // Ours, and staying: announce it so a turn that had already given up waiting
+  // still learns the tools arrived.
+  await announceToolsChanged()
+
   await notify({
     title: `Workspace "${binding.datamateName}" connected`,
     message:
