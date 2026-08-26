@@ -131,7 +131,11 @@ export const createClient = (config: Config = {}): Client => {
             // Only the page <title> rides on `cause` ("502 Bad Gateway", "Access Denied", "Sign in" — the
             // diagnostic part of a proxy/gateway/CDN page): util/error.ts serializes `cause` into logs,
             // and a page body can echo the request URL (query included) or be a malformed real response.
-            const body = text.trimStart().startsWith("<") ? /<title>([^<]{1,200})<\/title>/i.exec(text)?.[1] : undefined
+            // A title that echoes the request target (any `/ ? = %`) is dropped too.
+            const title = text.trimStart().startsWith("<")
+              ? /<title>([^<]{1,200})<\/title>/i.exec(text)?.[1]
+              : undefined
+            const body = title && !/[\/?=%]/.test(title) ? title : undefined
             throw new Error(
               `Expected a JSON response from ${request.method} ${new URL(request.url).pathname} but the body was not JSON ` +
                 `(HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "unset"}). ` +

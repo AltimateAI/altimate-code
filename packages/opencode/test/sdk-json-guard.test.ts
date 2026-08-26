@@ -62,6 +62,17 @@ describe("sdk json guard — live failure shapes", () => {
             status: 200,
             headers: { "content-type": "application/json" },
           })
+        if (p.endsWith("/echo-title"))
+          // a CDN/proxy page that renders the request target in its <title>
+          return new Response(`<!DOCTYPE html><html><head><title>Page not found at ${new URL(req.url).pathname}${new URL(req.url).search}</title></head><body>404</body></html>`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        if (p.endsWith("/echo-title-encoded"))
+          return new Response(`<!DOCTYPE html><html><head><title>Not found: ${encodeURIComponent(new URL(req.url).pathname + new URL(req.url).search)}</title></head><body>404</body></html>`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
         if (p.endsWith("/truncated-json"))
           return new Response('{"token":"SENTINEL_SECRET_VALUE","more":', {
             status: 200,
@@ -112,6 +123,20 @@ describe("sdk json guard — live failure shapes", () => {
       expect(err!.cause?.body).toBeUndefined()
       expect(JSON.stringify(errorData(err))).not.toContain("secret-project")
       expect(JSON.stringify(errorData(err))).not.toContain("directory=")
+    })
+
+    it(`${name}: a <title> that echoes the request target is dropped, raw or percent-encoded`, async () => {
+      const client = make({ baseUrl: base })
+      for (const url of ["/echo-title", "/echo-title-encoded"]) {
+        const err = await client
+          .get({ url, query: { directory: "/Users/jdoe/secret-project" } })
+          .then(() => null)
+          .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+        expect(err).not.toBeNull()
+        expect(err!.cause?.body).toBeUndefined()
+        expect(JSON.stringify(errorData(err))).not.toContain("secret-project")
+        expect(JSON.stringify(errorData(err))).not.toContain("directory")
+      }
     })
 
     it(`${name}: a malformed REAL JSON body never reaches serialized error data`, async () => {
