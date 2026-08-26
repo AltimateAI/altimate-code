@@ -47,7 +47,7 @@ describe("sdk json guard — codegen drift", () => {
 describe("sdk json guard — live failure shapes", () => {
   let server: ReturnType<typeof Bun.serve>
   let base: string
-  const html = "<!DOCTYPE html><html><body>502 Bad Gateway</body></html>"
+  const html = "<!DOCTYPE html><html><head><title>502 Bad Gateway</title></head><body>502 Bad Gateway</body></html>"
 
   beforeAll(() => {
     server = Bun.serve({
@@ -56,6 +56,12 @@ describe("sdk json guard — live failure shapes", () => {
         const p = new URL(req.url).pathname
         if (p.endsWith("/lying-proxy"))
           return new Response(html, { status: 200, headers: { "content-type": "application/json" } })
+        if (p.endsWith("/echo-page"))
+          // an Express-style page echoes the request target, query included
+          return new Response(`<!DOCTYPE html><html><body><pre>Cannot GET ${new URL(req.url).pathname}${new URL(req.url).search}</pre></body></html>`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
         if (p.endsWith("/truncated-json"))
           return new Response('{"token":"SENTINEL_SECRET_VALUE","more":', {
             status: 200,
@@ -93,6 +99,19 @@ describe("sdk json guard — live failure shapes", () => {
       expect(err!.cause?.body).toContain("502 Bad Gateway")
       // the markup case keeps its diagnostic through the repo's error serializer
       expect(JSON.stringify(errorData(err))).toContain("502 Bad Gateway")
+    })
+
+    it(`${name}: a page that echoes the request URL contributes nothing but its title`, async () => {
+      const client = make({ baseUrl: base })
+      const err = await client
+        .get({ url: "/echo-page", query: { directory: "/Users/jdoe/secret-project" } })
+        .then(() => null)
+        .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+      expect(err).not.toBeNull()
+      expect(err!.message).toContain("but the body was not JSON")
+      expect(err!.cause?.body).toBeUndefined()
+      expect(JSON.stringify(errorData(err))).not.toContain("secret-project")
+      expect(JSON.stringify(errorData(err))).not.toContain("directory=")
     })
 
     it(`${name}: a malformed REAL JSON body never reaches serialized error data`, async () => {
