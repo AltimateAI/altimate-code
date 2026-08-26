@@ -127,9 +127,14 @@ jobs:
           # post-codegen patch targets is asserted here. openapi.json must
           # exist afterwards: a codegen failure would leave the tree untouched
           # and turn this into a false pass.
+          # The build mutates the checkout (regenerated gen tree, openapi.json,
+          # dist); restore it afterwards so the test steps below see the
+          # committed tree, whatever this check concludes.
           bun script/build.ts || echo "::warning::build.ts exited non-zero (see log); codegen+patch output is asserted below"
           test -s openapi.json
-          git diff --exit-code -- src/v2/gen/client/client.gen.ts
+          rc=0; git diff --exit-code -- src/v2/gen/client/client.gen.ts || rc=$?
+          git checkout -- src/v2/gen; rm -f openapi.json
+          exit $rc
 
       - name: Run tests
         working-directory: packages/opencode
