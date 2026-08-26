@@ -84,17 +84,45 @@ describe("sql_execute — the hard deny outranks the redirect", () => {
     expect(result.metadata.redirected).toBe(true)
   })
 
-  test("a write is redirected rather than prompted for approval", async () => {
-    // Approving a write and then redirecting it asks the user to authorise something
-    // that never runs, so precedence still comes before the permission ask.
+  test("a write still asks for approval before it is redirected", async () => {
+    // The prompt is not wasted: the write still happens, through the engine. An engine
+    // tool key is matched by the builder's `"*": "allow"` rule, while `sql_execute_write`
+    // is "ask" — so redirecting first would let the same statement reach the warehouse
+    // without the confirmation it needed a moment earlier.
     const tool = await initTool(SqlExecuteTool)
     const asked: any[] = []
     const result: any = await tool.execute(
       { query: "insert into t values (1)", warehouse: "shadowed_snow", limit: 10 },
       { ...ctx, ask: async (req: any) => void asked.push(req) },
     )
+    expect(asked.map((r) => r.permission)).toEqual(["sql_execute_write"])
     expect(result.metadata.redirected).toBe(true)
+  })
+
+  test("a denied write is never redirected", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    await expect(
+      tool.execute(
+        { query: "delete from orders", warehouse: "shadowed_snow", limit: 10 },
+        {
+          ...ctx,
+          ask: async () => {
+            throw new Error("denied by the user")
+          },
+        },
+      ),
+    ).rejects.toThrow(/denied by the user/)
+  })
+
+  test("a read is redirected without any prompt", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const asked: any[] = []
+    const result: any = await tool.execute(
+      { query: "select 1", warehouse: "shadowed_snow", limit: 10 },
+      { ...ctx, ask: async (req: any) => void asked.push(req) },
+    )
     expect(asked).toHaveLength(0)
+    expect(result.metadata.redirected).toBe(true)
   })
 })
 

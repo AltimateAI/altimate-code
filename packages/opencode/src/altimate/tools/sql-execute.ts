@@ -31,19 +31,6 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     if (blocked) {
       throw new Error("DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.")
     }
-    // altimate_change end
-
-    // altimate_change start — workspace precedence.
-    // Strictly AFTER the hard deny above and strictly BEFORE the write prompt below.
-    // The hard deny says "cannot be overridden", and the engine tools apply no such
-    // list — redirecting a blocked statement would hand the model a way around it.
-    // The write prompt is the opposite: approving a write and then redirecting it
-    // asks the user to authorise something that never runs.
-    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
-    if (precedence.redirect) return precedence.redirect
-    // altimate_change end
-
-    // altimate_change start - SQL write access control
     if (queryType === "write") {
       await ctx.ask({
         permission: "sql_execute_write",
@@ -52,6 +39,19 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         metadata: { queryType },
       })
     }
+    // altimate_change end
+
+    // altimate_change start — workspace precedence.
+    // Last, after BOTH native safety checks. A redirect returns early, so anything
+    // above it stops running — and neither check has an equivalent on the other side:
+    // the engine's execution tools apply no hard-deny list, and an engine tool key is
+    // matched by the builder's `"*": "allow"` rule while `sql_execute_write` is "ask".
+    // Redirecting first would let a write reach the warehouse without the confirmation
+    // the same statement needed a moment ago. Approving and then redirecting is not a
+    // wasted prompt: the write still happens, through the engine, and what the user
+    // authorised is the write — not which connection carries it.
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
     // altimate_change end
 
     // altimate_change start — shadow-mode pre-execution SQL validation
