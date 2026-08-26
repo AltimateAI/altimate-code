@@ -36,8 +36,9 @@
 // Precedence is a pure function of the materialised set, so it is re-derived every
 // turn from the live MCP tool map (`refresh`) rather than cached at attach. That is
 // what keeps it correct when an engine's tool set changes under us — `MCP.tools()` is
-// cache-invalidated by the `tools/list_changed` notification, and `resolveTools` runs
-// once per turn.
+// re-read each turn by `resolveTools`. A `tools/list_changed` notification invalidates
+// that cache sooner, so it makes the next re-derivation see the change earlier — but the
+// per-turn re-derivation is the mechanism, not the notification.
 import { Config } from "@/config/config"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
