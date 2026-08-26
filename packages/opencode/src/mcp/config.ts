@@ -104,24 +104,33 @@ export async function listMcpInConfig(configPath: string): Promise<string[]> {
 }
 
 /** Find all config files that exist (project + global) */
-export async function findAllConfigPaths(projectDir: string, globalDir: string): Promise<string[]> {
+export async function findProjectConfigPaths(projectDir: string): Promise<string[]> {
   const paths: string[] = []
-  for (const dir of [projectDir, globalDir]) {
-    for (const name of dir === globalDir ? GLOBAL_CONFIG_FILENAMES : CONFIG_FILENAMES) {
-      const p = path.join(dir, name)
+  for (const name of CONFIG_FILENAMES) {
+    const p = path.join(projectDir, name)
+    if (await Filesystem.exists(p)) paths.push(p)
+  }
+  // Also check .altimate-code and .opencode subdirectories
+  for (const subdir of [".altimate-code", ".opencode"]) {
+    for (const name of CONFIG_FILENAMES) {
+      const p = path.join(projectDir, subdir, name)
       if (await Filesystem.exists(p)) paths.push(p)
-    }
-    // Also check .altimate-code and .opencode subdirectories for project
-    if (dir === projectDir) {
-      for (const subdir of [".altimate-code", ".opencode"]) {
-        for (const name of CONFIG_FILENAMES) {
-          const p = path.join(dir, subdir, name)
-          if (await Filesystem.exists(p)) paths.push(p)
-        }
-      }
     }
   }
   return paths
+}
+
+export async function findGlobalConfigPaths(globalDir: string): Promise<string[]> {
+  const paths: string[] = []
+  for (const name of GLOBAL_CONFIG_FILENAMES) {
+    const p = path.join(globalDir, name)
+    if (await Filesystem.exists(p)) paths.push(p)
+  }
+  return paths
+}
+
+export async function findAllConfigPaths(projectDir: string, globalDir: string): Promise<string[]> {
+  return [...(await findProjectConfigPaths(projectDir)), ...(await findGlobalConfigPaths(globalDir))]
 }
 
 /**

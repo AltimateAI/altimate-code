@@ -13,7 +13,7 @@ import {
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
-import { DATAMATE_KEY, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
+import { DATAMATE_KEY, DATAMATE_PROVENANCE, readDatamateTransportFromIde, TRANSPORT_IDENTITY_FIELDS } from "../datamate-transport"
 
 const log = Log.create({ service: "datamate" })
 
@@ -229,6 +229,11 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
       // mcp.json sync uses it to recognize the entry as current instead of
       // rewriting it on the next boot.
       const updatedAtField = transport.updatedAt ? { updatedAt: transport.updatedAt } : {}
+      // Provenance (disk-only): marks the entry as derived from this exact IDE
+      // file. The boot-time heal rewrites a GLOBAL entry only when this stamp
+      // matches, so an explicit `add` is what authorizes future auto-repair of
+      // a global-scope entry.
+      const provenanceFields = { managedBy: DATAMATE_PROVENANCE, sourceMcpJson: transport.source }
       const existingNames = await listMcpInConfig(configPath)
       const staleEntries = existingNames.filter(
         (n) => n !== DATAMATE_KEY && n.startsWith("datamate-"),
@@ -286,6 +291,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           ...mcpConfig,
           enabled: true,
           ...updatedAtField,
+          ...provenanceFields,
         }
         await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
         // The live client must get the same merged entry as the disk write — the
@@ -302,6 +308,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           ...mcpConfig,
           enabled: true,
           ...updatedAtField,
+          ...provenanceFields,
         }
         await addMcpToConfig(DATAMATE_KEY, diskEntry as Parameters<typeof addMcpToConfig>[1], configPath)
         await MCP.add(DATAMATE_KEY, mcpConfig)

@@ -1,7 +1,7 @@
 import { readFile } from "fs/promises"
 import path from "path"
 import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
-import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk, findAllConfigPaths } from "../mcp/config"
+import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk, findProjectConfigPaths, findGlobalConfigPaths } from "../mcp/config"
 import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "@opencode-ai/core/util/glob"
@@ -21,37 +21,74 @@ const MCP_SERVERS_KEYS = ["servers", "mcpServers"] as const
 
 
 export type DatamateTransport =
-  | { type: "remote"; url: string; updatedAt?: string }
-  | { type: "local"; command: string[]; environment?: Record<string, string>; updatedAt?: string }
+  | { type: "remote"; url: string; updatedAt?: string; source: string }
+  | { type: "local"; command: string[]; environment?: Record<string, string>; updatedAt?: string; source: string }
 
 /**
- * Env block to carry over when spawning the datamate CLI from an IDE mcp.json
- * entry, minus ALTIMATE_EXTENSION_RPC (the extension-private RPC socket path,
- * which goes stale whenever the extension restarts and is re-resolved by the
- * CLI itself). ELECTRON_RUN_AS_NODE must survive: on desktop editors the
- * entry's command is the editor's Electron binary, and without the flag the
- * spawn boots the editor GUI — which opens datamate-cli.js as a document in
- * the IDE — instead of running it as a Node script.
+ * Provenance stamp on entries altimate-code derived from an IDE mcp.json.
+ * `managedBy` marks the entry as ours; `sourceMcpJson` binds it to the exact
+ * file it came from. The boot-time heal only rewrites a GLOBAL entry that
+ * carries a matching stamp — a hand-added or legacy global entry is never
+ * silently replaced from a project-local file.
  */
+export const DATAMATE_PROVENANCE = "altimate-ide"
+
+/**
+ * The only mcp.json locations the extension writes (`.${ide}/mcp.json`, ide ∈
+ * vscode|cursor). Anything else in a checkout is not an extension-authored
+ * entry and must not become a transport source.
+ */
+const IDE_MCP_JSON_PATTERNS = ["**/.vscode/mcp.json", "**/.cursor/mcp.json"]
+
+/**
+ * Env keys carried from an IDE entry into the spawn. ELECTRON_RUN_AS_NODE is
+ * the one the fix exists for: on desktop editors the entry's command is the
+ * editor's Electron binary, and without the flag the spawn boots the editor
+ * GUI — which opens datamate-cli.js as a document — instead of running it.
+ * Nothing else is taken: the carried env is spread over altimate-code's own
+ * process env at spawn, so a denylist would let a repo-local file override
+ * NODE_OPTIONS/LD_PRELOAD/PATH for the child.
+ */
+const SPAWN_ENV_ALLOWLIST: ReadonlySet<string> = new Set(["ELECTRON_RUN_AS_NODE"])
+
 function extractSpawnEnvironment(raw: unknown): Record<string, string> | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (key === "ALTIMATE_EXTENSION_RPC") continue
+    if (!SPAWN_ENV_ALLOWLIST.has(key)) continue
     if (typeof value === "string") env[key] = value
   }
   return Object.keys(env).length > 0 ? env : undefined
 }
 
 /**
- * A missing or empty datamate entry. The extension blanks `datamate` to {}
- * (not delete) in non-active-IDE mcp.json files, so an empty object is a
- * tombstone, not a transport — both mcp.json scans must skip it, or the
- * active IDE's real entry is shadowed by whichever file sorts first
- * (`.cursor/` sorts before `.vscode/`).
+ * Validate an IDE mcp.json `datamate` entry into a transport, or null when it
+ * is not one: missing, a blanked {} tombstone (the extension blanks the entry
+ * in non-active-IDE files), or incomplete (no usable `url` for remote, no
+ * usable `command` for stdio). Incomplete entries must not win source
+ * selection — an entry like `{type:"stdio", updatedAt:…}` would otherwise be
+ * persisted as `{type:"remote"}` with no url and break config loading.
  */
-function isBlankDatamateEntry(entry: unknown): boolean {
-  return !entry || typeof entry !== "object" || Object.keys(entry as object).length === 0
+export function parseIdeTransport(entry: unknown, source: string): DatamateTransport | null {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null
+  const e = entry as Record<string, unknown>
+  if (Object.keys(e).length === 0) return null
+  const updatedAt = typeof e["updatedAt"] === "string" && e["updatedAt"] ? { updatedAt: e["updatedAt"] } : {}
+  if (typeof e["url"] === "string" && e["url"].length > 0) {
+    return { type: "remote", url: e["url"], ...updatedAt, source }
+  }
+  if (typeof e["command"] === "string" && e["command"].length > 0) {
+    const args = Array.isArray(e["args"]) ? e["args"].filter((a): a is string => typeof a === "string") : []
+    const environment = extractSpawnEnvironment(e["env"])
+    return {
+      type: "local",
+      command: [e["command"], ...args],
+      ...(environment ? { environment } : {}),
+      ...updatedAt,
+      source,
+    }
+  }
+  return null
 }
 
 /**
@@ -64,10 +101,20 @@ function isBlankDatamateEntry(entry: unknown): boolean {
  */
 export async function resolveDatamateSyncRoot(directory: string): Promise<string> {
   try {
-    const matches = Filesystem.up({ targets: [".git"], start: directory })
+    // Bounded at the home directory: an unbounded walk reaches `/`, and a home
+    // under dotfiles management would otherwise become the "project" — its
+    // whole tree scanned for a datamate entry from any unrelated project.
+    // `stop` is inclusive, so a `.git` AT home still matches and is rejected.
+    // `.git` may be a file (worktrees, submodules); the nearest one wins,
+    // matching how Project.fromDirectory derives the sandbox.
+    const home = Global.Path.home
+    const matches = Filesystem.up({ targets: [".git"], start: directory, stop: home })
     const dotgit = await matches.next().then((x) => x.value)
     await matches.return()
-    if (dotgit) return path.dirname(dotgit)
+    if (dotgit) {
+      const root = path.dirname(dotgit)
+      if (root !== home) return root
+    }
   } catch {
     // fall through to the directory itself
   }
@@ -87,6 +134,8 @@ export const TRANSPORT_IDENTITY_FIELDS: ReadonlySet<string> = new Set([
   "environment",
   "url",
   "updatedAt",
+  "managedBy",
+  "sourceMcpJson",
 ])
 
 /**
@@ -111,11 +160,10 @@ function extractServersMap(
  */
 async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
   try {
-    const paths = await Glob.scan("**/mcp.json", {
-      cwd: projectRootDir,
-      absolute: true,
-      dot: true,
-    })
+    const paths: string[] = []
+    for (const pattern of IDE_MCP_JSON_PATTERNS) {
+      paths.push(...(await Glob.scan(pattern, { cwd: projectRootDir, absolute: true, dot: true })))
+    }
     // Exclude build/dependency/output trees. command + args from a discovered
     // mcp.json are passed to StdioClientTransport, so keep the scan to source the
     // user actually authors and out of vendored/generated directories. The new core
@@ -154,54 +202,18 @@ async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
 export async function readDatamateTransportFromIde(
   projectRootDir: string,
 ): Promise<DatamateTransport | null> {
-  const mcpJsonPaths = await findAllMcpJsonFiles(projectRootDir)
-
-  for (const mcpJsonPath of mcpJsonPaths) {
+  for (const mcpJsonPath of await findAllMcpJsonFiles(projectRootDir)) {
     const relPath = path.relative(projectRootDir, mcpJsonPath)
     try {
-      const text = await readFile(mcpJsonPath, "utf-8")
-      const parsed = JSON.parse(text) as Record<string, unknown>
-      const serversMap = extractServersMap(parsed)
-      const entry = serversMap[DATAMATE_KEY]
-      if (isBlankDatamateEntry(entry)) continue
-
-      log.info("readDatamateTransportFromIde: found entry", {
-        source: relPath,
-        type: entry["type"] ?? "(no type)",
-      })
-
-      if (typeof entry["url"] === "string") {
-        // updatedAt carried for parity with the local branch: the boot-time sync
-        // uses it as its change signal regardless of transport type, and an entry
-        // persisted without it gets one redundant rewrite on the next boot.
-        const updatedAt = typeof entry["updatedAt"] === "string" ? entry["updatedAt"] : undefined
-        return { type: "remote", url: entry["url"], ...(updatedAt ? { updatedAt } : {}) }
-      }
-
-      // stdio entry — reuse the exact command + args + env the extension
-      // registered. Dropping env here regresses desktop editors: the entry's
-      // command is the editor's Electron binary and only runs as Node when
-      // ELECTRON_RUN_AS_NODE=1 is passed through.
-      const cmd = typeof entry["command"] === "string" ? entry["command"] : undefined
-      const args = Array.isArray(entry["args"]) ? (entry["args"] as string[]) : []
-      if (cmd) {
-        const environment = extractSpawnEnvironment(entry["env"])
-        const updatedAt = typeof entry["updatedAt"] === "string" ? entry["updatedAt"] : undefined
-        return {
-          type: "local",
-          command: [cmd, ...args],
-          ...(environment ? { environment } : {}),
-          ...(updatedAt ? { updatedAt } : {}),
-        }
-      }
-
-      // Entry exists but has no usable command — treat as local marker
-      return { type: "local", command: [DATAMATE_KEY, "start-stdio"] }
+      const parsed = JSON.parse(await readFile(mcpJsonPath, "utf-8")) as Record<string, unknown>
+      const transport = parseIdeTransport(extractServersMap(parsed)[DATAMATE_KEY], mcpJsonPath)
+      if (!transport) continue
+      log.info("readDatamateTransportFromIde: found entry", { source: relPath, type: transport.type })
+      return transport
     } catch {
       log.warn("readDatamateTransportFromIde: failed to parse", { source: relPath })
     }
   }
-
   log.info("readDatamateTransportFromIde: no IDE entry found, falling back to cloud config")
   return null
 }
@@ -217,33 +229,29 @@ export async function readDatamateTransportFromIde(
  * Returns the list of MCP server names whose config was updated on disk.
  */
 export async function syncDatamateUrlFromVscodeMcp(
-  cwd: string,
+  launchDir: string,
   // Overridable for tests only — the real global config dir is a static xdg path.
   globalConfigDir: string = Global.Path.config,
 ): Promise<string[]> {
   const updated: string[] = []
   try {
-    // Resolve the project root here rather than in each caller: an invocation
-    // from a nested subdirectory must still find the root .vscode/mcp.json and
-    // the root-level config files it needs to repair.
-    cwd = await resolveDatamateSyncRoot(cwd)
-    log.info("syncDatamateUrlFromVscodeMcp: start", { cwd })
+    // IDE discovery is scoped to the project root; the config heal walks from
+    // the launch directory up to that root, mirroring the loader (a nested
+    // package's own opencode.json is loaded and overrides the root entry, so
+    // it must be healed too — Codex review on this PR).
+    const root = await resolveDatamateSyncRoot(launchDir)
+    const cwd = root
+    log.info("syncDatamateUrlFromVscodeMcp: start", { launchDir, root })
 
-    // Find the first mcp.json that contains a "datamate" entry.
-    const mcpJsonPaths = await findAllMcpJsonFiles(cwd)
-    let mcpJsonPath: string | undefined
+    // First VALID datamate transport among the extension-written mcp.json files.
+    let transport: DatamateTransport | undefined
     let serversMap: Record<string, Record<string, unknown>> = {}
-
-    for (const candidate of mcpJsonPaths) {
+    for (const candidate of await findAllMcpJsonFiles(root)) {
       try {
-        const text = await readFile(candidate, "utf-8")
-        const parsed = JSON.parse(text) as Record<string, unknown>
-        const map = extractServersMap(parsed)
-        // A tombstone must not become the sync source either: it has no
-        // updatedAt, so the heal would silently skip while the real entry sits
-        // in the next file.
-        if (!isBlankDatamateEntry(map[DATAMATE_KEY])) {
-          mcpJsonPath = candidate
+        const map = extractServersMap(JSON.parse(await readFile(candidate, "utf-8")) as Record<string, unknown>)
+        const parsed = parseIdeTransport(map[DATAMATE_KEY], candidate)
+        if (parsed) {
+          transport = parsed
           serversMap = map
           break
         }
@@ -252,50 +260,47 @@ export async function syncDatamateUrlFromVscodeMcp(
       }
     }
 
-    if (!mcpJsonPath) {
-      log.info("syncDatamateUrlFromVscodeMcp: no mcp.json with datamate entry found, skipping sync")
+    if (!transport) {
+      log.info("syncDatamateUrlFromVscodeMcp: no mcp.json with a valid datamate entry found, skipping sync")
       return updated
     }
-
-    log.info("syncDatamateUrlFromVscodeMcp: using config", {
-      source: path.relative(cwd, mcpJsonPath),
-    })
+    log.info("syncDatamateUrlFromVscodeMcp: using config", { source: path.relative(root, transport.source) })
 
     // ── "datamate" entry: sync by updatedAt (works for stdio + HTTP) ────────
-    const datamateVscode = serversMap[DATAMATE_KEY]
-    const vscodeUpdatedAt =
-      datamateVscode && typeof datamateVscode["updatedAt"] === "string"
-        ? (datamateVscode["updatedAt"] as string)
-        : undefined
-
-    if (datamateVscode && vscodeUpdatedAt) {
-      // The entry may live in the project config OR the global one
-      // (`datamate_manager add` supports scope: "global") — a stale global entry
-      // is spawned at session start just the same, so heal every config file
-      // that carries a datamate entry, not only the project's.
-      const healEntryInFile = async (configPath: string): Promise<boolean> => {
+    const vscodeUpdatedAt = transport.updatedAt
+    if (vscodeUpdatedAt) {
+      const ideTransport = transport
+      const healEntryInFile = async (configPath: string, scope: "project" | "global"): Promise<boolean> => {
         const configText = await Filesystem.readText(configPath)
         const existingTree = parseTree(configText)
-        const existingNode = existingTree
-          ? findNodeAtLocation(existingTree, ["mcp", DATAMATE_KEY])
-          : undefined
+        const existingNode = existingTree ? findNodeAtLocation(existingTree, ["mcp", DATAMATE_KEY]) : undefined
         if (!existingNode) return false
 
         // getNodeValue reconstructs the full entry (a manual children walk reading
         // `prop.children[1].value` drops array/object fields — jsonc-parser only
         // populates `Node.value` for primitives).
         const existingEntry =
-          existingNode.type === "object"
-            ? (getNodeValue(existingNode) as Record<string, unknown>)
-            : {}
+          existingNode.type === "object" ? (getNodeValue(existingNode) as Record<string, unknown>) : {}
+
+        // A GLOBAL entry outlives the project, so it is rewritten only when it
+        // carries our provenance stamp bound to THIS mcp.json. Hand-added or
+        // legacy global entries stay untouched; `datamate_manager add` is the
+        // explicit path that (re)stamps them.
+        if (scope === "global") {
+          const managed =
+            existingEntry["managedBy"] === DATAMATE_PROVENANCE && existingEntry["sourceMcpJson"] === ideTransport.source
+          if (!managed) {
+            log.info("syncDatamateUrlFromVscodeMcp: global datamate entry not managed from this IDE file, leaving it", {
+              configPath,
+            })
+            return false
+          }
+        }
+
         const existingUpdatedAt =
           typeof existingEntry["updatedAt"] === "string" ? existingEntry["updatedAt"] : undefined
-
         if (vscodeUpdatedAt === existingUpdatedAt) {
-          log.info("syncDatamateUrlFromVscodeMcp: datamate entry already up to date", {
-            configPath,
-            updatedAt: vscodeUpdatedAt,
-          })
+          log.info("syncDatamateUrlFromVscodeMcp: datamate entry already up to date", { configPath, updatedAt: vscodeUpdatedAt })
           return false
         }
 
@@ -307,51 +312,51 @@ export async function syncDatamateUrlFromVscodeMcp(
         for (const [k, v] of Object.entries(existingEntry)) {
           if (!TRANSPORT_IDENTITY_FIELDS.has(k)) preserved[k] = v
         }
-
-        let newEntry: Record<string, unknown>
-        if ("command" in datamateVscode) {
-          const environment = extractSpawnEnvironment(datamateVscode["env"])
-          const cmd =
-            typeof datamateVscode["command"] === "string"
-              ? (datamateVscode["command"] as string)
-              : DATAMATE_KEY
-          newEntry = {
-            ...preserved,
-            type: "local",
-            command: [cmd, ...((datamateVscode["args"] as string[]) ?? [])],
-            ...(environment ? { environment } : {}),
-            updatedAt: vscodeUpdatedAt,
-          }
-        } else {
-          // http / streamable-http / sse → remote
-          newEntry = {
-            ...preserved,
-            type: "remote",
-            url: datamateVscode["url"] as string,
-            updatedAt: vscodeUpdatedAt,
-          }
+        const newEntry: Record<string, unknown> = {
+          ...preserved,
+          ...(ideTransport.type === "local"
+            ? {
+                type: "local",
+                command: ideTransport.command,
+                ...(ideTransport.environment ? { environment: ideTransport.environment } : {}),
+              }
+            : { type: "remote", url: ideTransport.url }),
+          updatedAt: vscodeUpdatedAt,
+          managedBy: DATAMATE_PROVENANCE,
+          sourceMcpJson: ideTransport.source,
         }
 
-        await addMcpToConfig(
-          DATAMATE_KEY,
-          newEntry as Parameters<typeof addMcpToConfig>[1],
-          configPath,
-        )
-        log.info("syncDatamateUrlFromVscodeMcp: datamate entry synced", {
-          configPath,
-          type: datamateVscode["type"],
-          updatedAt: vscodeUpdatedAt,
-        })
+        await addMcpToConfig(DATAMATE_KEY, newEntry as Parameters<typeof addMcpToConfig>[1], configPath)
+        log.info("syncDatamateUrlFromVscodeMcp: datamate entry synced", { configPath, type: ideTransport.type, updatedAt: vscodeUpdatedAt })
         return true
       }
 
+      // Project-scope candidates: every directory from the launch dir up to the
+      // root (inclusive), each with its .altimate-code/.opencode subdirs.
+      const candidates: Array<{ path: string; scope: "project" | "global" }> = []
+      const seen = new Set<string>()
+      let dir = path.resolve(launchDir)
+      const rootResolved = path.resolve(root)
+      while (true) {
+        for (const p of await findProjectConfigPaths(dir)) {
+          if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "project" }) }
+        }
+        if (dir === rootResolved || !dir.startsWith(rootResolved)) break
+        const parent = path.dirname(dir)
+        if (parent === dir) break
+        dir = parent
+      }
+      for (const p of await findGlobalConfigPaths(globalConfigDir)) {
+        if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "global" }) }
+      }
+
       let datamateHealed = false
-      for (const configPath of await findAllConfigPaths(cwd, globalConfigDir)) {
+      for (const { path: configPath, scope } of candidates) {
         // Per-file isolation: one malformed config (addMcpToConfig refuses to
         // rewrite unparseable files by throwing) must not abort the heal for the
-        // remaining project/global files.
+        // remaining files.
         try {
-          if (await healEntryInFile(configPath)) datamateHealed = true
+          if (await healEntryInFile(configPath, scope)) datamateHealed = true
         } catch (err) {
           log.warn("syncDatamateUrlFromVscodeMcp: skipping unhealable config file", {
             configPath,

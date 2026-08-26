@@ -7,6 +7,7 @@ import {
   syncDatamateUrlFromVscodeMcp,
   resolveDatamateSyncRoot,
   DATAMATE_KEY,
+  DATAMATE_PROVENANCE,
 } from "../../src/altimate/datamate-transport"
 
 // Regression tests for the stdio env carry-through. The IDE extension writes the
@@ -16,6 +17,17 @@ import {
 // instead of running it. readDatamateTransportFromIde used to drop env entirely,
 // so `datamate_manager add` persisted a broken entry that re-popped the file on
 // every session launch.
+
+/** Env-less broken entry as a fixed `datamate_manager add` would have stamped it. */
+function stamped(root: string) {
+  return {
+    type: "local",
+    command: ["/path/to/electron", "cli.js"],
+    enabled: true,
+    managedBy: DATAMATE_PROVENANCE,
+    sourceMcpJson: path.join(root, ".vscode", "mcp.json"),
+  }
+}
 
 async function seedIdeStdio(dir: string, entry: Record<string, unknown>) {
   await mkdir(path.join(dir, ".vscode"), { recursive: true })
@@ -45,6 +57,7 @@ describe("readDatamateTransportFromIde stdio env carry-through", () => {
       command: ["/path/to/electron", "/ext/dist/datamate-cli.js", "start-stdio"],
       environment: { ELECTRON_RUN_AS_NODE: "1" },
       updatedAt: "2026-08-06T00:00:00.000Z",
+      source: path.join(tmp.path, ".vscode", "mcp.json"),
     })
   })
 
@@ -61,6 +74,7 @@ describe("readDatamateTransportFromIde stdio env carry-through", () => {
     expect(t).toEqual({
       type: "local",
       command: ["/usr/lib/code-server/lib/node", "/ext/dist/datamate-cli.js", "start-stdio"],
+      source: path.join(tmp.path, ".vscode", "mcp.json"),
     })
   })
 
@@ -77,6 +91,7 @@ describe("readDatamateTransportFromIde stdio env carry-through", () => {
       type: "remote",
       url: "http://localhost:7801/mcp",
       updatedAt: "2026-08-06T00:00:00.000Z",
+      source: path.join(tmp.path, ".vscode", "mcp.json"),
     })
   })
 
@@ -89,7 +104,7 @@ describe("readDatamateTransportFromIde stdio env carry-through", () => {
     })
 
     const t = await readDatamateTransportFromIde(tmp.path)
-    expect(t).toEqual({ type: "local", command: ["datamate", "start-stdio"] })
+    expect(t).toEqual({ type: "local", command: ["datamate", "start-stdio"], source: path.join(tmp.path, ".vscode", "mcp.json"), })
   })
 
   test("non-string env values are ignored, string values kept", async () => {
@@ -164,7 +179,7 @@ describe("blanked {} datamate entries (non-active-IDE tombstones)", () => {
     await writeFile(
       configPath,
       JSON.stringify(
-        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        { mcp: { [DATAMATE_KEY]: stamped(tmp.path) } },
         null,
         2,
       ),
@@ -229,7 +244,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     await writeFile(
       globalConfigPath,
       JSON.stringify(
-        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        { mcp: { [DATAMATE_KEY]: stamped(tmp.path) } },
         null,
         2,
       ),
@@ -262,7 +277,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     await writeFile(
       projectConfigPath,
       JSON.stringify(
-        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        { mcp: { [DATAMATE_KEY]: stamped(tmp.path) } },
         null,
         2,
       ),
@@ -293,7 +308,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     await writeFile(
       globalConfigPath,
       JSON.stringify(
-        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        { mcp: { [DATAMATE_KEY]: stamped(tmp.path) } },
         null,
         2,
       ),
@@ -321,7 +336,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     await writeFile(
       globalJsoncPath,
       JSON.stringify(
-        { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+        { mcp: { [DATAMATE_KEY]: stamped(tmp.path) } },
         null,
         2,
       ),
@@ -345,7 +360,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     await using tmp = await tmpdir()
     const globalDir = path.join(tmp.path, "global-config")
     await mkdir(globalDir, { recursive: true })
-    const brokenEntry = { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true }
+    const brokenEntry = stamped(tmp.path)
     // Global legacy config.json IS merged by the config loader → must heal.
     const globalLegacyPath = path.join(globalDir, "config.json")
     await writeFile(globalLegacyPath, JSON.stringify({ mcp: { [DATAMATE_KEY]: brokenEntry } }, null, 2))
@@ -374,7 +389,7 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
     await using tmp = await tmpdir()
     const globalDir = path.join(tmp.path, "global-config")
     await mkdir(globalDir, { recursive: true })
-    const brokenEntry = { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true }
+    const brokenEntry = stamped(tmp.path)
     const projectConfigPath = path.join(tmp.path, "altimate-code.json")
     const globalConfigPath = path.join(globalDir, "altimate-code.json")
     await writeFile(projectConfigPath, JSON.stringify({ mcp: { [DATAMATE_KEY]: brokenEntry } }, null, 2))
@@ -395,5 +410,174 @@ describe("syncDatamateUrlFromVscodeMcp stdio env parity", () => {
       expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
       expect(entry.updatedAt).toBe("T4")
     }
+  })
+})
+
+describe("review hardening: allowlist, validation, provenance, bounded root, nested configs", () => {
+  test("only ELECTRON_RUN_AS_NODE is carried from the IDE env (allowlist, not denylist)", async () => {
+    await using tmp = await tmpdir()
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: {
+        ELECTRON_RUN_AS_NODE: "1",
+        NODE_OPTIONS: "--require /tmp/evil.js",
+        LD_PRELOAD: "/tmp/evil.so",
+        PATH: "/tmp/evil-bin",
+        ALTIMATE_EXTENSION_RPC: "/tmp/x.sock",
+      },
+    })
+    const t = await readDatamateTransportFromIde(tmp.path)
+    expect(t?.type).toBe("local")
+    if (t?.type === "local") expect(t.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+  })
+
+  test("an incomplete IDE entry cannot win source selection nor be persisted as a url-less remote", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    // .cursor sorts first and carries a non-empty but transport-less entry.
+    await mkdir(path.join(tmp.path, ".cursor"), { recursive: true })
+    await writeFile(
+      path.join(tmp.path, ".cursor", "mcp.json"),
+      JSON.stringify({ mcpServers: { [DATAMATE_KEY]: { type: "stdio", updatedAt: "T-bogus" } } }),
+    )
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T11",
+    })
+    const configPath = path.join(tmp.path, "altimate-code.json")
+    await writeFile(configPath, JSON.stringify({ mcp: { [DATAMATE_KEY]: stamped(tmp.path) } }, null, 2))
+
+    const t = await readDatamateTransportFromIde(tmp.path)
+    expect(t?.source).toBe(path.join(tmp.path, ".vscode", "mcp.json"))
+
+    await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    const entry = JSON.parse(await readFile(configPath, "utf-8")).mcp[DATAMATE_KEY]
+    expect(entry.type).toBe("local")
+    expect(entry.updatedAt).toBe("T11")
+    expect("url" in entry).toBe(false)
+  })
+
+  test("a lone incomplete IDE entry writes nothing at all", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    await seedIdeStdio(tmp.path, { type: "stdio", updatedAt: "T-bogus" })
+    const configPath = path.join(tmp.path, "altimate-code.json")
+    const before = JSON.stringify({ mcp: { [DATAMATE_KEY]: stamped(tmp.path) } }, null, 2)
+    await writeFile(configPath, before)
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toEqual([])
+    expect(await readFile(configPath, "utf-8")).toBe(before)
+  })
+
+  test("a hand-added GLOBAL entry (no provenance) survives a project-local heal byte-identical", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "global-config")
+    await mkdir(globalDir, { recursive: true })
+    const globalPath = path.join(globalDir, "altimate-code.json")
+    const handAdded = JSON.stringify(
+      { mcp: { [DATAMATE_KEY]: { type: "remote", url: "https://mcp.example.com/sse", headers: { Authorization: "Bearer x" } } } },
+      null,
+      2,
+    )
+    await writeFile(globalPath, handAdded)
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T12",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toEqual([])
+    expect(await readFile(globalPath, "utf-8")).toBe(handAdded)
+  })
+
+  test("a GLOBAL entry managed from a DIFFERENT project's mcp.json is left alone", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "global-config")
+    await mkdir(globalDir, { recursive: true })
+    const globalPath = path.join(globalDir, "altimate-code.json")
+    const other = JSON.stringify(
+      { mcp: { [DATAMATE_KEY]: { ...stamped(tmp.path), sourceMcpJson: "/somewhere/else/.vscode/mcp.json" } } },
+      null,
+      2,
+    )
+    await writeFile(globalPath, other)
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T13",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toEqual([])
+    expect(await readFile(globalPath, "utf-8")).toBe(other)
+  })
+
+  test("a nested package's own config (loaded by the config walk) is healed too", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    await mkdir(path.join(tmp.path, ".git"), { recursive: true })
+    const pkg = path.join(tmp.path, "packages", "app")
+    await mkdir(pkg, { recursive: true })
+    const nestedConfig = path.join(pkg, "opencode.json")
+    await writeFile(nestedConfig, JSON.stringify({ mcp: { [DATAMATE_KEY]: stamped(tmp.path) } }, null, 2))
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T14",
+    })
+
+    // Launched from the nested package: the root mcp.json is the IDE source,
+    // and the nested config on the launch→root walk is a heal target.
+    const updated = await syncDatamateUrlFromVscodeMcp(pkg, globalDir)
+    expect(updated).toContain(DATAMATE_KEY)
+    const entry = JSON.parse(await readFile(nestedConfig, "utf-8")).mcp[DATAMATE_KEY]
+    expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+  })
+
+  test("an mcp.json outside the extension-written locations is never a transport source", async () => {
+    await using tmp = await tmpdir()
+    await mkdir(path.join(tmp.path, "docs", "examples"), { recursive: true })
+    await writeFile(
+      path.join(tmp.path, "docs", "examples", "mcp.json"),
+      JSON.stringify({ servers: { [DATAMATE_KEY]: { command: "/evil", args: [], env: { ELECTRON_RUN_AS_NODE: "1" }, updatedAt: "T" } } }),
+    )
+    expect(await readDatamateTransportFromIde(tmp.path)).toBeNull()
+  })
+
+  test("resolveDatamateSyncRoot: a home directory that is itself a git repo is not a project", async () => {
+    await using tmp = await tmpdir()
+    const prev = process.env.OPENCODE_TEST_HOME
+    process.env.OPENCODE_TEST_HOME = tmp.path
+    try {
+      await mkdir(path.join(tmp.path, ".git"), { recursive: true })
+      const deep = path.join(tmp.path, "code", "no-git-here")
+      await mkdir(deep, { recursive: true })
+      expect(await resolveDatamateSyncRoot(deep)).toBe(deep)
+    } finally {
+      if (prev === undefined) delete process.env.OPENCODE_TEST_HOME
+      else process.env.OPENCODE_TEST_HOME = prev
+    }
+  })
+
+  test("resolveDatamateSyncRoot: a .git FILE (worktree/submodule) marks the nearest project root", async () => {
+    await using tmp = await tmpdir()
+    await mkdir(path.join(tmp.path, ".git"), { recursive: true })
+    const wt = path.join(tmp.path, "modules", "sub")
+    await mkdir(path.join(wt, "src"), { recursive: true })
+    await writeFile(path.join(wt, ".git"), "gitdir: ../../.git/modules/sub\n")
+    expect(await resolveDatamateSyncRoot(path.join(wt, "src"))).toBe(wt)
   })
 })

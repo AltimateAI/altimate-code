@@ -268,21 +268,22 @@ describe("PR893: findAllConfigPaths project subdir coverage", () => {
 describe("PR893: readDatamateTransportFromIde sorted-first selection + classification", () => {
   test("first sorted datamate-bearing mcp.json wins (a/ before b/)", async () => {
     await using tmp = await tmpdir()
-    // a/mcp.json — stdio datamate; b/mcp.json — http datamate.
-    await mkdir(path.join(tmp.path, "a"), { recursive: true })
-    await mkdir(path.join(tmp.path, "b"), { recursive: true })
+    // a/.vscode/mcp.json — stdio datamate; b/.vscode/mcp.json — http datamate.
+    // (Only extension-written locations, .vscode/ and .cursor/, are scanned.)
+    await mkdir(path.join(tmp.path, "a", ".vscode"), { recursive: true })
+    await mkdir(path.join(tmp.path, "b", ".vscode"), { recursive: true })
     await writeFile(
-      path.join(tmp.path, "a", "mcp.json"),
+      path.join(tmp.path, "a", ".vscode", "mcp.json"),
       JSON.stringify({ servers: { [DATAMATE_KEY]: { type: "stdio", command: "datamate", args: ["x"] } } }),
     )
     await writeFile(
-      path.join(tmp.path, "b", "mcp.json"),
+      path.join(tmp.path, "b", ".vscode", "mcp.json"),
       JSON.stringify({ servers: { [DATAMATE_KEY]: { url: "http://from-b" } } }),
     )
 
     const t = await readDatamateTransportFromIde(tmp.path)
     // a/ sorts before b/ → stdio entry from a/ wins → local transport.
-    expect(t).toEqual({ type: "local", command: ["datamate", "x"] })
+    expect(t).toEqual({ type: "local", command: ["datamate", "x"], source: path.join(tmp.path, "a", ".vscode", "mcp.json") })
   })
 
   test("stdio entry → local(command+args); http entry → remote(url)", async () => {
@@ -293,7 +294,7 @@ describe("PR893: readDatamateTransportFromIde sorted-first selection + classific
       JSON.stringify({ mcpServers: { [DATAMATE_KEY]: { url: "https://remote-only" } } }),
     )
     const t = await readDatamateTransportFromIde(tmp.path)
-    expect(t).toEqual({ type: "remote", url: "https://remote-only" })
+    expect(t).toEqual({ type: "remote", url: "https://remote-only", source: path.join(tmp.path, ".cursor", "mcp.json") })
   })
 
   test("returns null when no mcp.json contains a datamate entry", async () => {
@@ -319,7 +320,7 @@ describe("PR893: readDatamateTransportFromIde sorted-first selection + classific
     const t = await readDatamateTransportFromIde(tmp.path)
     // The implementation checks `typeof entry.url === "string"` first, so a URL
     // present always classifies as remote regardless of command/type.
-    expect(t).toEqual({ type: "remote", url: "http://wins" })
+    expect(t).toEqual({ type: "remote", url: "http://wins", source: path.join(tmp.path, ".vscode", "mcp.json") })
   })
 })
 
