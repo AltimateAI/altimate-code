@@ -138,11 +138,18 @@ async function handleList() {
 
 async function handleListIntegrations() {
   try {
-    const integrations = await AltimateApi.listIntegrations()
+    const catalog = await AltimateApi.listIntegrations()
+    // altimate_change start — extension-type integrations need a live VS Code
+    // bridge and cannot work from the CLI. Hide them from this surface (the
+    // workspace UI still offers them), but say how many were hidden rather than
+    // pretending they don't exist.
+    const integrations = catalog.filter((i) => i.type !== "extension")
+    const hidden = catalog.length - integrations.length
+    // altimate_change end
     if (integrations.length === 0) {
       return {
         title: "Integrations: none found",
-        metadata: { count: 0 },
+        metadata: { count: 0, hidden },
         output: "No integrations available.",
       }
     }
@@ -151,9 +158,17 @@ async function handleListIntegrations() {
       const tools = i.tools?.map((t) => t.key).join(", ") ?? "none"
       lines.push(`${i.id} | ${i.name} | ${tools}`)
     }
+    // altimate_change start
+    if (hidden > 0) {
+      lines.push(
+        "",
+        `(${hidden} extension-type integration${hidden === 1 ? "" : "s"} omitted — they require a live VS Code bridge and are not available from the CLI.)`,
+      )
+    }
+    // altimate_change end
     return {
       title: `Integrations: ${integrations.length} available`,
-      metadata: { count: integrations.length },
+      metadata: { count: integrations.length, hidden },
       output: lines.join("\n"),
     }
   } catch (e) {

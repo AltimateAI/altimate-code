@@ -37,6 +37,11 @@ const DatamateSummary = z.object({
 const IntegrationSummary = z.object({
   id: z.coerce.string(),
   name: z.string().optional(),
+  // altimate_change start — catalog `type` (tool | mcp | code | api | extension).
+  // Extension-type integrations are RPC into a live VS Code host and have no
+  // meaning on the CLI surface; callers filter on this.
+  type: z.string().optional(),
+  // altimate_change end
   description: z.string().nullable().optional(),
   tools: z
     .array(

@@ -25,6 +25,7 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
+import * as WorkspaceEngine from "../altimate/workspace/engine-sync"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -1007,6 +1008,27 @@ export namespace SessionPrompt {
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
+      // altimate_change start — workspace engine readiness.
+      //
+      // `resolveTools` below snapshots the MCP tool catalog, and it runs ahead of
+      // the per-turn block further down where this attach used to be started. A
+      // session that spawned its own engine therefore listed the engine's tools one
+      // turn late: the model saw `datamate_manager` alone on the first turn and the
+      // integration tools only from the second. Starting the attach here and giving
+      // it a bounded window puts them in the first tool list instead.
+      //
+      // Only a turn that actually spawns waits: an unbound or disabled session
+      // settles with no I/O beyond a local cache read, and an engine an IDE already
+      // runs is reused as fast as the status call it already makes. Past the cap the
+      // turn proceeds without those tools and `tools/list_changed` delivers them
+      // when the attach lands. `ensure` is idempotent per session id, so the later
+      // turns this block also runs on return the settled outcome immediately.
+      if (step === 1) {
+        void WorkspaceEngine.ensure(sessionID).catch(() => {})
+        await WorkspaceEngine.whenAttached(sessionID)
+      }
+      // altimate_change end
+
       // altimate_change start (AI-7519) — trace resolveTools per step.
       // Included in the parent `bootstrap` span on step===1; on later steps
       // this measures the per-turn tool-listing overhead (MCP.tools connect
@@ -1054,6 +1076,8 @@ export namespace SessionPrompt {
         // before the refetch, so workspace memory blinked out of the prompt whenever a
         // fetch ran long.
         void WorkspaceMemory.hydrate(sessionID).catch(() => {})
+        // The bound workspace's integration engine is attached above, ahead of
+        // `resolveTools`, because its tools have to be in that turn's tool list.
         // altimate_change end
         SessionSummary.summarize({
           sessionID: sessionID,
