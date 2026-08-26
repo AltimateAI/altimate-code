@@ -31,6 +31,9 @@ import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../al
 // altimate_change start — W1.10/W1.12/W1.1 run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
 // altimate_change end
+// altimate_change start — stable messageID for retry idempotency (see send() below)
+import { Identifier } from "../../id/id"
+// altimate_change end
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change end
@@ -938,10 +941,26 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       const retryMax = envBound("ALTIMATE_RUN_RETRY_MAX", 3)
       const retryBaseMs = envBound("ALTIMATE_RUN_RETRY_BASE_MS", 1000)
+      // altimate_change start — upstream_fix: stable messageID across retry attempts.
+      // Without this, every retry called send() with no messageID, so the server
+      // generated a fresh one each time (see createUserMessage in session/prompt.ts:
+      // `id: input.messageID ?? MessageID.ascending()`). On an AMBIGUOUS failure —
+      // the request was received and the agent loop ran (possibly executing tools)
+      // but the response never reached this process (timeout/ECONNRESET) — a retry
+      // with a new messageID creates a SECOND user turn and re-runs the loop,
+      // duplicating the prompt and any tool side effects. Reusing the same id lets
+      // the server's upsert-by-id (Session.updateMessage) and the loop's
+      // already-finished early exit (prompt.ts) recognize the retry as the same
+      // turn instead of a new one. This does not (and cannot, without a
+      // per-session lock the server doesn't have) rule out both attempts running
+      // concurrently if the retry fires WHILE the first is still mid-flight.
+      const messageID = Identifier.ascending("message")
+      // altimate_change end
       const send = () => {
         if (args.command)
           return sdk.session.command({
             sessionID,
+            messageID,
             agent,
             model: args.model,
             command: args.command,
@@ -951,6 +970,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const model = args.model ? Provider.parseModel(args.model) : undefined
         return sdk.session.prompt({
           sessionID,
+          messageID,
           agent,
           model,
           variant: args.variant,

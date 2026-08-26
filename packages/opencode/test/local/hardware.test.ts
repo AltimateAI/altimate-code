@@ -1,3 +1,4 @@
+import os from "node:os"
 import { describe, expect, test } from "bun:test"
 
 import { detectHardware, matchHardwareToTier, type HardwareInfo } from "../../src/local/hardware"
@@ -88,6 +89,14 @@ describe("local hardware tier matching", () => {
     const match = matchHardwareToTier(hardware({ memoryGb: 16 }), model)
     expect(match.tier).toBeUndefined()
     expect(match.reason).toContain("20GB")
+  })
+
+  test("reports real system RAM on platforms with no dedicated probe (e.g. native Windows)", async () => {
+    // Previously this branch hardcoded memoryGb: 0, which made every
+    // advertised tier unreachable regardless of how much RAM the machine has.
+    const detected = await detectHardware({ platform: "win32", arch: "x64" })
+    expect(detected.memoryGb).toBeGreaterThan(0)
+    expect(detected.memoryGb).toBeCloseTo(Math.round((os.totalmem() / 1024 ** 3) * 10) / 10, 1)
   })
 
   test("refuses the laptop fallback on a platform-arch with no published llama.cpp runtime", () => {

@@ -15,14 +15,18 @@ import { TruncateCore } from "./truncate-core"
 
 const RETENTION = Duration.days(7)
 
+// altimate_change start — W1.7: constants sourced from the shared truncate-core
 export const MAX_LINES = TruncateCore.MAX_LINES
 export const MAX_BYTES = TruncateCore.MAX_BYTES
+// altimate_change end
 export const DIR = TRUNCATION_DIR
 export const GLOB = path.join(TRUNCATION_DIR, "*")
 
 export type Result = { content: string; truncated: false } | { content: string; truncated: true; outputPath: string }
 
+// altimate_change start — W1.7: options type sourced from the shared truncate-core
 export type Options = TruncateCore.Options
+// altimate_change end
 
 function hasTaskTool(agent?: Agent.Info) {
   if (!agent?.permission) return false

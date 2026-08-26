@@ -65,19 +65,36 @@ export async function dockerHealthy(port: number, fetchImpl: Fetch = fetch) {
   }
 }
 
+// Docker's own "not found" errors are the only ones that legitimately mean
+// "container absent" — any other exec failure (daemon down, permission
+// denied, timeout) must propagate instead of being read as absence, or a
+// caller can conclude the container is gone/stopped while it is still
+// running.
+function isContainerNotFoundError(error: unknown): boolean {
+  const stderr = typeof (error as { stderr?: unknown })?.stderr === "string" ? (error as { stderr: string }).stderr : ""
+  const message = error instanceof Error ? error.message : String(error)
+  return /no such (object|container|image)/i.test(stderr) || /no such (object|container|image)/i.test(message)
+}
+
 export async function dockerContainerRunning(exec: DockerExec = defaultExec) {
   try {
     const result = await exec("docker", ["inspect", "-f", "{{.State.Running}}", LOCAL_CONTAINER_NAME])
     return result.stdout.trim() === "true"
-  } catch {
-    return false
+  } catch (error) {
+    if (isContainerNotFoundError(error)) return false
+    throw error
   }
 }
 
 export async function removeDockerContainer(exec: DockerExec = defaultExec) {
-  const exists = await exec("docker", ["inspect", "-f", "{{.Id}}", LOCAL_CONTAINER_NAME])
-    .then(() => true)
-    .catch(() => false)
+  let exists: boolean
+  try {
+    await exec("docker", ["inspect", "-f", "{{.Id}}", LOCAL_CONTAINER_NAME])
+    exists = true
+  } catch (error) {
+    if (!isContainerNotFoundError(error)) throw error
+    exists = false
+  }
   if (!exists) return { existed: false, removed: false }
   // rm failure must NOT look like success: callers keep state so the
   // container is never orphaned silently.
@@ -106,7 +123,15 @@ export async function startDockerServer(input: {
   await removeDockerContainer(exec)
   const hfCache = path.join(os.homedir(), ".cache", "huggingface")
   await exec("docker", buildDockerRunArgs({ tier: input.tier, modelID: input.modelID, port: input.port, hfCache }), 30 * 60_000)
-  const pidRaw = await exec("docker", ["inspect", "-f", "{{.State.Pid}}", LOCAL_CONTAINER_NAME])
+  let pidRaw: { stdout: string; stderr: string }
+  try {
+    pidRaw = await exec("docker", ["inspect", "-f", "{{.State.Pid}}", LOCAL_CONTAINER_NAME])
+  } catch (error) {
+    // The container is already running (docker run succeeded); an inspect
+    // failure here must not leave it orphaned and untracked.
+    await removeDockerContainer(exec)
+    throw error
+  }
   const pid = Number(pidRaw.stdout.trim())
   if (!Number.isInteger(pid) || pid <= 0) {
     await removeDockerContainer(exec)

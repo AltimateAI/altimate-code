@@ -111,6 +111,22 @@ export namespace SessionCompaction {
     const index = input.messages.findIndex((m) => m.info.id === input.lastFinishedId)
     if (index < 0) return 0
     let tokens = 0
+    // altimate_change start — count completed tool output living ON lastFinished itself.
+    // The usage snapshot on lastFinished is taken when its LLM call's finish-step fires,
+    // which happens once that step's own tool calls have already been executed and their
+    // results written onto this SAME message (see processor.ts "tool-result" case, which
+    // runs before "finish-step" within a step). That usage reflects only the model's own
+    // input/output tokens — a tool's own output size is never sent back to the provider
+    // within that step, so it's never part of the recorded count. Slicing strictly AFTER
+    // lastFinishedId (the pre-existing behavior below) misses this entirely: a large tool
+    // result can sit uncounted on lastFinished until the NEXT overflow check, one full
+    // turn late. Text/reasoning parts on lastFinished are excluded — those WERE generated
+    // by this step and are already inside its recorded output tokens.
+    const lastFinishedMessage = input.messages[index]!
+    for (const part of lastFinishedMessage.parts) {
+      if (part.type === "tool" && part.state?.status === "completed") tokens += Token.estimate(part.state.output ?? "")
+    }
+    // altimate_change end
     for (const m of input.messages.slice(index + 1)) {
       for (const part of m.parts) {
         if (part.type === "text") tokens += Token.estimate(part.text ?? "")
@@ -245,7 +261,15 @@ export namespace SessionCompaction {
     if (budget <= 0) return { head: input.head, dropped: 0 }
     let head = input.head
     let dropped = 0
-    while (head.length > 1 && (await estimate({ messages: head, model: input.model })) > budget) {
+    // altimate_change start — upstream_fix: keep shrinking down to (and including)
+    // an empty head. The original guard was `head.length > 1`, which stops the loop
+    // the moment one message remains WITHOUT re-checking whether that single message
+    // still exceeds budget (a lone assistant message with an oversized tool result
+    // can itself blow the window) — the fallback then silently returns an oversized
+    // head, defeating its own purpose. Dropping to an empty head is safe: the caller
+    // always appends its own trailing user prompt after `head` (see the summarizer
+    // call site), so an empty head still produces a valid, non-empty request.
+    while (head.length > 0 && (await estimate({ messages: head, model: input.model })) > budget) {
       const step = Math.max(1, Math.floor(head.length / 8))
       // Round the cut forward to the next turn boundary: a head that starts
       // mid-turn (assistant/tool messages with no leading user turn) is
@@ -256,6 +280,7 @@ export namespace SessionCompaction {
       head = head.slice(cut)
       dropped += cut
     }
+    // altimate_change end
     return { head, dropped }
   }
   // altimate_change end

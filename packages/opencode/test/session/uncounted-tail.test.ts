@@ -109,6 +109,80 @@ describe("SessionCompaction.uncountedTailTokens", () => {
     // Raw Token.estimate would land well under the margined figure.
     expect(tail).toBeGreaterThan(output.length / 4.0)
   })
+
+  // A step's own tool results complete on the SAME message that carries its
+  // finish-step usage snapshot (see processor.ts: "tool-result" is handled
+  // before "finish-step" within a step), so that message's recorded tokens never
+  // include its own tool output. The pre-fix slice (strictly AFTER lastFinishedId)
+  // missed this window entirely.
+  test("counts a completed tool part living ON the lastFinished message itself", () => {
+    const finishedWithToolOutput: MessageV2.WithParts = {
+      info: { id: "finished", sessionID: "s", role: "assistant", time: { created: 1 }, model: { providerID: "p", modelID: "m" } },
+      parts: [
+        { id: "finished-text", sessionID: "s", messageID: "finished", type: "text", text: "ok" },
+        {
+          id: "finished-tool",
+          sessionID: "s",
+          messageID: "finished",
+          type: "tool",
+          callID: "finished-call",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: {},
+            output: "x".repeat(200_000),
+            title: "Bash",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        },
+      ],
+    } as unknown as MessageV2.WithParts
+
+    const tail = SessionCompaction.uncountedTailTokens({
+      messages: [finishedWithToolOutput],
+      lastFinishedId: "finished" as any,
+    })
+    expect(tail).toBeGreaterThan(0)
+  })
+
+  test("does not double-count the lastFinished message's own text (already in recorded output tokens)", () => {
+    const finishedTextOnly = textMessage("finished", "assistant", "y".repeat(400))
+    const withToolOnly: MessageV2.WithParts = {
+      ...finishedTextOnly,
+      parts: [
+        ...finishedTextOnly.parts,
+        {
+          id: "finished-tool",
+          sessionID: "s",
+          messageID: "finished",
+          type: "tool",
+          callID: "finished-call",
+          tool: "bash",
+          state: {
+            status: "completed",
+            input: {},
+            output: "small",
+            title: "Bash",
+            metadata: {},
+            time: { start: 0, end: 1 },
+          },
+        },
+      ],
+    } as unknown as MessageV2.WithParts
+    const textOnlyTail = SessionCompaction.uncountedTailTokens({
+      messages: [finishedTextOnly],
+      lastFinishedId: "finished" as any,
+    })
+    const withToolTail = SessionCompaction.uncountedTailTokens({
+      messages: [withToolOnly],
+      lastFinishedId: "finished" as any,
+    })
+    // text-only lastFinished contributes nothing (its text is already recorded usage);
+    // adding a completed tool part is the only thing that should move the estimate.
+    expect(textOnlyTail).toBe(0)
+    expect(withToolTail).toBeGreaterThan(0)
+  })
 })
 
 describe("proactive overflow: isOverflow triggers on an oversized post-lastFinished tool result", () => {

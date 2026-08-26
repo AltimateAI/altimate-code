@@ -3,7 +3,7 @@ import path from "node:path"
 import { describe, expect, test } from "bun:test"
 
 import { tmpdir } from "../fixture/fixture"
-import { locateLlamaServer, RUNTIME_ASSETS } from "../../src/local/runtime"
+import { isWorkingRuntime, locateLlamaServer, RUNTIME_ASSETS } from "../../src/local/runtime"
 import type { LocalPaths } from "../../src/local/paths"
 
 const BIN_NAME = process.platform === "win32" ? "llama-server.exe" : "llama-server"
@@ -46,6 +46,31 @@ describe("locateLlamaServer", () => {
     const result = await locateLlamaServer({ env: {}, paths: paths(tmp.path) })
     expect(result?.source).toBe("installed")
     expect(result?.version).toBe("llama-server build 1")
+  })
+})
+
+describe("isWorkingRuntime", () => {
+  // installLlamaServer uses this to decide whether an already-installed
+  // target binary is good enough to keep (discarding the freshly downloaded
+  // replacement). It must check that the binary actually runs, not just
+  // that its execute bit is set — otherwise a broken-but-chmod'd install
+  // (e.g. missing shared libs after a bad unpack) can never be repaired.
+  test("is false for a file that has the execute bit but fails to run", async () => {
+    await using tmp = await tmpdir()
+    const binary = path.join(tmp.path, BIN_NAME)
+    await fs.writeFile(binary, "#!/bin/sh\nexit 1\n")
+    await fs.chmod(binary, 0o755)
+
+    expect(await isWorkingRuntime(binary)).toBe(false)
+  })
+
+  test("is true for a binary that runs and reports a version", async () => {
+    await using tmp = await tmpdir()
+    const binary = path.join(tmp.path, BIN_NAME)
+    await fs.writeFile(binary, '#!/bin/sh\necho "llama-server build 1"\nexit 0\n')
+    await fs.chmod(binary, 0o755)
+
+    expect(await isWorkingRuntime(binary)).toBe(true)
   })
 })
 

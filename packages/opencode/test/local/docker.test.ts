@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test"
 
-import { buildDockerRunArgs, LOCAL_CONTAINER_NAME, startDockerServer, type DockerExec } from "../../src/local/docker"
+import {
+  buildDockerRunArgs,
+  dockerContainerRunning,
+  LOCAL_CONTAINER_NAME,
+  removeDockerContainer,
+  startDockerServer,
+  type DockerExec,
+} from "../../src/local/docker"
 import { BUNDLED_RECIPES } from "../../src/local/recipes"
 
 const model = BUNDLED_RECIPES.models[0]!
@@ -57,6 +64,52 @@ const containerNotFound = async (): Promise<ExecResult> => {
   throw new Error("no such container")
 }
 
+const daemonError = async (): Promise<ExecResult> => {
+  const error = new Error("Cannot connect to the Docker daemon") as Error & { stderr: string }
+  error.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock: is the docker daemon running?"
+  throw error
+}
+
+describe("dockerContainerRunning", () => {
+  test("reports not running when docker inspect says the container is absent", async () => {
+    const exec = execRouter({ inspectRunning: containerNotFound })
+    expect(await dockerContainerRunning(exec)).toBe(false)
+  })
+
+  test("propagates a docker daemon error instead of reporting not running", async () => {
+    const exec = execRouter({ inspectRunning: daemonError })
+    await expect(dockerContainerRunning(exec)).rejects.toThrow(/Docker daemon/)
+  })
+})
+
+describe("removeDockerContainer", () => {
+  test("skips rm when docker inspect says the container is absent", async () => {
+    let rmCalls = 0
+    const exec = execRouter({
+      inspectId: containerNotFound,
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    expect(await removeDockerContainer(exec)).toEqual({ existed: false, removed: false })
+    expect(rmCalls).toBe(0)
+  })
+
+  test("propagates a docker daemon error instead of treating it as container absence", async () => {
+    let rmCalls = 0
+    const exec = execRouter({
+      inspectId: daemonError,
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    await expect(removeDockerContainer(exec)).rejects.toThrow(/Docker daemon/)
+    expect(rmCalls).toBe(0)
+  })
+})
+
 describe("startDockerServer", () => {
   test("resolves with the pid once the health check reports healthy", async () => {
     const exec = execRouter({
@@ -112,5 +165,34 @@ describe("startDockerServer", () => {
       }),
     ).rejects.toThrow(/did not become healthy in time/)
     expect(removeCalls).toBeGreaterThan(0)
+  })
+
+  test("removes the container when PID inspection fails after `docker run`, instead of leaving it untracked", async () => {
+    let rmCalls = 0
+    let inspectIdCalls = 0
+    const exec = execRouter({
+      // First call is startDockerServer's pre-run cleanup (nothing to remove
+      // yet); second call is the cleanup triggered by the pid-inspect
+      // failure below, after `docker run` has already created the container.
+      inspectId: async () => {
+        inspectIdCalls++
+        if (inspectIdCalls === 1) throw new Error("no such container")
+        return { stdout: "container123\n", stderr: "" }
+      },
+      run: async () => ({ stdout: "container123\n", stderr: "" }),
+      inspectPid: async () => {
+        throw new Error("Cannot connect to the Docker daemon")
+      },
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    const fetchImpl = async () => new Response(null, { status: 503 })
+
+    await expect(
+      startDockerServer({ tier, modelID: model.id, port: 8095, exec, fetchImpl }),
+    ).rejects.toThrow(/Cannot connect to the Docker daemon/)
+    expect(rmCalls).toBe(1)
   })
 })

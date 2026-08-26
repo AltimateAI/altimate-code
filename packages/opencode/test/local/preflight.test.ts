@@ -1,11 +1,14 @@
+import fs from "node:fs/promises"
+import path from "node:path"
 import { describe, expect, test } from "bun:test"
 
+import { tmpdir } from "../fixture/fixture"
 import { runPreflight } from "../../src/local/preflight"
-import { BUNDLED_RECIPES } from "../../src/local/recipes"
+import { BUNDLED_RECIPES, type LlamaRecipeTier } from "../../src/local/recipes"
 import type { HardwareInfo } from "../../src/local/hardware"
 
 const model = BUNDLED_RECIPES.models[0]!
-const llamaTier = model.tiers.find((tier) => tier.name === "gpu-24gb-discrete")!
+const llamaTier = model.tiers.find((tier) => tier.name === "gpu-24gb-discrete")! as LlamaRecipeTier
 const dockerTier = model.tiers.find((tier) => tier.name === "dgx-spark-128gb")!
 
 const nvidia: HardwareInfo = {
@@ -29,6 +32,10 @@ const spark: HardwareInfo = {
 
 const DF_OK = { stdout: "Filesystem 1K-blocks Used Available Use% Mounted\n/dev/sda1 999999999 1 524288000 1% /\n", stderr: "" }
 const DF_FULL = { stdout: "Filesystem 1K-blocks Used Available Use% Mounted\n/dev/sda1 999999999 1 1048576 1% /\n", stderr: "" }
+// ~10GB free: enough for the "already cached" 4GB estimate but not the ~24GB
+// fresh-download estimate, so these two outcomes are distinguishable.
+const DF_10GB = { stdout: "Filesystem 1K-blocks Used Available Use% Mounted\n/dev/sda1 999999999 1 10485760 1% /\n", stderr: "" }
+const VULKAN_OK = { stdout: "libvulkan.so.1 (libc6,x86-64) => /lib/libvulkan.so.1\n", stderr: "" }
 
 function exec(table: Record<string, { stdout: string; stderr: string } | Error>) {
   return async (file: string, args: string[]) => {
@@ -47,6 +54,7 @@ describe("runPreflight", () => {
   test("llama tier on linux fails fatally without the Vulkan loader", async () => {
     const result = await runPreflight({
       tier: llamaTier,
+      model: { id: model.id, revision: model.revision },
       hardware: nvidia,
       availableGb: 22.5,
       directory: "/tmp",
@@ -63,6 +71,7 @@ describe("runPreflight", () => {
   test("llama tier passes with loader present and enough disk", async () => {
     const result = await runPreflight({
       tier: llamaTier,
+      model: { id: model.id, revision: model.revision },
       hardware: nvidia,
       availableGb: 22.5,
       directory: "/tmp",
@@ -75,6 +84,7 @@ describe("runPreflight", () => {
   test("insufficient disk is fatal before any download", async () => {
     const result = await runPreflight({
       tier: llamaTier,
+      model: { id: model.id, revision: model.revision },
       hardware: nvidia,
       availableGb: 22.5,
       directory: "/tmp",
@@ -88,6 +98,7 @@ describe("runPreflight", () => {
   test("docker tier fails fatally when the daemon is unreachable", async () => {
     const result = await runPreflight({
       tier: dockerTier,
+      model: { id: model.id, revision: model.revision },
       hardware: spark,
       availableGb: 119,
       directory: "/tmp",
@@ -103,6 +114,7 @@ describe("runPreflight", () => {
   test("docker tier passes with nvidia runtime; low free memory is a warning only", async () => {
     const result = await runPreflight({
       tier: dockerTier,
+      model: { id: model.id, revision: model.revision },
       hardware: spark,
       availableGb: 119,
       directory: "/tmp",
@@ -123,6 +135,7 @@ describe("runPreflight", () => {
   test("capacity below the tier floor is fatal", async () => {
     const result = await runPreflight({
       tier: dockerTier,
+      model: { id: model.id, revision: model.revision },
       hardware: { ...spark, memoryGb: 64 },
       availableGb: 64,
       directory: "/tmp",
@@ -136,5 +149,47 @@ describe("runPreflight", () => {
     })
     expect(result.passed).toBe(false)
     expect(result.checks.find((check) => check.name === "accelerator_memory")!.ok).toBe(false)
+  })
+
+  test("a cached gguf from a different model/revision does not discount the disk estimate", async () => {
+    await using tmp = await tmpdir()
+    // A .gguf exists on disk, but for an unrelated model/revision — not the
+    // one this tier is about to download.
+    const other = path.join(tmp.path, "models", "some-other-model", "deadbeef", "other.gguf")
+    await fs.mkdir(path.dirname(other), { recursive: true })
+    await fs.writeFile(other, "not the target artifact")
+
+    const result = await runPreflight({
+      tier: llamaTier,
+      model: { id: model.id, revision: model.revision },
+      hardware: nvidia,
+      availableGb: 22.5,
+      directory: tmp.path,
+      platform: "linux",
+      exec: exec({ df: DF_10GB, ldconfig: VULKAN_OK }),
+    })
+    const disk = result.checks.find((check) => check.name === "disk_space")!
+    expect(disk.detail).not.toContain("already cached")
+    expect(disk.ok).toBe(false)
+  })
+
+  test("the exact target gguf being cached discounts the disk estimate", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "models", model.id, model.revision, path.basename(llamaTier.file))
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    await fs.writeFile(target, "the target artifact")
+
+    const result = await runPreflight({
+      tier: llamaTier,
+      model: { id: model.id, revision: model.revision },
+      hardware: nvidia,
+      availableGb: 22.5,
+      directory: tmp.path,
+      platform: "linux",
+      exec: exec({ df: DF_10GB, ldconfig: VULKAN_OK }),
+    })
+    const disk = result.checks.find((check) => check.name === "disk_space")!
+    expect(disk.detail).toContain("already cached")
+    expect(disk.ok).toBe(true)
   })
 })

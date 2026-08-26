@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import os from "node:os"
 
 import type { ModelRecipe, RecipeTier } from "./recipes"
 import { RUNTIME_ASSETS } from "./runtime"
@@ -130,11 +131,14 @@ export async function detectHardware(
     }
   }
 
+  // No dedicated probe below (e.g. win32): os.totalmem() is a plain Node API
+  // that works cross-platform without shelling out, and reports real system
+  // RAM instead of the 0 that made every advertised tier unreachable here.
   return {
     platform,
     arch,
     name: `${platform} ${arch}`,
-    memoryGb: 0,
+    memoryGb: gb(os.totalmem()),
     accelerator: "unknown",
     unifiedMemory: false,
   }

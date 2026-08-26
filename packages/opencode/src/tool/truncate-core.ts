@@ -109,9 +109,12 @@ export function preview(lines: string[], totalBytes: number, opts: ResolvedOptio
 
   if (direction === "middle") {
     const headBudgetLines = Math.max(1, Math.floor(maxLines * headRatio))
-    const tailBudgetLines = Math.max(1, maxLines - headBudgetLines)
+    // Not `Math.max(1, ...)`: flooring the tail budget to 1 would let the
+    // two halves together exceed maxLines (e.g. maxLines=1 -> head claims
+    // the only line, but tail would still floor up to 1 and add a second).
+    const tailBudgetLines = Math.max(0, maxLines - headBudgetLines)
     const headBudgetBytes = Math.max(1, Math.floor(maxBytes * headRatio))
-    const tailBudgetBytes = Math.max(1, maxBytes - headBudgetBytes)
+    const tailBudgetBytes = Math.max(0, maxBytes - headBudgetBytes)
 
     const headSel = selectFromHead(lines, headBudgetLines, headBudgetBytes)
     // notBefore = headSel.lines.length: the tail walk stops at the boundary

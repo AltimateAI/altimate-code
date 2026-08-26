@@ -94,8 +94,12 @@ function certificationInput(state: ServerState) {
   }
 }
 
-function printReady(wired: { file: string; guarded: string[] }, modelID: string) {
+function printReady(wired: { file: string; guarded: string[]; defaultModelIsLocal: boolean }, modelID: string) {
   console.log(`✓ Ready. Configured local/${modelID} in ${wired.file}`)
+  if (!wired.defaultModelIsLocal) {
+    console.log(`  ! Your default model is still set to something else — sessions keep using it, not local/${modelID}.`)
+    console.log(`    Switch with: altimate --model local/${modelID}, or set "model" in ${wired.file}.`)
+  }
   if (wired.guarded.length > 0) {
     console.log(`  Egress guard: ${wired.guarded.join(", ")} now ask before leaving this machine.`)
     console.log("  Local runs have no per-token cost. Disable the guard with --no-egress-guard.")
@@ -186,6 +190,7 @@ async function setup(args: LocalArgs) {
   await ensureLocalDirectories(paths)
   const preflight = await runPreflight({
     tier: matched,
+    model: { id: model.id, revision: model.revision },
     hardware,
     availableGb: match.availableGb,
     directory: paths.root,

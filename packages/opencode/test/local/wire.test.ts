@@ -123,4 +123,73 @@ describe("wireLocalProvider egress guard", () => {
     expect(second.changed).toBe(false)
     expect(await fs.readFile(second.file, "utf8")).toBe(before)
   })
+
+  // --no-egress-guard must only remove "ask" rules a prior `altimate local`
+  // wiring actually set — never a value the user configured independently, and
+  // never rules from a run that had the guard off in the first place.
+  test("--no-egress-guard removes nothing when the guard was never applied", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    // User (or some other tool) wrote "ask" rules directly, with no prior `altimate local` run.
+    await fs.writeFile(
+      path.join(dir, "altimate-code.json"),
+      JSON.stringify({ permission: { websearch: "ask", webfetch: "ask" } }),
+    )
+    const wired = await wire(home, { egressGuard: false })
+    const config = await readConfig(wired.file)
+    expect(config.permission.websearch).toBe("ask")
+    expect(config.permission.webfetch).toBe("ask")
+  })
+
+  test("--no-egress-guard removes nothing when the last wiring already had the guard off", async () => {
+    const home = await makeHome()
+    await wire(home, { egressGuard: false })
+    const dir = path.join(home, ".config", "altimate-code")
+    // Guard was never turned on, so nothing it owns exists — but simulate a
+    // user-set "ask" value that must survive the (still off) --no-egress-guard run.
+    const file = path.join(dir, "altimate-code.json")
+    const contents = JSON.parse(await fs.readFile(file, "utf8"))
+    contents.permission = { websearch: "ask" }
+    await fs.writeFile(file, JSON.stringify(contents))
+    const wired = await wire(home, { egressGuard: false })
+    const config = await readConfig(wired.file)
+    expect(config.permission.websearch).toBe("ask")
+  })
+
+  test("--no-egress-guard still removes guard-owned rules after a prior guard-on wiring", async () => {
+    const home = await makeHome()
+    await wire(home)
+    const wired = await wire(home, { egressGuard: false })
+    const config = await readConfig(wired.file)
+    for (const key of EGRESS_PERMISSIONS) expect(config.permission?.[key]).toBeUndefined()
+  })
+})
+
+describe("wireLocalProvider default model reporting", () => {
+  test("reports the default model as local when it was unset (and got patched)", async () => {
+    const home = await makeHome()
+    const wired = await wire(home)
+    expect(wired.defaultModelIsLocal).toBe(true)
+  })
+
+  test("reports the default model as local when it already pointed at this local model", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ model: "local/qwen3.8-27b" }))
+    const wired = await wire(home)
+    expect(wired.defaultModelIsLocal).toBe(true)
+  })
+
+  test("reports the default model as NOT local when the user's existing model is kept (never clobbered)", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ model: "anthropic/claude-sonnet-5" }))
+    const wired = await wire(home)
+    expect(wired.defaultModelIsLocal).toBe(false)
+    const config = await readConfig(wired.file)
+    expect(config.model).toBe("anthropic/claude-sonnet-5")
+  })
 })

@@ -71,6 +71,15 @@ describe("TruncateCore", () => {
     expect(result.content).not.toContain("line5")
   })
 
+  test("middle direction with maxLines=1 keeps exactly one line, not one from each half", () => {
+    const text = Array.from({ length: 5 }, (_, i) => `line${i}`).join("\n")
+    const result = assembleDefault(text, { maxLines: 1, direction: "middle" })
+    expect(result.truncated).toBe(true)
+    expect(result.preview!.head.split("\n").filter(Boolean).length + result.preview!.tail.split("\n").filter(Boolean).length).toBe(
+      1,
+    )
+  })
+
   test("middle direction respects a custom head ratio", () => {
     const text = Array.from({ length: 30 }, (_, i) => `line${i}`).join("\n")
     // headRatio 0.5 with maxLines 10 -> 5 head lines, 5 tail lines.

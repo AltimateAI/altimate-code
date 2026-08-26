@@ -5,7 +5,7 @@ import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 
 import type { LlamaRecipeTier } from "./recipes"
 import { getLocalPaths, type LocalPaths } from "./paths"
-import { writeLocalEnvironment } from "./environment"
+import { writeLocalEnvironment, readLocalEnvironment } from "./environment"
 
 function configFile(env: NodeJS.ProcessEnv, home: string) {
   const root = path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "altimate-code")
@@ -104,9 +104,16 @@ export async function wireLocalProvider(input: {
     }
   } else {
     // Reversible: --no-egress-guard removes only rules the guard plausibly owns
-    // (value is exactly "ask"); any custom user value or pattern map stays.
-    for (const key of EGRESS_PERMISSIONS) {
-      if (permission[key] === "ask") updated = patch(updated, ["permission", key], undefined)
+    // (value is exactly "ask" AND a prior `altimate local` wiring actually turned
+    // the guard on — recorded in environment.json's egress_guard field). Without
+    // that check, an "ask" rule the user wrote themselves (or one from a run that
+    // never applied the guard) would be silently deleted just because it matches
+    // the value the guard happens to use.
+    const priorEnvironment = await readLocalEnvironment(paths)
+    if (priorEnvironment?.egress_guard === true) {
+      for (const key of EGRESS_PERMISSIONS) {
+        if (permission[key] === "ask") updated = patch(updated, ["permission", key], undefined)
+      }
     }
   }
   if (!updated.endsWith("\n")) updated += "\n"
@@ -118,7 +125,13 @@ export async function wireLocalProvider(input: {
   }
   await fs.chmod(file, 0o600)
   await writeLocalEnvironment(input.tier.agent.tool_retrieval, paths, input.egressGuard !== false)
-  return { file, changed: updated !== before, advertisedContext, guarded }
+  // Whether the config's default `model` actually resolves to this local model:
+  // the patch above never overwrites an existing value (see comment at the top of
+  // this function), so a user with a cloud default keeps using it silently after
+  // setup reports "Ready" — callers use this to warn instead of implying the
+  // switch happened.
+  const defaultModelIsLocal = !("model" in parsed) || parsed.model === `local/${input.modelID}`
+  return { file, changed: updated !== before, advertisedContext, guarded, defaultModelIsLocal }
 }
 
 // Effective egress-guard state for `altimate local status`: what each

@@ -1199,6 +1199,7 @@ export namespace SessionPrompt {
         : await MemoryPrompt.inject(UNIFIED_INJECTION_BUDGET, {
             agent: agent.name,
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
+            sessionID,
           })
       // altimate_change end
       const system = [

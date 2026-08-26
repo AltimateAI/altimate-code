@@ -23,6 +23,17 @@ export function applyLocalEnvironment(env: NodeJS.ProcessEnv = process.env, path
   }
 }
 
+// Read-only view of the environment file written by the LAST `altimate local`
+// setup, used to tell whether a prior wiring actually applied the egress guard
+// (as opposed to a value the user set some other way) before removing it.
+export async function readLocalEnvironment(paths: LocalPaths): Promise<LocalEnvironment | undefined> {
+  try {
+    return JSON.parse(await fsPromises.readFile(paths.environment, "utf8")) as LocalEnvironment
+  } catch {
+    return undefined
+  }
+}
+
 export async function writeLocalEnvironment(toolRetrieval: boolean, paths: LocalPaths, egressGuard?: boolean) {
   await ensureLocalDirectories(paths)
   const temp = `${paths.environment}.${process.pid}.tmp`

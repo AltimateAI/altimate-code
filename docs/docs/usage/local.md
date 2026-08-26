@@ -15,7 +15,9 @@ altimate                # then use the CLI as normal
 - A pinned open 27B coding model in a quantization chosen for your hardware,
   with every artifact SHA-256 verified against a signed recipe.
 - A pinned `llama-server` runtime (Metal on Apple Silicon; Vulkan on
-  Linux/Windows, which covers NVIDIA, AMD, and Intel GPUs alike).
+  Linux/Windows). The runtime itself runs on NVIDIA, AMD, and Intel GPUs,
+  but automatic hardware *detection* currently probes NVIDIA only — on an
+  AMD/Intel discrete GPU, tier matching falls back to system RAM.
 - Speculative decoding (MTP) enabled where it measurably helps.
 - A certification pass before the config is touched: the server must answer
   health, completion, multi-turn, and tool-call probes — if any fail, nothing
@@ -27,7 +29,7 @@ altimate                # then use the CLI as normal
 |---|---|---|---|
 | `laptop-24gb` | Apple Silicon / unified memory, 24GB+ | 131K | the default certified tier |
 | `mac-64gb-unified` | Apple Silicon, 64GB+ | 131K | same recipe, more headroom |
-| `gpu-24gb-discrete` | discrete NVIDIA/AMD/Intel 22GB+ VRAM (RTX 3090/4090-class) | 49K | certified end-to-end on NVIDIA L4 (Vulkan); context sized so weights + KV fit VRAM alone |
+| `gpu-24gb-discrete` | discrete NVIDIA 22GB+ VRAM (RTX 3090/4090-class); AMD/Intel run via Vulkan but are not auto-detected yet | 49K | certified end-to-end on NVIDIA L4 (Vulkan); context sized so weights + KV fit VRAM alone |
 | `dgx-spark-128gb` | NVIDIA DGX Spark (GB10) | 131K | managed: runs the digest-pinned SGLang NVFP4+EAGLE container (~4× llama.cpp); needs Docker + nvidia-container-toolkit |
 | `datacenter-80gb` | 80GB+ NVIDIA (A100/H100) | — | prints BF16/FP8 server deployment guidance |
 

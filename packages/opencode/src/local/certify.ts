@@ -80,10 +80,14 @@ async function chat(input: { baseURL: string; apiKey: string; fetchImpl: Fetch; 
   return response.json()
 }
 
-async function check(run: () => Promise<string>): Promise<CertificateCheck> {
+export async function check(run: () => Promise<string>): Promise<CertificateCheck> {
   const started = Date.now()
   try {
-    return { ok: true, duration_ms: Date.now() - started, detail: await run() }
+    // Object-literal properties evaluate in source order, so awaiting
+    // `run()` inline in the `detail` field would compute `duration_ms`
+    // before the await — reporting near-zero time for every pass.
+    const detail = await run()
+    return { ok: true, duration_ms: Date.now() - started, detail }
   } catch (error) {
     return {
       ok: false,

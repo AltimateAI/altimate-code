@@ -140,6 +140,18 @@ export function runtimeAsset(options: { platform?: NodeJS.Platform; arch?: strin
   return { file, url, sha256 }
 }
 
+// A file with the execute bit set is not necessarily a working runtime (see
+// the "present-but-broken install" case in locateLlamaServer above): a bad
+// unpack can leave an executable binary that crashes on --version because a
+// shared lib beside it is missing. Only treat an existing target as good
+// enough to keep — discarding the freshly downloaded replacement — if it
+// actually runs.
+export async function isWorkingRuntime(file: string): Promise<boolean> {
+  return runtimeVersion(file)
+    .then(() => true)
+    .catch(() => false)
+}
+
 async function findFile(directory: string, name: string): Promise<string | undefined> {
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
     const target = path.join(directory, entry.name)
@@ -195,7 +207,7 @@ export async function installLlamaServer(
     // every versioned .so dangling on Linux.
     await fs.cp(path.dirname(binary), staging, { recursive: true, verbatimSymlinks: true })
     await fs.chmod(path.join(staging, BIN_NAME), 0o755)
-    if (await executable(path.join(target, BIN_NAME))) {
+    if (await isWorkingRuntime(path.join(target, BIN_NAME))) {
       await fs.rm(staging, { recursive: true, force: true })
     } else {
       await fs.rm(target, { recursive: true, force: true })

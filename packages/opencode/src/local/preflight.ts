@@ -5,7 +5,7 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
 import type { HardwareInfo } from "./hardware"
-import type { RecipeTier } from "./recipes"
+import type { ModelRecipe, RecipeTier } from "./recipes"
 
 const execFileAsync = promisify(execFile)
 
@@ -34,7 +34,7 @@ const LLAMA_DISK_GB = 24
 const DOCKER_DISK_GB = 45
 const CACHED_DISK_GB = 4
 
-async function artifactsCached(tier: RecipeTier, directory: string) {
+async function artifactsCached(tier: RecipeTier, model: Pick<ModelRecipe, "id" | "revision">, directory: string) {
   if (tier.engine === "docker-sglang") {
     const repo = tier.model_hf.replace("/", "--")
     const snapshot = path.join(os.homedir(), ".cache", "huggingface", "hub", `models--${repo}`, "snapshots", tier.model_revision)
@@ -44,16 +44,16 @@ async function artifactsCached(tier: RecipeTier, directory: string) {
       .catch(() => false)
   }
   if (tier.engine === "llama.cpp") {
-    const models = path.join(directory, "models")
-    const walk = async (root: string): Promise<boolean> => {
-      const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => [])
-      for (const entry of entries) {
-        if (entry.isDirectory() && (await walk(path.join(root, entry.name)))) return true
-        if (entry.isFile() && entry.name.endsWith(".gguf")) return true
-      }
-      return false
-    }
-    return walk(models)
+    // Must key on this tier's exact target file (matching fetchModelArtifacts'
+    // models/<model.id>/<model.revision>/<basename(tier.file)> layout), not
+    // "any .gguf anywhere under models/" — otherwise a cached file from a
+    // different model or revision falsely discounts the disk-space estimate
+    // for the multi-GB download that is about to happen.
+    const target = path.join(directory, "models", model.id, model.revision, path.basename(tier.file))
+    return fs
+      .stat(target)
+      .then((entry) => entry.isFile())
+      .catch(() => false)
   }
   return false
 }
@@ -92,6 +92,7 @@ async function vulkanLoaderPresent(exec: PreflightExec) {
 
 export async function runPreflight(input: {
   tier: RecipeTier
+  model: Pick<ModelRecipe, "id" | "revision">
   hardware: HardwareInfo
   availableGb: number
   directory: string
@@ -111,7 +112,7 @@ export async function runPreflight(input: {
     detail: `${input.availableGb.toFixed(1)}GB usable vs ${input.tier.min_vram_gb}GB required by ${input.tier.name}`,
   })
 
-  const cached = await artifactsCached(input.tier, input.directory)
+  const cached = await artifactsCached(input.tier, input.model, input.directory)
   const diskNeed = cached ? CACHED_DISK_GB : input.tier.engine === "docker-sglang" ? DOCKER_DISK_GB : LLAMA_DISK_GB
   const diskFree = await freeDiskGb(input.directory, exec).catch(() => undefined)
   checks.push({

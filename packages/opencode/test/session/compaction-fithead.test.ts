@@ -122,3 +122,34 @@ describe("SessionCompaction.fitHead turn boundaries (mixed-role heads)", () => {
   })
 })
 // altimate_change end
+
+// altimate_change start — upstream_fix: a lone oversized message must not survive fitHead
+describe("SessionCompaction.fitHead single-message overflow", () => {
+  test("drops the last message entirely when even a single message exceeds budget", async () => {
+    // One assistant message whose own size already blows the window — the old
+    // `head.length > 1` guard exited the loop without ever re-checking this
+    // message against budget, silently returning it still oversized.
+    const head = [assistantMessage("a0", "z".repeat(200_000))]
+    const result = await SessionCompaction.fitHead({ head, model: model(4096, 1024) })
+    expect(result.head.length).toBe(0)
+    expect(result.dropped).toBe(1)
+  })
+
+  test("shrinking down to a single oversized survivor still drops it, not just the earlier turns", async () => {
+    const head: MessageV2.WithParts[] = []
+    for (let i = 0; i < 7; i++) head.push(userMessage(`u${i}`, "q".repeat(200)))
+    // The newest (last) message is itself larger than the whole budget.
+    head.push(assistantMessage("huge", "z".repeat(200_000)))
+    const result = await SessionCompaction.fitHead({ head, model: model(4096, 1024) })
+    expect(result.head.length).toBe(0)
+    expect(result.dropped).toBe(head.length)
+  })
+
+  test("a single message that DOES fit is still kept (no regression)", async () => {
+    const head = [userMessage("u0", "short")]
+    const result = await SessionCompaction.fitHead({ head, model: model(131072) })
+    expect(result.head.length).toBe(1)
+    expect(result.dropped).toBe(0)
+  })
+})
+// altimate_change end

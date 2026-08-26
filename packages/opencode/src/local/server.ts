@@ -319,7 +319,16 @@ export async function startServer(input: {
   } catch (error) {
     // Covers state-write failures too (e.g. ENOSPC right after the model
     // download): a spawned server must never outlive its tracking state.
-    if (processAlive(child.pid)) process.kill(child.pid, "SIGTERM")
+    // Same escalation as stopServer — a child that ignores SIGTERM would
+    // otherwise be orphaned with its state already cleared.
+    if (processAlive(child.pid)) {
+      process.kill(child.pid, "SIGTERM")
+      const deadline = Date.now() + 10_000
+      while (processAlive(child.pid) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      if (processAlive(child.pid)) process.kill(child.pid, "SIGKILL")
+    }
     await clearServerState(paths)
     throw error
   }
