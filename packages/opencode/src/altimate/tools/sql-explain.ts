@@ -96,11 +96,6 @@ export const SqlExplainTool = Tool.define("sql_explain", {
       ),
   }),
   async execute(args, ctx) {
-    // altimate_change start — workspace precedence
-    const precedence = await Precedence.check(ctx.sessionID, "sql_explain", args.warehouse)
-    if (precedence.redirect) return precedence.redirect
-    // altimate_change end
-
     // Pre-flight validation — reject bad input before hitting the warehouse
     // so we return an actionable message instead of a verbatim DB error.
     const sqlError = validateSqlInput(args.sql)
@@ -131,6 +126,15 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         output: `Invalid input: ${warehouseError}`,
       }
     }
+
+    // altimate_change start — workspace precedence.
+    // After the pre-flight validators on purpose: a redirect reads as success, so
+    // returning one for an empty statement or a malformed warehouse name would send
+    // the model to the engine tool with the same bad arguments instead of telling it
+    // what was wrong.
+    const precedence = await Precedence.check(ctx.sessionID, "sql_explain", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
+    // altimate_change end
 
     try {
       const result = await Dispatcher.call("sql.explain", {

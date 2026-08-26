@@ -25,19 +25,25 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     limit: z.number().optional().default(100).describe("Max rows to return"),
   }),
   async execute(args, ctx) {
-    // altimate_change start — workspace precedence.
-    // Ahead of the write-permission prompt on purpose: a shadowed write should be
-    // redirected, not approved and then redirected.
-    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
-    if (precedence.redirect) return precedence.redirect
-    // altimate_change end
-
     // altimate_change start - SQL write access control
     // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
     const { queryType, blocked } = classifyAndCheck(args.query)
     if (blocked) {
       throw new Error("DROP DATABASE, DROP SCHEMA, and TRUNCATE are blocked for safety. This cannot be overridden.")
     }
+    // altimate_change end
+
+    // altimate_change start — workspace precedence.
+    // Strictly AFTER the hard deny above and strictly BEFORE the write prompt below.
+    // The hard deny says "cannot be overridden", and the engine tools apply no such
+    // list — redirecting a blocked statement would hand the model a way around it.
+    // The write prompt is the opposite: approving a write and then redirecting it
+    // asks the user to authorise something that never runs.
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
+    // altimate_change end
+
+    // altimate_change start - SQL write access control
     if (queryType === "write") {
       await ctx.ask({
         permission: "sql_execute_write",
