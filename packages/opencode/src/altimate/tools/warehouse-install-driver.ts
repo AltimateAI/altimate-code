@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import {
   DRIVER_PACKAGES,
+  shellQuote,
   loadOptionalDriver,
   driverInstallDir,
   driverLabel,
@@ -96,7 +97,7 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
         output:
           `Could not install the ${label} driver (${packages}).\n` +
           `${result.error}\n\n` +
-          `Install it manually with:\n  npm install --prefix ${result.dir} ${packages}`,
+          `Install it manually with:\n  npm install --prefix ${shellQuote(result.dir)} ${packages}`,
       }
     }
 

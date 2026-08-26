@@ -578,3 +578,21 @@ describe("shellQuote on Windows", () => {
     expect(shellQuote("C:\\Users\\x\\drivers", "win32")).toBe("C:\\Users\\x\\drivers")
   })
 })
+
+describe("manual-install hints are copy-pasteable", () => {
+  test("every printed --prefix is quoted", () => {
+    // The failure branch of warehouse_install_driver was the one site that
+    // interpolated the directory raw, and it is the branch a user reads
+    // precisely when the automatic install has just failed them.
+    process.env["ALTIMATE_DRIVER_DIR"] = "/Users/John Doe/Library/drivers"
+
+    const err = new DriverNotInstalledError("snowflake", DRIVER_PACKAGES.snowflake, [])
+    const prefixes = [...err.message.matchAll(/--prefix (\S+)/g)].map((m) => m[1]!)
+
+    expect(prefixes.length).toBeGreaterThan(0)
+    for (const prefix of prefixes) {
+      // An unquoted path with a space splits, and npm receives the wrong prefix.
+      expect(prefix.startsWith("'") || prefix.startsWith('"')).toBe(true)
+    }
+  })
+})

@@ -399,11 +399,43 @@ export interface InstallResult {
   readonly error?: string
 }
 
+/** Terminate a spawned shell and everything it started. */
+function killTree(child: ReturnType<typeof spawn>): void {
+  const pid = child.pid
+  if (pid === undefined) return
+  if (process.platform === "win32") {
+    try {
+      // No process groups on Windows; taskkill walks the tree instead.
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
+    } catch {
+      child.kill()
+    }
+    return
+  }
+  try {
+    // Negative pid targets the whole process group created by `detached`.
+    process.kill(-pid, "SIGTERM")
+  } catch {
+    try {
+      child.kill("SIGTERM")
+    } catch {
+      // Already gone.
+    }
+  }
+}
+
 function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
     // npm ships as a shell script on POSIX and a .cmd on Windows; `shell: true`
-    // lets the platform resolve whichever is present on PATH.
-    const child = spawn("npm", args, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"] })
+    // lets the platform resolve whichever is present on PATH. `detached` puts
+    // the shell in its own process group on POSIX so a timeout can take the
+    // whole group down — see killTree below.
+    const child = spawn("npm", args, {
+      cwd,
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    })
     let output = ""
     let settled = false
     const finish = (code: number) => {
@@ -413,7 +445,12 @@ function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code:
       resolve({ code, output: output.trim() })
     }
     const timer = setTimeout(() => {
-      child.kill()
+      // Killing the child alone leaves npm running: with `shell: true` the child
+      // is the shell, and npm is its descendant. An orphaned install keeps
+      // writing to the shared driver directory long after this promise settles,
+      // which the in-flight map cannot prevent — it serializes promises, not
+      // processes.
+      killTree(child)
       output += `\nTimed out after ${Math.round(timeoutMs / 1000)}s.`
       finish(124)
     }, timeoutMs)
