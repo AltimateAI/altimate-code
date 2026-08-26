@@ -1295,6 +1295,15 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
 
   const runInstall = async () => {
     setPhase("installing")
+    engineInstallInFlight = true
+    try {
+      await performInstall()
+    } finally {
+      engineInstallInFlight = false
+    }
+  }
+
+  const performInstall = async () => {
     const result = await installEngine()
     if (!result.ok) {
       installing = false
@@ -1402,6 +1411,15 @@ let engineOfferVisible = false
 /** Identifies which raise owns the latch, so a superseded dialog's teardown
  * cannot free a slot that a newer dialog is still holding. */
 let engineOfferGeneration = 0
+/** Held for the lifetime of an `npm i -g`, independently of the dialog.
+ *
+ * The install outlives the dialog that started it: dismissing mid-install
+ * tears the component down and frees the offer latch, but npm keeps running.
+ * Without this, the next turn's repair retry raises a fresh offer whose
+ * "Install now" starts a SECOND `npm i -g` against the same global prefix.
+ * The dialog latch answers "is an offer on screen"; this one answers "is an
+ * install still running", and only the second survives dismissal. */
+let engineInstallInFlight = false
 
 async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
   // The attach re-probes a repairable failure on every turn, so the offer can
@@ -1417,6 +1435,12 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
   // fixes, because the second dialog can replace an installing one and start a
   // concurrent global npm install.
   if (engineOfferVisible) return
+  if (engineInstallInFlight) {
+    // An install started from an earlier dialog is still running; offering
+    // again would invite a second concurrent global install.
+    log.info("engine install offer suppressed while an install is in flight")
+    return
+  }
   engineOfferVisible = true
   const generation = ++engineOfferGeneration
   const release = () => {
