@@ -922,16 +922,6 @@ describe("ensure — round 5", () => {
     expect(h.added[h.added.length - 1].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
   })
 
-  test("a genuinely disabled entry (enabled:false in config) is still respected", async () => {
-    const h = install({
-      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
-      statuses: [{ datamate: { status: "disabled" } }],
-    })
-    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
-    expect(h.connects).toHaveLength(0)
-    expect(h.persisted).toHaveLength(0)
-  })
-
   test("an unbound project does NOT tear down an entry it cannot prove it owns", async () => {
     // argv shape is not provenance: a hand-authored entry looks identical to ours.
     const h = install({
@@ -1462,25 +1452,6 @@ describe("INVARIANT — a cached success is re-probed and re-attributed", () => 
   }
 })
 
-describe("ensure — round 16", () => {
-  test("a config disable is honoured even while the runtime is still connected", async () => {
-    // The mirror of the round-9 case. There the runtime said disabled and the
-    // config said enabled; here the config says disabled and the RUNTIME still
-    // says connected, because MCP reports live client state. Gating the disable
-    // check on connectivity skipped it entirely — and for an unpinned entry the
-    // replacement path would then persist it enabled again, undoing the disable.
-    const h = install({
-      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
-      statuses: [{ datamate: { status: "connected" } }],
-      tools: { datamate_dbt_build_model: 1 },
-    })
-    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
-    expect(h.added, "attached over an entry the user had disabled").toHaveLength(0)
-    expect(h.persisted, "re-enabled an entry the user had disabled").toHaveLength(0)
-    expect(h.connects).toHaveLength(0)
-  })
-})
-
 describe("ensure — round 18", () => {
   test("a re-link DURING cached-success validation is not answered with the old workspace", async () => {
     // The memoised-success path does its own awaited validation outside run(),
@@ -1545,7 +1516,10 @@ describe("INVARIANT — a disabled entry serves nothing", () => {
     })
     expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
     expect(h.removes, "reported the entry disabled but left its client serving tools").toContain("datamate")
-    // Respecting the edit must not turn into rewriting it.
+    // Respecting the edit must not turn into rewriting it, and must not turn
+    // into attaching over it: for an unpinned entry the replacement path would
+    // otherwise persist it enabled again, undoing the very edit being honoured.
+    expect(h.added, "attached over an entry the user had disabled").toHaveLength(0)
     expect(h.persisted, "wrote to the config while honouring a disable").toHaveLength(0)
     expect(h.connects, "retried an entry the user disabled").toHaveLength(0)
   })
