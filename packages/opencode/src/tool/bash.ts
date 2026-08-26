@@ -176,6 +176,12 @@ export const BashTool = Tool.define("bash", async () => {
       // process.env spread above would silently disable that path in every
       // nested server invocation. See PR #937 review (Issue #3).
       delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]
+      // Same reasoning for the headless marker: `run` sets it so the workspace
+      // engine offer degrades to a printed line, but a nested entrypoint
+      // launched from here may well have a TUI. Left in place, the child would
+      // inherit "headless" and print the notice to stderr instead of showing
+      // the install dialog.
+      delete mergedEnv["ALTIMATE_CODE_HEADLESS"]
       // altimate_change end
       const sep = process.platform === "win32" ? ";" : ":"
       const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""

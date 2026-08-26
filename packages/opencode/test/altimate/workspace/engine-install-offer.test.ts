@@ -8,10 +8,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
   ensure,
   installCommand,
+  installEngine,
   installSpec,
   nodeMajor,
   describeOffer,
   isHeadless,
+  INSTALL_TIMEOUT_MS,
   resetForTests,
   syncInternals,
   ENGINE_BINARY,
@@ -305,5 +307,27 @@ describe("headless notice stream", () => {
     expect(errChunks.join("")).toContain("need the local engine")
     expect(outChunks.join("")).not.toContain("need the local engine")
     expect(h.toasts).toHaveLength(0)
+  })
+})
+
+describe("install deadline", () => {
+  // Regression guard. The install originally used execFile, whose `timeout`
+  // kills the child. Moving to Process.run for the Windows shim quietly lost
+  // that: Process.spawn consults `timeout` only inside its abort handler, as
+  // the grace before SIGKILL, so with no abort signal there is no deadline and
+  // a stalled npm leaves the dialog on "Installing…" forever. Measured: with
+  // `timeout` alone an 8s sleep ran 8004ms; with an abort signal, 502ms.
+  test("a stalled install is reported rather than hanging", async () => {
+    install({})
+    // Stand in for npm stalling past the deadline.
+    syncInternals.install = async () => ({ ok: false, error: "npm did not finish within 5 minutes" })
+    const result = await installEngine()
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain("did not finish")
+  })
+
+  test("the deadline is a real duration, not zero or unset", () => {
+    expect(INSTALL_TIMEOUT_MS).toBeGreaterThan(0)
+    expect(Number.isFinite(INSTALL_TIMEOUT_MS)).toBe(true)
   })
 })

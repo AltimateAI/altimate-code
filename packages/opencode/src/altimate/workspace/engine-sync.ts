@@ -95,6 +95,8 @@ export const INSTALL_COMMAND = `npm i -g ${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}
 /** Node major the npm install path needs. The CLI itself is a self-contained
  * binary and does not need Node — only this install route does. */
 export const MIN_NODE_MAJOR = 20
+/** How long "Install now" waits for npm before giving up. */
+export const INSTALL_TIMEOUT_MS = 300_000
 
 /** Engine tools arrive under the MCP server key as `<key>_<tool>`. */
 const TOOL_PREFIX = `${DATAMATE_KEY}_`
@@ -454,7 +456,18 @@ async function publishOffer(): Promise<boolean> {
  *
  * The offer reaches the TUI as a bare command, so the plugin rebuilds the
  * detail here rather than receiving it. Returns null when there is nothing to
- * offer — unbound, or an engine that already clears the floor. */
+ * offer — unbound, or an engine that already clears the floor.
+ *
+ * This describes the CURRENT state, not the decision that raised the offer,
+ * and the two can differ. `run()`'s rule-1 branch reports `engine-too-old`
+ * using the version of a reused entry's binary; that branch only fires when
+ * PATH has nothing better, so this function — which probes PATH alone — may
+ * describe the same situation as `engine-missing`. That is deliberate: the
+ * user's actionable state is "no usable engine, run this command", and the
+ * command is identical either way. Describing live state rather than echoing
+ * a trigger also keeps this correct when the conditions upstream change,
+ * which is the failure mode where describing code silently keeps asserting
+ * what used to be true. */
 export async function describeOffer(directory: string): Promise<EngineOffer | null> {
   const binding = syncInternals.resolveBinding
     ? await syncInternals.resolveBinding()
@@ -516,12 +529,24 @@ export async function installEngine(): Promise<InstallResult> {
   const spec = installSpec()
   if (syncInternals.install) return syncInternals.install(spec)
   const npm = process.platform === "win32" ? "npm.cmd" : "npm"
+  // The deadline has to come from an abort signal, not from `timeout`.
+  // `Process.spawn` only consults `timeout` inside its abort handler, as the
+  // grace period before escalating to SIGKILL — with no signal supplied that
+  // handler never runs and there is no deadline at all. An npm that stops
+  // making progress would leave the dialog on "Installing…" forever.
+  const deadline = AbortSignal.timeout(INSTALL_TIMEOUT_MS)
   try {
-    const result = await Process.run([npm, "i", "-g", spec], { timeout: 300_000, nothrow: true })
+    const result = await Process.run([npm, "i", "-g", spec], { abort: deadline, nothrow: true })
     if (result.code === 0) return { ok: true }
+    if (deadline.aborted) {
+      return { ok: false, error: `npm did not finish within ${Math.round(INSTALL_TIMEOUT_MS / 60_000)} minutes` }
+    }
     const detail = result.stderr.toString().trim().split(/\r?\n/).slice(-3).join(" ")
     return { ok: false, error: detail || `npm exited with code ${result.code}` }
   } catch (err) {
+    if (deadline.aborted) {
+      return { ok: false, error: `npm did not finish within ${Math.round(INSTALL_TIMEOUT_MS / 60_000)} minutes` }
+    }
     return { ok: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
