@@ -97,6 +97,7 @@ export type Outcome =
   | { kind: "engine-missing"; declared: number }
   | { kind: "engine-too-old"; found: string }
   | { kind: "connect-failed"; error: string }
+  | { kind: "entry-disabled" }
 
 export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolean }
 
@@ -446,6 +447,22 @@ async function run(): Promise<Outcome> {
     let connected = existing.status === "connected"
 
     if (!connected) {
+      if (existing.status === "disabled") {
+        // The user turned this entry off deliberately. Do NOT call `MCP.connect`
+        // to "retry" it: that persists `enabled: true` into whichever config
+        // owns the entry, so for a global `datamate` the first prompt in any
+        // bound project would silently re-enable it for every other project.
+        // Say what is unavailable and leave their choice alone.
+        log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
+        await notify({
+          title: "Workspace engine is disabled",
+          message:
+            `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
+            `integration tools are unavailable. Enable it to use them.`,
+          variant: "warning",
+        })
+        return { kind: "entry-disabled" }
+      }
       if (isUrlEntry(entry)) {
         // Dead URL: nothing here can bring that process back — only the IDE can
         // restore its port. Fall through to a local spawn and report it below.
@@ -656,7 +673,7 @@ type SessionAttach = { key?: string; task: Promise<Outcome>; waitTimedOut?: bool
  * it, fix a broken entry. Caching these for the life of the session means the
  * hint we just printed ("install it with …") can be followed and nothing
  * happens until a new session — so they are re-probed on the next turn. */
-const REPAIRABLE = new Set<Outcome["kind"]>(["engine-missing", "engine-too-old", "connect-failed"])
+const REPAIRABLE = new Set<Outcome["kind"]>(["engine-missing", "engine-too-old", "connect-failed", "entry-disabled"])
 
 function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE.has(outcome.kind)
@@ -724,9 +741,44 @@ export function ensure(sessionID: string): Promise<Outcome> {
   return entry.task
 }
 
-/** One attach, with the outcome logged exactly once. */
+/** In-flight attach chain per project.
+ *
+ * Per-session ordering is not enough: the MCP client is instance-wide, not per
+ * session, `MCP.add` is last-writer-wins, and `SessionRunState` keeps
+ * independent runners per session id — so two prompts in the same project
+ * genuinely overlap. Without this, a slower attach from one session can land
+ * after another session's and leave the runtime serving a workspace nobody is
+ * bound to, with both memos settled so no later turn repairs it. */
+const attachChains = new Map<string, Promise<unknown>>()
+
+function projectKey(): string {
+  try {
+    return projectRoot()
+  } catch {
+    return "<no-instance>"
+  }
+}
+
+function serializeAttach<T>(fn: () => Promise<T>): Promise<T> {
+  const key = projectKey()
+  const previous = attachChains.get(key) ?? Promise.resolve()
+  // Run regardless of how the previous attach ended — a failure must not wedge
+  // the chain for the rest of the process.
+  const next = previous.then(fn, fn)
+  attachChains.set(
+    key,
+    next.then(
+      () => {},
+      () => {},
+    ),
+  )
+  return next
+}
+
+/** One attach, serialized against every other attach in this project, with the
+ * outcome logged exactly once. */
 function attachOnce(sessionID: string): Promise<Outcome> {
-  return run()
+  return serializeAttach(() => run())
     .catch((err): Outcome => {
       log.warn("workspace engine attach failed", { err: String(err) })
       return { kind: "connect-failed", error: String(err) }
@@ -783,4 +835,5 @@ export async function whenAttached(sessionID: string, timeoutMs: number = ATTACH
 /** Test seam — drop memoised outcomes. */
 export function resetForTests(): void {
   sessions.clear()
+  attachChains.clear()
 }

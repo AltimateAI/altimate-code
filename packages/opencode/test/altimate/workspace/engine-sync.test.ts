@@ -800,3 +800,56 @@ describe("ensure — a superseded attach cannot overwrite the current one", () =
     expect(h.added[h.added.length - 1].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "99"])
   })
 })
+
+describe("ensure — round 4", () => {
+  test("an explicitly disabled entry is respected, never silently re-enabled", async () => {
+    // MCP.connect persists `enabled: true` into whichever config owns the entry,
+    // so retrying a DISABLED entry would undo a deliberate global disable for
+    // every other project.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"] },
+      statuses: [{ datamate: { status: "disabled" } }],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(h.connects).toHaveLength(0)
+    expect(h.added).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+  })
+
+  test("a genuinely FAILED entry is still retried once", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"] },
+      statuses: [
+        { datamate: { status: "failed", error: "exit 1" } },
+        { datamate: { status: "failed", error: "exit 1" } },
+      ],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "connect-failed", error: "exit 1" })
+    expect(h.connects).toEqual(["datamate"])
+  })
+
+  test("two overlapping SESSIONS in one project never attach concurrently", async () => {
+    // MCP state is instance-wide and MCP.add is last-writer-wins, while
+    // SessionRunState keeps independent runners per session id — so per-session
+    // ordering is not enough. The invariant is that no two attaches for the same
+    // project are ever in their mutating phase at the same time.
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    let inFlight = 0
+    let peak = 0
+    syncInternals.mcp!.add = async (name, cfg) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      await new Promise((r) => setTimeout(r, 40))
+      h.added.push({ name, cfg })
+      inFlight -= 1
+    }
+
+    await Promise.all([ensure("sessionA"), ensure("sessionB")])
+
+    expect(h.added).toHaveLength(2)
+    expect(peak).toBe(1) // 2 without project-scoped serialization
+  })
+})
