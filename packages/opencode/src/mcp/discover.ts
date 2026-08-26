@@ -46,7 +46,6 @@ function resolveServerEnvVars(
   }
   return out
 }
-// altimate_change end
 
 // altimate_change start — upstream_fix: unresolved-variable record for the user surface (#701).
 /** Server name -> variable names that resolved to "" during discovery. */
@@ -56,6 +55,59 @@ const _unresolvedEnv = new Map<string, Set<string>>()
 export function unresolvedEnvVars(server: string): string[] {
   return [...(_unresolvedEnv.get(server) ?? [])].sort()
 }
+
+// altimate_change start — upstream_fix (#878): report drift instead of silently skipping.
+// Discovery is first-source-wins, so a server already present in altimate-code.json is skipped
+// outright and a changed `.vscode/mcp.json` (a new ALTIMATE_EXTENSION_RPC port, a moved command)
+// is never mentioned. Overwriting the user's own config would be worse than the silence, so the
+// differing field names are recorded and a user surface reports them; the user decides.
+const _drift = new Map<string, { source: string; fields: string[] }>()
+
+/** Fields whose difference is expected and not worth reporting. */
+const DRIFT_IGNORED = new Set(["enabled"])
+
+/**
+ * Field names that differ between a discovered server and the one already configured.
+ * Nested `environment`/`headers` differences are reported per key (`environment.FOO`) so the
+ * message names the thing to fix rather than just "environment".
+ */
+export function driftFields(discovered: Record<string, any>, configured: Record<string, any>): string[] {
+  const fields: string[] = []
+  for (const key of new Set([...Object.keys(discovered), ...Object.keys(configured)])) {
+    if (DRIFT_IGNORED.has(key)) continue
+    const a = discovered[key]
+    const b = configured[key]
+    const nested = key === "environment" || key === "headers"
+    if (nested && a && b && typeof a === "object" && typeof b === "object") {
+      for (const inner of new Set([...Object.keys(a), ...Object.keys(b)])) {
+        if (a[inner] !== b[inner]) fields.push(`${key}.${inner}`)
+      }
+      continue
+    }
+    if (JSON.stringify(a) !== JSON.stringify(b)) fields.push(key)
+  }
+  return fields.sort()
+}
+
+/** Record that `server` is configured differently from what discovery found in `source`. */
+export function setConfigDrift(server: string, source: string, fields: string[]) {
+  if (fields.length > 0) _drift.set(server, { source, fields })
+  else _drift.delete(server)
+}
+
+/** Servers whose configured definition differs from the discovered one. */
+export function configDrift(): { server: string; source: string; fields: string[] }[] {
+  return [..._drift.entries()]
+    .map(([server, info]) => ({ server, ...info }))
+    .sort((a, b) => a.server.localeCompare(b.server))
+}
+
+/** Test seam — drift accumulates at module level. */
+export function resetConfigDrift() {
+  _drift.clear()
+}
+// altimate_change end
+// altimate_change end
 // altimate_change end
 
 interface ExternalMcpSource {
