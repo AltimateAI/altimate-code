@@ -208,6 +208,13 @@ export namespace Telemetry {
         attempt: number
       }
     | {
+        type: "compaction_head_truncated"
+        timestamp: number
+        session_id: string
+        dropped_messages: number
+        kept_messages: number
+      }
+    | {
         type: "tool_outputs_pruned"
         timestamp: number
         session_id: string

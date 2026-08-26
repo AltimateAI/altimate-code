@@ -1,4 +1,5 @@
 import path from "path"
+import { Token } from "@/util/token"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -23,8 +24,6 @@ import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
-// altimate_change - workspace memory read path
-import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -817,11 +816,38 @@ export namespace SessionPrompt {
       }
 
       // context overflow, needs compaction
+      // altimate_change start — proactive overflow check: the recorded usage is
+      // from the LAST assistant turn; tool results appended since then are not
+      // counted, and one oversized output can jump the session past the window
+      // between checks (24% of lost bench trials died this way). Estimate the
+      // uncounted tail and include it.
+      const uncountedTail = (() => {
+        if (!lastFinished) return 0
+        const index = msgs.findIndex((m) => m.info.id === lastFinished.id)
+        if (index < 0) return 0
+        let tokens = 0
+        for (const m of msgs.slice(index + 1)) {
+          for (const part of m.parts) {
+            if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+            if (part.type === "tool" && part.state?.status === "completed")
+              tokens += Token.estimate(part.state.output ?? "")
+          }
+        }
+        return tokens
+      })()
       if (
         lastFinished &&
         lastFinished.summary !== true &&
-        (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
+        (await SessionCompaction.isOverflow({
+          tokens: {
+            ...lastFinished.tokens,
+            input: (lastFinished.tokens.input ?? 0) + uncountedTail,
+            total: lastFinished.tokens.total ? lastFinished.tokens.total + uncountedTail : lastFinished.tokens.total,
+          },
+          model,
+        }))
       ) {
+        // altimate_change end
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -1044,17 +1070,6 @@ export namespace SessionPrompt {
         // altimate_change start - reset training session tracking to avoid stale applied counts
         MemoryPrompt.resetSession()
         // altimate_change end
-        // altimate_change start - workspace memory: one fetch per session, held as an
-        // in-memory overlay merged at injection time. Started rather than awaited so
-        // the turn proceeds immediately; MemoryPrompt.inject applies a bounded wait.
-        //
-        // This block runs on EVERY user turn (see the comment below on `step === 1`),
-        // so `hydrate` is idempotent per session id and is deliberately not preceded
-        // by a reset — resetting here made every turn refetch, and cleared the overlay
-        // before the refetch, so workspace memory blinked out of the prompt whenever a
-        // fetch ran long.
-        void WorkspaceMemory.hydrate(sessionID).catch(() => {})
-        // altimate_change end
         SessionSummary.summarize({
           sessionID: sessionID,
           messageID: lastUser.id,
@@ -1189,7 +1204,6 @@ export namespace SessionPrompt {
         : await MemoryPrompt.inject(UNIFIED_INJECTION_BUDGET, {
             agent: agent.name,
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
-            sessionID,
           })
       // altimate_change end
       const system = [

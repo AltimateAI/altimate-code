@@ -10,7 +10,6 @@ import { UninstallCommand } from "./cli/cmd/uninstall"
 import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
 import { InstallationVersion, InstallationLocal } from "@opencode-ai/core/installation/version"
-import { Flag } from "@opencode-ai/core/flag/flag"
 import { FormatError } from "./cli/error"
 import { ServeCommand } from "./cli/cmd/serve"
 // altimate_change start — workspace-serve: dev-only workspace serve command
@@ -45,17 +44,22 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
-// altimate_change start — link: workspace-binding subcommand
-import { LinkCommand } from "./cli/cmd/link"
-// altimate_change end
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
+// altimate_change start — local data agent command and persisted environment bootstrap
+import { LocalCommand } from "./local/command"
+import { applyLocalEnvironment } from "./local/environment"
+// altimate_change end
 // altimate_change start - telemetry import
 import { Telemetry } from "./telemetry"
 // altimate_change end
 // altimate_change start - welcome banner
 import { showWelcomeBannerIfNeeded } from "./cli/welcome"
+// altimate_change end
+
+// altimate_change start — apply certified local agent defaults before any command runs
+applyLocalEnvironment()
 // altimate_change end
 
 const args = hideBin(process.argv)
@@ -174,14 +178,8 @@ let cli = yargs(args)
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
   // altimate_change end
-
-// altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
-// so the command isn't registered — and doesn't show in --help — for users
-// who haven't opted in to the workspaces feature via ALTIMATE_WORKSPACE=1.
-// (M1 in the consensus review.)
-if (Flag.ALTIMATE_WORKSPACE) {
-  cli = cli.command(LinkCommand)
-}
+  // altimate_change start — register certified local data agent command group
+  .command(LocalCommand)
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

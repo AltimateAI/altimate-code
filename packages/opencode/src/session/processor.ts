@@ -39,6 +39,28 @@ export namespace SessionProcessor {
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
+  // altimate_change start — W1.8: per-processor tool-call id coercer. Malformed
+  // (non-string) ids from OpenAI-compatible servers are regenerated deterministically
+  // via MessageV2.sanitizeToolCallID; the raw→sanitized alias map (keyed on the JSON
+  // form) makes the propagation to paired tool-result/tool-error events atomic — even
+  // when the provider flips the value's type mid-pair (numeric call id, string result
+  // id), both halves resolve to the SAME sanitized id. A regenerated call id with an
+  // un-regenerated result id would 400 every subsequent provider request.
+  // Exported as a factory so the ingestion half is unit-testable against the replay
+  // half in message-v2.ts (they must produce identical output for a pair).
+  export function createToolCallIDCoercer() {
+    const aliases: Record<string, string> = {}
+    return (raw: unknown): string => {
+      const key = typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw))
+      const existing = aliases[key]
+      if (existing !== undefined) return existing
+      const sanitized = MessageV2.sanitizeToolCallID(raw)
+      aliases[key] = sanitized
+      return sanitized
+    }
+  }
+  // altimate_change end
+
   export function create(input: {
     assistantMessage: MessageV2.Assistant
     sessionID: SessionID
@@ -46,6 +68,10 @@ export namespace SessionProcessor {
     abort: AbortSignal
   }) {
     const toolcalls: Record<string, MessageV2.ToolPart> = {}
+    // altimate_change start — W1.8: coerce malformed tool-call ids at ingestion;
+    // sanitized ids are used as BOTH the persisted callID and the pairing key.
+    const coerceToolCallID = createToolCallIDCoercer()
+    // altimate_change end
     // altimate_change start — per-tool call counter for varied-input loop detection
     const toolCallCounts: Record<string, number> = {}
     // altimate_change end
@@ -70,7 +96,9 @@ export namespace SessionProcessor {
         return input.assistantMessage
       },
       partFromToolCall(toolCallID: string) {
-        return toolcalls[toolCallID]
+        // altimate_change start — W1.8: tool-execution lookups use the same coercion
+        return toolcalls[coerceToolCallID(toolCallID)]
+        // altimate_change end
       },
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
@@ -146,20 +174,24 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-input-start":
+                  // altimate_change start — W1.8: sanitize the incoming id before it
+                  // becomes the persisted callID and the pairing key.
+                  const inputStartCallID = coerceToolCallID(value.id)
                   const part = await Session.updatePart({
-                    id: toolcalls[value.id]?.id ?? PartID.ascending(),
+                    id: toolcalls[inputStartCallID]?.id ?? PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "tool",
                     tool: value.toolName,
-                    callID: value.id,
+                    callID: inputStartCallID,
                     state: {
                       status: "pending",
                       input: {},
                       raw: "",
                     },
                   })
-                  toolcalls[value.id] = part as MessageV2.ToolPart
+                  toolcalls[inputStartCallID] = part as MessageV2.ToolPart
+                  // altimate_change end
                   break
 
                 case "tool-input-delta":
@@ -169,7 +201,10 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-call": {
-                  const match = toolcalls[value.toolCallId]
+                  // altimate_change start — W1.8: resolve the pair via the coerced id
+                  const toolCallCallID = coerceToolCallID(value.toolCallId)
+                  const match = toolcalls[toolCallCallID]
+                  // altimate_change end
                   if (match) {
                     const part = await Session.updatePart({
                       ...match,
@@ -190,7 +225,9 @@ export namespace SessionProcessor {
                         : value.providerMetadata,
                       // altimate_change end
                     })
-                    toolcalls[value.toolCallId] = part as MessageV2.ToolPart
+                    // altimate_change start — W1.8: key by the coerced id
+                    toolcalls[toolCallCallID] = part as MessageV2.ToolPart
+                    // altimate_change end
                     // altimate_change start — session has now tool-called; suppresses plan refusal warning
                     sessionToolCallsMade++
                     // altimate_change end
@@ -256,7 +293,10 @@ export namespace SessionProcessor {
                   break
                 }
                 case "tool-result": {
-                  const match = toolcalls[value.toolCallId]
+                  // altimate_change start — W1.8: resolve the pair via the coerced id
+                  const toolResultCallID = coerceToolCallID(value.toolCallId)
+                  const match = toolcalls[toolResultCallID]
+                  // altimate_change end
                   if (match && match.state.status === "running") {
                     await Session.updatePart({
                       ...match,
@@ -274,13 +314,18 @@ export namespace SessionProcessor {
                       },
                     })
 
-                    delete toolcalls[value.toolCallId]
+                    // altimate_change start — W1.8: delete by the coerced id
+                    delete toolcalls[toolResultCallID]
+                    // altimate_change end
                   }
                   break
                 }
 
                 case "tool-error": {
-                  const match = toolcalls[value.toolCallId]
+                  // altimate_change start — W1.8: resolve the pair via the coerced id
+                  const toolErrorCallID = coerceToolCallID(value.toolCallId)
+                  const match = toolcalls[toolErrorCallID]
+                  // altimate_change end
                   if (match && match.state.status === "running") {
                     await Session.updatePart({
                       ...match,
@@ -301,7 +346,9 @@ export namespace SessionProcessor {
                     ) {
                       blocked = shouldBreak
                     }
-                    delete toolcalls[value.toolCallId]
+                    // altimate_change start — W1.8: delete by the coerced id
+                    delete toolcalls[toolErrorCallID]
+                    // altimate_change end
                   }
                   break
                 }

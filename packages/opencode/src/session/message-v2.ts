@@ -31,6 +31,26 @@ export namespace MessageV2 {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
 
+  // altimate_change start — W1.8: deterministic tool-call id sanitation. Some
+  // OpenAI-compatible servers emit non-string (numeric/object) tool-call ids;
+  // providers reject any request whose tool_use/tool_result pair carries a
+  // malformed or mismatched id. Valid non-empty strings pass through untouched.
+  // Anything else is regenerated deterministically (FNV-1a over the JSON form),
+  // so the SAME raw value always maps to the SAME id — the property that keeps
+  // the call half and the result half of a pair consistent whether coerced at
+  // ingestion (processor.ts) or defensively at replay (toModelMessagesEffect).
+  export function sanitizeToolCallID(id: unknown): string {
+    if (typeof id === "string" && id.length > 0) return id
+    const raw = typeof id === "string" ? id : (JSON.stringify(id) ?? String(id))
+    let hash = 0x811c9dc5
+    for (let i = 0; i < raw.length; i++) {
+      hash ^= raw.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193)
+    }
+    return "call_" + (hash >>> 0).toString(16).padStart(8, "0")
+  }
+  // altimate_change end
+
   // altimate_change start — shared synthetic-attachment prompt text. Used both when
   // injecting tool-result media as a user message (below) and by the GitHub Copilot
   // plugin's imgMsg() heuristic so the two stay in sync.
@@ -781,6 +801,14 @@ export namespace MessageV2 {
             })
           if (part.type === "tool") {
             toolNames.add(part.tool)
+            // altimate_change start — W1.8: defensive replay-side id coercion. Parts
+            // persisted after the ingestion fix already carry sanitized string ids;
+            // transcripts written before it may hold malformed (non-string) callIDs.
+            // Computing the sanitized id ONCE per tool part and using it for every
+            // rendered half guarantees the tool-call and its paired tool-result emit
+            // identical toolCallId values, so provider pairing validation cannot 400.
+            const replayCallID = sanitizeToolCallID(part.callID)
+            // altimate_change end
             if (part.state.status === "completed") {
               // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
               const rawOutputText = part.state.time.compacted
@@ -816,7 +844,9 @@ export namespace MessageV2 {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-available",
-                toolCallId: part.callID,
+                // altimate_change start — W1.8 replay-side id coercion
+                toolCallId: replayCallID,
+                // altimate_change end
                 input: part.state.input,
                 output,
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
@@ -829,7 +859,7 @@ export namespace MessageV2 {
                 assistantMessage.parts.push({
                   type: ("tool-" + part.tool) as `tool-${string}`,
                   state: "output-available",
-                  toolCallId: part.callID,
+                  toolCallId: replayCallID,
                   input: part.state.input,
                   output,
                   ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
@@ -838,7 +868,7 @@ export namespace MessageV2 {
                 assistantMessage.parts.push({
                   type: ("tool-" + part.tool) as `tool-${string}`,
                   state: "output-error",
-                  toolCallId: part.callID,
+                  toolCallId: replayCallID,
                   input: part.state.input,
                   errorText: part.state.error,
                   ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
@@ -852,7 +882,9 @@ export namespace MessageV2 {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
-                toolCallId: part.callID,
+                // altimate_change start — W1.8 replay-side id coercion
+                toolCallId: replayCallID,
+                // altimate_change end
                 input: part.state.input,
                 errorText: "[Tool execution was interrupted]",
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),

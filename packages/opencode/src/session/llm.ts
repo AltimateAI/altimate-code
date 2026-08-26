@@ -173,19 +173,7 @@ export namespace LLM {
     // tools absent from the current set. Add stub definitions for any missing tools.
     // Fixes: https://github.com/AltimateAI/altimate-code/issues/678
     const referencedTools = toolNamesFromMessages(input.messages)
-    for (const name of referencedTools) {
-      if (!Object.hasOwn(tools, name)) {
-        tools[name] = tool({
-          description: `[Historical] Tool no longer available in this session`,
-          inputSchema: jsonSchema({ type: "object", properties: {} }),
-          execute: async () => ({
-            output: "This tool is no longer available. Please use an alternative approach.",
-            title: "",
-            metadata: {},
-          }),
-        })
-      }
-    }
+    addHistoricalToolStubs(tools, referencedTools)
     // altimate_change end
 
     // altimate_change start — tool retrieval
@@ -339,6 +327,34 @@ export namespace LLM {
       }
     }
     return names
+  }
+
+  // Mutates `tools`, adding a stub definition for every referenced historical tool
+  // name that has no real definition (see toolNamesFromMessages above / issue #678).
+  //
+  // Harness plan W1.6 / item 3: when the call exposes ZERO real tools (e.g. the
+  // compaction summarizer, which passes tools: {} and toolChoice "none"), skip stub
+  // injection entirely. With an empty tool set the AI SDK omits both `tools` and
+  // `tool_choice` from the request, which every provider accepts — this is the
+  // compat fallback for providers whose OpenAI-compat layer rejects toolChoice
+  // "none". Injecting stubs here would instead advertise callable tools on a call
+  // that must produce text only.
+  export function addHistoricalToolStubs(tools: Record<string, Tool>, referenced: Iterable<string>) {
+    if (Object.keys(tools).length === 0) return tools
+    for (const name of referenced) {
+      if (!Object.hasOwn(tools, name)) {
+        tools[name] = tool({
+          description: `[Historical] Tool no longer available in this session`,
+          inputSchema: jsonSchema({ type: "object", properties: {} }),
+          execute: async () => ({
+            output: "This tool is no longer available. Please use an alternative approach.",
+            title: "",
+            metadata: {},
+          }),
+        })
+      }
+    }
+    return tools
   }
   // altimate_change end
 
