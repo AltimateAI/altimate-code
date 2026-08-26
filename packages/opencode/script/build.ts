@@ -6,6 +6,8 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { createRequire } from "node:module"
 import solidPlugin from "@opentui/solid/bun-plugin"
+// altimate_change — #1052 D10: sha256 for the per-target build-inputs stamp.
+import { createHash } from "node:crypto"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -15,6 +17,7 @@ process.chdir(dir)
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+import { walkInputs } from "./stamp-inputs"
 
 // Python engine has been eliminated — all methods run natively in TypeScript.
 // ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
@@ -145,43 +148,49 @@ const allTargets: {
 ]
 
 // If --targets is provided, filter to only matching OS values
-const validOsValues = new Set(allTargets.map(t => t.os))
-const targetsFlag = process.argv.find(a => a.startsWith('--targets='))?.split('=')[1]?.split(',')
+const validOsValues = new Set(allTargets.map((t) => t.os))
+const targetsFlag = process.argv
+  .find((a) => a.startsWith("--targets="))
+  ?.split("=")[1]
+  ?.split(",")
 if (targetsFlag) {
-  const invalid = targetsFlag.filter(t => !validOsValues.has(t))
+  const invalid = targetsFlag.filter((t) => !validOsValues.has(t))
   if (invalid.length > 0) {
-    console.error(`error: invalid --targets value(s): ${invalid.join(', ')}. Valid values: ${[...validOsValues].join(', ')}`)
+    console.error(
+      `error: invalid --targets value(s): ${invalid.join(", ")}. Valid values: ${[...validOsValues].join(", ")}`,
+    )
     process.exit(1)
   }
 }
 
 // --target-index=N builds a single target by index (for parallel CI matrix)
-const targetIndexFlag = process.argv.find(a => a.startsWith('--target-index='))?.split('=')[1]
+const targetIndexFlag = process.argv.find((a) => a.startsWith("--target-index="))?.split("=")[1]
 
-const targets = targetIndexFlag !== undefined
-  ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
-  : singleFlag
-  ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
-        return false
-      }
+const targets =
+  targetIndexFlag !== undefined
+    ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
+    : singleFlag
+      ? allTargets.filter((item) => {
+          if (item.os !== process.platform || item.arch !== process.arch) {
+            return false
+          }
 
-      // When building for the current platform, prefer a single native binary by default.
-      // Baseline binaries require additional Bun artifacts and can be flaky to download.
-      if (item.avx2 === false) {
-        return baselineFlag
-      }
+          // When building for the current platform, prefer a single native binary by default.
+          // Baseline binaries require additional Bun artifacts and can be flaky to download.
+          if (item.avx2 === false) {
+            return baselineFlag
+          }
 
-      // also skip abi-specific builds for the same reason
-      if (item.abi !== undefined) {
-        return false
-      }
+          // also skip abi-specific builds for the same reason
+          if (item.abi !== undefined) {
+            return false
+          }
 
-      return true
-    })
-  : targetsFlag
-    ? allTargets.filter(t => targetsFlag.includes(t.os))
-    : allTargets
+          return true
+        })
+      : targetsFlag
+        ? allTargets.filter((t) => targetsFlag.includes(t.os))
+        : allTargets
 
 // Defense in depth: refuse to produce no artifacts at all, and refuse to build
 // the glibc target on a musl host where the binary would crash at startup.
@@ -194,13 +203,14 @@ const targets = targetIndexFlag !== undefined
 //     `linux-x64` (glibc), produces a glibc binary that the musl host can't
 //     load, and dies later with a cryptic linker error.
 if (targets.length === 0) {
-  const reason = targetIndexFlag !== undefined
-    ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
-    : singleFlag
-      ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
-      : targetsFlag
-        ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
-        : "allTargets is empty."
+  const reason =
+    targetIndexFlag !== undefined
+      ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
+      : singleFlag
+        ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
+        : targetsFlag
+          ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
+          : "allTargets is empty."
   console.error(`error: no build targets selected. ${reason}`)
   process.exit(1)
 }
@@ -219,8 +229,12 @@ if (singleFlag && process.platform === "linux") {
     return false
   })()
   if (isMuslHost) {
-    console.error("error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.")
-    console.error("       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.")
+    console.error(
+      "error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.",
+    )
+    console.error(
+      "       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.",
+    )
     process.exit(1)
   }
 }
@@ -238,10 +252,18 @@ await $`rm -rf dist`
 const requiredExternals: string[] = []
 const optionalExternals = [
   // Database drivers — native addons, users install on demand per warehouse
-  "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
-  "mysql2", "mssql", "oracledb", "duckdb",
+  "pg",
+  "snowflake-sdk",
+  "@google-cloud/bigquery",
+  "@databricks/sql",
+  "mysql2",
+  "mssql",
+  "oracledb",
+  "duckdb",
   // Optional infra packages — native addons or heavy optional deps
-  "keytar", "ssh2", "dockerode",
+  "keytar",
+  "ssh2",
+  "dockerode",
 ]
 
 const binaries: Record<string, string> = {}
@@ -265,7 +287,9 @@ function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?
   platformTag: string
 } {
   if (item.abi === "musl") {
-    throw new Error(`No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`)
+    throw new Error(
+      `No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`,
+    )
   }
   if (item.os === "darwin") {
     const tag = `darwin-${item.arch}`
@@ -280,7 +304,9 @@ function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?
       const tag = "win32-x64-msvc"
       return { pkg: `@altimateai/altimate-core-${tag}`, nodeFile: `altimate-core.${tag}.node`, platformTag: tag }
     }
-    throw new Error(`No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`)
+    throw new Error(
+      `No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`,
+    )
   }
   throw new Error(`Unsupported build target: ${item.os}-${item.arch}`)
 }
@@ -297,9 +323,7 @@ const altimateCoreLoaderDir = fs.realpathSync(path.dirname(altimateCoreLoaderPkg
 // .node into today's release archive.
 {
   const expected = pkg.dependencies["@altimateai/altimate-core"]
-  const resolvedVersion = JSON.parse(
-    fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8"),
-  ).version
+  const resolvedVersion = JSON.parse(fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8")).version
   if (resolvedVersion !== expected) {
     throw new Error(
       `build.ts: resolved @altimateai/altimate-core version ${resolvedVersion} ` +
@@ -523,6 +547,119 @@ for (const item of targets) {
       2,
     ),
   )
+
+  // altimate_change start — #1052 D10: emit a build-inputs stamp so the
+  // smoke-test staleness guard can compare against ALL binary-embedded inputs,
+  // not just src/ + script/ mtimes.
+  //
+  // The previous guard (m5) walked src/ + script/ for the newest mtime — good
+  // for the common case but blind to changes in CHANGELOG.md, migrations,
+  // bundled skills, the models.dev snapshot, the parser worker, and the
+  // per-platform altimate-core prebuild. Editing any of those without touching
+  // a .ts file would leave the guard silent and the binary silently stale.
+  //
+  // Stamp format: JSON with one entry per input, sha256 of file content. Read
+  // side rehashes each listed path and compares; any mismatch → stale. Paths
+  // are REPO_ROOT-relative so entries under packages/tui, packages/core, the
+  // workspace-root package.json, bun.lock, etc. resolve without munging.
+  const REPO_ROOT = path.resolve(dir, "../..")
+  const stampInputs: Array<{ path: string; sha256: string }> = []
+  const addFile = (absPath: string) => {
+    try {
+      const buf = fs.readFileSync(absPath)
+      const rel = path.relative(REPO_ROOT, absPath)
+      const hash = createHash("sha256").update(buf).digest("hex")
+      stampInputs.push({ path: rel, sha256: hash })
+    } catch {
+      // Missing file: silently skip. The stamp only covers what actually
+      // shipped; a file the build didn't need doesn't invalidate the guard.
+    }
+  }
+  // CHANGELOG.md
+  addFile(changelogPath)
+  // Migrations
+  for (const m of migrationDirs) addFile(path.join(dir, "migration", m, "migration.sql"))
+  // Skills bundled via .opencode/skills/
+  for (const entry of skillEntries) addFile(path.join(skillsRoot, entry.name, "SKILL.md"))
+  // Generated models snapshot (build.ts rewrote it before we got here)
+  addFile(path.join(dir, "src/provider/models-snapshot.ts"))
+  // opentui parser worker
+  addFile(parserWorker)
+  // Per-target altimate-core NAPI prebuild
+  addFile(platformNodeSrc)
+  // altimate_change — #1052 D10 review-fix (M2): package.json + bun.lock cover
+  // dependency-version bumps that change what Bun.build embeds. Without these,
+  // `bun install` bumping a bundled dep would leave the stamp reporting fresh.
+  // Sibling workspace manifests are added in the packages walk below; this
+  // package's own manifest is added here, because that walk skips `opencode`
+  // (its src/ and script/ trees are already covered) and would otherwise leave
+  // `imports`, `exports` and other bundler-relevant fields unstamped.
+  addFile(path.join(REPO_ROOT, "package.json"))
+  addFile(path.join(REPO_ROOT, "bun.lock"))
+  addFile(path.join(dir, "package.json"))
+  // Also include tsconfig files that affect compiled output shape
+  // (bot review: tsconfig changes can flip target/moduleResolution).
+  addFile(path.join(dir, "tsconfig.json"))
+  // src/ + script/ TypeScript tree — hash every file the compiler actually saw.
+  // The walk rules live in ./build-inputs so the smoke-test guard can
+  // re-enumerate with identical rules and notice files ADDED after the build.
+  const walkedRoots: string[] = []
+  const walk = (root: string): void => {
+    if (!fs.existsSync(root)) return
+    walkedRoots.push(path.relative(REPO_ROOT, root))
+    for (const file of walkInputs(root)) addFile(file)
+  }
+  walk(path.join(dir, "src"))
+  walk(path.join(dir, "script"))
+  // altimate_change — #1052 D10 review-fix (M2): also hash every workspace
+  // package's src/ tree. `packages/opencode/src` imports from
+  // `@opencode-ai/{core,tui,util,plugin,sdk,server,cli,...}` and
+  // `@altimateai/{dbt-tools,drivers}` — Bun.build follows these imports and
+  // bundles them into the binary transitively. The original stamp walked only
+  // packages/opencode, so edits under any sibling workspace package would leave
+  // the binary silently stale. Enumerate `packages/*/src` at build time (rather
+  // than hard-coding names) so new packages get covered automatically.
+  const packagesRoot = path.resolve(REPO_ROOT, "packages")
+  try {
+    for (const pkg of fs.readdirSync(packagesRoot, { withFileTypes: true })) {
+      if (!pkg.isDirectory() || pkg.name.startsWith(".")) continue
+      // Skip packages/opencode — already covered by the walks above.
+      if (pkg.name === "opencode") continue
+      const pkgSrc = path.join(packagesRoot, pkg.name, "src")
+      if (fs.existsSync(pkgSrc)) walk(pkgSrc)
+      // Each workspace package.json influences its resolution/exports and could
+      // change what ends up in the binary even when its src/ files are unchanged.
+      const pkgJson = path.join(packagesRoot, pkg.name, "package.json")
+      if (fs.existsSync(pkgJson)) addFile(pkgJson)
+    }
+  } catch {
+    // packages/ missing (unlikely at build time) — skip; addFile() ignores non-existent paths anyway.
+  }
+  // Deterministic order so the aggregate hash is stable across build runs.
+  stampInputs.sort((a, b) => a.path.localeCompare(b.path))
+  const aggregate = createHash("sha256")
+    .update(stampInputs.map((i) => `${i.path}\t${i.sha256}`).join("\n"))
+    .digest("hex")
+  await Bun.file(`dist/${name}/bin/build-inputs.json`).write(
+    JSON.stringify(
+      {
+        target: name,
+        version: Script.version,
+        aggregate,
+        // Roots the walk covered, so the read side can detect files added after
+        // the build rather than only rehashing what was present at build time.
+        roots: [...new Set(walkedRoots)].sort(),
+        // Glob form so the read side notices a package added AFTER this build;
+        // concrete roots only describe what existed while it ran.
+        rootGlobs: ["packages/*/src"],
+        inputs: stampInputs,
+      },
+      null,
+      2,
+    ),
+  )
+  // altimate_change end
+
   binaries[name] = Script.version
 }
 

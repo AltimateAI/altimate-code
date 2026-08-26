@@ -110,6 +110,12 @@ export const TuiThreadCommand = cmd({
         type: "string",
         describe: "prompt to use",
       })
+      // altimate_change start — --workspace launch flag (AI-8504 item 1); see altimate/workspace/launch-resolve.ts
+      .option("workspace", {
+        type: "string",
+        describe: "attach this session to the workspace linked in this directory, by name",
+      })
+      // altimate_change end
       .option("agent", {
         type: "string",
         describe: "agent to use",
@@ -135,6 +141,27 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
+
+      // altimate_change start — AI-8504 item 1: launch-time --workspace resolver.
+      // Runs BEFORE the worker starts (needs stdout on this main thread for its
+      // native prompts and info messages). MUST NEVER block launch — a failure
+      // here (missing binding, unreadable cache, credentials-parse failure) is
+      // logged and swallowed; the session still starts. The resolver mutates
+      // ``process.env`` on this thread; the existing worker-spawn env spread
+      // below carries the resolved workspace id across for free — same
+      // mechanism as ``ALTIMATE_LAUNCH_ID``.
+      try {
+        const { resolveWorkspaceForLaunch } = await import(
+          "@/altimate/workspace/launch-resolve"
+        )
+        await resolveWorkspaceForLaunch(cwd, args.workspace)
+      } catch (err) {
+        UI.error(
+          `workspace resolution failed (continuing without a pinned workspace): ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+      // altimate_change end
 
       // altimate_change start — hand the launch correlation id to the worker explicitly. A Bun
       // Worker does not see runtime mutations to process.env, so without this the worker mints its

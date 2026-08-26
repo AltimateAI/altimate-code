@@ -9,6 +9,8 @@ import { ProjectID } from "../../src/project/schema"
 import { Provider } from "../../src/provider/provider"
 import { ProviderID, ModelID } from "../../src/provider/schema"
 import { Env } from "../../src/env"
+import { ModelsCatalog } from "../../src/provider/models-catalog"
+import type { ModelsDev } from "../../src/provider/models"
 
 function provideProviderTestInstance<R>(input: {
   directory: string
@@ -2603,5 +2605,60 @@ test("defaultModel falls through to other providers when altimate is not configu
       expect(String(model.providerID)).toBe("anthropic")
     },
   })
+})
+// altimate_change end
+
+// altimate_change start — upstream_fix: `ModelsCatalog.isCatalog` only requires
+// ONE entry in the map to be well-formed before caching (and trusting) the
+// whole catalog. `Provider.state()` used to `mapValues` every entry through
+// `fromModelsDevProvider` unconditionally, so a single malformed entry
+// alongside good ones crashed lookups for every provider. Reproduces that
+// mix directly against the exported `fromModelsDevProvider` +
+// `ModelsCatalog.isCatalogEntry`, the exact functions `Provider.state()` now
+// filters through, rather than the full `Provider.state()` call (which needs
+// config/instance context these fixtures don't set up).
+test("fromModelsDevProvider survives a catalog with a malformed entry mixed in", () => {
+  const wellFormed = {
+    id: "acme",
+    name: "Acme",
+    env: [],
+    api: "https://acme.example/v1",
+    models: {
+      "acme-model": {
+        id: "acme-model",
+        name: "Acme Model",
+        release_date: "2026-01-01",
+        attachment: false,
+        reasoning: false,
+        temperature: true,
+        tool_call: true,
+        options: {},
+        limit: { context: 8000, output: 2000 },
+      },
+    },
+  }
+  const missingModels = { id: "no-models", name: "No Models", env: [] }
+  const nonStringId = { id: 42, name: "Bad Id", env: [], models: {} }
+
+  const raw: Record<string, unknown> = {
+    acme: wellFormed,
+    "no-models": missingModels,
+    "bad-id": nonStringId,
+  }
+
+  const filtered = Object.entries(raw).filter(([, entry]) => ModelsCatalog.isCatalogEntry(entry))
+  expect(filtered.map(([id]) => id)).toEqual(["acme"])
+
+  let database: Record<string, ReturnType<typeof Provider.fromModelsDevProvider>> = {}
+  expect(() => {
+    database = Object.fromEntries(
+      filtered.map(([id, entry]) => [id, Provider.fromModelsDevProvider(entry as ModelsDev.Provider)]),
+    )
+  }).not.toThrow()
+
+  expect(database["acme"]).toBeDefined()
+  expect(database["acme"].models["acme-model"]).toBeDefined()
+  expect(database["no-models"]).toBeUndefined()
+  expect(database["bad-id"]).toBeUndefined()
 })
 // altimate_change end

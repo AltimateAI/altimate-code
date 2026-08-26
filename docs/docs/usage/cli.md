@@ -39,6 +39,7 @@ altimate --agent analyst
 | `export`    | Export session data            |
 | `import`    | Import session data            |
 | `session`   | Session management             |
+| `link`      | Link this project to an Altimate workspace (pilot, requires `ALTIMATE_WORKSPACE=1`) |
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |

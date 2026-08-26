@@ -2,7 +2,7 @@
 import type { Argv } from "yargs"
 import { cmd } from "./cmd"
 import { Dispatcher } from "../../altimate/native"
-import { readFileSync, existsSync } from "fs"
+import { readFileSync, existsSync, statSync, lstatSync, realpathSync } from "fs"
 import { Glob } from "../../util/glob"
 import path from "path"
 import {
@@ -10,6 +10,7 @@ import {
   type CheckCategoryResult,
   type Severity,
   VALID_CHECKS,
+  isSqlFile,
   normalizeSeverity,
   filterBySeverity,
   toCategoryResult,
@@ -460,8 +461,10 @@ export const CheckCommand = cmd({
     // 3. Resolve files
     let files: string[] = args.files ?? []
     if (files.length === 0) {
-      console.error("No files specified, searching for **/*.sql in current directory...")
-      files = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true })
+      console.error("No files specified, searching for **/*.{sql,ddl} in current directory...")
+      const sqls = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true })
+      const ddls = await Glob.scan("**/*.ddl", { cwd: process.cwd(), absolute: true })
+      files = [...new Set([...sqls, ...ddls])]
     } else {
       // Expand globs in positional args
       const expanded: string[] = []
@@ -476,10 +479,72 @@ export const CheckCommand = cmd({
       files = expanded
     }
 
-    // Filter to only existing .sql files
+    // Filter to only existing SQL files by extension. The prior version
+    // only checked existence — the "SQL" filter was a lie in the comment.
+    // Feeding a non-SQL file (e.g. ``altimate check /etc/passwd``) meant
+    // the engine parsed each line as a SQL statement; the 0.7.0 engine's
+    // ``multi_statement`` safety rule then echoed the offending line
+    // (uppercased) in its error message, leaking the file's first line
+    // into stdout. Rejecting by extension keeps non-SQL content from
+    // reaching the engine at all — no message, no leak. (v0.9.6 sanity
+    // regression; sanity test at test/sanity/phases/security.sh:96-103
+    // has been present + passing since PR #844.)
     files = files.filter((f) => {
       if (!existsSync(f)) {
         console.error(`Warning: file not found, skipping: ${f}`)
+        return false
+      }
+      if (!isSqlFile(f)) {
+        const ext = path.extname(f).toLowerCase() || "none"
+        console.error(`Warning: not a SQL file (extension "${ext}"), skipping: ${f}`)
+        return false
+      }
+      // Reject directories (and symlinks-to-directories) whose name happens
+      // to end in .sql / .ddl — statSync follows symlinks, so a symlink to
+      // a dir is rejected. (cubic P2 round on release/v0.9.6 hotfix.)
+      let st
+      try {
+        st = statSync(f)
+      } catch (e) {
+        console.error(`Warning: stat failed, skipping: ${f} (${(e as Error).message})`)
+        return false
+      }
+      if (!st.isFile()) {
+        console.error(`Warning: not a regular file (directory or other), skipping: ${f}`)
+        return false
+      }
+      // Reject symlinks entirely. An earlier attempt validated the
+      // symlink target's extension and then let the flow continue to
+      // ``readFileSync(f)``, but that opens a TOCTOU race: between
+      // validation and read, an attacker with write access to the
+      // parent directory can swap the symlink to point at a non-SQL
+      // file (e.g. /etc/passwd), which readFileSync would then dutifully
+      // read — reopening the same leak class this PR closes. Closing
+      // the race properly requires opening the file once, fstat'ing the
+      // fd, and passing the fd (not the path) through to every
+      // downstream reader — a large refactor for a CLI most invocations
+      // don't hit. Simpler + safer: refuse symlinks. Users who need to
+      // check a linked file can pass the resolved target directly.
+      // (coderabbit MAJOR TOCTOU on release/v0.9.6 hotfix; reverses the
+      // "accept link-to-SQL" behavior cubic asked for in the prior round
+      // — noted in the thread.)
+      let lst
+      try {
+        lst = lstatSync(f)
+      } catch (e) {
+        console.error(`Warning: lstat failed, skipping: ${f} (${(e as Error).message})`)
+        return false
+      }
+      if (lst.isSymbolicLink()) {
+        let target = ""
+        try {
+          target = realpathSync(f)
+        } catch {
+          // If we can't even resolve, just report the link path.
+        }
+        console.error(
+          `Warning: symlinks are not accepted (TOCTOU-safe), skipping: ${f}${target ? ` -> ${target}` : ""}`,
+        )
         return false
       }
       return true

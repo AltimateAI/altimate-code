@@ -2,6 +2,12 @@
 import z from "zod"
 
 export const TRAINING_TAG = "training"
+
+/** Matches the metadata comment ``embedTrainingMeta`` writes at the head of a
+ * training block's content. Exported so readers that normalise it away — the
+ * workspace mirror hashes content without it, because the applied counter is
+ * rewritten every session — cannot drift from the writer. */
+export const TRAINING_META_COMMENT = /^<!--\s*training\n[\s\S]*?-->\n*/
 export const TRAINING_ID_PREFIX = "training"
 // altimate_change start — increase training limits for enterprise teams
 // 20 entries per kind is too restrictive for teams with 200+ dbt models spanning
@@ -70,6 +76,6 @@ export function embedTrainingMeta(content: string, meta: TrainingBlockMeta): str
     "-->",
   ].join("\n")
   // Strip existing training meta block if present
-  const stripped = content.replace(/^<!--\s*training\n[\s\S]*?-->\n*/, "")
+  const stripped = content.replace(TRAINING_META_COMMENT, "")
   return header + "\n" + stripped
 }
