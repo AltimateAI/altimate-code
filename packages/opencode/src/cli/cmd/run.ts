@@ -30,6 +30,8 @@ import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+// altimate_change - render the workspace engine offer in an attached run
+import * as WorkspaceEngine from "@/altimate/workspace/engine-sync"
 // altimate_change end
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
@@ -760,6 +762,26 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ) {
             break
           }
+
+          // altimate_change start — an attached run is the only surface that can
+          // show the workspace engine offer. The headless marker is set on THIS
+          // process, but with --attach the attach flow and isHeadless() run in
+          // the server process, so the server publishes the offer command and
+          // treats the publish as delivery — while this event loop, which has
+          // no handler for it, is the only thing the user is looking at.
+          if (
+            event.type === "tui.command.execute" &&
+            (event.properties as { command?: string }).command === WorkspaceEngine.OFFER_COMMAND
+          ) {
+            // stderr for the same reason as the local headless notice: stdout
+            // is raw JSON events under --format json.
+            process.stderr.write(
+              `This workspace's integration tools need the local engine on the server. Install it there with: ${WorkspaceEngine.installCommand()}` +
+                EOL,
+            )
+            continue
+          }
+          // altimate_change end
 
           if (event.type === "permission.asked") {
             const permission = event.properties
