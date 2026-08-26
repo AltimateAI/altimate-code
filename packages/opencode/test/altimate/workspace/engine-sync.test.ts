@@ -75,6 +75,14 @@ function install(opts: {
   syncInternals.notify = async (toast) => {
     h.toasts.push(toast)
   }
+  // No dialog surface is registered in this suite, so the offer path falls back
+  // to toast + a printed line. Swallow the line so the suite stays quiet; the
+  // printed-line contract itself is covered in engine-install-offer.test.ts.
+  syncInternals.printLine = () => {}
+  // The "no usable engine" branches now offer through the event bus, which a
+  // unit test has no bus for. Force the publish to fail so this suite keeps
+  // exercising — and asserting on — the toast fallback it was written against.
+  syncInternals.publishOffer = async () => false
   syncInternals.mcp = {
     status: async () => h.statusQueue.length > 1 ? h.statusQueue.shift()! : h.statusQueue[0]!,
     add: async (name, cfg) => {

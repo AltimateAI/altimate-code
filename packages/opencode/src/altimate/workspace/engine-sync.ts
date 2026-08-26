@@ -61,6 +61,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
+import { Process } from "@/util/process"
 import { MCP } from "@/mcp"
 import { addMcpToConfig, resolveConfigPath } from "@/mcp/config"
 import { Config } from "@/config/config"
@@ -85,6 +86,15 @@ const log = Log.create({ service: "workspace-engine" })
 export const MIN_ENGINE_VERSION = "0.7.0"
 export const INSTALL_HINT = "npm i -g @altimateai/datamate"
 export const ENGINE_BINARY = "datamate"
+/** npm package that provides the engine binary. */
+export const ENGINE_PACKAGE = "@altimateai/datamate"
+/** The exact command the offer installs, copies, and prints. Version-pinned so
+ * what the user runs by hand equals what "Install now" runs. E2E points this at
+ * a local tarball via ALTIMATE_ENGINE_INSTALL_SPEC. */
+export const INSTALL_COMMAND = `npm i -g ${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`
+/** Node major the npm install path needs. The CLI itself is a self-contained
+ * binary and does not need Node — only this install route does. */
+export const MIN_NODE_MAJOR = 20
 
 /** Engine tools arrive under the MCP server key as `<key>_<tool>`. */
 const TOOL_PREFIX = `${DATAMATE_KEY}_`
@@ -110,6 +120,33 @@ export type ExistingEntry = { type?: string; url?: string; command?: string[] | 
 
 type Toast = { title: string; message: string; variant: "info" | "success" | "warning" | "error" }
 
+/** A "no usable engine" state, described well enough for an interactive
+ * surface to act on it without re-deriving anything. */
+export type EngineOffer = {
+  reason: "engine-missing" | "engine-too-old"
+  /** Stable id — the 7-day "Not now" latch keys on this, not the name. */
+  workspaceId: string
+  workspaceName: string
+  /** Declared, CLI-servable integration tools that are unavailable without it. */
+  declared: number
+  /** Version found — only set for "engine-too-old". */
+  found?: string
+  /** The exact install/update command. */
+  command: string
+}
+
+/** Interactive surface for the offer, registered by the workspace TUI plugin.
+ * Returns true when it took ownership.
+ *
+ * Deliberately synchronous: `run()` awaits the offer, and that await sits
+ * inside the window `whenAttached` caps. A handler that blocked on user input
+ * would spend the turn's ATTACH_WAIT_MS budget, so a surface claims the offer
+ * and renders it out-of-band rather than making the attach wait for a person.
+ * Rule 3 stands either way: this offers, it never installs on its own. */
+export type OfferHandler = (offer: EngineOffer) => boolean
+
+export type InstallResult = { ok: true } | { ok: false; error: string }
+
 type McpStatus = Record<string, { status: string; error?: string } | undefined>
 
 /** Declared allowlist for a workspace, split by whether the CLI can serve it.
@@ -134,7 +171,30 @@ export const syncInternals: {
   existingEntry?: (name: string) => Promise<ExistingEntry | null>
   declared?: (datamateId: string) => Promise<Declared | null>
   notify?: (toast: Toast) => Promise<void>
+  offer?: OfferHandler
+  publishOffer?: () => Promise<boolean>
+  printLine?: (line: string) => void
+  nodeMajor?: () => Promise<number | null>
+  install?: (spec: string) => Promise<InstallResult>
 } = {}
+
+/** Command the TUI plugin registers to raise the install offer.
+ *
+ * The offer crosses to the TUI over the SAME event bus toasts use. It cannot
+ * cross in-process: the TUI plugin runtime loads plugins in a separate realm,
+ * so neither a module-level binding nor a `globalThis` key set by the plugin is
+ * visible here. Both were tried and both silently degraded to the toast — the
+ * dialog never appeared. `CommandExecute` carries no payload, so the plugin
+ * re-derives the offer with `describeOffer()`; that is the same shape the
+ * post-scan workspace prompt already uses. */
+export const OFFER_COMMAND = "altimate.workspace.engineInstallOffer"
+
+/** True in headless `run`, where no TUI can render a dialog or a toast and the
+ * single printed line is the only way to say anything. Set by the run command;
+ * an env var because it must be readable from every realm. */
+export function isHeadless(): boolean {
+  return process.env["ALTIMATE_CODE_HEADLESS"] === "1"
+}
 
 export function isEnabled(): boolean {
   return CoreFlag.ALTIMATE_WORKSPACE
@@ -376,6 +436,142 @@ async function notify(toast: Toast): Promise<void> {
   }
 }
 
+/** Ask the TUI to raise the offer. False when the bus is unavailable. */
+async function publishOffer(): Promise<boolean> {
+  if (syncInternals.publishOffer) return syncInternals.publishOffer()
+  try {
+    await AppRuntime.runPromise(
+      EventV2Bridge.Service.use((events) => events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND })),
+    )
+    return true
+  } catch (err) {
+    log.warn("could not publish the engine install offer", { err: String(err) })
+    return false
+  }
+}
+
+/** Re-derive the current "no usable engine" state for a directory.
+ *
+ * The offer reaches the TUI as a bare command, so the plugin rebuilds the
+ * detail here rather than receiving it. Returns null when there is nothing to
+ * offer — unbound, or an engine that already clears the floor. */
+export async function describeOffer(directory: string): Promise<EngineOffer | null> {
+  const binding = syncInternals.resolveBinding
+    ? await syncInternals.resolveBinding()
+    : await readLocalBinding(directory).catch(() => null)
+  if (!binding) return null
+  const workspaceId = String(binding.datamateId)
+  const bin = which(ENGINE_BINARY)
+  const found = bin ? await versionOf(bin) : null
+  if (bin && found && compareVersions(found, MIN_ENGINE_VERSION) >= 0) return null
+  const declaredCount = (await declared(workspaceId))?.keys.length ?? 0
+  return {
+    reason: bin ? "engine-too-old" : "engine-missing",
+    workspaceId,
+    workspaceName: binding.datamateName,
+    declared: declaredCount,
+    ...(bin ? { found: found ?? "unknown" } : {}),
+    command: installCommand(),
+  }
+}
+
+/** npm spec to install. ALTIMATE_ENGINE_INSTALL_SPEC overrides it so E2E can
+ * point the real install path at a local tarball instead of the registry. */
+export function installSpec(): string {
+  return process.env["ALTIMATE_ENGINE_INSTALL_SPEC"] || `${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`
+}
+
+/** The command shown, copied, printed, and run — always the same string, so
+ * "Copy command" hands over exactly what "Install now" would have executed. */
+export function installCommand(): string {
+  return `npm i -g ${installSpec()}`
+}
+
+/** Node major on PATH, or null when Node is absent. Gates the "Install now"
+ * option: with no Node there is nothing to run `npm` with, so the offer
+ * degrades to showing the command. */
+export function nodeMajor(): Promise<number | null> {
+  if (syncInternals.nodeMajor) return syncInternals.nodeMajor()
+  const bin = which("node")
+  if (!bin) return Promise.resolve(null)
+  return new Promise((resolve) => {
+    execFile(bin, ["--version"], { timeout: 5000 }, (err, stdout) => {
+      if (err) return resolve(null)
+      const major = Number.parseInt(stdout.trim().replace(/^v/, "").split(".")[0] ?? "", 10)
+      resolve(Number.isFinite(major) ? major : null)
+    })
+  })
+}
+
+/** Run the global install. Only ever reached from an explicit user choice —
+ * rule 3 forbids reaching it from the attach flow itself.
+ *
+ * `npm.cmd` on Windows: a normal Node install exposes npm as a command shim,
+ * not an `npm` executable, and nothing here spawns a shell — so the bare name
+ * fails with ENOENT on the one platform where the Node gate has just told the
+ * user they are good to go. Same platform split the existing install path in
+ * `lsp/server.ts` uses. `Process.run` takes an argv array, so a spec with
+ * spaces (an E2E tarball path) needs no quoting. */
+export async function installEngine(): Promise<InstallResult> {
+  const spec = installSpec()
+  if (syncInternals.install) return syncInternals.install(spec)
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm"
+  try {
+    const result = await Process.run([npm, "i", "-g", spec], { timeout: 300_000, nothrow: true })
+    if (result.code === 0) return { ok: true }
+    const detail = result.stderr.toString().trim().split(/\r?\n/).slice(-3).join(" ")
+    return { ok: false, error: detail || `npm exited with code ${result.code}` }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/** Hand the offer to an interactive surface. False when none is registered. */
+function offerInstall(offer: EngineOffer): boolean {
+  const handler = syncInternals.offer
+  if (!handler) return false
+  try {
+    return handler(offer)
+  } catch (err) {
+    log.warn("install offer surface failed; falling back to toast", { err: String(err) })
+    return false
+  }
+}
+
+/** stderr, deliberately, not stdout.
+ *
+ * `run --format json` documents stdout as raw JSON events and routes every
+ * record through its `emit()` helper, so a human-readable line written there
+ * lands mid-stream and breaks line-oriented consumers — verified: the notice
+ * was line 1 of an otherwise-valid JSON stream. This is a status notice rather
+ * than run output, which is the same reason `run` already writes its own
+ * status line to stderr, so stderr is correct in both formats. */
+function printLine(line: string): void {
+  if (syncInternals.printLine) return syncInternals.printLine(line)
+  try {
+    process.stderr.write(line + "\n")
+  } catch {
+    // A closed stream must not take down the attach flow.
+  }
+}
+
+/** Offer via the dialog surface when there is one; otherwise print (headless)
+ * or toast (bus unavailable). */
+async function offerOrNotify(offer: EngineOffer, toast: Toast): Promise<void> {
+  if (isHeadless()) {
+    const tools = `${offer.declared} integration tool${offer.declared === 1 ? "" : "s"}`
+    printLine(
+      offer.reason === "engine-too-old"
+        ? `Workspace "${offer.workspaceName}": ${tools} need ${ENGINE_BINARY} ${MIN_ENGINE_VERSION}+ (found ${offer.found ?? "unknown"}). Update with: ${offer.command}`
+        : `Workspace "${offer.workspaceName}": ${tools} need the local engine, which is not installed. Install it with: ${offer.command}`,
+    )
+    return
+  }
+  if (offerInstall(offer)) return
+  if (await publishOffer()) return
+  await notify(toast)
+}
+
 // ---------------------------------------------------------------------------
 // The attach flow
 // ---------------------------------------------------------------------------
@@ -600,13 +796,28 @@ async function run(): Promise<Outcome> {
           // Rejected and irreplaceable: detach anyway. Leaving it connected would
           // return "too old" while still serving the too-old engine's tools.
           await detachRejected({ workspaceId, reason: "below-floor", found: label })
-          await notify({
+          // Same problem the offer exists for — an engine the user must update —
+          // so it gets the same actionable dialog rather than a transient toast.
+          // `declared` is not resolved this early in rule 1; fetch it here since
+          // this branch is rare and the count is what makes the offer concrete.
+          const reusedDeclared = (await declared(workspaceId))?.keys.length ?? 0
+          await offerOrNotify(
+            {
+              reason: "engine-too-old",
+              workspaceId,
+              workspaceName: binding.datamateName,
+              declared: reusedDeclared,
+              found: label,
+              command: installCommand(),
+            },
+                      {
             title: "Workspace engine is too old",
             message:
               `The engine serving workspace "${binding.datamateName}" reports ${label}; this client needs ` +
               `${MIN_ENGINE_VERSION} or newer. Update with: ${INSTALL_HINT}`,
             variant: "warning",
-          })
+            },
+          )
           return { kind: "engine-too-old", found: label }
         }
         replaced = describeEntry(entry)
@@ -627,24 +838,43 @@ async function run(): Promise<Outcome> {
   // Rule 2 / 3 — opportunistic use, or an offer. Never an install.
   const bin = which(ENGINE_BINARY)
   if (!bin) {
-    await notify({
-      title: "Workspace integrations unavailable",
+    await offerOrNotify(
+      {
+        reason: "engine-missing",
+        workspaceId,
+        workspaceName: binding.datamateName,
+        declared: declaredCount,
+        command: installCommand(),
+      },
+      {
+        title: "Workspace integrations unavailable",
       message:
         `Workspace "${binding.datamateName}" declares ${declaredCount} integration tool${declaredCount === 1 ? "" : "s"}. ` +
         `They run on the local engine, which is not installed. Install it with: ${INSTALL_HINT}`,
-      variant: "warning",
-    })
+        variant: "warning",
+      },
+    )
     return { kind: "engine-missing", declared: declaredCount }
   }
 
   const found = await versionOf(bin)
   if (!found || compareVersions(found, MIN_ENGINE_VERSION) < 0) {
     const label = found ?? "unknown"
-    await notify({
+    await offerOrNotify(
+      {
+        reason: "engine-too-old",
+        workspaceId,
+        workspaceName: binding.datamateName,
+        declared: declaredCount,
+        found: label,
+        command: installCommand(),
+      },
+          {
       title: "Workspace engine is too old",
       message: `Found ${ENGINE_BINARY} ${label}; this client needs ${MIN_ENGINE_VERSION} or newer. Update with: ${INSTALL_HINT}`,
       variant: "warning",
-    })
+      },
+    )
     return { kind: "engine-too-old", found: label }
   }
 

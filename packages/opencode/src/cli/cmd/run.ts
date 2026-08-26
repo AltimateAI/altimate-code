@@ -375,6 +375,12 @@ export const RunCommand = cmd({
     // altimate_change end
   },
   handler: async (args) => {
+    // altimate_change start — mark the headless surface. Nothing here can render
+    // a dialog or a toast, so the workspace engine offer degrades to a single
+    // printed line. An env var because it must be readable from every module
+    // realm (the TUI plugin runtime loads plugins in its own).
+    process.env["ALTIMATE_CODE_HEADLESS"] = "1"
+    // altimate_change end
     // altimate_change start — `run` is the only entrypoint without an answer
     // channel for the question tool: no TUI is mounted and the in-process
     // Server.Default() shim below does not bind a port, so a connected IDE
