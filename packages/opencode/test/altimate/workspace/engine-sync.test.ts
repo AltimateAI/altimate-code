@@ -1074,3 +1074,42 @@ describe("settledOutcome — a read-only view for other modules", () => {
     expect(h.added).toHaveLength(1) // no attach was triggered by reading
   })
 })
+
+describe("ensure — round 9", () => {
+  test("a live disconnect is honoured even when the config cache is stale", async () => {
+    // MCP.disconnect writes enabled:false to disk without invalidating Config,
+    // so the cached entry still says enabled:true. Believing the cache would
+    // reconnect the entry and persist it enabled again — undoing the user's
+    // disconnect, globally if the owning entry is global.
+    let refreshed = false
+    const h = install({
+      statuses: [{ datamate: { status: "disabled" } }],
+    })
+    syncInternals.refreshConfig = async () => {
+      refreshed = true
+    }
+    syncInternals.existingEntry = async () =>
+      refreshed
+        ? { type: "local", command: ["datamate", "start-stdio"], enabled: false } // on disk
+        : { type: "local", command: ["datamate", "start-stdio"], enabled: true } // stale cache
+
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(refreshed).toBe(true)
+    expect(h.connects).toHaveLength(0) // MCP.connect would persist enabled:true
+    expect(h.persisted).toHaveLength(0)
+  })
+
+  test("an unrunnable engine is described as broken, not as out of date", async () => {
+    const broken = install({ version: null })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "unknown" })
+    expect(broken.toasts[0].title).toContain("not runnable")
+    expect(broken.toasts[0].message).toContain("did not report a usable version")
+    expect(broken.toasts[0].message).not.toContain("needs 0.7.0 or newer")
+
+    resetForTests()
+    const old = install({ version: "0.6.9" })
+    expect(await ensure("s2")).toEqual({ kind: "engine-too-old", found: "0.6.9" })
+    expect(old.toasts[0].title).toContain("too old")
+    expect(old.toasts[0].message).toContain("needs 0.7.0 or newer")
+  })
+})

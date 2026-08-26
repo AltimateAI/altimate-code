@@ -147,10 +147,18 @@ async function handleListIntegrations() {
     const hidden = catalog.length - integrations.length
     // altimate_change end
     if (integrations.length === 0) {
+      // A catalog of nothing but extension-type entries filters down to empty,
+      // and the footer below never runs — so this branch used to report a
+      // genuinely empty catalog. Say what was hidden here too, or the model
+      // reports "no integrations" when the workspace in fact has several.
+      const omitted =
+        hidden > 0
+          ? ` ${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they require a live VS Code bridge and are not available from the CLI.`
+          : ""
       return {
-        title: "Integrations: none found",
+        title: hidden > 0 ? `Integrations: none available on the CLI (${hidden} hidden)` : "Integrations: none found",
         metadata: { count: 0, hidden },
-        output: "No integrations available.",
+        output: `No integrations available.${omitted}`,
       }
     }
     const lines = ["ID | Name | Tools", "---|------|------"]

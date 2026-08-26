@@ -132,6 +132,7 @@ export const syncInternals: {
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
   /** The configured (merged) MCP entry under `name`, or null if none. */
   existingEntry?: (name: string) => Promise<ExistingEntry | null>
+  refreshConfig?: () => Promise<void>
   declared?: (datamateId: string) => Promise<Declared | null>
   notify?: (toast: Toast) => Promise<void>
 } = {}
@@ -289,6 +290,18 @@ async function persist(name: string, cfg: LocalMcpConfig): Promise<void> {
   })
 }
 
+/** Drop the per-instance config cache so the next read sees the file.
+ *
+ * `MCP.disconnect` writes `enabled: false` straight to disk and does not
+ * invalidate `Config`, so a cached entry can still report `enabled: true` right
+ * after a user has disconnected. */
+async function refreshConfig(): Promise<void> {
+  if (syncInternals.refreshConfig) return syncInternals.refreshConfig()
+  await Config.invalidate().catch((err) => {
+    log.warn("could not refresh the config cache", { err: String(err) })
+  })
+}
+
 async function existingEntry(name: string): Promise<ExistingEntry | null> {
   if (syncInternals.existingEntry) return syncInternals.existingEntry(name)
   try {
@@ -379,6 +392,27 @@ async function notify(toast: Toast): Promise<void> {
 // ---------------------------------------------------------------------------
 // The attach flow
 // ---------------------------------------------------------------------------
+
+/** Why an engine was refused, in the user's terms.
+ *
+ * "Too old" and "could not be run at all" are the same code path but very
+ * different problems, and conflating them sent more than one debugging session
+ * hunting a version mismatch that did not exist. `versionOf` reads stdout only
+ * and returns null when the process fails, so a null here means the binary did
+ * not produce a version — broken, not merely out of date. */
+function describeRefusal(found: string | null, workspaceName: string): string {
+  if (!found) {
+    return (
+      `The ${ENGINE_BINARY} on PATH did not report a usable version, so it cannot be used for workspace ` +
+      `"${workspaceName}". It is more likely broken than out of date — try running \`${ENGINE_BINARY} --version\` ` +
+      `directly. Reinstall with: ${INSTALL_HINT}`
+    )
+  }
+  return (
+    `Found ${ENGINE_BINARY} ${found}; workspace "${workspaceName}" needs ${MIN_ENGINE_VERSION} or newer. ` +
+    `Update with: ${INSTALL_HINT}`
+  )
+}
 
 function describeMissing(missing: string[]): string {
   if (missing.length === 0) return ""
@@ -483,7 +517,16 @@ async function run(): Promise<Outcome> {
       // no runtime status, and `MCP.remove` deletes the status — so every
       // rejection teardown makes the next turn look like a user disable. Read the
       // config's actual flag instead; only that is user intent.
-      if (existing.status === "disabled" && entry?.enabled === false) {
+      // The runtime status is authoritative for "not running"; the CONFIG is
+      // authoritative for "the user turned it off" — and the two can disagree.
+      // `MCP.disconnect` writes `enabled: false` to disk WITHOUT invalidating
+      // Config, so a cached entry still says `enabled: true` immediately after a
+      // user disconnects. Treating that as a synthesized status would reconnect
+      // and persist it enabled again, undoing their disconnect — globally, if
+      // the owning entry is global. Read the file before deciding.
+      if (existing.status === "disabled") await refreshConfig()
+      const owning = existing.status === "disabled" ? await existingEntry(DATAMATE_KEY) : entry
+      if (existing.status === "disabled" && owning?.enabled === false) {
         // The user turned this entry off deliberately. Do NOT call `MCP.connect`
         // to "retry" it: that persists `enabled: true` into whichever config
         // owns the entry, so for a global `datamate` the first prompt in any
@@ -601,10 +644,8 @@ async function run(): Promise<Outcome> {
           // return "too old" while still serving the too-old engine's tools.
           await detachRejected({ workspaceId, reason: "below-floor", found: label })
           await notify({
-            title: "Workspace engine is too old",
-            message:
-              `The engine serving workspace "${binding.datamateName}" reports ${label}; this client needs ` +
-              `${MIN_ENGINE_VERSION} or newer. Update with: ${INSTALL_HINT}`,
+            title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
+            message: describeRefusal(found, binding.datamateName),
             variant: "warning",
           })
           return { kind: "engine-too-old", found: label }
@@ -641,8 +682,8 @@ async function run(): Promise<Outcome> {
   if (!found || compareVersions(found, MIN_ENGINE_VERSION) < 0) {
     const label = found ?? "unknown"
     await notify({
-      title: "Workspace engine is too old",
-      message: `Found ${ENGINE_BINARY} ${label}; this client needs ${MIN_ENGINE_VERSION} or newer. Update with: ${INSTALL_HINT}`,
+      title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
+      message: describeRefusal(found, binding.datamateName),
       variant: "warning",
     })
     return { kind: "engine-too-old", found: label }
