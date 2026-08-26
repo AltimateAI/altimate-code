@@ -671,3 +671,132 @@ describe("ensure — an unbound project does not keep a stale MANAGED entry", ()
     expect(h.toasts).toHaveLength(0)
   })
 })
+
+describe("ensure — a repairable failure is re-probed on the next turn", () => {
+  test("engine-missing is retried once the engine appears, without a new session", async () => {
+    let onPath: string | null = null
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.which = () => onPath
+
+    // Turn 1: no engine. We print the install hint.
+    expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
+    expect(h.added).toHaveLength(0)
+
+    // The user follows that hint mid-session.
+    onPath = "/usr/local/bin/datamate"
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("engine-too-old is retried after an update", async () => {
+    let version = "0.5.9"
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.versionOf = async () => version
+
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "0.5.9" })
+    version = "0.7.0"
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("a SUCCESSFUL outcome is still memoised — retry must not mean re-attach every turn", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    const first = await ensure("s1")
+    expect(first).toMatchObject({ kind: "attached" })
+    expect(await ensure("s1")).toBe(first)
+    expect(await ensure("s1")).toBe(first)
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("a repairable retry does not re-arm the turn wait", async () => {
+    install({ which: null })
+    expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
+    // Next turn re-probes, but whenAttached must return immediately rather than
+    // charging this turn the full cap.
+    void ensure("s1")
+    const started = performance.now()
+    await whenAttached("s1", 5_000)
+    expect(performance.now() - started).toBeLessThan(100)
+  })
+})
+
+describe("ensure — the version probe targets the engine, not its wrapper", () => {
+  test("an npx-wrapped entry is not trusted on the wrapper's version", async () => {
+    const probed: string[] = []
+    const h = install({
+      existing: { type: "local", command: ["npx", "@altimateai/datamate@0.6.3", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.versionOf = async (bin) => {
+      probed.push(bin)
+      return "0.7.0"
+    }
+    const outcome = await ensure("s1")
+    // npx is never probed — a modern wrapper must not vouch for an old engine.
+    expect(probed).not.toContain("npx")
+    // Unverifiable, so it is replaced by a pinned spawn we can vouch for.
+    expect(outcome).toMatchObject({ kind: "attached" })
+    expect(h.removes).toEqual(["datamate"])
+    expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+  })
+
+  test("an absolute path to a real datamate IS probed and reused", async () => {
+    const probed: string[] = []
+    const h = install({
+      existing: { type: "local", command: ["/opt/bin/datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.versionOf = async (bin) => {
+      probed.push(bin)
+      return "0.7.0"
+    }
+    expect(await ensure("s1")).toMatchObject({ kind: "reused" })
+    expect(probed).toContain("/opt/bin/datamate")
+    expect(h.added).toHaveLength(0)
+  })
+})
+
+describe("ensure — a superseded attach cannot overwrite the current one", () => {
+  test("the re-linked workspace wins even when the old attach is slower", async () => {
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      statuses: [
+        {},
+        { datamate: { status: "connected" } },
+        {},
+        { datamate: { status: "connected" } },
+      ],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    // Make the FIRST attach slow, so without serialization it would land last.
+    let firstAdd = true
+    syncInternals.mcp!.add = async (name, cfg) => {
+      if (firstAdd) {
+        firstAdd = false
+        await new Promise((r) => setTimeout(r, 60))
+      }
+      h.added.push({ name, cfg })
+    }
+
+    const a = ensure("s1") // workspace 42
+    current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    const b = ensure("s1") // re-link to 99
+    await Promise.all([a, b])
+
+    // Both ran, but in order: the LAST add must be the workspace we re-linked to.
+    expect(h.added).toHaveLength(2)
+    expect(h.added[h.added.length - 1].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "99"])
+  })
+})

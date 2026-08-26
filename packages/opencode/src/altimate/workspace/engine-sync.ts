@@ -263,6 +263,15 @@ async function persist(name: string, cfg: LocalMcpConfig): Promise<void> {
   if (syncInternals.persist) return syncInternals.persist(name, cfg)
   const configPath = await resolveConfigPath(projectRoot())
   await addMcpToConfig(name, cfg, configPath)
+  // `Config.get()` is cached per instance, and `addMcpToConfig` is a raw file
+  // write that does not touch that cache — so without this, every later
+  // `existingEntry()` in this process still sees the pre-write config. That is
+  // how a managed entry becomes unrecognisable to `isManagedEntry` later in the
+  // same server process, leaving a stale engine attached in an unbound project.
+  // The local-config write path in `config.ts` invalidates for the same reason.
+  await Config.invalidate().catch((err) => {
+    log.warn("could not invalidate the config cache after persisting the engine entry", { err: String(err) })
+  })
 }
 
 async function existingEntry(name: string): Promise<ExistingEntry | null> {
@@ -486,8 +495,16 @@ async function run(): Promise<Outcome> {
         })
         await detachRejected({ workspaceId, reason: "not-attributable", pinnedTo: pin })
       } else {
+        // Probe the ENGINE, not whatever wraps it. `npx @altimateai/datamate@0.6.3
+        // start-stdio --datamate 42` would otherwise have us run `npx --version`
+        // and let a pre-floor engine clear the floor on the wrapper's version.
+        // Asking the running server instead is not an option: `serverInfo.version`
+        // is a hard-coded placeholder on the very engines this floor excludes.
+        // An unidentifiable command yields no version, which falls through to the
+        // below-floor handling — replace it from PATH, or report it.
         const entryBin = commandArgv(entry)[0]
-        const found = entryBin ? await versionOf(entryBin) : null
+        const directBin = entryBin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(entryBin) ? entryBin : null
+        const found = directBin ? await versionOf(directBin) : null
         if (found && compareVersions(found, MIN_ENGINE_VERSION) >= 0) {
           // Rule 5 applies to a reused engine too. A running engine that lost an
           // integration — a connection deleted, a restart that dropped it —
@@ -633,7 +650,17 @@ async function run(): Promise<Outcome> {
  * answers costs the first turn a pause rather than the turn itself. */
 export const ATTACH_WAIT_MS = 15_000
 
-type SessionAttach = { key?: string; task: Promise<Outcome>; waitTimedOut?: boolean }
+type SessionAttach = { key?: string; task: Promise<Outcome>; waitTimedOut?: boolean; outcome?: Outcome }
+
+/** Outcomes the user can repair without restarting: install the engine, update
+ * it, fix a broken entry. Caching these for the life of the session means the
+ * hint we just printed ("install it with …") can be followed and nothing
+ * happens until a new session — so they are re-probed on the next turn. */
+const REPAIRABLE = new Set<Outcome["kind"]>(["engine-missing", "engine-too-old", "connect-failed"])
+
+function isRepairable(outcome: Outcome | undefined): boolean {
+  return !!outcome && REPAIRABLE.has(outcome.kind)
+}
 
 const sessions = new Map<string, SessionAttach>()
 
@@ -662,15 +689,37 @@ export function ensure(sessionID: string): Promise<Outcome> {
   const entry = { key: previous?.key, waitTimedOut: previous?.waitTimedOut } as SessionAttach
   entry.task = (async (): Promise<Outcome> => {
     const key = await attachKey()
-    // Same workspace as the attach we already did for this session: reuse it.
-    if (previous && previous.key === key) return previous.task
-    // First attach for this session, or the binding changed under it. A changed
-    // binding gets a fresh attach AND a fresh wait budget: the previous budget
-    // was spent on a different workspace's engine.
+    const sameWorkspace = !!previous && previous.key === key
+    // Same workspace and the attach either succeeded or is still in flight:
+    // reuse it. A settled FAILURE is not reused — the user may have acted on
+    // the hint it produced.
+    if (sameWorkspace && !isRepairable(previous!.outcome)) return previous!.task
     entry.key = key
-    entry.waitTimedOut = false
+    if (sameWorkspace) {
+      // Re-probing a repairable failure. Do NOT re-arm the wait: this runs on
+      // every turn, and a retry that blocks would charge each one the full cap
+      // (a `connect-failed` retry can sit in MCP's 30s connect budget). The
+      // repaired engine's tools arrive over `tools/list_changed` instead.
+      entry.waitTimedOut = true
+    } else {
+      // The binding changed under this session. A fresh attach gets a fresh wait
+      // budget — the previous one was spent on a different workspace's engine.
+      entry.waitTimedOut = false
+      // Serialize against the attach being superseded. Both tasks end in
+      // `MCP.add`, and whichever completes LAST owns the runtime client, so a
+      // slower attach for the workspace we just left could otherwise land after
+      // this one and restore its tools — with this session's memo already
+      // settled, so no later turn would repair it.
+      if (previous) await previous.task.catch(() => {})
+    }
     return attachOnce(sessionID)
   })()
+  entry.task.then(
+    (outcome) => {
+      entry.outcome = outcome
+    },
+    () => {},
+  )
   sessions.set(sessionID, entry)
   return entry.task
 }
