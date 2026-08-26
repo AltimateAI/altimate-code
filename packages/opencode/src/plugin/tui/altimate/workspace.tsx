@@ -54,6 +54,7 @@ import {
   installCommand,
   installEngine,
   nodeMajor as detectNodeMajor,
+  npmAvailable,
   MIN_NODE_MAJOR,
   OFFER_COMMAND,
   type EngineOffer,
@@ -1204,6 +1205,9 @@ interface EngineOfferProps {
   /** Node major on PATH, or null when Node is absent. Resolved by the caller
    * so the dialog itself stays sync (same shape as ``browserAvailable``). */
   nodeMajor: number | null
+  /** Whether npm itself can be invoked. Node 20+ is not enough: several Linux
+   * distributions package node and npm separately. */
+  hasNpm: boolean
   latchScope: LatchScope | null
   /** Which raise owns the single-offer latch; only the owner releases it. */
   generation: number
@@ -1238,7 +1242,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   let installing = false
 
   const command = () => props.offer.command
-  const canInstall = () => props.nodeMajor !== null && props.nodeMajor >= MIN_NODE_MAJOR
+  const canInstall = () => props.nodeMajor !== null && props.nodeMajor >= MIN_NODE_MAJOR && props.hasNpm
 
   const title = () => {
     const tools = `${props.offer.declared} integration tool${props.offer.declared === 1 ? "" : "s"}`
@@ -1251,7 +1255,9 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       parts.push(
         props.nodeMajor === null
           ? `(needs Node ${MIN_NODE_MAJOR}+ to install — Node was not found on PATH)`
-          : `(needs Node ${MIN_NODE_MAJOR}+ to install — found Node ${props.nodeMajor})`,
+          : props.nodeMajor < MIN_NODE_MAJOR
+            ? `(needs Node ${MIN_NODE_MAJOR}+ to install — found Node ${props.nodeMajor})`
+            : `(needs npm to install — npm was not found on PATH)`,
       )
     }
     const err = failure()
@@ -1485,11 +1491,13 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
       return release()
     }
     const major = await detectNodeMajor()
+  const hasNpm = npmAvailable()
     api.ui.dialog.replace(() => (
       <EngineInstallOfferDialog
         api={api}
         offer={offer}
         nodeMajor={major}
+        hasNpm={hasNpm}
         latchScope={latchScope}
         generation={generation}
       />

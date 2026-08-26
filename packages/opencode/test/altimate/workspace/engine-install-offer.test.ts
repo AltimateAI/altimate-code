@@ -9,6 +9,7 @@ import {
   ensure,
   installCommand,
   installEngine,
+  npmAvailable,
   installSpec,
   nodeMajor,
   describeOffer,
@@ -324,7 +325,11 @@ describe("install deadline", () => {
   // it echoed the stub and passed just as happily with the abort signal
   // deleted. This spies on the real call instead.
   test("passes an abort signal to the spawn, not just a timeout", async () => {
-    install({})
+    // Discovery now runs after a zero exit, so the installed engine has to look
+    // usable or installEngine reports the PATH failure instead. That is the
+    // round-9 behaviour; this test is about the abort signal, so make discovery
+    // succeed and keep the assertion on the spawn options.
+    install({ which: "/usr/local/bin/datamate", version: MIN_ENGINE_VERSION })
     delete syncInternals.install
     const spy = spyOn(Process, "run").mockResolvedValue({
       code: 0,
@@ -347,5 +352,55 @@ describe("install deadline", () => {
   test("the deadline is a real duration", () => {
     expect(INSTALL_TIMEOUT_MS).toBeGreaterThan(0)
     expect(Number.isFinite(INSTALL_TIMEOUT_MS)).toBe(true)
+  })
+})
+
+describe("install success is verified, not assumed", () => {
+  // npm installs into its configured global prefix, whose bin directory need
+  // not be on PATH. A zero exit therefore does not mean the next attach will
+  // find anything — and reporting success there promises tools that never
+  // arrive, then raises the offer again.
+  test("a zero exit with the engine still absent from PATH is a failure", async () => {
+    install({ which: null })
+    delete syncInternals.install
+    const spy = spyOn(Process, "run").mockResolvedValue({
+      code: 0,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    })
+    try {
+      const result = await installEngine()
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error).toContain("not on PATH")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("a zero exit with a below-floor engine on PATH is a failure", async () => {
+    install({ which: "/usr/local/bin/datamate", version: "0.5.9" })
+    delete syncInternals.install
+    const spy = spyOn(Process, "run").mockResolvedValue({
+      code: 0,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    })
+    try {
+      const result = await installEngine()
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error).toContain("0.5.9")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe("npmAvailable", () => {
+  test("false when npm is not on PATH, true when it is", () => {
+    install({})
+    syncInternals.npmAvailable = () => false
+    expect(npmAvailable()).toBe(false)
+    syncInternals.npmAvailable = () => true
+    expect(npmAvailable()).toBe(true)
   })
 })

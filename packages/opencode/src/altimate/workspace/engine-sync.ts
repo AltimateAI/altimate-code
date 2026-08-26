@@ -177,6 +177,7 @@ export const syncInternals: {
   publishOffer?: () => Promise<boolean>
   printLine?: (line: string) => void
   nodeMajor?: () => Promise<number | null>
+  npmAvailable?: () => boolean
   install?: (spec: string) => Promise<InstallResult>
 } = {}
 
@@ -516,6 +517,15 @@ export function nodeMajor(): Promise<number | null> {
   })
 }
 
+/** Whether npm can be invoked at all. Node and npm are separate packages on
+ * several Linux distributions, so Node 20+ is not sufficient to conclude that
+ * `npm i -g` will run — without this the offer enables "Install now" and the
+ * install fails immediately with ENOENT. */
+export function npmAvailable(): boolean {
+  if (syncInternals.npmAvailable) return syncInternals.npmAvailable()
+  return which(process.platform === "win32" ? "npm.cmd" : "npm") !== null
+}
+
 /** Run the global install. Only ever reached from an explicit user choice —
  * rule 3 forbids reaching it from the attach flow itself.
  *
@@ -537,7 +547,28 @@ export async function installEngine(): Promise<InstallResult> {
   const deadline = AbortSignal.timeout(INSTALL_TIMEOUT_MS)
   try {
     const result = await Process.run([npm, "i", "-g", spec], { abort: deadline, nothrow: true })
-    if (result.code === 0) return { ok: true }
+    if (result.code === 0) {
+      // A zero exit is not the same as a usable engine. npm installs into its
+      // configured global prefix, whose bin directory need not be on PATH — so
+      // the install genuinely succeeds while the next attach still finds
+      // nothing, and the offer is raised again after a success message. Re-run
+      // the same discovery the attach will do, and fail with the reason.
+      const installedBin = which(ENGINE_BINARY)
+      if (!installedBin) {
+        return {
+          ok: false,
+          error: `npm installed it, but ${ENGINE_BINARY} is not on PATH — add your npm global bin directory to PATH`,
+        }
+      }
+      const installedVersion = await versionOf(installedBin)
+      if (!installedVersion || compareVersions(installedVersion, MIN_ENGINE_VERSION) < 0) {
+        return {
+          ok: false,
+          error: `npm installed it, but ${ENGINE_BINARY} on PATH reports ${installedVersion ?? "no version"}`,
+        }
+      }
+      return { ok: true }
+    }
     if (deadline.aborted) {
       return { ok: false, error: `npm did not finish within ${Math.round(INSTALL_TIMEOUT_MS / 60_000)} minutes` }
     }
