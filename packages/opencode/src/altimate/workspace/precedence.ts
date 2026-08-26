@@ -308,6 +308,21 @@ function reachable(precedence: Precedence, modelKey: string): boolean {
   return PermissionNext.evaluate(modelKey, "*", precedence.ruleset).action !== "deny"
 }
 
+/**
+ * The capabilities this caller will really have routed for a given type — the ones
+ * that materialised AND whose destination the caller may call. Everything user-facing
+ * reports through this, so a listing can never claim a routing that will not happen:
+ * an `analyst` is told its reads stay local, because they do.
+ */
+function servedFor(precedence: Precedence, type: string): Capability[] {
+  const byCapability = precedence.shadowed.get(type)
+  if (!byCapability) return []
+  return CAPABILITIES.filter((c) => {
+    const entry = byCapability.get(c)
+    return !!entry && reachable(precedence, entry.modelKey)
+  })
+}
+
 function unreachable(workspaceName: string, modelKey: string): Verdict {
   return {
     notice:
@@ -469,6 +484,8 @@ export function describeNativeTool(toolID: string, base: string, precedence?: Pr
   if (!precedence?.enabled) return base
   const shadowed = (CAPABILITIES as string[]).includes(toolID) || toolID === "warehouse_list"
   if (!shadowed) return base
+  // Say nothing about redirection to a caller whose redirects will not happen.
+  if (![...precedence.shadowed.keys()].some((t) => servedFor(precedence, t).length > 0)) return base
   return (
     `${base} Serves local connections; types served by workspace "${precedence.workspaceName}" ` +
     `redirect to that workspace's integration tools.`
@@ -503,14 +520,17 @@ export function inventoryLine(precedence: Precedence): string {
     }
   }
   const parts: string[] = []
-  for (const [type, byCapability] of precedence.shadowed) {
-    const served = CAPABILITIES.filter((c) => byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
-    const local = CAPABILITIES.filter((c) => !byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
+  const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
+  for (const type of precedence.shadowed.keys()) {
+    const servedCaps = servedFor(precedence, type)
+    if (servedCaps.length === 0) continue
+    const local = CAPABILITIES.filter((c) => !servedCaps.includes(c)).map(short)
     parts.push(
-      `${type}: ${served.join("/")} via workspace ${precedence.workspaceName}` +
+      `${type}: ${servedCaps.map(short).join("/")} via workspace ${precedence.workspaceName}` +
         (local.length ? `, ${local.join("/")} stay local` : ""),
     )
   }
+  if (parts.length === 0) return ""
   const shadowedCount = countShadowedConnections(precedence)
   return `Workspace integrations — ${parts.join("; ")}. ${shadowedCount} local connection${shadowedCount === 1 ? "" : "s"} shadowed.`
 }
@@ -519,7 +539,7 @@ function countShadowedConnections(precedence: Precedence): number {
   try {
     return Registry.list().warehouses.filter((w) => {
       const type = canonicalType(w.type)
-      return !!type && precedence.shadowed.has(type)
+      return !!type && servedFor(precedence, type).length > 0
     }).length
   } catch {
     return 0
@@ -531,10 +551,11 @@ export function warehouseListNote(precedence: Precedence | undefined, warehouseT
   if (!precedence?.enabled) return null
   const type = canonicalType(warehouseType)
   if (!type) return null
-  const byCapability = precedence.shadowed.get(type)
-  if (!byCapability) return null
-  const served = CAPABILITIES.filter((c) => byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
-  const local = CAPABILITIES.filter((c) => !byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
+  const servedCaps = servedFor(precedence, type)
+  if (servedCaps.length === 0) return null
+  const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
+  const served = servedCaps.map(short)
+  const local = CAPABILITIES.filter((c) => !servedCaps.includes(c)).map(short)
   return (
     `${served.join("/")} via workspace ${precedence.workspaceName}` + (local.length ? `; ${local.join("/")} local` : "")
   )

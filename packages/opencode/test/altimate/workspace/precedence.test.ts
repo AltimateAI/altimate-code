@@ -314,6 +314,57 @@ describe("a redirect the caller cannot follow is not a redirect", () => {
   })
 })
 
+describe("reporting never claims a routing that will not happen", () => {
+  // The listing is what the model reads before choosing a tool. Telling an analyst a
+  // connection is served by the workspace, when that agent's calls demonstrably run
+  // locally, is worse than saying nothing: it points the model at the wrong tool.
+  const analystLike = [
+    { permission: "*", pattern: "*", action: "deny" as const },
+    { permission: "sql_execute", pattern: "*", action: "allow" as const },
+    { permission: "sql_explain", pattern: "*", action: "allow" as const },
+    { permission: "schema_inspect", pattern: "*", action: "allow" as const },
+  ]
+
+  test("warehouse_list marks nothing when the caller cannot reach the engine", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    expect(warehouseListNote(p, "snowflake")).toBeNull()
+  })
+
+  test("...and the routing decision agrees with it", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+  })
+
+  test("warehouse_list still marks the row for a caller that can reach it", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, [
+      { permission: "*", pattern: "*", action: "allow" as const },
+    ])
+    expect(warehouseListNote(p, "snowflake")).toContain("via workspace")
+  })
+
+  test("the inventory line says nothing rather than something false", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    expect(inventoryLine(p)).toBe("")
+  })
+
+  test("the native tool description makes no redirect claim either", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    expect(describeNativeTool("sql_execute", "Execute SQL.", p)).toBe("Execute SQL.")
+  })
+
+  test("a partially-reachable caller is reported per capability", async () => {
+    // Allowed to execute through the engine, denied explain and inspect.
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, [
+      { permission: "*", pattern: "*", action: "deny" as const },
+      { permission: "datamate_snowflake_execute_database_query", pattern: "*", action: "allow" as const },
+    ])
+    const note = warehouseListNote(p, "snowflake")
+    expect(note).toContain("execute via workspace")
+    expect(note).toContain("explain/inspect local")
+  })
+})
+
 describe("default-target decisions — branch order", () => {
   // Reaching a dbt-sourced target through check() needs a real dbt project, so the
   // order of these branches is only checkable on the pure function. It is also the
