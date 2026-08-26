@@ -93,6 +93,9 @@ afterAll(() => {
 /** Serve the real contract: a paginated summary page, a detail view carrying
  * files[{path,size}], and raw file bytes. */
 function serve(skills: Record<string, Record<string, string>>, updatedAt = "2026-01-01T00:00:00Z") {
+  // Shapes verified against a local backend on `development`: the list is NOT
+  // wrapped, the detail IS wrapped in `{skill: ...}`, and the file endpoint
+  // answers `{path, content}` JSON rather than raw bytes.
   const items = Object.keys(skills).map((id) => ({
     public_id: id,
     name: id,
@@ -105,18 +108,20 @@ function serve(skills: Record<string, Record<string, string>>, updatedAt = "2026
     if (files) {
       const id = decodeURIComponent(files[1])
       const rel = files[2].split("/").map(decodeURIComponent).join("/")
-      return new Response(Buffer.from(skills[id][rel]), { status: 200 })
+      return json({ path: rel, content: skills[id][rel] })
     }
     const detail = url.match(/skills\/([^/?]+)(?:\?|$)/)
     if (detail && !url.includes("datamate_id")) {
       const id = decodeURIComponent(detail[1])
       return json({
-        public_id: id,
-        files: Object.entries(skills[id]).map(([p, c]) => ({
-          path: p,
-          size: Buffer.from(c).byteLength,
-        })),
-        content: skills[id]["SKILL.md"] ?? "",
+        skill: {
+          public_id: id,
+          files: Object.entries(skills[id]).map(([p, c]) => ({
+            path: p,
+            size: Buffer.from(c).byteLength,
+          })),
+          content: skills[id]["SKILL.md"] ?? "",
+        },
       })
     }
     return json({ items, total: items.length, page: 1, size: 50, pages: 1 })
@@ -211,7 +216,7 @@ describe("workspace skill sync", () => {
     // skill.
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
-      if (url.includes("/files/")) return new Response(Buffer.from("short"), { status: 200 })
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "short" })
       if (url.includes("datamate_id"))
         return json({
           items: [{ public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-02-02T00:00:00Z" }],
@@ -220,7 +225,7 @@ describe("workspace skill sync", () => {
           size: 50,
           pages: 1,
         })
-      return json({ public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" })
+      return json({ skill: { public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" } })
     }) as unknown as typeof fetch
     await syncSkills(project)
 
@@ -274,7 +279,7 @@ describe("workspace skill sync", () => {
     const escape = "escaped"
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
-      if (url.includes("/files/")) return new Response(Buffer.from(escape), { status: 200 })
+      if (url.includes("/files/")) return json({ path: "../escape.md", content: escape })
       if (url.includes("datamate_id"))
         return json({
           items: [{ public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-01-01T00:00:00Z" }],
@@ -284,9 +289,11 @@ describe("workspace skill sync", () => {
           pages: 1,
         })
       return json({
-        public_id: "pub-1",
-        files: [{ path: "../escape.md", size: Buffer.from(escape).byteLength }],
-        content: "",
+        skill: {
+          public_id: "pub-1",
+          files: [{ path: "../escape.md", size: Buffer.from(escape).byteLength }],
+          content: "",
+        },
       })
     }) as unknown as typeof fetch
     await syncSkills(project)
@@ -317,6 +324,33 @@ describe("workspace skill sync", () => {
     serve({ "pub-1": { "SKILL.md": "two" } }, "2026-03-03T00:00:00Z")
     await syncSkills(project)
     expect(snapshotGeneration()).toBeGreaterThan(afterWrite)
+  })
+
+  test("a file body without content is an error, not an empty file", async () => {
+    // The size check alone does not cover this: a bundle may legitimately hold
+    // a zero-byte file, and a malformed body coerced to "" would match size 0
+    // and publish silently, advancing the manifest as though it had succeeded.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ path: "SKILL.md" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-3", name: "p3", file_count: 1, updated_at: "2026-04-04T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-3", files: [{ path: "SKILL.md", size: 0 }], content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-3", "SKILL.md"))).toBe(false)
+    // And the previous snapshot is intact — an error never publishes.
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("does nothing when the workspace flag is off", async () => {

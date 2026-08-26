@@ -27,7 +27,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
 import { readLocalBinding, type CachedBinding } from "./state"
-import { altimateRequest, altimateRequestBytes, WorkspaceApiError } from "./api-client"
+import { altimateRequest, WorkspaceApiError } from "./api-client"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
 
@@ -145,9 +145,23 @@ function parsePage(payload: unknown): { rows: RemoteSummary[]; pages: number } |
   return { rows, pages }
 }
 
+/** ``GET /skills/{id}/files/{path}`` answers ``{path, content}``. Anything else
+ * is an error, not an empty file — see ``parsePage`` for why that matters. */
+function parseFileContent(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null
+  const c = (body as { content?: unknown }).content
+  return typeof c === "string" ? c : null
+}
+
 function parseDetailFiles(payload: unknown): RemoteFile[] | null {
   if (!payload || typeof payload !== "object") return null
-  const files = (payload as { files?: unknown }).files
+  // The detail view wraps its body in ``{skill: {...}}`` while the list view
+  // does not wrap at all. Verified against a local backend on `development`;
+  // the inconsistency is the contract, so accept the wrapper and also the bare
+  // object in case the envelope is ever dropped.
+  const inner = (payload as { skill?: unknown }).skill
+  const body = inner && typeof inner === "object" ? inner : payload
+  const files = (body as { files?: unknown }).files
   if (!Array.isArray(files)) return null
   const out: RemoteFile[] = []
   for (const f of files) {
@@ -248,13 +262,23 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         const recorded: Record<string, number> = {}
         for (const file of files) {
           const encoded = file.path.split("/").map(encodeURIComponent).join("/")
-          const bytes = await altimateRequestBytes(
+          // The file endpoint answers with ``{path, content}`` JSON, not the raw
+          // object — the server decodes the bundle file and hands back a string.
+          const body = await altimateRequest<unknown>(
+            "GET",
             `/${encodeURIComponent(summary.publicId)}/files/${encoded}`,
             { base: SKILLS_BASE },
           )
-          // No checksum exists in the API, so length is the only integrity
-          // check available. It still catches a truncated download, which is
-          // the failure that would otherwise publish a half-written skill.
+          const content = parseFileContent(body)
+          if (content === null) {
+            throw new WorkspaceApiError(`unrecognised file body for ${summary.publicId}/${file.path}`)
+          }
+          // No checksum exists in the API, so length is the only integrity check
+          // available. `size` is the stored object's byte count, so the
+          // comparison has to be on UTF-8 bytes rather than string length — the
+          // two differ for any non-ASCII skill. It still catches a truncated
+          // download, which is what would otherwise publish half a skill.
+          const bytes = Buffer.from(content, "utf8")
           if (bytes.byteLength !== file.size) {
             throw new WorkspaceApiError(
               `size mismatch for ${summary.publicId}/${file.path}: expected ${file.size}, got ${bytes.byteLength}`,
