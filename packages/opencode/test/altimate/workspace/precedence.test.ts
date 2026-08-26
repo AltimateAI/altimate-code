@@ -6,8 +6,10 @@
 // booting an instance, reading config, or touching MCP state.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  MAX_TRACKED_SESSIONS,
   check,
   decideForTarget,
+  trackedSessionCount,
   describeEngineTool,
   describeNativeTool,
   forSession,
@@ -42,6 +44,7 @@ const BIGQUERY_TOOLS = {
 function bindTo(id = 42, name = "analytics") {
   precedenceInternals.binding = async () => ({ datamateId: id, datamateName: name })
   precedenceInternals.attributedTo = async () => String(id)
+  precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
 }
 
 beforeEach(() => {
@@ -121,6 +124,53 @@ describe("mechanism 1 — materialised, not declared", () => {
     precedenceInternals.binding = async () => null
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.disabledReason).toBe("unbound")
+  })
+})
+
+describe("attribution is grounded in the attach, not only the saved config", () => {
+  // A `datamate` entry can be rewritten — by an IDE — from unpinned to pinned while
+  // MCP keeps serving the process it already connected. The config would then name
+  // this workspace while the running engine serves another, which is the exact
+  // mis-routing this design exists to prevent. The attach outcome is the runtime
+  // signal; the pin is the naming signal; both must agree.
+  test("a session with no established attach confers no precedence", async () => {
+    precedenceInternals.attachOutcome = async () => ({ kind: "engine-missing", declared: 12 })
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("unattributed")
+  })
+
+  test("a superseded attach confers no precedence", async () => {
+    // Superseded means the binding moved while the attach was in flight, so whatever
+    // is connected was established for a workspace this project has left.
+    precedenceInternals.attachOutcome = async () => ({ kind: "entry-disabled" })
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(false)
+  })
+
+  test("a reused engine counts as established, because attach verified it first", async () => {
+    precedenceInternals.attachOutcome = async () => ({ kind: "reused", available: 12 })
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(true)
+  })
+
+  test("an established attach whose config now names another workspace is refused", async () => {
+    precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
+    precedenceInternals.attributedTo = async () => "999"
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.disabledReason).toBe("unattributed")
+  })
+})
+
+describe("the per-session caches are bounded", () => {
+  test("old sessions are evicted rather than accumulating", async () => {
+    for (let i = 0; i < MAX_TRACKED_SESSIONS + 25; i++) {
+      await refresh(`ses_bounded_${i}`, SNOWFLAKE_TOOLS)
+    }
+    expect(trackedSessionCount()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
+    // The newest survives; the oldest is gone.
+    expect(forSession(`ses_bounded_${MAX_TRACKED_SESSIONS + 24}`)).toBeDefined()
+    expect(forSession("ses_bounded_0")).toBeUndefined()
   })
 })
 

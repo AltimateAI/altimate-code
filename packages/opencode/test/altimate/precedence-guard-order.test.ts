@@ -47,6 +47,9 @@ beforeEach(async () => {
   delete process.env.ALTIMATE_INTEGRATIONS
   precedenceInternals.binding = async () => ({ datamateId: 5, datamateName: "demo" })
   precedenceInternals.attributedTo = async () => "5"
+  // Attribution is grounded in the attach outcome as well as the pin, so a test that
+  // wants precedence engaged has to attest the engine too.
+  precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
   precedenceInternals.announce = async () => {}
   Registry.setConfigs({
     shadowed_snow: { type: "snowflake", account: "a", user: "u" } as never,

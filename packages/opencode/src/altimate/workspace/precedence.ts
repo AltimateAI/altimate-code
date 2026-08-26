@@ -47,7 +47,7 @@ import { Instance } from "@/project/instance"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { PermissionNext } from "@/permission/next"
 import { DATAMATE_KEY } from "../datamate-transport"
-import { engineToolKeys, isEnabled, pinnedWorkspace, type ExistingEntry } from "./engine-sync"
+import { engineToolKeys, ensure, isEnabled, pinnedWorkspace, type ExistingEntry, type Outcome } from "./engine-sync"
 import { readLocalBinding } from "./state"
 import { canonicalType } from "../native/connections/registry"
 import * as Registry from "../native/connections/registry"
@@ -130,8 +130,47 @@ const bySession = new Map<string, Precedence>()
 export const precedenceInternals: {
   binding?: () => Promise<{ datamateId: number; datamateName: string } | null>
   attributedTo?: () => Promise<string | null>
+  attachOutcome?: () => Promise<Outcome>
   announce?: (line: string) => Promise<void>
 } = {}
+
+/** Bound both per-session maps. A long-running `serve` process sees an unbounded
+ * number of session ids, and each entry holds a merged permission ruleset, so an
+ * unevicted map grows with lifetime session count. Mirrors the attach module's cap
+ * and insertion-ordered eviction: dropping the oldest is safe because the next turn
+ * simply re-derives. */
+export const MAX_TRACKED_SESSIONS = 256
+
+function remember(sessionID: string, value: Precedence): void {
+  bySession.delete(sessionID)
+  bySession.set(sessionID, value)
+  while (bySession.size > MAX_TRACKED_SESSIONS) {
+    const oldest = bySession.keys().next()
+    if (oldest.done) break
+    bySession.delete(oldest.value)
+    announced.delete(oldest.value)
+  }
+}
+
+/**
+ * Did an attach actually produce the engine now serving this session? The saved
+ * config is not sufficient on its own: an entry can be rewritten — by an IDE, say —
+ * from unpinned to pinned while MCP goes on serving the process it already connected,
+ * so the config would claim this workspace while the running engine serves another.
+ * The attach outcome is the runtime-grounded signal, because `attached` means we
+ * spawned a pinned engine and `reused` means attach verified one before adopting it.
+ */
+async function attested(sessionID: string): Promise<boolean> {
+  try {
+    const outcome = precedenceInternals.attachOutcome
+      ? await precedenceInternals.attachOutcome()
+      : await ensure(sessionID)
+    return outcome.kind === "attached" || outcome.kind === "reused"
+  } catch (err) {
+    log.warn("could not establish the attach outcome", { err: String(err) })
+    return false
+  }
+}
 
 /** Sessions whose inventory line has already been reported. Precedence is re-derived
  * every turn, but the inventory is a once-per-session statement of what changed. */
@@ -205,9 +244,9 @@ export async function refresh(
   tools: Record<string, unknown>,
   ruleset?: PermissionNext.Ruleset,
 ): Promise<Precedence> {
-  const result = await derive(tools)
+  const result = await derive(sessionID, tools)
   if (ruleset) result.ruleset = ruleset
-  bySession.set(sessionID, result)
+  remember(sessionID, result)
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
   if (!announced.has(sessionID)) {
@@ -220,7 +259,7 @@ export async function refresh(
   return result
 }
 
-async function derive(tools: Record<string, unknown>): Promise<Precedence> {
+async function derive(sessionID: string, tools: Record<string, unknown>): Promise<Precedence> {
   // The workspace pilot is opt-in, and opting out has to mean it. A binding and a
   // pinned `datamate` entry both persist in config, and the MCP client connects that
   // entry on its own regardless of the pilot flag — so engine tools can materialise
@@ -234,6 +273,14 @@ async function derive(tools: Record<string, unknown>): Promise<Precedence> {
   const workspaceName = binding.datamateName
 
   // Mechanism 1a — refuse to engage on an engine we cannot attribute to this binding.
+  // Two signals, and both must agree. The attach outcome says the running engine is
+  // one we established; the configured pin says it still names this workspace. Config
+  // alone is not enough — it can be rewritten under a live connection — and the
+  // outcome alone would not notice a later rewrite pointing somewhere else.
+  if (!(await attested(sessionID))) {
+    log.info("no attach established this session's engine; precedence off", { bound: binding.datamateId })
+    return EMPTY("unattributed", workspaceName)
+  }
   const pinned = await attributedTo()
   if (pinned === null || pinned !== String(binding.datamateId)) {
     log.info("engine not attributable to the bound workspace; precedence off", {
@@ -272,6 +319,11 @@ async function derive(tools: Record<string, unknown>): Promise<Precedence> {
 /** Read the session's precedence without recomputing it. */
 export function forSession(sessionID: string): Precedence | undefined {
   return bySession.get(sessionID)
+}
+
+/** Test-visible size of the per-session cache. */
+export function trackedSessionCount(): number {
+  return bySession.size
 }
 
 export function resetForTests(): void {
