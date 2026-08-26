@@ -1552,6 +1552,21 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Supported hardware">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#platform-status-and-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      Platform status and roadmap
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2499,6 +2514,21 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Supported hardware">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#platform-status-and-roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      Platform status and roadmap
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2569,7 +2599,9 @@ altimate<span class="w">                </span><span class="c1"># then use the C
 <li>A pinned open 27B coding model in a quantization chosen for your hardware,
   with every artifact SHA-256 verified against a signed recipe.</li>
 <li>A pinned <code>llama-server</code> runtime (Metal on Apple Silicon; Vulkan on
-  Linux/Windows, which covers NVIDIA, AMD, and Intel GPUs alike).</li>
+  Linux/Windows, which runs on NVIDIA, AMD, and Intel GPUs — see the
+  <a href="#platform-status-and-roadmap">platform status table</a> for what is
+  auto-detected and certified today).</li>
 <li>Speculative decoding (MTP) enabled where it measurably helps.</li>
 <li>A certification pass before the config is touched: the server must answer
   health, completion, multi-turn, and tool-call probes — if any fail, nothing
@@ -2600,7 +2632,7 @@ altimate<span class="w">                </span><span class="c1"># then use the C
 </tr>
 <tr>
 <td><code>gpu-24gb-discrete</code></td>
-<td>discrete NVIDIA/AMD/Intel 22GB+ VRAM (RTX 3090/4090-class)</td>
+<td>discrete NVIDIA 22GB+ VRAM (RTX 3090/4090-class); AMD/Intel run via Vulkan but are not auto-detected yet</td>
 <td>49K</td>
 <td>certified end-to-end on NVIDIA L4 (Vulkan); context sized so weights + KV fit VRAM alone</td>
 </tr>
@@ -2618,9 +2650,44 @@ altimate<span class="w">                </span><span class="c1"># then use the C
 </tr>
 </tbody>
 </table>
-<p>Windows (x64, Vulkan) is wired but <strong>experimental</strong> — the runtime asset is
-pinned and unpacked, but we have not yet certified it on physical hardware.
-<code>altimate local doctor</code> reports certification state honestly on every platform.</p>
+<h3 id="platform-status-and-roadmap">Platform status and roadmap</h3>
+<table>
+<thead>
+<tr>
+<th>Platform</th>
+<th>Today</th>
+<th>Next</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>macOS (Apple Silicon)</td>
+<td>fully supported and certified</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Linux + NVIDIA</td>
+<td>fully supported; certified on L4</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Linux + AMD (RX 7900-class, 20GB+)</td>
+<td>runtime works via Vulkan, but auto-detection probes NVIDIA only — tier matching falls back to system RAM. If your RAM qualifies for a tier, the runtime still offloads layers to the AMD GPU at run time (<code>--n-gpu-layers</code>).</td>
+<td>sysfs-based AMD VRAM detection (<code>amdgpu</code> exposes it without extra tools)</td>
+</tr>
+<tr>
+<td>Windows (x64, native)</td>
+<td><strong>experimental</strong> — the Vulkan runtime is pinned and unpacked, memory detection works, but there is no GPU probe yet and it has not been certified on physical hardware. <a href="../../reference/windows-wsl/">WSL 2</a> uses the Linux build and is the recommended path today.</td>
+<td>native GPU probe + a hardware-certified pass to drop the experimental label</td>
+</tr>
+<tr>
+<td>Intel Arc</td>
+<td>runs under Vulkan, but current Arc cards (≤16GB) sit below the smallest discrete-GPU tier's VRAM floor, so detection would not unlock a tier</td>
+<td>arrives together with a smaller-model registry entry whose tier fits 12–16GB cards</td>
+</tr>
+</tbody>
+</table>
+<p><code>altimate local doctor</code> reports certification state honestly on every platform.</p>
 <p>Before anything is downloaded, <code>altimate local</code> runs a preflight against the
 matched tier and prints each check: accelerator memory floor, free disk,
 Vulkan loader (Linux), and — for the DGX tier — Docker daemon,

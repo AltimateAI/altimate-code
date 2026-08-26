@@ -93,6 +93,21 @@ If you need to use Git Bash instead of WSL:
 export ALTIMATE_CLI_GIT_BASH_PATH="C:\\Program Files\\Git\\bin\\bash.exe"
 ```
 
+## Local Mode on Windows
+
+[Local Mode](../usage/local.md) (`altimate local` — run a local model with no
+API key) has two paths on Windows:
+
+- **WSL 2 (recommended today):** uses the Linux Vulkan build; follow the
+  Linux instructions inside your WSL distro.
+- **Native Windows (experimental):** the Vulkan runtime is pinned and
+  unpacks correctly, and memory detection works, but there is no GPU probe
+  yet and the flow has not been certified on physical Windows hardware.
+  `altimate local doctor` reports certification state honestly.
+
+See the [platform status table](../usage/local.md#platform-status-and-roadmap)
+for what is auto-detected and certified per platform.
+
 ## Known Limitations
 
 - The TUI works best in Windows Terminal or a modern terminal emulator

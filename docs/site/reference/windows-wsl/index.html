@@ -1987,6 +1987,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#local-mode-on-windows" class="md-nav__link">
+    <span class="md-ellipsis">
+      Local Mode on Windows
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#known-limitations" class="md-nav__link">
     <span class="md-ellipsis">
       Known Limitations
@@ -2601,6 +2610,15 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#local-mode-on-windows" class="md-nav__link">
+    <span class="md-ellipsis">
+      Local Mode on Windows
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#known-limitations" class="md-nav__link">
     <span class="md-ellipsis">
       Known Limitations
@@ -2742,6 +2760,19 @@ sudo<span class="w"> </span>apt-get<span class="w"> </span>install<span class="w
 <div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ALTIMATE_CLI_GIT_BASH_PATH</span><span class="o">=</span><span class="s2">&quot;C:\\Program Files\\Git\\bin\\bash.exe&quot;</span>
 </code></pre></div>
 
+<h2 id="local-mode-on-windows">Local Mode on Windows</h2>
+<p><a href="../../usage/local/">Local Mode</a> (<code>altimate local</code> — run a local model with no
+API key) has two paths on Windows:</p>
+<ul>
+<li><strong>WSL 2 (recommended today):</strong> uses the Linux Vulkan build; follow the
+  Linux instructions inside your WSL distro.</li>
+<li><strong>Native Windows (experimental):</strong> the Vulkan runtime is pinned and
+  unpacks correctly, and memory detection works, but there is no GPU probe
+  yet and the flow has not been certified on physical Windows hardware.
+  <code>altimate local doctor</code> reports certification state honestly.</li>
+</ul>
+<p>See the <a href="../../usage/local/#platform-status-and-roadmap">platform status table</a>
+for what is auto-detected and certified per platform.</p>
 <h2 id="known-limitations">Known Limitations</h2>
 <ul>
 <li>The TUI works best in Windows Terminal or a modern terminal emulator</li>

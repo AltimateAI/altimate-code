@@ -15,9 +15,9 @@ altimate                # then use the CLI as normal
 - A pinned open 27B coding model in a quantization chosen for your hardware,
   with every artifact SHA-256 verified against a signed recipe.
 - A pinned `llama-server` runtime (Metal on Apple Silicon; Vulkan on
-  Linux/Windows). The runtime itself runs on NVIDIA, AMD, and Intel GPUs,
-  but automatic hardware *detection* currently probes NVIDIA only — on an
-  AMD/Intel discrete GPU, tier matching falls back to system RAM.
+  Linux/Windows, which runs on NVIDIA, AMD, and Intel GPUs — see the
+  [platform status table](#platform-status-and-roadmap) for what is
+  auto-detected and certified today).
 - Speculative decoding (MTP) enabled where it measurably helps.
 - A certification pass before the config is touched: the server must answer
   health, completion, multi-turn, and tool-call probes — if any fail, nothing
@@ -33,8 +33,16 @@ altimate                # then use the CLI as normal
 | `dgx-spark-128gb` | NVIDIA DGX Spark (GB10) | 131K | managed: runs the digest-pinned SGLang NVFP4+EAGLE container (~4× llama.cpp); needs Docker + nvidia-container-toolkit |
 | `datacenter-80gb` | 80GB+ NVIDIA (A100/H100) | — | prints BF16/FP8 server deployment guidance |
 
-Windows (x64, Vulkan) is wired but **experimental** — the runtime asset is
-pinned and unpacked, but we have not yet certified it on physical hardware.
+### Platform status and roadmap
+
+| Platform | Today | Next |
+|---|---|---|
+| macOS (Apple Silicon) | fully supported and certified | — |
+| Linux + NVIDIA | fully supported; certified on L4 | — |
+| Linux + AMD (RX 7900-class, 20GB+) | runtime works via Vulkan, but auto-detection probes NVIDIA only — tier matching falls back to system RAM. If your RAM qualifies for a tier, the runtime still offloads layers to the AMD GPU at run time (`--n-gpu-layers`). | sysfs-based AMD VRAM detection (`amdgpu` exposes it without extra tools) |
+| Windows (x64, native) | **experimental** — the Vulkan runtime is pinned and unpacked, memory detection works, but there is no GPU probe yet and it has not been certified on physical hardware. [WSL 2](../reference/windows-wsl.md) uses the Linux build and is the recommended path today. | native GPU probe + a hardware-certified pass to drop the experimental label |
+| Intel Arc | runs under Vulkan, but current Arc cards (≤16GB) sit below the smallest discrete-GPU tier's VRAM floor, so detection would not unlock a tier | arrives together with a smaller-model registry entry whose tier fits 12–16GB cards |
+
 `altimate local doctor` reports certification state honestly on every platform.
 
 Before anything is downloaded, `altimate local` runs a preflight against the
