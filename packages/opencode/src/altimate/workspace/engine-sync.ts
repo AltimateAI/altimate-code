@@ -549,6 +549,93 @@ function describeMissing(missing: string[]): string {
   return ` Declared but not available: ${shown}${more}.`
 }
 
+/** Is this engine version usable at all?
+ *
+ * The single definition of "unusable" for this module. An unreadable version is
+ * treated as below the floor: the floor exists because engines under it do not
+ * lock their `--datamate` pin, and an engine that cannot say what it is cannot
+ * be shown to lock it either. */
+export function clearsFloor(version: string | null): boolean {
+  return !!version && compareVersions(version, MIN_ENGINE_VERSION) >= 0
+}
+
+/** The version of the ENGINE an entry runs, not of whatever wraps it.
+ *
+ * `npx @altimateai/datamate@0.6.3 start-stdio --datamate 42` would otherwise
+ * have us run `npx --version` and let a pre-floor engine clear the floor on the
+ * wrapper's version. Asking the running server instead is not an option:
+ * `serverInfo.version` is a hard-coded placeholder on the very engines this
+ * floor excludes. An unidentifiable command yields null, which `clearsFloor`
+ * treats as below the floor. */
+async function engineVersionOf(entry: ExistingEntry | null): Promise<string | null> {
+  const bin = commandArgv(entry)[0]
+  const direct = bin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(bin) ? bin : null
+  return direct ? await versionOf(direct) : null
+}
+
+/** What an existing entry means for this workspace — the whole decision, taken
+ * in one synchronous step over one snapshot.
+ *
+ * The order below is the contract, and it is the part of this module with the
+ * worst history: intent outranks connectivity, connectivity outranks
+ * attribution, attribution outranks version. Three separate review rounds each
+ * found one of those checks sitting on the wrong side of another, and each time
+ * the defect was reachable only because an await separated them — a config read,
+ * a status call, a version probe. A function that cannot await cannot reorder
+ * itself, so those defects stop being possible rather than being fixed again.
+ *
+ * `retried` is why "one retry, never two" is a property here rather than a
+ * branch someone has to remember not to re-enter. */
+type EntryPlan =
+  | { act: "spawn" }
+  | { act: "honour-disable" }
+  | { act: "retry-connect" }
+  | { act: "refuse-unreachable"; error: string }
+  | { act: "replace-unreachable-url"; url: string }
+  | { act: "replace-unattributable"; entry: string; pinnedTo: string | null }
+  | { act: "check-version" }
+
+export function planForEntry(
+  entry: ExistingEntry | null,
+  observed: { status: string; error?: string } | undefined,
+  workspaceId: string,
+  retried: boolean,
+): EntryPlan {
+  // Nothing registered under this key: there is no entry to judge.
+  if (!observed) return { act: "spawn" }
+
+  // Intent first. The config's `enabled` flag is the only place a user
+  // expresses "off", and the two sources disagree in BOTH directions:
+  // `MCP.status()` synthesizes "disabled" for a configured entry with no
+  // runtime status (so a teardown looks like a user disable), and it keeps
+  // reporting "connected" from live client state after the config has been set
+  // to disabled (so a real disable looked like nothing at all). Gating on
+  // connectivity missed the second case entirely.
+  if (entry?.enabled === false) return { act: "honour-disable" }
+
+  if (observed.status !== "connected") {
+    // A dead URL is not something this client can revive — only the IDE can
+    // restore its port — so it is replaced rather than retried.
+    if (isUrlEntry(entry)) return { act: "replace-unreachable-url", url: entry.url }
+    if (retried) return { act: "refuse-unreachable", error: observed.error ?? observed.status ?? "not connected" }
+    return { act: "retry-connect" }
+  }
+
+  // Live — either it already was, or the single retry brought it back. A
+  // recovered entry is gated exactly like one that never dropped.
+  //
+  // "Connected" is not attribution. An entry without `--datamate <id>` follows
+  // its owner's active teammate, which changes at runtime from a UI this client
+  // does not control; reusing one would report "workspace X: N tools" about a
+  // process serving Y, and once precedence acts on that inventory it routes the
+  // model into another workspace's credentials.
+  const pin = pinnedWorkspace(entry)
+  if (pin !== workspaceId) {
+    return { act: "replace-unattributable", entry: describeEntry(entry), pinnedTo: pin }
+  }
+  return { act: "check-version" }
+}
+
 async function run(): Promise<Outcome> {
   if (!isEnabled()) return { kind: "disabled" }
 
@@ -639,188 +726,180 @@ async function run(): Promise<Outcome> {
   // added after the cache was warmed is missing from status entirely, `existing`
   // is undefined, rule 1 never runs, and we persist our managed entry straight
   // over theirs. Refreshing first is what makes the status gate trustworthy.
+  // Intent, then connectivity, then attribution, then version.
+  //
+  // That order is what this flow kept getting wrong: three separate review
+  // rounds each moved one of these checks past another, and every one of those
+  // mistakes was possible only because the checks were separated by an await.
+  // `planForEntry` cannot await, so none of them is expressible against it.
+  //
+  // The entry is read BEFORE the status it is judged against. `existingEntry`
+  // refreshes the config cache that `MCP.status()` then reads, so an entry an
+  // IDE added after the cache warmed would otherwise be missing from status
+  // entirely — the entry check would never run and our managed entry would be
+  // persisted straight over theirs.
   const entry = await existingEntry(DATAMATE_KEY)
-  const before = await client.status()
-  const existing = before[DATAMATE_KEY]
-  if (existing) {
-    let connected = existing.status === "connected"
+  let observed = (await client.status())[DATAMATE_KEY]
+  let plan = planForEntry(entry, observed, workspaceId, false)
 
-    // Intent first, connectivity second. The config's `enabled` flag is the
-    // only place a user expresses "off", and the two sources disagree in BOTH
-    // directions: `MCP.status()` synthesizes "disabled" for a configured entry
-    // that has no runtime status (so a teardown looks like a user disable), and
-    // it keeps reporting "connected" from live client state after the config
-    // has been set to disabled (so a real disable looked like nothing at all).
-    // Gating on connectivity missed the second case entirely — and for an
-    // unpinned entry the replacement path below would then have persisted it
-    // enabled again, undoing the very edit the user made.
+  if (plan.act === "retry-connect") {
+    // Exactly one retry, then report — never a second spawn beside a failing
+    // one. "Never twice" is the `retried` argument rather than a branch someone
+    // has to remember not to re-enter.
+    await client.connect(DATAMATE_KEY).catch(() => undefined)
+    observed = (await client.status())[DATAMATE_KEY]
+    plan = planForEntry(entry, observed, workspaceId, true)
+  }
+
+  if (plan.act === "honour-disable") {
+    // The user turned this entry off deliberately. Do NOT call `MCP.connect` to
+    // "retry" it: that persists `enabled: true` into whichever config owns the
+    // entry, so for a global `datamate` the first prompt in any bound project
+    // would silently re-enable it for every other project.
     //
-    // `existingEntry` is always fresh, so `entry` already reflects disk.
-    if (entry?.enabled === false) {
-      // The user turned this entry off deliberately. Do NOT call `MCP.connect`
-      // to "retry" it: that persists `enabled: true` into whichever config
-      // owns the entry, so for a global `datamate` the first prompt in any
-      // bound project would silently re-enable it for every other project.
-      // Say what is unavailable and leave their choice alone.
-      log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
-      // Leaving the CONFIG alone is the whole point; leaving the RUNTIME alone is
-      // not. `MCP.status()` reports live client state, and `MCP.tools()` gates on
-      // exactly that status without consulting `enabled` — so an entry disabled
-      // after it connected keeps exporting its tools to `resolveTools`, and the
-      // user's "off" is honoured on disk while the model still holds the
-      // workspace's tools and credentials. `remove` is runtime-only: it closes
-      // the client and publishes ToolsChanged without writing config, which is
-      // precisely "respect the edit", not "re-apply" it.
-      await detachRejected({ reason: "the entry is disabled" })
+    // Leaving the CONFIG alone is the point; leaving the RUNTIME alone is not.
+    // `MCP.status()` reports live client state and `MCP.tools()` gates on
+    // exactly that status, consulting the config only for a timeout — so an
+    // entry disabled after it connected keeps exporting its tools and its
+    // credentials to the turn. `remove` is runtime-only: it closes the client
+    // and publishes ToolsChanged without writing config, which is respecting
+    // the edit rather than re-applying it.
+    log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
+    await detachRejected({ reason: "the entry is disabled" })
+    await notify({
+      title: "Workspace engine is disabled",
+      message:
+        `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
+        `integration tools are unavailable. Enable it to use them.`,
+      variant: "warning",
+    })
+    return { kind: "entry-disabled" }
+  }
+
+  if (plan.act === "refuse-unreachable") {
+    await notify({
+      title: "Workspace engine is not running",
+      message:
+        `The "${DATAMATE_KEY}" MCP entry for workspace "${binding.datamateName}" could not connect: ` +
+        `${plan.error}. Integration tools are unavailable until it does.`,
+      variant: "error",
+    })
+    return { kind: "connect-failed", error: plan.error }
+  }
+
+  if (plan.act === "replace-unreachable-url") {
+    // Dead URL: nothing here can bring that process back — only the IDE can
+    // restore its port. Fall through to a local spawn and report it below.
+    replaced = plan.url
+    replacedNote = ` Replaced the unreachable engine URL ${plan.url} for this session.`
+    log.info("existing engine entry is a URL that is not reachable; will spawn locally", {
+      workspaceId,
+      url: plan.url,
+      error: observed?.error,
+    })
+  }
+
+  if (plan.act === "replace-unattributable") {
+    // Not attributable to this workspace. Replacing it costs the other client
+    // nothing: a stdio entry is a per-client child process, so the IDE keeps its
+    // own engine and only OUR registration changes. A connected URL entry lands
+    // here too, which is the point — the hosted endpoint serves a different tool
+    // set, and rule 4 forbids adopting it.
+    replaced = plan.entry
+    replacedNote = plan.pinnedTo
+      ? ` Replaced an engine entry pinned to workspace ${plan.pinnedTo} for this session.`
+      : ` Replaced an engine entry that is not pinned to this workspace (${plan.entry}) for this session; ` +
+        `it serves whichever workspace its owner has active.`
+    log.info("existing engine entry is not attributable to this workspace; detaching", {
+      workspaceId,
+      pinnedTo: plan.pinnedTo,
+      entry: plan.entry,
+    })
+    await detachRejected({ workspaceId, reason: "not-attributable", pinnedTo: plan.pinnedTo })
+  }
+
+  if (plan.act === "check-version") {
+    const found = await engineVersionOf(entry)
+    if (clearsFloor(found)) {
+      // Rule 5 applies to a reused engine too. A running engine that lost an
+      // integration — a connection deleted, a restart that dropped it — serves
+      // fewer tools than the workspace declares, and only the fresh attach used
+      // to say so. Reuse is the COMMON path, so staying silent here is where the
+      // gap would actually go unnoticed.
+      const present = engineToolKeys(await client.tools())
+      const declaredKeys = await declaredBounded(workspaceId)
+      const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
+      const available = present.size
+      if (declaredKeys && missing.length > 0) {
+        await notify({
+          title: `Workspace "${binding.datamateName}" is missing declared tools`,
+          message:
+            `The running engine serves ${available} of ${declaredKeys.keys.length} declared integration tools.` +
+            describeMissing(missing),
+          variant: "warning",
+        })
+      }
+      // Returning `reused` ASSERTS that the connected engine serves the current
+      // binding — and the lookup above can have waited. Every mutation already
+      // revalidates; so must this, because the caller acts on the answer just as
+      // surely. A re-link inside that await would otherwise hand this turn the
+      // previous workspace's tools, and its credentials, under the new binding.
+      if (!(await stillCurrent())) {
+        // Detach, do not merely decline. The caller runs `resolveTools` whatever
+        // this returns, so leaving the old client registered hands that turn the
+        // previous workspace's tools and credentials anyway — the outcome is
+        // advice, the registration is what the model sees.
+        log.info("binding changed while reusing; detaching rather than answering for the old workspace", {
+          workspaceId,
+        })
+        await client.remove(DATAMATE_KEY).catch((err) => {
+          log.warn("could not detach the superseded engine", { err: String(err) })
+        })
+        return { kind: "superseded" }
+      }
+      log.info("reusing existing engine entry", {
+        workspaceId,
+        available,
+        version: found,
+        declared: declaredKeys?.keys.length,
+        missing,
+      })
+      return {
+        kind: "reused",
+        available,
+        ...(declaredKeys ? { declared: declaredKeys.keys.length, missing } : {}),
+      }
+    }
+
+    // Pinned to us, but below the floor or unreadable. Prefer a newer engine on
+    // PATH over keeping one whose pin the engine does not lock; if PATH cannot
+    // do better, say so rather than reuse it silently.
+    //
+    // PATH is probed HERE rather than inside the plan because probing spawns a
+    // process: folding it into the pure decision would charge the reuse path —
+    // the common one, run on every turn — for a question it never asks.
+    const onPath = which(ENGINE_BINARY)
+    const pathVersion = onPath ? await versionOf(onPath) : null
+    if (!clearsFloor(pathVersion)) {
+      const label = found ?? "unknown"
+      // Rejected and irreplaceable: detach anyway. Leaving it connected would
+      // return "too old" while still serving the too-old engine's tools.
+      await detachRejected({ workspaceId, reason: "below-floor", found: label })
       await notify({
-        title: "Workspace engine is disabled",
-        message:
-          `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
-          `integration tools are unavailable. Enable it to use them.`,
+        title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
+        message: describeRefusal(found, binding.datamateName),
         variant: "warning",
       })
-      return { kind: "entry-disabled" }
+      return { kind: "engine-too-old", found: label }
     }
-
-
-    if (!connected) {
-      if (isUrlEntry(entry)) {
-        // Dead URL: nothing here can bring that process back — only the IDE can
-        // restore its port. Fall through to a local spawn and report it below.
-        replaced = entry.url
-        replacedNote = ` Replaced the unreachable engine URL ${entry.url} for this session.`
-        log.info("existing engine entry is a URL that is not reachable; will spawn locally", {
-          workspaceId,
-          url: entry.url,
-          error: existing.error,
-        })
-      } else {
-        // A command entry that failed: one retry, then report — never a second
-        // spawn beside a failing one.
-        await client.connect(DATAMATE_KEY).catch(() => undefined)
-        const retried = (await client.status())[DATAMATE_KEY]
-        connected = retried?.status === "connected"
-        if (!connected) {
-          const error = retried?.error ?? retried?.status ?? "not connected"
-          await notify({
-            title: "Workspace engine is not running",
-            message: `The "${DATAMATE_KEY}" MCP entry for workspace "${binding.datamateName}" could not connect: ${error}. Integration tools are unavailable until it does.`,
-            variant: "error",
-          })
-          return { kind: "connect-failed", error }
-        }
-      }
-    }
-
-    // Live — either it already was, or the single retry brought it back. A
-    // recovered entry is gated exactly like one that never dropped.
-    if (connected) {
-      const pin = pinnedWorkspace(entry)
-      if (pin !== workspaceId) {
-        // Not attributable to this workspace. Replacing it costs the other
-        // client nothing: a stdio entry is a per-client child process, so the
-        // IDE keeps its own engine and only OUR registration changes. A
-        // connected URL entry lands here too, which is the point — the hosted
-        // endpoint serves a different tool set, and rule 4 forbids adopting it.
-        replaced = describeEntry(entry)
-        replacedNote = pin
-          ? ` Replaced an engine entry pinned to workspace ${pin} for this session.`
-          : ` Replaced an engine entry that is not pinned to this workspace (${replaced}) for this session; it serves whichever workspace its owner has active.`
-        log.info("existing engine entry is not attributable to this workspace; detaching", {
-          workspaceId,
-          pinnedTo: pin,
-          entry: replaced,
-        })
-        await detachRejected({ workspaceId, reason: "not-attributable", pinnedTo: pin })
-      } else {
-        // Probe the ENGINE, not whatever wraps it. `npx @altimateai/datamate@0.6.3
-        // start-stdio --datamate 42` would otherwise have us run `npx --version`
-        // and let a pre-floor engine clear the floor on the wrapper's version.
-        // Asking the running server instead is not an option: `serverInfo.version`
-        // is a hard-coded placeholder on the very engines this floor excludes.
-        // An unidentifiable command yields no version, which falls through to the
-        // below-floor handling — replace it from PATH, or report it.
-        const entryBin = commandArgv(entry)[0]
-        const directBin = entryBin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(entryBin) ? entryBin : null
-        const found = directBin ? await versionOf(directBin) : null
-        if (found && compareVersions(found, MIN_ENGINE_VERSION) >= 0) {
-          // Rule 5 applies to a reused engine too. A running engine that lost an
-          // integration — a connection deleted, a restart that dropped it —
-          // serves fewer tools than the workspace declares, and only the fresh
-          // attach used to say so. Reuse is the COMMON path, so staying silent
-          // here is where the gap would actually go unnoticed.
-          const present = engineToolKeys(await client.tools())
-          const declaredKeys = await declaredBounded(workspaceId)
-          const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
-          const available = present.size
-          if (declaredKeys && missing.length > 0) {
-            await notify({
-              title: `Workspace "${binding.datamateName}" is missing declared tools`,
-              message:
-                `The running engine serves ${available} of ${declaredKeys.keys.length} declared integration tools.` +
-                describeMissing(missing),
-              variant: "warning",
-            })
-          }
-          // Returning `reused` ASSERTS that the connected engine serves the
-          // current binding — and the lookup above can have waited. Every
-          // mutation already revalidates; so must this, because the caller acts
-          // on the answer just as surely. A re-link inside that await would
-          // otherwise hand this turn the previous workspace's tools, and its
-          // credentials, under the new binding.
-          if (!(await stillCurrent())) {
-            // Detach, do not merely decline. The caller runs `resolveTools`
-            // whatever this returns, so leaving the old client registered hands
-            // that turn the previous workspace's tools and credentials anyway —
-            // the outcome is advice, the registration is what the model sees.
-            log.info("binding changed while reusing; detaching rather than answering for the old workspace", {
-              workspaceId,
-            })
-            await client.remove(DATAMATE_KEY).catch((err) => {
-              log.warn("could not detach the superseded engine", { err: String(err) })
-            })
-            return { kind: "superseded" }
-          }
-          log.info("reusing existing engine entry", {
-            workspaceId,
-            available,
-            version: found,
-            declared: declaredKeys?.keys.length,
-            missing,
-          })
-          return {
-            kind: "reused",
-            available,
-            ...(declaredKeys ? { declared: declaredKeys.keys.length, missing } : {}),
-          }
-        }
-        // Pinned to us, but below the floor or unreadable. Prefer a newer engine
-        // on PATH over keeping one whose pin the engine does not lock; if PATH
-        // cannot do better, say so rather than reuse it silently.
-        const onPath = which(ENGINE_BINARY)
-        const pathVersion = onPath ? await versionOf(onPath) : null
-        if (!pathVersion || compareVersions(pathVersion, MIN_ENGINE_VERSION) < 0) {
-          const label = found ?? "unknown"
-          // Rejected and irreplaceable: detach anyway. Leaving it connected would
-          // return "too old" while still serving the too-old engine's tools.
-          await detachRejected({ workspaceId, reason: "below-floor", found: label })
-          await notify({
-            title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
-            message: describeRefusal(found, binding.datamateName),
-            variant: "warning",
-          })
-          return { kind: "engine-too-old", found: label }
-        }
-        replaced = describeEntry(entry)
-        replacedNote = ` Replaced an engine entry running ${found ?? "an unreadable version"}, below the ${MIN_ENGINE_VERSION} floor, for this session.`
-        log.info("existing engine entry is below the version floor; detaching", {
-          workspaceId,
-          found,
-          pathVersion,
-        })
-        await detachRejected({ workspaceId, reason: "below-floor-replaceable", found })
-      }
-    }
+    replaced = describeEntry(entry)
+    replacedNote = ` Replaced an engine entry running ${found ?? "an unreadable version"}, below the ${MIN_ENGINE_VERSION} floor, for this session.`
+    log.info("existing engine entry is below the version floor; detaching", {
+      workspaceId,
+      found,
+      pathVersion,
+    })
+    await detachRejected({ workspaceId, reason: "below-floor-replaceable", found })
   }
 
   // Bounded: this lookup is reporting only, but it runs BEFORE the engine is
@@ -844,7 +923,7 @@ async function run(): Promise<Outcome> {
   }
 
   const found = await versionOf(bin)
-  if (!found || compareVersions(found, MIN_ENGINE_VERSION) < 0) {
+  if (!clearsFloor(found)) {
     const label = found ?? "unknown"
     await notify({
       title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
@@ -1080,10 +1159,10 @@ async function engineStillOurs(workspaceId: string, record?: SessionAttach): Pro
     // next session.
     const command = commandArgv(entry).join(" ")
     if (record && record.validated === command) return true
-    const bin = commandArgv(entry)[0]
-    const direct = bin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(bin) ? bin : null
-    const found = direct ? await versionOf(direct) : null
-    if (!found || compareVersions(found, MIN_ENGINE_VERSION) < 0) {
+    // Same probe and same floor as the attach path, from the same helpers. This
+    // was duplicated here, which is how a describer and a decider drift apart.
+    const found = await engineVersionOf(entry)
+    if (!clearsFloor(found)) {
       log.info("cached attach no longer clears the version floor; re-attaching", { workspaceId, found })
       return false
     }

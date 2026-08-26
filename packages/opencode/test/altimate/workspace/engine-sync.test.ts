@@ -21,6 +21,8 @@ import {
   settledOutcome,
   attributableEngine,
   installWouldHelp,
+  planForEntry,
+  clearsFloor,
   type LocalMcpConfig,
   type Outcome,
 } from "../../../src/altimate/workspace/engine-sync"
@@ -1649,5 +1651,71 @@ describe("INVARIANT — every outcome answers both consumer questions deliberate
     await ensure("s1")
     expect(settledOutcome("s1")).toBeDefined()
     expect(settledOutcome("s2"), "a session that never attached inherited another's verdict").toBeUndefined()
+  })
+})
+
+describe("INVARIANT — the entry decision is ordered by authority and cannot await", () => {
+  // The order is the contract: intent > connectivity > attribution > version.
+  // Three review rounds each found one of these checks on the wrong side of
+  // another, and every one of those defects was reachable only because an await
+  // separated them. These assert the order directly, on the function that has
+  // no awaits to separate anything.
+  const live = { status: "connected" }
+  const ours = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true }
+  const theirs = { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"], enabled: true }
+  const unpinned = { type: "local", command: ["datamate", "start-stdio"], enabled: true }
+
+  test("intent outranks connectivity — a disabled entry is honoured while its client is live", () => {
+    expect(planForEntry({ ...ours, enabled: false }, live, "42", false).act).toBe("honour-disable")
+  })
+
+  test("intent outranks attribution — a disabled entry is honoured even when it is not ours", () => {
+    expect(planForEntry({ ...theirs, enabled: false }, live, "42", false).act).toBe("honour-disable")
+  })
+
+  test("connectivity outranks attribution — an unreachable entry is retried before being judged ours", () => {
+    expect(planForEntry(theirs, { status: "failed", error: "exit 1" }, "42", false).act).toBe("retry-connect")
+  })
+
+  test("attribution outranks version — an entry pinned elsewhere is replaced, never probed", () => {
+    expect(planForEntry(theirs, live, "42", false)).toEqual({
+      act: "replace-unattributable",
+      entry: "datamate start-stdio --datamate 9",
+      pinnedTo: "9",
+    })
+    // An unpinned entry is equally unattributable: it follows its owner's active
+    // teammate, which this client does not control.
+    expect(planForEntry(unpinned, live, "42", false).act).toBe("replace-unattributable")
+  })
+
+  test("one retry, never two — the bound is an argument, not a branch", () => {
+    const failed = { status: "failed", error: "exit 1" }
+    expect(planForEntry(ours, failed, "42", false).act).toBe("retry-connect")
+    expect(planForEntry(ours, failed, "42", true)).toEqual({ act: "refuse-unreachable", error: "exit 1" })
+  })
+
+  test("a dead URL is replaced rather than retried — only the IDE can restore its port", () => {
+    const url = { type: "remote", url: "http://localhost:7801/sse", enabled: true }
+    expect(planForEntry(url, { status: "failed" }, "42", false)).toEqual({
+      act: "replace-unreachable-url",
+      url: "http://localhost:7801/sse",
+    })
+  })
+
+  test("nothing registered is a spawn, and ours-and-live goes to the version check", () => {
+    expect(planForEntry(null, undefined, "42", false).act).toBe("spawn")
+    expect(planForEntry(ours, live, "42", false).act).toBe("check-version")
+  })
+
+  test("the decision is a value, not a promise — nothing can interleave inside it", () => {
+    const plan = planForEntry(ours, live, "42", false) as unknown as { then?: unknown }
+    expect(typeof plan.then).toBe("undefined")
+  })
+
+  test("an unreadable version is below the floor, because it cannot be shown to lock its pin", () => {
+    expect(clearsFloor(null)).toBe(false)
+    expect(clearsFloor("0.6.3")).toBe(false)
+    expect(clearsFloor(MIN_ENGINE_VERSION)).toBe(true)
+    expect(clearsFloor("1.0.0")).toBe(true)
   })
 })
