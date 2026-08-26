@@ -763,7 +763,22 @@ export function ensure(sessionID: string): Promise<Outcome> {
   // turn would sail past without waiting — which is exactly the first-turn gap
   // this module exists to close. All the async work happens inside the task.
   const previous = sessions.get(sessionID)
-  const entry = { key: previous?.key, waitTimedOut: previous?.waitTimedOut } as SessionAttach
+  // Decided SYNCHRONOUSLY, because the entry is published synchronously and
+  // `whenAttached` reads it on the very next line. Whether this is a repair
+  // retry depends only on the previous outcome, which is already known — the
+  // workspace comparison needs an await, and refining the flag after that await
+  // is too late: the timer is armed by then, so a hung retry charged the turn
+  // the full cap despite the retry being documented as non-blocking.
+  //
+  // Conservative in the right direction: if the binding also changed, the branch
+  // below resets this to false and that fresh attach may lose its wait for one
+  // turn. Failing to wait costs a turn's tools, which `tools/list_changed`
+  // repairs; waiting wrongly costs every turn 15 seconds.
+  const repairRetry = !!previous && isRepairable(previous.outcome)
+  const entry = {
+    key: previous?.key,
+    waitTimedOut: previous?.waitTimedOut || repairRetry,
+  } as SessionAttach
   entry.task = (async (): Promise<Outcome> => {
     const key = await attachKey()
     const sameWorkspace = !!previous && previous.key === key
@@ -839,9 +854,20 @@ function serializeAttach<T>(fn: () => Promise<T>): Promise<T> {
  * outcome logged exactly once. */
 function attachOnce(sessionID: string): Promise<Outcome> {
   return serializeAttach(() => run())
-    .catch((err): Outcome => {
-      log.warn("workspace engine attach failed", { err: String(err) })
-      return { kind: "connect-failed", error: String(err) }
+    .catch(async (err): Promise<Outcome> => {
+      const error = String(err)
+      // Every explicit failure branch tells the user what is unavailable and
+      // why. An unexpected throw — an unwritable project config, a malformed
+      // one — must not be the single path that leaves them with neither tools
+      // nor an explanation, since the caller discards this outcome and
+      // `whenAttached` returns void.
+      log.warn("workspace engine attach failed", { err: error })
+      await notify({
+        title: "Workspace engine attach failed",
+        message: `Could not attach the workspace engine: ${error}. Integration tools are unavailable for this session.`,
+        variant: "error",
+      })
+      return { kind: "connect-failed", error }
     })
     .then((outcome) => {
       // One line per session, whatever happened — silence is the defect this

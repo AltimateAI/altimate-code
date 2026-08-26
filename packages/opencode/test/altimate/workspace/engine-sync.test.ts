@@ -721,15 +721,21 @@ describe("ensure — a repairable failure is re-probed on the next turn", () => 
     expect(h.added).toHaveLength(1)
   })
 
-  test("a repairable retry does not re-arm the turn wait", async () => {
-    install({ which: null })
+  test("a repairable retry does not re-arm the turn wait, even when the retry HANGS", async () => {
+    // The earlier version of this test let the retry settle immediately, so
+    // whenAttached returned on settle and the test passed whatever the flag
+    // said. The retry must hang for the flag to be the thing under test.
+    let onPath: string | null = null
+    install({})
+    syncInternals.which = () => onPath
     expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
-    // Next turn re-probes, but whenAttached must return immediately rather than
-    // charging this turn the full cap.
+
+    onPath = "/usr/local/bin/datamate"
+    syncInternals.versionOf = () => new Promise<string | null>(() => {}) // never settles
     void ensure("s1")
     const started = performance.now()
     await whenAttached("s1", 5_000)
-    expect(performance.now() - started).toBeLessThan(100)
+    expect(performance.now() - started).toBeLessThan(150)
   })
 })
 
@@ -949,5 +955,21 @@ describe("ensure — round 6: a stale binding must not be installed", () => {
     })
     expect(await ensure("s1")).toMatchObject({ kind: "attached" })
     expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+  })
+})
+
+describe("ensure — round 7", () => {
+  test("an unexpected attach error still tells the user", async () => {
+    // Every explicit failure branch notifies; an unexpected throw must not be
+    // the one path that leaves the user with neither tools nor an explanation.
+    const h = install({ statuses: [{}] })
+    syncInternals.persist = async () => {
+      throw new Error("EACCES: project config is not writable")
+    }
+    const outcome = await ensure("s1")
+    expect(outcome).toMatchObject({ kind: "connect-failed" })
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0].variant).toBe("error")
+    expect(h.toasts[0].message).toContain("EACCES")
   })
 })
