@@ -248,6 +248,48 @@ async function req<T>(
  * ``base``; the default is this module's own namespace. */
 export { req as altimateRequest }
 
+/** Fetch a response body as raw bytes, sharing ``req``'s credential resolution,
+ * abort budget and unreachable/timeout classification.
+ *
+ * Skill bundles are arbitrary files — markdown, but also anything an author put
+ * in ``references/`` — so they cannot go through ``req``, which assumes a JSON
+ * body. Kept deliberately small: status handling here is pass/fail only,
+ * because the one caller (skill sync) treats every non-2xx identically as
+ * "this file did not download", and a partial bundle must never be published. */
+export async function altimateRequestBytes(
+  subpath: string,
+  opts: { base?: string } = {},
+): Promise<Uint8Array> {
+  const { url, instance, apiKey } = await creds()
+  const target = `${url}${opts.base ?? "/datamate-project-bindings"}${subpath}`
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    const res = await fetch(target, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, "x-tenant": instance },
+      signal: controller.signal,
+    })
+    // Read the body inside the same try/finally as the fetch, for the reason
+    // documented on ``req``: headers can arrive and the stream then stall.
+    const buf = await res.arrayBuffer()
+    if (!res.ok) throw new WorkspaceApiError(`GET ${target} failed with ${res.status}`)
+    return new Uint8Array(buf)
+  } catch (err) {
+    if (err instanceof WorkspaceApiError) throw err
+    const name = (err as { name?: string } | undefined)?.name
+    if (name === "AbortError") {
+      throw new WorkspaceApiError(
+        `Request to ${target} timed out after ${Math.round(REQUEST_TIMEOUT_MS / 1000)}s`,
+      )
+    }
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new WorkspaceApiError(`Cannot reach ${target}: ${msg}`)
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export namespace WorkspaceApi {
   /** Server-authoritative pre-check by git remote. Returns null on 404. */
   export async function getBindingForRemote(remote: string): Promise<GetBindingResponse | null> {
