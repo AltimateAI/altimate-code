@@ -689,6 +689,37 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(order).toHaveLength(2)
   })
 
+  test("a correction back to the delivered line is not suppressed by one still in flight", async () => {
+    // Inventory can return to what was already announced while a different line is
+    // mid-publication. Comparing only against the delivered line would drop that
+    // correction, and the queue would then deliver the stale line last — leaving the
+    // session looking at guidance that no longer matches where its calls go.
+    const order: string[] = []
+    const settle: Array<() => void> = []
+    precedenceInternals.announce = (line) => {
+      order.push(line)
+      return new Promise<void>((resolve) => settle.push(resolve))
+    }
+
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    settle[0]()
+    await tick()
+    expect(order).toHaveLength(1)
+
+    // A different inventory, left in flight.
+    await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(order).toHaveLength(2)
+
+    // Back to the first inventory before that one lands.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    settle[1]()
+    await tick()
+
+    // The correction was queued, so it is what the session is left looking at.
+    expect(order).toHaveLength(3)
+    expect(order[2]).toBe(order[0])
+  })
+
   test("a session that never had routing is still told nothing", async () => {
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)

@@ -327,12 +327,15 @@ export async function refresh(
   const routed = result.enabled && current !== ""
   // Only a session that was actually routing can be told routing has stopped.
   const line = current || (previous?.routed ? STOPPED_ROUTING : "")
-  if (line && previous?.line !== line && publishing.get(sessionID)?.line !== line) {
-    // The attempt is its own object, so identity alone settles which one is current:
-    // a publication that finishes after a newer one started finds its attempt gone and
-    // records nothing. Nothing reaches `announced` until the line actually arrives, so
-    // a failure — or a lost race — leaves the session's known state untouched and the
-    // next turn retries.
+  // Compare against the newest line this session is committed to saying — the one still
+  // being published if there is one, otherwise the one it has actually been told.
+  // Comparing against the delivered line alone would suppress a correction back to it
+  // while a different line is still in flight, and the queue would then deliver the
+  // stale one last.
+  const committed = publishing.get(sessionID)?.line ?? previous?.line
+  if (line && committed !== line) {
+    // Nothing reaches `announced` until the line actually arrives, so a failure leaves
+    // the session's known state untouched and the next turn retries.
     const attempt = { line, routed }
     publishing.set(sessionID, attempt)
     const queued = (publishQueue.get(sessionID) ?? Promise.resolve()).then(async () => {
