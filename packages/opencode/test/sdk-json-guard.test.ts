@@ -1,32 +1,43 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test"
-import { createClient } from "../../sdk/js/src/v2/gen/client/client.gen"
+import path from "path"
+import { fileURLToPath } from "url"
+import { createClient as createV2Client } from "../../sdk/js/src/v2/gen/client/client.gen"
+import { createClient as createV1Client } from "../../sdk/js/src/gen/client/client.gen"
 import { createOpencodeClient } from "../../sdk/js/src/v2/client"
 
 // The JSON-parse guard lives in GENERATED code that `script/build.ts` wipes
-// (clean: true) and re-applies on every release build. These tests pin both
-// halves: the drift canaries fail if either copy of the patch disappears, and
-// the live-server tests exercise the actual failure shapes (a proxy serving
-// an HTML error page as application/json, and one labeling it honestly).
+// (clean: true) and re-applies on every release build. These tests pin the
+// chain end to end: the needle still matches the generator TEMPLATE on disk
+// (the real drift detector), both copies carry the guard, build.ts carries
+// the re-apply step, and live-server tests drive the actual failure shapes
+// against BOTH clients (v1 is the root `@opencode-ai/sdk` export plugins use).
 
-describe("sdk json guard — drift canaries", () => {
-  const read = (p: string) => Bun.file(new URL(p, import.meta.url).pathname).text()
+const sdk = fileURLToPath(new URL("../../sdk/js/", import.meta.url))
+const read = (rel: string) => Bun.file(path.join(sdk, rel)).text()
+
+describe("sdk json guard — codegen drift", () => {
+  it("the needle still matches @hey-api/client-fetch's template on disk", async () => {
+    // build.ts throws mid-release if this stops matching; catching it here
+    // moves the failure to CI (resolved through the sdk package root: the
+    // generator exports only ".", "./internal" and "./package.json")
+    const root = path.dirname(require.resolve("@hey-api/openapi-ts/package.json", { paths: [sdk] }))
+    const tpl = await Bun.file(path.join(root, "dist/clients/fetch/client.ts")).text()
+    expect(tpl).toContain("          data = text ? JSON.parse(text) : {};")
+  })
+
+  it("build.ts pins the needle literal and re-applies the guard", async () => {
+    const build = await read("script/build.ts")
+    expect(build).toContain('const jsonGuardNeedle = "          data = text ? JSON.parse(text) : {};"')
+    expect(build).toContain("json-guard patch did not apply")
+    expect(build).toContain("but the body was not JSON")
+  })
 
   it("both generated clients carry the guard", async () => {
-    for (const p of [
-      "../../sdk/js/src/gen/client/client.gen.ts",
-      "../../sdk/js/src/v2/gen/client/client.gen.ts",
-    ]) {
-      const src = await read(p)
+    for (const rel of ["src/gen/client/client.gen.ts", "src/v2/gen/client/client.gen.ts"]) {
+      const src = await read(rel)
       expect(src).toContain("guard JSON parse against non-JSON")
       expect(src).toContain("but the body was not JSON")
     }
-  })
-
-  it("build.ts re-applies the v2 guard after codegen with a matching needle", async () => {
-    const build = await read("../../sdk/js/script/build.ts")
-    expect(build).toContain("json-guard patch did not apply")
-    expect(build).toContain('const jsonGuardNeedle = "          data = text ? JSON.parse(text) : {};"')
-    expect(build).toContain("but the body was not JSON")
   })
 })
 
@@ -39,10 +50,18 @@ describe("sdk json guard — live failure shapes", () => {
     server = Bun.serve({
       port: 0,
       fetch(req) {
-        const path = new URL(req.url).pathname
-        if (path.endsWith("/lying-proxy"))
+        const p = new URL(req.url).pathname
+        if (p.endsWith("/lying-proxy"))
           return new Response(html, { status: 200, headers: { "content-type": "application/json" } })
-        // every other route: an honest proxy error page with charset
+        if (p.endsWith("/plain-text"))
+          return new Response("just text", { status: 200, headers: { "content-type": "text/plain" } })
+        if (p.endsWith("/empty-chunked")) {
+          // a 200 with an empty streamed body and no Content-Length reaches
+          // the json switch arm (the 204 / Content-Length:0 early return
+          // does not cover it)
+          const body = new ReadableStream({ start(c) { c.close() } })
+          return new Response(body, { status: 200, headers: { "content-type": "application/json" } })
+        }
         return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
       },
     })
@@ -50,20 +69,36 @@ describe("sdk json guard — live failure shapes", () => {
   })
   afterAll(() => server.stop(true))
 
-  it("HTML mislabeled as application/json rejects with an actionable error", async () => {
-    const client = createClient({ baseUrl: base })
-    const err = await client
-      .get({ url: "/lying-proxy" })
-      .then(() => null)
-      .catch((e: unknown) => e as Error & { cause?: { body?: string } })
-    expect(err).not.toBeNull()
-    expect(err!.message).toContain("but the body was not JSON")
-    expect(err!.message).toContain("/lying-proxy")
-    expect(err!.message).toContain("content-type application/json")
-    expect(err!.cause?.body).toContain("502 Bad Gateway")
+  for (const [name, make] of [["v2", createV2Client], ["v1", createV1Client]] as const) {
+    it(`${name}: HTML mislabeled as application/json rejects with a traceable, query-free error`, async () => {
+      const client = make({ baseUrl: base })
+      const err = await client
+        .get({ url: "/lying-proxy", query: { directory: "/Users/jdoe/secret-project" } })
+        .then(() => null)
+        .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+      expect(err).not.toBeNull()
+      expect(err!.message).toContain("but the body was not JSON")
+      expect(err!.message).toContain("GET /lying-proxy")
+      expect(err!.message).not.toContain("directory=")
+      expect(err!.message).not.toContain("secret-project")
+      expect(err!.message).toContain("content-type application/json")
+      expect(err!.cause?.body).toContain("502 Bad Gateway")
+    })
+  }
+
+  it("v1: parseAs text still dispatches through the split switch", async () => {
+    const client = createV1Client({ baseUrl: base })
+    const res = await client.get({ url: "/plain-text", parseAs: "text" })
+    expect(res.data).toBe("just text")
   })
 
-  it("honestly-labeled text/html (with charset) rejects at the interceptor", async () => {
+  it("v1: a chunked empty 200 yields {} (declared alignment with v2; was SyntaxError)", async () => {
+    const client = createV1Client({ baseUrl: base })
+    const res = await client.get({ url: "/empty-chunked" })
+    expect(res.data).toEqual({})
+  })
+
+  it("honestly-labeled text/html (with charset) rejects at the v2 interceptor", async () => {
     const oc = createOpencodeClient({ baseUrl: base })
     const err = await oc.app
       .log({ service: "t", level: "info", message: "x" })

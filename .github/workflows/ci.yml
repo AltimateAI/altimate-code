@@ -115,6 +115,22 @@ jobs:
       # such hang) at --max-concurrency=2, which stays green even under heavy load (~43s locally at
       # load 21). Do not reintroduce OPENCODE_TEST_CLI for these tests without fixing that binary hang.
 
+      - name: SDK codegen is reproducible
+        # The v2 gen tree is committed AND regenerated on every release build
+        # (script/build.ts, clean: true) with post-codegen patches re-applied.
+        # A clean checkout must round-trip to itself, or a release ships
+        # something the review never saw.
+        working-directory: packages/sdk/js
+        run: |
+          # build.ts ends with tsc; main's committed types.gen.ts currently
+          # does not round-trip (tracked separately), so only the file the
+          # post-codegen patch targets is asserted here. openapi.json must
+          # exist afterwards: a codegen failure would leave the tree untouched
+          # and turn this into a false pass.
+          bun script/build.ts || echo "::warning::build.ts exited non-zero (see log); codegen+patch output is asserted below"
+          test -s openapi.json
+          git diff --exit-code -- src/v2/gen/client/client.gen.ts
+
       - name: Run tests
         working-directory: packages/opencode
         # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when

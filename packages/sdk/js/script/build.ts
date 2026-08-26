@@ -70,12 +70,14 @@ const jsonGuardSource = await jsonGuardFile.text()
 const jsonGuardNeedle = "          data = text ? JSON.parse(text) : {};"
 const jsonGuardBlock = [
   "          // altimate_change start — upstream_fix: guard JSON parse against non-JSON (HTML) response bodies",
-  "          // Re-applied by script/build.ts after codegen; edit it THERE, not here.",
+  "          // A 200 whose body is an HTML error page from a proxy/gateway/CDN otherwise crashes with a",
+  "          // raw \"JSON Parse error: Unrecognized token '<'\". Surface an actionable error instead.",
+  "          // Re-applied by script/build.ts after codegen (clean: true wipes this tree); edit it THERE.",
   "          try {",
   "            data = text ? JSON.parse(text) : {}",
   "          } catch (cause) {",
   "            throw new Error(",
-  "              \`Expected a JSON response from \${request.method} \${request.url} but the body was not JSON \` +",
+  "              \`Expected a JSON response from \${request.method} \${new URL(request.url).pathname} but the body was not JSON \` +",
   "                \`(HTTP \${response.status}, content-type \${response.headers.get(\"content-type\") ?? \"unset\"}). \` +",
   "                \`This is usually a proxy or gateway error page, not the API.\`,",
   "              { cause: { parseError: cause, status: response.status, body: text.slice(0, 200) } },",

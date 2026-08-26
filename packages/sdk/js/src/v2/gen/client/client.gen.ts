@@ -177,7 +177,7 @@ export const createClient = (config: Config = {}): Client => {
             data = text ? JSON.parse(text) : {}
           } catch (cause) {
             throw new Error(
-              `Expected a JSON response from ${request.method} ${request.url} but the body was not JSON ` +
+              `Expected a JSON response from ${request.method} ${new URL(request.url).pathname} but the body was not JSON ` +
                 `(HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "unset"}). ` +
                 `This is usually a proxy or gateway error page, not the API.`,
               { cause: { parseError: cause, status: response.status, body: text.slice(0, 200) } },
