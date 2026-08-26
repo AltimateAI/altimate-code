@@ -98,6 +98,7 @@ export type Outcome =
   | { kind: "engine-too-old"; found: string }
   | { kind: "connect-failed"; error: string }
   | { kind: "entry-disabled" }
+  | { kind: "superseded" }
 
 export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolean }
 
@@ -419,6 +420,23 @@ async function run(): Promise<Outcome> {
   let replaced: string | undefined
   let replacedNote = ""
 
+  /** Is this attach still the one this project wants?
+   *
+   * The binding is snapshotted at the top of `run()`, but reaching a mutation
+   * costs seconds — a status call, one or two process spawns for `--version`,
+   * and the workspace allowlist over the network. A re-link inside that window
+   * leaves this attach acting for a workspace the project has already left, and
+   * per-project serialization does not help: it orders the writes, so the stale
+   * attach simply installs FIRST and the replacement queues behind it. Anything
+   * that mutates MCP state re-checks here and abandons instead.
+   *
+   * Cheap enough to call before every mutation — the binding is a local cache
+   * read, not a network one. */
+  const stillCurrent = async (): Promise<boolean> => {
+    const now = await resolveBinding().catch(() => null)
+    return !!now && String(now.datamateId) === workspaceId
+  }
+
   /** Stop serving an entry we have judged untrustworthy for this workspace.
    *
    * Runtime-only (`MCP.remove`): closes the client and drops it from the tool
@@ -433,6 +451,10 @@ async function run(): Promise<Outcome> {
    * tools we just decided it must not have. It also closes the client `MCP.add`
    * would otherwise overwrite without closing, which orphans a second engine. */
   const detachRejected = async (why: Record<string, unknown>): Promise<void> => {
+    if (!(await stillCurrent())) {
+      log.info("skipping teardown; the binding changed while this attach was deciding", { workspaceId, ...why })
+      return
+    }
     await client.remove(DATAMATE_KEY).catch((err) => {
       log.warn("could not detach the rejected engine entry", { err: String(err), ...why })
     })
@@ -620,6 +642,12 @@ async function run(): Promise<Outcome> {
     command: [ENGINE_BINARY, "start-stdio", "--datamate", workspaceId],
     enabled: true,
   }
+  if (!(await stillCurrent())) {
+    // Re-linked while we were probing. Installing now would attach the workspace
+    // this session has already left, and would win by arriving first.
+    log.info("abandoning attach; the binding changed before the engine was installed", { workspaceId })
+    return { kind: "superseded" }
+  }
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
 
@@ -674,7 +702,13 @@ type SessionAttach = { key?: string; task: Promise<Outcome>; waitTimedOut?: bool
  * it, fix a broken entry. Caching these for the life of the session means the
  * hint we just printed ("install it with …") can be followed and nothing
  * happens until a new session — so they are re-probed on the next turn. */
-const REPAIRABLE = new Set<Outcome["kind"]>(["engine-missing", "engine-too-old", "connect-failed", "entry-disabled"])
+const REPAIRABLE = new Set<Outcome["kind"]>([
+  "engine-missing",
+  "engine-too-old",
+  "connect-failed",
+  "entry-disabled",
+  "superseded",
+])
 
 function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE.has(outcome.kind)

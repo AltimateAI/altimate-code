@@ -918,3 +918,36 @@ describe("ensure — round 5", () => {
     expect(trackedSessionsForTests()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
   })
 })
+
+describe("ensure — round 6: a stale binding must not be installed", () => {
+  test("a re-link DURING an attach abandons it instead of installing the old workspace", async () => {
+    // run() snapshots the binding, then spends seconds in status, version and
+    // API work before persisting. A re-link inside that window used to install
+    // the workspace the session had already left.
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    // The re-link lands while the attach is in its slow phase.
+    syncInternals.declared = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] }
+    }
+
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    // The decisive assertion: workspace 42's engine is never installed.
+    expect(h.added).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+  })
+
+  test("an unchanged binding still attaches normally", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+  })
+})
