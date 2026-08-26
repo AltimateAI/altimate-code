@@ -61,7 +61,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
-import { MCP } from "@/mcp"
+import { MCP, ToolsChanged } from "@/mcp"
 import { addMcpToConfig, resolveConfigPath } from "@/mcp/config"
 import { Config } from "@/config/config"
 import { AltimateApi } from "@/altimate/api/client"
@@ -72,6 +72,9 @@ import { TuiEvent } from "@/server/tui-event"
 import { readLocalBinding, type CachedBinding } from "./state"
 
 const log = Log.create({ service: "workspace-engine" })
+
+/** How long the optional allowlist lookup may delay a local spawn. */
+const DECLARED_TIMEOUT_MS = 4_000
 
 /** Oldest engine this client is known to work against.
  *
@@ -132,7 +135,8 @@ export const syncInternals: {
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
   /** The configured (merged) MCP entry under `name`, or null if none. */
   existingEntry?: (name: string) => Promise<ExistingEntry | null>
-  refreshConfig?: () => Promise<void>
+  freshConfig?: () => Promise<{ mcp?: Record<string, ExistingEntry | undefined> }>
+  toolsChanged?: () => Promise<void>
   declared?: (datamateId: string) => Promise<Declared | null>
   notify?: (toast: Toast) => Promise<void>
 } = {}
@@ -290,22 +294,30 @@ async function persist(name: string, cfg: LocalMcpConfig): Promise<void> {
   })
 }
 
-/** Drop the per-instance config cache so the next read sees the file.
+/** The module's ONLY path to config, and it is always fresh.
  *
- * `MCP.disconnect` writes `enabled: false` straight to disk and does not
- * invalidate `Config`, so a cached entry can still report `enabled: true` right
- * after a user has disconnected. */
-async function refreshConfig(): Promise<void> {
-  if (syncInternals.refreshConfig) return syncInternals.refreshConfig()
+ * `Config.get()` is cached per instance, and this module has now been bitten
+ * three times by reading it after someone else wrote: our own `addMcpToConfig`,
+ * `MCP.disconnect` writing `enabled: false`, and an IDE rewriting the entry —
+ * which never goes through `Config` at all. Two of those defeated a fix from an
+ * earlier round.
+ *
+ * Enumerating the writers is therefore not possible, so freshness is structural
+ * at the point of READ rather than remembered at each write site. The cost is
+ * real and shared: invalidating drops the per-instance cache for every other
+ * `Config` consumer too. That is the price of not having a fourth instance. */
+async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntry | undefined> }> {
+  if (syncInternals.freshConfig) return syncInternals.freshConfig()
   await Config.invalidate().catch((err) => {
     log.warn("could not refresh the config cache", { err: String(err) })
   })
+  return (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
 }
 
 async function existingEntry(name: string): Promise<ExistingEntry | null> {
   if (syncInternals.existingEntry) return syncInternals.existingEntry(name)
   try {
-    const cfg = (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
+    const cfg = await freshConfig()
     return cfg.mcp?.[name] ?? null
   } catch (err) {
     log.warn("could not read merged MCP config", { name, err: String(err) })
@@ -375,6 +387,24 @@ async function declared(datamateId: string): Promise<Declared | null> {
   } catch (err) {
     log.warn("could not read declared workspace integrations", { datamateId, err: String(err) })
     return null
+  }
+}
+
+/** Tell the session its tool list changed.
+ *
+ * `MCP.add` stores the client but publishes nothing, so an attach that lands
+ * after the turn's bounded wait — or on a repair retry, which never waits —
+ * produced tools the session had no way to learn about until the user sent
+ * another message. The documented fallback for exceeding the cap depends on
+ * this event existing, so it has to be published here. */
+async function announceToolsChanged(): Promise<void> {
+  if (syncInternals.toolsChanged) return syncInternals.toolsChanged()
+  try {
+    await AppRuntime.runPromise(
+      EventV2Bridge.Service.use((events) => events.publish(ToolsChanged, { server: DATAMATE_KEY })),
+    )
+  } catch (err) {
+    log.warn("could not announce the workspace engine tool change", { err: String(err) })
   }
 }
 
@@ -524,8 +554,8 @@ async function run(): Promise<Outcome> {
       // user disconnects. Treating that as a synthesized status would reconnect
       // and persist it enabled again, undoing their disconnect — globally, if
       // the owning entry is global. Read the file before deciding.
-      if (existing.status === "disabled") await refreshConfig()
-      const owning = existing.status === "disabled" ? await existingEntry(DATAMATE_KEY) : entry
+      // `existingEntry` is always fresh now, so `entry` already reflects disk.
+      const owning = entry
       if (existing.status === "disabled" && owning?.enabled === false) {
         // The user turned this entry off deliberately. Do NOT call `MCP.connect`
         // to "retry" it: that persists `enabled: true` into whichever config
@@ -662,7 +692,23 @@ async function run(): Promise<Outcome> {
     }
   }
 
-  const declaredKeys = await declared(workspaceId)
+  // Bounded: this lookup is reporting only, but it runs BEFORE the engine is
+  // launched and its HTTP layer has no abort timeout — so an API that accepts a
+  // connection and then stalls stopped a good cached binding and an installed
+  // engine from ever attaching. Reporting degrades; attaching does not wait.
+  const declaredKeys = await Promise.race([
+    declared(workspaceId),
+    new Promise<null>((resolve) => {
+      const timer = setTimeout(() => {
+        log.warn("workspace allowlist lookup timed out; attaching without the declared-vs-delivered report", {
+          workspaceId,
+          timeoutMs: DECLARED_TIMEOUT_MS,
+        })
+        resolve(null)
+      }, DECLARED_TIMEOUT_MS)
+      timer.unref?.()
+    }),
+  ])
   const declaredCount = declaredKeys?.keys.length ?? 0
 
   // Rule 2 / 3 — opportunistic use, or an offer. Never an install.
@@ -730,6 +776,10 @@ async function run(): Promise<Outcome> {
     return { kind: "connect-failed", error }
   }
 
+  // The add succeeded and is ours: announce it, so a turn that had already given
+  // up waiting still learns the tools arrived.
+  await announceToolsChanged()
+
   // Rule 5 — report declared-but-missing.
   const present = engineToolKeys(await client.tools())
   const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
@@ -795,11 +845,16 @@ function wasServing(outcome: Outcome | undefined): boolean {
  * reconnected until a new session or a re-link.
  *
  * Fails OPEN: a status read that throws must not invalidate a good attach. */
-async function engineStillConnected(): Promise<boolean> {
+async function engineStillOurs(workspaceId: string): Promise<boolean> {
   try {
-    return (await mcp().status())[DATAMATE_KEY]?.status === "connected"
+    if ((await mcp().status())[DATAMATE_KEY]?.status !== "connected") return false
+    // Connected is not enough. Link A -> B -> A with another session attaching B
+    // in between, and this session's key matches its original memo while the
+    // instance-wide client is serving B — so the cached success would expose B's
+    // tools under binding A. The pin is what makes it ours.
+    return pinnedWorkspace(await existingEntry(DATAMATE_KEY)) === workspaceId
   } catch (err) {
-    log.warn("could not re-probe the engine connection; keeping the cached attach", { err: String(err) })
+    log.warn("could not re-probe the engine attribution; keeping the cached attach", { err: String(err) })
     return true
   }
 }
@@ -840,6 +895,13 @@ export function trackedSessionsForTests(): number {
  * workspace would keep serving the old workspace's tools, both silently and for
  * the rest of the session. Keying on the bound workspace makes a re-link produce
  * a fresh attach on the next turn and leaves everything else memoised as before. */
+/** The bound workspace id, or null when unbound or disabled. */
+async function attachKeyWorkspace(): Promise<string | null> {
+  if (!isEnabled()) return null
+  const binding = await resolveBinding()
+  return binding ? String(binding.datamateId) : null
+}
+
 async function attachKey(): Promise<string> {
   if (!isEnabled()) return "disabled"
   const binding = await resolveBinding()
@@ -877,7 +939,8 @@ export function ensure(sessionID: string): Promise<Outcome> {
     // the hint it produced.
     if (sameWorkspace && !isRepairable(previous!.outcome)) {
       // Re-probe before trusting a cached success — see `engineStillConnected`.
-      if (!wasServing(previous!.outcome) || (await engineStillConnected())) return previous!.task
+      const boundTo = await attachKeyWorkspace()
+      if (!wasServing(previous!.outcome) || !boundTo || (await engineStillOurs(boundTo))) return previous!.task
       log.info("cached attach is no longer connected; re-attaching", { sessionID })
     }
     entry.key = key

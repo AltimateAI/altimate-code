@@ -22,6 +22,7 @@ import {
   type LocalMcpConfig,
 } from "../../../src/altimate/workspace/engine-sync"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
+import type { ExistingEntry } from "../../../src/altimate/workspace/engine-sync"
 
 const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
 
@@ -38,6 +39,7 @@ type Harness = {
   connects: string[]
   removes: string[]
   toasts: Array<{ title: string; message: string; variant: string }>
+  toolsChanged: number
   statusQueue: Array<Record<string, { status: string; error?: string } | undefined>>
   tools: Record<string, unknown>
 }
@@ -57,6 +59,7 @@ function install(opts: {
     connects: [],
     removes: [],
     toasts: [],
+    toolsChanged: 0,
     statusQueue: opts.statuses ?? [{}],
     tools: opts.tools ?? {},
   }
@@ -71,9 +74,19 @@ function install(opts: {
   syncInternals.persist = async (name, cfg) => {
     h.persisted.push({ name, cfg })
   }
-  syncInternals.existingEntry = async () => (opts.existing === undefined ? null : opts.existing)
+  syncInternals.existingEntry = async () => {
+    if (opts.existing !== undefined) return opts.existing
+    // Production persists the pinned entry before adding it, so a later read
+    // sees it. Without this the harness under-reports and a legitimate memo
+    // looks like a workspace change.
+    const last = h.persisted[h.persisted.length - 1]
+    return last ? ({ type: "local", command: last.cfg.command, enabled: true } as ExistingEntry) : null
+  }
   syncInternals.notify = async (toast) => {
     h.toasts.push(toast)
+  }
+  syncInternals.toolsChanged = async () => {
+    h.toolsChanged += 1
   }
   syncInternals.mcp = {
     status: async () => h.statusQueue.length > 1 ? h.statusQueue.shift()! : h.statusQueue[0]!,
@@ -1081,20 +1094,19 @@ describe("ensure — round 9", () => {
     // so the cached entry still says enabled:true. Believing the cache would
     // reconnect the entry and persist it enabled again — undoing the user's
     // disconnect, globally if the owning entry is global.
-    let refreshed = false
+    let reads = 0
     const h = install({
       statuses: [{ datamate: { status: "disabled" } }],
     })
-    syncInternals.refreshConfig = async () => {
-      refreshed = true
+    // Reads go through freshConfig now, so the disk value is what is seen.
+    syncInternals.existingEntry = undefined
+    syncInternals.freshConfig = async () => {
+      reads += 1
+      return { mcp: { datamate: { type: "local", command: ["datamate", "start-stdio"], enabled: false } } }
     }
-    syncInternals.existingEntry = async () =>
-      refreshed
-        ? { type: "local", command: ["datamate", "start-stdio"], enabled: false } // on disk
-        : { type: "local", command: ["datamate", "start-stdio"], enabled: true } // stale cache
 
     expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
-    expect(refreshed).toBe(true)
+    expect(reads).toBeGreaterThan(0)
     expect(h.connects).toHaveLength(0) // MCP.connect would persist enabled:true
     expect(h.persisted).toHaveLength(0)
   })
@@ -1111,5 +1123,69 @@ describe("ensure — round 9", () => {
     expect(await ensure("s2")).toEqual({ kind: "engine-too-old", found: "0.6.9" })
     expect(old.toasts[0].title).toContain("too old")
     expect(old.toasts[0].message).toContain("needs 0.7.0 or newer")
+  })
+})
+
+describe("ensure — round 10", () => {
+  test("a successful add announces the new tools", async () => {
+    // MCP.add stores the client but publishes nothing, so a late attach — after
+    // the bounded wait expired, or on a repair retry — left the session with
+    // tools it had no way to learn about until another user turn.
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    expect(h.toolsChanged).toBe(1)
+  })
+
+  test("a cached success is re-attributed, not merely re-connected", async () => {
+    // A -> B -> A while another session attached B: the key matches this
+    // session's original memo and the client is connected, but it is serving B.
+    let pinned = "42"
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.existingEntry = async () => ({
+      type: "local",
+      command: ["datamate", "start-stdio", "--datamate", pinned],
+    })
+    const first = await ensure("s1")
+    expect(first).toMatchObject({ kind: "attached" })
+
+    pinned = "99" // the live entry now serves another workspace
+    const second = await ensure("s1")
+    expect(second).not.toBe(first)
+  })
+
+  test("a stalled catalog lookup cannot block the local engine", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.declared = () => new Promise(() => {}) // API accepts then stalls
+    const outcome = await ensure("s1")
+    // The engine is on PATH and the binding is cached; reporting is optional.
+    expect(outcome).toMatchObject({ kind: "attached" })
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("config is read fresh, so an external write is never missed", async () => {
+    // Nothing in this module can enumerate the writers — MCP writes raw, and an
+    // IDE rewriting the entry never touches Config at all — so freshness has to
+    // be structural at the point of read.
+    let onDisk: Record<string, unknown> = { type: "local", command: ["datamate", "start-stdio"], enabled: true }
+    let invalidations = 0
+    const h = install({ statuses: [{ datamate: { status: "disabled" } }] })
+    syncInternals.existingEntry = undefined // let the real reader go through freshConfig
+    syncInternals.freshConfig = async () => {
+      invalidations += 1
+      return { mcp: { datamate: onDisk as ExistingEntry } }
+    }
+    onDisk = { type: "local", command: ["datamate", "start-stdio"], enabled: false }
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(invalidations).toBeGreaterThan(0)
+    expect(h.connects).toHaveLength(0)
   })
 })
