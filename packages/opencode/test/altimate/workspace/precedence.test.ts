@@ -136,28 +136,6 @@ describe("attribution is grounded in the attach, not only the saved config", () 
   // this workspace while the running engine serves another, which is the exact
   // mis-routing this design exists to prevent. The attach outcome is the runtime
   // signal; the pin is the naming signal; both must agree.
-  test("a session with no established attach confers no precedence", async () => {
-    precedenceInternals.attachOutcome = async () => ({ kind: "engine-missing", declared: 12 })
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(p.enabled).toBe(false)
-    expect(p.disabledReason).toBe("unattributed")
-  })
-
-  test("a superseded attach confers no precedence", async () => {
-    // Superseded means the binding moved while the attach was in flight, so whatever
-    // is connected was established for a workspace this project has already left.
-    precedenceInternals.attachOutcome = async () => ({ kind: "superseded" })
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(p.enabled).toBe(false)
-    expect(p.disabledReason).toBe("unattributed")
-  })
-
-  test("a disabled entry confers no precedence either", async () => {
-    precedenceInternals.attachOutcome = async () => ({ kind: "entry-disabled" })
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(p.enabled).toBe(false)
-  })
-
   test("an attach still in flight confers no precedence, and does not wait for it", async () => {
     // The attach task is deliberately uncapped: the prompt loop bounds its own wait and
     // lets a turn proceed without engine tools past the cap, so a broken connection
@@ -182,17 +160,18 @@ describe("attribution is grounded in the attach, not only the saved config", () 
     expect(verdict.redirect).toBeUndefined()
   })
 
-  test("a settled outcome is still read, so the common case is unaffected", async () => {
-    precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(p.enabled).toBe(true)
-  })
 
   test("only an established attach qualifies — every other outcome is refused", async () => {
     // Asserts the invariant rather than a sample of it: the allowlist is exactly
     // {attached, reused}, so a new Outcome variant defaults to refusing rather than
-    // silently qualifying.
-    const refused: Array<{ kind: string }> = [
+    // silently qualifying. `undefined` is in the list because "in flight" and "never
+    // attached" are indistinguishable and both must fail open rather than route.
+    //
+    // Superseded is the one worth naming: the binding moved while the attach was in
+    // flight, so whatever is connected was established for a workspace this project
+    // has already left.
+    const refused: Array<{ kind: string } | undefined> = [
+      undefined,
       { kind: "disabled" },
       { kind: "unbound" },
       { kind: "engine-missing" },
@@ -206,14 +185,33 @@ describe("attribution is grounded in the attach, not only the saved config", () 
       bindTo()
       precedenceInternals.attachOutcome = async () => outcome as never
       const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-      expect({ kind: outcome.kind, enabled: p.enabled }).toEqual({ kind: outcome.kind, enabled: false })
+      const label = outcome?.kind ?? "(none)"
+      // The reason matters as much as the refusal: it is what the inventory line and
+      // the tool descriptions render, so a refusal with the wrong reason is a wrong
+      // explanation shown to the user.
+      expect({ label, enabled: p.enabled, why: p.disabledReason }).toEqual({
+        label,
+        enabled: false,
+        why: "unattributed",
+      })
     }
   })
 
-  test("a reused engine counts as established, because attach verified it first", async () => {
-    precedenceInternals.attachOutcome = async () => ({ kind: "reused", available: 12 })
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(p.enabled).toBe(true)
+  test("an established attach qualifies, however it was established", async () => {
+    // The other half of the same allowlist. `reused` counts because attach verified the
+    // engine before handing it back; a settled `attached` is the common case and must
+    // not have been broken by any of the refusal machinery above.
+    const qualifying = [
+      { kind: "attached", available: 12, declared: 12, missing: [] },
+      { kind: "reused", available: 12 },
+    ]
+    for (const outcome of qualifying) {
+      resetForTests()
+      bindTo()
+      precedenceInternals.attachOutcome = async () => outcome as never
+      const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+      expect({ kind: outcome.kind, enabled: p.enabled }).toEqual({ kind: outcome.kind, enabled: true })
+    }
   })
 
   test("an established attach whose config now names another workspace is refused", async () => {
@@ -468,16 +466,6 @@ describe("reporting never claims a routing that will not happen", () => {
     { permission: "schema_inspect", pattern: "*", action: "allow" as const },
   ]
 
-  test("warehouse_list marks nothing when the caller cannot reach the engine", async () => {
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
-    expect(warehouseListNote(p, "snowflake")).toBeNull()
-  })
-
-  test("...and the routing decision agrees with it", async () => {
-    await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
-    const verdict = await check(SESSION, "sql_execute", "local_snow")
-    expect(verdict.redirect).toBeUndefined()
-  })
 
   test("warehouse_list still marks the row for a caller that can reach it", async () => {
     const p = await refresh(SESSION, SNOWFLAKE_TOOLS, [
@@ -486,14 +474,24 @@ describe("reporting never claims a routing that will not happen", () => {
     expect(warehouseListNote(p, "snowflake")).toContain("via workspace")
   })
 
-  test("the inventory line says nothing rather than something false", async () => {
+  test("no surface claims a routing the caller cannot follow", async () => {
+    // Asserted together rather than one test per surface: the failure this guards is
+    // exactly that these drift apart, so the invariant is that every surface agrees
+    // with the routing decision. Three findings in this review were a surface still
+    // asserting what had stopped being true.
     const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
-    expect(inventoryLine(p)).toBe("")
-  })
-
-  test("the native tool description makes no redirect claim either", async () => {
-    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
-    expect(describeNativeTool("sql_execute", "Execute SQL.", p)).toBe("Execute SQL.")
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect({
+      listing: warehouseListNote(p, "snowflake"),
+      inventory: inventoryLine(p),
+      description: describeNativeTool("sql_execute", "Execute SQL.", p),
+      redirected: verdict.redirect !== undefined,
+    }).toEqual({
+      listing: null,
+      inventory: "",
+      description: "Execute SQL.",
+      redirected: false,
+    })
   })
 
   test("a partially-reachable caller is reported per capability", async () => {
