@@ -1,0 +1,400 @@
+// Workspace precedence: when a bound workspace's engine serves a capability for a
+// warehouse type, the equivalent native tool stops executing against a local
+// connection of that type and points the model at the engine tool instead.
+//
+// One principle governs the whole module: shadow only what is MATERIALISED and
+// ATTRIBUTED; anything undetermined runs locally with an explicit notice; nothing
+// is ever silent.
+//
+//  1. Materialised, not declared. Precedence is derived from the engine tool keys
+//     actually present in the model-facing MCP map, never from what the workspace
+//     declared. A declared-but-broken integration shadows nothing.
+//  1a. Attributed. The engine must be provably serving the *bound* workspace. Attach
+//     reuses any connected `datamate` entry, and an IDE writes that entry unpinned,
+//     so a reused engine can be serving a different workspace than the local binding
+//     names. Attach is being fixed to guarantee attribution; this module re-checks it
+//     and refuses to engage if the guarantee is ever violated. Defence in depth.
+//  2. Capability-scoped. The engine's warehouse integrations are NOT symmetric —
+//     snowflake serves execute/explain/inspect, bigquery and postgresql serve execute
+//     only, databricks serves execute only. Shadowing is keyed on the individual
+//     materialised tool key, so `sql_explain` on a BigQuery connection stays local
+//     instead of redirecting to a tool that does not exist.
+//  3. Default targets. A native call with no `warehouse` resolves through
+//     `resolveDefaultTarget`, which mirrors each handler's own resolution.
+//  4. Redirect. A shadowed call returns a result naming the exact engine key. Nothing
+//     executes and there is no fallback.
+//
+// Precedence is a pure function of the materialised set, so it is re-derived every
+// turn from the live MCP tool map (`refresh`) rather than cached at attach. That is
+// what keeps it correct when an engine's tool set changes under us — `MCP.tools()` is
+// cache-invalidated by the `tools/list_changed` notification, and `resolveTools` runs
+// once per turn.
+import { Config } from "@/config/config"
+import { Log } from "@/altimate/util/log"
+import { Instance } from "@/project/instance"
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+import { DATAMATE_KEY } from "../datamate-transport"
+import { engineToolKeys } from "./engine-sync"
+import { readLocalBinding } from "./state"
+import { canonicalType } from "../native/connections/registry"
+import * as Registry from "../native/connections/registry"
+
+const log = Log.create({ service: "workspace-precedence" })
+
+/** Native tools that can be shadowed. `warehouse_list` annotates instead (it has no
+ * connection argument), and `sql_optimize` is excluded — it is a pure sqlglot
+ * transform with no connection to scope on. */
+export type Capability = "sql_execute" | "sql_explain" | "schema_inspect"
+
+/** The dispatcher operation each capability resolves its default target through.
+ * Only `sql.execute` consults dbt; explain/inspect are registry-only. */
+export const CAPABILITY_OP: Record<Capability, "sql.execute" | "sql.explain" | "schema.inspect"> = {
+  sql_execute: "sql.execute",
+  sql_explain: "sql.explain",
+  schema_inspect: "schema.inspect",
+}
+
+/** Mechanism 2 — the engine tool name implementing each capability, per integration
+ * id. Databricks names its execute tool differently from the `<id>_…` convention. */
+function engineToolFor(capability: Capability, integration: string): string {
+  if (capability === "sql_execute") {
+    return integration === "databricks" ? "databricks_execute_sql" : `${integration}_execute_database_query`
+  }
+  if (capability === "sql_explain") return `${integration}_get_query_explain_plan`
+  return `${integration}_get_table_stats`
+}
+
+/** Engine integration id → canonical local driver type. The id is the engine's name
+ * for the integration (`postgresql`); the driver type is what local connections carry
+ * (`postgres`). Only warehouse integrations appear here. */
+const INTEGRATION_TYPE: Record<string, string> = {
+  snowflake: "snowflake",
+  bigquery: "bigquery",
+  postgresql: "postgres",
+  databricks: "databricks",
+}
+
+const CAPABILITIES: Capability[] = ["sql_execute", "sql_explain", "schema_inspect"]
+
+export interface ShadowEntry {
+  /** Engine tool name, without the MCP server prefix. */
+  engineTool: string
+  /** Model-facing key, i.e. `<server>_<engineTool>`. This is what the model calls. */
+  modelKey: string
+  /** Engine integration id (`postgresql`), not the driver type. */
+  integration: string
+}
+
+export interface Precedence {
+  workspaceName: string
+  /** false when the escape hatch is on, when nothing is bound, or when the engine
+   * could not be attributed to the bound workspace. */
+  enabled: boolean
+  /** Why precedence is off, for the inventory line. Absent when enabled. */
+  disabledReason?: "escape-hatch" | "unbound" | "unattributed" | "nothing-materialised"
+  /** canonical driver type → capability → who serves it. */
+  shadowed: Map<string, Map<Capability, ShadowEntry>>
+}
+
+const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
+  workspaceName,
+  enabled: false,
+  disabledReason: reason,
+  shadowed: new Map(),
+})
+
+/** Per-session precedence, refreshed once per turn by the tool resolver and read
+ * (never recomputed) by tool bodies mid-turn. */
+const bySession = new Map<string, Precedence>()
+
+/** Test seam. Production leaves every field unset. */
+export const precedenceInternals: {
+  binding?: () => Promise<{ datamateId: number; datamateName: string } | null>
+  attributedTo?: () => Promise<string | null>
+} = {}
+
+/** Mechanism 6 — the escape hatch. `--integrations=local` (or the env var) turns
+ * shadowing off for the whole session. */
+export function escapeHatchOn(): boolean {
+  return CoreFlag.ALTIMATE_INTEGRATIONS_LOCAL
+}
+
+async function currentBinding(): Promise<{ datamateId: number; datamateName: string } | null> {
+  if (precedenceInternals.binding) return precedenceInternals.binding()
+  try {
+    const directory = Instance.directory
+    if (!directory) return null
+    const binding = await readLocalBinding(directory)
+    return binding ? { datamateId: binding.datamateId, datamateName: binding.datamateName } : null
+  } catch (err) {
+    log.warn("could not read local binding", { err: String(err) })
+    return null
+  }
+}
+
+/**
+ * Mechanism 1a — which workspace the live engine entry is actually pinned to, or
+ * null when that cannot be established. Reads the merged MCP config rather than
+ * engine-sync's internals so this module needs no changes there.
+ *
+ * A command entry carries the pin as `--datamate <id>`. A URL entry is an IDE's
+ * in-process engine, which is never pinned and whose active teammate changes at
+ * runtime — it can never be attributed.
+ */
+async function attributedTo(): Promise<string | null> {
+  if (precedenceInternals.attributedTo) return precedenceInternals.attributedTo()
+  try {
+    const cfg = (await Config.get()) as {
+      mcp?: Record<string, { type?: string; url?: string; command?: string[] } | undefined>
+    }
+    const entry = cfg.mcp?.[DATAMATE_KEY]
+    if (!entry || entry.url || !entry.command) return null
+    const flag = entry.command.indexOf("--datamate")
+    if (flag === -1) return null
+    return entry.command[flag + 1] ?? null
+  } catch (err) {
+    log.warn("could not read MCP config for engine attribution", { err: String(err) })
+    return null
+  }
+}
+
+/**
+ * Re-derive precedence for a session from the live model-facing tool map. Called
+ * once per turn by the tool resolver, before descriptions are assembled.
+ */
+export async function refresh(sessionID: string, tools: Record<string, unknown>): Promise<Precedence> {
+  const result = await derive(tools)
+  bySession.set(sessionID, result)
+  return result
+}
+
+async function derive(tools: Record<string, unknown>): Promise<Precedence> {
+  if (escapeHatchOn()) return EMPTY("escape-hatch")
+
+  const binding = await currentBinding()
+  if (!binding) return EMPTY("unbound")
+  const workspaceName = binding.datamateName
+
+  // Mechanism 1a — refuse to engage on an engine we cannot attribute to this binding.
+  const pinned = await attributedTo()
+  if (pinned === null || pinned !== String(binding.datamateId)) {
+    log.info("engine not attributable to the bound workspace; precedence off", {
+      bound: binding.datamateId,
+      pinned: pinned ?? "(none)",
+    })
+    return EMPTY("unattributed", workspaceName)
+  }
+
+  // Mechanism 1 — what actually materialised, never what was declared.
+  const present = engineToolKeys(tools)
+  if (present.size === 0) return EMPTY("nothing-materialised", workspaceName)
+
+  // Mechanism 2 — capability by capability, only where the key is really there.
+  const shadowed = new Map<string, Map<Capability, ShadowEntry>>()
+  for (const [integration, type] of Object.entries(INTEGRATION_TYPE)) {
+    for (const capability of CAPABILITIES) {
+      const engineTool = engineToolFor(capability, integration)
+      if (!present.has(engineTool)) continue
+      let forType = shadowed.get(type)
+      if (!forType) {
+        forType = new Map()
+        shadowed.set(type, forType)
+      }
+      forType.set(capability, {
+        engineTool,
+        modelKey: `${DATAMATE_KEY}_${engineTool}`,
+        integration,
+      })
+    }
+  }
+  if (shadowed.size === 0) return EMPTY("nothing-materialised", workspaceName)
+  return { workspaceName, enabled: true, shadowed }
+}
+
+/** Read the session's precedence without recomputing it. */
+export function forSession(sessionID: string): Precedence | undefined {
+  return bySession.get(sessionID)
+}
+
+export function resetForTests(): void {
+  bySession.clear()
+  delete precedenceInternals.binding
+  delete precedenceInternals.attributedTo
+}
+
+export interface RedirectResult {
+  title: string
+  metadata: Record<string, unknown>
+  output: string
+}
+
+/** What a tool body should do about a call. */
+export interface Verdict {
+  /** Present when the call is shadowed: return this instead of executing. */
+  redirect?: RedirectResult
+  /** Present when the call runs but the user must be told why it was not routed. */
+  notice?: string
+  /** Stamped onto the executed result's metadata so telemetry can count these. */
+  precedence?: "undetermined" | "pending"
+}
+
+const RUN: Verdict = {}
+
+function redirectFor(capability: Capability, entry: ShadowEntry, workspaceName: string, connection: string): Verdict {
+  return {
+    redirect: {
+      title: `Routed to workspace ${workspaceName}`,
+      metadata: {
+        // Machine-readable marker: `Tool.wrap` reports every returning body as a
+        // successful call, so without this a redirect is indistinguishable from a
+        // real execution in telemetry.
+        redirected: true,
+        redirect_to: entry.modelKey,
+        precedence: "shadowed",
+        workspace: workspaceName,
+        capability,
+        connection,
+      },
+      output:
+        `Not run locally. Workspace "${workspaceName}" serves ${entry.integration} through its integration engine, ` +
+        `so this connection is served by \`${entry.modelKey}\`.\n\n` +
+        `Call \`${entry.modelKey}\` instead. ` +
+        `To use the local connection for this session, restart with \`--integrations=local\`.`,
+    },
+  }
+}
+
+/**
+ * Mechanism 4 — the single decision a tool body asks for. Returns an empty verdict
+ * when the call should proceed normally.
+ *
+ * `warehouse` undefined means "this tool's default target", which is resolved the way
+ * the handler itself would resolve it (see `resolveDefaultTarget`).
+ */
+export async function check(sessionID: string, capability: Capability, warehouse?: string): Promise<Verdict> {
+  const precedence = bySession.get(sessionID)
+  if (!precedence || !precedence.enabled) return RUN
+
+  if (warehouse) {
+    const type = canonicalType(Registry.getConfig(warehouse)?.type)
+    if (!type) return RUN
+    const entry = precedence.shadowed.get(type)?.get(capability)
+    return entry ? redirectFor(capability, entry, precedence.workspaceName, warehouse) : RUN
+  }
+
+  // No warehouse named: resolve the default the way this operation's handler does.
+  // Imported lazily — `register.ts` imports the tool layer, so a static import here
+  // would close a cycle.
+  const { resolveDefaultTarget } = await import("../native/connections/register")
+  const target = await resolveDefaultTarget(CAPABILITY_OP[capability])
+  if (target.source === "none") return RUN
+
+  const type = canonicalType(target.type)
+  if (!type) {
+    // Decided for v1: FAIL OPEN, non-silent. The call runs on the user's own local
+    // credential — exactly today's behaviour — and says why it was not routed.
+    return {
+      notice:
+        `Not routed through workspace "${precedence.workspaceName}": ` +
+        `the default target's type could not be determined.`,
+      precedence: "undetermined",
+    }
+  }
+  const entry = precedence.shadowed.get(type)?.get(capability)
+  if (!entry) return RUN
+  const connection = target.source === "registry" ? target.name : "the dbt profile's target"
+  return redirectFor(capability, entry, precedence.workspaceName, connection)
+}
+
+/**
+ * Attach a fail-open notice to an executed result. No-op for the common case, so
+ * every tool body can call it unconditionally on its way out.
+ */
+export function annotate<T extends { metadata?: Record<string, unknown>; output?: string }>(
+  verdict: Verdict,
+  result: T,
+): T {
+  if (!verdict.notice) return result
+  return {
+    ...result,
+    metadata: { ...(result.metadata ?? {}), precedence: verdict.precedence ?? "undetermined" },
+    output: `${verdict.notice}\n\n${result.output ?? ""}`,
+  }
+}
+
+/**
+ * Mechanism 5 — tool descriptions. Both tool resolvers call these so the two cannot
+ * describe the same tool differently.
+ */
+export function describeNativeTool(toolID: string, base: string, precedence?: Precedence): string {
+  if (!precedence?.enabled) return base
+  const shadowed = CAPABILITIES.includes(toolID as Capability) || toolID === "warehouse_list"
+  if (!shadowed) return base
+  return (
+    `${base} Serves local connections; types served by workspace "${precedence.workspaceName}" ` +
+    `redirect to that workspace's integration tools.`
+  )
+}
+
+export function describeEngineTool(modelKey: string, base: string, precedence?: Precedence): string {
+  if (!precedence?.enabled) return base
+  for (const byCapability of precedence.shadowed.values()) {
+    for (const entry of byCapability.values()) {
+      if (entry.modelKey === modelKey) return `${base} (workspace ${precedence.workspaceName})`
+    }
+  }
+  return base
+}
+
+/** Mechanism 6 — the inventory line reported once the attach settles. */
+export function inventoryLine(precedence: Precedence): string {
+  if (!precedence.enabled) {
+    switch (precedence.disabledReason) {
+      case "escape-hatch":
+        return "Workspace integrations: shadowing off (--integrations=local); local connections serve every warehouse."
+      case "unattributed":
+        return (
+          `Workspace integrations: shadowing off — the running engine could not be attributed to workspace ` +
+          `"${precedence.workspaceName}". Local connections serve every warehouse.`
+        )
+      default:
+        return ""
+    }
+  }
+  const parts: string[] = []
+  for (const [type, byCapability] of precedence.shadowed) {
+    const served = CAPABILITIES.filter((c) => byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
+    const local = CAPABILITIES.filter((c) => !byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
+    parts.push(
+      `${type}: ${served.join("/")} via workspace ${precedence.workspaceName}` +
+        (local.length ? `, ${local.join("/")} stay local` : ""),
+    )
+  }
+  const shadowedCount = countShadowedConnections(precedence)
+  return `Workspace integrations — ${parts.join("; ")}. ${shadowedCount} local connection${shadowedCount === 1 ? "" : "s"} shadowed.`
+}
+
+function countShadowedConnections(precedence: Precedence): number {
+  try {
+    return Registry.list().warehouses.filter((w) => {
+      const type = canonicalType(w.type)
+      return !!type && precedence.shadowed.has(type)
+    }).length
+  } catch {
+    return 0
+  }
+}
+
+/** Per-capability note for a `warehouse_list` row, or null when the row is untouched. */
+export function warehouseListNote(precedence: Precedence | undefined, warehouseType: string): string | null {
+  if (!precedence?.enabled) return null
+  const type = canonicalType(warehouseType)
+  if (!type) return null
+  const byCapability = precedence.shadowed.get(type)
+  if (!byCapability) return null
+  const served = CAPABILITIES.filter((c) => byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
+  const local = CAPABILITIES.filter((c) => !byCapability.has(c)).map((c) => c.replace(/^(sql|schema)_/, ""))
+  return (
+    `${served.join("/")} via workspace ${precedence.workspaceName}` + (local.length ? `; ${local.join("/")} local` : "")
+  )
+}

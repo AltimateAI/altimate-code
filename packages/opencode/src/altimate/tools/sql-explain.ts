@@ -2,6 +2,9 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExplainResult } from "../native/types"
+// altimate_change start — workspace precedence
+import * as Precedence from "../workspace/precedence"
+// altimate_change end
 
 /**
  * Detect SQL input that cannot be meaningfully EXPLAIN'd.
@@ -92,7 +95,12 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         "Run EXPLAIN ANALYZE (actually executes the query, slower but more accurate). Not supported by Snowflake.",
       ),
   }),
-  async execute(args, _ctx) {
+  async execute(args, ctx) {
+    // altimate_change start — workspace precedence
+    const precedence = await Precedence.check(ctx.sessionID, "sql_explain", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
+    // altimate_change end
+
     // Pre-flight validation — reject bad input before hitting the warehouse
     // so we return an actionable message instead of a verbatim DB error.
     const sqlError = validateSqlInput(args.sql)
@@ -145,7 +153,8 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         }
       }
 
-      return {
+      // altimate_change — attaches the fail-open notice when present; no-op otherwise.
+      return Precedence.annotate(precedence, {
         title: `Explain: ${result.analyzed ? "ANALYZE" : "PLAN"} [${result.warehouse_type ?? "unknown"}]`,
         metadata: {
           success: true,
@@ -153,7 +162,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
           warehouse_type: result.warehouse_type ?? "unknown",
         },
         output: formatPlan(result),
-      }
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return {

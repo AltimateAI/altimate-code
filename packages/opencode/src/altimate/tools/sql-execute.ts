@@ -13,6 +13,9 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { getCache } from "../native/schema/cache"
 import * as Registry from "../native/connections/registry"
 // altimate_change end
+// altimate_change start — workspace precedence
+import * as Precedence from "../workspace/precedence"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -22,6 +25,13 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     limit: z.number().optional().default(100).describe("Max rows to return"),
   }),
   async execute(args, ctx) {
+    // altimate_change start — workspace precedence.
+    // Ahead of the write-permission prompt on purpose: a shadowed write should be
+    // redirected, not approved and then redirected.
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
+    // altimate_change end
+
     // altimate_change start - SQL write access control
     // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
     const { queryType, blocked } = classifyAndCheck(args.query)
@@ -87,11 +97,13 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         })
       }
       // altimate_change end
-      return {
+      // altimate_change — carries the fail-open notice when the target could not be
+      // attributed to the workspace; a no-op otherwise.
+      return Precedence.annotate(precedence, {
         title: `SQL: ${args.query.slice(0, 60)}${args.query.length > 60 ? "..." : ""}`,
         metadata: { rowCount: result.row_count, truncated: result.truncated },
         output,
-      }
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return {

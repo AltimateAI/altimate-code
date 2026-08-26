@@ -102,12 +102,23 @@ let cli = yargs(args)
     default: false,
   })
   // altimate_change end
+  // altimate_change start - workspace precedence escape hatch
+  .option("integrations", {
+    describe:
+      "where warehouse tools run: 'workspace' (default) lets the bound workspace's engine serve the types it provides; 'local' keeps every connection on the local drivers",
+    type: "string",
+    choices: ["workspace", "local"],
+  })
+  // altimate_change end
   .middleware(async (opts) => {
     if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
     if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
+    // altimate_change start - workspace precedence escape hatch
+    if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
+    // altimate_change end
 
     Heap.start()
 

@@ -43,22 +43,23 @@ import { Telemetry } from "../../../telemetry"
 /** Cached dbt adapter (lazily created on first use). */
 let dbtAdapter: any | null | undefined = undefined
 
-/**
- * Try to execute SQL via dbt's adapter (which uses profiles.yml for connection).
- * Returns null if dbt is not available or not configured — caller should fall back
- * to native driver.
- *
- * This is the preferred path when working in a dbt project: dbt already knows
- * how to connect, so users don't need to configure a separate connection.
- */
-async function tryExecuteViaDbt(
-  sql: string,
-  limit?: number,
-): Promise<SqlExecuteResult | null> {
-  // Only attempt dbt once — if it's not configured, don't retry on every query
-  if (dbtAdapter === null) return null
+// altimate_change start — single-flight adapter creation.
+// Two concurrent `warehouse`-less calls used to construct the adapter twice, and
+// construction is expensive: it spawns a detached Python bridge, rebuilds the
+// manifest and starts file watchers. Share one in-flight promise instead. The
+// permanent negative cache (`dbtAdapter === null`) is unchanged — a project that
+// becomes valid mid-session is still not retried.
+let dbtAdapterInflight: Promise<any | null> | undefined
 
-  if (dbtAdapter === undefined) {
+/**
+ * Resolve the dbt adapter for this project, or null when there is no usable dbt
+ * project. Idempotent, single-flight, and permanently negative once it has failed.
+ */
+async function ensureDbtAdapter(): Promise<any | null> {
+  if (dbtAdapter !== undefined) return dbtAdapter
+  if (dbtAdapterInflight) return dbtAdapterInflight
+
+  dbtAdapterInflight = (async () => {
     try {
       // Check if dbt config exists
       const { read: readDbtConfig } = await import(
@@ -83,12 +84,96 @@ async function tryExecuteViaDbt(
       // Create the adapter
       const { create } = await import("../../../../../dbt-tools/src/adapter")
       dbtAdapter = await create(dbtConfig)
+      return dbtAdapter
     } catch {
       // dbt-tools not available or config invalid — fall back to native
       dbtAdapter = null
       return null
+    } finally {
+      dbtAdapterInflight = undefined
+    }
+  })()
+  return dbtAdapterInflight
+}
+
+/** Where a `warehouse`-less call would actually go. */
+export type DefaultTarget =
+  | { source: "dbt"; type?: string }
+  | { source: "registry"; type: string; name: string }
+  | { source: "none" }
+
+/**
+ * Resolve the target a call with no `warehouse` would reach, mirroring the resolution
+ * the handler for `op` performs itself — so a caller inspecting the target ahead of
+ * time cannot disagree with where execution actually lands.
+ *
+ * Only `sql.execute` consults dbt. `sql.explain` and `schema.inspect` are
+ * registry-only, and must stay that way: resolving them through dbt would drag
+ * adapter construction (Python bridge, manifest rebuild, file watchers) onto paths
+ * that never touch dbt today.
+ *
+ * For the dbt path the reported `type` is the project's adapter type, which is what
+ * decides *which* warehouse the profile reaches. It is left undefined when it cannot
+ * be established — the adapter coalesces an unknown type to the string "unknown", and
+ * the call can throw before initialisation completes.
+ */
+export async function resolveDefaultTarget(
+  op: "sql.execute" | "sql.explain" | "schema.inspect",
+): Promise<DefaultTarget> {
+  if (op === "sql.execute") {
+    const adapter = await ensureDbtAdapter()
+    if (adapter) {
+      let type: string | undefined
+      try {
+        const reported = adapter.getAdapterType?.()
+        if (typeof reported === "string" && reported && reported.toLowerCase() !== "unknown") type = reported
+      } catch {
+        // Adapter not initialised far enough to answer; leave the type undetermined.
+      }
+      if (!type) type = await adapterTypeFromManifest()
+      return { source: "dbt", type }
     }
   }
+
+  const warehouses = Registry.list().warehouses
+  if (warehouses.length === 0) return { source: "none" }
+  return { source: "registry", type: warehouses[0].type, name: warehouses[0].name }
+}
+
+/** Fallback adapter type: the dbt manifest records it as `metadata.adapter_type`. */
+async function adapterTypeFromManifest(): Promise<string | undefined> {
+  try {
+    const { read: readDbtConfig } = await import("../../../../../dbt-tools/src/config")
+    const dbtConfig = await readDbtConfig()
+    if (!dbtConfig) return undefined
+    const fs = await import("fs")
+    const path = await import("path")
+    const manifestPath = path.join(dbtConfig.projectRoot, "target", "manifest.json")
+    if (!fs.existsSync(manifestPath)) return undefined
+    const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    const adapter = String(raw?.metadata?.adapter_type ?? "").toLowerCase()
+    return adapter || undefined
+  } catch {
+    return undefined
+  }
+}
+// altimate_change end
+
+/**
+ * Try to execute SQL via dbt's adapter (which uses profiles.yml for connection).
+ * Returns null if dbt is not available or not configured — caller should fall back
+ * to native driver.
+ *
+ * This is the preferred path when working in a dbt project: dbt already knows
+ * how to connect, so users don't need to configure a separate connection.
+ */
+async function tryExecuteViaDbt(
+  sql: string,
+  limit?: number,
+): Promise<SqlExecuteResult | null> {
+  // altimate_change start — share the single-flight creation path with resolveDefaultTarget
+  if (!(await ensureDbtAdapter())) return null
+  // altimate_change end
 
   try {
     const raw = limit
@@ -146,6 +231,9 @@ async function tryExecuteViaDbt(
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
+  // altimate_change — drop any in-flight creation too, or a test that resets mid-flight
+  // would still receive the previous adapter.
+  dbtAdapterInflight = undefined
 }
 
 // ---------------------------------------------------------------------------

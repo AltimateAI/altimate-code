@@ -76,6 +76,14 @@ export const Flag = {
   get ALTIMATE_WORKSPACE() {
     return truthy("ALTIMATE_WORKSPACE")
   },
+  /**
+   * Workspace precedence escape hatch, set by `--integrations=local`. When on, the
+   * native warehouse tools serve every local connection themselves and nothing is
+   * redirected to the bound workspace's integration engine, for the whole session.
+   */
+  get ALTIMATE_INTEGRATIONS_LOCAL() {
+    return process.env["ALTIMATE_INTEGRATIONS"]?.toLowerCase() === "local"
+  },
   // altimate_change end
 
   // Evaluated at access time (not module load) because tests, the CLI, and
