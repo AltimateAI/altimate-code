@@ -82,7 +82,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   // altimate_change start — workspace precedence, derived once per turn from the live map
   const mcpTools = yield* mcp.tools()
-  const precedence = yield* Effect.promise(() => Precedence.refresh(input.session.id, mcpTools))
+  const precedence = yield* Effect.promise(() =>
+    Precedence.refresh(input.session.id, mcpTools, Permission.merge(input.agent.permission, input.session.permission ?? [])),
+  )
   // altimate_change end
 
   for (const item of yield* registry.tools({

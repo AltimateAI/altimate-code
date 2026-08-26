@@ -45,6 +45,7 @@ import { TuiEvent } from "@/server/tui-event"
 import { Log } from "@/altimate/util/log"
 import { Instance } from "@/project/instance"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+import { PermissionNext } from "@/permission/next"
 import { DATAMATE_KEY } from "../datamate-transport"
 import { engineToolKeys, isEnabled, pinnedWorkspace, type ExistingEntry } from "./engine-sync"
 import { readLocalBinding } from "./state"
@@ -106,6 +107,12 @@ export interface Precedence {
   disabledReason?: "pilot-off" | "escape-hatch" | "unbound" | "unattributed" | "nothing-materialised"
   /** canonical driver type → capability → who serves it. */
   shadowed: Map<string, Map<Capability, ShadowEntry>>
+  /** The caller's effective permission rules, captured when this was derived. A
+   * redirect is only useful if the caller may actually call the engine tool: the
+   * `analyst` agent denies everything it does not name, and it never names the
+   * engine keys, so redirecting its permitted reads would take away the one thing
+   * it exists to do. Absent means "unknown", which is treated as reachable. */
+  ruleset?: PermissionNext.Ruleset
 }
 
 const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
@@ -193,8 +200,13 @@ async function attributedTo(): Promise<string | null> {
  * Re-derive precedence for a session from the live model-facing tool map. Called
  * once per turn by the tool resolver, before descriptions are assembled.
  */
-export async function refresh(sessionID: string, tools: Record<string, unknown>): Promise<Precedence> {
+export async function refresh(
+  sessionID: string,
+  tools: Record<string, unknown>,
+  ruleset?: PermissionNext.Ruleset,
+): Promise<Precedence> {
   const result = await derive(tools)
+  if (ruleset) result.ruleset = ruleset
   bySession.set(sessionID, result)
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
@@ -288,6 +300,23 @@ export interface Verdict {
 
 const RUN: Verdict = {}
 
+/** Can the caller actually call this engine tool? An agent that denies what it does
+ * not name (the `analyst` default) can be permitted the native tool and forbidden its
+ * engine counterpart, and a redirect it cannot follow is a dead end. */
+function reachable(precedence: Precedence, modelKey: string): boolean {
+  if (!precedence.ruleset) return true
+  return PermissionNext.evaluate(modelKey, "*", precedence.ruleset).action !== "deny"
+}
+
+function unreachable(workspaceName: string, modelKey: string): Verdict {
+  return {
+    notice:
+      `Not routed through workspace "${workspaceName}": this agent is not permitted to call ` +
+      `\`${modelKey}\`, so the call ran on the local connection instead.`,
+    precedence: "undetermined",
+  }
+}
+
 function redirectFor(
   capability: Capability,
   entry: ShadowEntry,
@@ -344,7 +373,9 @@ export async function check(sessionID: string, capability: Capability, warehouse
     const type = canonicalType(Registry.getConfig(warehouse)?.type)
     if (!type) return RUN
     const entry = precedence.shadowed.get(type)?.get(capability)
-    return entry ? redirectFor(capability, entry, precedence.workspaceName, warehouse) : RUN
+    if (!entry) return RUN
+    if (!reachable(precedence, entry.modelKey)) return unreachable(precedence.workspaceName, entry.modelKey)
+    return redirectFor(capability, entry, precedence.workspaceName, warehouse)
   }
 
   // No warehouse named: resolve the default the way this operation's handler does.
@@ -384,6 +415,7 @@ export function decideForTarget(
   const type = canonicalType(target.type)
   const entry = type ? precedence.shadowed.get(type)?.get(capability) : undefined
   if (entry) {
+    if (!reachable(precedence, entry.modelKey)) return unreachable(precedence.workspaceName, entry.modelKey)
     const connection = target.source === "registry" ? (target.name ?? "the default connection") : "the dbt profile's target"
     return redirectFor(capability, entry, precedence.workspaceName, connection)
   }
@@ -393,6 +425,9 @@ export function decideForTarget(
     const fallbackType = canonicalType(target.fallback.type)
     const fallbackEntry = fallbackType ? precedence.shadowed.get(fallbackType)?.get(capability) : undefined
     if (fallbackEntry) {
+      if (!reachable(precedence, fallbackEntry.modelKey)) {
+        return unreachable(precedence.workspaceName, fallbackEntry.modelKey)
+      }
       return redirectFor(capability, fallbackEntry, precedence.workspaceName, target.fallback.name, true)
     }
   }

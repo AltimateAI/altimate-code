@@ -1768,7 +1768,11 @@ export namespace SessionPrompt {
     // is what keeps precedence correct when an engine's tool set changes under us.
     // Resolved before the loops below because both sides' descriptions depend on it.
     const mcpTools = await MCP.tools()
-    const precedence = await Precedence.refresh(input.session.id, mcpTools)
+    const precedence = await Precedence.refresh(
+      input.session.id,
+      mcpTools,
+      PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+    )
     // altimate_change end
 
     for (const item of await ToolRegistry.tools(

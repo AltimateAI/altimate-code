@@ -262,6 +262,58 @@ describe("the dbt-fallback redirect explains itself", () => {
   })
 })
 
+describe("a redirect the caller cannot follow is not a redirect", () => {
+  // The `analyst` agent denies everything it does not name and names the native
+  // warehouse tools but never the engine keys. Redirecting its permitted reads to a
+  // tool it is forbidden to call would take away the one thing that agent exists to
+  // do — the same dead end as redirecting to a tool that does not exist.
+  const analystLike = [
+    { permission: "*", pattern: "*", action: "deny" as const },
+    { permission: "sql_execute", pattern: "*", action: "allow" as const },
+    { permission: "sql_explain", pattern: "*", action: "allow" as const },
+    { permission: "schema_inspect", pattern: "*", action: "allow" as const },
+  ]
+  const builderLike = [{ permission: "*", pattern: "*", action: "allow" as const }]
+
+  test("a caller denied the engine key runs locally, and is told why", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("not permitted to call")
+  })
+
+  test("a caller allowed the engine key is still redirected", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS, builderLike)
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect?.metadata.redirect_to).toBe("datamate_snowflake_execute_database_query")
+  })
+
+  test("no ruleset means unknown, which is treated as reachable", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeDefined()
+  })
+
+  test("the default-target path is gated too, not just the named-warehouse path", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    const v = decideForTarget(p, "sql_execute", { source: "registry", type: "snowflake", name: "s" })
+    expect(v.redirect).toBeUndefined()
+    expect(v.notice).toContain("not permitted to call")
+  })
+
+  test("the dbt-fallback path is gated too", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    const v = decideForTarget(p, "sql_execute", {
+      source: "dbt",
+      type: undefined,
+      fallback: { type: "snowflake", name: "local_snow" },
+    })
+    expect(v.redirect).toBeUndefined()
+    expect(v.notice).toContain("not permitted to call")
+  })
+})
+
 describe("default-target decisions — branch order", () => {
   // Reaching a dbt-sourced target through check() needs a real dbt project, so the
   // order of these branches is only checkable on the pure function. It is also the
