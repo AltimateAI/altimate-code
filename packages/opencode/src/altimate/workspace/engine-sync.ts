@@ -721,6 +721,50 @@ async function run(): Promise<Outcome> {
       log.warn("could not detach the rejected engine entry", { err: String(err), ...why })
     })
   }
+  /** Abandon an install without trace.
+   *
+   * Both halves, together, because they were fixed one round apart: a supersede
+   * that undid only the runtime left our pin on disk, and MCP bootstrap starts
+   * every enabled entry — so a restart before the next attach would start the
+   * workspace this project had just walked away from. Naming them as one
+   * operation is what stops the next caller from remembering only one.
+   *
+   * `projectBefore` is the PROJECT file's own entry, not the merged view.
+   * Restoring the merged value writes a copy of a global entry into the project,
+   * which is a permanent override shadowing every later global change — undoing
+   * a write is only correct if it restores what that write replaced. */
+  const undoInstall = async (projectBefore: ExistingEntry | null): Promise<Outcome> => {
+    await client.remove(DATAMATE_KEY).catch((err) => {
+      log.warn("could not remove the superseded engine", { err: String(err) })
+    })
+    await persistRestore(DATAMATE_KEY, projectBefore)
+    return { kind: "superseded" }
+  }
+
+  /** The single exit for every refusal.
+   *
+   * Three properties that were previously spread across six branches, each of
+   * which had to remember all three:
+   *
+   * 1. An actionable failure is never silent — the toast is not optional.
+   * 2. A refusal that leaves a client registered tears it down. The caller runs
+   *    `resolveTools` whatever this returns, so declining while the old client
+   *    stays registered hands that turn its tools and its credentials anyway.
+   *    The outcome is advice; the registration is what the model sees.
+   * 3. Whether a remedy exists is asked in ONE place, of `installWouldHelp`,
+   *    with the binding still in scope. "Refused" and "no engine is obtainable"
+   *    are different questions, and unifying refusals is exactly what makes them
+   *    diverge: a user who deliberately disabled their engine must never be
+   *    offered an install for the engine they already have and switched off. */
+  const refuse = async (outcome: Outcome, toast: Toast, detach?: Record<string, unknown>): Promise<Outcome> => {
+    if (detach) await detachRejected(detach)
+    await notify(toast)
+    if (installWouldHelp(outcome)) {
+      log.info("refusal is remediable by installing the engine", { workspaceId, kind: outcome.kind })
+    }
+    return outcome
+  }
+
   // Read the entry BEFORE asking for status. `existingEntry` refreshes the config
   // cache and `MCP.status()` reads that same cache — so an entry an IDE or user
   // added after the cache was warmed is missing from status entirely, `existing`
@@ -765,26 +809,27 @@ async function run(): Promise<Outcome> {
     // and publishes ToolsChanged without writing config, which is respecting
     // the edit rather than re-applying it.
     log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
-    await detachRejected({ reason: "the entry is disabled" })
-    await notify({
-      title: "Workspace engine is disabled",
-      message:
-        `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
-        `integration tools are unavailable. Enable it to use them.`,
-      variant: "warning",
-    })
-    return { kind: "entry-disabled" }
+    return await refuse(
+      { kind: "entry-disabled" },
+      {
+        title: "Workspace engine is disabled",
+        message:
+          `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
+          `integration tools are unavailable. Enable it to use them.`,
+        variant: "warning",
+      },
+      { reason: "the entry is disabled" },
+    )
   }
 
   if (plan.act === "refuse-unreachable") {
-    await notify({
+    return await refuse({ kind: "connect-failed", error: plan.error }, {
       title: "Workspace engine is not running",
       message:
         `The "${DATAMATE_KEY}" MCP entry for workspace "${binding.datamateName}" could not connect: ` +
         `${plan.error}. Integration tools are unavailable until it does.`,
       variant: "error",
     })
-    return { kind: "connect-failed", error: plan.error }
   }
 
   if (plan.act === "replace-unreachable-url") {
@@ -884,13 +929,15 @@ async function run(): Promise<Outcome> {
       const label = found ?? "unknown"
       // Rejected and irreplaceable: detach anyway. Leaving it connected would
       // return "too old" while still serving the too-old engine's tools.
-      await detachRejected({ workspaceId, reason: "below-floor", found: label })
-      await notify({
-        title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
-        message: describeRefusal(found, binding.datamateName),
-        variant: "warning",
-      })
-      return { kind: "engine-too-old", found: label }
+      return await refuse(
+        { kind: "engine-too-old", found: label },
+        {
+          title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
+          message: describeRefusal(found, binding.datamateName),
+          variant: "warning",
+        },
+        { workspaceId, reason: "below-floor", found: label },
+      )
     }
     replaced = describeEntry(entry)
     replacedNote = ` Replaced an engine entry running ${found ?? "an unreadable version"}, below the ${MIN_ENGINE_VERSION} floor, for this session.`
@@ -912,25 +959,23 @@ async function run(): Promise<Outcome> {
   // Rule 2 / 3 — opportunistic use, or an offer. Never an install.
   const bin = which(ENGINE_BINARY)
   if (!bin) {
-    await notify({
+    return await refuse({ kind: "engine-missing", declared: declaredCount }, {
       title: "Workspace integrations unavailable",
       message:
         `Workspace "${binding.datamateName}" declares ${declaredCount} integration tool${declaredCount === 1 ? "" : "s"}. ` +
         `They run on the local engine, which is not installed. Install it with: ${INSTALL_HINT}`,
       variant: "warning",
     })
-    return { kind: "engine-missing", declared: declaredCount }
   }
 
   const found = await versionOf(bin)
   if (!clearsFloor(found)) {
     const label = found ?? "unknown"
-    await notify({
+    return await refuse({ kind: "engine-too-old", found: label }, {
       title: found ? "Workspace engine is too old" : "Workspace engine is not runnable",
       message: describeRefusal(found, binding.datamateName),
       variant: "warning",
     })
-    return { kind: "engine-too-old", found: label }
   }
 
   // Spawn under the same server key the IDE uses, bound to THIS workspace.
@@ -964,12 +1009,11 @@ async function run(): Promise<Outcome> {
   const after = (await client.status())[DATAMATE_KEY]
   if (after?.status !== "connected") {
     const error = after?.error ?? after?.status ?? "not connected"
-    await notify({
+    return await refuse({ kind: "connect-failed", error }, {
       title: "Workspace engine failed to start",
       message: `Could not start ${ENGINE_BINARY} for workspace "${binding.datamateName}": ${error}. Integration tools are unavailable; not falling back to the hosted endpoint because it serves a different tool set.`,
       variant: "error",
     })
-    return { kind: "connect-failed", error }
   }
 
   // Rule 5 — report declared-but-missing.
@@ -986,13 +1030,7 @@ async function run(): Promise<Outcome> {
   // still revocable.
   if (!(await stillCurrent())) {
     log.info("binding changed before the attach could be reported; undoing what we installed", { workspaceId })
-    await client.remove(DATAMATE_KEY).catch((err) => {
-      log.warn("could not remove the superseded engine", { err: String(err) })
-    })
-    // And the config: `persist()` committed the pin before the engine was known
-    // to be ours, and bootstrap starts every enabled entry.
-    await persistRestore(DATAMATE_KEY, projectBefore)
-    return { kind: "superseded" }
+    return await undoInstall(projectBefore)
   }
 
   // Ours, and staying: announce it so a turn that had already given up waiting
