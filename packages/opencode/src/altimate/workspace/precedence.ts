@@ -9,11 +9,12 @@
 //  1. Materialised, not declared. Precedence is derived from the engine tool keys
 //     actually present in the model-facing MCP map, never from what the workspace
 //     declared. A declared-but-broken integration shadows nothing.
-//  1a. Attributed. The engine must be provably serving the *bound* workspace. Attach
-//     reuses any connected `datamate` entry, and an IDE writes that entry unpinned,
-//     so a reused engine can be serving a different workspace than the local binding
-//     names. Attach is being fixed to guarantee attribution; this module re-checks it
-//     and refuses to engage if the guarantee is ever violated. Defence in depth.
+//  1a. Attributed. The engine must be provably serving the *bound* workspace. An IDE
+//     writes its `datamate` entry unpinned, and such an engine serves whichever
+//     teammate is active in that IDE — changing at runtime. Attach now guarantees
+//     attribution (it reuses only a live, pinned, version-current entry and replaces
+//     anything else); this module re-checks that guarantee and refuses to engage if it
+//     is ever violated. Defence in depth, not the primary control.
 //  2. Capability-scoped. The engine's warehouse integrations are NOT symmetric —
 //     snowflake serves execute/explain/inspect, bigquery and postgresql serve execute
 //     only, databricks serves execute only. Shadowing is keyed on the individual
@@ -34,7 +35,7 @@ import { Log } from "@/altimate/util/log"
 import { Instance } from "@/project/instance"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { DATAMATE_KEY } from "../datamate-transport"
-import { engineToolKeys } from "./engine-sync"
+import { engineToolKeys, pinnedWorkspace, type ExistingEntry } from "./engine-sync"
 import { readLocalBinding } from "./state"
 import { canonicalType } from "../native/connections/registry"
 import * as Registry from "../native/connections/registry"
@@ -133,25 +134,21 @@ async function currentBinding(): Promise<{ datamateId: number; datamateName: str
 }
 
 /**
- * Mechanism 1a — which workspace the live engine entry is actually pinned to, or
- * null when that cannot be established. Reads the merged MCP config rather than
- * engine-sync's internals so this module needs no changes there.
- *
- * A command entry carries the pin as `--datamate <id>`. A URL entry is an IDE's
- * in-process engine, which is never pinned and whose active teammate changes at
- * runtime — it can never be attributed.
+ * Mechanism 1a — which workspace the live engine entry is actually pinned to, or null
+ * when that cannot be established. A URL entry is an IDE's in-process engine: never
+ * pinned, its active teammate changing at runtime, so it can never be attributed.
  */
 async function attributedTo(): Promise<string | null> {
   if (precedenceInternals.attributedTo) return precedenceInternals.attributedTo()
   try {
-    const cfg = (await Config.get()) as {
-      mcp?: Record<string, { type?: string; url?: string; command?: string[] } | undefined>
-    }
+    const cfg = (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
     const entry = cfg.mcp?.[DATAMATE_KEY]
-    if (!entry || entry.url || !entry.command) return null
-    const flag = entry.command.indexOf("--datamate")
-    if (flag === -1) return null
-    return entry.command[flag + 1] ?? null
+    if (!entry) return null
+    // Parsed by attach's own parser, not a second copy here. It handles both entry
+    // shapes (`command` as argv, or a string plus separate `args`), both flag
+    // spellings, and last-wins on repeats — a private reimplementation would refuse
+    // precedence on engines that are in fact correctly pinned.
+    return pinnedWorkspace(entry)
   } catch (err) {
     log.warn("could not read MCP config for engine attribution", { err: String(err) })
     return null
