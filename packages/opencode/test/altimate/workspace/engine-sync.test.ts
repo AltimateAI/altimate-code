@@ -1207,3 +1207,31 @@ describe("ensure — round 11", () => {
     expect(h.added).toHaveLength(0)
   })
 })
+
+describe("ensure — round 12", () => {
+  test("an externally added entry is seen even when MCP status has not caught up", async () => {
+    // MCP.status() reads the same cached config as everything else, so an entry
+    // an IDE adds after the cache is warm is absent from status. Without a fresh
+    // read first, rule 1 never runs and we persist over the user's entry.
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }], // status omits it
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] }, // but config has it
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    let readBeforeStatus = false
+    let statusCalls = 0
+    const realStatus = syncInternals.mcp!.status
+    syncInternals.mcp!.status = async () => {
+      statusCalls += 1
+      return realStatus()
+    }
+    syncInternals.existingEntry = async () => {
+      if (statusCalls === 0) readBeforeStatus = true
+      return { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] }
+    }
+    await ensure("s1")
+    // The ordering is the fix: the config refresh must precede the status gate.
+    expect(readBeforeStatus).toBe(true)
+    expect(h).toBeDefined()
+  })
+})

@@ -423,19 +423,26 @@ async function announceToolsChanged(): Promise<void> {
  * signal), so a stalled server releases its socket instead of accumulating
  * pending fetches across repair retries. */
 async function declaredBounded(workspaceId: string): Promise<Declared | null> {
-  return Promise.race([
-    declared(workspaceId),
-    new Promise<null>((resolve) => {
-      const timer = setTimeout(() => {
-        log.warn("workspace allowlist lookup timed out; continuing without the declared-vs-delivered report", {
-          workspaceId,
-          timeoutMs: DECLARED_TIMEOUT_MS,
-        })
-        resolve(null)
-      }, DECLARED_TIMEOUT_MS)
-      timer.unref?.()
-    }),
-  ])
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      declared(workspaceId),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          log.warn("workspace allowlist lookup timed out; continuing without the declared-vs-delivered report", {
+            workspaceId,
+            timeoutMs: DECLARED_TIMEOUT_MS,
+          })
+          resolve(null)
+        }, DECLARED_TIMEOUT_MS)
+        timer.unref?.()
+      }),
+    ])
+  } finally {
+    // Racing does not cancel the loser: left running, the timer fires later and
+    // warns about a lookup that had already succeeded, on every normal attach.
+    if (timer) clearTimeout(timer)
+  }
 }
 
 async function notify(toast: Toast): Promise<void> {
@@ -566,10 +573,15 @@ async function run(): Promise<Outcome> {
       log.warn("could not detach the rejected engine entry", { err: String(err), ...why })
     })
   }
+  // Read the entry BEFORE asking for status. `existingEntry` refreshes the config
+  // cache and `MCP.status()` reads that same cache — so an entry an IDE or user
+  // added after the cache was warmed is missing from status entirely, `existing`
+  // is undefined, rule 1 never runs, and we persist our managed entry straight
+  // over theirs. Refreshing first is what makes the status gate trustworthy.
+  const entry = await existingEntry(DATAMATE_KEY)
   const before = await client.status()
   const existing = before[DATAMATE_KEY]
   if (existing) {
-    const entry = await existingEntry(DATAMATE_KEY)
     let connected = existing.status === "connected"
 
     if (!connected) {

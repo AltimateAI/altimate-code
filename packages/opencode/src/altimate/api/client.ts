@@ -238,20 +238,27 @@ export namespace AltimateApi {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 15_000)
     // altimate_change end
-    const res = await fetch(url, {
-      signal: controller.signal,
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${creds.altimateApiKey}`,
-        "x-tenant": creds.altimateInstanceName,
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    }).finally(() => clearTimeout(timeout))
-    if (!res.ok) {
-      throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
+    try {
+      const res = await fetch(url, {
+        signal: controller.signal,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${creds.altimateApiKey}`,
+          "x-tenant": creds.altimateInstanceName,
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      })
+      if (!res.ok) {
+        throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
+      }
+      // The abort stays armed until the BODY is read. `fetch` resolves on
+      // headers, so clearing it here would leave a server that sends headers and
+      // then stalls mid-body hanging indefinitely — with the socket held open.
+      return await res.json()
+    } finally {
+      clearTimeout(timeout)
     }
-    return res.json()
   }
 
   export async function listDatamates() {
