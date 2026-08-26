@@ -110,6 +110,10 @@ export namespace Server {
           if (err instanceof NotFoundError) status = 404
           else if (err instanceof Provider.ModelNotFoundError) status = 400
           else if (err.name.startsWith("Worktree")) status = 400
+          // altimate_change start — a malformed search regex is bad user input, not a
+          // server fault; without this it surfaced from /find as a 500.
+          else if (err.name === "RipgrepInvalidPatternError") status = 400
+          // altimate_change end
           else status = 500
           return c.json(err.toObject(), { status })
         }
@@ -118,6 +122,9 @@ export namespace Server {
           let status: ContentfulStatusCode
           if (err.name === "NotFoundError") status = 404
           else if (err.name.startsWith("Worktree")) status = 400
+          // altimate_change start — see above: an invalid search pattern is a client error.
+          else if (err.name === "RipgrepInvalidPatternError") status = 400
+          // altimate_change end
           else status = 500
           return c.json(err.toObject(), { status })
         }

@@ -20,85 +20,23 @@ import { text } from "node:stream/consumers"
 
 import { ZipReader, BlobReader, BlobWriter } from "@zip.js/zip.js"
 import { Log } from "@/util/log"
+import { RipgrepRecords } from "./ripgrep-records"
 
 export namespace Ripgrep {
   const log = Log.create({ service: "ripgrep" })
-  const Stats = z.object({
-    elapsed: z.object({
-      secs: z.number(),
-      nanos: z.number(),
-      human: z.string(),
-    }),
-    searches: z.number(),
-    searches_with_match: z.number(),
-    bytes_searched: z.number(),
-    bytes_printed: z.number(),
-    matched_lines: z.number(),
-    matches: z.number(),
-  })
+  // altimate_change start — upstream_fix: record parsing lives in ./ripgrep-records so it can be
+  // tested directly, without exporting an implementation detail through this namespace and without
+  // a stub binary whose per-process memoisation leaks into other test files. `Match` stays exported
+  // here because server/routes/file.ts builds the `/find` response schema from it.
+  export const Match = RipgrepRecords.Match
+  const parseRecords = RipgrepRecords.parseRecords
+  // altimate_change end
 
-  const Begin = z.object({
-    type: z.literal("begin"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-    }),
-  })
-
-  export const Match = z.object({
-    type: z.literal("match"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-      lines: z.object({
-        text: z.string(),
-      }),
-      line_number: z.number(),
-      absolute_offset: z.number(),
-      submatches: z.array(
-        z.object({
-          match: z.object({
-            text: z.string(),
-          }),
-          start: z.number(),
-          end: z.number(),
-        }),
-      ),
-    }),
-  })
-
-  const End = z.object({
-    type: z.literal("end"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-      binary_offset: z.number().nullable(),
-      stats: Stats,
-    }),
-  })
-
-  const Summary = z.object({
-    type: z.literal("summary"),
-    data: z.object({
-      elapsed_total: z.object({
-        human: z.string(),
-        nanos: z.number(),
-        secs: z.number(),
-      }),
-      stats: Stats,
-    }),
-  })
-
-  const Result = z.union([Begin, Match, End, Summary])
-
-  export type Result = z.infer<typeof Result>
-  export type Match = z.infer<typeof Match>
-  export type Begin = z.infer<typeof Begin>
-  export type End = z.infer<typeof End>
-  export type Summary = z.infer<typeof Summary>
+  export type Result = RipgrepRecords.Result
+  export type Match = RipgrepRecords.Match
+  export type Begin = RipgrepRecords.Begin
+  export type End = RipgrepRecords.End
+  export type Summary = RipgrepRecords.Summary
   const PLATFORM = {
     "arm64-darwin": { platform: "aarch64-apple-darwin", extension: "tar.gz" },
     "arm64-linux": {
@@ -125,6 +63,20 @@ export namespace Ripgrep {
       platform: z.string(),
     }),
   )
+
+  // altimate_change start — upstream_fix: distinguish an invalid pattern from a
+  // partial search. Mirrors packages/core/src/ripgrep.ts.
+  const isInvalidPattern = (stderr: string) =>
+    stderr.includes("regex parse error") || stderr.includes("error parsing regex")
+
+  export const InvalidPatternError = NamedError.create(
+    "RipgrepInvalidPatternError",
+    z.object({
+      pattern: z.string(),
+      message: z.string(),
+    }),
+  )
+  // altimate_change end
 
   export const DownloadFailedError = NamedError.create(
     "RipgrepDownloadFailedError",
@@ -366,19 +318,36 @@ export namespace Ripgrep {
       cwd: input.cwd,
       nothrow: true,
     })
-    if (result.code !== 0) {
+    // altimate_change start — upstream_fix: exit 2 is PARTIAL, not fatal.
+    // ripgrep exits 2 when it could not read something (an unreadable file, a
+    // broken symlink) while still searching everything else — verified: with one
+    // `chmod 000` file present it emits a full match record for the readable
+    // file and exits 2. Discarding stdout on any non-zero code therefore threw
+    // away real matches because one unrelated file was unreadable, which is the
+    // same "one bad thing kills the whole search" failure this change removes.
+    // 0 = matches, 1 = no matches, 2 = partial; anything else is a real failure.
+    //
+    // Exit 2 is overloaded: ripgrep also uses it for an INVALID PATTERN, where
+    // stdout is empty and stderr carries a regex diagnostic. Accepting that as
+    // "partial" would answer a bad pattern with an empty success and hide the
+    // real error, so stderr is inspected first — the same distinction core's
+    // `run()` makes via `isInvalidPattern`.
+    const stderr = result.stderr?.toString() ?? ""
+    if (result.code === 2 && isInvalidPattern(stderr)) {
+      throw new InvalidPatternError({ pattern: input.pattern, message: stderr.trim() })
+    }
+    if (result.code !== 0 && result.code !== 1 && result.code !== 2) {
       return []
     }
+    // altimate_change end
 
     // Handle both Unix (\n) and Windows (\r\n) line endings
     const lines = result.text.trim().split(/\r?\n/).filter(Boolean)
     // Parse JSON lines from ripgrep output
 
-    return lines
-      .map((line) => JSON.parse(line))
-      .map((parsed) => Result.parse(parsed))
-      .filter((r) => r.type === "match")
-      .map((r) => r.data)
+    // altimate_change start — upstream_fix: a bad record skips itself, not the whole search.
+    return parseRecords(lines)
+    // altimate_change end
   }
 }
 // altimate_change end

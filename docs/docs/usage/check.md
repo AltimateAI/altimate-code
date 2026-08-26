@@ -50,6 +50,8 @@ altimate-code check --fail-on warning
 | `semantic` | Semantic validation (cartesian products, wrong JOINs)        | Optional      | No      |
 | `grade`    | SQL quality grading with recommendations                     | Optional      | No      |
 
+Findings usually carry a machine-readable `rule` field (e.g. `unbalanced_quote`, `sql_injection`, `L003`) visible in `--format json` output — see the [Finding Object](#finding-object) schema below. `safety` and `policy` findings always include one; `lint` findings may omit both `rule` and `code` if the engine didn't attach them, so switch on presence rather than assuming.
+
 By default, `lint` and `safety` are enabled. Override with `--checks`:
 
 ```bash

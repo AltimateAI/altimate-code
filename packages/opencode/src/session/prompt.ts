@@ -23,6 +23,8 @@ import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
+// altimate_change - workspace memory read path
+import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -1042,6 +1044,17 @@ export namespace SessionPrompt {
         // altimate_change start - reset training session tracking to avoid stale applied counts
         MemoryPrompt.resetSession()
         // altimate_change end
+        // altimate_change start - workspace memory: one fetch per session, held as an
+        // in-memory overlay merged at injection time. Started rather than awaited so
+        // the turn proceeds immediately; MemoryPrompt.inject applies a bounded wait.
+        //
+        // This block runs on EVERY user turn (see the comment below on `step === 1`),
+        // so `hydrate` is idempotent per session id and is deliberately not preceded
+        // by a reset — resetting here made every turn refetch, and cleared the overlay
+        // before the refetch, so workspace memory blinked out of the prompt whenever a
+        // fetch ran long.
+        void WorkspaceMemory.hydrate(sessionID).catch(() => {})
+        // altimate_change end
         SessionSummary.summarize({
           sessionID: sessionID,
           messageID: lastUser.id,
@@ -1176,6 +1189,7 @@ export namespace SessionPrompt {
         : await MemoryPrompt.inject(UNIFIED_INJECTION_BUDGET, {
             agent: agent.name,
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
+            sessionID,
           })
       // altimate_change end
       const system = [

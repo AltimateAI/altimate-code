@@ -904,7 +904,9 @@ function runMarkerCheck(config: MergeConfig, base?: string, strict?: boolean): n
   // Ensure upstream remote exists and is fetched so we can check file existence
   try {
     execSync(`git remote get-url ${config.upstreamRemote}`, { cwd: root, stdio: "ignore" })
-    execSync(`git fetch ${config.upstreamRemote} --quiet`, { cwd: root, stdio: "ignore" })
+    // --no-tags: upstream tags (v0.x, v1.x) collide with our own release tags
+    // (see git.ts's fetchRemote(), which this call duplicates but historically omitted the flag).
+    execSync(`git fetch ${config.upstreamRemote} --quiet --no-tags`, { cwd: root, stdio: "ignore" })
   } catch {
     // If upstream remote doesn't exist, fall back to pattern-only checks
     logger.warn(`Could not fetch '${config.upstreamRemote}' remote — falling back to pattern-based detection`)

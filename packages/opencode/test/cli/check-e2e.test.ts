@@ -3,7 +3,7 @@
 // IMPORTANT: This file uses Dispatcher.register() / Dispatcher.reset() instead
 // of mock.module("@/altimate/native") to avoid Bun's mock.module leaking across
 // test files and breaking Glob/Dispatcher for all subsequent tests in CI.
-import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test"
 import * as fs from "fs/promises"
 import path from "path"
 import os from "os"
@@ -16,6 +16,7 @@ import {
   formatText,
   buildCheckOutput,
   VALID_CHECKS,
+  isSqlFile,
   type Finding,
   type CheckCategoryResult,
 } from "../../src/cli/cmd/check-helpers"
@@ -152,6 +153,11 @@ beforeEach(async () => {
 afterEach(async () => {
   process.exit = origExit
   process.exitCode = 0
+  // Restore all spies (process.stdout.write, process.stderr.write,
+  // console.error) — Bun doesn't auto-restore spyOn mocks across test
+  // files, so without this the mocks leak into subsequent files' output.
+  // (coderabbit MAJOR on v0.9.6 hotfix.)
+  mock.restore()
   // Restore Dispatcher: clear our mocks and re-enable lazy registration
   Dispatcher.reset()
   // Re-install the registration hook so subsequent tests get real handlers
@@ -1111,6 +1117,93 @@ describe("check command E2E", () => {
 // ===========================================================================
 
 describe("check command adversarial", () => {
+  test("handler filters non-SQL files from positional args — no content parsed or echoed", async () => {
+    // Handler-level integration test (cubic P2 catch on the pure-helper-only
+    // test coverage). This test would fail if CheckCommand.handler stopped
+    // calling isSqlFile — proving the filter is wired end-to-end, not just
+    // present as an unused helper. Reproduces the exact regression path:
+    // a non-SQL file containing "root:x:0" must NOT flow through the engine
+    // path where a rule message could echo its content to stdout.
+    const sqlFile = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
+    const nonSql = path.join(tmpDir.dir, "fake-passwd-no-ext")
+    await fs.writeFile(nonSql, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    const r = await runHandler(baseArgs({ files: [sqlFile, nonSql], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    // Only the .sql file made it through.
+    expect(j.files_checked).toBe(1)
+    // The non-SQL file was rejected with a clear warning on stderr.
+    expect(r.stderr).toMatch(/not a SQL file.*fake-passwd-no-ext/)
+    // Critically: no content leak. Neither the SQL output nor the warning
+    // contains any part of the non-SQL file's content.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
+  test("handler rejects a directory whose name ends in .sql", async () => {
+    // cubic P2: extension check alone would accept ``foo.sql/`` as a file.
+    // The isFile() stat gate must reject it. When ALL positional files
+    // are rejected, check.ts's early "No SQL files found" bail-out fires
+    // and there is no JSON body — assert on stderr instead of parseJson.
+    const dirLikeFile = path.join(tmpDir.dir, "not-a-file.sql")
+    await fs.mkdir(dirLikeFile, { recursive: true })
+    const r = await runHandler(baseArgs({ files: [dirLikeFile], checks: "safety" }))
+    expect(r.stderr).toMatch(/not a regular file.*not-a-file\.sql/)
+    expect(r.stderr).toContain("No SQL files found to check")
+    // No content-leak surface at all when the file is rejected.
+    expect(r.stdout).not.toContain("not-a-file")
+  })
+
+  test("handler rejects ALL symlinks (TOCTOU-safe)", async () => {
+    // coderabbit MAJOR: even a "resolve target + extension check" approach
+    // opens a TOCTOU race — an attacker can swap the symlink target
+    // between validation and readFileSync. Simpler + fully safe: refuse
+    // symlinks entirely. Rejects both attack cases and previously-legit
+    // symlink-to-SQL — users pass the resolved target directly instead.
+    const target = path.join(tmpDir.dir, "fake-passwd.txt")
+    const link = path.join(tmpDir.dir, "passwd.sql")
+    await fs.writeFile(target, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    await fs.symlink(target, link)
+    const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("passwd.sql")
+    expect(r.stderr).toContain("No SQL files found to check")
+    // Critical: no content leak — the file was never read.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
+  test("handler rejects symlink-to-SQL too (blanket ban is intentional)", async () => {
+    // Deliberate revert of an earlier round's behavior: cubic asked to
+    // accept `link.sql -> real.sql` in a prior round, then coderabbit
+    // flagged the TOCTOU race. Blanket-rejecting closes the race
+    // completely at the cost of legitimate symlink-to-SQL, which users
+    // can work around by passing the resolved target path directly.
+    const target = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
+    const link = path.join(tmpDir.dir, "link.sql")
+    await fs.symlink(target, link)
+    const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("link.sql")
+    // The user can still check the resolved target directly.
+    const r2 = await runHandler(baseArgs({ files: [target], checks: "safety" }))
+    const j = parseJson(r2.stdout)
+    expect(j.files_checked).toBe(1)
+  })
+
+  test("handler rejects a dotfile named exactly '.sql'", async () => {
+    // cubic P2: ``.sql`` as a filename is a dotfile with no extension,
+    // not a SQL file. Must be rejected before reaching the engine.
+    const dotSql = path.join(tmpDir.dir, ".sql")
+    await fs.writeFile(dotSql, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    const r = await runHandler(baseArgs({ files: [dotSql], checks: "safety" }))
+    // Same as above — all files rejected → "No SQL files found" bail-out.
+    expect(r.stderr).toMatch(/not a SQL file.*\.sql$/m)
+    expect(r.stderr).toContain("No SQL files found to check")
+    // Critical: the file's content NEVER reaches stdout or stderr.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
   test("handles SQL with embedded null bytes", async () => {
     const file = await writeSql(tmpDir.dir, "null.sql", "SELECT 1;\0DROP TABLE users;")
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
@@ -1293,14 +1386,19 @@ describe("check command adversarial", () => {
   })
 
   test("handles directory with .sql extension", async () => {
+    // Extension filter passes ``dir.sql`` (name ends in .sql) but the
+    // stat/isFile gate rejects it as "not a regular file" before it ever
+    // reaches the readFileSync call. The good.sql file still processes.
+    // (v0.9.6 hotfix: added statSync isFile() check.)
     const good = await writeSql(tmpDir.dir, "good.sql", "SELECT 1;")
     const dir = path.join(tmpDir.dir, "dir.sql")
     await fs.mkdir(dir)
 
     const r = await runHandler(baseArgs({ files: [good, dir], checks: "lint" }))
-    expect(r.stderr).toContain("Error reading")
+    expect(r.stderr).toContain("not a regular file")
+    expect(r.stderr).toContain("dir.sql")
     const j = parseJson(r.stdout)
-    expect(j.files_checked).toBe(2)
+    expect(j.files_checked).toBe(1)
   })
 
   test("processes duplicate file args (each checked separately)", async () => {
@@ -1370,14 +1468,20 @@ describe("check command adversarial", () => {
     expect(j.checks_run).toEqual(["lint", "safety"])
   })
 
-  test("handles symlinked SQL files", async () => {
+  test("symlinks are rejected (superseded by TOCTOU-safe policy)", async () => {
+    // Was: "handles symlinked SQL files" — asserted files_checked===1 when
+    // check followed a symlink. Behavior changed in the v0.9.6 hotfix:
+    // symlinks are blanket-rejected to close a TOCTOU race where an
+    // attacker could swap the symlink target between validate and read.
+    // See handler adversarial cases above.
     const real = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
     const link = path.join(tmpDir.dir, "link.sql")
     await fs.symlink(real, link)
 
     const r = await runHandler(baseArgs({ files: [link], checks: "lint" }))
-    const j = parseJson(r.stdout)
-    expect(j.files_checked).toBe(1)
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("link.sql")
+    expect(r.stderr).toContain("No SQL files found to check")
   })
 
   test("handles binary content in .sql file without crashing", async () => {
@@ -1399,6 +1503,76 @@ describe("check command adversarial", () => {
     const r = await runHandler(baseArgs({ files, checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.files_checked).toBe(50)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isSqlFile — SQL-extension filter (v0.9.6 sanity regression)
+// ---------------------------------------------------------------------------
+//
+// v0.9.6 shipped an ``altimate-core`` 0.7.0 upgrade whose new
+// ``multi_statement`` safety rule echoes the offending statement text in
+// its error message. When ``check`` was invoked on a non-SQL file (e.g.
+// ``altimate check /etc/passwd``), the engine parsed each line as SQL,
+// failed, and echoed the line back — leaking file content to stdout.
+// The sanity test at ``test/sanity/phases/security.sh:96-103`` has been
+// present + passing since PR #844 (June 2026); v0.9.6's engine upgrade
+// regressed it. Fix: reject non-SQL files by extension BEFORE they
+// reach the engine, so no content is ever parsed and echoed.
+describe("isSqlFile — extension filter (v0.9.6 sanity regression)", () => {
+  test("accepts .sql (both cases)", () => {
+    expect(isSqlFile("query.sql")).toBe(true)
+    expect(isSqlFile("QUERY.SQL")).toBe(true)
+    expect(isSqlFile("/absolute/path/to/query.sql")).toBe(true)
+    expect(isSqlFile("relative/path/query.sql")).toBe(true)
+  })
+  test("accepts .ddl (both cases)", () => {
+    expect(isSqlFile("schema.ddl")).toBe(true)
+    expect(isSqlFile("SCHEMA.DDL")).toBe(true)
+  })
+  test("rejects the exact sanity-test path (system file, no extension)", () => {
+    // The exact input the sanity test at test/sanity/phases/security.sh:96
+    // was leaking through before the fix.
+    expect(isSqlFile("../../../../etc/passwd")).toBe(false)
+    expect(isSqlFile("/etc/passwd")).toBe(false)
+  })
+  test("rejects extensionless files", () => {
+    expect(isSqlFile("passwd")).toBe(false)
+    expect(isSqlFile("/tmp/no-extension")).toBe(false)
+  })
+  test("rejects unrelated extensions", () => {
+    expect(isSqlFile("foo.txt")).toBe(false)
+    expect(isSqlFile("query.yml")).toBe(false)
+    expect(isSqlFile("script.sh")).toBe(false)
+    expect(isSqlFile("archive.tar.gz")).toBe(false)
+  })
+  test("dotfiles without an extension are not SQL", () => {
+    // ``.hidden`` has a leading dot but no proper extension — the
+    // filename ``.hidden`` has ``extname === ""`` under Node's rules.
+    expect(isSqlFile(".hidden")).toBe(false)
+    expect(isSqlFile("/etc/.passwd")).toBe(false)
+  })
+  test("dotfiles with a SQL extension ARE accepted", () => {
+    // Edge case: ``.query.sql`` is a hidden file with a real .sql extension.
+    expect(isSqlFile(".query.sql")).toBe(true)
+  })
+  test("basename that is JUST the extension (bare dotfile) is NOT SQL", () => {
+    // ``.sql`` and ``.ddl`` as filenames are dotfiles per node's
+    // ``path.extname`` — they have NO extension, they're just dot-prefixed
+    // names. Must not be accepted. (cubic P2 catch on release/v0.9.6 hotfix.)
+    expect(isSqlFile(".sql")).toBe(false)
+    expect(isSqlFile(".ddl")).toBe(false)
+    expect(isSqlFile("/some/dir/.sql")).toBe(false)
+    expect(isSqlFile("/some/dir/.ddl")).toBe(false)
+  })
+  test("directory paths (trailing slash) are not SQL files", () => {
+    expect(isSqlFile("/path/to/dir/")).toBe(false)
+    expect(isSqlFile("relative/dir/")).toBe(false)
+  })
+  test("path with dots in directory names but no extension on the file", () => {
+    // ``foo.bar/baz`` — the ``.`` is in the directory, not the file.
+    expect(isSqlFile("foo.bar/baz")).toBe(false)
+    expect(isSqlFile("foo.bar/baz.sql")).toBe(true)
   })
 })
 // altimate_change end
