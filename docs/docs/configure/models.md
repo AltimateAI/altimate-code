@@ -18,6 +18,9 @@ altimate supports models from all configured providers. Use the `model` and `sma
 
 The model format is `provider/model-name`.
 
+!!! note
+    `altimate local` pins `small_model` to the local provider automatically when you haven't set one — no background step (like compaction or title generation) silently calls a cloud model. See [Local Mode](../usage/local.md).
+
 ## Browsing Models
 
 In the TUI:
@@ -85,6 +88,7 @@ Models are referenced as `provider/model-name`:
 | OpenRouter | `openrouter/anthropic/claude-sonnet-4-6` |
 | Copilot | `copilot/gpt-4o` |
 | Snowflake Cortex | `snowflake-cortex/claude-sonnet-4-6` |
+| Local ([`altimate local`](../usage/local.md)) | `local/qwen3.8-27b` |
 | Custom | `my-provider/my-model` |
 
 See [Providers](providers.md) for full provider configuration details.

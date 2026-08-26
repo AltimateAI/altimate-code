@@ -104,6 +104,9 @@ Override permissions for specific agents:
 | `todoread` | No | Read tasks |
 | `doom_loop` | No | Loop detection |
 
+!!! note "Local Mode egress guard"
+    Running `altimate local` adds `ask` rules for `websearch`, `webfetch`, and `codesearch`, so a local-first session only reaches the internet with your approval. See [Local Mode](../usage/local.md#trust-model).
+
 ## Environment Variable
 
 Set permissions via environment variable:
