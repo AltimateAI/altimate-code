@@ -10,9 +10,11 @@ import {
   ensure,
   resetForTests,
   syncInternals,
+  pinnedWorkspace,
   whenAttached,
   ATTACH_WAIT_MS,
   INSTALL_HINT,
+  MIN_ENGINE_VERSION,
   type LocalMcpConfig,
 } from "../../../src/altimate/workspace/engine-sync"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
@@ -30,6 +32,7 @@ type Harness = {
   added: Array<{ name: string; cfg: LocalMcpConfig }>
   persisted: Array<{ name: string; cfg: LocalMcpConfig }>
   connects: string[]
+  disconnects: string[]
   toasts: Array<{ title: string; message: string; variant: string }>
   statusQueue: Array<Record<string, { status: string; error?: string } | undefined>>
   tools: Record<string, unknown>
@@ -38,23 +41,27 @@ type Harness = {
 function install(opts: {
   binding?: CachedBinding | null
   which?: string | null
-  version?: string | null
+  version?: string | null | ((bin: string) => string | null)
   declared?: { keys: string[]; extensionKeys: string[] } | null
   statuses?: Harness["statusQueue"]
   tools?: Record<string, unknown>
-  existing?: { type?: string; url?: string; command?: string[] } | null
+  existing?: { type?: string; url?: string; command?: string[] | string; args?: string[] } | null
 }): Harness {
   const h: Harness = {
     added: [],
     persisted: [],
     connects: [],
+    disconnects: [],
     toasts: [],
     statusQueue: opts.statuses ?? [{}],
     tools: opts.tools ?? {},
   }
   syncInternals.resolveBinding = async () => (opts.binding === undefined ? binding : opts.binding)
   syncInternals.which = () => (opts.which === undefined ? "/usr/local/bin/datamate" : opts.which)
-  syncInternals.versionOf = async () => (opts.version === undefined ? "0.6.3" : opts.version)
+  syncInternals.versionOf = async (bin) => {
+    if (typeof opts.version === "function") return opts.version(bin)
+    return opts.version === undefined ? "0.7.0" : opts.version
+  }
   syncInternals.declared = async () =>
     opts.declared === undefined ? { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] } : opts.declared
   syncInternals.persist = async (name, cfg) => {
@@ -71,6 +78,9 @@ function install(opts: {
     },
     connect: async (name) => {
       h.connects.push(name)
+    },
+    disconnect: async (name) => {
+      h.disconnects.push(name)
     },
     tools: async () => h.tools,
   }
@@ -124,8 +134,9 @@ describe("ensure", () => {
     expect(h.toasts).toHaveLength(0)
   })
 
-  test("reuses an already-connected engine entry without spawning", async () => {
+  test("reuses a connected entry that is pinned to this workspace, without spawning", async () => {
     const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
       statuses: [{ datamate: { status: "connected" } }],
       tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
     })
@@ -223,6 +234,7 @@ describe("ensure", () => {
       replaced: "http://localhost:7801/sse",
     })
     expect(h.connects).toHaveLength(0) // no pointless retry of a dead port
+    expect(h.disconnects).toHaveLength(0) // a dead URL has nothing live to close
     expect(h.added).toHaveLength(1)
     expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
     expect(h.toasts[0].message).toContain("Replaced the unreachable engine URL http://localhost:7801/sse")
@@ -297,5 +309,152 @@ describe("whenAttached", () => {
     const second = performance.now()
     await whenAttached("s1", 5_000)
     expect(performance.now() - second).toBeLessThan(50)
+  })
+})
+
+describe("pinnedWorkspace", () => {
+  test("reads the pin from opencode's argv shape", () => {
+    expect(pinnedWorkspace({ type: "local", command: ["datamate", "start-stdio", "--datamate", "5"] })).toBe("5")
+  })
+  test("reads the pin from the IDE's { command, args } shape", () => {
+    expect(pinnedWorkspace({ command: "datamate", args: ["start-stdio", "--datamate", "5"] })).toBe("5")
+  })
+  test("accepts the --datamate=5 spelling", () => {
+    expect(pinnedWorkspace({ type: "local", command: ["datamate", "start-stdio", "--datamate=5"] })).toBe("5")
+  })
+  test("a repeated flag resolves last-wins, as the engine's CLI does", () => {
+    expect(
+      pinnedWorkspace({ type: "local", command: ["datamate", "--datamate", "5", "--datamate", "9"] }),
+    ).toBe("9")
+  })
+  test("an entry with no pin is not attributable — this is what the extension writes", () => {
+    expect(pinnedWorkspace({ command: "datamate", args: ["start-stdio"] })).toBeNull()
+    expect(pinnedWorkspace({ type: "local", command: ["datamate", "start-stdio"] })).toBeNull()
+  })
+  test("a URL entry pins nothing, and a missing entry is not attributable", () => {
+    expect(pinnedWorkspace({ type: "remote", url: "http://localhost:7801/sse" })).toBeNull()
+    expect(pinnedWorkspace(null)).toBeNull()
+  })
+  test("a dangling --datamate with no value is not a pin", () => {
+    expect(pinnedWorkspace({ type: "local", command: ["datamate", "start-stdio", "--datamate"] })).toBeNull()
+  })
+})
+
+describe("ensure — attribution of a CONNECTED entry", () => {
+  const liveTwice: Harness["statusQueue"] = [
+    { datamate: { status: "connected" } },
+    { datamate: { status: "connected" } },
+  ]
+  const twoTools = { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 }
+
+  test("an UNPINNED entry is replaced by a pinned spawn — this is the extension's entry", async () => {
+    const h = install({
+      existing: { command: "datamate", args: ["start-stdio"] },
+      statuses: liveTwice,
+      tools: twoTools,
+    })
+    const outcome = await ensure("s1")
+    expect(outcome).toEqual({
+      kind: "attached",
+      available: 2,
+      declared: 2,
+      missing: [],
+      replaced: "datamate start-stdio",
+    })
+    // The replacement is a pinned spawn, so the engine we end up on is ours.
+    expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+    // ...and the live one it displaced was CLOSED first. `MCP.add` does not close
+    // the client it overwrites, so skipping this orphans a second live engine.
+    expect(h.disconnects).toEqual(["datamate"])
+    expect(h.toasts[0].message).toContain("not pinned to this workspace")
+  })
+
+  test("an entry pinned to ANOTHER workspace is replaced, and says which", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "7"] },
+      statuses: liveTwice,
+      tools: twoTools,
+    })
+    const outcome = await ensure("s1")
+    expect(outcome).toMatchObject({ kind: "attached", replaced: "datamate start-stdio --datamate 7" })
+    expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+    expect(h.toasts[0].message).toContain("pinned to workspace 7")
+  })
+
+  test("a CONNECTED url entry is replaced too — rule 4 forbids adopting hosted", async () => {
+    const h = install({
+      existing: { type: "remote", url: "https://api.altimate.ai/sse" },
+      statuses: liveTwice,
+      tools: twoTools,
+    })
+    const outcome = await ensure("s1")
+    expect(outcome).toMatchObject({ kind: "attached", replaced: "https://api.altimate.ai/sse" })
+    expect(h.added[0].cfg.type).toBe("local")
+  })
+
+  test("a matching pin is reused — no spawn, no persist", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: twoTools,
+    })
+    expect(await ensure("s1")).toEqual({ kind: "reused", available: 2 })
+    expect(h.added).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+    expect(h.disconnects).toHaveLength(0) // reuse must never close what it reuses
+  })
+
+  test("a recovered entry is gated too: retried back to life but unpinned, it is replaced", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"] },
+      statuses: [
+        { datamate: { status: "failed", error: "exit 1" } },
+        { datamate: { status: "connected" } },
+        { datamate: { status: "connected" } },
+      ],
+      tools: twoTools,
+    })
+    const outcome = await ensure("s1")
+    expect(h.connects).toEqual(["datamate"]) // the one retry still happened
+    expect(outcome).toMatchObject({ kind: "attached", replaced: "datamate start-stdio" })
+  })
+})
+
+describe("ensure — the version floor applies to a REUSED entry", () => {
+  test("a pinned entry below the floor is replaced when PATH has a newer engine", async () => {
+    const h = install({
+      existing: { type: "local", command: ["/opt/old/datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+      version: (bin) => (bin === "/opt/old/datamate" ? "0.6.3" : "0.7.0"),
+    })
+    const outcome = await ensure("s1")
+    expect(outcome).toMatchObject({
+      kind: "attached",
+      replaced: "/opt/old/datamate start-stdio --datamate 42",
+    })
+    expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+  })
+
+  test("a pinned entry below the floor with nothing newer on PATH is reported, not reused", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      version: () => "0.6.3",
+    })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "0.6.3" })
+    expect(h.added).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+    expect(h.toasts[0].message).toContain(MIN_ENGINE_VERSION)
+  })
+
+  test("an entry whose binary reports no version is not trusted for reuse", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      version: () => null,
+    })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "unknown" })
+    expect(h.added).toHaveLength(0)
   })
 })

@@ -10,9 +10,21 @@
 // no extension-bridge tools, server-side cwd). This module closes that gap.
 //
 // Rules, in order:
-//  1. Reuse. A connected MCP server already registered under DATAMATE_KEY wins —
-//     that is an IDE-written or previously persisted entry, and attaching to it
-//     is free. If that entry is DOWN, what it is decides what happens next:
+//  1. Reuse, but only what is ATTRIBUTABLE. An entry already registered under
+//     DATAMATE_KEY is reused only when it is live AND its command pins the
+//     engine to this workspace (`--datamate <id>`) AND that binary clears the
+//     version floor. Being connected proves none of that: an unpinned engine
+//     serves whichever teammate its owner has active, and that changes at
+//     runtime from a UI this client does not control — the extension writes
+//     exactly such an entry. Reusing one would report "workspace X: N tools"
+//     about a process serving Y.
+//     Anything live but not attributable — unpinned, pinned elsewhere, below the
+//     floor, or a URL — is replaced by a pinned local spawn, and what it was is
+//     reported. That costs the other client nothing: a stdio entry is a
+//     per-client child process, so the IDE keeps its own engine and only our
+//     registration changes. A connected URL entry is replaced for the same
+//     reason rule 4 exists — the hosted endpoint serves a different tool set.
+//     If the entry is DOWN, what it is decides what happens first:
 //       - a URL entry is an IDE's in-process engine (normally localhost) or the
 //         hosted endpoint. Neither can be revived from here — only the IDE can
 //         bring its port back — so with a binding and a usable engine on PATH we
@@ -20,7 +32,8 @@
 //         never touched; when the IDE returns, its sync overwrites ours.
 //       - a command entry that failed is retried once, then reported. Spawning a
 //         second engine beside a failing one is the duplicate-process problem the
-//         single-gateway design exists to avoid.
+//         single-gateway design exists to avoid. A retry that succeeds is then
+//         gated for attribution exactly like an entry that never dropped.
 //  2. Opportunistic use. If a `datamate` binary is on PATH and its `--version`
 //     clears the floor, spawn it for this workspace. A lookup, never an install.
 //  3. Offer, never silently install. No engine → tell the user exactly which
@@ -60,8 +73,16 @@ import { readLocalBinding, type CachedBinding } from "./state"
 
 const log = Log.create({ service: "workspace-engine" })
 
-/** Oldest engine this client is known to work against. */
-export const MIN_ENGINE_VERSION = "0.6.3"
+/** Oldest engine this client is known to work against.
+ *
+ * 0.7.0 is the first engine that LOCKS the `--datamate` pin, so a settings
+ * change cannot swap the workspace out from under a running engine. Everything
+ * below it can drift, which is precisely what the attribution check in rule 1
+ * exists to exclude — so the floor and that check are one mechanism, not two.
+ *
+ * SEQUENCING: this must not ship before `@altimateai/datamate` 0.7.0 is on npm,
+ * or every bound user gets `engine-too-old` for a version they cannot install. */
+export const MIN_ENGINE_VERSION = "0.7.0"
 export const INSTALL_HINT = "npm i -g @altimateai/datamate"
 export const ENGINE_BINARY = "datamate"
 
@@ -79,7 +100,11 @@ export type Outcome =
 
 export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolean }
 
-export type ExistingEntry = { type?: string; url?: string; command?: string[] }
+/** A configured MCP entry, in either shape it can reach us: opencode's own
+ * `command: string[]` argv, or the `{ command, args }` split an IDE writes and
+ * `datamate-transport` normalises. Read defensively — this is merged config
+ * written by other clients. */
+export type ExistingEntry = { type?: string; url?: string; command?: string[] | string; args?: string[] }
 
 type Toast = { title: string; message: string; variant: "info" | "success" | "warning" | "error" }
 
@@ -99,6 +124,7 @@ export const syncInternals: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
     connect: (name: string) => Promise<unknown>
+    disconnect: (name: string) => Promise<unknown>
     tools: () => Promise<Record<string, unknown>>
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
@@ -194,6 +220,7 @@ function mcp() {
       status: () => MCP.status() as Promise<McpStatus>,
       add: (name: string, cfg: LocalMcpConfig) => MCP.add(name, cfg),
       connect: (name: string) => MCP.connect(name),
+      disconnect: (name: string) => MCP.disconnect(name),
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,
     }
   )
@@ -220,6 +247,43 @@ async function existingEntry(name: string): Promise<ExistingEntry | null> {
  * client does not own: an IDE's in-process engine, or the hosted endpoint. */
 function isUrlEntry(entry: ExistingEntry | null): entry is ExistingEntry & { url: string } {
   return !!entry && (entry.type === "remote" || typeof entry.url === "string")
+}
+
+const PIN_FLAG = "--datamate"
+
+/** The entry's full argv, flattening both config shapes. */
+function commandArgv(entry: ExistingEntry | null): string[] {
+  if (!entry) return []
+  const head = typeof entry.command === "string" ? [entry.command] : (entry.command ?? [])
+  return [...head, ...(entry.args ?? [])]
+}
+
+/** Which workspace does this entry pin its engine to, if any?
+ *
+ * `--datamate <id>` is the whole of an engine's workspace identity: the engine
+ * locks it, so a settings change cannot swap it out underneath. An entry
+ * WITHOUT it is not neutral — it serves whichever teammate its owner currently
+ * has active, and that changes at runtime from a UI this client does not
+ * control. The extension writes exactly such an entry (`datamate start-stdio`,
+ * no pin), so "connected" alone never proves an engine serves this workspace.
+ *
+ * Scanned from the end because a repeated flag resolves last-wins, and both the
+ * `--datamate 5` and `--datamate=5` spellings are valid on the engine's CLI. */
+export function pinnedWorkspace(entry: ExistingEntry | null): string | null {
+  const argv = commandArgv(entry)
+  for (let i = argv.length - 1; i >= 0; i--) {
+    const arg = argv[i]
+    if (arg === PIN_FLAG) return argv[i + 1] ?? null
+    if (arg.startsWith(`${PIN_FLAG}=`)) return arg.slice(PIN_FLAG.length + 1) || null
+  }
+  return null
+}
+
+/** Short, printable identity of an entry, for saying what was replaced. */
+function describeEntry(entry: ExistingEntry | null): string {
+  if (isUrlEntry(entry)) return entry.url
+  const argv = commandArgv(entry)
+  return argv.length > 0 ? argv.join(" ") : "an engine entry with no command"
 }
 
 async function declared(datamateId: string): Promise<Declared | null> {
@@ -274,25 +338,45 @@ async function run(): Promise<Outcome> {
   const workspaceId = String(binding.datamateId)
   const client = mcp()
 
-  // Rule 1 — reuse whatever already serves this session.
+  // Rule 1 — reuse what already serves this session, but only if it can be shown
+  // to serve THIS workspace, on an engine that still clears the floor.
+  //
+  // "Connected" is not that proof. An entry without `--datamate <id>` follows
+  // its owner's active teammate, and that changes at runtime from a UI this
+  // client does not control — the extension writes exactly such an entry. Reusing
+  // one would let us report "workspace X: N tools" about a process serving Y,
+  // and once precedence acts on that inventory it would route the model into
+  // another workspace's credentials, with no fallback and nothing naming the
+  // discrepancy. The floor is re-checked here for the same reason: a stale
+  // persisted entry can be running an engine old enough that its pin is not
+  // locked, which is the drift this attribution is meant to exclude.
   let replaced: string | undefined
+  let replacedNote = ""
+  /** Was the entry we are replacing still RUNNING? Then it must be closed before
+   * we spawn, or `MCP.add` leaves its child process orphaned beside the new one —
+   * the same duplicate-engine hazard this module refuses for a failing entry, and
+   * in practice it wedges the session. */
+  let replacedLive = false
   const before = await client.status()
   const existing = before[DATAMATE_KEY]
   if (existing) {
+    const entry = await existingEntry(DATAMATE_KEY)
     let connected = existing.status === "connected"
+
     if (!connected) {
-      const entry = await existingEntry(DATAMATE_KEY)
       if (isUrlEntry(entry)) {
-        // Dead URL: nothing here can bring that process back. Fall through to a
-        // local spawn (if one is possible) and report the replacement below.
+        // Dead URL: nothing here can bring that process back — only the IDE can
+        // restore its port. Fall through to a local spawn and report it below.
         replaced = entry.url
+        replacedNote = ` Replaced the unreachable engine URL ${entry.url} for this session.`
         log.info("existing engine entry is a URL that is not reachable; will spawn locally", {
           workspaceId,
           url: entry.url,
           error: existing.error,
         })
       } else {
-        // A command entry that failed: one retry, then report — never a second spawn.
+        // A command entry that failed: one retry, then report — never a second
+        // spawn beside a failing one.
         await client.connect(DATAMATE_KEY).catch(() => undefined)
         const retried = (await client.status())[DATAMATE_KEY]
         connected = retried?.status === "connected"
@@ -307,10 +391,60 @@ async function run(): Promise<Outcome> {
         }
       }
     }
+
+    // Live — either it already was, or the single retry brought it back. A
+    // recovered entry is gated exactly like one that never dropped.
     if (connected) {
-      const available = engineToolKeys(await client.tools()).size
-      log.info("reusing existing engine entry", { workspaceId, available })
-      return { kind: "reused", available }
+      const pin = pinnedWorkspace(entry)
+      if (pin !== workspaceId) {
+        // Not attributable to this workspace. Replacing it costs the other
+        // client nothing: a stdio entry is a per-client child process, so the
+        // IDE keeps its own engine and only OUR registration changes. A
+        // connected URL entry lands here too, which is the point — the hosted
+        // endpoint serves a different tool set, and rule 4 forbids adopting it.
+        replaced = describeEntry(entry)
+        replacedLive = true
+        replacedNote = pin
+          ? ` Replaced an engine entry pinned to workspace ${pin} for this session.`
+          : ` Replaced an engine entry that is not pinned to this workspace (${replaced}) for this session; it serves whichever workspace its owner has active.`
+        log.info("existing engine entry is not attributable to this workspace; will spawn locally", {
+          workspaceId,
+          pinnedTo: pin,
+          entry: replaced,
+        })
+      } else {
+        const entryBin = commandArgv(entry)[0]
+        const found = entryBin ? await versionOf(entryBin) : null
+        if (found && compareVersions(found, MIN_ENGINE_VERSION) >= 0) {
+          const available = engineToolKeys(await client.tools()).size
+          log.info("reusing existing engine entry", { workspaceId, available, version: found })
+          return { kind: "reused", available }
+        }
+        // Pinned to us, but below the floor or unreadable. Prefer a newer engine
+        // on PATH over keeping one whose pin the engine does not lock; if PATH
+        // cannot do better, say so rather than reuse it silently.
+        const onPath = which(ENGINE_BINARY)
+        const pathVersion = onPath ? await versionOf(onPath) : null
+        if (!pathVersion || compareVersions(pathVersion, MIN_ENGINE_VERSION) < 0) {
+          const label = found ?? "unknown"
+          await notify({
+            title: "Workspace engine is too old",
+            message:
+              `The engine serving workspace "${binding.datamateName}" reports ${label}; this client needs ` +
+              `${MIN_ENGINE_VERSION} or newer. Update with: ${INSTALL_HINT}`,
+            variant: "warning",
+          })
+          return { kind: "engine-too-old", found: label }
+        }
+        replaced = describeEntry(entry)
+        replacedLive = true
+        replacedNote = ` Replaced an engine entry running ${found ?? "an unreadable version"}, below the ${MIN_ENGINE_VERSION} floor, for this session.`
+        log.info("existing engine entry is below the version floor; will spawn locally", {
+          workspaceId,
+          found,
+          pathVersion,
+        })
+      }
     }
   }
 
@@ -348,6 +482,14 @@ async function run(): Promise<Outcome> {
     command: [ENGINE_BINARY, "start-stdio", "--datamate", workspaceId],
     enabled: true,
   }
+  if (replacedLive) {
+    // Close the live registration first: `MCP.add` does not close the client it
+    // overwrites, so adding over a running stdio server starts a second engine
+    // and abandons the first with its pipes still open.
+    await client.disconnect(DATAMATE_KEY).catch((err) => {
+      log.warn("could not close the engine entry being replaced", { err: String(err) })
+    })
+  }
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
 
@@ -367,7 +509,6 @@ async function run(): Promise<Outcome> {
   const present = engineToolKeys(await client.tools())
   const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
   const available = present.size
-  const replacedNote = replaced ? ` Replaced the unreachable engine URL ${replaced} for this session.` : ""
   await notify({
     title: `Workspace "${binding.datamateName}" connected`,
     message:
