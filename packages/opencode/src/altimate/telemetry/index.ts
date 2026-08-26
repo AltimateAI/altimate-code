@@ -1492,27 +1492,34 @@ export namespace Telemetry {
   // can't reconstruct the original token.
 
   export function maskString(s: string): string {
+    // Consumers truncate masked output to <= 2000 chars; masking beyond 8 KB
+    // of input buys nothing, and unbounded input is what turns any super-
+    // linear rule into a stall. The cut happens FIRST so every rule — the
+    // linear credential/quote passes included — does bounded work, but it
+    // must never fail a rule open across the boundary: it backs off to the
+    // last whitespace of any kind (no token straddles the cut), then to
+    // before any unbalanced quote (a quoted value never survives half-open).
+    if (s.length > 8192) {
+      let cut = 8192
+      const ws = s.slice(0, 8192).search(/\s\S*$/)
+      if (ws > 4096) cut = ws
+      for (const q of ['"', "'"]) {
+        const window = s.slice(0, cut)
+        if ((window.split(q).length - 1) % 2 === 1) {
+          const open = window.lastIndexOf(q)
+          if (open > 2048) cut = open
+        }
+      }
+      s = s.slice(0, cut)
+    }
     let out = s
       // ANSI CSI sequences (colored subprocess stderr) would otherwise split
       // tokens so neither credential nor path rules can see them
       .replace(/\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g, "")
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
-      // quoted literals collapse BEFORE truncation: the rule needs its
-      // closing quote, and a cut inside a quoted value would leave the
-      // opening half in the clear
       .replace(/'(?:[^'\\]|\\.)*'/g, "?")
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
-    // Consumers truncate masked output to <= 2000 chars; masking beyond 8 KB
-    // of input buys nothing and unbounded input is what turns any super-
-    // linear rule into a stall (a wide generated SELECT reached seconds).
-    // The cut comes AFTER the length-gated credential rules and the quote
-    // collapse (all linear) so nothing fails open across the boundary, and
-    // it backs off to whitespace so no token straddles it.
-    if (out.length > 8192) {
-      const cut = out.lastIndexOf(" ", 8192)
-      out = out.slice(0, cut > 4096 ? cut : 8192)
-    }
     // Fast path: a string with no separator cannot contain a path — skip the
     // whole path stack (most telemetry strings carry no path at all).
     if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:[^\s:]{1,255}(?: [^\s:]{1,255}){0,2}\.[A-Za-z]/.test(out)) {

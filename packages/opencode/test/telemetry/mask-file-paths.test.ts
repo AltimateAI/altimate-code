@@ -61,12 +61,17 @@ describe("maskString paths — preprocessing — escape stripping, known-prefix 
     expect(mask(`id=abc${home.replace(/[\\/]/g, "_")}xyz ok`)).toBe(`id=abc${home.replace(/[\\/]/g, "_")}xyz ok`)
   })
 
-  it("a credential straddling the 8 KB cut never ships in the clear", () => {
+  it("a credential or quoted value straddling the 8 KB cut never ships in the clear", () => {
+    // the cut backs off to whitespace and to before any unbalanced quote, so a
+    // straddling token is dropped whole (or masked) — never emitted in part
     const pad = '"' + "A".repeat(8170) + '" '
-    expect(mask(pad + "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")).toBe("? Bearer ***")
-    expect(mask(pad + "sk-abcdefghijklmnopqrstuvwxyz0123456789")).toBe("? sk-***")
-    expect(mask(pad + '"customer-secret-value-here"')).toBe("? ?")
-    expect(mask('"' + "A".repeat(8180) + '" "customer secret value here"')).toBe("? ?")
+    expect(mask(pad + "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")).not.toContain("ABCDEFGH")
+    expect(mask(pad + "sk-abcdefghijklmnopqrstuvwxyz0123456789")).not.toContain("sk-abc")
+    expect(mask(pad + '"customer-secret-value-here"')).not.toContain("customer")
+    expect(mask('"' + "A".repeat(8180) + '" "customer secret value here"')).not.toContain("customer")
+    // tab / newline boundaries count as whitespace for the back-off
+    expect(mask("x".repeat(8100) + "\t/Users/jdoe/secret-client-repo/models")).not.toContain("jdoe")
+    expect(mask("x".repeat(8100) + "\n/Users/jdoe/secret-client-repo/models")).not.toContain("jdoe")
   })
 
   it("masking never throws when the cwd has been deleted", () => {
@@ -898,7 +903,7 @@ describe("maskString paths — performance — growth rates, not wall clocks", (
     expect(growth(n => '"' + "\\".repeat(n) + '"')).toBeLessThan(16)
   })
 
-  it("entry truncation makes cost flat beyond 8 KB (ratio, not wall clock)", () => {
+  it("entry truncation makes cost flat beyond 8 KB — every pass runs on the window", () => {
     const gen = (n: number) => "a:".repeat(n / 2)
     mask(gen(20000))
     // 8x more input past the cap must cost ~1x, never scale with length
