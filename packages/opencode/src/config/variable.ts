@@ -28,6 +28,22 @@ type SubstituteInput = ParseSource & {
   // altimate_change end
 }
 
+// altimate_change start — upstream_fix (#701): keep the names of variables that silently blanked.
+// An unresolved bare `${VAR}` is left LITERAL above on purpose, so it stays visible and is not
+// recorded here. `{env:VAR}` has no such deferral — it becomes "" and the config parses clean, so
+// a missing `{env:SNOWFLAKE_PASSWORD}` launches an MCP server with a blank credential and fails
+// later with an error naming neither the variable nor this file. Keyed by config source; the
+// newest parse of a file replaces its entry so a fixed variable stops being reported.
+const _blankedEnv = new Map<string, Set<string>>()
+
+/** Variable names that silently became "" during config substitution, grouped by config source. */
+export function blankedEnvVars(): { source: string; names: string[] }[] {
+  return [..._blankedEnv.entries()]
+    .map(([src, names]) => ({ source: src, names: [...names].sort() }))
+    .sort((a, b) => a.source.localeCompare(b.source))
+}
+// altimate_change end
+
 function source(input: ParseSource) {
   return input.type === "path" ? input.path : input.source
 }
@@ -42,6 +58,9 @@ export async function substitute(input: SubstituteInput) {
   // altimate_change start — upstream_fix: restore ${VAR}/${VAR:-default}/$${VAR} config interpolation
   const format = input.format ?? "json"
   const encode = (value: string) => (format === "raw" ? value : JSON.stringify(value).slice(1, -1))
+  // altimate_change — upstream_fix (#701): collect blanked names for this parse, replacing any
+  // earlier entry for the same source rather than accumulating stale ones.
+  const blanked = new Set<string>()
   let text = input.text.replace(ConfigPaths.ENV_VAR_PATTERN, (match, escaped, dollarVar, dollarDefault, braceVar) => {
     if (escaped !== undefined) return "$" + escaped
     if (dollarVar !== undefined) {
@@ -56,10 +75,18 @@ export async function substitute(input: SubstituteInput) {
       return match
     }
     if (braceVar !== undefined) {
-      return (input.env?.[braceVar] ?? process.env[braceVar]) || ""
+      const value = input.env?.[braceVar] ?? process.env[braceVar]
+      // altimate_change — upstream_fix (#701): record the blank, then behave exactly as before.
+      if (!value) blanked.add(braceVar)
+      return value || ""
     }
     return match
   })
+  // altimate_change end
+
+  // altimate_change start — upstream_fix (#701): publish after the whole text is scanned.
+  if (blanked.size > 0) _blankedEnv.set(source(input), blanked)
+  else _blankedEnv.delete(source(input))
   // altimate_change end
 
   const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))

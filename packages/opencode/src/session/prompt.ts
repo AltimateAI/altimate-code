@@ -30,6 +30,8 @@ import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
+// altimate_change — upstream_fix (#701): unresolved-env record for the /mcps view.
+import * as McpDiscover from "../mcp/discover"
 import { ToolRegistry } from "../tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "../lsp"
@@ -2871,11 +2873,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   // altimate_change start — shared text formatter for /mcps runtime status (#972)
   /** @internal Exported for tests. */
-  export function formatMcpStatusForDisplay(name: string, status: MCP.Status) {
+  export function formatMcpStatusForDisplay(name: string, status: MCP.Status, unresolvedEnv: string[] = []) {
     const icon = status.status === "connected" ? "\u2713" : "\u25cb"
-    if (status.status === "failed") return icon + " " + status.status + " (" + status.error + ")"
-    if (status.status === "needs_auth") return icon + " Needs authentication (run: altimate mcp auth " + name + ")"
-    return icon + " " + status.status
+    // upstream_fix (#701): a server whose `${VAR}` did not resolve launched with that value
+    // blank — most often a password. It then fails with a downstream error naming neither the
+    // variable nor the config file, and the only trace is a log line nobody opens. Say it here,
+    // where the user is already looking, and say it even when the server appears connected: a
+    // blank credential often connects and fails on first use.
+    const blanks =
+      unresolvedEnv.length > 0 ? " \u2014 unresolved: " + unresolvedEnv.join(", ") + " (set or remove)" : ""
+    if (status.status === "failed") return icon + " " + status.status + " (" + status.error + ")" + blanks
+    if (status.status === "needs_auth")
+      return icon + " Needs authentication (run: altimate mcp auth " + name + ")" + blanks
+    return icon + " " + status.status + blanks
   }
   // altimate_change end
 
@@ -2930,7 +2940,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const model = await lastModel(input.sessionID)
         const statusMap = await MCP.status()
         const rows = Object.entries(statusMap)
-          .map(([srv, s]) => "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s) + " |")
+          .map(
+            ([srv, s]) =>
+              "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s, McpDiscover.unresolvedEnvVars(srv)) + " |",
+          )
           .join("\n")
         const responseText = rows
           ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows

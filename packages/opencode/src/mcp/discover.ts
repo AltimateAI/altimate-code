@@ -34,8 +34,27 @@ function resolveServerEnvVars(
       field: context.field,
       unresolved: stats.unresolvedNames.join(", "),
     })
+    // altimate_change start — upstream_fix: remember it for the user, not just the log (#701).
+    // An unresolved `${SNOWFLAKE_PASSWORD}` becomes "" and the server launches with a blank
+    // credential, failing later with something that names neither the variable nor the config
+    // file. The log line already had the answer; nobody reads it. Recorded here so `/mcps` can
+    // say so. Mirrors the `setDiscoveryResult` handoff below.
+    const seen = _unresolvedEnv.get(context.server) ?? new Set<string>()
+    for (const name of stats.unresolvedNames) seen.add(name)
+    _unresolvedEnv.set(context.server, seen)
+    // altimate_change end
   }
   return out
+}
+// altimate_change end
+
+// altimate_change start — upstream_fix: unresolved-variable record for the user surface (#701).
+/** Server name -> variable names that resolved to "" during discovery. */
+const _unresolvedEnv = new Map<string, Set<string>>()
+
+/** Variable names that silently became "" for `server`, newest discovery wins. */
+export function unresolvedEnvVars(server: string): string[] {
+  return [...(_unresolvedEnv.get(server) ?? [])].sort()
 }
 // altimate_change end
 
