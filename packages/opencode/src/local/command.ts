@@ -12,10 +12,11 @@ import { pickPort, writeServerState } from "./server"
 import { getLocalPaths, ensureLocalDirectories } from "./paths"
 import { ensureLlamaServer } from "./runtime"
 import { getServerStatus, startServer, stopServer, type ServerState } from "./server"
-import { wireLocalProvider } from "./wire"
+import { readEgressGuard, wireLocalProvider } from "./wire"
 
 interface LocalArgs {
   model?: string
+  egressGuard?: boolean
   port?: number
   ctx?: number
   parallel?: number
@@ -93,7 +94,16 @@ function certificationInput(state: ServerState) {
   }
 }
 
-async function setupDocker(model: ModelRecipe, tier: DockerRecipeTier) {
+function printReady(wired: { file: string; guarded: string[] }, modelID: string) {
+  console.log(`✓ Ready. Configured local/${modelID} in ${wired.file}`)
+  if (wired.guarded.length > 0) {
+    console.log(`  Egress guard: ${wired.guarded.join(", ")} now ask before leaving this machine.`)
+    console.log("  Local runs have no per-token cost. Disable the guard with --no-egress-guard.")
+  }
+  console.log('  Try: altimate "profile the orders table and suggest tests"')
+}
+
+async function setupDocker(model: ModelRecipe, tier: DockerRecipeTier, args: LocalArgs) {
   console.log(`◇ Recommended: ${model.name} ${tier.quant} · SGLang + EAGLE in the pinned container · ${tier.ctx} context`)
   const port = await pickPort(8095)
   console.log("◇ Starting SGLang container (first run downloads the weights — this can take a while)")
@@ -146,9 +156,9 @@ async function setupDocker(model: ModelRecipe, tier: DockerRecipeTier) {
     baseURL: state.baseURL,
     modelID: model.id,
     tier: { ctx: tier.ctx, parallel: 1, agent: tier.agent },
+    egressGuard: args.egressGuard,
   })
-  console.log(`✓ Ready. Configured local/${model.id} in ${wired.file}`)
-  console.log('  Try: altimate "profile the orders table and suggest tests"')
+  printReady(wired, model.id)
 }
 
 async function setup(args: LocalArgs) {
@@ -185,7 +195,7 @@ async function setup(args: LocalArgs) {
   }
 
   if (matched.engine === "docker-sglang") {
-    await setupDocker(model, matched)
+    await setupDocker(model, matched, args)
     return
   }
   // No runtime build for this platform-arch (e.g. Intel macOS) must fail
@@ -223,9 +233,13 @@ async function setup(args: LocalArgs) {
   printCertificate(certificate)
   if (!certificate.passed)
     throw new Error("Local certification failed. Run `altimate local doctor --show` for details.")
-  const wired = await wireLocalProvider({ baseURL: state.baseURL, modelID: model.id, tier })
-  console.log(`✓ Ready. Configured local/${model.id} in ${wired.file}`)
-  console.log('  Try: altimate "profile the orders table and suggest tests"')
+  const wired = await wireLocalProvider({
+    baseURL: state.baseURL,
+    modelID: model.id,
+    tier,
+    egressGuard: args.egressGuard,
+  })
+  printReady(wired, model.id)
 }
 
 const LocalStatusCommand = {
@@ -252,6 +266,12 @@ const LocalStatusCommand = {
         flags: status.state.flags,
       })
       console.log(`Certificate: ${key}`)
+      const guard = await readEgressGuard()
+      console.log("Egress guard (network tools):")
+      for (const [permission, action] of Object.entries(guard)) {
+        console.log(`  ${permission}: ${action}`)
+      }
+      console.log("Local runs: no per-token cost")
     })
   },
 }
@@ -340,6 +360,11 @@ export const LocalCommand = {
       .command(LocalModelsCommand)
       .command(LocalUpdateCommand)
       .option("model", { type: "string", describe: "registry model id (see `altimate local models`)" })
+      .option("egress-guard", {
+        type: "boolean",
+        default: true,
+        describe: "make network tools (websearch/webfetch/codesearch) ask before leaving this machine",
+      })
       .option("port", { type: "number", describe: "preferred llama-server port (auto-picks if unavailable)" })
       .option("ctx", { type: "number", describe: "aggregate llama.cpp context size" })
       .option("parallel", { type: "number", describe: "llama.cpp parallel slot count" })

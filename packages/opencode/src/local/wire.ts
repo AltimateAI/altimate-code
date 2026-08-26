@@ -22,10 +22,17 @@ function patch(input: string, keys: (string | number)[], value: unknown) {
   )
 }
 
+// Tool permission keys that send content off the machine. With the egress guard
+// on, each gets an "ask" rule so a local-first session escalates to the network
+// only with per-step approval. User config merges after agent rulesets
+// (last-match-wins), so these override the agents' built-in "allow".
+export const EGRESS_PERMISSIONS = ["websearch", "webfetch", "codesearch"] as const
+
 export async function wireLocalProvider(input: {
   baseURL: string
   modelID: string
   tier: Pick<LlamaRecipeTier, "ctx" | "parallel" | "agent">
+  egressGuard?: boolean
   env?: NodeJS.ProcessEnv
   home?: string
   paths?: LocalPaths
@@ -80,6 +87,22 @@ export async function wireLocalProvider(input: {
     updated = patch(updated, ["agent", agent, "options", "reasoningEffort"], input.tier.agent.reasoning_effort)
   }
   if (!("model" in parsed)) updated = patch(updated, ["model"], `local/${input.modelID}`)
+
+  // Keep internal machinery (compaction, title generation) on the local model:
+  // getSmallModel falls back to the session model today, but an explicit value
+  // survives future default changes without silently leaving the machine.
+  if (!("small_model" in parsed)) updated = patch(updated, ["small_model"], `local/${input.modelID}`)
+
+  const guarded: string[] = []
+  if (input.egressGuard !== false) {
+    const permission = (parsed.permission ?? {}) as Record<string, unknown>
+    for (const key of EGRESS_PERMISSIONS) {
+      // Only where the user has not already decided — never clobber their config.
+      if (key in permission) continue
+      updated = patch(updated, ["permission", key], "ask")
+      guarded.push(key)
+    }
+  }
   if (!updated.endsWith("\n")) updated += "\n"
 
   if (updated !== before) {
@@ -89,5 +112,28 @@ export async function wireLocalProvider(input: {
   }
   await fs.chmod(file, 0o600)
   await writeLocalEnvironment(input.tier.agent.tool_retrieval, paths)
-  return { file, changed: updated !== before, advertisedContext }
+  return { file, changed: updated !== before, advertisedContext, guarded }
+}
+
+// Effective egress-guard state for `altimate local status`: what each
+// network-egress permission resolves to in the user config file.
+export async function readEgressGuard(env?: NodeJS.ProcessEnv, home?: string) {
+  const resolvedEnv = env ?? process.env
+  const resolvedHome = home ?? resolvedEnv.OPENCODE_TEST_HOME ?? os.homedir()
+  const config = configFile(resolvedEnv, resolvedHome)
+  for (const file of config.candidates) {
+    const text = await fs.readFile(file, "utf8").catch(() => undefined)
+    if (text === undefined) continue
+    const parsed = parse(text, [], { allowTrailingComma: true, disallowComments: false }) as
+      | Record<string, unknown>
+      | undefined
+    const permission = (parsed?.permission ?? {}) as Record<string, unknown>
+    return Object.fromEntries(
+      EGRESS_PERMISSIONS.map((key) => {
+        const value = permission[key]
+        return [key, typeof value === "string" ? value : value === undefined ? "allow (no rule)" : "custom"]
+      }),
+    )
+  }
+  return Object.fromEntries(EGRESS_PERMISSIONS.map((key) => [key, "allow (no rule)"]))
 }
