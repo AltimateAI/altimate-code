@@ -100,6 +100,8 @@ function printReady(wired: { file: string; guarded: string[] }, modelID: string)
     console.log(`  Egress guard: ${wired.guarded.join(", ")} now ask before leaving this machine.`)
     console.log("  Local runs have no per-token cost. Disable the guard with --no-egress-guard.")
   }
+  console.log("  Note: the first turn of each session prefills the full context — on laptops")
+  console.log("  this can take a few minutes; later turns reuse the cache and stream normally.")
   console.log('  Try: altimate "profile the orders table and suggest tests"')
 }
 

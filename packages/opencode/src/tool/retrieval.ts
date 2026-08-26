@@ -49,6 +49,19 @@ export namespace Retrieval {
     return process.env["ALTIMATE_TOOL_RETRIEVAL"] === "1"
   }
 
+  /**
+   * Compact a multi-sentence description to its first sentence (capped), for
+   * token-diet listings (e.g. the skills block on small-context local models).
+   * Items stay discoverable by name; the full description loads on invocation.
+   */
+  export function compactDescription(text: string | undefined, max = 160): string {
+    if (!text) return ""
+    const normalized = text.replace(/\s+/g, " ").trim()
+    const sentence = normalized.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? normalized
+    if (sentence.length <= max) return sentence
+    return sentence.slice(0, max - 1).trimEnd() + "…"
+  }
+
   function score(query: string, t: Tool): number {
     // Tokenize on alphanumerics + underscore so digits survive (e.g. "v2", "s3")
     // and hyphenated names split into matchable parts (e.g. "dbt-schema-verify").
