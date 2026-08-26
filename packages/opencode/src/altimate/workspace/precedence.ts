@@ -25,6 +25,14 @@
 //  4. Redirect. A shadowed call returns a result naming the exact engine key. Nothing
 //     executes and there is no fallback.
 //
+// SERVER-SIDE ONLY. The TUI plugin runtime loads plugins in a separate module realm
+// in the same process: an import from there is a different instance, sharing neither
+// module state nor `globalThis`. Importing this module from a plugin would typecheck,
+// unit-test green, and return an empty precedence forever — `bySession` would simply
+// be a different, always-empty map. Only the event bus crosses that boundary, which is
+// why the inventory line is published as a TUI event rather than read directly. Anything
+// on the TUI side that needs this state must cross the bus or re-derive it.
+//
 // Precedence is a pure function of the materialised set, so it is re-derived every
 // turn from the live MCP tool map (`refresh`) rather than cached at attach. That is
 // what keeps it correct when an engine's tool set changes under us — `MCP.tools()` is

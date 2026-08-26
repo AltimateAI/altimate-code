@@ -6,21 +6,24 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 start ACP (Agent Client Protocol) server
 
 Options:
-  -h, --help         show help                                                             [boolean]
-  -v, --version      show version number                                                   [boolean]
-      --print-logs   print logs to stderr                                                  [boolean]
-      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure         run without external plugins                                          [boolean]
-      --yolo         auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --port         port to listen on                                         [number] [default: 0]
-      --hostname     hostname to listen on                           [string] [default: "127.0.0.1"]
-      --mdns         enable mDNS service discovery (defaults hostname to 0.0.0.0)
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --port          port to listen on                                        [number] [default: 0]
+      --hostname      hostname to listen on                          [string] [default: "127.0.0.1"]
+      --mdns          enable mDNS service discovery (defaults hostname to 0.0.0.0)
                                                                           [boolean] [default: false]
-      --mdns-domain  custom domain name for mDNS service (default: altimate-code.local)
+      --mdns-domain   custom domain name for mDNS service (default: altimate-code.local)
                                                            [string] [default: "altimate-code.local"]
-      --cors         additional domains to allow for CORS                      [array] [default: []]
-      --cwd          working directory [string] [default: "<HOME>"]"
+      --cors          additional domains to allow for CORS                     [array] [default: []]
+      --cwd           working directory [string] [default: "<HOME>"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp --help 1`] = `
@@ -37,13 +40,16 @@ Commands:
   altimate-code mcp debug <name>   debug OAuth connection for an MCP server
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode attach --help 1`] = `
@@ -55,19 +61,23 @@ Positionals:
   url  http://localhost:4096                                                     [string] [required]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --dir         directory to run in                                                     [string]
-  -c, --continue    continue the last session                                              [boolean]
-  -s, --session     session id to continue                                                  [string]
-      --fork        fork the session when continuing (use with --continue or --session)    [boolean]
-  -p, --password    basic auth password (defaults to OPENCODE_SERVER_PASSWORD)              [string]
-  -u, --username    basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')[string]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --dir           directory to run in                                                   [string]
+  -c, --continue      continue the last session                                            [boolean]
+  -s, --session       session id to continue                                                [string]
+      --fork          fork the session when continuing (use with --continue or --session)  [boolean]
+  -p, --password      basic auth password (defaults to OPENCODE_SERVER_PASSWORD)            [string]
+  -u, --username      basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')
+                                                                                            [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode run --help 1`] = `
@@ -86,6 +96,10 @@ Options:
       --pure                          run without external plugins                         [boolean]
       --yolo                          auto-approve all permission prompts (explicit deny rules still
                                       enforced)                           [boolean] [default: false]
+      --integrations                  where warehouse tools run: 'workspace' (default) lets the
+                                      bound workspace's engine serve the types it provides; 'local'
+                                      keeps every connection on the local drivers
+                                                            [string] [choices: "workspace", "local"]
       --command                       the command to run, use message for args              [string]
   -c, --continue                      continue the last session                            [boolean]
   -s, --session                       session id to continue                                [string]
@@ -145,13 +159,16 @@ Commands:
   altimate-code debug wait          wait indefinitely (for debugging)
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode providers --help 1`] = `
@@ -165,13 +182,16 @@ Commands:
   altimate-code providers logout [provider]  log out from a configured provider
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode agent --help 1`] = `
@@ -184,13 +204,16 @@ Commands:
   altimate-code agent list    list all available agents
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode upgrade --help 1`] = `
@@ -202,14 +225,17 @@ Positionals:
   target  version to upgrade to, for ex '0.1.48' or 'v0.1.48'                               [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-  -m, --method      installation method to use
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+  -m, --method        installation method to use
                           [string] [choices: "curl", "npm", "pnpm", "bun", "brew", "choco", "scoop"]"
 `;
 
@@ -219,17 +245,20 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 uninstall altimate-code and remove all related files
 
 Options:
-  -h, --help         show help                                                             [boolean]
-  -v, --version      show version number                                                   [boolean]
-      --print-logs   print logs to stderr                                                  [boolean]
-      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure         run without external plugins                                          [boolean]
-      --yolo         auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-  -c, --keep-config  keep configuration files                             [boolean] [default: false]
-  -d, --keep-data    keep session data and snapshots                      [boolean] [default: false]
-      --dry-run      show what would be removed without removing          [boolean] [default: false]
-  -f, --force        skip confirmation prompts                            [boolean] [default: false]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+  -c, --keep-config   keep configuration files                            [boolean] [default: false]
+  -d, --keep-data     keep session data and snapshots                     [boolean] [default: false]
+      --dry-run       show what would be removed without removing         [boolean] [default: false]
+  -f, --force         skip confirmation prompts                           [boolean] [default: false]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode serve --help 1`] = `
@@ -238,20 +267,23 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 starts a headless altimate-code server
 
 Options:
-  -h, --help         show help                                                             [boolean]
-  -v, --version      show version number                                                   [boolean]
-      --print-logs   print logs to stderr                                                  [boolean]
-      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure         run without external plugins                                          [boolean]
-      --yolo         auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --port         port to listen on                                         [number] [default: 0]
-      --hostname     hostname to listen on                           [string] [default: "127.0.0.1"]
-      --mdns         enable mDNS service discovery (defaults hostname to 0.0.0.0)
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --port          port to listen on                                        [number] [default: 0]
+      --hostname      hostname to listen on                          [string] [default: "127.0.0.1"]
+      --mdns          enable mDNS service discovery (defaults hostname to 0.0.0.0)
                                                                           [boolean] [default: false]
-      --mdns-domain  custom domain name for mDNS service (default: altimate-code.local)
+      --mdns-domain   custom domain name for mDNS service (default: altimate-code.local)
                                                            [string] [default: "altimate-code.local"]
-      --cors         additional domains to allow for CORS                      [array] [default: []]"
+      --cors          additional domains to allow for CORS                     [array] [default: []]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode web --help 1`] = `
@@ -260,20 +292,23 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 start altimate-code server and open web interface
 
 Options:
-  -h, --help         show help                                                             [boolean]
-  -v, --version      show version number                                                   [boolean]
-      --print-logs   print logs to stderr                                                  [boolean]
-      --log-level    log level                  [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure         run without external plugins                                          [boolean]
-      --yolo         auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --port         port to listen on                                         [number] [default: 0]
-      --hostname     hostname to listen on                           [string] [default: "127.0.0.1"]
-      --mdns         enable mDNS service discovery (defaults hostname to 0.0.0.0)
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --port          port to listen on                                        [number] [default: 0]
+      --hostname      hostname to listen on                          [string] [default: "127.0.0.1"]
+      --mdns          enable mDNS service discovery (defaults hostname to 0.0.0.0)
                                                                           [boolean] [default: false]
-      --mdns-domain  custom domain name for mDNS service (default: altimate-code.local)
+      --mdns-domain   custom domain name for mDNS service (default: altimate-code.local)
                                                            [string] [default: "altimate-code.local"]
-      --cors         additional domains to allow for CORS                      [array] [default: []]"
+      --cors          additional domains to allow for CORS                     [array] [default: []]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode models --help 1`] = `
@@ -285,15 +320,18 @@ Positionals:
   provider  provider ID to filter models by                                                 [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --verbose     use more verbose model output (includes metadata like costs)           [boolean]
-      --refresh     refresh the models cache from models.dev                               [boolean]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --verbose       use more verbose model output (includes metadata like costs)         [boolean]
+      --refresh       refresh the models cache from models.dev                             [boolean]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode stats --help 1`] = `
@@ -302,18 +340,22 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 show token usage and cost statistics
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --days        show stats for the last N days (default: all time)                      [number]
-      --tools       number of tools to show (default: all)                                  [number]
-      --models      show model statistics (default: hidden). Pass a number to show top N, otherwise
-                    shows all
-      --project     filter by project (default: all projects, empty string: current project)[string]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --days          show stats for the last N days (default: all time)                    [number]
+      --tools         number of tools to show (default: all)                                [number]
+      --models        show model statistics (default: hidden). Pass a number to show top N,
+                      otherwise shows all
+      --project       filter by project (default: all projects, empty string: current project)
+                                                                                            [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode export --help 1`] = `
@@ -325,14 +367,17 @@ Positionals:
   sessionID  session id to export                                                           [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --sanitize    redact sensitive transcript and file data                              [boolean]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --sanitize      redact sensitive transcript and file data                            [boolean]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode import --help 1`] = `
@@ -344,13 +389,16 @@ Positionals:
   file  path to JSON file or share URL                                           [string] [required]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode github --help 1`] = `
@@ -363,13 +411,16 @@ Commands:
   altimate-code github run      run the GitHub agent
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode pr --help 1`] = `
@@ -381,13 +432,16 @@ Positionals:
   number  PR number to checkout                                                  [number] [required]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode session --help 1`] = `
@@ -400,13 +454,16 @@ Commands:
   altimate-code session delete <sessionID>  delete a session
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode plugin --help 1`] = `
@@ -418,15 +475,18 @@ Positionals:
   module  npm module name                                                        [string] [required]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-  -g, --global      install in global config                              [boolean] [default: false]
-  -f, --force       replace existing plugin version                       [boolean] [default: false]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+  -g, --global        install in global config                            [boolean] [default: false]
+  -f, --force         replace existing plugin version                     [boolean] [default: false]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode db --help 1`] = `
@@ -442,14 +502,17 @@ Positionals:
   query  SQL query to execute                                                               [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --format      Output format                 [string] [choices: "json", "tsv"] [default: "tsv"]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --format        Output format               [string] [choices: "json", "tsv"] [default: "tsv"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp list --help 1`] = `
@@ -458,13 +521,16 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 list MCP servers and their status
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp add --help 1`] = `
@@ -473,21 +539,24 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 add an MCP server
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --name        MCP server name                                                         [string]
-      --type        Server type                                [string] [choices: "local", "remote"]
-      --url         Server URL (for remote type)                                            [string]
-      --command     Command to run (for local type)                                         [string]
-      --env         Environment variables as key=value (repeatable)                          [array]
-      --header      HTTP headers as key=value (repeatable)                                   [array]
-      --oauth       Enable OAuth                                           [boolean] [default: true]
-      --global      Add to global config                                  [boolean] [default: false]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --name          MCP server name                                                       [string]
+      --type          Server type                              [string] [choices: "local", "remote"]
+      --url           Server URL (for remote type)                                          [string]
+      --command       Command to run (for local type)                                       [string]
+      --env           Environment variables as key=value (repeatable)                        [array]
+      --header        HTTP headers as key=value (repeatable)                                 [array]
+      --oauth         Enable OAuth                                         [boolean] [default: true]
+      --global        Add to global config                                [boolean] [default: false]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp auth --help 1`] = `
@@ -502,13 +571,16 @@ Positionals:
   name  name of the MCP server                                                              [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp logout --help 1`] = `
@@ -520,13 +592,16 @@ Positionals:
   name  name of the MCP server                                                              [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode providers list --help 1`] = `
@@ -535,13 +610,16 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 list providers and credentials
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode providers login --help 1`] = `
@@ -553,15 +631,18 @@ Positionals:
   url  altimate auth provider                                                               [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-  -p, --provider    provider id or name to log in to (skips provider selection)             [string]
-  -m, --method      login method label (skips method selection)                             [string]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+  -p, --provider      provider id or name to log in to (skips provider selection)           [string]
+  -m, --method        login method label (skips method selection)                           [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode providers logout --help 1`] = `
@@ -573,13 +654,16 @@ Positionals:
   provider  provider id or name to log out from                                             [string]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode agent create --help 1`] = `
@@ -595,6 +679,10 @@ Options:
       --pure                  run without external plugins                                 [boolean]
       --yolo                  auto-approve all permission prompts (explicit deny rules still
                               enforced)                                   [boolean] [default: false]
+      --integrations          where warehouse tools run: 'workspace' (default) lets the bound
+                              workspace's engine serve the types it provides; 'local' keeps every
+                              connection on the local drivers
+                                                            [string] [choices: "workspace", "local"]
       --path                  directory path to generate the agent file                     [string]
       --description           what the agent should do                                      [string]
       --mode                  agent mode            [string] [choices: "all", "primary", "subagent"]
@@ -610,13 +698,16 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 list all available agents
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode session list --help 1`] = `
@@ -625,15 +716,18 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 list sessions
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-  -n, --max-count   limit to N most recent sessions                                         [number]
-      --format      output format             [string] [choices: "table", "json"] [default: "table"]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+  -n, --max-count     limit to N most recent sessions                                       [number]
+      --format        output format           [string] [choices: "table", "json"] [default: "table"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode session delete --help 1`] = `
@@ -645,13 +739,16 @@ Positionals:
   sessionID  session ID to delete                                                [string] [required]
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode github install --help 1`] = `
@@ -660,13 +757,16 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 install the GitHub agent
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode github run --help 1`] = `
@@ -675,15 +775,18 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 run the GitHub agent
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
                                                                           [boolean] [default: false]
-      --event       GitHub mock event to run the agent for                                  [string]
-      --token       GitHub personal access token (github_pat_********)                      [string]"
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]
+      --event         GitHub mock event to run the agent for                                [string]
+      --token         GitHub personal access token (github_pat_********)                    [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode db path --help 1`] = `
@@ -692,11 +795,14 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 print the database path
 
 Options:
-  -h, --help        show help                                                              [boolean]
-  -v, --version     show version number                                                    [boolean]
-      --print-logs  print logs to stderr                                                   [boolean]
-      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-      --yolo        auto-approve all permission prompts (explicit deny rules still enforced)
-                                                                          [boolean] [default: false]"
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
 `;
