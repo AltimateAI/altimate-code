@@ -36,7 +36,7 @@ writeFileSync(
   }),
 )
 
-const { syncSkills } = await import("@/altimate/workspace/skill-sync")
+const { syncSkills, snapshotGeneration } = await import("@/altimate/workspace/skill-sync")
 const { cachePath } = await import("@/altimate/workspace/state")
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
@@ -296,6 +296,27 @@ describe("workspace skill sync", () => {
     // And specifically not one level up from where the skill would have gone.
     expect(existsSync(path.join(project, ".altimate-code", "skill", "escape.md"))).toBe(false)
     expect(existsSync(path.join(project, MANAGED, "escape.md"))).toBe(false)
+  })
+
+  test("the snapshot generation advances only when disk actually changed", async () => {
+    // Session start uses this counter to decide whether to drop the cached skill
+    // registry. Bumping it on an unchanged sync would make every turn pay a full
+    // config reread and re-scan; failing to bump it on a real change would leave
+    // the model looking at the previous workspace's skills.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const start = snapshotGeneration()
+    await syncSkills(project)
+    const afterWrite = snapshotGeneration()
+    expect(afterWrite).toBeGreaterThan(start)
+
+    // Same content, same updated_at: nothing to do.
+    await syncSkills(project)
+    expect(snapshotGeneration()).toBe(afterWrite)
+
+    // A newer updated_at is a real change.
+    serve({ "pub-1": { "SKILL.md": "two" } }, "2026-03-03T00:00:00Z")
+    await syncSkills(project)
+    expect(snapshotGeneration()).toBeGreaterThan(afterWrite)
   })
 
   test("does nothing when the workspace flag is off", async () => {
