@@ -1257,3 +1257,47 @@ describe("ensure — round 13", () => {
     expect(h.added).toHaveLength(0)
   })
 })
+
+describe("ensure — round 14", () => {
+  test("a cached success stops being trusted if the engine drops below the floor", async () => {
+    // The pin is only trustworthy because the floor is: engines below it do not
+    // lock the pin. An entry reconnected behind the same pin with a pre-floor
+    // binary would otherwise ride the cached success forever.
+    let version = "0.7.0"
+    let command = ["datamate", "start-stdio", "--datamate", "42"]
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.versionOf = async () => version
+    syncInternals.existingEntry = async () => ({ type: "local", command })
+
+    const first = await ensure("s1")
+    expect(first).toMatchObject({ kind: "attached" })
+
+    // The entry is replaced behind the same pin by an older engine.
+    command = ["/opt/old/datamate", "start-stdio", "--datamate", "42"]
+    version = "0.6.3"
+    const second = await ensure("s1")
+    expect(second).not.toBe(first)
+  })
+
+  test("an unchanged command is not re-probed every turn", async () => {
+    let probes = 0
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.versionOf = async () => {
+      probes += 1
+      return "0.7.0"
+    }
+    await ensure("s1")
+    const afterAttach = probes
+    await ensure("s1")
+    await ensure("s1")
+    // Probing spawns a process; the reuse path must not pay it on every turn.
+    expect(probes).toBeLessThanOrEqual(afterAttach + 1)
+    expect(h.added).toHaveLength(1)
+  })
+})

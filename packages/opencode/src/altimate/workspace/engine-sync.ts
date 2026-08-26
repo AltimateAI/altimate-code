@@ -56,7 +56,7 @@
 //
 // Gated on the workspace pilot flag; inert without a local binding.
 
-import { execFile } from "node:child_process"
+import launch from "cross-spawn"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { Instance } from "@/project/instance"
@@ -259,11 +259,33 @@ function which(cmd: string): string | null {
 function versionOf(bin: string): Promise<string | null> {
   if (syncInternals.versionOf) return syncInternals.versionOf(bin)
   return new Promise((resolve) => {
-    execFile(bin, ["--version"], { timeout: 5000 }, (err, stdout) => {
-      if (err) return resolve(null)
-      const line = String(stdout).trim().split(/\r?\n/)[0] ?? ""
-      resolve(line || null)
-    })
+    // cross-spawn, not execFile. An npm-installed engine on Windows is resolved
+    // by `which` to a `.cmd` shim (it honours PATHEXT), and Node cannot execute
+    // `.cmd` or `.bat` directly without a shell — the callback just errors. That
+    // would report "not runnable" to every bound Windows user with an ordinary
+    // global install, while MCP's own launcher started the same engine fine.
+    // This is the launcher the rest of the repo already uses for that reason.
+    let settled = false
+    const done = (value: string | null) => {
+      if (settled) return
+      settled = true
+      resolve(value)
+    }
+    try {
+      const child = launch(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 })
+      let out = ""
+      child.stdout?.on("data", (chunk) => {
+        out += String(chunk)
+      })
+      child.on("error", () => done(null))
+      child.on("close", (code) => {
+        if (code !== 0) return done(null)
+        const line = out.trim().split(/\r?\n/)[0] ?? ""
+        done(line || null)
+      })
+    } catch {
+      done(null)
+    }
   })
 }
 
@@ -855,7 +877,14 @@ async function run(): Promise<Outcome> {
  * answers costs the first turn a pause rather than the turn itself. */
 export const ATTACH_WAIT_MS = 15_000
 
-type SessionAttach = { key?: string; task: Promise<Outcome>; waitTimedOut?: boolean; outcome?: Outcome }
+type SessionAttach = {
+  key?: string
+  task: Promise<Outcome>
+  waitTimedOut?: boolean
+  outcome?: Outcome
+  /** The entry argv whose version we last verified against the floor. */
+  validated?: string
+}
 
 /** Outcomes the user can repair without restarting: install the engine, update
  * it, fix a broken entry. Caching these for the life of the session means the
@@ -887,14 +916,38 @@ function wasServing(outcome: Outcome | undefined): boolean {
  * reconnected until a new session or a re-link.
  *
  * Fails OPEN: a status read that throws must not invalidate a good attach. */
-async function engineStillOurs(workspaceId: string): Promise<boolean> {
+async function engineStillOurs(workspaceId: string, record?: SessionAttach): Promise<boolean> {
   try {
     if ((await mcp().status())[DATAMATE_KEY]?.status !== "connected") return false
     // Connected is not enough. Link A -> B -> A with another session attaching B
     // in between, and this session's key matches its original memo while the
     // instance-wide client is serving B — so the cached success would expose B's
     // tools under binding A. The pin is what makes it ours.
-    return pinnedWorkspace(await existingEntry(DATAMATE_KEY)) === workspaceId
+    const entry = await existingEntry(DATAMATE_KEY)
+    if (pinnedWorkspace(entry) !== workspaceId) return false
+
+    // The pin is not the whole contract: the FLOOR is what makes the pin
+    // trustworthy, since engines below it do not lock it. An entry reconnected
+    // or replaced behind the same pin with a pre-floor binary would otherwise
+    // ride the cached success forever, never passing through `run()` again.
+    //
+    // Re-probed only when the command CHANGES, because probing spawns a process
+    // and this runs every turn. The residual is narrow and worth naming: a
+    // binary swapped in place under an unchanged command is not caught until the
+    // next session.
+    const command = commandArgv(entry).join(" ")
+    if (record && record.validated === command) return true
+    const bin = commandArgv(entry)[0]
+    const direct = bin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(bin) ? bin : null
+    const found = direct ? await versionOf(direct) : null
+    if (!found || compareVersions(found, MIN_ENGINE_VERSION) < 0) {
+      log.info("cached attach no longer clears the version floor; re-attaching", { workspaceId, found })
+      return false
+    }
+    // Recorded on the CURRENT entry — the one that will be remembered and copied
+    // forward. Writing it to the previous entry would be discarded next turn.
+    if (record) record.validated = command
+    return true
   } catch (err) {
     log.warn("could not re-probe the engine attribution; keeping the cached attach", { err: String(err) })
     return true
@@ -972,6 +1025,10 @@ export function ensure(sessionID: string): Promise<Outcome> {
   const entry = {
     key: previous?.key,
     waitTimedOut: previous?.waitTimedOut || repairRetry,
+    // Carried forward, or the version re-probe spawns a process every turn: a
+    // fresh entry is built per call, so state that is not copied is state that
+    // is silently rebuilt.
+    validated: previous?.validated,
   } as SessionAttach
   entry.task = (async (): Promise<Outcome> => {
     const key = await attachKey()
@@ -982,7 +1039,7 @@ export function ensure(sessionID: string): Promise<Outcome> {
     if (sameWorkspace && !isRepairable(previous!.outcome)) {
       // Re-probe before trusting a cached success — see `engineStillConnected`.
       const boundTo = await attachKeyWorkspace()
-      if (!wasServing(previous!.outcome) || !boundTo || (await engineStillOurs(boundTo))) return previous!.task
+      if (!wasServing(previous!.outcome) || !boundTo || (await engineStillOurs(boundTo, entry))) return previous!.task
       log.info("cached attach is no longer connected; re-attaching", { sessionID })
     }
     entry.key = key
