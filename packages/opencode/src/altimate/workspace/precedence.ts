@@ -47,7 +47,7 @@ import { Instance } from "@/project/instance"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { PermissionNext } from "@/permission/next"
 import { DATAMATE_KEY } from "../datamate-transport"
-import { engineToolKeys, ensure, isEnabled, pinnedWorkspace, type ExistingEntry, type Outcome } from "./engine-sync"
+import { engineToolKeys, isEnabled, pinnedWorkspace, settledOutcome, type ExistingEntry, type Outcome } from "./engine-sync"
 import { readLocalBinding } from "./state"
 import { canonicalType } from "../native/connections/registry"
 import * as Registry from "../native/connections/registry"
@@ -130,7 +130,7 @@ const bySession = new Map<string, Precedence>()
 export const precedenceInternals: {
   binding?: () => Promise<{ datamateId: number; datamateName: string } | null>
   attributedTo?: () => Promise<string | null>
-  attachOutcome?: () => Promise<Outcome>
+  attachOutcome?: () => Promise<Outcome | undefined>
   announce?: (line: string) => Promise<void>
 } = {}
 
@@ -153,24 +153,32 @@ function remember(sessionID: string, value: Precedence): void {
 }
 
 /**
- * Did an attach actually produce the engine now serving this session? The saved
- * config is not sufficient on its own: an entry can be rewritten — by an IDE, say —
+ * Did an attach actually produce the engine now serving this session?
+ *
+ * The saved config is not enough on its own: an entry can be rewritten — by an IDE —
  * from unpinned to pinned while MCP goes on serving the process it already connected,
- * so the config would claim this workspace while the running engine serves another.
- * The attach outcome is the runtime-grounded signal, because `attached` means we
- * spawned a pinned engine and `reused` means attach verified one before adopting it.
+ * so the config would name this workspace while the running engine serves another.
+ * The attach outcome is the runtime-grounded signal: `attached` means a pinned engine
+ * was spawned, `reused` means attach verified one before adopting it.
+ *
+ * Read through `settledOutcome`, which is a pure read of state already held. The
+ * attach task itself must NOT be awaited here — the prompt loop caps its own wait and
+ * lets a turn proceed without engine tools past the cap, so awaiting it would hang
+ * every affected turn on a broken connection for the full connection timeout.
+ *
+ * `undefined` means "not known yet", and cannot be told apart from "never attached".
+ * Both are treated as unattested: precedence stays off and the call runs locally with
+ * a notice. Being wrong in that direction costs a turn's routing, which the next turn
+ * repairs; being wrong the other way routes credentials into someone else's engine.
  */
 async function attested(sessionID: string): Promise<boolean> {
-  try {
-    const outcome = precedenceInternals.attachOutcome
-      ? await precedenceInternals.attachOutcome()
-      : await ensure(sessionID)
-    return outcome.kind === "attached" || outcome.kind === "reused"
-  } catch (err) {
-    log.warn("could not establish the attach outcome", { err: String(err) })
-    return false
-  }
+  const outcome = precedenceInternals.attachOutcome
+    ? await precedenceInternals.attachOutcome().catch(() => undefined)
+    : settledOutcome(sessionID)
+  if (!outcome) return false
+  return outcome.kind === "attached" || outcome.kind === "reused"
 }
+
 
 /** Sessions whose inventory line has already been reported. Precedence is re-derived
  * every turn, but the inventory is a once-per-session statement of what changed. */

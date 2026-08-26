@@ -155,6 +155,36 @@ describe("attribution is grounded in the attach, not only the saved config", () 
     expect(p.enabled).toBe(false)
   })
 
+  test("an attach still in flight confers no precedence, and does not wait for it", async () => {
+    // The attach task is deliberately uncapped: the prompt loop bounds its own wait and
+    // lets a turn proceed without engine tools past the cap, so a broken connection
+    // cannot hold up the conversation. Attribution reads `settledOutcome`, a pure read
+    // of state already held, so it cannot reintroduce that wait — an earlier version
+    // awaited the task itself and hung the turn for the full connection timeout.
+    //
+    // `undefined` covers both "in flight" and "never attached"; they are
+    // indistinguishable, and both must fail open rather than route.
+    precedenceInternals.attachOutcome = async () => undefined
+    const started = Date.now()
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("unattributed")
+  })
+
+  test("an unattested session runs locally rather than being blocked", async () => {
+    precedenceInternals.attachOutcome = async () => undefined
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+  })
+
+  test("a settled outcome is still read, so the common case is unaffected", async () => {
+    precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(true)
+  })
+
   test("only an established attach qualifies — every other outcome is refused", async () => {
     // Asserts the invariant rather than a sample of it: the allowlist is exactly
     // {attached, reused}, so a new Outcome variant defaults to refusing rather than
