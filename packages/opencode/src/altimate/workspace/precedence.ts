@@ -288,7 +288,16 @@ export interface Verdict {
 
 const RUN: Verdict = {}
 
-function redirectFor(capability: Capability, entry: ShadowEntry, workspaceName: string, connection: string): Verdict {
+function redirectFor(
+  capability: Capability,
+  entry: ShadowEntry,
+  workspaceName: string,
+  connection: string,
+  /** Set when the call was routed because the *fallback* target is served, not the
+   * target it would have tried first. The dbt attempt might well have succeeded, so
+   * the message has to say why this was refused and how to insist. */
+  viaDbtFallback = false,
+): Verdict {
   return {
     redirect: {
       title: `Routed to workspace ${workspaceName}`,
@@ -302,12 +311,20 @@ function redirectFor(capability: Capability, entry: ShadowEntry, workspaceName: 
         workspace: workspaceName,
         capability,
         connection,
+        ...(viaDbtFallback ? { via: "dbt-fallback" } : {}),
       },
-      output:
-        `Not run locally. Workspace "${workspaceName}" serves ${entry.integration} through its integration engine, ` +
-        `so this connection is served by \`${entry.modelKey}\`.\n\n` +
-        `Call \`${entry.modelKey}\` instead. ` +
-        `To use the local connection for this session, restart with \`--integrations=local\`.`,
+      output: viaDbtFallback
+        ? `Not run locally. This call names no warehouse, so it resolves through the dbt project — and if dbt ` +
+          `returns nothing it falls back to the local connection \`${connection}\`, which workspace ` +
+          `"${workspaceName}" serves through its integration engine. Whether it lands on dbt or on that ` +
+          `connection is only known once it runs, so it is not run.\n\n` +
+          `Call \`${entry.modelKey}\` instead. If you meant the dbt path specifically, either name the ` +
+          `warehouse you want (\`warehouse=${connection}\` routes to the engine; any unserved connection runs ` +
+          `locally), or restart with \`--integrations=local\` to keep every connection on the local drivers.`
+        : `Not run locally. Workspace "${workspaceName}" serves ${entry.integration} through its integration engine, ` +
+          `so this connection is served by \`${entry.modelKey}\`.\n\n` +
+          `Call \`${entry.modelKey}\` instead. ` +
+          `To use the local connection for this session, restart with \`--integrations=local\`.`,
     },
   }
 }
@@ -365,7 +382,7 @@ export async function check(sessionID: string, capability: Capability, warehouse
     const fallbackType = canonicalType(target.fallback.type)
     const fallbackEntry = fallbackType ? precedence.shadowed.get(fallbackType)?.get(capability) : undefined
     if (fallbackEntry) {
-      return redirectFor(capability, fallbackEntry, precedence.workspaceName, target.fallback.name)
+      return redirectFor(capability, fallbackEntry, precedence.workspaceName, target.fallback.name, true)
     }
   }
   return RUN

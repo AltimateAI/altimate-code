@@ -249,6 +249,18 @@ describe("mechanism 4 — the redirect", () => {
   })
 })
 
+describe("the dbt-fallback redirect explains itself", () => {
+  test("names the fallback connection and both ways out", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    // Reach the fallback branch directly: the default target is dbt with a served
+    // registry fallback behind it.
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    // (the explicit-warehouse path shares redirectFor; assert the plain wording here)
+    expect(verdict.redirect!.output).toContain("--integrations=local")
+    expect(verdict.redirect!.metadata.via).toBeUndefined()
+  })
+})
+
 describe("mechanism 6 — the escape hatch", () => {
   test("--integrations=local turns shadowing off for the session", async () => {
     process.env.ALTIMATE_INTEGRATIONS = "local"
