@@ -32,7 +32,7 @@ type Harness = {
   added: Array<{ name: string; cfg: LocalMcpConfig }>
   persisted: Array<{ name: string; cfg: LocalMcpConfig }>
   connects: string[]
-  disconnects: string[]
+  removes: string[]
   toasts: Array<{ title: string; message: string; variant: string }>
   statusQueue: Array<Record<string, { status: string; error?: string } | undefined>>
   tools: Record<string, unknown>
@@ -51,7 +51,7 @@ function install(opts: {
     added: [],
     persisted: [],
     connects: [],
-    disconnects: [],
+    removes: [],
     toasts: [],
     statusQueue: opts.statuses ?? [{}],
     tools: opts.tools ?? {},
@@ -79,8 +79,8 @@ function install(opts: {
     connect: async (name) => {
       h.connects.push(name)
     },
-    disconnect: async (name) => {
-      h.disconnects.push(name)
+    remove: async (name) => {
+      h.removes.push(name)
     },
     tools: async () => h.tools,
   }
@@ -234,7 +234,7 @@ describe("ensure", () => {
       replaced: "http://localhost:7801/sse",
     })
     expect(h.connects).toHaveLength(0) // no pointless retry of a dead port
-    expect(h.disconnects).toHaveLength(0) // a dead URL has nothing live to close
+    expect(h.removes).toHaveLength(0) // a dead URL has nothing live to close
     expect(h.added).toHaveLength(1)
     expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
     expect(h.toasts[0].message).toContain("Replaced the unreachable engine URL http://localhost:7801/sse")
@@ -363,9 +363,11 @@ describe("ensure — attribution of a CONNECTED entry", () => {
     })
     // The replacement is a pinned spawn, so the engine we end up on is ours.
     expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
-    // ...and the live one it displaced was CLOSED first. `MCP.add` does not close
-    // the client it overwrites, so skipping this orphans a second live engine.
-    expect(h.disconnects).toEqual(["datamate"])
+    // ...and the live one it displaced was torn down first. `MCP.add` does not
+    // close the client it overwrites, so skipping this orphans a second live
+    // engine. It must be `remove` (runtime-only), never `disconnect`, which
+    // would persist `enabled: false` into the config that owns the entry.
+    expect(h.removes).toEqual(["datamate"])
     expect(h.toasts[0].message).toContain("not pinned to this workspace")
   })
 
@@ -401,7 +403,7 @@ describe("ensure — attribution of a CONNECTED entry", () => {
     expect(await ensure("s1")).toEqual({ kind: "reused", available: 2 })
     expect(h.added).toHaveLength(0)
     expect(h.persisted).toHaveLength(0)
-    expect(h.disconnects).toHaveLength(0) // reuse must never close what it reuses
+    expect(h.removes).toHaveLength(0) // reuse must never tear down what it reuses
   })
 
   test("a recovered entry is gated too: retried back to life but unpinned, it is replaced", async () => {
@@ -456,5 +458,106 @@ describe("ensure — the version floor applies to a REUSED entry", () => {
     })
     expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "unknown" })
     expect(h.added).toHaveLength(0)
+  })
+})
+
+describe("compareVersions — pre-release precedence (SemVer §11.3)", () => {
+  test("a pre-release of the floor version does NOT clear the floor", () => {
+    // The floor exists to require behaviour that shipped in a release; a
+    // pre-release of that version predates it, so it must rank below.
+    expect(compareVersions("0.7.0-beta.1", "0.7.0")).toBeLessThan(0)
+    expect(compareVersions("0.7.0", "0.7.0-beta.1")).toBeGreaterThan(0)
+    expect(compareVersions("0.7.0-beta.1", MIN_ENGINE_VERSION)).toBeLessThan(0)
+  })
+  test("identifiers order by SemVer rules", () => {
+    expect(compareVersions("0.7.0-alpha", "0.7.0-beta")).toBeLessThan(0)
+    expect(compareVersions("0.7.0-beta.2", "0.7.0-beta.10")).toBeLessThan(0) // numeric, not lexical
+    expect(compareVersions("0.7.0-alpha", "0.7.0-alpha.1")).toBeLessThan(0) // fewer fields rank lower
+    expect(compareVersions("0.7.0-alpha.1", "0.7.0-alpha.beta")).toBeLessThan(0) // numeric < alphanumeric
+    expect(compareVersions("0.7.0-beta.1", "0.7.0-beta.1")).toBe(0)
+  })
+  test("build metadata is ignored", () => {
+    expect(compareVersions("0.7.0+build.5", "0.7.0")).toBe(0)
+    expect(compareVersions("0.8.0+x", "0.7.0")).toBeGreaterThan(0)
+  })
+  test("a release still outranks an older release", () => {
+    expect(compareVersions("0.7.1", "0.7.0")).toBeGreaterThan(0)
+    expect(compareVersions("0.6.9", "0.7.0")).toBeLessThan(0)
+  })
+})
+
+describe("ensure — pre-release engines are refused", () => {
+  test("an engine reporting a pre-release of the floor is too old", async () => {
+    const h = install({ version: "0.7.0-beta.1" })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "0.7.0-beta.1" })
+    expect(h.added).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+  })
+})
+
+describe("ensure — the memo follows the BINDING, not just the session id", () => {
+  const spawnTwice: Harness["statusQueue"] = [
+    {},
+    { datamate: { status: "connected" } },
+    {},
+    { datamate: { status: "connected" } },
+  ]
+
+  test("a re-link mid-session attaches the NEW workspace", async () => {
+    // recordApprovedBinding is reachable mid-session from the TUI workspace
+    // panel, so a live session's binding really can change under it.
+    let current: CachedBinding | null = binding // datamate 42
+    const h = install({ statuses: spawnTwice, tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+
+    const first = await ensure("s1")
+    expect(first).toMatchObject({ kind: "attached" })
+    expect(h.added[0].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+
+    current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    const second = await ensure("s1")
+    expect(second).toMatchObject({ kind: "attached" })
+    expect(h.added).toHaveLength(2)
+    expect(h.added[1].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "99"])
+  })
+
+  test("a session that starts UNBOUND attaches once the project is linked", async () => {
+    let current: CachedBinding | null = null
+    const h = install({ statuses: spawnTwice, tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+
+    expect(await ensure("s1")).toEqual({ kind: "unbound" })
+    expect(h.added).toHaveLength(0)
+
+    current = binding
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("an unchanged binding is still memoised — no second attach per turn", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const first = await ensure("s1")
+    const second = await ensure("s1")
+    const third = await ensure("s1")
+    expect(second).toBe(first)
+    expect(third).toBe(first)
+    expect(h.added).toHaveLength(1)
+    expect(h.persisted).toHaveLength(1)
+  })
+
+  test("registration is SYNCHRONOUS, so whenAttached on the next line sees it", async () => {
+    // ensure() must not await before registering: prompt.ts calls whenAttached
+    // immediately after, and a late registration would make the turn skip the
+    // wait entirely — the exact first-turn gap this module closes.
+    const h = install({ tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.versionOf = () => new Promise<string | null>(() => {}) // never settles
+    void ensure("s1")
+    const started = performance.now()
+    await whenAttached("s1", 30)
+    expect(performance.now() - started).toBeGreaterThanOrEqual(20)
+    expect(h).toBeDefined()
   })
 })

@@ -124,7 +124,7 @@ export const syncInternals: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
     connect: (name: string) => Promise<unknown>
-    disconnect: (name: string) => Promise<unknown>
+    remove: (name: string) => Promise<unknown>
     tools: () => Promise<Record<string, unknown>>
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
@@ -138,22 +138,55 @@ export function isEnabled(): boolean {
   return CoreFlag.ALTIMATE_WORKSPACE
 }
 
-/** Numeric semver compare on the `major.minor.patch` core; pre-release tags
- * are ignored. Returns <0, 0, >0. Non-numeric input compares as older. */
+/** SemVer precedence compare. Returns <0, 0, >0.
+ *
+ * Build metadata is ignored, and a NON-numeric core component compares as older
+ * so unreadable `--version` output can never clear a floor.
+ *
+ * Pre-release ordering is honoured rather than stripped: `0.7.0-beta.1` is
+ * BELOW `0.7.0`. That matters here — the floor exists to require behaviour that
+ * shipped in a specific release (the locked `--datamate` pin), and a pre-release
+ * of that version predates it. Treating them as equal let a beta clear the floor
+ * and be trusted for reuse. */
 export function compareVersions(a: string, b: string): number {
-  const parse = (v: string) =>
-    v
-      .trim()
-      .replace(/^v/, "")
-      .split("-")[0]
-      .split(".")
-      .map((n) => Number.parseInt(n, 10))
-  const pa = parse(a)
-  const pb = parse(b)
+  const split = (v: string) => {
+    const bare = v.trim().replace(/^v/, "")
+    const plus = bare.indexOf("+")
+    const noBuild = plus >= 0 ? bare.slice(0, plus) : bare
+    const dash = noBuild.indexOf("-")
+    return {
+      core: (dash >= 0 ? noBuild.slice(0, dash) : noBuild).split(".").map((n) => Number.parseInt(n, 10)),
+      pre: dash >= 0 ? noBuild.slice(dash + 1) : "",
+    }
+  }
+  const pa = split(a)
+  const pb = split(b)
   for (let i = 0; i < 3; i++) {
-    const x = Number.isFinite(pa[i]) ? pa[i] : -1
-    const y = Number.isFinite(pb[i]) ? pb[i] : -1
+    const x = Number.isFinite(pa.core[i]) ? pa.core[i] : -1
+    const y = Number.isFinite(pb.core[i]) ? pb.core[i] : -1
     if (x !== y) return x - y
+  }
+  // Same core: a release outranks every pre-release of it (SemVer §11.3).
+  if (!pa.pre && !pb.pre) return 0
+  if (!pa.pre) return 1
+  if (!pb.pre) return -1
+  const ia = pa.pre.split(".")
+  const ib = pb.pre.split(".")
+  for (let i = 0; i < Math.max(ia.length, ib.length); i++) {
+    const x = ia[i]
+    const y = ib[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    const nx = /^\d+$/.test(x)
+    const ny = /^\d+$/.test(y)
+    if (nx && ny) {
+      const d = Number(x) - Number(y)
+      if (d !== 0) return d
+    } else if (nx !== ny) {
+      return nx ? -1 : 1
+    } else if (x !== y) {
+      return x < y ? -1 : 1
+    }
   }
   return 0
 }
@@ -220,7 +253,7 @@ function mcp() {
       status: () => MCP.status() as Promise<McpStatus>,
       add: (name: string, cfg: LocalMcpConfig) => MCP.add(name, cfg),
       connect: (name: string) => MCP.connect(name),
-      disconnect: (name: string) => MCP.disconnect(name),
+      remove: (name: string) => MCP.remove(name),
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,
     }
   )
@@ -486,7 +519,14 @@ async function run(): Promise<Outcome> {
     // Close the live registration first: `MCP.add` does not close the client it
     // overwrites, so adding over a running stdio server starts a second engine
     // and abandons the first with its pipes still open.
-    await client.disconnect(DATAMATE_KEY).catch((err) => {
+    //
+    // `remove`, NOT `disconnect`. `MCP.disconnect` persists `enabled: false` to
+    // whichever config file actually holds the entry — which for an IDE-written
+    // or user-global `datamate` is the GLOBAL config. Our replacement is written
+    // project-locally, so disconnecting would leave the user's engine disabled in
+    // every OTHER project. `remove` is runtime-only teardown: it closes the
+    // client, drops it from state, and publishes ToolsChanged, touching no file.
+    await client.remove(DATAMATE_KEY).catch((err) => {
       log.warn("could not close the engine entry being replaced", { err: String(err) })
     })
   }
@@ -538,14 +578,51 @@ async function run(): Promise<Outcome> {
  * answers costs the first turn a pause rather than the turn itself. */
 export const ATTACH_WAIT_MS = 15_000
 
-type SessionAttach = { task: Promise<Outcome>; waitTimedOut?: boolean }
+type SessionAttach = { key?: string; task: Promise<Outcome>; waitTimedOut?: boolean }
 
 const sessions = new Map<string, SessionAttach>()
 
-export async function ensure(sessionID: string): Promise<Outcome> {
-  const existing = sessions.get(sessionID)
-  if (existing) return existing.task
-  const task = run()
+/** What a memoised attach is valid FOR.
+ *
+ * Memoising on the session id alone was wrong: the binding can change while a
+ * session is open — `recordApprovedBinding` is reachable mid-session from the
+ * TUI workspace panel as well as from `altimate-code link`. A session that
+ * started unbound would then never attach, and one that was re-linked to another
+ * workspace would keep serving the old workspace's tools, both silently and for
+ * the rest of the session. Keying on the bound workspace makes a re-link produce
+ * a fresh attach on the next turn and leaves everything else memoised as before. */
+async function attachKey(): Promise<string> {
+  if (!isEnabled()) return "disabled"
+  const binding = await resolveBinding()
+  return binding ? `workspace:${binding.datamateId}` : "unbound"
+}
+
+export function ensure(sessionID: string): Promise<Outcome> {
+  // NOT async, and the entry is registered SYNCHRONOUSLY. `whenAttached` is
+  // called on the line after this one and looks the session up by id; if the
+  // registration happened after an await, that lookup would find nothing and the
+  // turn would sail past without waiting — which is exactly the first-turn gap
+  // this module exists to close. All the async work happens inside the task.
+  const previous = sessions.get(sessionID)
+  const entry = { key: previous?.key, waitTimedOut: previous?.waitTimedOut } as SessionAttach
+  entry.task = (async (): Promise<Outcome> => {
+    const key = await attachKey()
+    // Same workspace as the attach we already did for this session: reuse it.
+    if (previous && previous.key === key) return previous.task
+    // First attach for this session, or the binding changed under it. A changed
+    // binding gets a fresh attach AND a fresh wait budget: the previous budget
+    // was spent on a different workspace's engine.
+    entry.key = key
+    entry.waitTimedOut = false
+    return attachOnce(sessionID)
+  })()
+  sessions.set(sessionID, entry)
+  return entry.task
+}
+
+/** One attach, with the outcome logged exactly once. */
+function attachOnce(sessionID: string): Promise<Outcome> {
+  return run()
     .catch((err): Outcome => {
       log.warn("workspace engine attach failed", { err: String(err) })
       return { kind: "connect-failed", error: String(err) }
@@ -556,8 +633,6 @@ export async function ensure(sessionID: string): Promise<Outcome> {
       log.info("workspace engine outcome", { sessionID, ...outcome })
       return outcome
     })
-  sessions.set(sessionID, { task })
-  return task
 }
 
 /** Wait for a session's in-flight attach, capped.
