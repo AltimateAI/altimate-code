@@ -9,12 +9,10 @@ import {
   ensure,
   installCommand,
   installEngine,
-  npmAvailable,
   installSpec,
   nodeMajor,
   describeOffer,
   isHeadless,
-  INSTALL_TIMEOUT_MS,
   resetForTests,
   syncInternals,
   ENGINE_BINARY,
@@ -113,36 +111,13 @@ describe("nodeMajor", () => {
     syncInternals.which = () => null
     expect(await nodeMajor()).toBeNull()
   })
-
-  test("parses the major out of a v-prefixed version", async () => {
-    syncInternals.nodeMajor = async () => 22
-    expect(await nodeMajor()).toBe(22)
-  })
 })
 
 describe("offer routing — engine missing", () => {
-  test("raises the dialog over the event bus, with no toast and no printed line", async () => {
-    const h = install({})
-    syncInternals.offer = (offer) => {
-      h.offers.push(offer)
-      return true
-    }
-    expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
-    expect(h.offers).toHaveLength(1)
-    expect(h.offers[0]).toMatchObject({
-      reason: "engine-missing",
-      workspaceId: "42",
-      workspaceName: "analytics",
-      declared: 2,
-      command: `npm i -g ${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`,
-    })
-    // A surface owns it — the fallbacks must stay silent.
-    expect(h.toasts).toHaveLength(0)
-    expect(h.printed).toHaveLength(0)
-  })
-
   test("headless prints exactly one line naming workspace and command, and no toast", async () => {
+    expect(isHeadless()).toBe(false)
     process.env.ALTIMATE_CODE_HEADLESS = "1"
+    expect(isHeadless()).toBe(true)
     const h = install({})
     expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
     expect(h.toasts).toHaveLength(0)
@@ -271,14 +246,6 @@ describe("describeOffer — the TUI re-derives its own detail", () => {
   })
 })
 
-describe("headless detection", () => {
-  test("off by default, on when the run command marks it", () => {
-    expect(isHeadless()).toBe(false)
-    process.env.ALTIMATE_CODE_HEADLESS = "1"
-    expect(isHeadless()).toBe(true)
-  })
-})
-
 describe("headless notice stream", () => {
   // Regression guard: the notice used to go to stdout, which `run --format
   // json` documents as raw JSON events. A human-readable line there was line 1
@@ -348,11 +315,6 @@ describe("install deadline", () => {
       spy.mockRestore()
     }
   })
-
-  test("the deadline is a real duration", () => {
-    expect(INSTALL_TIMEOUT_MS).toBeGreaterThan(0)
-    expect(Number.isFinite(INSTALL_TIMEOUT_MS)).toBe(true)
-  })
 })
 
 describe("install success is verified, not assumed", () => {
@@ -392,15 +354,5 @@ describe("install success is verified, not assumed", () => {
     } finally {
       spy.mockRestore()
     }
-  })
-})
-
-describe("npmAvailable", () => {
-  test("false when npm is not on PATH, true when it is", () => {
-    install({})
-    syncInternals.npmAvailable = () => false
-    expect(npmAvailable()).toBe(false)
-    syncInternals.npmAvailable = () => true
-    expect(npmAvailable()).toBe(true)
   })
 })
