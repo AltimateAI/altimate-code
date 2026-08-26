@@ -1203,6 +1203,8 @@ interface EngineOfferProps {
    * so the dialog itself stays sync (same shape as ``browserAvailable``). */
   nodeMajor: number | null
   latchScope: LatchScope | null
+  /** Which raise owns the single-offer latch; only the owner releases it. */
+  generation: number
 }
 
 /** One DialogSelect for every phase — the row set changes, the component never
@@ -1224,8 +1226,9 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   onCleanup(() => {
     mounted = false
     // Release the single-offer latch however this dialog goes away — chosen,
-    // dismissed, or replaced — so a later turn can offer again.
-    engineOfferVisible = false
+    // dismissed, or replaced — but only if this dialog still owns it. A
+    // superseded dialog tearing down must not free a slot the newer one holds.
+    if (engineOfferGeneration === props.generation) engineOfferVisible = false
   })
   // ``onSelect`` is delivered synchronously per Enter keypress; the install is
   // a multi-minute await. Without this latch a second Enter starts a second
@@ -1396,6 +1399,9 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
  * availability and latch scope are resolved before rendering so the dialog
  * itself stays sync. */
 let engineOfferVisible = false
+/** Identifies which raise owns the latch, so a superseded dialog's teardown
+ * cannot free a slot that a newer dialog is still holding. */
+let engineOfferGeneration = 0
 
 async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
   // The attach re-probes a repairable failure on every turn, so the offer can
@@ -1404,21 +1410,43 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
   // the user's keystrokes into its own filter. Observed end-to-end: after a
   // successful install the pane showed a second offer in its idle phase and
   // typing went to the dialog rather than the prompt. One offer at a time.
+  //
+  // The slot is reserved BEFORE the first await. Discovery below awaits three
+  // times, and a check-then-act guard placed after them lets two dispatches
+  // that arrive close together both pass — which is worse than the bug it
+  // fixes, because the second dialog can replace an installing one and start a
+  // concurrent global npm install.
   if (engineOfferVisible) return
-  const offer = await describeOffer(api.state.path.directory)
-  // Null means the situation resolved between the attach and this dialog — an
-  // engine appeared, or the project is no longer bound. Say nothing.
-  if (!offer) return
-  const latchScope = await currentLatchScope()
-  if (isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
-    log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
-    return
-  }
-  const major = await detectNodeMajor()
   engineOfferVisible = true
-  api.ui.dialog.replace(() => (
-    <EngineInstallOfferDialog api={api} offer={offer} nodeMajor={major} latchScope={latchScope} />
-  ))
+  const generation = ++engineOfferGeneration
+  const release = () => {
+    // Only the current owner may free the slot.
+    if (engineOfferGeneration === generation) engineOfferVisible = false
+  }
+  try {
+    const offer = await describeOffer(api.state.path.directory)
+    // Null means the situation resolved between the attach and this dialog — an
+    // engine appeared, or the project is no longer bound. Say nothing.
+    if (!offer) return release()
+    const latchScope = await currentLatchScope()
+    if (isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
+      log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
+      return release()
+    }
+    const major = await detectNodeMajor()
+    api.ui.dialog.replace(() => (
+      <EngineInstallOfferDialog
+        api={api}
+        offer={offer}
+        nodeMajor={major}
+        latchScope={latchScope}
+        generation={generation}
+      />
+    ))
+  } catch (err) {
+    release()
+    throw err
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
