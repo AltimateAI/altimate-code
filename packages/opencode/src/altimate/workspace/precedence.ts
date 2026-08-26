@@ -153,6 +153,7 @@ function remember(sessionID: string, value: Precedence): void {
     if (oldest.done) break
     bySession.delete(oldest.value)
     announced.delete(oldest.value)
+    publishing.delete(oldest.value)
   }
 }
 
@@ -191,11 +192,22 @@ async function attested(sessionID: string): Promise<boolean> {
  * looks identical to no engine — and precedence is deliberately re-derived every
  * turn, so the truth can change under a session that has already been told. Comparing
  * the line means a correction is delivered and an unchanged one stays quiet. */
-/** What each session was last told, and whether that statement described actual
- * routing. The flag matters: "shadowing off, the engine could not be attributed" is a
- * non-empty announcement that is NOT routing, so treating any prior announcement as
- * routing would later claim routing had stopped when it never started. */
+/** What each session has actually been told, and whether that statement described
+ * actual routing. The flag matters: "shadowing off, the engine could not be
+ * attributed" is a non-empty announcement that is NOT routing, so treating any prior
+ * announcement as routing would later claim routing had stopped when it never started.
+ *
+ * Only confirmed deliveries are written here. An optimistic record cannot live in this
+ * map even briefly: two refreshes can publish different lines before either settles,
+ * and rolling one back to the other's unconfirmed value would claim a delivery that
+ * never happened, silencing that line for good. */
 const announced = new Map<string, { line: string; routed: boolean }>()
+
+/** The announcement currently being published for a session, held separately so it can
+ * never be mistaken for one that arrived. It exists only to stop a second refresh in
+ * the same window from sending the same line twice; a failed attempt leaves `announced`
+ * untouched, so the next turn simply tries again. */
+const publishing = new Map<string, { line: string; routed: boolean }>()
 
 /** Said when routing stops entirely, which `inventoryLine` renders as an empty string
  * because there is nothing left to enumerate. Silence is the wrong answer only here:
@@ -307,18 +319,18 @@ export async function refresh(
   const routed = result.enabled && current !== ""
   // Only a session that was actually routing can be told routing has stopped.
   const line = current || (previous?.routed ? STOPPED_ROUTING : "")
-  if (line && previous?.line !== line) {
-    // Record before publishing so a second refresh landing in the same window does not
-    // send the line twice, then put the record back if delivery failed. The bridge can
-    // be briefly unavailable, and that failure is recoverable — but only if the line is
-    // not remembered as delivered, since a later turn with the same inventory would
-    // otherwise skip it as unchanged and the session would never hear it.
-    announced.set(sessionID, { line, routed })
+  if (line && previous?.line !== line && publishing.get(sessionID)?.line !== line) {
+    // The attempt is its own object, so identity alone settles which one is current:
+    // a publication that finishes after a newer one started finds its attempt gone and
+    // records nothing. Nothing reaches `announced` until the line actually arrives, so
+    // a failure — or a lost race — leaves the session's known state untouched and the
+    // next turn retries.
+    const attempt = { line, routed }
+    publishing.set(sessionID, attempt)
     void announce(line).then((delivered) => {
-      if (delivered) return
-      if (announced.get(sessionID)?.line !== line) return
-      if (previous) announced.set(sessionID, previous)
-      else announced.delete(sessionID)
+      if (publishing.get(sessionID) !== attempt) return
+      publishing.delete(sessionID)
+      if (delivered) announced.set(sessionID, attempt)
     })
   }
   return result
@@ -394,6 +406,7 @@ export function trackedSessionCount(): number {
 export function resetForTests(): void {
   bySession.clear()
   announced.clear()
+  publishing.clear()
   delete precedenceInternals.announce
   delete precedenceInternals.binding
   delete precedenceInternals.attributedTo

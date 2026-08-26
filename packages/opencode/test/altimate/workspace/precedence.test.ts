@@ -597,6 +597,59 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(delivered.some((l) => l.includes("any more"))).toBe(true)
   })
 
+  test("two announcements failing while they overlap are both still owed", async () => {
+    // Precedence is re-derived every turn, so a second refresh can publish a different
+    // line before the first has settled. If the rollback restored the earlier record,
+    // it would restore a line that was never delivered either — and a later turn
+    // returning to that inventory would skip it as already said. Nothing may be treated
+    // as delivered until it arrives, whatever order the publications settle in.
+    const attempts: string[] = []
+    const fail: Array<() => void> = []
+    precedenceInternals.announce = (line) => {
+      attempts.push(line)
+      return new Promise<void>((_resolve, reject) => fail.push(() => reject(new Error("bridge down"))))
+    }
+
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]).not.toBe(attempts[1])
+
+    // Both fail, in the order they were sent.
+    for (const reject of fail) reject()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // Neither arrived, so the first inventory is still unsaid.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(attempts).toHaveLength(3)
+    expect(attempts[2]).toBe(attempts[0])
+  })
+
+  test("a publication overtaken by a newer one does not record the line it lost to", async () => {
+    // Out-of-order settlement: the older publication succeeds after a newer one has
+    // started. It must not write itself in as the session's current knowledge, or the
+    // newer line is skipped as already said.
+    const attempts: string[] = []
+    const settle: Array<() => void> = []
+    precedenceInternals.announce = (line) => {
+      attempts.push(line)
+      return new Promise<void>((resolve) => settle.push(resolve))
+    }
+
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, BIGQUERY_TOOLS)
+    // The FIRST publication lands last.
+    settle[1]()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    settle[0]()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // The session's state is the line that actually won, so re-deriving the same
+    // inventory stays quiet rather than repeating it.
+    await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(attempts).toHaveLength(2)
+  })
+
   test("a session that never had routing is still told nothing", async () => {
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)
