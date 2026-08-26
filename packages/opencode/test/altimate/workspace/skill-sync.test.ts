@@ -11,7 +11,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
-import { createHash } from "node:crypto"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
 const ORIGINAL_TEST_HOME = process.env.OPENCODE_TEST_HOME
@@ -42,10 +41,6 @@ const { cachePath } = await import("@/altimate/workspace/state")
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
 const ORIGINAL_FETCH = globalThis.fetch
-
-function sha(s: string) {
-  return createHash("sha256").update(Buffer.from(s)).digest("hex")
-}
 
 let project: string
 
@@ -95,26 +90,44 @@ afterAll(() => {
   }
 })
 
-/** Serve a skill list plus its file bodies. */
-function serve(skills: Record<string, Record<string, string>>) {
-  const list = Object.entries(skills).map(([id, files]) => ({
+/** Serve the real contract: a paginated summary page, a detail view carrying
+ * files[{path,size}], and raw file bytes. */
+function serve(skills: Record<string, Record<string, string>>, updatedAt = "2026-01-01T00:00:00Z") {
+  const items = Object.keys(skills).map((id) => ({
     public_id: id,
-    files: Object.entries(files).map(([p, content]) => ({ path: p, sha256: sha(content) })),
+    name: id,
+    file_count: Object.keys(skills[id]).length,
+    updated_at: updatedAt,
   }))
   globalThis.fetch = (async (input: string | URL) => {
     const url = String(input)
-    if (url.includes("/files/")) {
-      const m = url.match(/custom-skills\/([^/]+)\/files\/(.+)$/)
-      const id = decodeURIComponent(m![1])
-      const file = m![2].split("/").map(decodeURIComponent).join("/")
-      const body = skills[id][file]
-      return new Response(Buffer.from(body), { status: 200 })
+    const files = url.match(/skills\/([^/]+)\/files\/(.+)$/)
+    if (files) {
+      const id = decodeURIComponent(files[1])
+      const rel = files[2].split("/").map(decodeURIComponent).join("/")
+      return new Response(Buffer.from(skills[id][rel]), { status: 200 })
     }
-    return new Response(JSON.stringify(list), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    })
+    const detail = url.match(/skills\/([^/?]+)(?:\?|$)/)
+    if (detail && !url.includes("datamate_id")) {
+      const id = decodeURIComponent(detail[1])
+      return json({
+        public_id: id,
+        files: Object.entries(skills[id]).map(([p, c]) => ({
+          path: p,
+          size: Buffer.from(c).byteLength,
+        })),
+        content: skills[id]["SKILL.md"] ?? "",
+      })
+    }
+    return json({ items, total: items.length, page: 1, size: 50, pages: 1 })
   }) as unknown as typeof fetch
+}
+
+function json(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })
 }
 
 function skillFile(id: string, rel: string) {
@@ -189,18 +202,25 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
   })
 
-  test("a checksum mismatch publishes nothing and keeps the previous snapshot", async () => {
+  test("a truncated download publishes nothing and keeps the previous snapshot", async () => {
     serve({ "pub-1": { "SKILL.md": "good" } })
     await syncSkills(project)
 
-    const list = [{ public_id: "pub-2", files: [{ path: "SKILL.md", sha256: sha("expected") }] }]
+    // The API exposes no checksum, so byte length is the only integrity check.
+    // A short body must abandon the whole snapshot rather than publish half a
+    // skill.
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
-      if (url.includes("/files/")) return new Response(Buffer.from("tampered"), { status: 200 })
-      return new Response(JSON.stringify(list), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
+      if (url.includes("/files/")) return new Response(Buffer.from("short"), { status: 200 })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-2", name: "p2", file_count: 1, updated_at: "2026-02-02T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ public_id: "pub-2", files: [{ path: "SKILL.md", size: 9999 }], content: "" })
     }) as unknown as typeof fetch
     await syncSkills(project)
 
@@ -208,22 +228,25 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
-  test("an unchanged workspace issues no file downloads on the second run", async () => {
+  test("an unchanged workspace issues no detail or file requests on the second run", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
 
-    let fileRequests = 0
-    const list = [{ public_id: "pub-1", files: [{ path: "SKILL.md", sha256: sha("one") }] }]
+    let detailOrFile = 0
     globalThis.fetch = (async (input: string | URL) => {
-      if (String(input).includes("/files/")) fileRequests++
-      return new Response(JSON.stringify(list), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
+      const url = String(input)
+      if (url.includes("/files/") || !url.includes("datamate_id")) detailOrFile++
+      return json({
+        items: [{ public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-01-01T00:00:00Z" }],
+        total: 1,
+        page: 1,
+        size: 50,
+        pages: 1,
       })
     }) as unknown as typeof fetch
     await syncSkills(project)
 
-    expect(fileRequests).toBe(0)
+    expect(detailOrFile).toBe(0)
   })
 
   test("never writes outside the managed directory", async () => {
@@ -246,16 +269,33 @@ describe("workspace skill sync", () => {
   })
 
   test("path traversal in a file entry is refused", async () => {
-    const list = [{ public_id: "pub-1", files: [{ path: "../escape.md", sha256: sha("x") }] }]
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify(list), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })) as unknown as typeof fetch
+    // The body is served at exactly the advertised size, so the size check
+    // cannot be what stops this — only the path guard can.
+    const escape = "escaped"
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return new Response(Buffer.from(escape), { status: 200 })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-01-01T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({
+        public_id: "pub-1",
+        files: [{ path: "../escape.md", size: Buffer.from(escape).byteLength }],
+        content: "",
+      })
+    }) as unknown as typeof fetch
     await syncSkills(project)
 
-    expect(existsSync(path.join(project, ".altimate-code", "skill", "escape.md"))).toBe(false)
+    // Nothing is published at all: an unrecognised inventory aborts the sync.
     expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    // And specifically not one level up from where the skill would have gone.
+    expect(existsSync(path.join(project, ".altimate-code", "skill", "escape.md"))).toBe(false)
+    expect(existsSync(path.join(project, MANAGED, "escape.md"))).toBe(false)
   })
 
   test("does nothing when the workspace flag is off", async () => {
