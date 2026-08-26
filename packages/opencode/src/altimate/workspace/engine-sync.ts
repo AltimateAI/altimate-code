@@ -151,22 +151,35 @@ export function isEnabled(): boolean {
  * of that version predates it. Treating them as equal let a beta clear the floor
  * and be trusted for reuse. */
 export function compareVersions(a: string, b: string): number {
+  /** An exact `major.minor.patch` of digits, or null.
+   *
+   * `Number.parseInt` was too permissive: it reads "7rc" as 7, so "0.7rc.0"
+   * compared EQUAL to a 0.7.0 floor, and a bare "1" won on major before its
+   * missing components were ever examined. Unreadable output must never
+   * authorise reuse of an engine whose pin-locking cannot be established, so
+   * anything not exactly three numeric parts is treated as older. */
+  const parseCore = (raw: string): number[] | null => {
+    const parts = raw.split(".")
+    if (parts.length !== 3) return null
+    if (!parts.every((part) => /^\d+$/.test(part))) return null
+    return parts.map((part) => Number(part))
+  }
   const split = (v: string) => {
     const bare = v.trim().replace(/^v/, "")
     const plus = bare.indexOf("+")
     const noBuild = plus >= 0 ? bare.slice(0, plus) : bare
     const dash = noBuild.indexOf("-")
     return {
-      core: (dash >= 0 ? noBuild.slice(0, dash) : noBuild).split(".").map((n) => Number.parseInt(n, 10)),
+      core: parseCore(dash >= 0 ? noBuild.slice(0, dash) : noBuild),
       pre: dash >= 0 ? noBuild.slice(dash + 1) : "",
     }
   }
   const pa = split(a)
   const pb = split(b)
+  // A core we cannot read ranks below one we can, and two unreadable ones tie.
+  if (!pa.core || !pb.core) return !pa.core && !pb.core ? 0 : pa.core ? 1 : -1
   for (let i = 0; i < 3; i++) {
-    const x = Number.isFinite(pa.core[i]) ? pa.core[i] : -1
-    const y = Number.isFinite(pb.core[i]) ? pb.core[i] : -1
-    if (x !== y) return x - y
+    if (pa.core[i] !== pb.core[i]) return pa.core[i] - pb.core[i]
   }
   // Same core: a release outranks every pre-release of it (SemVer §11.3).
   if (!pa.pre && !pb.pre) return 0
@@ -651,6 +664,19 @@ async function run(): Promise<Outcome> {
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
 
+  // `client.add` waits for the MCP handshake, which can run to the connection
+  // timeout — an unchecked window the pre-mutation guard cannot cover. A re-link
+  // inside it leaves us having just installed the workspace this session left,
+  // and serialization means we installed it FIRST, so the replacement queues
+  // behind us while the waiting turn's budget drains. Undo it rather than return.
+  if (!(await stillCurrent())) {
+    log.info("binding changed during the engine handshake; removing what we just installed", { workspaceId })
+    await client.remove(DATAMATE_KEY).catch((err) => {
+      log.warn("could not remove the superseded engine", { err: String(err) })
+    })
+    return { kind: "superseded" }
+  }
+
   // Rule 4 — a failed local engine is reported, never routed around.
   const after = (await client.status())[DATAMATE_KEY]
   if (after?.status !== "connected") {
@@ -712,6 +738,29 @@ const REPAIRABLE = new Set<Outcome["kind"]>([
 
 function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE.has(outcome.kind)
+}
+
+/** Did this outcome leave an engine serving this session? */
+function wasServing(outcome: Outcome | undefined): boolean {
+  return outcome?.kind === "attached" || outcome?.kind === "reused"
+}
+
+/** Is the engine we attached still connected?
+ *
+ * A memoised success is only true while it stays true. When the engine's child
+ * exits, MCP drops the client and marks the entry `failed`, but a settled
+ * successful outcome was returned before `run()` ever read that status — so
+ * every later turn resolved without the integration tools and nothing
+ * reconnected until a new session or a re-link.
+ *
+ * Fails OPEN: a status read that throws must not invalidate a good attach. */
+async function engineStillConnected(): Promise<boolean> {
+  try {
+    return (await mcp().status())[DATAMATE_KEY]?.status === "connected"
+  } catch (err) {
+    log.warn("could not re-probe the engine connection; keeping the cached attach", { err: String(err) })
+    return true
+  }
 }
 
 /** Cap on remembered sessions.
@@ -785,7 +834,11 @@ export function ensure(sessionID: string): Promise<Outcome> {
     // Same workspace and the attach either succeeded or is still in flight:
     // reuse it. A settled FAILURE is not reused — the user may have acted on
     // the hint it produced.
-    if (sameWorkspace && !isRepairable(previous!.outcome)) return previous!.task
+    if (sameWorkspace && !isRepairable(previous!.outcome)) {
+      // Re-probe before trusting a cached success — see `engineStillConnected`.
+      if (!wasServing(previous!.outcome) || (await engineStillConnected())) return previous!.task
+      log.info("cached attach is no longer connected; re-attaching", { sessionID })
+    }
     entry.key = key
     if (sameWorkspace) {
       // Re-probing a repairable failure. Do NOT re-arm the wait: this runs on
@@ -840,14 +893,23 @@ function serializeAttach<T>(fn: () => Promise<T>): Promise<T> {
   // Run regardless of how the previous attach ended — a failure must not wedge
   // the chain for the rest of the process.
   const next = previous.then(fn, fn)
-  attachChains.set(
-    key,
-    next.then(
-      () => {},
-      () => {},
-    ),
+  const tail = next.then(
+    () => {},
+    () => {},
   )
+  attachChains.set(key, tail)
+  // Drop the entry once it settles, unless another attach has already queued
+  // behind it — otherwise every project path a long-running server opens is
+  // retained for the life of the process. Bounding `sessions` did not cover this.
+  void tail.then(() => {
+    if (attachChains.get(key) === tail) attachChains.delete(key)
+  })
   return next
+}
+
+/** Test seam — how many project attach chains are currently retained. */
+export function trackedChainsForTests(): number {
+  return attachChains.size
 }
 
 /** One attach, serialized against every other attach in this project, with the

@@ -17,6 +17,7 @@ import {
   MIN_ENGINE_VERSION,
   MAX_TRACKED_SESSIONS,
   trackedSessionsForTests,
+  trackedChainsForTests,
   type LocalMcpConfig,
 } from "../../../src/altimate/workspace/engine-sync"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
@@ -971,5 +972,68 @@ describe("ensure — round 7", () => {
     expect(h.toasts).toHaveLength(1)
     expect(h.toasts[0].variant).toBe("error")
     expect(h.toasts[0].message).toContain("EACCES")
+  })
+})
+
+describe("ensure — round 8", () => {
+  test("a malformed core is refused, not treated as equal to the floor", () => {
+    // parseInt("7rc") is 7, so "0.7rc.0" compared EQUAL to a 0.7.0 floor, and a
+    // bare "1" won on major before its missing components were examined.
+    expect(compareVersions("0.7rc.0", MIN_ENGINE_VERSION)).toBeLessThan(0)
+    expect(compareVersions("1", MIN_ENGINE_VERSION)).toBeLessThan(0)
+    expect(compareVersions("1.0", MIN_ENGINE_VERSION)).toBeLessThan(0)
+    // Well-formed versions must still behave.
+    expect(compareVersions("0.7.0", MIN_ENGINE_VERSION)).toBe(0)
+    expect(compareVersions("1.0.0", MIN_ENGINE_VERSION)).toBeGreaterThan(0)
+    expect(compareVersions("0.6.9", MIN_ENGINE_VERSION)).toBeLessThan(0)
+  })
+
+  test("an engine reporting a malformed version is refused", async () => {
+    const h = install({ version: "0.7rc.0" })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "0.7rc.0" })
+    expect(h.added).toHaveLength(0)
+  })
+
+  test("a re-link DURING the engine add is caught after it completes", async () => {
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    // The re-link lands while the MCP handshake is in flight.
+    syncInternals.mcp!.add = async (name, cfg) => {
+      h.added.push({ name, cfg })
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    const outcome = await ensure("s1")
+    expect(outcome).toEqual({ kind: "superseded" })
+    // The client we installed for the workspace we left must not stay serving.
+    expect(h.removes).toEqual(["datamate"])
+  })
+
+  test("a cached SUCCESS is re-probed: a died engine re-attaches", async () => {
+    const h = install({
+      statuses: [
+        {},
+        { datamate: { status: "connected" } },
+        { datamate: { status: "failed", error: "Connection closed" } },
+        {},
+        { datamate: { status: "connected" } },
+      ],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const first = await ensure("s1")
+    expect(first).toMatchObject({ kind: "attached" })
+    // The engine's child exits; MCP marks it failed. The next turn must notice.
+    const second = await ensure("s1")
+    expect(second).not.toBe(first)
+    expect(h.added).toHaveLength(2)
+  })
+
+  test("settled project attach chains are not retained", async () => {
+    install({ binding: null })
+    await ensure("s1")
+    expect(trackedChainsForTests()).toBe(0)
   })
 })
