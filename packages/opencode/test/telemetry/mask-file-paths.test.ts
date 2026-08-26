@@ -51,10 +51,38 @@ describe("maskString paths — preprocessing — escape stripping, known-prefix 
     expect(mask(`stat ${home}/client repo does not exist`)).toBe("stat <path> does not exist")
   })
 
-  it("known-prefix literals never fire mid-token (URL interiors, longer tokens)", () => {
+  it("known-prefix literals never fire mid-token; home STRUCTURE still does", () => {
     const home = os.homedir()
-    expect(mask(`see https://example.com${home}/docs now`)).toBe(`see https://example.com${home}/docs now`)
+    // the literal layer is token-boundary guarded, but a home root embedded
+    // in a URL still masks structurally — it carries the username
+    expect(mask(`see https://example.com${home}/docs now`)).toBe("see https://example.com<path>")
     expect(mask(`at path:${home}/x.sql end`)).toBe("at path:<path> end")
+    // a longer token that merely contains the home string is left alone
+    expect(mask(`id=abc${home.replace(/[\\/]/g, "_")}xyz ok`)).toBe(`id=abc${home.replace(/[\\/]/g, "_")}xyz ok`)
+  })
+
+  it("a credential straddling the 8 KB cut never ships in the clear", () => {
+    const pad = '"' + "A".repeat(8170) + '" '
+    expect(mask(pad + "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")).toBe("? Bearer ***")
+    expect(mask(pad + "sk-abcdefghijklmnopqrstuvwxyz0123456789")).toBe("? sk-***")
+    expect(mask(pad + '"customer-secret-value-here"')).toBe("? ?")
+    expect(mask('"' + "A".repeat(8180) + '" "customer secret value here"')).toBe("? ?")
+  })
+
+  it("masking never throws when the cwd has been deleted", () => {
+    const os = require("os")
+    const fs = require("fs")
+    const path = require("path")
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gone-"))
+    const prev = process.cwd()
+    try {
+      process.chdir(dir)
+      mask("warm the cache /x/y.sql")
+      fs.rmdirSync(dir)
+      expect(() => mask("error after cwd vanished /opt/app/x.sql")).not.toThrow()
+    } finally {
+      process.chdir(prev)
+    }
   })
 
   it("separator-free strings take the fast path unchanged", () => {
@@ -569,13 +597,16 @@ describe("maskString paths — delimiters and quotes inside components — separ
       .toBe("read <path> failed")
   })
 
-  it("delimiter bridges are bounded to two spaced words", () => {
-    // two spaced words still prove a delimiter...
+  it("longer bridges need a deep continuation, not just a later slash", () => {
+    // <=2 words: first-segment proof; 3-6 words: the continuation must
+    // itself look like a path (another separator or a dotted extension)
     expect(mask("read /data/x, client repo/models/a.sql done")).toBe("read <path> done")
-    // ...three or more read as prose and stay a boundary (they were the
-    // vector that swallowed clauses between a path and any later slash)
+    // delimiter proofs stay light: 3+ words after a comma read as prose
     expect(mask("read /data/x, big client repo/models/a.sql done"))
       .toBe("read <path>, big client repo/models/a.sql done")
+    // a 4-word prose bridge to a lone slashed token stays a boundary
+    expect(mask("read /data/x, see the big report/summary now"))
+      .toBe("read <path>, see the big report/summary now")
   })
 
   it("continues through ) when a later separator proves it is path content", () => {
@@ -698,6 +729,37 @@ describe("maskString paths — prose survives around a masked path", () => {
     expect(a).not.toBe(b)
   })
 
+  it("4+-word directory components mask whole in every family", () => {
+    expect(mask("read /data/my big client folder/models/x.sql")).toBe("read <path>")
+    expect(mask("read /srv/acme corp data warehouse/models/x.sql")).toBe("read <path>")
+    expect(mask(String.raw`read C:\data\my big client folder\models\x.sql`)).toBe("read <path>")
+    expect(mask("s3://bucket/my big client folder/models/x.parquet")).toBe("<path>")
+    expect(mask("read ~/w0 w1 w2 w3/models/x.sql")).toBe("read <path>")
+    expect(mask("read //srv/share/Users/jdoe/w0 w1 w2 w3/x.sql")).toBe("read <path>")
+    expect(mask("read /data/w0 w1 w2 w3/x.sql")).toBe("read <path>")
+  })
+
+  it("windowsHome segments cannot bridge prose to a later home root", () => {
+    const out = mask("open //server.example.com/share/x failed on 8/17/2026/Users/jdoe/secret.txt")
+    // the prose survives; the date fragment glued to the home path goes with
+    // it (a home root anchors mid-token by design — the username must mask)
+    expect(out).toContain("failed on 8")
+    expect(out).not.toContain("jdoe")
+    const out2 = mask(String.raw`open \\server\share\x failed with many ordinary bridge words here/Users/jdoe/secret.txt`)
+    expect(out2).toContain("failed with many ordinary bridge words here")
+    expect(out2).not.toContain("jdoe")
+  })
+
+  it("FQDN UNC /home/ and /homes/ shares mask", () => {
+    expect(mask("ENOENT: //server.example.com/share/home/jdoe/secret.txt")).toBe("ENOENT: <path>")
+    expect(mask("ENOENT: //server.example.com/share/homes/jdoe/secret.txt")).toBe("ENOENT: <path>")
+  })
+
+  it("home roots anchor mid-token: glued or URL-embedded usernames still mask", () => {
+    expect(mask("prose here now/Users/jdoe/secret.txt")).toBe("prose here now<path>")
+    expect(mask("see https://example.com/Users/jdoe/profile now")).toBe("see https://example.com<path>")
+  })
+
   it("FQDN UNC homes mask; schemed public URLs stay", () => {
     expect(mask("ENOENT: //server.example.com/share/Users/jdoe/secret.txt")).toBe("ENOENT: <path>")
     expect(mask("see https://community.snowflake.com/s/ip-not-allowed for details"))
@@ -795,18 +857,21 @@ describe("maskString paths — performance — growth rates, not wall clocks", (
   // A single-size wall-clock budget cannot distinguish O(n) from O(n^2) and
   // flakes on loaded runners. Each adversarial shape is timed at two sizes;
   // 8x the input must cost < 16x the time (linear ~8x, quadratic ~64x).
-  const t = (s: string) => {
-    // median of 3 — a single sample is at the mercy of the scheduler
+  // per-call cost measured over enough repetitions that BOTH sizes are real
+  // milliseconds — a floor on the small side would silently turn the ratio
+  // back into a single-size wall clock (median of 3 batches vs scheduler)
+  const perCall = (s: string, reps: number) => {
     const xs = [0, 0, 0].map(() => {
       const a = performance.now()
-      mask(s)
-      return performance.now() - a
+      for (let i = 0; i < reps; i++) mask(s)
+      return (performance.now() - a) / reps
     })
     return xs.sort((x, y) => x - y)[1]
   }
   const growth = (gen: (n: number) => string) => {
-    mask(gen(1000)) // warmup
-    return t(gen(8000)) / Math.max(t(gen(1000)), 0.05)
+    const small = gen(1000), large = gen(8000)
+    mask(small); mask(large) // warmup
+    return perCall(large, 12) / perCall(small, 100)
   }
 
   it("drive-colon runs grow linearly (was quadratic: v:col SQL stalled seconds)", () => {
@@ -833,9 +898,10 @@ describe("maskString paths — performance — growth rates, not wall clocks", (
     expect(growth(n => '"' + "\\".repeat(n) + '"')).toBeLessThan(16)
   })
 
-  it("entry truncation caps any input at 8 KB of work", () => {
-    const a = performance.now()
-    mask("a:".repeat(200000))
-    expect(performance.now() - a).toBeLessThan(300)
+  it("entry truncation makes cost flat beyond 8 KB (ratio, not wall clock)", () => {
+    const gen = (n: number) => "a:".repeat(n / 2)
+    mask(gen(20000))
+    // 8x more input past the cap must cost ~1x, never scale with length
+    expect(perCall(gen(160000), 12) / perCall(gen(20000), 12)).toBeLessThan(3)
   })
 })
