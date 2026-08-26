@@ -44,6 +44,17 @@ function extractSpawnEnvironment(raw: unknown): Record<string, string> | undefin
 }
 
 /**
+ * A missing or empty datamate entry. The extension blanks `datamate` to {}
+ * (not delete) in non-active-IDE mcp.json files, so an empty object is a
+ * tombstone, not a transport — both mcp.json scans must skip it, or the
+ * active IDE's real entry is shadowed by whichever file sorts first
+ * (`.cursor/` sorts before `.vscode/`).
+ */
+function isBlankDatamateEntry(entry: unknown): boolean {
+  return !entry || typeof entry !== "object" || Object.keys(entry as object).length === 0
+}
+
+/**
  * Root directory the boot-time heal should scan from: the containing git
  * project root when there is one, else the directory itself. Boot-time callers
  * (TUI worker, `run`) fire the sync before an Instance exists, so they cannot
@@ -152,11 +163,7 @@ export async function readDatamateTransportFromIde(
       const parsed = JSON.parse(text) as Record<string, unknown>
       const serversMap = extractServersMap(parsed)
       const entry = serversMap[DATAMATE_KEY]
-      // The extension blanks `datamate` to {} (not delete) in non-active-IDE
-      // mcp.json files, and the sorted scan can reach the blanked file first
-      // (`.cursor/` sorts before `.vscode/`). An empty entry is a tombstone,
-      // not a transport — skip it so the active IDE's real entry is found.
-      if (!entry || Object.keys(entry).length === 0) continue
+      if (isBlankDatamateEntry(entry)) continue
 
       log.info("readDatamateTransportFromIde: found entry", {
         source: relPath,
@@ -232,11 +239,10 @@ export async function syncDatamateUrlFromVscodeMcp(
         const text = await readFile(candidate, "utf-8")
         const parsed = JSON.parse(text) as Record<string, unknown>
         const map = extractServersMap(parsed)
-        // Same tombstone rule as readDatamateTransportFromIde: a blanked {}
-        // entry (non-active-IDE file) must not be selected as the sync source —
-        // it has no updatedAt, so the heal would silently skip while the real
-        // entry sits in the next file.
-        if (map[DATAMATE_KEY] && Object.keys(map[DATAMATE_KEY]).length > 0) {
+        // A tombstone must not become the sync source either: it has no
+        // updatedAt, so the heal would silently skip while the real entry sits
+        // in the next file.
+        if (!isBlankDatamateEntry(map[DATAMATE_KEY])) {
           mcpJsonPath = candidate
           serversMap = map
           break
