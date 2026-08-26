@@ -108,7 +108,7 @@ no hallucinated SQL advice, no guessing at schema, no missed PII.
 
 **Works seamlessly with Claude Code and Codex.** Use `/configure-claude` or `/configure-codex` to set up integration in one step. altimate is the data engineering tool layer — use it standalone in your terminal, or mount it as the harness underneath whatever AI agent you already run. The two are complementary.
 
-altimate-code is a fork of [OpenCode](https://github.com/anomalyco/opencode) rebuilt for data teams. Model-agnostic — bring your own LLM or run locally with Ollama.
+altimate-code is a fork of [OpenCode](https://github.com/anomalyco/opencode) rebuilt for data teams. Model-agnostic — bring your own LLM, or run fully local with `altimate local`.
 
 ## Quick demo
 
@@ -133,6 +133,9 @@ altimate-code is a fork of [OpenCode](https://github.com/anomalyco/opencode) reb
 
 # Generate dbt 1.8 unit tests for a model with CASE/WHEN and JOINs
 > /dbt-unit-tests for models/marts/fct_revenue.sql
+
+# Run fully local — no API key, no per-token cost, web tools ask before egress
+altimate local
 ```
 
 ## Key Features
@@ -159,6 +162,9 @@ Manifest parsing, test generation, model scaffolding, incremental model detectio
 
 ### Data Visualization
 Interactive charts and dashboards from SQL results. The data-viz skill generates publication-ready visualizations with automatic chart type selection based on your data.
+
+### Certified Local Mode
+Run the whole agent on your own hardware with one command — `altimate local`. No account, no API key, no per-token cost: hardware detection picks a recipe, every artifact is SHA-256-verified, and the endpoint must pass certification probes (tool calls, reasoning, long-context prefill) before your config is touched. An egress guard makes web tools ask before anything leaves the machine. See the [Local Mode docs](https://docs.altimate.sh/usage/local/).
 
 ### Local-First Tracing
 Built-in observability for AI interactions — trace tool calls, token usage, and session activity locally. No external services required. View session recordings with `altimate trace`. Features include loop detection, post-session summary, and shareable HTML exports.
@@ -195,7 +201,7 @@ First-class support with schema indexing, query execution, and metadata introspe
 
 ## Works with Any LLM
 
-Model-agnostic — bring your own provider or run locally.
+Model-agnostic — bring your own provider, or run fully local with `altimate local` (managed setup, certified endpoint, no API key) or your own Ollama / LM Studio server.
 
 Altimate LLM Gateway · Anthropic · OpenAI · Google Gemini · Google Vertex AI · Amazon Bedrock · Azure OpenAI · Databricks AI Gateway · Snowflake Cortex · Mistral · Groq · DeepInfra · Cerebras · Cohere · Together AI · Perplexity · xAI · OpenRouter · LM Studio · Ollama · GitHub Copilot
 
