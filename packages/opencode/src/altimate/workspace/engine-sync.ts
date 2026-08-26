@@ -55,523 +55,69 @@
 // delivers them.
 //
 // Gated on the workspace pilot flag; inert without a local binding.
-
-import launch from "cross-spawn"
-import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
-import { which as whichBinary } from "@opencode-ai/core/util/which"
-import { Instance } from "@/project/instance"
-import { Log } from "@/altimate/util/log"
-import { MCP, ToolsChanged } from "@/mcp"
-import { addMcpToConfig, readMcpEntryFromDisk, removeMcpFromConfig, resolveConfigPath } from "@/mcp/config"
-import { Config } from "@/config/config"
-import { AltimateApi } from "@/altimate/api/client"
+import { type CachedBinding } from "./state"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
-import { AppRuntime } from "@/effect/app-runtime"
-import { EventV2Bridge } from "@/event-v2-bridge"
-import { TuiEvent } from "@/server/tui-event"
-import { readLocalBinding, type CachedBinding } from "./state"
+import { log, syncInternals, isEnabled } from "./engine-seams"
+import {
+  attributableEngine,
+  clearsFloor,
+  commandArgv,
+  describeEntry,
+  describeMissing,
+  describeRefusal,
+  engineToolKeys,
+  installWouldHelp,
+  isUrlEntry,
+  pinnedWorkspace,
+  ENGINE_BINARY,
+  INSTALL_HINT,
+  MIN_ENGINE_VERSION,
+  type ExistingEntry,
+  type LocalMcpConfig,
+  type Outcome,
+  type Toast,
+} from "./engine-types"
+import {
+  declaredBounded,
+  engineVersionOf,
+  announceToolsChanged,
+  mcp,
+  notify,
+  resolveBinding,
+  versionOf,
+  which,
+} from "./engine-probes"
+import { existingEntry, persist, persistRestore, projectEntry } from "./engine-config"
+import { serializeAttach, trackedChainsForTests, attachChains } from "./engine-chain"
 
-const log = Log.create({ service: "workspace-engine" })
-
-/** How long the optional allowlist lookup may delay a local spawn. */
-const DECLARED_TIMEOUT_MS = 4_000
-
-/** Oldest engine this client is known to work against.
- *
- * 0.7.0 is the first engine that LOCKS the `--datamate` pin, so a settings
- * change cannot swap the workspace out from under a running engine. Everything
- * below it can drift, which is precisely what the attribution check in rule 1
- * exists to exclude — so the floor and that check are one mechanism, not two.
- *
- * SEQUENCING: this must not ship before `@altimateai/datamate` 0.7.0 is on npm,
- * or every bound user gets `engine-too-old` for a version they cannot install. */
-export const MIN_ENGINE_VERSION = "0.7.0"
-export const INSTALL_HINT = "npm i -g @altimateai/datamate"
-export const ENGINE_BINARY = "datamate"
-
-/** Engine tools arrive under the MCP server key as `<key>_<tool>`. */
-const TOOL_PREFIX = `${DATAMATE_KEY}_`
-
-export type Outcome =
-  | { kind: "disabled" }
-  | { kind: "unbound" }
-  | { kind: "reused"; available: number; declared?: number; missing?: string[] }
-  | { kind: "attached"; available: number; declared: number; missing: string[]; replaced?: string }
-  | { kind: "engine-missing"; declared: number }
-  | { kind: "engine-too-old"; found: string }
-  | { kind: "connect-failed"; error: string }
-  | { kind: "entry-disabled" }
-  | { kind: "superseded" }
-
-export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolean }
-
-/** A configured MCP entry, in either shape it can reach us: opencode's own
- * `command: string[]` argv, or the `{ command, args }` split an IDE writes and
- * `datamate-transport` normalises. Read defensively — this is merged config
- * written by other clients. */
-export type ExistingEntry = { type?: string; url?: string; command?: string[] | string; args?: string[]; enabled?: boolean }
-
-type Toast = { title: string; message: string; variant: "info" | "success" | "warning" | "error" }
-
-type McpStatus = Record<string, { status: string; error?: string } | undefined>
-
-/** Declared allowlist for a workspace, split by whether the CLI can serve it.
- * Extension-type integrations are RPC into a live VS Code host and have no
- * meaning on the CLI surface, so they are excluded from the reported gap. */
-export type Declared = { keys: string[]; extensionKeys: string[] }
-
-/** Test seams. Production leaves every field unset. */
-export const syncInternals: {
-  resolveBinding?: () => Promise<CachedBinding | null>
-  which?: (cmd: string) => string | null
-  versionOf?: (bin: string) => Promise<string | null>
-  mcp?: {
-    status: () => Promise<McpStatus>
-    add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
-    connect: (name: string) => Promise<unknown>
-    remove: (name: string) => Promise<unknown>
-    tools: () => Promise<Record<string, unknown>>
-  }
-  persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
-  persistRestore?: (name: string, previous: ExistingEntry | null) => Promise<void>
-  projectEntry?: () => Promise<ExistingEntry | null>
-  /** The configured (merged) MCP entry under `name`, or null if none. */
-  existingEntry?: (name: string) => Promise<ExistingEntry | null>
-  freshConfig?: () => Promise<{ mcp?: Record<string, ExistingEntry | undefined> }>
-  toolsChanged?: () => Promise<void>
-  declared?: (datamateId: string) => Promise<Declared | null>
-  notify?: (toast: Toast) => Promise<void>
-} = {}
-
-export function isEnabled(): boolean {
-  return CoreFlag.ALTIMATE_WORKSPACE
-}
-
-/** SemVer precedence compare. Returns <0, 0, >0.
- *
- * Build metadata is ignored, and a NON-numeric core component compares as older
- * so unreadable `--version` output can never clear a floor.
- *
- * Pre-release ordering is honoured rather than stripped: `0.7.0-beta.1` is
- * BELOW `0.7.0`. That matters here — the floor exists to require behaviour that
- * shipped in a specific release (the locked `--datamate` pin), and a pre-release
- * of that version predates it. Treating them as equal let a beta clear the floor
- * and be trusted for reuse. */
-export function compareVersions(a: string, b: string): number {
-  /** An exact `major.minor.patch` of digits, or null.
-   *
-   * `Number.parseInt` was too permissive: it reads "7rc" as 7, so "0.7rc.0"
-   * compared EQUAL to a 0.7.0 floor, and a bare "1" won on major before its
-   * missing components were ever examined. Unreadable output must never
-   * authorise reuse of an engine whose pin-locking cannot be established, so
-   * anything not exactly three numeric parts is treated as older. */
-  const parseCore = (raw: string): number[] | null => {
-    const parts = raw.split(".")
-    if (parts.length !== 3) return null
-    if (!parts.every((part) => /^\d+$/.test(part))) return null
-    return parts.map((part) => Number(part))
-  }
-  const split = (v: string) => {
-    const bare = v.trim().replace(/^v/, "")
-    const plus = bare.indexOf("+")
-    const noBuild = plus >= 0 ? bare.slice(0, plus) : bare
-    const dash = noBuild.indexOf("-")
-    return {
-      core: parseCore(dash >= 0 ? noBuild.slice(0, dash) : noBuild),
-      pre: dash >= 0 ? noBuild.slice(dash + 1) : "",
-    }
-  }
-  const pa = split(a)
-  const pb = split(b)
-  // A core we cannot read ranks below one we can, and two unreadable ones tie.
-  if (!pa.core || !pb.core) return !pa.core && !pb.core ? 0 : pa.core ? 1 : -1
-  for (let i = 0; i < 3; i++) {
-    if (pa.core[i] !== pb.core[i]) return pa.core[i] - pb.core[i]
-  }
-  // Same core: a release outranks every pre-release of it (SemVer §11.3).
-  if (!pa.pre && !pb.pre) return 0
-  if (!pa.pre) return 1
-  if (!pb.pre) return -1
-  const ia = pa.pre.split(".")
-  const ib = pb.pre.split(".")
-  for (let i = 0; i < Math.max(ia.length, ib.length); i++) {
-    const x = ia[i]
-    const y = ib[i]
-    if (x === undefined) return -1
-    if (y === undefined) return 1
-    const nx = /^\d+$/.test(x)
-    const ny = /^\d+$/.test(y)
-    if (nx && ny) {
-      const d = Number(x) - Number(y)
-      if (d !== 0) return d
-    } else if (nx !== ny) {
-      return nx ? -1 : 1
-    } else if (x !== y) {
-      return x < y ? -1 : 1
-    }
-  }
-  return 0
-}
-
-/** Strip the server prefix from the engine tools present in the catalog. */
-export function engineToolKeys(tools: Record<string, unknown>): Set<string> {
-  const out = new Set<string>()
-  for (const key of Object.keys(tools)) {
-    if (key.startsWith(TOOL_PREFIX)) out.add(key.slice(TOOL_PREFIX.length))
-  }
-  return out
-}
+// The module's public surface is deliberately unchanged by the split: consumers
+// import from `engine-sync` and should not have to know which file a symbol
+// moved to.
+export {
+  attributableEngine,
+  clearsFloor,
+  compareVersions,
+  engineToolKeys,
+  installWouldHelp,
+  pinnedWorkspace,
+  ENGINE_BINARY,
+  INSTALL_HINT,
+  MIN_ENGINE_VERSION,
+  type Declared,
+  type ExistingEntry,
+  type LocalMcpConfig,
+  type Outcome,
+} from "./engine-types"
+export { isEnabled, syncInternals } from "./engine-seams"
+export { trackedChainsForTests } from "./engine-chain"
 
 // ---------------------------------------------------------------------------
 // Production implementations behind the seams
 // ---------------------------------------------------------------------------
 
-function currentDirectory(): string | null {
-  try {
-    return Instance.directory
-  } catch {
-    return null
-  }
-}
-
-function projectRoot(): string {
-  const wt = Instance.worktree
-  return wt === "/" ? Instance.directory : wt
-}
-
-async function resolveBinding(): Promise<CachedBinding | null> {
-  if (syncInternals.resolveBinding) return syncInternals.resolveBinding()
-  const directory = currentDirectory()
-  if (!directory) return null
-  try {
-    return await readLocalBinding(directory)
-  } catch (err) {
-    log.warn("could not resolve binding for engine attach", { err: String(err) })
-    return null
-  }
-}
-
-function which(cmd: string): string | null {
-  return syncInternals.which ? syncInternals.which(cmd) : whichBinary(cmd)
-}
-
-/** `datamate --version` — the engine inlines its real package version here,
- * unlike its MCP `serverInfo`, which is a hard-coded placeholder. A version
- * string proves output, not identity; it is a compatibility floor only. */
-function versionOf(bin: string): Promise<string | null> {
-  if (syncInternals.versionOf) return syncInternals.versionOf(bin)
-  return new Promise((resolve) => {
-    // cross-spawn, not execFile. An npm-installed engine on Windows is resolved
-    // by `which` to a `.cmd` shim (it honours PATHEXT), and Node cannot execute
-    // `.cmd` or `.bat` directly without a shell — the callback just errors. That
-    // would report "not runnable" to every bound Windows user with an ordinary
-    // global install, while MCP's own launcher started the same engine fine.
-    // This is the launcher the rest of the repo already uses for that reason.
-    let settled = false
-    const done = (value: string | null) => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
-    try {
-      const child = launch(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 })
-      let out = ""
-      child.stdout?.on("data", (chunk) => {
-        out += String(chunk)
-      })
-      child.on("error", () => done(null))
-      child.on("close", (code) => {
-        if (code !== 0) return done(null)
-        const line = out.trim().split(/\r?\n/)[0] ?? ""
-        done(line || null)
-      })
-    } catch {
-      done(null)
-    }
-  })
-}
-
-function mcp() {
-  return (
-    syncInternals.mcp ?? {
-      status: () => MCP.status() as Promise<McpStatus>,
-      add: (name: string, cfg: LocalMcpConfig) => MCP.add(name, cfg),
-      connect: (name: string) => MCP.connect(name),
-      remove: (name: string) => MCP.remove(name),
-      tools: () => MCP.tools() as Promise<Record<string, unknown>>,
-    }
-  )
-}
-
-async function persist(name: string, cfg: LocalMcpConfig): Promise<void> {
-  if (syncInternals.persist) return syncInternals.persist(name, cfg)
-  const configPath = await resolveConfigPath(projectRoot())
-  await addMcpToConfig(name, cfg, configPath)
-  // `Config.get()` is cached per instance, and `addMcpToConfig` is a raw file
-  // write that does not touch that cache — so without this, every later
-  // `existingEntry()` in this process still sees the pre-write config. That is
-  // how a managed entry becomes unrecognisable to `isManagedEntry` later in the
-  // same server process, leaving a stale engine attached in an unbound project.
-  // The local-config write path in `config.ts` invalidates for the same reason.
-  await Config.invalidate().catch((err) => {
-    log.warn("could not invalidate the config cache after persisting the engine entry", { err: String(err) })
-  })
-}
-
-/** The module's ONLY path to config, and it is always fresh.
- *
- * `Config.get()` is cached per instance, and this module has now been bitten
- * three times by reading it after someone else wrote: our own `addMcpToConfig`,
- * `MCP.disconnect` writing `enabled: false`, and an IDE rewriting the entry —
- * which never goes through `Config` at all. Two of those defeated a fix from an
- * earlier round.
- *
- * Enumerating the writers is therefore not possible, so freshness is structural
- * at the point of READ rather than remembered at each write site. The cost is
- * real and shared: invalidating drops the per-instance cache for every other
- * `Config` consumer too. That is the price of not having a fourth instance. */
-async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntry | undefined> }> {
-  if (syncInternals.freshConfig) return syncInternals.freshConfig()
-  await Config.invalidate().catch((err) => {
-    log.warn("could not refresh the config cache", { err: String(err) })
-  })
-  return (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
-}
-
-/** The entry in the PROJECT config only, not the merged view.
- *
- * `existingEntry()` returns the merged value, which may come from global config,
- * while `persist()` writes to the project file. Restoring the merged value would
- * write a copy of the global entry into the project — a permanent override that
- * shadows every later global update, disable or removal, from an attach that was
- * meant to leave configuration untouched. */
-async function projectEntry(): Promise<ExistingEntry | null> {
-  if (syncInternals.projectEntry) return syncInternals.projectEntry()
-  try {
-    const configPath = await resolveConfigPath(projectRoot())
-    return ((await readMcpEntryFromDisk(DATAMATE_KEY, configPath)) as ExistingEntry | undefined) ?? null
-  } catch (err) {
-    log.warn("could not read the project-level engine entry", { err: String(err) })
-    return null
-  }
-}
-
-/** Put the config back the way we found it.
- *
- * `persist()` commits the pin BEFORE the engine is known to be ours, so a
- * supersede after that point leaves the abandoned workspace pinned on disk —
- * and MCP bootstraps every enabled entry, so a restart before the next attach
- * would start the workspace we just walked away from. Removing the runtime
- * client is only half of undoing an attach. */
-async function persistRestore(name: string, previous: ExistingEntry | null): Promise<void> {
-  if (syncInternals.persistRestore) return syncInternals.persistRestore(name, previous)
-  try {
-    const configPath = await resolveConfigPath(projectRoot())
-    if (previous) await addMcpToConfig(name, previous as never, configPath)
-    else await removeMcpFromConfig(name, configPath)
-    await Config.invalidate().catch(() => undefined)
-  } catch (err) {
-    log.warn("could not restore the config after a superseded attach", { name, err: String(err) })
-  }
-}
-
-async function existingEntry(name: string): Promise<ExistingEntry | null> {
-  if (syncInternals.existingEntry) return syncInternals.existingEntry(name)
-  try {
-    const cfg = await freshConfig()
-    return cfg.mcp?.[name] ?? null
-  } catch (err) {
-    log.warn("could not read merged MCP config", { name, err: String(err) })
-    return null
-  }
-}
-
-/** URL-based entries (`type: "remote"`, or any `url`) point at a process this
- * client does not own: an IDE's in-process engine, or the hosted endpoint. */
-function isUrlEntry(entry: ExistingEntry | null): entry is ExistingEntry & { url: string } {
-  return !!entry && (entry.type === "remote" || typeof entry.url === "string")
-}
-
-const PIN_FLAG = "--datamate"
-
-/** The entry's full argv, flattening both config shapes. */
-function commandArgv(entry: ExistingEntry | null): string[] {
-  if (!entry) return []
-  const head = typeof entry.command === "string" ? [entry.command] : (entry.command ?? [])
-  return [...head, ...(entry.args ?? [])]
-}
-
-/** Which workspace does this entry pin its engine to, if any?
- *
- * `--datamate <id>` is the whole of an engine's workspace identity: the engine
- * locks it, so a settings change cannot swap it out underneath. An entry
- * WITHOUT it is not neutral — it serves whichever teammate its owner currently
- * has active, and that changes at runtime from a UI this client does not
- * control. The extension writes exactly such an entry (`datamate start-stdio`,
- * no pin), so "connected" alone never proves an engine serves this workspace.
- *
- * Scanned from the end because a repeated flag resolves last-wins, and both the
- * `--datamate 5` and `--datamate=5` spellings are valid on the engine's CLI. */
-export function pinnedWorkspace(entry: ExistingEntry | null): string | null {
-  const argv = commandArgv(entry)
-  for (let i = argv.length - 1; i >= 0; i--) {
-    const arg = argv[i]
-    if (arg === PIN_FLAG) return argv[i + 1] ?? null
-    if (arg.startsWith(`${PIN_FLAG}=`)) return arg.slice(PIN_FLAG.length + 1) || null
-  }
-  return null
-}
-
-/** Short, printable identity of an entry, for saying what was replaced. */
-function describeEntry(entry: ExistingEntry | null): string {
-  if (isUrlEntry(entry)) return entry.url
-  const argv = commandArgv(entry)
-  return argv.length > 0 ? argv.join(" ") : "an engine entry with no command"
-}
-
-async function declared(datamateId: string): Promise<Declared | null> {
-  if (syncInternals.declared) return syncInternals.declared(datamateId)
-  try {
-    if (!(await AltimateApi.isConfigured())) return null
-    const [workspace, catalog] = await Promise.all([
-      AltimateApi.getDatamate(datamateId),
-      AltimateApi.listIntegrations(),
-    ])
-    const extensionIds = new Set(catalog.filter((i) => i.type === "extension").map((i) => i.id))
-    const keys: string[] = []
-    const extensionKeys: string[] = []
-    for (const integration of workspace.integrations ?? []) {
-      const target = extensionIds.has(integration.id) ? extensionKeys : keys
-      for (const tool of integration.tools ?? []) target.push(tool.key)
-    }
-    return { keys, extensionKeys }
-  } catch (err) {
-    log.warn("could not read declared workspace integrations", { datamateId, err: String(err) })
-    return null
-  }
-}
-
-/** Tell the session its tool list changed.
- *
- * `MCP.add` stores the client but publishes nothing, so nothing downstream could
- * even observe a late attach. This restores that signal.
- *
- * What it does NOT do, stated plainly because this module claimed otherwise for
- * several revisions: it does not give tools to the invocation already running.
- * That turn's tool set was passed to the model before the attach finished and
- * cannot be rebuilt mid-call — the session's subscriber only logs, and the next
- * `resolveTools` is what picks the tools up. So exceeding the bounded wait costs
- * a turn, not a session. The event is worth publishing for traceability and for
- * any subscriber that can act between turns; it is not a live refresh. */
-async function announceToolsChanged(): Promise<void> {
-  if (syncInternals.toolsChanged) return syncInternals.toolsChanged()
-  try {
-    await AppRuntime.runPromise(
-      EventV2Bridge.Service.use((events) => events.publish(ToolsChanged, { server: DATAMATE_KEY })),
-    )
-  } catch (err) {
-    log.warn("could not announce the workspace engine tool change", { err: String(err) })
-  }
-}
-
-/** The workspace allowlist, bounded.
- *
- * Reporting only — the attach must never wait on it. The bound was previously
- * applied to the spawn path alone, leaving a reused engine awaiting it with no
- * limit. Both paths go through here now, so there is one answer rather than two.
- *
- * The underlying request is separately abortable (the API client attaches a
- * signal), so a stalled server releases its socket instead of accumulating
- * pending fetches across repair retries. */
-async function declaredBounded(workspaceId: string): Promise<Declared | null> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      declared(workspaceId),
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => {
-          log.warn("workspace allowlist lookup timed out; continuing without the declared-vs-delivered report", {
-            workspaceId,
-            timeoutMs: DECLARED_TIMEOUT_MS,
-          })
-          resolve(null)
-        }, DECLARED_TIMEOUT_MS)
-        timer.unref?.()
-      }),
-    ])
-  } finally {
-    // Racing does not cancel the loser: left running, the timer fires later and
-    // warns about a lookup that had already succeeded, on every normal attach.
-    if (timer) clearTimeout(timer)
-  }
-}
-
-async function notify(toast: Toast): Promise<void> {
-  if (syncInternals.notify) return syncInternals.notify(toast)
-  try {
-    await AppRuntime.runPromise(
-      EventV2Bridge.Service.use((events) => events.publish(TuiEvent.ToastShow, { ...toast, duration: 10000 })),
-    )
-  } catch (err) {
-    log.warn("could not show workspace engine toast", { err: String(err) })
-  }
-}
-
 // ---------------------------------------------------------------------------
 // The attach flow
 // ---------------------------------------------------------------------------
-
-/** Why an engine was refused, in the user's terms.
- *
- * "Too old" and "could not be run at all" are the same code path but very
- * different problems, and conflating them sent more than one debugging session
- * hunting a version mismatch that did not exist. `versionOf` reads stdout only
- * and returns null when the process fails, so a null here means the binary did
- * not produce a version — broken, not merely out of date. */
-function describeRefusal(found: string | null, workspaceName: string): string {
-  if (!found) {
-    return (
-      `The ${ENGINE_BINARY} on PATH did not report a usable version, so it cannot be used for workspace ` +
-      `"${workspaceName}". It is more likely broken than out of date — try running \`${ENGINE_BINARY} --version\` ` +
-      `directly. Reinstall with: ${INSTALL_HINT}`
-    )
-  }
-  return (
-    `Found ${ENGINE_BINARY} ${found}; workspace "${workspaceName}" needs ${MIN_ENGINE_VERSION} or newer. ` +
-    `Update with: ${INSTALL_HINT}`
-  )
-}
-
-function describeMissing(missing: string[]): string {
-  if (missing.length === 0) return ""
-  const shown = missing.slice(0, 5).join(", ")
-  const more = missing.length > 5 ? ` (+${missing.length - 5} more)` : ""
-  return ` Declared but not available: ${shown}${more}.`
-}
-
-/** Is this engine version usable at all?
- *
- * The single definition of "unusable" for this module. An unreadable version is
- * treated as below the floor: the floor exists because engines under it do not
- * lock their `--datamate` pin, and an engine that cannot say what it is cannot
- * be shown to lock it either. */
-export function clearsFloor(version: string | null): boolean {
-  return !!version && compareVersions(version, MIN_ENGINE_VERSION) >= 0
-}
-
-/** The version of the ENGINE an entry runs, not of whatever wraps it.
- *
- * `npx @altimateai/datamate@0.6.3 start-stdio --datamate 42` would otherwise
- * have us run `npx --version` and let a pre-floor engine clear the floor on the
- * wrapper's version. Asking the running server instead is not an option:
- * `serverInfo.version` is a hard-coded placeholder on the very engines this
- * floor excludes. An unidentifiable command yields null, which `clearsFloor`
- * treats as below the floor. */
-async function engineVersionOf(entry: ExistingEntry | null): Promise<string | null> {
-  const bin = commandArgv(entry)[0]
-  const direct = bin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(bin) ? bin : null
-  return direct ? await versionOf(direct) : null
-}
 
 /** What an existing entry means for this workspace — the whole decision, taken
  * in one synchronous step over one snapshot.
@@ -1091,67 +637,6 @@ function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE.has(outcome.kind)
 }
 
-/** What each outcome MEANS, stated once, as tables over the whole union.
- *
- * Two different consumers — tool precedence and the install offer — each need a
- * yes/no answer about an outcome, and each had derived it independently: one by
- * comparing kinds inline, the other by relying on where its call site sat in the
- * control flow. Both are the same latent bug, which is that adding a state to
- * this union silently gives it an answer nobody chose.
- *
- * A `Record` keyed by the union is the strongest available guard: a new variant
- * fails to compile until every table names it, and a removed one fails too. That
- * holds regardless of tsconfig strictness, which a `switch` with no default does
- * not. The safe answer is `false` in both tables, so the compiler asks the
- * question and the reviewer answers it deliberately. */
-const SERVING: Record<Outcome["kind"], boolean> = {
-  attached: true,
-  reused: true,
-  disabled: false,
-  unbound: false,
-  "engine-missing": false,
-  "engine-too-old": false,
-  "connect-failed": false,
-  "entry-disabled": false,
-  // The binding moved while this attach was in flight, so whatever is connected
-  // was established for a workspace this project has already left.
-  superseded: false,
-}
-
-/** Would installing the engine fix this outcome?
- *
- * NOT the same question as "did the attach refuse", and the two diverge exactly
- * where it matters: a user who deliberately disabled their engine would be
- * offered an install for an engine they already have and switched off, and a
- * failed connection is not an absence. Only genuine unobtainability qualifies. */
-const INSTALL_HELPS: Record<Outcome["kind"], boolean> = {
-  "engine-missing": true,
-  "engine-too-old": true,
-  attached: false,
-  reused: false,
-  disabled: false,
-  unbound: false,
-  "connect-failed": false,
-  "entry-disabled": false,
-  superseded: false,
-}
-
-/** Is an engine attributable to THIS session serving it?
- *
- * The contract for tool precedence: the config pin is the naming signal and this
- * is the runtime one, and both must agree before queries are routed into a
- * workspace's credentials. `undefined` means not settled — in flight or never
- * attached — and must stay distinguishable from a refusal, because the caller
- * fails open on it. */
-export function attributableEngine(outcome: Outcome | undefined): boolean {
-  return !!outcome && SERVING[outcome.kind]
-}
-
-/** Would offering to install the engine be a remedy for this outcome? */
-export function installWouldHelp(outcome: Outcome | undefined): boolean {
-  return !!outcome && INSTALL_HELPS[outcome.kind]
-}
-
 /** Did this outcome leave an engine serving this session? */
 function wasServing(outcome: Outcome | undefined): boolean {
   return attributableEngine(outcome)
@@ -1337,49 +822,6 @@ export function ensure(sessionID: string): Promise<Outcome> {
   )
   rememberSession(sessionID, entry)
   return entry.task
-}
-
-/** In-flight attach chain per project.
- *
- * Per-session ordering is not enough: the MCP client is instance-wide, not per
- * session, `MCP.add` is last-writer-wins, and `SessionRunState` keeps
- * independent runners per session id — so two prompts in the same project
- * genuinely overlap. Without this, a slower attach from one session can land
- * after another session's and leave the runtime serving a workspace nobody is
- * bound to, with both memos settled so no later turn repairs it. */
-const attachChains = new Map<string, Promise<unknown>>()
-
-function projectKey(): string {
-  try {
-    return projectRoot()
-  } catch {
-    return "<no-instance>"
-  }
-}
-
-function serializeAttach<T>(fn: () => Promise<T>): Promise<T> {
-  const key = projectKey()
-  const previous = attachChains.get(key) ?? Promise.resolve()
-  // Run regardless of how the previous attach ended — a failure must not wedge
-  // the chain for the rest of the process.
-  const next = previous.then(fn, fn)
-  const tail = next.then(
-    () => {},
-    () => {},
-  )
-  attachChains.set(key, tail)
-  // Drop the entry once it settles, unless another attach has already queued
-  // behind it — otherwise every project path a long-running server opens is
-  // retained for the life of the process. Bounding `sessions` did not cover this.
-  void tail.then(() => {
-    if (attachChains.get(key) === tail) attachChains.delete(key)
-  })
-  return next
-}
-
-/** Test seam — how many project attach chains are currently retained. */
-export function trackedChainsForTests(): number {
-  return attachChains.size
 }
 
 /** One attach, serialized against every other attach in this project, with the
