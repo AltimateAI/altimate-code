@@ -474,6 +474,11 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
     // Reading once here makes the decided connection and the executed connection the
     // same by construction. The dbt-first ordering below is unchanged.
     const fallbackName = params.warehouse || Registry.list().warehouses[0]?.name
+    // Pinning the name is not enough on its own: the same name can be re-added against a
+    // different warehouse while this call is suspended, and the routing decision made for
+    // it is a function of that connection's canonical type. Pin the type too, so a
+    // replacement is caught rather than executed under a decision that never covered it.
+    const fallbackType = fallbackName ? Registry.canonicalType(Registry.getConfig(fallbackName)?.type) : undefined
     // altimate_change end
 
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
@@ -488,6 +493,13 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
         "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
       )
     }
+    // altimate_change start — refuse rather than execute under a stale decision.
+    if (Registry.canonicalType(Registry.getConfig(fallbackName)?.type) !== fallbackType) {
+      throw new Error(
+        `Connection "${fallbackName}" changed while this query was being prepared, so the routing decided for it no longer applies. Re-run the query.`,
+      )
+    }
+    // altimate_change end
     const connector = await Registry.get(fallbackName)
     const result: SqlExecuteResult = await connector.execute(params.sql, params.limit)
     try {

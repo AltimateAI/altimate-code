@@ -151,3 +151,38 @@ describe("the default target survives a concurrent registry change", () => {
     expect(result.error).toMatch(/pinned_first/)
   })
 })
+
+describe("a connection replaced under the same name is not executed on the old verdict", () => {
+  // Pinning the name closes the case where the *identity* of the default changes.
+  // It does not close a same-name replacement: `Registry.get(name)` still consults the
+  // mutable registry after the dbt await, so a name re-added against a different
+  // warehouse would execute under a routing decision computed for the old one. The
+  // decision is a function of the connection's canonical type, so pinning the type
+  // pins the decision.
+  test("a same-name replacement of a different type is refused, not run locally", async () => {
+    Registry.setConfigs({ warm: { type: "duckdb", path: ":memory:" } as never })
+    await Dispatcher.call("warehouse.list", {}).catch(() => {})
+
+    Registry.setConfigs({ primary: { type: "duckdb", path: ":memory:" } as never })
+    const inflight = Dispatcher.call("sql.execute", { sql: "select 1" } as never)
+    // Same name, different warehouse — the kind a workspace integration may shadow.
+    Registry.setConfigs({ primary: { type: "snowflake", account: "a" } as never })
+
+    const result = (await inflight) as { error?: string }
+    expect(result.error).toMatch(/changed while this query was being prepared/)
+  })
+
+  test("a same-name rewrite that keeps the type still runs", async () => {
+    // The guard binds the routing decision, not the config bytes: an edit that cannot
+    // change where the call is routed must not turn into a spurious failure.
+    Registry.setConfigs({ warm: { type: "duckdb", path: ":memory:" } as never })
+    await Dispatcher.call("warehouse.list", {}).catch(() => {})
+
+    Registry.setConfigs({ primary: { type: "postgres", host: "a" } as never })
+    const inflight = Dispatcher.call("sql.execute", { sql: "select 1" } as never)
+    Registry.setConfigs({ primary: { type: "postgresql", host: "b" } as never })
+
+    const result = (await inflight) as { error?: string }
+    expect(result.error ?? "").not.toMatch(/changed while this query was being prepared/)
+  })
+})
