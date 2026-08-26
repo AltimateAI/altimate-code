@@ -288,6 +288,49 @@ describe("descriptions and listings", () => {
   })
 })
 
+describe("mechanism 6 — the inventory is stated once per session", () => {
+  test("the line is reported on first derivation", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain("snowflake: execute/explain/inspect via workspace analytics")
+  })
+
+  test("re-deriving every turn does not repeat it", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines).toHaveLength(1)
+  })
+
+  test("the escape hatch is reported rather than passing silently", async () => {
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines[0]).toContain("--integrations=local")
+  })
+
+  test("an ordinary unbound session says nothing", async () => {
+    precedenceInternals.binding = async () => null
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines).toHaveLength(0)
+  })
+
+  test("counts the local connections that are shadowed", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    // local_snow is snowflake; local_duck, bq_conn, pg_conn and rs_conn are not served.
+    expect(lines[0]).toContain("1 local connection shadowed")
+  })
+})
+
 describe("re-derivation", () => {
   test("precedence follows the live tool map when the engine's tools change", async () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS)

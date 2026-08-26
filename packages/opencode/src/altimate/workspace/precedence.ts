@@ -31,6 +31,9 @@
 // cache-invalidated by the `tools/list_changed` notification, and `resolveTools` runs
 // once per turn.
 import { Config } from "@/config/config"
+import { AppRuntime } from "@/effect/app-runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { TuiEvent } from "@/server/tui-event"
 import { Log } from "@/altimate/util/log"
 import { Instance } from "@/project/instance"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
@@ -112,7 +115,30 @@ const bySession = new Map<string, Precedence>()
 export const precedenceInternals: {
   binding?: () => Promise<{ datamateId: number; datamateName: string } | null>
   attributedTo?: () => Promise<string | null>
+  announce?: (line: string) => Promise<void>
 } = {}
+
+/** Sessions whose inventory line has already been reported. Precedence is re-derived
+ * every turn, but the inventory is a once-per-session statement of what changed. */
+const announced = new Set<string>()
+
+async function announce(line: string): Promise<void> {
+  if (precedenceInternals.announce) return precedenceInternals.announce(line)
+  try {
+    await AppRuntime.runPromise(
+      EventV2Bridge.Service.use((events) =>
+        events.publish(TuiEvent.ToastShow, {
+          title: "Workspace integrations",
+          message: line,
+          variant: "info",
+          duration: 10000,
+        }),
+      ),
+    )
+  } catch (err) {
+    log.warn("could not report the workspace precedence inventory", { err: String(err) })
+  }
+}
 
 /** Mechanism 6 — the escape hatch. `--integrations=local` (or the env var) turns
  * shadowing off for the whole session. */
@@ -162,6 +188,15 @@ async function attributedTo(): Promise<string | null> {
 export async function refresh(sessionID: string, tools: Record<string, unknown>): Promise<Precedence> {
   const result = await derive(tools)
   bySession.set(sessionID, result)
+  // Mechanism 6 — say once, per session, what is now served where. Silence is the one
+  // thing this design does not allow, but repeating it every turn would be noise.
+  if (!announced.has(sessionID)) {
+    const line = inventoryLine(result)
+    if (line) {
+      announced.add(sessionID)
+      void announce(line).catch(() => {})
+    }
+  }
   return result
 }
 
@@ -215,6 +250,8 @@ export function forSession(sessionID: string): Precedence | undefined {
 
 export function resetForTests(): void {
   bySession.clear()
+  announced.clear()
+  delete precedenceInternals.announce
   delete precedenceInternals.binding
   delete precedenceInternals.attributedTo
 }
@@ -314,7 +351,7 @@ export function annotate<T extends { metadata?: Record<string, unknown>; output?
   if (!verdict.notice) return result
   return {
     ...result,
-    metadata: { ...(result.metadata ?? {}), precedence: verdict.precedence ?? "undetermined" },
+    metadata: { ...result.metadata, precedence: verdict.precedence ?? "undetermined" },
     output: `${verdict.notice}\n\n${result.output ?? ""}`,
   }
 }
@@ -325,7 +362,7 @@ export function annotate<T extends { metadata?: Record<string, unknown>; output?
  */
 export function describeNativeTool(toolID: string, base: string, precedence?: Precedence): string {
   if (!precedence?.enabled) return base
-  const shadowed = CAPABILITIES.includes(toolID as Capability) || toolID === "warehouse_list"
+  const shadowed = (CAPABILITIES as string[]).includes(toolID) || toolID === "warehouse_list"
   if (!shadowed) return base
   return (
     `${base} Serves local connections; types served by workspace "${precedence.workspaceName}" ` +
