@@ -15,6 +15,8 @@ import {
   ATTACH_WAIT_MS,
   INSTALL_HINT,
   MIN_ENGINE_VERSION,
+  MAX_TRACKED_SESSIONS,
+  trackedSessionsForTests,
   type LocalMcpConfig,
 } from "../../../src/altimate/workspace/engine-sync"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
@@ -45,7 +47,7 @@ function install(opts: {
   declared?: { keys: string[]; extensionKeys: string[] } | null
   statuses?: Harness["statusQueue"]
   tools?: Record<string, unknown>
-  existing?: { type?: string; url?: string; command?: string[] | string; args?: string[] } | null
+  existing?: { type?: string; url?: string; command?: string[] | string; args?: string[]; enabled?: boolean } | null
 }): Harness {
   const h: Harness = {
     added: [],
@@ -644,14 +646,16 @@ describe("ensure — reuse reports the declared-vs-delivered gap (rule 5)", () =
 })
 
 describe("ensure — an unbound project does not keep a stale MANAGED entry", () => {
-  test("our own pinned entry is detached when the binding is gone", async () => {
+  test("a pinned entry is LEFT ALONE when the binding is gone — argv is not provenance", async () => {
+    // Reversed deliberately in round 5: a hand-authored entry is byte-identical
+    // to one we wrote, so tearing it down would take the user's server offline.
     const h = install({
       binding: null,
       existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "5"] },
       statuses: [{ datamate: { status: "connected" } }],
     })
     expect(await ensure("s1")).toEqual({ kind: "unbound" })
-    expect(h.removes).toEqual(["datamate"])
+    expect(h.removes).toHaveLength(0)
   })
 
   test("an IDE-written entry is LEFT ALONE — it is the user's, not ours", async () => {
@@ -807,7 +811,9 @@ describe("ensure — round 4", () => {
     // so retrying a DISABLED entry would undo a deliberate global disable for
     // every other project.
     const h = install({
-      existing: { type: "local", command: ["datamate", "start-stdio"] },
+      // A real user disable is `enabled: false` in the config. The runtime
+      // status alone is not evidence of intent — see the round-5 test below.
+      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
       statuses: [{ datamate: { status: "disabled" } }],
     })
     expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
@@ -851,5 +857,64 @@ describe("ensure — round 4", () => {
 
     expect(h.added).toHaveLength(2)
     expect(peak).toBe(1) // 2 without project-scoped serialization
+  })
+})
+
+describe("ensure — round 5", () => {
+  test("a REMOVED entry is not mistaken for a user disable — repair still works", async () => {
+    // MCP.remove deletes s.status[name], and MCP.status() reports a configured
+    // entry with no status as "disabled". Reading that as user intent made every
+    // turn after a rejection teardown return entry-disabled, permanently —
+    // silently undoing the repairable-retry fix from the previous round.
+    let onPath: string | null = null
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"] }, // unpinned -> rejected
+      statuses: [
+        { datamate: { status: "connected" } },
+        { datamate: { status: "disabled" } }, // synthesized after remove
+        { datamate: { status: "connected" } },
+        { datamate: { status: "connected" } },
+      ],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.which = () => onPath
+
+    // Turn 1: rejected and torn down, and no engine to replace it with.
+    expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
+    expect(h.removes).toEqual(["datamate"])
+
+    // The user installs the engine and takes another turn.
+    onPath = "/usr/local/bin/datamate"
+    const second = await ensure("s1")
+    expect(second).not.toEqual({ kind: "entry-disabled" })
+    expect(second).toMatchObject({ kind: "attached" })
+    expect(h.added[h.added.length - 1].cfg.command).toEqual(["datamate", "start-stdio", "--datamate", "42"])
+  })
+
+  test("a genuinely disabled entry (enabled:false in config) is still respected", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
+      statuses: [{ datamate: { status: "disabled" } }],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(h.connects).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+  })
+
+  test("an unbound project does NOT tear down an entry it cannot prove it owns", async () => {
+    // argv shape is not provenance: a hand-authored entry looks identical to ours.
+    const h = install({
+      binding: null,
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "5"] },
+      statuses: [{ datamate: { status: "connected" } }],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "unbound" })
+    expect(h.removes).toHaveLength(0) // the user's server stays up
+  })
+
+  test("the session map does not grow without bound", async () => {
+    install({ binding: null })
+    for (let i = 0; i < MAX_TRACKED_SESSIONS + 25; i++) await ensure(`s${i}`)
+    expect(trackedSessionsForTests()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
   })
 })

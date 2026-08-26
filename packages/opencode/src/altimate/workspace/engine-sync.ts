@@ -105,7 +105,7 @@ export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolea
  * `command: string[]` argv, or the `{ command, args }` split an IDE writes and
  * `datamate-transport` normalises. Read defensively — this is merged config
  * written by other clients. */
-export type ExistingEntry = { type?: string; url?: string; command?: string[] | string; args?: string[] }
+export type ExistingEntry = { type?: string; url?: string; command?: string[] | string; args?: string[]; enabled?: boolean }
 
 type Toast = { title: string; message: string; variant: "info" | "success" | "warning" | "error" }
 
@@ -322,14 +322,6 @@ export function pinnedWorkspace(entry: ExistingEntry | null): string | null {
   return null
 }
 
-/** Did WE write this entry? Only an entry matching the exact command we persist
- * is ours to tear down; an IDE-written or hand-edited entry belongs to the user
- * and is left alone even when it is the wrong one for this project. */
-function isManagedEntry(entry: ExistingEntry | null): boolean {
-  const argv = commandArgv(entry)
-  return argv.length === 4 && argv[0] === ENGINE_BINARY && argv[1] === "start-stdio" && argv[2] === PIN_FLAG && !!argv[3]
-}
-
 /** Short, printable identity of an entry, for saying what was replaced. */
 function describeEntry(entry: ExistingEntry | null): string {
   if (isUrlEntry(entry)) return entry.url
@@ -388,18 +380,23 @@ async function run(): Promise<Outcome> {
 
   const binding = await resolveBinding()
   if (!binding) {
-    // An entry WE persisted for a binding that no longer exists is still started
-    // by MCP bootstrap on every launch, and would serve the OLD workspace's tools
-    // in a project that is no longer linked to it. Detach it — runtime only, the
-    // config entry is left in place — so an unlinked project does not silently
-    // keep another workspace's tools. Only our own managed entry qualifies.
+    // An entry left over from a binding that no longer exists still gets started
+    // by MCP bootstrap and can serve the OLD workspace's tools here. Tempting to
+    // tear it down — but we cannot prove we wrote it. argv shape is not
+    // provenance: a hand-authored `datamate start-stdio --datamate <id>` is
+    // byte-identical to ours, and removing it would take the user's own server
+    // offline on every first prompt. This module's whole thesis is that you do
+    // not act on something you cannot attribute, so it applies to itself here:
+    // report it and leave it alone. Attributing this properly needs an explicit
+    // ownership marker written at persist time, which is a separate change.
     const present = (await client.status())[DATAMATE_KEY]
     if (present) {
       const stale = await existingEntry(DATAMATE_KEY)
-      if (isManagedEntry(stale)) {
-        log.info("detaching a managed engine entry in an unbound project", { entry: describeEntry(stale) })
-        await client.remove(DATAMATE_KEY).catch((err) => {
-          log.warn("could not detach the managed engine entry", { err: String(err) })
+      const pin = pinnedWorkspace(stale)
+      if (pin) {
+        log.info("unbound project has an engine entry pinned to a workspace; leaving it alone", {
+          pinnedTo: pin,
+          entry: describeEntry(stale),
         })
       }
     }
@@ -447,7 +444,11 @@ async function run(): Promise<Outcome> {
     let connected = existing.status === "connected"
 
     if (!connected) {
-      if (existing.status === "disabled") {
+      // `MCP.status()` synthesizes "disabled" for any CONFIGURED entry that has
+      // no runtime status, and `MCP.remove` deletes the status — so every
+      // rejection teardown makes the next turn look like a user disable. Read the
+      // config's actual flag instead; only that is user intent.
+      if (existing.status === "disabled" && entry?.enabled === false) {
         // The user turned this entry off deliberately. Do NOT call `MCP.connect`
         // to "retry" it: that persists `enabled: true` into whichever config
         // owns the entry, so for a global `datamate` the first prompt in any
@@ -679,7 +680,32 @@ function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE.has(outcome.kind)
 }
 
+/** Cap on remembered sessions.
+ *
+ * These maps are module-level and a long-running `serve` process creates
+ * sessions indefinitely, so without a bound they grow for the life of the
+ * process. Evicting the oldest is safe: a session whose memo is dropped simply
+ * re-attaches on its next turn, which is correct, just not free. */
+export const MAX_TRACKED_SESSIONS = 256
+
 const sessions = new Map<string, SessionAttach>()
+
+/** Insertion-ordered eviction — `Map` preserves insertion order, so the first
+ * key is the least recently STARTED attach. */
+function rememberSession(sessionID: string, entry: SessionAttach): void {
+  sessions.delete(sessionID)
+  sessions.set(sessionID, entry)
+  while (sessions.size > MAX_TRACKED_SESSIONS) {
+    const oldest = sessions.keys().next()
+    if (oldest.done) break
+    sessions.delete(oldest.value)
+  }
+}
+
+/** Test seam — how many sessions are currently remembered. */
+export function trackedSessionsForTests(): number {
+  return sessions.size
+}
 
 /** What a memoised attach is valid FOR.
  *
@@ -737,7 +763,7 @@ export function ensure(sessionID: string): Promise<Outcome> {
     },
     () => {},
   )
-  sessions.set(sessionID, entry)
+  rememberSession(sessionID, entry)
   return entry.task
 }
 
