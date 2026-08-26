@@ -307,3 +307,15 @@ export function firstModel(recipes: Recipes) {
   if (!model) throw new Error("No local model recipe is available")
   return model
 }
+
+// The registry is multi-model; the default is its first entry. `--model` selects
+// any other entry by id.
+export function selectModel(recipes: Recipes, id?: string) {
+  if (id === undefined) return firstModel(recipes)
+  const model = recipes.models.find((candidate) => candidate.id === id)
+  if (!model) {
+    const available = recipes.models.map((candidate) => candidate.id).join(", ")
+    throw new Error(`Unknown local model "${id}". Available: ${available}`)
+  }
+  return model
+}

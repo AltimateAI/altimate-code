@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { BUNDLED_RECIPES, validateRecipes } from "../../src/local/recipes"
+import { BUNDLED_RECIPES, selectModel, validateRecipes } from "../../src/local/recipes"
 
 describe("local recipe schema", () => {
   test("accepts the bundled schema-v1 snapshot", () => {
@@ -36,5 +36,23 @@ describe("local recipe schema", () => {
     const input = structuredClone(BUNDLED_RECIPES) as any
     input.models[0].tiers[0].parallel = 3
     expect(() => validateRecipes(input)).toThrow("ctx must divide evenly")
+  })
+})
+
+describe("selectModel", () => {
+  test("defaults to the first registry entry", () => {
+    const recipes = validateRecipes(structuredClone(BUNDLED_RECIPES))
+    expect(selectModel(recipes).id).toBe(recipes.models[0]!.id)
+  })
+
+  test("selects a model by id", () => {
+    const recipes = validateRecipes(structuredClone(BUNDLED_RECIPES))
+    const id = recipes.models[0]!.id
+    expect(selectModel(recipes, id).id).toBe(id)
+  })
+
+  test("rejects an unknown id and lists what is available", () => {
+    const recipes = validateRecipes(structuredClone(BUNDLED_RECIPES))
+    expect(() => selectModel(recipes, "no-such-model")).toThrow(/Unknown local model.*Available/)
   })
 })

@@ -3,7 +3,7 @@ import type { Argv } from "yargs"
 import { certify, certificateCacheKey, type LocalCertificate } from "./certify"
 import { describeHardware, detectHardware, matchHardwareToTier } from "./hardware"
 import { fetchModelArtifacts, type DownloadProgress } from "./fetch"
-import { firstModel, loadRecipes, refreshRecipes, type DockerRecipeTier, type LlamaRecipeTier, type ModelRecipe } from "./recipes"
+import { loadRecipes, refreshRecipes, selectModel, type DockerRecipeTier, type LlamaRecipeTier, type ModelRecipe } from "./recipes"
 import { formatPreflight, runPreflight } from "./preflight"
 import { withLifecycleLock } from "./lock"
 import { runtimeAsset } from "./runtime"
@@ -15,6 +15,7 @@ import { getServerStatus, startServer, stopServer, type ServerState } from "./se
 import { wireLocalProvider } from "./wire"
 
 interface LocalArgs {
+  model?: string
   port?: number
   ctx?: number
   parallel?: number
@@ -153,7 +154,7 @@ async function setupDocker(model: ModelRecipe, tier: DockerRecipeTier) {
 async function setup(args: LocalArgs) {
   const loaded = await loadRecipes()
   if (loaded.warning) console.warn(loaded.warning)
-  const model = firstModel(loaded.recipes)
+  const model = selectModel(loaded.recipes, args.model)
   const hardware = await detectHardware()
   console.log(`◇ Detected: ${describeHardware(hardware)}`)
   const match = matchHardwareToTier(hardware, model)
@@ -294,6 +295,27 @@ const LocalDoctorCommand = {
   },
 }
 
+const LocalModelsCommand = {
+  command: "models",
+  describe: "list the local model registry",
+  async handler() {
+    await task(async () => {
+      const loaded = await loadRecipes()
+      if (loaded.warning) console.warn(loaded.warning)
+      const hardware = await detectHardware()
+      for (const model of loaded.recipes.models) {
+        const match = matchHardwareToTier(hardware, model)
+        const fit = match.tier ? `matches this machine (${match.tier.name})` : "no matching tier here"
+        const isDefault = model === loaded.recipes.models[0] ? " · default" : ""
+        console.log(`${model.id} — ${model.name}${isDefault}`)
+        console.log(`  tiers: ${model.tiers.map((tier) => `${tier.name} (${tier.quant})`).join(", ")}`)
+        console.log(`  ${fit}`)
+      }
+      console.log("Run `altimate local --model <id>` to set one up.")
+    })
+  },
+}
+
 const LocalUpdateCommand = {
   command: "update",
   describe: "refresh the pinned local model recipes",
@@ -315,7 +337,9 @@ export const LocalCommand = {
       .command(LocalStatusCommand)
       .command(LocalStopCommand)
       .command(LocalDoctorCommand)
+      .command(LocalModelsCommand)
       .command(LocalUpdateCommand)
+      .option("model", { type: "string", describe: "registry model id (see `altimate local models`)" })
       .option("port", { type: "number", describe: "preferred llama-server port (auto-picks if unavailable)" })
       .option("ctx", { type: "number", describe: "aggregate llama.cpp context size" })
       .option("parallel", { type: "number", describe: "llama.cpp parallel slot count" })
