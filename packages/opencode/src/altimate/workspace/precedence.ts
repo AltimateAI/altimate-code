@@ -352,9 +352,51 @@ export async function check(sessionID: string, capability: Capability, warehouse
   // would close a cycle.
   const { resolveDefaultTarget } = await import("../native/connections/register")
   const target = await resolveDefaultTarget(CAPABILITY_OP[capability])
+  return decideForTarget(precedence, capability, target)
+}
+
+/**
+ * Decide a no-`warehouse` call from the target it would actually reach. Pure, and
+ * exported for its own tests: the ORDER of these branches is the property that has
+ * broken repeatedly, and it is only checkable in isolation — reaching a dbt-sourced
+ * target through `check()` needs a real dbt project.
+ *
+ * Order matters and is deliberate:
+ *   1. the target's own type is served      → redirect
+ *   2. the fallback behind it is served     → redirect (see below)
+ *   3. the type could not be determined     → run locally, non-silently
+ *   4. otherwise                            → run
+ *
+ * Step 2 must precede step 3. `sql.execute` falls back to the first registry
+ * connection whenever the dbt attempt yields nothing — an unrecognised result shape
+ * or a throw, not only an absent project. An undetermined dbt type is *more* likely
+ * to be the broken setup that yields nothing, so returning "undetermined" before
+ * looking at the fallback fails open into exactly the local execution against a
+ * served connection that this design exists to prevent.
+ */
+export function decideForTarget(
+  precedence: Precedence,
+  capability: Capability,
+  target: { source: "dbt" | "registry" | "none"; type?: string; name?: string; fallback?: { type: string; name: string } },
+): Verdict {
   if (target.source === "none") return RUN
 
   const type = canonicalType(target.type)
+  const entry = type ? precedence.shadowed.get(type)?.get(capability) : undefined
+  if (entry) {
+    const connection = target.source === "registry" ? (target.name ?? "the default connection") : "the dbt profile's target"
+    return redirectFor(capability, entry, precedence.workspaceName, connection)
+  }
+
+  // Reached whether or not the dbt type resolved — see the ordering note above.
+  if (target.source === "dbt" && target.fallback) {
+    const fallbackType = canonicalType(target.fallback.type)
+    const fallbackEntry = fallbackType ? precedence.shadowed.get(fallbackType)?.get(capability) : undefined
+    if (fallbackEntry) {
+      return redirectFor(capability, fallbackEntry, precedence.workspaceName, target.fallback.name, true)
+    }
+  }
+
   if (!type) {
     // Decided for v1: FAIL OPEN, non-silent. The call runs on the user's own local
     // credential — exactly today's behaviour — and says why it was not routed.
@@ -363,26 +405,6 @@ export async function check(sessionID: string, capability: Capability, warehouse
         `Not routed through workspace "${precedence.workspaceName}": ` +
         `the default target's type could not be determined.`,
       precedence: "undetermined",
-    }
-  }
-  const entry = precedence.shadowed.get(type)?.get(capability)
-  if (entry) {
-    const connection = target.source === "registry" ? target.name : "the dbt profile's target"
-    return redirectFor(capability, entry, precedence.workspaceName, connection)
-  }
-
-  // The dbt target itself is not served — but `sql.execute` falls back to the first
-  // registry connection whenever the dbt attempt yields nothing, including on an
-  // unrecognised result shape or a throw. If that fallback is a served connection,
-  // letting the call proceed would execute locally against exactly what precedence
-  // exists to route. Redirect rather than gamble on dbt succeeding: a redirect is
-  // visible and recoverable (name a `warehouse`, or `--integrations=local`), whereas
-  // the silent local execution is the harm this design is for.
-  if (target.source === "dbt" && target.fallback) {
-    const fallbackType = canonicalType(target.fallback.type)
-    const fallbackEntry = fallbackType ? precedence.shadowed.get(fallbackType)?.get(capability) : undefined
-    if (fallbackEntry) {
-      return redirectFor(capability, fallbackEntry, precedence.workspaceName, target.fallback.name, true)
     }
   }
   return RUN

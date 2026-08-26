@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
   check,
+  decideForTarget,
   describeEngineTool,
   describeNativeTool,
   forSession,
@@ -258,6 +259,71 @@ describe("the dbt-fallback redirect explains itself", () => {
     // (the explicit-warehouse path shares redirectFor; assert the plain wording here)
     expect(verdict.redirect!.output).toContain("--integrations=local")
     expect(verdict.redirect!.metadata.via).toBeUndefined()
+  })
+})
+
+describe("default-target decisions — branch order", () => {
+  // Reaching a dbt-sourced target through check() needs a real dbt project, so the
+  // order of these branches is only checkable on the pure function. It is also the
+  // property that has broken most often, which is why it gets its own suite.
+  const snowflakeFallback = { type: "snowflake", name: "local_snow" }
+
+  test("a served dbt target redirects", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const v = decideForTarget(p, "sql_execute", { source: "dbt", type: "snowflake" })
+    expect(v.redirect?.metadata.redirect_to).toBe("datamate_snowflake_execute_database_query")
+  })
+
+  test("an UNDETERMINED dbt type still redirects when the fallback behind it is served", async () => {
+    // The regression this suite exists for: returning "undetermined" before looking
+    // at the fallback fails open into a local execution against a served connection.
+    // An undetermined type is *more* likely to be the broken setup that falls back.
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const v = decideForTarget(p, "sql_execute", { source: "dbt", type: undefined, fallback: snowflakeFallback })
+    expect(v.redirect).toBeDefined()
+    expect(v.redirect!.metadata.via).toBe("dbt-fallback")
+    expect(v.precedence).toBeUndefined()
+  })
+
+  test("an undetermined dbt type with an UNSERVED fallback runs locally, non-silently", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const v = decideForTarget(p, "sql_execute", {
+      source: "dbt",
+      type: undefined,
+      fallback: { type: "duckdb", name: "local_duck" },
+    })
+    expect(v.redirect).toBeUndefined()
+    expect(v.precedence).toBe("undetermined")
+    expect(v.notice).toContain("could not be determined")
+  })
+
+  test("an undetermined dbt type with no fallback at all runs locally, non-silently", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const v = decideForTarget(p, "sql_execute", { source: "dbt", type: undefined })
+    expect(v.precedence).toBe("undetermined")
+  })
+
+  test("an unserved dbt type with a served fallback still redirects", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const v = decideForTarget(p, "sql_execute", { source: "dbt", type: "duckdb", fallback: snowflakeFallback })
+    expect(v.redirect!.metadata.via).toBe("dbt-fallback")
+  })
+
+  test("a registry target is decided on its own type, with no fallback notion", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(decideForTarget(p, "sql_execute", { source: "registry", type: "snowflake", name: "s" }).redirect).toBeDefined()
+    expect(decideForTarget(p, "sql_execute", { source: "registry", type: "duckdb", name: "d" }).redirect).toBeUndefined()
+  })
+
+  test("no resolvable target runs locally", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(decideForTarget(p, "sql_execute", { source: "none" })).toEqual({})
+  })
+
+  test("explain is decided per capability, so an execute-only integration leaves it local", async () => {
+    const p = await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(decideForTarget(p, "sql_execute", { source: "registry", type: "bigquery", name: "b" }).redirect).toBeDefined()
+    expect(decideForTarget(p, "sql_explain", { source: "registry", type: "bigquery", name: "b" }).redirect).toBeUndefined()
   })
 })
 
