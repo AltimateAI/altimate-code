@@ -28,6 +28,8 @@ const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
 
 /** The engine tools a workspace with a Snowflake connection materialises. Snowflake is
  * the only integration serving all three capabilities. */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
 const SNOWFLAKE_TOOLS = {
   datamate_snowflake_execute_database_query: {},
   datamate_snowflake_get_query_explain_plan: {},
@@ -597,12 +599,10 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(delivered.some((l) => l.includes("any more"))).toBe(true)
   })
 
-  test("two announcements failing while they overlap are both still owed", async () => {
-    // Precedence is re-derived every turn, so a second refresh can publish a different
-    // line before the first has settled. If the rollback restored the earlier record,
-    // it would restore a line that was never delivered either — and a later turn
-    // returning to that inventory would skip it as already said. Nothing may be treated
-    // as delivered until it arrives, whatever order the publications settle in.
+  test("two announcements that both fail are both still owed", async () => {
+    // Nothing may be treated as delivered until it arrives. Two lines can be pending at
+    // once — publishing is deliberately not awaited, so a turn is never held up by a
+    // toast — and if neither lands, neither may be remembered as said.
     const attempts: string[] = []
     const fail: Array<() => void> = []
     precedenceInternals.announce = (line) => {
@@ -612,42 +612,49 @@ describe("descriptions are per capability, and corrections are delivered", () =>
 
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     await refresh(SESSION, BIGQUERY_TOOLS)
-    expect(attempts).toHaveLength(2)
-    expect(attempts[0]).not.toBe(attempts[1])
+    // The second waits for the first rather than racing it.
+    expect(attempts).toHaveLength(1)
 
-    // Both fail, in the order they were sent.
-    for (const reject of fail) reject()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    fail[0]()
+    await tick()
+    expect(attempts).toHaveLength(2)
+    expect(attempts[1]).not.toBe(attempts[0])
+    fail[1]()
+    await tick()
 
     // Neither arrived, so the first inventory is still unsaid.
     await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await tick()
     expect(attempts).toHaveLength(3)
     expect(attempts[2]).toBe(attempts[0])
   })
 
-  test("a publication overtaken by a newer one does not record the line it lost to", async () => {
-    // Out-of-order settlement: the older publication succeeds after a newer one has
-    // started. It must not write itself in as the session's current knowledge, or the
-    // newer line is skipped as already said.
-    const attempts: string[] = []
+  test("announcements arrive in the order they were decided", async () => {
+    // Refreshes are serialized, but publishing is not awaited, so without a chain two
+    // lines could be in flight at once and land in either order — leaving the stale one
+    // on screen while the newer one is recorded as the session's state.
+    const order: string[] = []
     const settle: Array<() => void> = []
     precedenceInternals.announce = (line) => {
-      attempts.push(line)
+      order.push(line)
       return new Promise<void>((resolve) => settle.push(resolve))
     }
 
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     await refresh(SESSION, BIGQUERY_TOOLS)
-    // The FIRST publication lands last.
-    settle[1]()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    settle[0]()
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(order).toHaveLength(1)
 
-    // The session's state is the line that actually won, so re-deriving the same
-    // inventory stays quiet rather than repeating it.
+    settle[0]()
+    await tick()
+    expect(order).toHaveLength(2)
+    settle[1]()
+    await tick()
+
+    // The newest line is what the session is recorded as knowing, so re-deriving that
+    // same inventory stays quiet rather than repeating it.
     await refresh(SESSION, BIGQUERY_TOOLS)
-    expect(attempts).toHaveLength(2)
+    await tick()
+    expect(order).toHaveLength(2)
   })
 
   test("a session that never had routing is still told nothing", async () => {

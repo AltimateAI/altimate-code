@@ -154,6 +154,7 @@ function remember(sessionID: string, value: Precedence): void {
     bySession.delete(oldest.value)
     announced.delete(oldest.value)
     publishing.delete(oldest.value)
+    publishQueue.delete(oldest.value)
   }
 }
 
@@ -203,11 +204,18 @@ async function attested(sessionID: string): Promise<boolean> {
  * never happened, silencing that line for good. */
 const announced = new Map<string, { line: string; routed: boolean }>()
 
-/** The announcement currently being published for a session, held separately so it can
- * never be mistaken for one that arrived. It exists only to stop a second refresh in
- * the same window from sending the same line twice; a failed attempt leaves `announced`
+/** The announcement currently queued or being published for a session, held separately
+ * so it can never be mistaken for one that arrived. It exists only to stop a second
+ * refresh from sending the same line twice; a failed attempt leaves `announced`
  * untouched, so the next turn simply tries again. */
 const publishing = new Map<string, { line: string; routed: boolean }>()
+
+/** Publications are chained per session so they arrive in the order they were decided.
+ * Refreshes are serialized by the prompt loop, but publishing deliberately is not
+ * awaited — a toast must never be able to stall a turn — so without a chain two lines
+ * can be in flight at once and land in either order, leaving the stale one on screen
+ * while the newer one is recorded as the session's state. */
+const publishQueue = new Map<string, Promise<void>>()
 
 /** Said when routing stops entirely, which `inventoryLine` renders as an empty string
  * because there is nothing left to enumerate. Silence is the wrong answer only here:
@@ -327,11 +335,13 @@ export async function refresh(
     // next turn retries.
     const attempt = { line, routed }
     publishing.set(sessionID, attempt)
-    void announce(line).then((delivered) => {
-      if (publishing.get(sessionID) !== attempt) return
-      publishing.delete(sessionID)
+    const queued = (publishQueue.get(sessionID) ?? Promise.resolve()).then(async () => {
+      const delivered = await announce(line)
+      if (publishing.get(sessionID) === attempt) publishing.delete(sessionID)
       if (delivered) announced.set(sessionID, attempt)
     })
+    publishQueue.set(sessionID, queued)
+    void queued
   }
   return result
 }
@@ -407,6 +417,7 @@ export function resetForTests(): void {
   bySession.clear()
   announced.clear()
   publishing.clear()
+  publishQueue.clear()
   delete precedenceInternals.announce
   delete precedenceInternals.binding
   delete precedenceInternals.attributedTo
