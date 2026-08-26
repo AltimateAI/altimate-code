@@ -522,6 +522,36 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(lines).toHaveLength(1)
   })
 
+  test("routing stopping entirely is announced, not swallowed", async () => {
+    // The transition the user most needs to hear, and the one an empty inventory
+    // string cannot express on its own: they were told calls are routed, and now
+    // they are not.
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines).toHaveLength(1)
+    await refresh(SESSION, {})
+    expect(lines).toHaveLength(2)
+    expect(lines[1]).toContain("runs on the local drivers")
+  })
+
+  test("a session that never had routing is still told nothing", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, {})
+    expect(lines).toHaveLength(0)
+  })
+
+  test("routing stopping is announced once, not every turn", async () => {
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, {})
+    await refresh(SESSION, {})
+    await refresh(SESSION, {})
+    expect(lines).toHaveLength(2)
+  })
+
   test("a shrinking engine re-announces the smaller inventory", async () => {
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)

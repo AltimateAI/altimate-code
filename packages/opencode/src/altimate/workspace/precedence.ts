@@ -193,6 +193,12 @@ async function attested(sessionID: string): Promise<boolean> {
  * the line means a correction is delivered and an unchanged one stays quiet. */
 const announced = new Map<string, string>()
 
+/** Said when routing stops entirely, which `inventoryLine` renders as an empty string
+ * because there is nothing left to enumerate. Silence is the wrong answer only here:
+ * the session was previously told its calls were routed. */
+const STOPPED_ROUTING =
+  "Workspace integrations: nothing is served by the workspace any more; every connection now runs on the local drivers."
+
 async function announce(line: string): Promise<void> {
   if (precedenceInternals.announce) return precedenceInternals.announce(line)
   try {
@@ -281,8 +287,14 @@ export async function refresh(
   remember(sessionID, result)
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
-  const line = inventoryLine(result)
-  if (line && announced.get(sessionID) !== line) {
+  // A session that never had routing is told nothing — there is nothing to say. But a
+  // session that HAD routing and no longer does must hear about it: the empty
+  // inventory is exactly the transition the user most needs, and a truthiness guard
+  // alone can never announce it, so they would go on believing calls are routed while
+  // they run locally.
+  const previous = announced.get(sessionID)
+  const line = inventoryLine(result) || (previous ? STOPPED_ROUTING : "")
+  if (line && previous !== line) {
     announced.set(sessionID, line)
     void announce(line).catch(() => {})
   }
