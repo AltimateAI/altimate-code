@@ -71,6 +71,13 @@ function isAutomatedRun(): boolean {
 const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
 // slash-delimited variant: backslash is path content, not a separator
 const PM_R_P = "(?:[^\\s\\/'\"`]|'(?=[\\p{L}\\p{N}_]))"
+// drive-relative run (`C:file.sql`, `C:dir\x`): PM_R minus the colon — a second
+// colon inside the run is never a path (Snowflake `v:col`, `c::int`, `k:v`),
+// and stopping at it keeps every `x:` anchor of a colon-dense run O(1).
+// The separator-free form (`C:file.sql`) is the weakest evidence of all, so
+// it also requires the canonical uppercase drive letter and no `:` after
+// the extension — `v:geo.city::string` is a VARIANT traversal, not a file.
+const PM_DR = "(?:[^\\s\\/\\\\'\"`:]|'(?=[\\p{L}\\p{N}_]))"
 const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
 const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<|>)\\]}&])"
 const PM_SP = "[^\\S\\t\\n\\r\\v\\f]"
@@ -103,26 +110,56 @@ const PM_SEG_L = "(?=[^\\s'\"`]{0,128}[\\p{L}\\p{M}]|[\\s'\"`,;)\\]}>]|$)"
 // source raw/orders') do not.
 const PM_SEG_B = "(?=[^\\s\\/\\\\'\"`]{0,64}[\\p{L}\\p{M}]|[\\s'\"`,;)\\]}>]|$)"
 const PM_SEG_DEEP = "(?=[^\\s'\"`]{0,128}(?:[\\/\\\\]|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
+// Component-length bounds. Spaced runs are bounded by the filesystem's
+// 255-byte component limit — never by a word count: past a word cap the rest
+// of the component would ship in the clear, the wrong failure mode. pmComp:
+// the rest of this component reaches its proving separator within the
+// limit; PM_COMP_EXT: it ends in a dotted extension within the limit.
+const pmComp = (sep: string) => "(?=[^\\/\\\\\\n]{0,255}" + sep + ")"
+const PM_COMP_EXT = "(?=[^\\/\\\\\\n]{0,255}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))"
 // a spaced bridge + its proving separator: <=2 words with the first-segment
-// proof, or 3-6 words with the deep-continuation proof as well
+// proof, or 3+ words (one component) with the deep-continuation proof as well
 const pmBridgeLight = (sep: string) =>
   "(?:(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B + ")"
 const pmBridge = (sep: string) =>
   "(?:(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B +
-  "|(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){3,6}" + sep + PM_SEG_B + PM_SEG_DEEP + ")"
-const PM_ANCHOR_HOME = "(^|[\\s\"'`=(,[{:;<|>)\\]}&]|(?<=[^\\s:\\/\\\\])(?=\\/(?:[Uu]sers|[Hh]ome)\\/))"
+  "|" + pmComp(sep) + "(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){3,64}" + sep + PM_SEG_B + PM_SEG_DEEP + ")"
+const PM_ANCHOR_HOME = "(^|[\\s\"'`=(,[{:;<|>)\\]}&]|(?<=[^\\s:\\/\\\\])(?=\\/(?:" + pmCI("users") + "|" + pmCI("home") + "[sS]?)\\/))"
 const pmSpan = (sep: string) =>
   "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "{0,256}(?:" + sep + PM_SEG_L + "|(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))|[\"'`](?=" + pmR(sep) + "{1,256}(?:" + sep + PM_SEG_L + "|(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))))"
 const pmChunks = (sep: string) => "(?:" + pmBridge(sep) + pmSpan(sep) + "*){0,2}"
-// terminal dotted filename: up to four spaced words that END in an extension
-const pmSpFile = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "+){1,4}(?<=" + PM_EXT + "))?"
-const PM_TERM_COND = "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?=$|[.,;:)\\]}!?]))?"
+// terminal dotted filename: spaced words that END in an extension, bounded
+// by component length (PM_COMP_EXT), not by a word count
+const pmSpFile = (sep: string) => "(?:" + PM_COMP_EXT + "(?:" + PM_SP + "{1,2}" + pmR(sep) + "+){1,64}(?<=" + PM_EXT + "))?"
+// a trailing word is never the drive letter of a following path: `:` ends
+// it only when whitespace or the end follows (`copy C:\\a C:\\b`, `moved
+// C:\\x D:y.sql` keep both paths whole; `at /x/y line: 3` still terminates)
+const PM_TERM_COND = "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?=$|[.,;)\\]}!?]|:(?=$|\\s)))?"
 const PM_TERM_UNC =
-  "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?:" + PM_SP + "{1,2}(?:[\\p{Lu}\\p{Lo}]" + PM_WORD + "*|(?:v[ao]n|de[nrl]?|d[aiou]|dos|la|les?|los|bin|ibn|al|el|te[nr])(?=" + PM_SP + ")))*)?"
+  "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?:" + PM_SP + "{1,2}(?:[\\p{Lu}\\p{Lo}]" + PM_WORD + "*|(?:v[ao]n|de[nrl]?|d[aiou]|dos|la|les?|los|bin|ibn|al|el|te[nr])(?=" + PM_SP + ")))*(?!:\\S))?"
 const PM_WC = "(?:[\\p{L}\\p{N}_#@().'-]{2,}|[\\p{L}\\p{N}_#@().'+&-]{3,})"
 const PM_WCC = "[\\p{L}\\p{N}_#@().'+&-]+"
-const pmSpFileX = (sep: string) => "(?:(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){1,12}(?<=" + PM_EXT + "))?"
+const pmSpFileX = (sep: string) => "(?:" + PM_COMP_EXT + "(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){1,64}(?<=" + PM_EXT + "))?"
 const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
+// an absolute HTTP request target (`GET /api/v1/x`, `route /a/b`) is not a
+// filesystem path — masking it destroys HTTP error identity. Home-rooted
+// targets are still masked by the home rules (which carry no such guard).
+const PM_NOT_ROUTE = "(?<!(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|route|endpoint)\\s)"
+// input cap and the lookahead the rules may see past it (wider than any
+// proof scan — all are bounded at the 255-byte component limit)
+const PM_CAP = 8192
+const PM_LOOKAHEAD = 2048
+// is a `q`-quoted span still open at the end of `s`? Mirrors the quote rules'
+// grammar exactly (`q(?:[^q\\]|\\.)*q`): a backslash escapes only inside a span
+function pmQuoteOpen(s: string, q: string): boolean {
+  let open = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (open && c === "\\") i++
+    else if (c === q) open = !open
+  }
+  return open
+}
 // Known-prefix literals — the local user's home and cwd are KNOWN values,
 // replaced by exact match AFTER the structural rules (structure must see the
 // original string: stripping the prefix first orphans terminal spaced
@@ -165,10 +202,10 @@ function pmKnownPrefixes(): RegExp[] {
 }
 const PATH_RULES = {
   cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "{0,2}|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\]+" + SEP_W + "))(?:" + PM_R + "{1,256}(?:" + SEP_W + "{1,2}" + PM_SEG_L + "|" + pmBridgeLight(SEP_W) + ")){0,8}|" + SEP_W + "{1,2})(?:" + pmCI("users") + "|" + pmCI("home") + "s?|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + "{1,2}" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
-  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\\\|(?=[^\\s\\/\\\\]{0,256}[\\p{L}])" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\/|" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256}){0,6}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;:)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
-  posixHome: new RegExp(PM_ANCHOR_HOME + "\\/(?:" + PM_R_P + "{1,256}(?:\\/" + PM_SEG_L + "|" + pmBridgeLight(SEP_P) + "))*(?:" + pmCI("users") + "|" + pmCI("home") + ")\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
-  posix: new RegExp(PM_ANCHOR + "(?:\\.{0,2}\\/(?:" + PM_R_P + "{1,256}(?:\\/" + PM_SEG_L + "|" + pmBridgeLight(SEP_P) + "))+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "{0,2}|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\]+" + SEP_W + "))(?:" + PM_R + "{1,256}(?:" + SEP_W + "{1,2}" + PM_SEG_L + "|" + pmBridgeLight(SEP_W) + ")){0,8}|" + SEP_W + "{1,2})(?:" + pmCI("users") + "|" + pmCI("home") + "[sS]?|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + "{1,2}" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_DR + "{1,256}(?:" + PM_SP + "{1,2}" + PM_DR + "{1,256}){0,8}\\\\|(?=[^\\s\\/\\\\:]{0,256}[\\p{L}])" + PM_DR + "{1,256}(?:" + PM_SP + "{1,2}" + PM_DR + "{1,256}){0,8}\\/)|[A-Z]:(?=" + PM_DR + "{1,255}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  posixHome: new RegExp(PM_ANCHOR_HOME + "\\/(?:" + PM_R_P + "{1,256}(?:\\/" + PM_SEG_L + "|" + pmBridgeLight(SEP_P) + "))*(?:" + pmCI("users") + "|" + pmCI("home") + "[sS]?)\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
+  posix: new RegExp(PM_ANCHOR + PM_NOT_ROUTE + "(?:\\.{0,2}\\/(?:" + PM_R_P + "{1,256}(?:\\/" + PM_SEG_L + "|" + pmBridgeLight(SEP_P) + "))+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
   tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*[\\\\\\/]|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
 }
 // altimate_change end
@@ -1493,25 +1530,40 @@ export namespace Telemetry {
 
   export function maskString(s: string): string {
     // Consumers truncate masked output to <= 2000 chars; masking beyond 8 KB
-    // of input buys nothing, and unbounded input is what turns any super-
-    // linear rule into a stall. The cut happens FIRST so every rule — the
-    // linear credential/quote passes included — does bounded work, but it
-    // must never fail a rule open across the boundary: it backs off to the
-    // last whitespace of any kind (no token straddles the cut), then to
-    // before any unbalanced quote (a quoted value never survives half-open).
-    if (s.length > 8192) {
-      let cut = 8192
-      const ws = s.slice(0, 8192).search(/\s\S*$/)
-      if (ws > 4096) cut = ws
-      for (const q of ['"', "'"]) {
-        const window = s.slice(0, cut)
-        if ((window.split(q).length - 1) % 2 === 1) {
-          const open = window.lastIndexOf(q)
-          if (open > 2048) cut = open
-        }
-      }
-      s = s.slice(0, cut)
-    }
+    // buys nothing, and unbounded input is what turns any super-linear rule
+    // into a stall. Input is cut FIRST so every rule — the linear credential/
+    // quote passes included — does bounded work, and the cut must never fail
+    // a rule open across the boundary. No floor gates any of this: a floor is
+    // a leak past the floor.
+    if (s.length <= PM_CAP) return pmMask(s)
+    // the head ends at whitespace of any kind, so no token straddles it (a
+    // head with no whitespace at all is one token: nothing is emitted)
+    const ws = s.slice(0, PM_CAP).search(/\s\S*$/)
+    const at = ws >= 0 ? ws : 0
+    // a quote the cut left half-open is closed (escape-aware, mirroring the
+    // quote rules, in their order) so the quote rule collapses the value
+    // instead of emitting it verbatim
+    let head = s.slice(0, at)
+    if (pmQuoteOpen(head, "'")) head += "'"
+    if (pmQuoteOpen(head.replace(/'(?:[^'\\]|\\.)*'/g, "?"), '"')) head += '"'
+    // Every rule proves a path by what FOLLOWS it — a spaced component whose
+    // proving separator falls past the cut would otherwise leak its words.
+    // So the head is masked twice: alone, and with the text past the cut in
+    // view. Only the prefix on which both agree is emitted: text the rules
+    // masked the same way with and without the continuation, cut back to
+    // whitespace. Whatever the continuation changes is dropped, never
+    // emitted half-proven.
+    const alone = pmMask(head)
+    const seen = pmMask(s.slice(0, at + PM_LOOKAHEAD))
+    let n = 0
+    while (n < alone.length && alone[n] === seen[n]) n++
+    if (n === alone.length) return alone
+    const back = alone.slice(0, n).search(/\s\S*$/)
+    return back >= 0 ? alone.slice(0, back).trimEnd() : ""
+  }
+
+  // the masking chain proper, on bounded input (see maskString)
+  function pmMask(s: string): string {
     let out = s
       // ANSI CSI sequences (colored subprocess stderr) would otherwise split
       // tokens so neither credential nor path rules can see them
@@ -1522,7 +1574,7 @@ export namespace Telemetry {
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
     // Fast path: a string with no separator cannot contain a path — skip the
     // whole path stack (most telemetry strings carry no path at all).
-    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:[^\s:]{1,255}(?: [^\s:]{1,255}){0,2}\.[A-Za-z]/.test(out)) {
+    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Z]:[^\s:\\\/]{1,255}\.[A-Za-z]/.test(out)) {
       out = out
       // altimate_change start — mask filesystem paths in error text
       // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and

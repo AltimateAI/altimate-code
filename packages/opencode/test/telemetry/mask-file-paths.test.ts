@@ -74,6 +74,41 @@ describe("maskString paths — preprocessing — escape stripping, known-prefix 
     expect(mask("x".repeat(8100) + "\n/Users/jdoe/secret-client-repo/models")).not.toContain("jdoe")
   })
 
+  it("the cut has no floors: a half-open quote is closed wherever it opened", () => {
+    // opened in the first 2 KB (a floor would skip it) — the quote rule
+    // collapses the closed span; an escaped quote inside does not fake balance
+    expect(mask('"customer-secret-payload ' + "A".repeat(9000))).not.toContain("customer-secret")
+    expect(mask('error: "customer-secret-\\"payload-' + "A".repeat(9000) + '"')).not.toContain("customer-secret")
+    expect(mask("p".repeat(3000) + '"customer-secret-payload ' + "A".repeat(9000))).not.toContain("customer-secret")
+    expect(mask("note 'customer-secret-payload " + "A".repeat(9000))).not.toContain("customer-secret")
+  })
+
+  it("the cut never emits part of a token: a whitespace-free window emits nothing", () => {
+    expect(mask("x".repeat(8170) + "=/acme-client-secret-repo/models/private.sql")).toBe("")
+    expect(mask("x".repeat(9000))).toBe("")
+    // a partial token past the last whitespace is dropped whole
+    expect(mask("word ".repeat(1700) + "acme-client-secret")).not.toContain("acme")
+  })
+
+  it("a spaced component whose proving separator falls past the cut masks whole (every offset)", () => {
+    // the head is masked with the text past the cut in view, and only the
+    // prefix both readings agree on is emitted — so the cut cannot strand
+    // the words of a component whose separator it removed
+    for (let k = 4060; k <= 4105; k++) {
+      const out = mask("z ".repeat(k) + "/data/my big client folder/models/x.sql")
+      expect(out).not.toContain("big")
+      expect(out).not.toContain("client")
+      const home = mask("z ".repeat(k) + "/Users/jdoe/my big client folder/models/x.sql")
+      expect(home).not.toContain("jdoe")
+      expect(home).not.toContain("client")
+    }
+  })
+
+  it("the cut keeps what the rules proved: a path wholly before it stays one marker", () => {
+    expect(mask("z ".repeat(4000) + "/data/my big client folder/models/x.sql failed " + "z ".repeat(200)))
+      .toContain("<path> failed")
+  })
+
   it("masking never throws when the cwd has been deleted", () => {
     const os = require("os")
     const fs = require("fs")
@@ -157,6 +192,18 @@ describe("maskString paths — home-rooted paths — roots and reach", () => {
     expect(mask("check /users/jane went missing")).toBe("check <path> missing")
     expect(mask("read S3://Bucket/Key now")).toBe("read <path>")
     expect(mask(String.raw`stat \\?\unc\srv\share\Users\Jane Doe gone`)).toBe("stat <path> gone")
+  })
+  it("glued home roots mask in every spelling — the anchor uses the rule body's case fragments", () => {
+    for (const root of ["Users", "users", "USERS", "UsErS", "Home", "home", "HOME", "homes", "HOMES"]) {
+      expect(mask(`prefixtext/${root}/jdoe/client/model.sql`)).not.toContain("jdoe")
+      expect(mask(`see https://example.com/${root}/jdoe/docs now`)).not.toContain("jdoe")
+    }
+  })
+
+  it("/homes/ is a home root for every layer", () => {
+    expect(mask("stat /var/homes/Jane Doe does not exist")).toBe("stat <path> does not exist")
+    expect(mask("stat /homes/jdoe/x")).toBe("stat <path>")
+    expect(mask(String.raw`stat C:\homes\Jane Doe\x`)).toBe("stat <path>")
   })
 })
 
@@ -251,6 +298,23 @@ describe("maskString paths — terminal components and tails — spaced, unicode
 
   it("name particles work across nonbreaking spaces", () => {
     expect(mask("/Users/Mary\u00A0van\u00A0der\u00A0Berg does not exist")).toBe("<path> does not exist")
+  })
+  it("a trailing word is never the drive letter of a following path", () => {
+    expect(mask(String.raw`cannot copy C:\acme\reports C:\backup\acmereports`)).toBe("cannot copy <path> <path>")
+    expect(mask(String.raw`moved C:\clientdata D:\backupdata`)).toBe("moved <path> <path>")
+    expect(mask(String.raw`copy s3://bucket/clientkey C:\dest\secret`)).toBe("copy <path> <path>")
+    expect(mask(String.raw`read /Users/jdoe/clientdata D:\backupdata`)).toBe("read <path> <path>")
+    expect(mask("moved /srv/a /srv/b")).toBe("moved <path> <path>")
+    // legitimate trailing-word consumption is unchanged
+    expect(mask(String.raw`read C:\acme\reports done`)).toBe("read <path>")
+    expect(mask(String.raw`read C:\acme\reports, then stop`)).toBe("read <path>, then stop")
+  })
+
+  it("spaced filenames and directory components are bounded by length, not word count", () => {
+    expect(mask("read /Users/jdoe/Q1 final audited customer revenue report.sql failed")).toBe("read <path> failed")
+    expect(mask("read /data/one two three four five six seven eight/models/x.sql failed")).toBe("read <path> failed")
+    expect(mask(String.raw`read C:\data\one two three four five six seven eight\models\x.sql failed`)).toBe("read <path> failed")
+    expect(mask("read /data/" + "w ".repeat(30) + "final report.sql failed")).toBe("read <path> failed")
   })
 })
 
@@ -373,7 +437,12 @@ describe("maskString paths — windows paths — drive, UNC, relative, and roote
   it("drive-relative terminal filenames mask when the extension carries a letter", () => {
     expect(mask("read C:123_customer_secret.sql failed")).toBe("read <path> failed")
     expect(mask("read C:.env.local failed")).toBe("read <path> failed")
-    expect(mask("read C:customer secret.sql failed")).toBe("read <path> failed")
+    // a SPACED drive-relative filename is not reached (documented residue):
+    // `x:word … dotted.token` is Snowflake VARIANT syntax in ordinary SQL
+    // (`SELECT v:customer_id FROM raw.events`), which masked_sql must keep
+    expect(mask("read C:customer secret.sql failed")).toBe("read C:customer secret.sql failed")
+    // the separator-free form needs the canonical uppercase drive letter
+    expect(mask("read c:customer_secret.sql failed")).toBe("read c:customer_secret.sql failed")
     // versions and ratios have all-numeric extensions and never qualify
     expect(mask("avg C:8.5 shown")).toBe("avg C:8.5 shown")
     expect(mask("version C:1.2.3 tagged")).toBe("version C:1.2.3 tagged")
@@ -435,11 +504,14 @@ describe("maskString paths — posix paths — absolute, dot-relative, and shall
     expect(mask("fetch //cdn.example.com/lib.js failed")).toBe("fetch //cdn.example.com/lib.js failed")
   })
 
-  it("explicit shallow paths take many spaced words; deep tails keep the prose cap", () => {
+  it("spaced terminal filenames are bounded by component length, never by a word count", () => {
     expect(mask("read ./Q1 final audited customer revenue report.sql failed")).toBe("read <path> failed")
-    // prose after a deep extensionless path must NOT be chased to a dotted token
-    expect(mask("read /opt/x error reading the project config.yml here"))
-      .toBe("read <path> error reading the project config.yml here")
+    // past a word cap the rest of a filename would ship in the clear — so a
+    // deep tail is chased to a dotted token within one 255-byte component
+    // (the prose between is over-masked: the correct failure mode)
+    expect(mask("read /opt/x error reading the project config.yml here")).toBe("read <path> here")
+    // beyond the component limit the run is prose, not a filename
+    expect(mask("read /opt/x " + "word ".repeat(60) + "y.sql here")).toContain("word word")
   })
 })
 
@@ -750,9 +822,14 @@ describe("maskString paths — prose survives around a masked path", () => {
     // it (a home root anchors mid-token by design — the username must mask)
     expect(out).toContain("failed on 8")
     expect(out).not.toContain("jdoe")
+    // a 7-word run that reaches a proven deep path IS a spaced component
+    // (bounded by component length, not word count) and masks with it
     const out2 = mask(String.raw`open \\server\share\x failed with many ordinary bridge words here/Users/jdoe/secret.txt`)
-    expect(out2).toContain("failed with many ordinary bridge words here")
-    expect(out2).not.toContain("jdoe")
+    expect(out2).toBe("open <path>")
+    // past the 255-byte component limit the words are prose again
+    const out3 = mask(String.raw`open \\server\share\x failed ` + "word ".repeat(60) + "here/Users/jdoe/secret.txt")
+    expect(out3).toContain("failed word word")
+    expect(out3).not.toContain("jdoe")
   })
 
   it("FQDN UNC /home/ and /homes/ shares mask", () => {
@@ -842,6 +919,40 @@ describe("maskString paths — must NOT mask — prose, URLs, and documented bou
   it("three or more spaces stay a column boundary", () => {
     expect(mask("read /opt/data/x.sql    404 NotFound")).toBe("read <path> 404 NotFound")
   })
+
+  it("HTTP request targets after a method or route keyword are not filesystem paths", () => {
+    expect(mask("GET /api/v1/customers returned 404")).toBe("GET /api/v1/customers returned 404")
+    expect(mask("PUT /v1/x/y 500")).toBe("PUT /v1/x/y 500")
+    expect(mask("route /a/b not found")).toBe("route /a/b not found")
+    expect(mask("DELETE /session/abc123/message/xyz failed")).toBe("DELETE /session/abc123/message/xyz failed")
+    // a home-rooted target is still a home path
+    expect(mask("GET /Users/jdoe/profile 200")).not.toContain("jdoe")
+    // without a method or route keyword a multi-segment slash token is a
+    // filesystem path (pinned: routes in that position mask)
+    expect(mask("open /api/v1/customers failed")).not.toContain("customers")
+  })
+})
+
+describe("maskString paths — SQL bodies — masked_sql and hashError inputs", () => {
+  // maskString runs on raw SQL (sql-execute hashError, register.ts
+  // masked_sql): dialect syntax must survive so the triage pipeline keeps
+  // clustering on the statement
+  it("Snowflake VARIANT accessors and casts are not drive-relative paths", () => {
+    expect(mask("SELECT v:customer_id FROM raw.events")).toBe("SELECT v:customer_id FROM raw.events")
+    expect(mask("SELECT a/b AS ratio, c::int FROM db.tbl")).toBe("SELECT a/b AS ratio, c::int FROM db.tbl")
+    expect(mask("SELECT amount::numeric FROM finance.orders")).toBe("SELECT amount::numeric FROM finance.orders")
+    expect(mask("column x::text does not exist in schema.table")).toBe("column x::text does not exist in schema.table")
+    expect(mask("SELECT v:geo.city::string, v:c[0] FROM t")).toBe("SELECT v:geo.city::string, v:c[0] FROM t")
+    expect(mask("SELECT v:geo.city FROM t")).toBe("SELECT v:geo.city FROM t")
+    expect(mask("note: see readme.md")).toBe("note: see readme.md")
+    expect(mask("TODO: update package.json")).toBe("TODO: update package.json")
+  })
+
+  it("paths inside SQL still mask", () => {
+    expect(mask("COPY INTO t FROM @stage/Users/jdoe/data/x.csv")).not.toContain("jdoe")
+    expect(mask("SELECT * FROM read_csv('/Users/jdoe/data/x.csv')")).not.toContain("jdoe")
+    expect(mask("SELECT * FROM read_parquet(s3://bucket/customer-data/x.parquet)")).toBe("SELECT * FROM read_parquet(<path>)")
+  })
 })
 
 describe("maskString paths — composition with the rest of the masking chain", () => {
@@ -880,7 +991,28 @@ describe("maskString paths — performance — growth rates, not wall clocks", (
   }
 
   it("drive-colon runs grow linearly (was quadratic: v:col SQL stalled seconds)", () => {
-    expect(growth(n => "a:".repeat(n / 2))).toBeLessThan(16)
+    // the dotted tail is what admits this shape past the fast-path gate
+    expect(growth(n => "a:".repeat(n / 2) + "x.sql")).toBeLessThan(16)
+    expect(growth(n => "A:".repeat(n / 2) + "x.sql")).toBeLessThan(16)
+  })
+
+  it("stays under an absolute per-call budget at the cap (a ratio is blind to a large constant)", () => {
+    // the colon-dense shape the gate admits, at 8 KB (was ~170 ms/call while
+    // the drive-relative run class admitted `:`); ordinary messages cost well
+    // under a millisecond — this pins the constant the growth ratios cannot see
+    for (const worst of ["a:".repeat(4090) + "x.sql", "A:".repeat(4090) + "x.sql"]) {
+      mask(worst)
+      expect(perCall(worst, 5)).toBeLessThan(25)
+    }
+  })
+
+  it("path-dense input is bounded per matched path", () => {
+    // each masked path costs a constant (~50 µs: the composed rules run in
+    // the engine's slower path) — 900 paths in 8 KB is the densest possible
+    // list and the ceiling for any message under the cap
+    const dense = "/a/b.sql ".repeat(900)
+    mask(dense)
+    expect(perCall(dense, 5)).toBeLessThan(150)
   })
 
   it("delimiter runs grow linearly", () => {
