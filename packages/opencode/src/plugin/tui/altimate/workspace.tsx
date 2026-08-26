@@ -24,6 +24,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import open from "open"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -50,6 +51,7 @@ import {
 import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
 import {
   describeOffer,
+  installCommand,
   installEngine,
   nodeMajor as detectNodeMajor,
   MIN_NODE_MAJOR,
@@ -1372,6 +1374,12 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
     <props.api.ui.DialogSelect
       title={title()}
       options={options()}
+      // No filter. The row set changes with the phase, and a query typed to
+      // reach "Install now" still applies afterwards — the installing sentinel
+      // and the failure rows do not match it, so `filtered()` empties and the
+      // recovery actions become unreachable. A fixed three-option dialog gains
+      // nothing from filtering anyway.
+      skipFilter
       current={canInstall() ? "install" : "copy"}
       onSelect={(option) => {
         if (option.value === "busy") return
@@ -1434,6 +1442,25 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
   // that arrive close together both pass — which is worse than the bug it
   // fixes, because the second dialog can replace an installing one and start a
   // concurrent global npm install.
+  // `attach <url>` runs this plugin on the CLIENT while the binding, the PATH
+  // that matters and the MCP session all live on the SERVER. Probing PATH here
+  // would describe the wrong machine, and "Install now" would install npm on
+  // the client, leaving the server exactly as it was behind a success toast.
+  // attach.ts recognises that case the same way — the server's directory does
+  // not exist locally — so use it and refuse to act, saying where the fix goes.
+  //
+  // Not a complete answer: a client that happens to have the same path, with a
+  // binding, is still misread. Closing that needs server-side discovery and
+  // install behind an API, which this PR does not add.
+  if (!existsSync(api.state.path.directory)) {
+    log.info("engine install offer suppressed: not the host that owns this workspace")
+    api.ui.toast({
+      variant: "warning",
+      message: `This workspace's engine is missing on the server, not on this machine. Run there: ${installCommand()}`,
+      duration: 30_000,
+    })
+    return
+  }
   if (engineOfferVisible) return
   if (engineInstallInFlight) {
     // An install started from an earlier dialog is still running; offering
