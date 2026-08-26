@@ -46,7 +46,7 @@ import { Log } from "@/altimate/util/log"
 import { Instance } from "@/project/instance"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { DATAMATE_KEY } from "../datamate-transport"
-import { engineToolKeys, pinnedWorkspace, type ExistingEntry } from "./engine-sync"
+import { engineToolKeys, isEnabled, pinnedWorkspace, type ExistingEntry } from "./engine-sync"
 import { readLocalBinding } from "./state"
 import { canonicalType } from "../native/connections/registry"
 import * as Registry from "../native/connections/registry"
@@ -103,7 +103,7 @@ export interface Precedence {
    * could not be attributed to the bound workspace. */
   enabled: boolean
   /** Why precedence is off, for the inventory line. Absent when enabled. */
-  disabledReason?: "escape-hatch" | "unbound" | "unattributed" | "nothing-materialised"
+  disabledReason?: "pilot-off" | "escape-hatch" | "unbound" | "unattributed" | "nothing-materialised"
   /** canonical driver type → capability → who serves it. */
   shadowed: Map<string, Map<Capability, ShadowEntry>>
 }
@@ -209,6 +209,12 @@ export async function refresh(sessionID: string, tools: Record<string, unknown>)
 }
 
 async function derive(tools: Record<string, unknown>): Promise<Precedence> {
+  // The workspace pilot is opt-in, and opting out has to mean it. A binding and a
+  // pinned `datamate` entry both persist in config, and the MCP client connects that
+  // entry on its own regardless of the pilot flag — so engine tools can materialise
+  // for someone who has switched the pilot off. Without this gate their local
+  // warehouse calls would start redirecting.
+  if (!isEnabled()) return EMPTY("pilot-off")
   if (escapeHatchOn()) return EMPTY("escape-hatch")
 
   const binding = await currentBinding()
@@ -343,9 +349,26 @@ export async function check(sessionID: string, capability: Capability, warehouse
     }
   }
   const entry = precedence.shadowed.get(type)?.get(capability)
-  if (!entry) return RUN
-  const connection = target.source === "registry" ? target.name : "the dbt profile's target"
-  return redirectFor(capability, entry, precedence.workspaceName, connection)
+  if (entry) {
+    const connection = target.source === "registry" ? target.name : "the dbt profile's target"
+    return redirectFor(capability, entry, precedence.workspaceName, connection)
+  }
+
+  // The dbt target itself is not served — but `sql.execute` falls back to the first
+  // registry connection whenever the dbt attempt yields nothing, including on an
+  // unrecognised result shape or a throw. If that fallback is a served connection,
+  // letting the call proceed would execute locally against exactly what precedence
+  // exists to route. Redirect rather than gamble on dbt succeeding: a redirect is
+  // visible and recoverable (name a `warehouse`, or `--integrations=local`), whereas
+  // the silent local execution is the harm this design is for.
+  if (target.source === "dbt" && target.fallback) {
+    const fallbackType = canonicalType(target.fallback.type)
+    const fallbackEntry = fallbackType ? precedence.shadowed.get(fallbackType)?.get(capability) : undefined
+    if (fallbackEntry) {
+      return redirectFor(capability, fallbackEntry, precedence.workspaceName, target.fallback.name)
+    }
+  }
+  return RUN
 }
 
 /**
@@ -392,6 +415,8 @@ export function describeEngineTool(modelKey: string, base: string, precedence?: 
 export function inventoryLine(precedence: Precedence): string {
   if (!precedence.enabled) {
     switch (precedence.disabledReason) {
+      case "pilot-off":
+        return ""
       case "escape-hatch":
         return "Workspace integrations: shadowing off (--integrations=local); local connections serve every warehouse."
       case "unattributed":

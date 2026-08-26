@@ -58,6 +58,31 @@ describe("resolveDefaultTarget — registry branch", () => {
   })
 })
 
+describe("resolveDefaultTarget — the dbt fallback is reported, not hidden", () => {
+  test("the registry fallback is exposed whenever one exists", async () => {
+    // `sql.execute` falls back to the first registry connection whenever the dbt
+    // attempt yields nothing — not only when dbt is absent, but on an unrecognised
+    // result shape or a throw. A caller deciding whether to route this call has to be
+    // able to see both possible targets; reporting only the dbt one lets a call slip
+    // through and execute locally against a connection that should have been routed.
+    Registry.setConfigs({ first: { type: "snowflake", account: "a" } as never })
+    const target = await resolveDefaultTarget("sql.execute")
+    if (target.source === "dbt") {
+      expect(target.fallback).toEqual({ type: "snowflake", name: "first" })
+    } else {
+      // No dbt project here, so this resolves to the registry directly — same target.
+      expect(target).toMatchObject({ source: "registry", name: "first", type: "snowflake" })
+    }
+  })
+
+  test("no fallback is reported when the registry is empty", async () => {
+    Registry.setConfigs({})
+    const target = await resolveDefaultTarget("sql.execute")
+    if (target.source === "dbt") expect(target.fallback).toBeUndefined()
+    else expect(target.source).toBe("none")
+  })
+})
+
 describe("resolveDefaultTarget — per-operation resolution", () => {
   test("every op agrees on the registry default when there is no dbt project", async () => {
     Registry.setConfigs({ only: { type: "postgres", host: "h" } as never })

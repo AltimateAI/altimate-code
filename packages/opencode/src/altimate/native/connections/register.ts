@@ -98,7 +98,15 @@ async function ensureDbtAdapter(): Promise<any | null> {
 
 /** Where a `warehouse`-less call would actually go. */
 export type DefaultTarget =
-  | { source: "dbt"; type?: string }
+  | {
+      source: "dbt"
+      type?: string
+      /** Where execution actually lands if the dbt attempt yields nothing. `sql.execute`
+       * falls back to the registry not only when dbt is absent, but whenever
+       * `tryExecuteViaDbt` returns null — an unrecognised result shape, or any throw.
+       * A caller deciding anything about this call has to consider both targets. */
+      fallback?: { type: string; name: string }
+    }
   | { source: "registry"; type: string; name: string }
   | { source: "none" }
 
@@ -131,7 +139,9 @@ export async function resolveDefaultTarget(
         // Adapter not initialised far enough to answer; leave the type undetermined.
       }
       if (!type) type = await adapterTypeFromManifest()
-      return { source: "dbt", type }
+      const warehouses = Registry.list().warehouses
+      const fallback = warehouses.length > 0 ? { type: warehouses[0].type, name: warehouses[0].name } : undefined
+      return { source: "dbt", type, fallback }
     }
   }
 
