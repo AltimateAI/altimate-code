@@ -4,7 +4,7 @@ import os from "os"
 import fsp from "fs/promises"
 
 import { AltimateApi } from "../../src/altimate/api/client"
-import { slugify } from "../../src/altimate/tools/datamate"
+import { slugify, isPinnedToOtherWorkspace } from "../../src/altimate/tools/datamate"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -588,4 +588,34 @@ describe("slugify", () => {
 
 afterEach(async () => {
   await fsp.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
+})
+
+describe("isPinnedToOtherWorkspace", () => {
+  // The workspace attach persists the shared gateway key pinned to one
+  // workspace, so "already configured and connected" stopped implying "serving
+  // the datamate you asked for". Reporting success in that case would tell the
+  // user their datamate is connected while another workspace's tools — and
+  // credentials — were the ones actually exposed.
+  test("a pin for another workspace is not the gateway you asked for", () => {
+    const entry = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] }
+    expect(isPinnedToOtherWorkspace(entry, "99")).toBe(true)
+    expect(isPinnedToOtherWorkspace(entry, 99)).toBe(true)
+  })
+
+  test("a pin for the requested workspace is", () => {
+    const entry = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] }
+    expect(isPinnedToOtherWorkspace(entry, "42")).toBe(false)
+    expect(isPinnedToOtherWorkspace(entry, 42)).toBe(false)
+  })
+
+  test("an UNPINNED entry is the generic gateway and answers for any datamate", () => {
+    // This is the pre-existing extension-written shape; it must keep working.
+    expect(isPinnedToOtherWorkspace({ type: "local", command: ["datamate", "start-stdio"] }, "99")).toBe(false)
+    expect(isPinnedToOtherWorkspace({ command: "datamate", args: ["start-stdio"] }, "99")).toBe(false)
+  })
+
+  test("a missing entry is not treated as a foreign pin", () => {
+    expect(isPinnedToOtherWorkspace(undefined, "99")).toBe(false)
+    expect(isPinnedToOtherWorkspace(null, "99")).toBe(false)
+  })
 })

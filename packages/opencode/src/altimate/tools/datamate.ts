@@ -8,11 +8,13 @@ import {
   listMcpInConfig,
   resolveConfigPath,
   findAllConfigPaths,
+  readMcpEntryFromDisk,
 } from "../../mcp/config"
 import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
+import { pinnedWorkspace } from "../workspace/engine-sync"
 
 const log = Log.create({ service: "datamate" })
 
@@ -190,6 +192,19 @@ async function handleListIntegrations() {
 
 // DATAMATE_KEY is imported from altimate/datamate-transport.ts (shared constant).
 
+/** Is the configured gateway entry pinned to a DIFFERENT workspace than the one
+ * being asked for?
+ *
+ * The workspace attach persists this shared key with `--datamate <id>`, so
+ * "configured and connected" stopped meaning "serving whatever you asked for".
+ * An unpinned entry is the generic gateway and still answers for any datamate;
+ * a pin for another workspace does not, and saying otherwise would report success
+ * while the runtime served another workspace's tools and credentials. */
+export function isPinnedToOtherWorkspace(entry: unknown, datamateId: string | number): boolean {
+  const pin = pinnedWorkspace((entry ?? null) as never)
+  return pin !== null && pin !== String(datamateId)
+}
+
 async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "project" | "global" }) {
   if (!args.datamate_id) {
     return {
@@ -251,8 +266,24 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         })
       }
 
-      if (existingNames.includes(DATAMATE_KEY)) {
-        // Already in config — just ensure it is connected in this session
+      // The workspace attach persists this same key PINNED to one workspace
+      // (`--datamate <id>`), so "configured and connected" no longer means "serving
+      // whatever you asked for". Reporting success here would tell the user their
+      // datamate is connected while the runtime kept serving another workspace's
+      // tools — and its credentials. A pin for a different workspace is replaced,
+      // which is what the user asked for by naming a datamate explicitly.
+      const configuredEntry = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
+      const pinnedElsewhere = isPinnedToOtherWorkspace(configuredEntry, args.datamate_id)
+      if (pinnedElsewhere) {
+        log.info("handleAdd: existing entry is pinned to another workspace; replacing", {
+          serverName: DATAMATE_KEY,
+          pinnedTo: pinnedWorkspace((configuredEntry ?? null) as never),
+          requested: args.datamate_id,
+        })
+      }
+
+      if (existingNames.includes(DATAMATE_KEY) && !pinnedElsewhere) {
+        // Already in config for THIS datamate — just ensure it is connected.
         const allStatus = await MCP.status()
         if (allStatus[DATAMATE_KEY]?.status === "connected") {
           log.info("handleAdd: already connected, skipping add", {
@@ -281,7 +312,8 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
         })
         await MCP.connect(DATAMATE_KEY)
       } else {
-        // Not in config yet — write to disk then connect
+        // Not in config yet, or pinned to a workspace other than the one asked
+        // for — write to disk then connect, replacing the pin either way.
         log.info("handleAdd: adding new datamate entry", {
           serverName: DATAMATE_KEY,
           type: mcpConfig.type,
