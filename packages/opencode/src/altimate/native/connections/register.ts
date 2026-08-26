@@ -467,6 +467,15 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
   const startTime = Date.now()
   const warehouseType = getWarehouseType(params.warehouse)
   try {
+    // altimate_change start — resolve the fallback connection before the dbt attempt.
+    // `tryExecuteViaDbt` awaits, and the registry is mutable: re-reading it afterwards
+    // could pick a different connection than the one the caller's routing decision was
+    // computed against (a concurrent `warehouse.add` can change which name sorts first).
+    // Reading once here makes the decided connection and the executed connection the
+    // same by construction. The dbt-first ordering below is unchanged.
+    const fallbackName = params.warehouse || Registry.list().warehouses[0]?.name
+    // altimate_change end
+
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
     if (!params.warehouse) {
@@ -474,22 +483,13 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       if (dbtResult) return dbtResult
     }
 
-    const warehouseName = params.warehouse
-    let result: SqlExecuteResult
-    if (!warehouseName) {
-      const warehouses = Registry.list().warehouses
-      if (warehouses.length === 0) {
-        throw new Error(
-          "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
-        )
-      }
-      // Use the first warehouse as default
-      const connector = await Registry.get(warehouses[0].name)
-      result = await connector.execute(params.sql, params.limit)
-    } else {
-      const connector = await Registry.get(warehouseName)
-      result = await connector.execute(params.sql, params.limit)
+    if (!fallbackName) {
+      throw new Error(
+        "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
+      )
     }
+    const connector = await Registry.get(fallbackName)
+    const result: SqlExecuteResult = await connector.execute(params.sql, params.limit)
     try {
       Telemetry.track({
         type: "warehouse_query",

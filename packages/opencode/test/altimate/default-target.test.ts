@@ -16,6 +16,7 @@
 // bun's default sequential file execution.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { resolveDefaultTarget, resetDbtAdapter } from "../../src/altimate/native/connections/register"
+import { Dispatcher } from "../../src/altimate/native"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
 const OPS = ["sql.execute", "sql.explain", "schema.inspect"] as const
@@ -116,5 +117,37 @@ describe("resolveDefaultTarget — per-operation resolution", () => {
     Registry.setConfigs({ only: { type: "snowflake", account: "a" } as never })
     const [a, b] = await Promise.all([resolveDefaultTarget("sql.execute"), resolveDefaultTarget("sql.execute")])
     expect(a).toEqual(b)
+  })
+})
+
+describe("the default target survives a concurrent registry change", () => {
+  // `sql.execute` awaits the dbt attempt before it reaches the registry. The registry
+  // is a process-wide mutable singleton, so a `warehouse.add`/`remove` landing during
+  // that await used to change which connection the call fell back to — after the
+  // caller's routing decision had already been made against the old one. The handler
+  // now pins the fallback before the await, so the decided and executed connections
+  // are the same by construction.
+  test("a connection dropped during the dbt await does not silently redirect the call", async () => {
+    // Warm the dispatcher: its first call awaits lazy handler registration, and a
+    // mutation landing in *that* window would be indistinguishable from the one
+    // under test.
+    Registry.setConfigs({ warm: { type: "duckdb", path: ":memory:" } as never })
+    await Dispatcher.call("warehouse.list", {}).catch(() => {})
+
+    Registry.setConfigs({
+      pinned_first: { type: "duckdb", path: ":memory:" } as never,
+      other: { type: "duckdb", path: ":memory:" } as never,
+    })
+
+    // Start the call, then mutate while it is suspended in the dbt attempt.
+    const inflight = Dispatcher.call("sql.execute", { sql: "select 1" } as never)
+    Registry.setConfigs({ other: { type: "duckdb", path: ":memory:" } as never })
+
+    // The call must still be about `pinned_first` — the connection the decision
+    // covered — rather than quietly landing on whatever now sorts first. The handler
+    // reports connection failures in the result rather than throwing, so the named
+    // connection in the error is what identifies which one it tried.
+    const result = (await inflight) as { error?: string }
+    expect(result.error).toMatch(/pinned_first/)
   })
 })
