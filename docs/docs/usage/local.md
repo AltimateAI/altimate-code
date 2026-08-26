@@ -25,7 +25,7 @@ altimate                # then use the CLI as normal
 
 | Tier | Hardware | Context | Notes |
 |---|---|---|---|
-| `laptop-24gb` | Apple Silicon / unified memory, 24GB+ | 131K | validated on ADE-bench (62% all-in) |
+| `laptop-24gb` | Apple Silicon / unified memory, 24GB+ | 131K | the default certified tier |
 | `mac-64gb-unified` | Apple Silicon, 64GB+ | 131K | same recipe, more headroom |
 | `gpu-24gb-discrete` | discrete NVIDIA/AMD/Intel 22GB+ VRAM (RTX 3090/4090-class) | 49K | certified end-to-end on NVIDIA L4 (Vulkan); context sized so weights + KV fit VRAM alone |
 | `dgx-spark-128gb` | NVIDIA DGX Spark (GB10) | 131K | managed: runs the digest-pinned SGLang NVFP4+EAGLE container (~4× llama.cpp); needs Docker + nvidia-container-toolkit |
@@ -43,9 +43,14 @@ fix spelled out; nothing is fetched or installed until preflight passes.
 
 ## Commands
 
-- `altimate local` — full flow. Power flags: `--ctx`, `--parallel`, `--kv`,
-  `--mtp/--no-mtp`, `--effort`, `--temperature`, `--port`.
-- `altimate local status` — managed process + endpoint state.
+- `altimate local` — full flow. Power flags: `--model`, `--ctx`, `--parallel`,
+  `--kv`, `--mtp/--no-mtp`, `--effort`, `--temperature`, `--port`,
+  `--no-egress-guard`.
+- `altimate local models` — list the model registry and which entry matches
+  this machine. The registry is multi-model; more models will be added over
+  time, and `--model <id>` selects one explicitly.
+- `altimate local status` — managed process + endpoint state, plus the
+  effective egress-guard rules.
 - `altimate local stop` — graceful stop (SIGKILL only as a last resort).
 - `altimate local doctor [--show]` — re-run all certification checks;
   `--show` prints the certificate JSON.
@@ -70,6 +75,12 @@ not vendor benchmarks. Your throughput scales with memory bandwidth.
 - Model and runtime downloads verify SHA-256 before use; partial downloads
   resume and re-verify.
 - The local server binds `127.0.0.1` only. Nothing is exposed to the network.
+- **Egress guard** (on by default): wiring local mode adds `ask` rules for the
+  network tools (`websearch`, `webfetch`, `codesearch`), so a local-first
+  session escalates to the internet only with your per-step approval. Your own
+  permission settings are never overwritten; opt out with `--no-egress-guard`.
+- Internal machinery (compaction, title generation) is pinned to the local
+  model too — no background step silently calls a cloud model.
 - No telemetry is added by local mode; the agent's normal settings apply.
 
 ## Troubleshooting

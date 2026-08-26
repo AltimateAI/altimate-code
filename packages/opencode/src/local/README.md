@@ -8,13 +8,14 @@ The module is intentionally single-model and single-user. It does not integrate 
 
 ## Commands
 
-- `altimate local` — select a recipe, fetch verified artifacts, start the server, certify it, and update the user config.
-- `altimate local status` — print managed process and endpoint state.
+- `altimate local` — select a recipe, fetch verified artifacts, start the server, certify it, and update the user config. `--model <id>` picks a registry entry; the registry is multi-model by design.
+- `altimate local models` — list the model registry and the tier matching this machine.
+- `altimate local status` — print managed process, endpoint state, and effective egress-guard rules.
 - `altimate local stop` — send `SIGTERM`, wait, and use `SIGKILL` only if the managed process does not exit.
 - `altimate local doctor [--show]` — force all certification checks to run again; `--show` prints the certificate JSON.
 - `altimate local update` — refresh a hash-pinned recipe snapshot and fall back to the bundled copy on any error.
 
-Power options on the root command mirror the recipe fields: `--ctx`, `--parallel`, `--kv`, `--mtp/--no-mtp`, `--effort`, `--temperature`, and preferred `--port`.
+Power options on the root command mirror the recipe fields: `--ctx`, `--parallel`, `--kv`, `--mtp/--no-mtp`, `--effort`, `--temperature`, and preferred `--port`. `--no-egress-guard` skips the default `ask` rules that `wire.ts` adds for `websearch`/`webfetch`/`codesearch`.
 
 ## State and trust boundaries
 
