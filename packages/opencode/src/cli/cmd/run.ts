@@ -755,14 +755,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.error(err)
           }
 
-          if (
-            event.type === "session.status" &&
-            event.properties.sessionID === sessionID &&
-            event.properties.status.type === "idle"
-          ) {
-            break
-          }
-
           // altimate_change start — an attached run is the only surface that can
           // show the workspace engine offer. The headless marker is set on THIS
           // process, but with --attach the attach flow and isHeadless() run in
@@ -781,7 +773,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
             )
             continue
           }
+          // Placed BEFORE the idle break deliberately: the loop stops on idle,
+          // so a handler after it never runs for an offer that arrives in the
+          // same batch. An offer published strictly after idle still cannot be
+          // shown here — the stream is over by then — which is a real gap when
+          // the attach exceeds its bounded wait. The TUI and local headless
+          // paths are unaffected.
           // altimate_change end
+
+          if (
+            event.type === "session.status" &&
+            event.properties.sessionID === sessionID &&
+            event.properties.status.type === "idle"
+          ) {
+            break
+          }
+
 
           if (event.type === "permission.asked") {
             const permission = event.properties
