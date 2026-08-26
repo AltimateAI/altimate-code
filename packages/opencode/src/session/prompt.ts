@@ -96,11 +96,9 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
-  // altimate_change start — see the workspace skill block in `prompt`. Projects
-  // whose skills have been pulled in this process, and the snapshot generation
-  // whose contents the skill registry currently reflects.
+  // altimate_change start — see the workspace skill block in `prompt`: projects
+  // whose skills have already been pulled in this process.
   const workspaceSkillsPulled = new Set<string>()
-  let workspaceSkillsApplied = 0
   // altimate_change end
 
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
@@ -279,35 +277,27 @@ export namespace SessionPrompt {
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
 
-    // altimate_change start — make the bound workspace's custom skills visible
-    // before the agent is resolved. `createUserMessage` -> `Agent.get` ->
-    // `Skill.dirs()` is what first materialises the skill registry, so acting
-    // here lands the skills in the same turn rather than one turn late.
+    // altimate_change start — pull the bound workspace's custom skills before the
+    // agent is resolved. `createUserMessage` -> `Agent.get` -> `Skill.dirs()` is
+    // what first materialises the skill registry, so a session that starts with
+    // a bound project picks the skills up on its first turn.
     //
-    // `prompt` runs per message, not per session, so the network pull is done
-    // once per project per process — otherwise every turn would pay an HTTP
-    // round-trip, in the one code path whose first-answer latency is measured.
-    // Refreshing is driven off `snapshotGeneration()` instead of this call's own
-    // result, so a sync that happened elsewhere (a mid-session bind, which syncs
-    // directly) is still picked up here without re-fetching to discover it.
+    // Once per project per process: `prompt` runs per message, and an HTTP
+    // round-trip on every turn is not acceptable in the one code path whose
+    // first-answer latency is measured.
     //
-    // `Config` is invalidated before `Skill` because the skill scan asks Config
-    // for the project config directories, and that list is itself cached: on the
-    // first sync `.altimate-code/` may not have existed when Config last looked.
-    // Both are gated on a real change — `Config.invalidate()` rereads config for
-    // every instance and is far too heavy to pay speculatively.
+    // Note the limit this accepts: the registry is cached per instance, so a
+    // bind that happens MID-session lands the files but does not make them
+    // visible until the next start. Refreshing in place needs the invalidation
+    // to run inside the server's Effect context — the imperative facade builds
+    // its own runtime and invalidates a different instance — so it is not the
+    // few lines it looks like, and is deliberately left out of v0.
     try {
-      const skillSync = await import("../altimate/workspace/skill-sync")
       const dir = Instance.directory
       if (!workspaceSkillsPulled.has(dir)) {
         workspaceSkillsPulled.add(dir)
-        await skillSync.syncSkills(dir)
-      }
-      const generation = skillSync.snapshotGeneration()
-      if (generation !== workspaceSkillsApplied) {
-        workspaceSkillsApplied = generation
-        await Config.invalidate()
-        await import("../skill").then((m) => m.Skill.refresh())
+        const { syncSkills } = await import("../altimate/workspace/skill-sync")
+        await syncSkills(dir)
       }
     } catch (err) {
       log.warn("workspace skill sync failed", { err: String(err) })

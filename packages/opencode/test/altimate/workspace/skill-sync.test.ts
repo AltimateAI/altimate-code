@@ -36,7 +36,7 @@ writeFileSync(
   }),
 )
 
-const { syncSkills, snapshotGeneration } = await import("@/altimate/workspace/skill-sync")
+const { syncSkills } = await import("@/altimate/workspace/skill-sync")
 const { cachePath } = await import("@/altimate/workspace/state")
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
@@ -305,25 +305,20 @@ describe("workspace skill sync", () => {
     expect(existsSync(path.join(project, MANAGED, "escape.md"))).toBe(false)
   })
 
-  test("the snapshot generation advances only when disk actually changed", async () => {
-    // Session start uses this counter to decide whether to drop the cached skill
-    // registry. Bumping it on an unchanged sync would make every turn pay a full
-    // config reread and re-scan; failing to bump it on a real change would leave
-    // the model looking at the previous workspace's skills.
+  test("`changed` is true only when disk actually changed", async () => {
+    // `changed` is the gate on refreshing the skill registry, which costs a full
+    // config reread plus a re-scan. Reporting it on a no-op sync would put that
+    // on every turn; failing to report it on a real change would leave the model
+    // looking at the previous snapshot.
     serve({ "pub-1": { "SKILL.md": "one" } })
-    const start = snapshotGeneration()
-    await syncSkills(project)
-    const afterWrite = snapshotGeneration()
-    expect(afterWrite).toBeGreaterThan(start)
+    expect((await syncSkills(project)).changed).toBe(true)
 
     // Same content, same updated_at: nothing to do.
-    await syncSkills(project)
-    expect(snapshotGeneration()).toBe(afterWrite)
+    expect((await syncSkills(project)).changed).toBe(false)
 
     // A newer updated_at is a real change.
     serve({ "pub-1": { "SKILL.md": "two" } }, "2026-03-03T00:00:00Z")
-    await syncSkills(project)
-    expect(snapshotGeneration()).toBeGreaterThan(afterWrite)
+    expect((await syncSkills(project)).changed).toBe(true)
   })
 
   test("a file body without content is an error, not an empty file", async () => {

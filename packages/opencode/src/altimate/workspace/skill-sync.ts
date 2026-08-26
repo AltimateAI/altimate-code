@@ -87,17 +87,6 @@ function managedRoot(directory: string): string {
  * start racing on the same project do not both stage and swap. */
 const inFlight = new Map<string, Promise<void>>()
 
-/** Bumped whenever a sync actually changes what is on disk, for any project.
- * Consumers that cache a view of the skill registry compare the value they last
- * acted on against this one, so a sync triggered elsewhere — a mid-session bind,
- * say — still causes them to refresh, without them having to re-run the sync
- * themselves just to learn whether anything moved. */
-let generation = 0
-
-export function snapshotGeneration(): number {
-  return generation
-}
-
 async function readManifest(directory: string): Promise<Manifest | null> {
   try {
     const raw = await fs.readFile(path.join(managedRoot(directory), MANIFEST_NAME), "utf8")
@@ -315,7 +304,6 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   } finally {
     inFlight.delete(canon)
   }
-  if (changed) generation++
   return { changed }
 }
 
