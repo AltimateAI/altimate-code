@@ -532,6 +532,37 @@ describe("descriptions are per capability, and corrections are delivered", () =>
   })
 })
 
+describe("a snapshot must not outlive the binding that justified it", () => {
+  test("a mid-flight re-link stops the redirect naming the old workspace", async () => {
+    // Re-linking mid-session is supported, so the turn's snapshot can name a workspace
+    // the project has already left. Following a redirect to it would run the query
+    // with that workspace's credentials — the exact mis-routing this design prevents.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect((await check(SESSION, "sql_execute", "local_snow")).redirect).toBeDefined()
+
+    precedenceInternals.binding = async () => ({ datamateId: 77, datamateName: "somewhere-else" })
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("re-linked")
+  })
+
+  test("an unchanged binding still redirects", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect((await check(SESSION, "sql_execute", "local_snow")).redirect).toBeDefined()
+  })
+
+  test("a session whose snapshot was evicted says so rather than running silently", async () => {
+    // Eviction can drop an entry between tool resolution and the call. Returning a
+    // bare "run" there is indistinguishable from a considered "not served", so a
+    // shadowed connection would execute locally with no indication.
+    const verdict = await check("ses_never_derived", "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("no routing decision")
+  })
+})
+
 describe("default-target decisions — branch order", () => {
   // Reaching a dbt-sourced target through check() needs a real dbt project, so the
   // order of these branches is only checkable on the pure function. It is also the
@@ -727,5 +758,7 @@ describe("re-derivation", () => {
   test("a session with no derivation yet never shadows", async () => {
     const verdict = await check("ses_never_refreshed", "sql_execute", "local_snow")
     expect(verdict.redirect).toBeUndefined()
+    // ...and is explicit about it, rather than silently looking like "not served".
+    expect(verdict.precedence).toBe("undetermined")
   })
 })

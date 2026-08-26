@@ -101,6 +101,9 @@ export interface ShadowEntry {
 
 export interface Precedence {
   workspaceName: string
+  /** The bound workspace this snapshot was derived for. Re-linking mid-session is
+   * supported, so a snapshot can outlive the binding that justified it. */
+  workspaceId?: string
   /** false when the escape hatch is on, when nothing is bound, or when the engine
    * could not be attributed to the bound workspace. */
   enabled: boolean
@@ -340,7 +343,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
     }
   }
   if (shadowed.size === 0) return EMPTY("nothing-materialised", workspaceName)
-  return { workspaceName, enabled: true, shadowed }
+  return { workspaceName, workspaceId: String(binding.datamateId), enabled: true, shadowed }
 }
 
 /** Read the session's precedence without recomputing it. */
@@ -461,7 +464,31 @@ function redirectFor(
  */
 export async function check(sessionID: string, capability: Capability, warehouse?: string): Promise<Verdict> {
   const precedence = bySession.get(sessionID)
-  if (!precedence || !precedence.enabled) return RUN
+  if (!precedence) {
+    // No snapshot for this session. The resolver derives one every turn, so this is
+    // either a caller that never resolved tools or an entry evicted between tool
+    // resolution and this call. Either way the decision is unknown, and unknown runs
+    // locally *and says so* rather than silently — a silent run is indistinguishable
+    // from a considered "not served".
+    return {
+      notice: "Not routed through the bound workspace: no routing decision was available for this call.",
+      precedence: "undetermined",
+    }
+  }
+  if (!precedence.enabled) return RUN
+
+  // Re-linking mid-session is supported, so this snapshot can name a workspace the
+  // project has since left — and a redirect naming it would send the call to that
+  // workspace's engine, with its credentials. The binding is a local cache read, and
+  // this only runs on the path that is about to redirect.
+  if (precedence.workspaceId && (await currentBinding())?.datamateId !== Number(precedence.workspaceId)) {
+    return {
+      notice:
+        `Not routed through workspace "${precedence.workspaceName}": the project was re-linked while ` +
+        `this call was in flight, so the routing decision no longer applies.`,
+      precedence: "undetermined",
+    }
+  }
 
   if (warehouse) {
     const type = canonicalType(Registry.getConfig(warehouse)?.type)
