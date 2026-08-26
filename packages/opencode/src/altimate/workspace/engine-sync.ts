@@ -62,7 +62,7 @@ import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import { MCP, ToolsChanged } from "@/mcp"
-import { addMcpToConfig, removeMcpFromConfig, resolveConfigPath } from "@/mcp/config"
+import { addMcpToConfig, readMcpEntryFromDisk, removeMcpFromConfig, resolveConfigPath } from "@/mcp/config"
 import { Config } from "@/config/config"
 import { AltimateApi } from "@/altimate/api/client"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
@@ -134,6 +134,7 @@ export const syncInternals: {
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
   persistRestore?: (name: string, previous: ExistingEntry | null) => Promise<void>
+  projectEntry?: () => Promise<ExistingEntry | null>
   /** The configured (merged) MCP entry under `name`, or null if none. */
   existingEntry?: (name: string) => Promise<ExistingEntry | null>
   freshConfig?: () => Promise<{ mcp?: Record<string, ExistingEntry | undefined> }>
@@ -335,6 +336,24 @@ async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntry | und
     log.warn("could not refresh the config cache", { err: String(err) })
   })
   return (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
+}
+
+/** The entry in the PROJECT config only, not the merged view.
+ *
+ * `existingEntry()` returns the merged value, which may come from global config,
+ * while `persist()` writes to the project file. Restoring the merged value would
+ * write a copy of the global entry into the project — a permanent override that
+ * shadows every later global update, disable or removal, from an attach that was
+ * meant to leave configuration untouched. */
+async function projectEntry(): Promise<ExistingEntry | null> {
+  if (syncInternals.projectEntry) return syncInternals.projectEntry()
+  try {
+    const configPath = await resolveConfigPath(projectRoot())
+    return ((await readMcpEntryFromDisk(DATAMATE_KEY, configPath)) as ExistingEntry | undefined) ?? null
+  } catch (err) {
+    log.warn("could not read the project-level engine entry", { err: String(err) })
+    return null
+  }
 }
 
 /** Put the config back the way we found it.
@@ -839,6 +858,9 @@ async function run(): Promise<Outcome> {
     log.info("abandoning attach; the binding changed before the engine was installed", { workspaceId })
     return { kind: "superseded" }
   }
+  // Snapshot what persist() is about to overwrite — the project file's own
+  // entry, not the merged view — so a supersede can put back exactly that.
+  const projectBefore = await projectEntry()
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
 
@@ -873,7 +895,7 @@ async function run(): Promise<Outcome> {
     })
     // And the config: `persist()` committed the pin before the engine was known
     // to be ours, and bootstrap starts every enabled entry.
-    await persistRestore(DATAMATE_KEY, entry)
+    await persistRestore(DATAMATE_KEY, projectBefore)
     return { kind: "superseded" }
   }
 
@@ -1072,7 +1094,14 @@ export function ensure(sessionID: string): Promise<Outcome> {
     if (sameWorkspace && !isRepairable(previous!.outcome)) {
       // Re-probe before trusting a cached success — see `engineStillConnected`.
       const boundTo = await attachKeyWorkspace()
-      if (!wasServing(previous!.outcome) || !boundTo || (await engineStillOurs(boundTo, entry))) return previous!.task
+      const reusable =
+        !wasServing(previous!.outcome) || !boundTo || (await engineStillOurs(boundTo, entry))
+      // Validating the cached success is itself awaited work — status, config and
+      // possibly a version probe — so the binding can move underneath it. This
+      // path lives outside `run()` and therefore never had its final check;
+      // without one, a confirmed-valid engine for the workspace we just left is
+      // returned as the answer for the one we just joined.
+      if (reusable && (await attachKeyWorkspace()) === boundTo) return previous!.task
       log.info("cached attach is no longer connected; re-attaching", { sessionID })
     }
     entry.key = key

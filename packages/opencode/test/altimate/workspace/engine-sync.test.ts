@@ -1475,3 +1475,51 @@ describe("ensure — round 16", () => {
     expect(h.connects).toHaveLength(0)
   })
 })
+
+describe("ensure — round 18", () => {
+  test("a re-link DURING cached-success validation is not answered with the old workspace", async () => {
+    // The memoised-success path does its own awaited validation outside run(),
+    // so it never had run()'s final binding check. Status, config and version
+    // work all await; a re-link inside them left `boundTo` pointing at the old
+    // workspace and returned its cached task — handing the turn A's tools and
+    // credentials under binding B.
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }, {}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    const first = await ensure("s1")
+    expect(first).toMatchObject({ kind: "attached" })
+
+    // The re-link lands while the cached success is being re-validated.
+    syncInternals.versionOf = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return "0.7.0"
+    }
+    const second = await ensure("s1")
+    expect(second, "returned the cached success for a workspace the project had left").not.toBe(first)
+  })
+
+  test("a superseded attach removes the project override rather than copying the global entry", async () => {
+    // existingEntry() returns the MERGED value, which may come from global, while
+    // persist() writes to the project file. Restoring the merged value would
+    // write a copy of the global entry into the project — a permanent override
+    // shadowing every later global update, disable or removal.
+    let current: CachedBinding | null = binding
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: true }, // merged, from global
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectEntry = async () => null // the PROJECT file has no entry of its own
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, c) => {
+      await prevAdd(n, c)
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.restores, "restored something into the project file instead of removing the override").toEqual([null])
+  })
+})
