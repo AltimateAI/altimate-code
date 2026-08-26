@@ -142,10 +142,39 @@ describe("attribution is grounded in the attach, not only the saved config", () 
 
   test("a superseded attach confers no precedence", async () => {
     // Superseded means the binding moved while the attach was in flight, so whatever
-    // is connected was established for a workspace this project has left.
+    // is connected was established for a workspace this project has already left.
+    precedenceInternals.attachOutcome = async () => ({ kind: "superseded" })
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("unattributed")
+  })
+
+  test("a disabled entry confers no precedence either", async () => {
     precedenceInternals.attachOutcome = async () => ({ kind: "entry-disabled" })
     const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(p.enabled).toBe(false)
+  })
+
+  test("only an established attach qualifies — every other outcome is refused", async () => {
+    // Asserts the invariant rather than a sample of it: the allowlist is exactly
+    // {attached, reused}, so a new Outcome variant defaults to refusing rather than
+    // silently qualifying.
+    const refused: Array<{ kind: string }> = [
+      { kind: "disabled" },
+      { kind: "unbound" },
+      { kind: "engine-missing" },
+      { kind: "engine-too-old" },
+      { kind: "connect-failed" },
+      { kind: "entry-disabled" },
+      { kind: "superseded" },
+    ]
+    for (const outcome of refused) {
+      resetForTests()
+      bindTo()
+      precedenceInternals.attachOutcome = async () => outcome as never
+      const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+      expect({ kind: outcome.kind, enabled: p.enabled }).toEqual({ kind: outcome.kind, enabled: false })
+    }
   })
 
   test("a reused engine counts as established, because attach verified it first", async () => {
