@@ -8,8 +8,10 @@
 import { RGBA, SyntaxStyle, type CliRenderer, type ColorInput, type TerminalColors } from "@opentui/core"
 import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { EntryKind } from "./types"
+// altimate_change start — share the TUI's mode-resolution chain with the direct-run renderer
 // Shared with the full-screen TUI so both renderers agree on how a mode is chosen.
 import { resolveInitialMode } from "@opencode-ai/tui/terminal-detection"
+// altimate_change end
 
 type Tone = {
   body: ColorInput
@@ -583,6 +585,7 @@ function map(
   }
 }
 
+// altimate_change start — mode-aware fallback seed (#809: dark panel + black resolved fg)
 /**
  * Seed colours for the direct-run fallback theme.
  *
@@ -603,6 +606,7 @@ function fallbackSeed(mode: "dark" | "light") {
     error: RGBA.fromIndex(1, rgba(dark ? "#ef4444" : "#b91c1c")),
   }
 }
+// altimate_change end
 
 function tone(body: ColorInput, start?: ColorInput): Tone {
   return {
@@ -615,6 +619,7 @@ const fallbackSplashIndexed = Array.from({ length: 256 }, (_, index) => RGBA.fro
 const fallbackSplashLeft = RGBA.fromIndex(67)
 const fallbackSplashRight = RGBA.fromIndex(110)
 
+// altimate_change start — per-mode fallback theme; dark instance keeps identity for existing callers
 const fallbackByMode = new Map<"dark" | "light", RunTheme>()
 
 /**
@@ -683,7 +688,9 @@ export function runThemeFallback(mode: "dark" | "light"): RunTheme {
 
 /** Dark instance, kept as the default for callers with no mode to hand. */
 export const RUN_THEME_FALLBACK: RunTheme = runThemeFallback("dark")
+// altimate_change end
 
+// altimate_change start — resolve a mode instead of always falling back to dark
 /**
  * Best guess at terminal mode when the palette query gives us nothing.
  *
@@ -698,6 +705,7 @@ function fallbackMode(renderer: CliRenderer): "dark" | "light" {
     osc: renderer.themeMode ?? null,
   })
 }
+// altimate_change end
 
 export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> {
   try {
@@ -706,7 +714,9 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
     })
     const bg = colors.defaultBackground ?? colors.palette[0]
     if (!bg) {
+      // altimate_change start — light terminals must not get the dark fallback
       return runThemeFallback(fallbackMode(renderer))
+      // altimate_change end
     }
 
     // Palette-only terminal reloads can leave renderer.themeMode stale, but
@@ -731,6 +741,8 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
       shared.generateSubtleSyntax(syntaxTheme),
     )
   } catch {
+    // altimate_change start — light terminals must not get the dark fallback
     return runThemeFallback(fallbackMode(renderer))
+    // altimate_change end
   }
 }
