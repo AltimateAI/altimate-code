@@ -1223,6 +1223,9 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   let mounted = true
   onCleanup(() => {
     mounted = false
+    // Release the single-offer latch however this dialog goes away — chosen,
+    // dismissed, or replaced — so a later turn can offer again.
+    engineOfferVisible = false
   })
   // ``onSelect`` is delivered synchronously per Enter keypress; the install is
   // a multi-minute await. Without this latch a second Enter starts a second
@@ -1392,7 +1395,16 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
  * the post-scan prompt re-derives its own state from the directory. Node
  * availability and latch scope are resolved before rendering so the dialog
  * itself stays sync. */
+let engineOfferVisible = false
+
 async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
+  // The attach re-probes a repairable failure on every turn, so the offer can
+  // be raised again while an earlier one is still up — including mid-install,
+  // where a fresh idle dialog replaces the "Installing…" one and then swallows
+  // the user's keystrokes into its own filter. Observed end-to-end: after a
+  // successful install the pane showed a second offer in its idle phase and
+  // typing went to the dialog rather than the prompt. One offer at a time.
+  if (engineOfferVisible) return
   const offer = await describeOffer(api.state.path.directory)
   // Null means the situation resolved between the attach and this dialog — an
   // engine appeared, or the project is no longer bound. Say nothing.
@@ -1403,6 +1415,7 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
     return
   }
   const major = await detectNodeMajor()
+  engineOfferVisible = true
   api.ui.dialog.replace(() => (
     <EngineInstallOfferDialog api={api} offer={offer} nodeMajor={major} latchScope={latchScope} />
   ))

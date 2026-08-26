@@ -4,7 +4,7 @@
 // fallback emits when there is no surface, and the command/Node detection the
 // dialog's "Install now" gate depends on. Everything routes through
 // `syncInternals`, so no process is spawned and no MCP state is touched.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import {
   ensure,
   installCommand,
@@ -22,6 +22,7 @@ import {
   type EngineOffer,
   type LocalMcpConfig,
 } from "../../../src/altimate/workspace/engine-sync"
+import { Process } from "../../../src/util/process"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 
 const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
@@ -311,22 +312,39 @@ describe("headless notice stream", () => {
 })
 
 describe("install deadline", () => {
-  // Regression guard. The install originally used execFile, whose `timeout`
-  // kills the child. Moving to Process.run for the Windows shim quietly lost
-  // that: Process.spawn consults `timeout` only inside its abort handler, as
-  // the grace before SIGKILL, so with no abort signal there is no deadline and
-  // a stalled npm leaves the dialog on "Installing…" forever. Measured: with
-  // `timeout` alone an 8s sleep ran 8004ms; with an abort signal, 502ms.
-  test("a stalled install is reported rather than hanging", async () => {
+  // The invariant is that installEngine hands the spawn an abort signal, which
+  // is the ONLY thing that produces a deadline: Process.spawn consults
+  // `timeout` solely inside its abort handler, as the grace before SIGKILL, so
+  // without a signal a stalled npm runs forever and the dialog sits on
+  // "Installing…". Measured on the real helper — an 8s sleep took 8004ms under
+  // `timeout` alone and 502ms under an abort signal.
+  //
+  // An earlier version of this test stubbed syncInternals.install to return a
+  // timeout error and asserted that error came back. That asserted nothing:
+  // it echoed the stub and passed just as happily with the abort signal
+  // deleted. This spies on the real call instead.
+  test("passes an abort signal to the spawn, not just a timeout", async () => {
     install({})
-    // Stand in for npm stalling past the deadline.
-    syncInternals.install = async () => ({ ok: false, error: "npm did not finish within 5 minutes" })
-    const result = await installEngine()
-    expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.error).toContain("did not finish")
+    delete syncInternals.install
+    const spy = spyOn(Process, "run").mockResolvedValue({
+      code: 0,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    })
+    try {
+      const result = await installEngine()
+      expect(result.ok).toBe(true)
+      expect(spy).toHaveBeenCalled()
+      const opts = spy.mock.calls[0]?.[1] as { abort?: AbortSignal } | undefined
+      // The load-bearing assertion: a real AbortSignal was supplied.
+      expect(opts?.abort).toBeInstanceOf(AbortSignal)
+      expect(opts?.abort?.aborted).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
-  test("the deadline is a real duration, not zero or unset", () => {
+  test("the deadline is a real duration", () => {
     expect(INSTALL_TIMEOUT_MS).toBeGreaterThan(0)
     expect(Number.isFinite(INSTALL_TIMEOUT_MS)).toBe(true)
   })
