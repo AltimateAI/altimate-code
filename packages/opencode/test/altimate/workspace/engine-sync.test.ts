@@ -40,6 +40,7 @@ type Harness = {
   removes: string[]
   toasts: Array<{ title: string; message: string; variant: string }>
   toolsChanged: number
+  restores: Array<unknown>
   statusQueue: Array<Record<string, { status: string; error?: string } | undefined>>
   tools: Record<string, unknown>
 }
@@ -60,6 +61,7 @@ function install(opts: {
     removes: [],
     toasts: [],
     toolsChanged: 0,
+    restores: [],
     statusQueue: opts.statuses ?? [{}],
     tools: opts.tools ?? {},
   }
@@ -87,6 +89,9 @@ function install(opts: {
   }
   syncInternals.toolsChanged = async () => {
     h.toolsChanged += 1
+  }
+  syncInternals.persistRestore = async (_name, previous) => {
+    h.restores.push(previous ?? null)
   }
   syncInternals.mcp = {
     status: async () => h.statusQueue.length > 1 ? h.statusQueue.shift()! : h.statusQueue[0]!,
@@ -1403,6 +1408,29 @@ describe("INVARIANT — a superseded attach leaves nothing installed", () => {
     const outcome = await ensure("s1")
     expect(outcome).toEqual({ kind: "superseded" })
     expect(h.removes, "superseded left the engine it installed still registered").toContain("datamate")
+    // The runtime is only half of it. `persist()` already wrote the old
+    // workspace's pin to disk, so a restart before the next attach would
+    // bootstrap it again — "leaves nothing installed" has to mean the config too.
+    expect(h.restores.length, "superseded left the old workspace pinned on disk").toBeGreaterThan(0)
+  })
+
+  test("a superseded REUSE detaches the engine it declined to answer with", async () => {
+    // The caller runs resolveTools regardless of the outcome, so returning
+    // `superseded` while the old client stays registered still hands that turn
+    // the previous workspace's tools — and its credentials.
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.declared = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return { keys: ["dbt_build_model"], extensionKeys: [] }
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.removes, "left the old workspace's client registered for resolveTools to find").toContain("datamate")
   })
 })
 

@@ -62,7 +62,7 @@ import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import { MCP, ToolsChanged } from "@/mcp"
-import { addMcpToConfig, resolveConfigPath } from "@/mcp/config"
+import { addMcpToConfig, removeMcpFromConfig, resolveConfigPath } from "@/mcp/config"
 import { Config } from "@/config/config"
 import { AltimateApi } from "@/altimate/api/client"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
@@ -133,6 +133,7 @@ export const syncInternals: {
     tools: () => Promise<Record<string, unknown>>
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
+  persistRestore?: (name: string, previous: ExistingEntry | null) => Promise<void>
   /** The configured (merged) MCP entry under `name`, or null if none. */
   existingEntry?: (name: string) => Promise<ExistingEntry | null>
   freshConfig?: () => Promise<{ mcp?: Record<string, ExistingEntry | undefined> }>
@@ -334,6 +335,25 @@ async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntry | und
     log.warn("could not refresh the config cache", { err: String(err) })
   })
   return (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
+}
+
+/** Put the config back the way we found it.
+ *
+ * `persist()` commits the pin BEFORE the engine is known to be ours, so a
+ * supersede after that point leaves the abandoned workspace pinned on disk —
+ * and MCP bootstraps every enabled entry, so a restart before the next attach
+ * would start the workspace we just walked away from. Removing the runtime
+ * client is only half of undoing an attach. */
+async function persistRestore(name: string, previous: ExistingEntry | null): Promise<void> {
+  if (syncInternals.persistRestore) return syncInternals.persistRestore(name, previous)
+  try {
+    const configPath = await resolveConfigPath(projectRoot())
+    if (previous) await addMcpToConfig(name, previous as never, configPath)
+    else await removeMcpFromConfig(name, configPath)
+    await Config.invalidate().catch(() => undefined)
+  } catch (err) {
+    log.warn("could not restore the config after a superseded attach", { name, err: String(err) })
+  }
 }
 
 async function existingEntry(name: string): Promise<ExistingEntry | null> {
@@ -721,8 +741,15 @@ async function run(): Promise<Outcome> {
           // otherwise hand this turn the previous workspace's tools, and its
           // credentials, under the new binding.
           if (!(await stillCurrent())) {
-            log.info("binding changed while reusing; abandoning rather than answering for the old workspace", {
+            // Detach, do not merely decline. The caller runs `resolveTools`
+            // whatever this returns, so leaving the old client registered hands
+            // that turn the previous workspace's tools and credentials anyway —
+            // the outcome is advice, the registration is what the model sees.
+            log.info("binding changed while reusing; detaching rather than answering for the old workspace", {
               workspaceId,
+            })
+            await client.remove(DATAMATE_KEY).catch((err) => {
+              log.warn("could not detach the superseded engine", { err: String(err) })
             })
             return { kind: "superseded" }
           }
@@ -840,10 +867,13 @@ async function run(): Promise<Outcome> {
   // moment before we announce and answer, because everything before that is
   // still revocable.
   if (!(await stillCurrent())) {
-    log.info("binding changed before the attach could be reported; removing what we installed", { workspaceId })
+    log.info("binding changed before the attach could be reported; undoing what we installed", { workspaceId })
     await client.remove(DATAMATE_KEY).catch((err) => {
       log.warn("could not remove the superseded engine", { err: String(err) })
     })
+    // And the config: `persist()` committed the pin before the engine was known
+    // to be ours, and bootstrap starts every enabled entry.
+    await persistRestore(DATAMATE_KEY, entry)
     return { kind: "superseded" }
   }
 
