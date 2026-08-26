@@ -232,7 +232,14 @@ export namespace AltimateApi {
 
   async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
     const url = `${creds.altimateUrl}${endpoint}`
+    // altimate_change start — upstream_fix: bound every API request. Without a
+    // signal a stalled server holds the caller indefinitely; the workspace attach
+    // awaited this on its critical path.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15_000)
+    // altimate_change end
     const res = await fetch(url, {
+      signal: controller.signal,
       method,
       headers: {
         "Content-Type": "application/json",
@@ -240,7 +247,7 @@ export namespace AltimateApi {
         "x-tenant": creds.altimateInstanceName,
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
-    })
+    }).finally(() => clearTimeout(timeout))
     if (!res.ok) {
       throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
     }

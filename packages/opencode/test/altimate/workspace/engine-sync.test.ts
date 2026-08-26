@@ -1189,3 +1189,21 @@ describe("ensure — round 10", () => {
     expect(h.connects).toHaveLength(0)
   })
 })
+
+describe("ensure — round 11", () => {
+  test("a stalled catalog lookup cannot block the REUSE path either", async () => {
+    // The bound added last round covered only the fresh-spawn path; a compatible
+    // pinned engine still awaited the lookup with no limit, and the generic API
+    // request attaches no abort signal at all.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.declared = () => new Promise(() => {}) // accepts, then stalls
+    const outcome = await ensure("s1")
+    // Reuse still succeeds; only the optional reporting degrades.
+    expect(outcome).toMatchObject({ kind: "reused", available: 1 })
+    expect(h.added).toHaveLength(0)
+  })
+})

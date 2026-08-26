@@ -392,11 +392,16 @@ async function declared(datamateId: string): Promise<Declared | null> {
 
 /** Tell the session its tool list changed.
  *
- * `MCP.add` stores the client but publishes nothing, so an attach that lands
- * after the turn's bounded wait — or on a repair retry, which never waits —
- * produced tools the session had no way to learn about until the user sent
- * another message. The documented fallback for exceeding the cap depends on
- * this event existing, so it has to be published here. */
+ * `MCP.add` stores the client but publishes nothing, so nothing downstream could
+ * even observe a late attach. This restores that signal.
+ *
+ * What it does NOT do, stated plainly because this module claimed otherwise for
+ * several revisions: it does not give tools to the invocation already running.
+ * That turn's tool set was passed to the model before the attach finished and
+ * cannot be rebuilt mid-call — the session's subscriber only logs, and the next
+ * `resolveTools` is what picks the tools up. So exceeding the bounded wait costs
+ * a turn, not a session. The event is worth publishing for traceability and for
+ * any subscriber that can act between turns; it is not a live refresh. */
 async function announceToolsChanged(): Promise<void> {
   if (syncInternals.toolsChanged) return syncInternals.toolsChanged()
   try {
@@ -406,6 +411,31 @@ async function announceToolsChanged(): Promise<void> {
   } catch (err) {
     log.warn("could not announce the workspace engine tool change", { err: String(err) })
   }
+}
+
+/** The workspace allowlist, bounded.
+ *
+ * Reporting only — the attach must never wait on it. The bound was previously
+ * applied to the spawn path alone, leaving a reused engine awaiting it with no
+ * limit. Both paths go through here now, so there is one answer rather than two.
+ *
+ * The underlying request is separately abortable (the API client attaches a
+ * signal), so a stalled server releases its socket instead of accumulating
+ * pending fetches across repair retries. */
+async function declaredBounded(workspaceId: string): Promise<Declared | null> {
+  return Promise.race([
+    declared(workspaceId),
+    new Promise<null>((resolve) => {
+      const timer = setTimeout(() => {
+        log.warn("workspace allowlist lookup timed out; continuing without the declared-vs-delivered report", {
+          workspaceId,
+          timeoutMs: DECLARED_TIMEOUT_MS,
+        })
+        resolve(null)
+      }, DECLARED_TIMEOUT_MS)
+      timer.unref?.()
+    }),
+  ])
 }
 
 async function notify(toast: Toast): Promise<void> {
@@ -638,7 +668,7 @@ async function run(): Promise<Outcome> {
           // attach used to say so. Reuse is the COMMON path, so staying silent
           // here is where the gap would actually go unnoticed.
           const present = engineToolKeys(await client.tools())
-          const declaredKeys = await declared(workspaceId)
+          const declaredKeys = await declaredBounded(workspaceId)
           const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
           const available = present.size
           if (declaredKeys && missing.length > 0) {
@@ -696,19 +726,7 @@ async function run(): Promise<Outcome> {
   // launched and its HTTP layer has no abort timeout — so an API that accepts a
   // connection and then stalls stopped a good cached binding and an installed
   // engine from ever attaching. Reporting degrades; attaching does not wait.
-  const declaredKeys = await Promise.race([
-    declared(workspaceId),
-    new Promise<null>((resolve) => {
-      const timer = setTimeout(() => {
-        log.warn("workspace allowlist lookup timed out; attaching without the declared-vs-delivered report", {
-          workspaceId,
-          timeoutMs: DECLARED_TIMEOUT_MS,
-        })
-        resolve(null)
-      }, DECLARED_TIMEOUT_MS)
-      timer.unref?.()
-    }),
-  ])
+  const declaredKeys = await declaredBounded(workspaceId)
   const declaredCount = declaredKeys?.keys.length ?? 0
 
   // Rule 2 / 3 — opportunistic use, or an offer. Never an install.
