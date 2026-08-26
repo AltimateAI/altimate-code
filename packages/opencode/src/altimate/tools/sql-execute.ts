@@ -112,11 +112,15 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      // altimate_change — annotate the failure too. A fail-open notice that only rides
+      // on success is worse than none: the reason vanishes exactly when the call went
+      // wrong, and the `precedence` marker under-counts fail-open in precisely the
+      // cases most likely to fail.
+      return Precedence.annotate(precedence, {
         title: "SQL: ERROR",
         metadata: { rowCount: 0, truncated: false, error: msg },
         output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
-      }
+      })
     }
   },
 })

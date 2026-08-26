@@ -15,9 +15,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 import { SqlExplainTool } from "../../src/altimate/tools/sql-explain"
+import { SchemaInspectTool } from "../../src/altimate/tools/schema-inspect"
 import { initTool } from "./tool-fixture"
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { precedenceInternals, refresh, resetForTests } from "../../src/altimate/workspace/precedence"
+import { check, precedenceInternals, refresh, resetForTests } from "../../src/altimate/workspace/precedence"
 
 const SESSION = SessionID.make("ses_guard_order")
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
@@ -123,6 +124,51 @@ describe("sql_execute — the hard deny outranks the redirect", () => {
     )
     expect(asked).toHaveLength(0)
     expect(result.metadata.redirected).toBe(true)
+  })
+})
+
+describe("a fail-open notice survives the failure paths", () => {
+  // The notice and its `precedence` marker exist so a skipped routing decision is
+  // never silent and can be counted. Attaching them only to the success return
+  // loses both exactly when the call went wrong — and an undetermined target is a
+  // sign of a misconfigured setup, so those calls are *more* likely to fail. The
+  // telemetry would then under-count fail-open in precisely the population it
+  // exists to measure.
+  //
+  // Reached here by giving the registry a single connection of a type no driver
+  // serves: the default target resolves, its type cannot be canonicalised, so
+  // `check()` returns the undetermined verdict — and the dispatcher then fails on
+  // that same unsupported type, giving a genuine error path rather than a mocked one.
+  beforeEach(async () => {
+    Registry.setConfigs({ mystery: { type: "notadb", host: "h" } as never })
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+  })
+
+  test("check() reports undetermined for a type no driver serves", async () => {
+    const verdict = await check(SESSION, "sql_execute")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("could not be determined")
+  })
+
+  test("sql_execute carries the marker and the reason", async () => {
+    // Not the error path: the unknown type that produces the notice also makes the
+    // dispatcher a no-op, so a notice and a throw cannot co-occur here. The failure
+    // exits are covered by schema_inspect below, which does fail for real.
+    const tool = await initTool(SqlExecuteTool)
+    const result: any = await tool.execute({ query: "select 1", limit: 10 }, ctx)
+    expect(result.metadata.precedence).toBe("undetermined")
+    expect(result.output).toContain("Not routed through workspace")
+  })
+
+  test("schema_inspect carries the marker on a genuine failure exit", async () => {
+    // This one really does fail — an unsupported type has no driver to inspect with —
+    // so it exercises the exact path the review found unannotated.
+    const tool = await initTool(SchemaInspectTool)
+    const result: any = await tool.execute({ table: "orders" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.precedence).toBe("undetermined")
+    expect(result.output).toContain("Not routed through workspace")
   })
 })
 

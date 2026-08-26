@@ -21,6 +21,10 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     // altimate_change start — workspace precedence
     const precedence = await Precedence.check(ctx.sessionID, "schema_inspect", args.warehouse)
     if (precedence.redirect) return precedence.redirect
+    // Every failure exit goes through here, so a fail-open notice cannot be dropped by
+    // one path being overlooked — three of the four exits below are errors, and the
+    // marker is most needed on exactly those.
+    const failed = (message: string) => Precedence.annotate(precedence, schemaError(message))
     // altimate_change end
     try {
       const result = (await Dispatcher.call("schema.inspect", {
@@ -30,12 +34,12 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       })) as unknown
 
       if (!isRecord(result)) {
-        return schemaError("Invalid schema response from dispatcher.")
+        return failed("Invalid schema response from dispatcher.")
       }
 
       const responseError = normalizeError(result.error)
       if (result.success === false || responseError !== undefined) {
-        return schemaError(responseError?.trim() || "Schema inspection failed.")
+        return failed(responseError?.trim() || "Schema inspection failed.")
       }
 
       const schemaResult = (isRecord(result.data) ? result.data : result) as Partial<SchemaInspectResult>
@@ -60,7 +64,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return schemaError(msg)
+      return failed(msg)
     }
   },
 })

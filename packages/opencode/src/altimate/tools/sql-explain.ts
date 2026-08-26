@@ -145,7 +145,8 @@ export const SqlExplainTool = Tool.define("sql_explain", {
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"
-        return {
+        // altimate_change — see sql-execute: every post-guard exit carries the notice.
+        return Precedence.annotate(precedence, {
           title: "Explain: FAILED",
           metadata: {
             success: false,
@@ -154,7 +155,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
             error,
           },
           output: `Failed to get execution plan: ${error}`,
-        }
+        })
       }
 
       // altimate_change — attaches the fail-open notice when present; no-op otherwise.
@@ -169,11 +170,11 @@ export const SqlExplainTool = Tool.define("sql_explain", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      return Precedence.annotate(precedence, {
         title: "Explain: ERROR",
         metadata: { success: false, analyzed: false, warehouse_type: "unknown", error: msg },
         output: `Failed to run EXPLAIN: ${msg}\n\nEnsure a warehouse connection is configured and the dispatcher is running.`,
-      }
+      })
     }
   },
 })
