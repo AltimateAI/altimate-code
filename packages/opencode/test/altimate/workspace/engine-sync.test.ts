@@ -1523,3 +1523,69 @@ describe("ensure — round 18", () => {
     expect(h.restores, "restored something into the project file instead of removing the override").toEqual([null])
   })
 })
+
+describe("INVARIANT — a disabled entry serves nothing", () => {
+  // "Disabled" is a claim about what the model can reach, not about what the
+  // config file says. The config is where the user expresses it; the runtime is
+  // where it either holds or doesn't.
+  test("an entry disabled AFTER it connected is torn down, not merely reported", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false },
+      // The status a live disable actually produces. `MCP.status()` returns live
+      // client state and `MCP.tools()` gates on exactly that, consulting the
+      // config only for a timeout — so reporting `entry-disabled` while the
+      // client stays registered hands that turn the tools and the credentials
+      // of the workspace the user just switched off.
+      statuses: [{ datamate: { status: "connected" } }],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(h.removes, "reported the entry disabled but left its client serving tools").toContain("datamate")
+    // Respecting the edit must not turn into rewriting it.
+    expect(h.persisted, "wrote to the config while honouring a disable").toHaveLength(0)
+    expect(h.connects, "retried an entry the user disabled").toHaveLength(0)
+  })
+
+  test("a memoised success does not outlive the entry being disabled", async () => {
+    // The disable check lives in `run()`, and a settled success never re-enters
+    // it. Every later turn of that session is decided by the memo alone, so the
+    // check has to be reachable from the validation path too.
+    let enabled = true
+    const h = install({
+      statuses: [
+        {},
+        { datamate: { status: "connected" } },
+        { datamate: { status: "connected" } },
+        { datamate: { status: "connected" } },
+      ],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.existingEntry = async () =>
+      ({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled }) as ExistingEntry
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+
+    enabled = false
+    expect(await ensure("s1"), "rode the memo straight past the user's disable").toEqual({ kind: "entry-disabled" })
+    expect(h.removes, "kept serving the disabled entry's tools for the rest of the session").toContain("datamate")
+  })
+
+  test("nothing awaits between the final binding check and the install", async () => {
+    // The guard is only worth what the gap after it is: any await between the
+    // check and the mutations reopens the window the check exists to close. The
+    // late guard would undo this attach — but only after it had spawned an
+    // engine and taken the per-project lock, which is long enough for the
+    // replacement attach's first-turn wait to expire.
+    let current: CachedBinding | null = binding
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectEntry = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return null
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.added, "installed an engine for a workspace the project had already left").toHaveLength(0)
+    expect(h.persisted, "pinned a workspace the project had already left").toHaveLength(0)
+  })
+})

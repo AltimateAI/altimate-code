@@ -663,6 +663,15 @@ async function run(): Promise<Outcome> {
       // bound project would silently re-enable it for every other project.
       // Say what is unavailable and leave their choice alone.
       log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
+      // Leaving the CONFIG alone is the whole point; leaving the RUNTIME alone is
+      // not. `MCP.status()` reports live client state, and `MCP.tools()` gates on
+      // exactly that status without consulting `enabled` — so an entry disabled
+      // after it connected keeps exporting its tools to `resolveTools`, and the
+      // user's "off" is honoured on disk while the model still holds the
+      // workspace's tools and credentials. `remove` is runtime-only: it closes
+      // the client and publishes ToolsChanged without writing config, which is
+      // precisely "respect the edit", not "re-apply" it.
+      await detachRejected({ reason: "the entry is disabled" })
       await notify({
         title: "Workspace engine is disabled",
         message:
@@ -852,15 +861,23 @@ async function run(): Promise<Outcome> {
     command: [ENGINE_BINARY, "start-stdio", "--datamate", workspaceId],
     enabled: true,
   }
+  // Snapshot what persist() is about to overwrite — the project file's own
+  // entry, not the merged view — so a supersede can put back exactly that.
+  //
+  // Read BEFORE the guard rather than between it and the writes. Every await
+  // after the last check reopens the window that check exists to close, and a
+  // disk read is a wide one. The post-install guard would undo the stale attach,
+  // but only after it had spawned an engine and held the per-project lock — long
+  // enough for the replacement's first-turn wait to expire, which is the failure
+  // the guard was added to prevent. Nothing may await between the guard and the
+  // mutations it guards.
+  const projectBefore = await projectEntry()
   if (!(await stillCurrent())) {
     // Re-linked while we were probing. Installing now would attach the workspace
     // this session has already left, and would win by arriving first.
     log.info("abandoning attach; the binding changed before the engine was installed", { workspaceId })
     return { kind: "superseded" }
   }
-  // Snapshot what persist() is about to overwrite — the project file's own
-  // entry, not the merged view — so a supersede can put back exactly that.
-  const projectBefore = await projectEntry()
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
 
@@ -979,6 +996,16 @@ async function engineStillOurs(workspaceId: string, record?: SessionAttach): Pro
     // instance-wide client is serving B — so the cached success would expose B's
     // tools under binding A. The pin is what makes it ours.
     const entry = await existingEntry(DATAMATE_KEY)
+    // Intent outranks every other check, and it is checked FIRST because the
+    // command-unchanged shortcut below returns early: a session that already
+    // attached would otherwise ride its memo straight past the disable for the
+    // rest of its life, never re-entering `run()` where the check lives.
+    // Returning false here does not itself detach — it routes this session back
+    // through `run()`, which reports `entry-disabled` and tears the client down.
+    if (entry?.enabled === false) {
+      log.info("engine entry was disabled since the cached attach; re-deciding", { workspaceId })
+      return false
+    }
     if (pinnedWorkspace(entry) !== workspaceId) return false
 
     // The pin is not the whole contract: the FLOOR is what makes the pin
