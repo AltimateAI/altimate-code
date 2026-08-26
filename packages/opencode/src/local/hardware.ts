@@ -1,6 +1,7 @@
 import fs from "node:fs/promises"
 
 import type { ModelRecipe, RecipeTier } from "./recipes"
+import { RUNTIME_ASSETS } from "./runtime"
 
 const GIB = 1024 ** 3
 
@@ -172,8 +173,20 @@ export function matchHardwareToTier(hardware: HardwareInfo, model: ModelRecipe):
   // The laptop tier's 131K context assumes unified memory; discrete cards that
   // reached here are below the discrete tier's floor and must not inherit it.
   const discreteNvidia = hardware.accelerator === "nvidia" && !hardware.unifiedMemory
-  if (laptop && !discreteNvidia && availableGb >= laptop.min_vram_gb) {
+  // This is a hardware-only fallback with no platform gate, so it can match
+  // platforms llama.cpp has no published runtime for (e.g. Intel macOS):
+  // require a RUNTIME_ASSETS entry before letting it proceed to a download.
+  const runtimeAvailable =
+    laptop?.engine !== "llama.cpp" || Boolean(RUNTIME_ASSETS[`${hardware.platform}-${hardware.arch}`])
+  if (laptop && !discreteNvidia && runtimeAvailable && availableGb >= laptop.min_vram_gb) {
     return { tier: laptop, availableGb, reason: `${availableGb}GB available memory meets the laptop tier` }
+  }
+
+  if (laptop && !discreteNvidia && !runtimeAvailable && availableGb >= laptop.min_vram_gb) {
+    return {
+      availableGb,
+      reason: `No Phase 1 llama.cpp runtime is available for ${hardware.platform}-${hardware.arch}`,
+    }
   }
 
   return {

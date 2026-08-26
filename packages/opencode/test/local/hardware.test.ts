@@ -89,4 +89,13 @@ describe("local hardware tier matching", () => {
     expect(match.tier).toBeUndefined()
     expect(match.reason).toContain("20GB")
   })
+
+  test("refuses the laptop fallback on a platform-arch with no published llama.cpp runtime", () => {
+    // Intel macOS has enough memory to clear the laptop tier's floor but
+    // RUNTIME_ASSETS only ships darwin-arm64 — must not match a tier whose
+    // runtime can never be installed.
+    const match = matchHardwareToTier(hardware({ platform: "darwin", arch: "x64", memoryGb: 32 }), model)
+    expect(match.tier).toBeUndefined()
+    expect(match.reason).toContain("darwin-x64")
+  })
 })

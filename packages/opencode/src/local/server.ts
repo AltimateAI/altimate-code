@@ -8,7 +8,7 @@ import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 
 import type { LlamaRecipeTier } from "./recipes"
-import { dockerContainerRunning, dockerHealthy, removeDockerContainer } from "./docker"
+import { dockerContainerRunning, dockerHealthy, removeDockerContainer, type DockerExec } from "./docker"
 import type { RuntimeInfo } from "./runtime"
 import { ensureLocalDirectories, getLocalPaths, type LocalPaths } from "./paths"
 
@@ -149,12 +149,14 @@ export async function checkHealth(port: number, fetchImpl: Fetch = fetch) {
   }
 }
 
-export async function getServerStatus(options: { paths?: LocalPaths; fetchImpl?: Fetch } = {}): Promise<ServerStatus> {
+export async function getServerStatus(
+  options: { paths?: LocalPaths; fetchImpl?: Fetch; dockerExec?: DockerExec } = {},
+): Promise<ServerStatus> {
   const paths = options.paths ?? getLocalPaths()
   const state = await readServerState(paths)
   if (!state) return { processAlive: false, healthy: false, stale: false }
   if (state.engine === "docker-sglang") {
-    const running = await dockerContainerRunning()
+    const running = await dockerContainerRunning(options.dockerExec)
     const healthy = running && (await dockerHealthy(state.port, options.fetchImpl))
     return { state, processAlive: running, healthy, stale: !running }
   }
@@ -323,14 +325,14 @@ export async function startServer(input: {
   }
 }
 
-export async function stopServer(options: { paths?: LocalPaths; graceMs?: number } = {}) {
+export async function stopServer(options: { paths?: LocalPaths; graceMs?: number; dockerExec?: DockerExec } = {}) {
   const paths = options.paths ?? getLocalPaths()
   const state = await readServerState(paths)
   if (!state) return { stopped: false, reason: "not-running" as const }
   if (state.engine === "docker-sglang") {
-    const running = await dockerContainerRunning()
+    const running = await dockerContainerRunning(options.dockerExec)
     // Throws on rm failure — state stays so the container is not orphaned.
-    await removeDockerContainer()
+    await removeDockerContainer(options.dockerExec)
     await clearServerState(paths)
     if (!running) return { stopped: false, reason: "stale" as const }
     return { stopped: true, reason: "stopped" as const, pid: state.pid }

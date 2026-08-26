@@ -101,6 +101,29 @@ export namespace SessionCompaction {
   }
   // altimate_change end
 
+  // altimate_change start — proactive overflow tail estimator: the usage recorded
+  // on lastFinished is from the LAST assistant turn; tool results appended since
+  // then are not counted, and one oversized output can jump the session past the
+  // window between checks (24% of lost bench trials died this way). Exported (not
+  // an inline IIFE in the prompt loop) so it's unit-testable on its own.
+  export function uncountedTailTokens(input: { messages: MessageV2.WithParts[]; lastFinishedId?: MessageID }) {
+    if (!input.lastFinishedId) return 0
+    const index = input.messages.findIndex((m) => m.info.id === input.lastFinishedId)
+    if (index < 0) return 0
+    let tokens = 0
+    for (const m of input.messages.slice(index + 1)) {
+      for (const part of m.parts) {
+        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+        if (part.type === "tool" && part.state?.status === "completed") tokens += Token.estimate(part.state.output ?? "")
+      }
+    }
+    // 0.8: same safety margin fitHead applies to its budget — Token.estimate can
+    // undercount dense code/JSON tool output, so inflate the tail estimate before
+    // it feeds the overflow threshold check.
+    return Math.ceil(tokens / 0.8)
+  }
+  // altimate_change end
+
   export const PRUNE_MINIMUM = 20_000
   export const PRUNE_PROTECT = 40_000
 

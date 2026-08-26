@@ -98,9 +98,11 @@ export async function startDockerServer(input: {
   exec?: DockerExec
   fetchImpl?: Fetch
   timeoutMs?: number
+  pollIntervalMs?: number
   onProgress?: (line: string) => void
 }) {
   const exec = input.exec ?? defaultExec
+  const pollIntervalMs = input.pollIntervalMs ?? 3000
   await removeDockerContainer(exec)
   const hfCache = path.join(os.homedir(), ".cache", "huggingface")
   await exec("docker", buildDockerRunArgs({ tier: input.tier, modelID: input.modelID, port: input.port, hfCache }), 30 * 60_000)
@@ -129,7 +131,7 @@ export async function startDockerServer(input: {
       lastLine = line
       input.onProgress?.(line)
     }
-    await new Promise((resolve) => setTimeout(resolve, 3000))
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
   }
   await removeDockerContainer(exec)
   throw new Error("SGLang container did not become healthy in time")

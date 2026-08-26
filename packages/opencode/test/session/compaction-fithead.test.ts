@@ -60,3 +60,65 @@ describe("SessionCompaction.fitHead", () => {
     expect(result.dropped).toBe(0)
   })
 })
+
+// altimate_change start — mixed-role/turn-shaped fixture: a raw array-offset cut
+// (head.slice(step)) can land inside a turn, leaving the summarization request
+// starting with a non-user message — providers 400 on that, which bypasses the
+// "too large to compact" fallback entirely. fitHead rounds the cut forward to
+// the next user-role message instead.
+function assistantMessage(id: string, text: string): MessageV2.WithParts {
+  return {
+    info: {
+      id,
+      sessionID: "session-1",
+      role: "assistant",
+      time: { created: 1000 },
+      model: { providerID: "local", modelID: "qwen3.8-27b" },
+    },
+    parts: [
+      {
+        id: `${id}-part`,
+        sessionID: "session-1",
+        messageID: id,
+        type: "text",
+        text,
+      },
+    ],
+  } as unknown as MessageV2.WithParts
+}
+
+describe("SessionCompaction.fitHead turn boundaries (mixed-role heads)", () => {
+  test("truncation lands on a user message, never mid-turn", async () => {
+    const head: MessageV2.WithParts[] = []
+    for (let i = 0; i < 24; i++) {
+      head.push(userMessage(`u${i}`, "q".repeat(8_000)))
+      head.push(assistantMessage(`a${i}`, "r".repeat(8_000)))
+    }
+    const result = await SessionCompaction.fitHead({ head, model: model(16384, 4096) })
+    expect(result.dropped).toBeGreaterThan(0)
+    // This is the assertion that fails without turn-boundary rounding: a raw
+    // step offset lands on an odd index (an assistant message) roughly half
+    // the time, which this fixture's alternating user/assistant shape exposes.
+    expect(result.head[0]!.info.role).toBe("user")
+  })
+
+  test("no truncation when a mixed-role head already fits", async () => {
+    const head = [userMessage("u", "small"), assistantMessage("a", "tiny")]
+    const result = await SessionCompaction.fitHead({ head, model: model(131072) })
+    expect(result.dropped).toBe(0)
+  })
+
+  test("repeated truncation passes stays on user boundaries across multiple iterations", async () => {
+    // Enough turns that the while-loop in fitHead needs several passes to
+    // shrink under budget, exercising the boundary-rounding logic more than once.
+    const head: MessageV2.WithParts[] = []
+    for (let i = 0; i < 80; i++) {
+      head.push(userMessage(`u${i}`, "q".repeat(4_000)))
+      head.push(assistantMessage(`a${i}`, "r".repeat(4_000)))
+    }
+    const result = await SessionCompaction.fitHead({ head, model: model(8192, 2048) })
+    expect(result.dropped).toBeGreaterThan(0)
+    expect(result.head[0]!.info.role).toBe("user")
+  })
+})
+// altimate_change end
