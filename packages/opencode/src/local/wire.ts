@@ -94,13 +94,19 @@ export async function wireLocalProvider(input: {
   if (!("small_model" in parsed)) updated = patch(updated, ["small_model"], `local/${input.modelID}`)
 
   const guarded: string[] = []
+  const permission = (parsed.permission ?? {}) as Record<string, unknown>
   if (input.egressGuard !== false) {
-    const permission = (parsed.permission ?? {}) as Record<string, unknown>
     for (const key of EGRESS_PERMISSIONS) {
       // Only where the user has not already decided — never clobber their config.
       if (key in permission) continue
       updated = patch(updated, ["permission", key], "ask")
       guarded.push(key)
+    }
+  } else {
+    // Reversible: --no-egress-guard removes only rules the guard plausibly owns
+    // (value is exactly "ask"); any custom user value or pattern map stays.
+    for (const key of EGRESS_PERMISSIONS) {
+      if (permission[key] === "ask") updated = patch(updated, ["permission", key], undefined)
     }
   }
   if (!updated.endsWith("\n")) updated += "\n"
@@ -111,7 +117,7 @@ export async function wireLocalProvider(input: {
     await fs.rename(temp, file)
   }
   await fs.chmod(file, 0o600)
-  await writeLocalEnvironment(input.tier.agent.tool_retrieval, paths)
+  await writeLocalEnvironment(input.tier.agent.tool_retrieval, paths, input.egressGuard !== false)
   return { file, changed: updated !== before, advertisedContext, guarded }
 }
 

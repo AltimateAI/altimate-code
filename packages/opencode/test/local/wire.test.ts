@@ -89,6 +89,32 @@ describe("wireLocalProvider egress guard", () => {
     for (const key of EGRESS_PERMISSIONS) expect(none[key]).toBe("allow (no rule)")
   })
 
+  test("guard is reversible: on → off → on", async () => {
+    const home = await makeHome()
+    const first = await wire(home)
+    expect(first.guarded).toEqual([...EGRESS_PERMISSIONS])
+
+    await wire(home, { egressGuard: false })
+    const off = await readConfig(first.file)
+    for (const key of EGRESS_PERMISSIONS) expect(off.permission?.[key]).toBeUndefined()
+
+    const again = await wire(home)
+    expect(again.guarded).toEqual([...EGRESS_PERMISSIONS])
+    const on = await readConfig(first.file)
+    for (const key of EGRESS_PERMISSIONS) expect(on.permission[key]).toBe("ask")
+  })
+
+  test("disabling the guard keeps custom user values", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ permission: { websearch: "deny" } }))
+    const wired = await wire(home, { egressGuard: false })
+    const config = await readConfig(wired.file)
+    expect(config.permission.websearch).toBe("deny")
+    expect(config.permission.webfetch).toBeUndefined()
+  })
+
   test("wiring twice is idempotent", async () => {
     const home = await makeHome()
     const first = await wire(home)

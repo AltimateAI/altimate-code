@@ -76,11 +76,16 @@ not vendor benchmarks. Your throughput scales with memory bandwidth.
   resume and re-verify.
 - The local server binds `127.0.0.1` only. Nothing is exposed to the network.
 - **Egress guard** (on by default): wiring local mode adds `ask` rules for the
-  network tools (`websearch`, `webfetch`, `codesearch`), so a local-first
-  session escalates to the internet only with your per-step approval. Your own
-  permission settings are never overwritten; opt out with `--no-egress-guard`.
-- Internal machinery (compaction, title generation) is pinned to the local
-  model too — no background step silently calls a cloud model.
+  web tools (`websearch`, `webfetch`, `codesearch`), so a local-first session
+  escalates to the internet only with your per-step approval. Your own
+  permission settings are never overwritten, and `--no-egress-guard` removes
+  exactly the rules the guard added (nothing else). Scope note: this is a
+  *web-tool* guard — shell commands are governed separately by the bash
+  permission rules, which default to `ask` for anything not explicitly
+  allowlisted.
+- Internal machinery stays local too: compaction follows the session model,
+  and `small_model` (title generation) is pinned to the local provider when
+  you haven't set it — no background step silently calls a cloud model.
 - No telemetry is added by local mode; the agent's normal settings apply.
 
 ## Troubleshooting
