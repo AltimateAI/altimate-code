@@ -1235,3 +1235,25 @@ describe("ensure — round 12", () => {
     expect(h).toBeDefined()
   })
 })
+
+describe("ensure — round 13", () => {
+  test("a re-link during the reuse lookup is not answered with the old workspace", async () => {
+    // The reuse branch awaits the allowlist lookup for up to the bound. Returning
+    // `reused` afterwards asserts the connected engine serves the CURRENT binding
+    // — so a re-link inside that await would hand this turn workspace A's tools,
+    // and its credentials, under binding B.
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.declared = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return { keys: ["dbt_build_model"], extensionKeys: [] }
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.added).toHaveLength(0)
+  })
+})

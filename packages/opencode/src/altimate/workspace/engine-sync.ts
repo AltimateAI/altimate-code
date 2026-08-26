@@ -692,6 +692,18 @@ async function run(): Promise<Outcome> {
               variant: "warning",
             })
           }
+          // Returning `reused` ASSERTS that the connected engine serves the
+          // current binding — and the lookup above can have waited. Every
+          // mutation already revalidates; so must this, because the caller acts
+          // on the answer just as surely. A re-link inside that await would
+          // otherwise hand this turn the previous workspace's tools, and its
+          // credentials, under the new binding.
+          if (!(await stillCurrent())) {
+            log.info("binding changed while reusing; abandoning rather than answering for the old workspace", {
+              workspaceId,
+            })
+            return { kind: "superseded" }
+          }
           log.info("reusing existing engine entry", {
             workspaceId,
             available,
