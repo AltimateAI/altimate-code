@@ -140,7 +140,7 @@ describe("ensure", () => {
       statuses: [{ datamate: { status: "connected" } }],
       tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
     })
-    expect(await ensure("s1")).toEqual({ kind: "reused", available: 2 })
+    expect(await ensure("s1")).toEqual({ kind: "reused", available: 2, declared: 2, missing: [] })
     expect(h.added).toHaveLength(0)
     expect(h.persisted).toHaveLength(0)
   })
@@ -400,7 +400,7 @@ describe("ensure — attribution of a CONNECTED entry", () => {
       statuses: [{ datamate: { status: "connected" } }],
       tools: twoTools,
     })
-    expect(await ensure("s1")).toEqual({ kind: "reused", available: 2 })
+    expect(await ensure("s1")).toEqual({ kind: "reused", available: 2, declared: 2, missing: [] })
     expect(h.added).toHaveLength(0)
     expect(h.persisted).toHaveLength(0)
     expect(h.removes).toHaveLength(0) // reuse must never tear down what it reuses
@@ -559,5 +559,115 @@ describe("ensure — the memo follows the BINDING, not just the session id", () 
     await whenAttached("s1", 30)
     expect(performance.now() - started).toBeGreaterThanOrEqual(20)
     expect(h).toBeDefined()
+  })
+})
+
+describe("ensure — a REJECTED engine is detached even when it cannot be replaced", () => {
+  const liveUnpinned = { type: "local", command: ["datamate", "start-stdio"] }
+
+  test("no engine on PATH: still detaches, so resolveTools cannot serve the wrong workspace", async () => {
+    const h = install({
+      existing: liveUnpinned,
+      statuses: [{ datamate: { status: "connected" } }],
+      which: null,
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(await ensure("s1")).toEqual({ kind: "engine-missing", declared: 2 })
+    // The whole point: we judged it untrustworthy, so it must not still be serving.
+    expect(h.removes).toEqual(["datamate"])
+    expect(h.added).toHaveLength(0)
+  })
+
+  test("PATH engine below the floor: still detaches before reporting too-old", async () => {
+    const h = install({
+      existing: liveUnpinned,
+      statuses: [{ datamate: { status: "connected" } }],
+      version: "0.5.9",
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "0.5.9" })
+    expect(h.removes).toEqual(["datamate"])
+    expect(h.added).toHaveLength(0)
+  })
+
+  test("a pinned-but-below-floor engine with nothing better is detached, not left serving", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      version: () => "0.6.3",
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(await ensure("s1")).toEqual({ kind: "engine-too-old", found: "0.6.3" })
+    expect(h.removes).toEqual(["datamate"])
+  })
+})
+
+describe("ensure — reuse reports the declared-vs-delivered gap (rule 5)", () => {
+  test("a reused engine missing a declared tool warns, and the outcome carries the gap", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 }, // declared has two keys
+    })
+    expect(await ensure("s1")).toEqual({
+      kind: "reused",
+      available: 1,
+      declared: 2,
+      missing: ["dbt_compile_model"],
+    })
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0].variant).toBe("warning")
+    expect(h.toasts[0].message).toContain("1 of 2 declared integration tools")
+    expect(h.toasts[0].message).toContain("dbt_compile_model")
+  })
+
+  test("no gap means no toast", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    expect(await ensure("s1")).toMatchObject({ kind: "reused", missing: [] })
+    expect(h.toasts).toHaveLength(0)
+  })
+
+  test("an unreadable allowlist degrades quietly rather than inventing a gap", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      declared: null,
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(await ensure("s1")).toEqual({ kind: "reused", available: 1 })
+    expect(h.toasts).toHaveLength(0)
+  })
+})
+
+describe("ensure — an unbound project does not keep a stale MANAGED entry", () => {
+  test("our own pinned entry is detached when the binding is gone", async () => {
+    const h = install({
+      binding: null,
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "5"] },
+      statuses: [{ datamate: { status: "connected" } }],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "unbound" })
+    expect(h.removes).toEqual(["datamate"])
+  })
+
+  test("an IDE-written entry is LEFT ALONE — it is the user's, not ours", async () => {
+    const h = install({
+      binding: null,
+      existing: { command: "datamate", args: ["start-stdio"] },
+      statuses: [{ datamate: { status: "connected" } }],
+    })
+    expect(await ensure("s1")).toEqual({ kind: "unbound" })
+    expect(h.removes).toHaveLength(0)
+  })
+
+  test("nothing registered means nothing to detach", async () => {
+    const h = install({ binding: null, statuses: [{}] })
+    expect(await ensure("s1")).toEqual({ kind: "unbound" })
+    expect(h.removes).toHaveLength(0)
+    expect(h.toasts).toHaveLength(0)
   })
 })

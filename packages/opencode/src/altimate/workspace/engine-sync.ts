@@ -92,7 +92,7 @@ const TOOL_PREFIX = `${DATAMATE_KEY}_`
 export type Outcome =
   | { kind: "disabled" }
   | { kind: "unbound" }
-  | { kind: "reused"; available: number }
+  | { kind: "reused"; available: number; declared?: number; missing?: string[] }
   | { kind: "attached"; available: number; declared: number; missing: string[]; replaced?: string }
   | { kind: "engine-missing"; declared: number }
   | { kind: "engine-too-old"; found: string }
@@ -312,6 +312,14 @@ export function pinnedWorkspace(entry: ExistingEntry | null): string | null {
   return null
 }
 
+/** Did WE write this entry? Only an entry matching the exact command we persist
+ * is ours to tear down; an IDE-written or hand-edited entry belongs to the user
+ * and is left alone even when it is the wrong one for this project. */
+function isManagedEntry(entry: ExistingEntry | null): boolean {
+  const argv = commandArgv(entry)
+  return argv.length === 4 && argv[0] === ENGINE_BINARY && argv[1] === "start-stdio" && argv[2] === PIN_FLAG && !!argv[3]
+}
+
 /** Short, printable identity of an entry, for saying what was replaced. */
 function describeEntry(entry: ExistingEntry | null): string {
   if (isUrlEntry(entry)) return entry.url
@@ -366,10 +374,28 @@ function describeMissing(missing: string[]): string {
 async function run(): Promise<Outcome> {
   if (!isEnabled()) return { kind: "disabled" }
 
-  const binding = await resolveBinding()
-  if (!binding) return { kind: "unbound" }
-  const workspaceId = String(binding.datamateId)
   const client = mcp()
+
+  const binding = await resolveBinding()
+  if (!binding) {
+    // An entry WE persisted for a binding that no longer exists is still started
+    // by MCP bootstrap on every launch, and would serve the OLD workspace's tools
+    // in a project that is no longer linked to it. Detach it — runtime only, the
+    // config entry is left in place — so an unlinked project does not silently
+    // keep another workspace's tools. Only our own managed entry qualifies.
+    const present = (await client.status())[DATAMATE_KEY]
+    if (present) {
+      const stale = await existingEntry(DATAMATE_KEY)
+      if (isManagedEntry(stale)) {
+        log.info("detaching a managed engine entry in an unbound project", { entry: describeEntry(stale) })
+        await client.remove(DATAMATE_KEY).catch((err) => {
+          log.warn("could not detach the managed engine entry", { err: String(err) })
+        })
+      }
+    }
+    return { kind: "unbound" }
+  }
+  const workspaceId = String(binding.datamateId)
 
   // Rule 1 — reuse what already serves this session, but only if it can be shown
   // to serve THIS workspace, on an engine that still clears the floor.
@@ -385,11 +411,25 @@ async function run(): Promise<Outcome> {
   // locked, which is the drift this attribution is meant to exclude.
   let replaced: string | undefined
   let replacedNote = ""
-  /** Was the entry we are replacing still RUNNING? Then it must be closed before
-   * we spawn, or `MCP.add` leaves its child process orphaned beside the new one —
-   * the same duplicate-engine hazard this module refuses for a failing entry, and
-   * in practice it wedges the session. */
-  let replacedLive = false
+
+  /** Stop serving an entry we have judged untrustworthy for this workspace.
+   *
+   * Runtime-only (`MCP.remove`): closes the client and drops it from the tool
+   * catalogue without touching any config file — `MCP.disconnect` would persist
+   * `enabled: false` into whichever config owns the entry, which for a global
+   * one disables the user's engine everywhere.
+   *
+   * This must run at the moment of REJECTION, not merely before a replacement
+   * spawn. Every exit that fails to produce a replacement — `engine-missing`,
+   * `engine-too-old` — would otherwise return with the rejected engine still
+   * connected, and the turn's `resolveTools` would hand the model exactly the
+   * tools we just decided it must not have. It also closes the client `MCP.add`
+   * would otherwise overwrite without closing, which orphans a second engine. */
+  const detachRejected = async (why: Record<string, unknown>): Promise<void> => {
+    await client.remove(DATAMATE_KEY).catch((err) => {
+      log.warn("could not detach the rejected engine entry", { err: String(err), ...why })
+    })
+  }
   const before = await client.status()
   const existing = before[DATAMATE_KEY]
   if (existing) {
@@ -436,22 +476,49 @@ async function run(): Promise<Outcome> {
         // connected URL entry lands here too, which is the point — the hosted
         // endpoint serves a different tool set, and rule 4 forbids adopting it.
         replaced = describeEntry(entry)
-        replacedLive = true
         replacedNote = pin
           ? ` Replaced an engine entry pinned to workspace ${pin} for this session.`
           : ` Replaced an engine entry that is not pinned to this workspace (${replaced}) for this session; it serves whichever workspace its owner has active.`
-        log.info("existing engine entry is not attributable to this workspace; will spawn locally", {
+        log.info("existing engine entry is not attributable to this workspace; detaching", {
           workspaceId,
           pinnedTo: pin,
           entry: replaced,
         })
+        await detachRejected({ workspaceId, reason: "not-attributable", pinnedTo: pin })
       } else {
         const entryBin = commandArgv(entry)[0]
         const found = entryBin ? await versionOf(entryBin) : null
         if (found && compareVersions(found, MIN_ENGINE_VERSION) >= 0) {
-          const available = engineToolKeys(await client.tools()).size
-          log.info("reusing existing engine entry", { workspaceId, available, version: found })
-          return { kind: "reused", available }
+          // Rule 5 applies to a reused engine too. A running engine that lost an
+          // integration — a connection deleted, a restart that dropped it —
+          // serves fewer tools than the workspace declares, and only the fresh
+          // attach used to say so. Reuse is the COMMON path, so staying silent
+          // here is where the gap would actually go unnoticed.
+          const present = engineToolKeys(await client.tools())
+          const declaredKeys = await declared(workspaceId)
+          const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
+          const available = present.size
+          if (declaredKeys && missing.length > 0) {
+            await notify({
+              title: `Workspace "${binding.datamateName}" is missing declared tools`,
+              message:
+                `The running engine serves ${available} of ${declaredKeys.keys.length} declared integration tools.` +
+                describeMissing(missing),
+              variant: "warning",
+            })
+          }
+          log.info("reusing existing engine entry", {
+            workspaceId,
+            available,
+            version: found,
+            declared: declaredKeys?.keys.length,
+            missing,
+          })
+          return {
+            kind: "reused",
+            available,
+            ...(declaredKeys ? { declared: declaredKeys.keys.length, missing } : {}),
+          }
         }
         // Pinned to us, but below the floor or unreadable. Prefer a newer engine
         // on PATH over keeping one whose pin the engine does not lock; if PATH
@@ -460,6 +527,9 @@ async function run(): Promise<Outcome> {
         const pathVersion = onPath ? await versionOf(onPath) : null
         if (!pathVersion || compareVersions(pathVersion, MIN_ENGINE_VERSION) < 0) {
           const label = found ?? "unknown"
+          // Rejected and irreplaceable: detach anyway. Leaving it connected would
+          // return "too old" while still serving the too-old engine's tools.
+          await detachRejected({ workspaceId, reason: "below-floor", found: label })
           await notify({
             title: "Workspace engine is too old",
             message:
@@ -470,13 +540,13 @@ async function run(): Promise<Outcome> {
           return { kind: "engine-too-old", found: label }
         }
         replaced = describeEntry(entry)
-        replacedLive = true
         replacedNote = ` Replaced an engine entry running ${found ?? "an unreadable version"}, below the ${MIN_ENGINE_VERSION} floor, for this session.`
-        log.info("existing engine entry is below the version floor; will spawn locally", {
+        log.info("existing engine entry is below the version floor; detaching", {
           workspaceId,
           found,
           pathVersion,
         })
+        await detachRejected({ workspaceId, reason: "below-floor-replaceable", found })
       }
     }
   }
@@ -514,21 +584,6 @@ async function run(): Promise<Outcome> {
     type: "local",
     command: [ENGINE_BINARY, "start-stdio", "--datamate", workspaceId],
     enabled: true,
-  }
-  if (replacedLive) {
-    // Close the live registration first: `MCP.add` does not close the client it
-    // overwrites, so adding over a running stdio server starts a second engine
-    // and abandons the first with its pipes still open.
-    //
-    // `remove`, NOT `disconnect`. `MCP.disconnect` persists `enabled: false` to
-    // whichever config file actually holds the entry — which for an IDE-written
-    // or user-global `datamate` is the GLOBAL config. Our replacement is written
-    // project-locally, so disconnecting would leave the user's engine disabled in
-    // every OTHER project. `remove` is runtime-only teardown: it closes the
-    // client, drops it from state, and publishes ToolsChanged, touching no file.
-    await client.remove(DATAMATE_KEY).catch((err) => {
-      log.warn("could not close the engine entry being replaced", { err: String(err) })
-    })
   }
   await persist(DATAMATE_KEY, cfg)
   await client.add(DATAMATE_KEY, cfg)
