@@ -69,9 +69,12 @@ describe("maskString paths — preprocessing — escape stripping, known-prefix 
     expect(mask(pad + "sk-abcdefghijklmnopqrstuvwxyz0123456789")).not.toContain("sk-abc")
     expect(mask(pad + '"customer-secret-value-here"')).not.toContain("customer")
     expect(mask('"' + "A".repeat(8180) + '" "customer secret value here"')).not.toContain("customer")
-    // tab / newline boundaries count as whitespace for the back-off
-    expect(mask("x".repeat(8100) + "\t/Users/jdoe/secret-client-repo/models")).not.toContain("jdoe")
-    expect(mask("x".repeat(8100) + "\n/Users/jdoe/secret-client-repo/models")).not.toContain("jdoe")
+    // tab / newline boundaries count as whitespace for the back-off: the
+    // input is over the cap (8223 chars) and the only whitespace is the
+    // tab/newline at 8185, so the cut must land there and drop the path
+    // whole (a literal-space back-off would emit it in part)
+    expect(mask("x".repeat(8185) + "\t/Users/jdoe/secret-client-repo/models")).toBe("x".repeat(8185))
+    expect(mask("x".repeat(8185) + "\n/Users/jdoe/secret-client-repo/models")).toBe("x".repeat(8185))
   })
 
   it("the cut has no floors: a half-open quote is closed wherever it opened", () => {
