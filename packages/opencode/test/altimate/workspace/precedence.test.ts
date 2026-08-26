@@ -10,6 +10,7 @@ import {
   check,
   decideForTarget,
   trackedSessionCount,
+  announcedSessionCount,
   describeEngineTool,
   describeNativeTool,
   forSession,
@@ -232,6 +233,37 @@ describe("the per-session caches are bounded", () => {
     // The newest survives; the oldest is gone.
     expect(forSession(`ses_bounded_${MAX_TRACKED_SESSIONS + 24}`)).toBeDefined()
     expect(forSession("ses_bounded_0")).toBeUndefined()
+  })
+
+  test("a line still in flight when its session is evicted does not resurrect it", async () => {
+    // Publishing is not awaited, so a line can still be pending when its session falls
+    // out of the cache. Writing the delivery back afterwards would recreate an entry
+    // for a session eviction has already left — and eviction only ever walks
+    // `bySession`, so nothing could ever reclaim it. The announcement cache would then
+    // grow with the lifetime session count, which is the bound this suite exists for.
+    const settle: Array<() => void> = []
+    precedenceInternals.announce = () => new Promise<void>((resolve) => settle.push(resolve))
+
+    await refresh("ses_evicted", SNOWFLAKE_TOOLS)
+    expect(settle).toHaveLength(1)
+
+    // Push it out of the cache while its line is still in flight.
+    for (let i = 0; i < MAX_TRACKED_SESSIONS + 5; i++) {
+      await refresh(`ses_flood_${i}`, {})
+    }
+    expect(forSession("ses_evicted")).toBeUndefined()
+
+    settle[0]()
+    await tick()
+
+    // The evicted session left no trace behind: re-deriving it announces afresh rather
+    // than being suppressed by a record that outlived the eviction.
+    const said: string[] = []
+    precedenceInternals.announce = async (line) => void said.push(line)
+    await refresh("ses_evicted", SNOWFLAKE_TOOLS)
+    await tick()
+    expect(said).toHaveLength(1)
+    expect(announcedSessionCount()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
   })
 })
 

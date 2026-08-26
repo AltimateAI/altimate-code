@@ -338,7 +338,11 @@ export async function refresh(
     const queued = (publishQueue.get(sessionID) ?? Promise.resolve()).then(async () => {
       const delivered = await announce(line)
       if (publishing.get(sessionID) === attempt) publishing.delete(sessionID)
-      if (delivered) announced.set(sessionID, attempt)
+      // A session evicted while its line was in flight must not be written back:
+      // eviction only ever walks `bySession`, so an entry recreated here after the
+      // session left it could never be reclaimed, and the map would grow with the
+      // lifetime session count rather than staying bounded.
+      if (delivered && bySession.has(sessionID)) announced.set(sessionID, attempt)
     })
     publishQueue.set(sessionID, queued)
     void queued
@@ -411,6 +415,12 @@ export function forSession(sessionID: string): Precedence | undefined {
 /** Test-visible size of the per-session cache. */
 export function trackedSessionCount(): number {
   return bySession.size
+}
+
+/** Test-visible size of the announcement cache, which is bounded by the same eviction
+ * and so must never outgrow it. */
+export function announcedSessionCount(): number {
+  return announced.size
 }
 
 export function resetForTests(): void {
