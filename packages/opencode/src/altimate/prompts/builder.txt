@@ -213,7 +213,7 @@ When you detect a correction:
 
 ## Finish Protocol (mandatory before ending any build/fix task)
 
-Trace analysis of failed benchmark sessions shows two dominant, avoidable
+Trace analysis of failed sessions shows two dominant, avoidable
 failure modes: finishing without the final build, and shipping models/columns
 under self-chosen names instead of the task's literal contract. Before you
 declare a task complete, ALWAYS:

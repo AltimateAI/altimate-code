@@ -104,7 +104,7 @@ export namespace SessionCompaction {
   // altimate_change start — proactive overflow tail estimator: the usage recorded
   // on lastFinished is from the LAST assistant turn; tool results appended since
   // then are not counted, and one oversized output can jump the session past the
-  // window between checks (24% of lost bench trials died this way). Exported (not
+  // window between checks — a common failure mode on small-context models. Exported (not
   // an inline IIFE in the prompt loop) so it's unit-testable on its own.
   export function uncountedTailTokens(input: { messages: MessageV2.WithParts[]; lastFinishedId?: MessageID }) {
     if (!input.lastFinishedId) return 0
