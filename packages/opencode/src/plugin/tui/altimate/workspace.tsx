@@ -25,7 +25,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
 import open from "open"
-import { createSignal, onMount } from "solid-js"
+import { createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   ForbiddenError,
@@ -1214,6 +1214,16 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const clipboard = useClipboard()
   const [phase, setPhase] = createSignal<"idle" | "installing" | "installed" | "failed">("idle")
   const [failure, setFailure] = createSignal<string | null>(null)
+  // The install outlives this component: Escape or a click outside dismisses
+  // the dialog while npm keeps running. Signals set after that update nothing
+  // anyone can see — a failed install or the five-minute timeout would be
+  // completely silent — and clearing the dialog stack would close whatever
+  // opened in our place. So completion reports through a toast when we are
+  // gone, and only touches the dialog while we still own it.
+  let mounted = true
+  onCleanup(() => {
+    mounted = false
+  })
   // ``onSelect`` is delivered synchronously per Enter keypress; the install is
   // a multi-minute await. Without this latch a second Enter starts a second
   // ``npm i -g`` against the same global prefix.
@@ -1281,13 +1291,25 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
     setPhase("installing")
     const result = await installEngine()
     if (!result.ok) {
+      installing = false
+      if (!mounted) {
+        // Dismissed mid-install: the failed-phase rows have nowhere to render,
+        // so the error reaches the user as a toast or not at all.
+        props.api.ui.toast({
+          variant: "error",
+          message: `Workspace engine install failed: ${result.error}. Run: ${command()}`,
+          duration: 30_000,
+        })
+        return
+      }
       setFailure(result.error)
       setPhase("failed")
-      installing = false
       return
     }
     setPhase("installed")
-    props.api.ui.dialog.clear()
+    // Only clear a dialog we still own — by now the user may have opened
+    // another, and clearing the stack would take theirs down instead.
+    if (mounted) props.api.ui.dialog.clear()
     // Deliberately NOT re-attaching this session from here. The plugin runtime
     // loads this file in its own realm, so `ensure()` called here would run a
     // SECOND, independent attach — spawning an engine the session never uses
