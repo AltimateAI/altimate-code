@@ -42,9 +42,6 @@
             "tool_retrieval": true,
             "reasoning_effort": "medium",
             "temperature": 1.0
-          },
-          "evidence": {
-            "date": "2026-08-21"
           }
         },
         {
@@ -81,9 +78,6 @@
             "tool_retrieval": true,
             "reasoning_effort": "medium",
             "temperature": 1.0
-          },
-          "evidence": {
-            "date": "2026-08-21"
           }
         },
         {
@@ -127,9 +121,6 @@
             "tool_retrieval": true,
             "reasoning_effort": "medium",
             "temperature": 1.0
-          },
-          "evidence": {
-            "date": "2026-08-21"
           },
           "notes": "Discrete 24GB GPUs (RTX 3090/4090-class, Vulkan build): weights+KV must fit VRAM alone, so context is capped at 49K. Unified-memory laptops use laptop-24gb instead."
         },

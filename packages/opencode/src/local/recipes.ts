@@ -18,10 +18,6 @@ export interface RecipeMtp {
   draft_max: number
 }
 
-export interface RecipeEvidence {
-  date: string
-}
-
 export interface LlamaRecipeTier {
   name: string
   min_vram_gb: number
@@ -35,7 +31,6 @@ export interface LlamaRecipeTier {
   mtp?: RecipeMtp
   flags: string[]
   agent: RecipeAgent
-  evidence?: RecipeEvidence
 }
 
 export interface GuidanceRecipeTier {
@@ -138,13 +133,6 @@ function validateMtp(value: unknown, label: string): RecipeMtp {
   }
 }
 
-function validateEvidence(value: unknown, label: string): RecipeEvidence {
-  const input = record(value, label)
-  return {
-    date: string(input.date, `${label}.date`),
-  }
-}
-
 function validateTier(value: unknown, label: string): RecipeTier {
   const input = record(value, label)
   const engine = string(input.engine, `${label}.engine`)
@@ -200,7 +188,6 @@ function validateTier(value: unknown, label: string): RecipeTier {
     mtp: input.mtp === undefined ? undefined : validateMtp(input.mtp, `${label}.mtp`),
     flags: [...input.flags] as string[],
     agent: validateAgent(input.agent, `${label}.agent`),
-    evidence: input.evidence === undefined ? undefined : validateEvidence(input.evidence, `${label}.evidence`),
   }
 }
 
