@@ -720,6 +720,30 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(order[2]).toBe(order[0])
   })
 
+  test("routing that stops before its announcement lands is still reported stopped", async () => {
+    // The stop decision has to consult what the session is committed to saying, not
+    // only what it has been told. With the first routing line still in flight, a
+    // refresh that serves nothing would otherwise queue no correction at all — and the
+    // routing line would then arrive after routing had already stopped.
+    const order: string[] = []
+    const settle: Array<() => void> = []
+    precedenceInternals.announce = (line) => {
+      order.push(line)
+      return new Promise<void>((resolve) => settle.push(resolve))
+    }
+
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(order).toHaveLength(1)
+
+    // Routing stops while that first line is still pending.
+    await refresh(SESSION, {})
+    settle[0]()
+    await tick()
+
+    expect(order).toHaveLength(2)
+    expect(order[1]).toContain("any more")
+  })
+
   test("a session that never had routing is still told nothing", async () => {
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)

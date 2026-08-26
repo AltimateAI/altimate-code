@@ -322,18 +322,18 @@ export async function refresh(
   // inventory is exactly the transition the user most needs, and a truthiness guard
   // alone can never announce it, so they would go on believing calls are routed while
   // they run locally.
-  const previous = announced.get(sessionID)
   const current = inventoryLine(result)
   const routed = result.enabled && current !== ""
+  // What this session is committed to saying: the announcement still being published if
+  // there is one, otherwise the one it has actually been told. Both questions below are
+  // asked of this single record. Consulting only the delivered one would suppress a
+  // correction back to it while another line is in flight, and would miss that routing
+  // had been announced at all when the stop arrives before that announcement lands —
+  // in both cases the queue then delivers the stale line last.
+  const committed = publishing.get(sessionID) ?? announced.get(sessionID)
   // Only a session that was actually routing can be told routing has stopped.
-  const line = current || (previous?.routed ? STOPPED_ROUTING : "")
-  // Compare against the newest line this session is committed to saying — the one still
-  // being published if there is one, otherwise the one it has actually been told.
-  // Comparing against the delivered line alone would suppress a correction back to it
-  // while a different line is still in flight, and the queue would then deliver the
-  // stale one last.
-  const committed = publishing.get(sessionID)?.line ?? previous?.line
-  if (line && committed !== line) {
+  const line = current || (committed?.routed ? STOPPED_ROUTING : "")
+  if (line && committed?.line !== line) {
     // Nothing reaches `announced` until the line actually arrives, so a failure leaves
     // the session's known state untouched and the next turn retries.
     const attempt = { line, routed }
