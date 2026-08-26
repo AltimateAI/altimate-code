@@ -231,9 +231,9 @@ async function currentBinding(): Promise<{ datamateId: number; datamateName: str
  * when that cannot be established. A URL entry is an IDE's in-process engine: never
  * pinned, its active teammate changing at runtime, so it can never be attributed.
  */
-async function attributedTo(): Promise<string | null> {
+async function attributedTo(expected: string): Promise<string | null> {
   if (precedenceInternals.attributedTo) return precedenceInternals.attributedTo()
-  try {
+  const read = async (): Promise<string | null> => {
     const cfg = (await Config.get()) as { mcp?: Record<string, ExistingEntry | undefined> }
     const entry = cfg.mcp?.[DATAMATE_KEY]
     if (!entry) return null
@@ -242,6 +242,21 @@ async function attributedTo(): Promise<string | null> {
     // spellings, and last-wins on repeats — a private reimplementation would refuse
     // precedence on engines that are in fact correctly pinned.
     return pinnedWorkspace(entry)
+  }
+  try {
+    const cached = await read()
+    // `Config.get()` is cached per instance, and an IDE rewriting the entry writes
+    // straight to disk without going through it — so a cached pin can outlive the
+    // entry it describes. Staleness is only dangerous in one direction: a stale
+    // "pinned to us" would help enable routing, while a stale "pinned elsewhere"
+    // merely refuses, which is the safe way to be wrong. So confirm against disk only
+    // when the cached answer is about to enable, and leave the refusing path cheap
+    // rather than re-reading all config on every turn.
+    if (cached !== expected) return cached
+    await Config.invalidate().catch((err) => {
+      log.warn("could not invalidate the config cache before attributing the engine", { err: String(err) })
+    })
+    return await read()
   } catch (err) {
     log.warn("could not read MCP config for engine attribution", { err: String(err) })
     return null
@@ -292,7 +307,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
     log.info("no attach established this session's engine; precedence off", { bound: binding.datamateId })
     return EMPTY("unattributed", workspaceName)
   }
-  const pinned = await attributedTo()
+  const pinned = await attributedTo(String(binding.datamateId))
   if (pinned === null || pinned !== String(binding.datamateId)) {
     log.info("engine not attributable to the bound workspace; precedence off", {
       bound: binding.datamateId,
