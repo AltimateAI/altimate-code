@@ -1428,3 +1428,22 @@ describe("INVARIANT — a cached success is re-probed and re-attributed", () => 
     })
   }
 })
+
+describe("ensure — round 16", () => {
+  test("a config disable is honoured even while the runtime is still connected", async () => {
+    // The mirror of the round-9 case. There the runtime said disabled and the
+    // config said enabled; here the config says disabled and the RUNTIME still
+    // says connected, because MCP reports live client state. Gating the disable
+    // check on connectivity skipped it entirely — and for an unpinned entry the
+    // replacement path would then persist it enabled again, undoing the disable.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(h.added, "attached over an entry the user had disabled").toHaveLength(0)
+    expect(h.persisted, "re-enabled an entry the user had disabled").toHaveLength(0)
+    expect(h.connects).toHaveLength(0)
+  })
+})

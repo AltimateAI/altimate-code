@@ -606,36 +606,36 @@ async function run(): Promise<Outcome> {
   if (existing) {
     let connected = existing.status === "connected"
 
+    // Intent first, connectivity second. The config's `enabled` flag is the
+    // only place a user expresses "off", and the two sources disagree in BOTH
+    // directions: `MCP.status()` synthesizes "disabled" for a configured entry
+    // that has no runtime status (so a teardown looks like a user disable), and
+    // it keeps reporting "connected" from live client state after the config
+    // has been set to disabled (so a real disable looked like nothing at all).
+    // Gating on connectivity missed the second case entirely — and for an
+    // unpinned entry the replacement path below would then have persisted it
+    // enabled again, undoing the very edit the user made.
+    //
+    // `existingEntry` is always fresh, so `entry` already reflects disk.
+    if (entry?.enabled === false) {
+      // The user turned this entry off deliberately. Do NOT call `MCP.connect`
+      // to "retry" it: that persists `enabled: true` into whichever config
+      // owns the entry, so for a global `datamate` the first prompt in any
+      // bound project would silently re-enable it for every other project.
+      // Say what is unavailable and leave their choice alone.
+      log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
+      await notify({
+        title: "Workspace engine is disabled",
+        message:
+          `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
+          `integration tools are unavailable. Enable it to use them.`,
+        variant: "warning",
+      })
+      return { kind: "entry-disabled" }
+    }
+
+
     if (!connected) {
-      // `MCP.status()` synthesizes "disabled" for any CONFIGURED entry that has
-      // no runtime status, and `MCP.remove` deletes the status — so every
-      // rejection teardown makes the next turn look like a user disable. Read the
-      // config's actual flag instead; only that is user intent.
-      // The runtime status is authoritative for "not running"; the CONFIG is
-      // authoritative for "the user turned it off" — and the two can disagree.
-      // `MCP.disconnect` writes `enabled: false` to disk WITHOUT invalidating
-      // Config, so a cached entry still says `enabled: true` immediately after a
-      // user disconnects. Treating that as a synthesized status would reconnect
-      // and persist it enabled again, undoing their disconnect — globally, if
-      // the owning entry is global. Read the file before deciding.
-      // `existingEntry` is always fresh now, so `entry` already reflects disk.
-      const owning = entry
-      if (existing.status === "disabled" && owning?.enabled === false) {
-        // The user turned this entry off deliberately. Do NOT call `MCP.connect`
-        // to "retry" it: that persists `enabled: true` into whichever config
-        // owns the entry, so for a global `datamate` the first prompt in any
-        // bound project would silently re-enable it for every other project.
-        // Say what is unavailable and leave their choice alone.
-        log.info("engine entry is explicitly disabled; leaving it alone", { workspaceId })
-        await notify({
-          title: "Workspace engine is disabled",
-          message:
-            `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
-            `integration tools are unavailable. Enable it to use them.`,
-          variant: "warning",
-        })
-        return { kind: "entry-disabled" }
-      }
       if (isUrlEntry(entry)) {
         // Dead URL: nothing here can bring that process back — only the IDE can
         // restore its port. Fall through to a local spawn and report it below.
