@@ -404,9 +404,20 @@ function killTree(child: ReturnType<typeof spawn>): void {
   const pid = child.pid
   if (pid === undefined) return
   if (process.platform === "win32") {
+    // No process groups on Windows; taskkill walks the tree instead.
     try {
-      // No process groups on Windows; taskkill walks the tree instead.
-      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
+      const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
+      // spawn reports a missing binary through an asynchronous `error` event,
+      // not a throw, so the surrounding try/catch never sees it — and an
+      // unhandled `error` on a ChildProcess takes the process down while npm
+      // carries on running.
+      killer.on("error", () => {
+        try {
+          child.kill()
+        } catch {
+          // Already gone.
+        }
+      })
     } catch {
       child.kill()
     }
@@ -580,7 +591,7 @@ async function performInstall(
       alreadyPresent: false,
       error:
         `npm is not available on PATH, so ${DRIVER_LABELS[driver]} cannot be installed automatically. ` +
-        `Install Node.js, then run: npm install --prefix ${dir} ${packages.join(" ")}`,
+        `Install Node.js, then run: npm install --prefix ${shellQuote(dir)} ${packages.join(" ")}`,
     }
   }
 

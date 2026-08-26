@@ -580,19 +580,53 @@ describe("shellQuote on Windows", () => {
 })
 
 describe("manual-install hints are copy-pasteable", () => {
-  test("every printed --prefix is quoted", () => {
-    // The failure branch of warehouse_install_driver was the one site that
-    // interpolated the directory raw, and it is the branch a user reads
-    // precisely when the automatic install has just failed them.
+  test("the npm-missing branch quotes the directory", async () => {
+    // A third --prefix site lived here and was missed twice: the previous
+    // version of this suite asserted "every printed --prefix is quoted" while
+    // only ever exercising DriverNotInstalledError.
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "My Drivers")
+
+    // force, because snowflake-sdk is a real workspace dependency and the
+    // resolution check would otherwise short-circuit before npm is reached.
+    const result = await installOptionalDriver("snowflake", {
+      force: true,
+      runNpm: async () => ({ code: 127, output: "npm: command not found" }),
+    })
+
+    expect(result.installed).toBe(false)
+    const prefix = /--prefix (\S+)/.exec(result.error ?? "")?.[1]
+    expect(prefix).toBeDefined()
+    expect(prefix!.startsWith("'") || prefix!.startsWith('"')).toBe(true)
+  })
+
+  test("DriverNotInstalledError quotes the directory", () => {
     process.env["ALTIMATE_DRIVER_DIR"] = "/Users/John Doe/Library/drivers"
 
     const err = new DriverNotInstalledError("snowflake", DRIVER_PACKAGES.snowflake, [])
-    const prefixes = [...err.message.matchAll(/--prefix (\S+)/g)].map((m) => m[1]!)
+    const prefix = /--prefix (\S+)/.exec(err.message)?.[1]
 
-    expect(prefixes.length).toBeGreaterThan(0)
-    for (const prefix of prefixes) {
-      // An unquoted path with a space splits, and npm receives the wrong prefix.
-      expect(prefix.startsWith("'") || prefix.startsWith('"')).toBe(true)
+    expect(prefix).toBeDefined()
+    expect(prefix!.startsWith("'")).toBe(true)
+  })
+
+  test("no source builds a --prefix hint without shellQuote", () => {
+    // Structural, because the behavioural tests can only cover the sites someone
+    // remembered to write a case for. This fails when a NEW unquoted hint is
+    // added anywhere, which is how the third site slipped through.
+    const sources = [
+      path.join(import.meta.dir, "..", "src", "resolve.ts"),
+      path.join(import.meta.dir, "..", "..", "opencode", "src", "altimate", "tools", "warehouse-install-driver.ts"),
+      path.join(import.meta.dir, "..", "..", "opencode", "src", "altimate", "tools", "warehouse-add.ts"),
+    ]
+
+    const offenders: string[] = []
+    for (const file of sources) {
+      const text = fs.readFileSync(file, "utf8")
+      for (const match of text.matchAll(/--prefix \$\{([^}]*)\}/g)) {
+        if (!match[1]!.includes("shellQuote")) offenders.push(`${path.basename(file)}: ${match[0]}`)
+      }
     }
+
+    expect(offenders).toEqual([])
   })
 })
