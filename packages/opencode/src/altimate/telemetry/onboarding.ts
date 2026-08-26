@@ -50,6 +50,8 @@ type OnboardingEventInput = Extract<
       | "provider_selected"
       | "big_pickle_confirm_shown"
       | "big_pickle_choice"
+      | "local_model_info_shown"
+      | "local_model_choice"
       | "gateway_device_code_issued"
       | "gateway_auth_completed"
       | "gateway_auth_failed"

@@ -797,7 +797,7 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         /** the picker mounts from several paths — without this the event over-counts first runs */
-        trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+        trigger: "first_run" | "connect_command" | "big_pickle_back" | "local_model_back" | "prompt_gate"
       }
     | {
         type: "provider_selected"
@@ -826,6 +826,18 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         choice: "accept" | "cancel"
+      }
+    | {
+        type: "local_model_info_shown"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "local_model_choice"
+        timestamp: number
+        session_id: string
+        /** acknowledge = user will run `altimate local`; back = returned to the picker. */
+        choice: "acknowledge" | "back" | "cancel"
       }
     | {
         type: "gateway_device_code_issued"

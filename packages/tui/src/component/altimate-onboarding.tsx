@@ -77,9 +77,9 @@ export function useSetupComplete() {
 }
 
 // First-run welcome picker (presentation only; reuses the same action handlers as
-// DialogModel/createDialogProviderOptions). A curated six: five recommended
-// providers + a "Search all providers…" row that hands off to the full DialogModel
-// picker. The long tail stays behind search.
+// DialogModel/createDialogProviderOptions). A curated seven: six recommended
+// rows (five providers + the local model) + a "Search all providers…" row that
+// hands off to the full DialogModel picker. The long tail stays behind search.
 const NAME_W = 24
 type WelcomeTone = "success" | "warning" | "muted"
 
@@ -103,7 +103,7 @@ export function DialogModelWelcome(props: {
   // declining Big Pickle, and from the prompt gate, so without this every impression would read
   // as a fresh first run. Defaults to the /connect case since that is the only caller that does
   // not pass one explicitly.
-  trigger?: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+  trigger?: "first_run" | "connect_command" | "big_pickle_back" | "local_model_back" | "prompt_gate"
 }) {
   const { theme } = useTheme()
   const dialog = useDialog()
@@ -123,7 +123,7 @@ export function DialogModelWelcome(props: {
   /**
    * Reuse the exact provider onSelect (gateway flow for altimate-backend, auth-method screens for
    * the BYOK providers). Returns whether an action was actually dispatched: the server filters
-   * providers via `enabled_providers` / `disabled_providers` while these five rows are hardcoded,
+   * providers via `enabled_providers` / `disabled_providers` while these curated rows are hardcoded,
    * so a row can legitimately have no matching option and this would otherwise no-op in silence.
    */
   function connectProvider(id: string): boolean {
@@ -135,6 +135,11 @@ export function DialogModelWelcome(props: {
 
   function chooseBigPickle(): boolean {
     dialog.replace(() => <DialogBigPickleConfirm origin="welcome" />)
+    return true
+  }
+
+  function chooseLocalModel(): boolean {
+    dialog.replace(() => <DialogLocalModelInfo />)
     return true
   }
 
@@ -183,6 +188,13 @@ export function DialogModelWelcome(props: {
       activate: chooseBigPickle,
     },
     {
+      name: "Local model",
+      note: "no account · runs on this machine",
+      tone: "muted",
+      providerID: "local",
+      activate: chooseLocalModel,
+    },
+    {
       name: "Search all providers…",
       note: "/",
       tone: "muted",
@@ -226,8 +238,8 @@ export function DialogModelWelcome(props: {
       })
   }
 
-  // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
-  const COUNT = 6
+  // Indices 0-5 are providers, 6 is the search row (rendered below a divider).
+  const COUNT = 7
   function move(direction: number) {
     setSelected((prev) => (prev + direction + COUNT) % COUNT)
   }
@@ -246,7 +258,7 @@ export function DialogModelWelcome(props: {
       evt.preventDefault()
       // altimate_change — the "/" shortcut is the same intent as the "Search all providers…"
       // row, so it routes through the same guarded path.
-      activateRow(rows()[5])
+      activateRow(rows()[6])
     }
   })
 
@@ -319,10 +331,10 @@ export function DialogModelWelcome(props: {
           <span style={{ fg: theme.textMuted }}> — you can change this anytime with /model</span>
         </text>
         <box gap={0}>
-          <For each={rows().slice(0, 5)}>{(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}</For>
+          <For each={rows().slice(0, 6)}>{(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}</For>
         </box>
         <box border={["top"]} borderColor={theme.border} />
-        <Row row={rows()[5]} index={5} onActivate={activateRow} />
+        <Row row={rows()[6]} index={6} onActivate={activateRow} />
       </box>
     </box>
   )
@@ -433,6 +445,111 @@ export function DialogBigPickleConfirm(props: {
       <text fg={theme.textMuted} wrapMode="word" width="100%">
         Big Pickle works for chat but often fails at data tasks. The Gateway is free to start (10M tokens). Continue?
         [y/N]
+      </text>
+      <box>
+        <For each={options}>
+          {(option, index) => (
+            <box flexDirection="row" gap={1} onMouseMove={() => setSelected(index())} onMouseUp={() => option.run()}>
+              <text flexShrink={0} fg={theme.primary}>
+                {selected() === index() ? "›" : " "}
+              </text>
+              <box
+                paddingLeft={1}
+                paddingRight={1}
+                backgroundColor={selected() === index() ? theme.primary : transparent}
+              >
+                <text
+                  fg={selected() === index() ? selFg : theme.text}
+                  attributes={selected() === index() ? TextAttributes.BOLD : undefined}
+                >
+                  {option.label}
+                </text>
+              </box>
+              <Show when={option.hint}>
+                <text fg={theme.textMuted}>{option.hint}</text>
+              </Show>
+            </box>
+          )}
+        </For>
+      </box>
+    </box>
+  )
+}
+
+// Local-model interstitial — the picker cannot run the multi-minute `altimate local`
+// setup (model download + certification is a CLI-side flow), so this explains what
+// it is and hands the user the one command. Mirrors DialogBigPickleConfirm's
+// structure, keyboard handling, and funnel-telemetry discipline.
+export function DialogLocalModelInfo() {
+  const { theme } = useTheme()
+  const dialog = useDialog()
+  const [selected, setSelected] = createSignal(0) // 0 = Got it (default)
+  const trackOnboarding = useOnboardingTelemetry()
+  const firstRunActive = useFirstRunActive()
+  let decided = false
+  onMount(() => {
+    if (firstRunActive()) trackOnboarding({ name: "local_model_info_shown" })
+  })
+  // Escape / click-away never reach this component's handlers (DialogProvider owns them),
+  // so onCleanup is the only hook that sees every undecided close.
+  onCleanup(() => {
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "local_model_choice", choice: "cancel" })
+  })
+
+  function acknowledge() {
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "local_model_choice", choice: "acknowledge" })
+    dialog.clear()
+  }
+  function back() {
+    if (decided) return
+    decided = true
+    if (firstRunActive()) trackOnboarding({ name: "local_model_choice", choice: "back" })
+    dialog.replace(() => <DialogModelWelcome trigger="local_model_back" />)
+  }
+  const options = [
+    { label: "Got it — I'll run `altimate local`", hint: "(default)", run: acknowledge },
+    { label: "Back — pick something else", hint: "", run: back },
+  ]
+
+  useKeyboard((evt) => {
+    if (evt.name === "up" || evt.name === "down") {
+      setSelected((prev) => (prev + 1) % 2)
+      evt.preventDefault()
+      return
+    }
+    if (evt.name === "return") {
+      evt.preventDefault()
+      evt.stopPropagation()
+      options[selected()].run()
+    }
+  })
+
+  const selFg = selectedForeground(theme)
+  const transparent = RGBA.fromInts(0, 0, 0, 0)
+
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <box flexDirection="row" justifyContent="space-between">
+        <text attributes={TextAttributes.BOLD} fg={theme.text}>
+          Run a local model?
+        </text>
+        <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+          esc
+        </text>
+      </box>
+      <text fg={theme.textMuted} wrapMode="word" width="100%">
+        No account, no API key — a certified open model runs on this machine, and web tools ask before anything
+        leaves it. Needs Apple Silicon or a 24GB+ GPU, plus a one-time ~16GB download. Exit and run:
+      </text>
+      <text fg={theme.text} wrapMode="word" width="100%">
+        {"  altimate local"}
+      </text>
+      <text fg={theme.textMuted} wrapMode="word" width="100%">
+        Then start altimate again — the local model will be selected automatically.
       </text>
       <box>
         <For each={options}>
