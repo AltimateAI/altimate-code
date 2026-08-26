@@ -191,7 +191,11 @@ async function attested(sessionID: string): Promise<boolean> {
  * looks identical to no engine — and precedence is deliberately re-derived every
  * turn, so the truth can change under a session that has already been told. Comparing
  * the line means a correction is delivered and an unchanged one stays quiet. */
-const announced = new Map<string, string>()
+/** What each session was last told, and whether that statement described actual
+ * routing. The flag matters: "shadowing off, the engine could not be attributed" is a
+ * non-empty announcement that is NOT routing, so treating any prior announcement as
+ * routing would later claim routing had stopped when it never started. */
+const announced = new Map<string, { line: string; routed: boolean }>()
 
 /** Said when routing stops entirely, which `inventoryLine` renders as an empty string
  * because there is nothing left to enumerate. Silence is the wrong answer only here:
@@ -293,9 +297,12 @@ export async function refresh(
   // alone can never announce it, so they would go on believing calls are routed while
   // they run locally.
   const previous = announced.get(sessionID)
-  const line = inventoryLine(result) || (previous ? STOPPED_ROUTING : "")
-  if (line && previous !== line) {
-    announced.set(sessionID, line)
+  const current = inventoryLine(result)
+  const routed = result.enabled && current !== ""
+  // Only a session that was actually routing can be told routing has stopped.
+  const line = current || (previous?.routed ? STOPPED_ROUTING : "")
+  if (line && previous?.line !== line) {
+    announced.set(sessionID, { line, routed })
     void announce(line).catch(() => {})
   }
   return result

@@ -535,6 +535,23 @@ describe("descriptions are per capability, and corrections are delivered", () =>
     expect(lines[1]).toContain("runs on the local drivers")
   })
 
+  test("routing never having started is not announced as routing stopping", async () => {
+    // "Shadowing off, the engine could not be attributed" is a non-empty announcement
+    // that is NOT routing. Treating any prior announcement as routing would tell the
+    // user routing had stopped when it never began — common when the first attach
+    // outruns its wait and later exposes only non-warehouse tools.
+    const lines: string[] = []
+    precedenceInternals.announce = async (line) => void lines.push(line)
+    precedenceInternals.attributedTo = async () => null
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain("could not be attributed")
+
+    precedenceInternals.attributedTo = async () => "42"
+    await refresh(SESSION, {})
+    expect(lines.some((l) => l.includes("any more"))).toBe(false)
+  })
+
   test("a session that never had routing is still told nothing", async () => {
     const lines: string[] = []
     precedenceInternals.announce = async (line) => void lines.push(line)
