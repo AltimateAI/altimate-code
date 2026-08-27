@@ -503,6 +503,39 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome(`s${MAX_TRACKED_SESSIONS + 9}`)?.kind).toBe("attached")
   })
 
+  test("turn hooks for one directory run one at a time, so a re-link cannot interleave with another session's hook", async () => {
+    const h = install({})
+    // Session A's binding read blocks until released; a re-link lands and
+    // session B's hook starts while A is inside its hook.
+    let calls = 0
+    let releaseA: () => void = () => {}
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    syncInternals.resolveBinding = async () => {
+      calls += 1
+      // The read observes the binding as it was when asked; only the delivery
+      // of the answer is held back.
+      const snapshot = h.binding
+      if (calls === 2) await gateA
+      return snapshot
+    }
+    const a = beforeTurn("A")
+    await new Promise((r) => setTimeout(r, 5))
+    h.binding = bound(7, "growth")
+    const b = beforeTurn("B")
+    await new Promise((r) => setTimeout(r, 5))
+    // B is queued behind A: nothing has been applied for workspace 7 yet.
+    expect(h.added).toEqual([])
+    releaseA()
+    await Promise.all([a, b])
+    // A settled for the workspace it read; B's boundary then moved the engine.
+    expect(h.toasts.map((t) => t.title)).toEqual(['Workspace "analytics"', 'Workspace "growth"'])
+    expect(h.added).toHaveLength(1)
+    expect(pinnedWorkspace(h.added[0] as LocalMcpConfig)).toBe("7")
+    expect(managedWorkspace()?.id).toBe("7")
+  })
+
   test("the turn hook never throws", async () => {
     install({})
     syncInternals.config = {

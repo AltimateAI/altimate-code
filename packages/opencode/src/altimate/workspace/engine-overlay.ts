@@ -107,6 +107,12 @@ type Overlay = {
 type DirectoryState = {
   /** The overlay as of the last config load for this directory. */
   current: Overlay | null
+  /** Turn hooks for one directory run one at a time. Sessions in a directory
+   * share the key (a sub-agent's session is enough to make two concurrent),
+   * and a hook's binding read, reload and engine replacement must not
+   * interleave with another's — otherwise one session's boundary could
+   * replace the engine between another's read and its apply. */
+  chain: Promise<void>
   /** What MCP is believed to be running under the key: the overlay as it stood
    * when MCP bootstrapped (config load precedes MCP init, which reads the cached
    * config), then whatever the turn hook last applied. `undefined` until the
@@ -120,7 +126,7 @@ const directories = new Map<string, DirectoryState>()
 function stateFor(directory: string): DirectoryState {
   let state = directories.get(directory)
   if (!state) {
-    state = { current: null, applied: undefined }
+    state = { current: null, applied: undefined, chain: Promise.resolve() }
     directories.set(directory, state)
   }
   return state
@@ -260,14 +266,6 @@ async function declaredFor(workspaceId: string): Promise<Declared | null> {
 /** Reconcile, settle and announce for one session. Runs at the start of every
  * user turn, before the tool list is resolved. Never throws. */
 export async function beforeTurn(sessionID: string): Promise<void> {
-  try {
-    await reconcile(sessionID)
-  } catch (err) {
-    log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
-  }
-}
-
-async function reconcile(sessionID: string): Promise<void> {
   if (!isEnabled() || isServe()) {
     record(sessionID, { kind: "disabled" })
     return
@@ -278,6 +276,16 @@ async function reconcile(sessionID: string): Promise<void> {
     return
   }
   const state = stateFor(directory)
+  const run = state.chain.then(() => reconcile(sessionID, directory, state))
+  state.chain = run.catch(() => undefined)
+  try {
+    await run
+  } catch (err) {
+    log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
+  }
+}
+
+async function reconcile(sessionID: string, directory: string, state: DirectoryState): Promise<void> {
   // The overlay runs inside config load; make sure it has run at least once.
   await config().get()
   // First turn boundary: MCP bootstrapped from the config as loaded, i.e. from
