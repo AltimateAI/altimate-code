@@ -25,6 +25,7 @@ export const syncInternals: {
   resolveBinding?: (directory: string) => Promise<ScopedBinding | null>
   which?: (cmd: string) => string | null
   versionOf?: (bin: string) => Promise<string | null>
+  fingerprint?: (bin: string) => string | null
   declared?: (workspaceId: string) => Promise<Declared | null>
   notify?: (toast: Toast) => Promise<void>
   printLine?: (line: string) => void

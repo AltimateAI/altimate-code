@@ -55,6 +55,7 @@ type Harness = {
   /** Whether MCP holds a client under the key — set when MCP "bootstraps" from
    * the first config load, then tracked through add/remove, as in the runtime. */
   live?: boolean
+  fingerprint: string | null
 }
 
 function install(opts: {
@@ -90,6 +91,7 @@ function install(opts: {
     toasts: [],
     lines: [],
     clock: 1_000_000,
+    fingerprint: "bin-1",
   }
   process.env.ALTIMATE_WORKSPACE = opts.flag === false ? "" : "1"
   syncInternals.serve = () => opts.serve === true
@@ -112,6 +114,7 @@ function install(opts: {
     h.lines.push(line)
   }
   syncInternals.now = () => h.clock
+  syncInternals.fingerprint = () => h.fingerprint
   // No TUI bus in this harness, so a refusal that would raise the install
   // offer falls back to the toast, which is what these tests observe.
   syncInternals.publishOffer = async () => false
@@ -747,6 +750,36 @@ describe("beforeTurn — what a turn boundary does", () => {
     invalidateProbe()
     await beforeTurn("s1")
     expect(h.probes).toBe(2)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+  })
+
+  test("a too-old engine updated in place is re-probed on the next turn, inside the TTL", async () => {
+    // The offer's install writes the new engine over the old one at the same
+    // PATH entry, from another module realm that cannot invalidate this memo.
+    // The file's fingerprint changing is what ends the memo, not the clock.
+    const h = install({ version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(h.probes).toBe(1)
+    expect(settledOutcome("s1")?.kind).toBe("engine-too-old")
+    h.version = "0.7.0"
+    h.fingerprint = "bin-2"
+    h.clock += 1_000
+    await beforeTurn("s1")
+    expect(h.probes).toBe(2)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    // A binary that cannot be stat'ed has no fingerprint to compare, so the
+    // memo falls back to its TTL alone — never a spawn on every turn.
+    resetForTests()
+    const u = install({ version: "0.6.3" })
+    u.fingerprint = null
+    await beforeTurn("s1")
+    u.version = "0.7.0"
+    u.clock += 1_000
+    await beforeTurn("s1")
+    expect(u.probes).toBe(1)
+    u.clock += FAILED_PROBE_TTL_MS
+    await beforeTurn("s1")
+    expect(u.probes).toBe(2)
     expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 

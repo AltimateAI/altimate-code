@@ -35,7 +35,7 @@ import {
   syncInternals,
   type ScopedBinding,
 } from "./engine-seams"
-import { declaredBounded, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
+import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
 import { OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
 import {
   ENGINE_BINARY,
@@ -72,7 +72,7 @@ const DECLARED_RETRY_MS = 60_000
 
 type Probe = { kind: "ok"; version: string } | { kind: "missing" } | { kind: "too-old"; found: string | null }
 
-let probeMemo: { result: Probe; at: number } | null = null
+let probeMemo: { result: Probe; at: number; fingerprint: string | null } | null = null
 
 function now(): number {
   return syncInternals.now ? syncInternals.now() : Date.now()
@@ -85,9 +85,19 @@ async function probeEngine(): Promise<Probe> {
   // about on every call — `which` is a PATH scan, no process spawn — so an
   // install made from the offer dialog (which runs in another module realm and
   // cannot reach this memo) is seen on the next turn. A too-old or broken one
-  // costs a spawn to re-check, so that is rate-limited by the TTL.
+  // costs a spawn to re-check, so that is rate-limited by the TTL — but only
+  // while the file on PATH is the same one: an update written over it (the
+  // offer's `npm i -g` on an old engine) changes the fingerprint and is
+  // re-probed on the next turn, just as an install is.
+  const seen = bin ? fingerprint(bin) : null
   if (probeMemo && probeMemo.result.kind === "ok") return probeMemo.result
-  if (probeMemo && probeMemo.result.kind === "too-old" && bin && at - probeMemo.at < FAILED_PROBE_TTL_MS) {
+  if (
+    probeMemo &&
+    probeMemo.result.kind === "too-old" &&
+    bin &&
+    probeMemo.fingerprint === seen &&
+    at - probeMemo.at < FAILED_PROBE_TTL_MS
+  ) {
     return probeMemo.result
   }
   let result: Probe
@@ -97,12 +107,14 @@ async function probeEngine(): Promise<Probe> {
     const version = await versionOf(bin)
     result = clearsFloor(version) ? { kind: "ok", version: version! } : { kind: "too-old", found: version }
   }
-  probeMemo = { result, at }
+  probeMemo = { result, at, fingerprint: seen }
   return result
 }
 
 /** Forget the last probe, so the next turn boundary looks for the engine
- * again immediately. The install offer calls this after an install. */
+ * again immediately. Nothing in production calls this — the offer dialog runs
+ * in another module realm — which is why the probe itself notices an engine
+ * that appeared or changed on PATH. Kept for tests and diagnostics. */
 export function invalidateProbe(): void {
   probeMemo = null
 }
@@ -700,8 +712,8 @@ export async function announceRefusal(
 }
 
 /** Is a re-probe worth asking for on the next turn? Exposed for the install
- * offer, which schedules nothing itself: it installs, invalidates the probe,
- * and the next turn boundary attaches. */
+ * offer, which schedules nothing itself: it installs, and the next turn
+ * boundary sees the new or changed binary on PATH and attaches. */
 export function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE[outcome.kind]
 }
