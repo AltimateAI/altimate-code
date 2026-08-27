@@ -87,7 +87,7 @@ export async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntr
  * write a copy of the global entry into the project — a permanent override that
  * shadows every later global update, disable or removal, from an attach that was
  * meant to leave configuration untouched. */
-export async function projectEntry(): Promise<ExistingEntry | null> {
+export async function projectEntry(configPath?: string): Promise<ExistingEntry | null> {
   if (syncInternals.projectEntry) return syncInternals.projectEntry()
   // THROWS rather than returning null on a read error, because the two answers
   // mean opposite things to the caller: `null` says "the project file has no
@@ -95,8 +95,13 @@ export async function projectEntry(): Promise<ExistingEntry | null> {
   // "there was nothing here" with "I could not look" turned an unreadable
   // project config into a deletion of the user's own entry. If we cannot record
   // what to put back, we must not write in the first place.
-  const configPath = await resolveConfigPath(projectRoot())
-  return ((await readMcpEntryFromDisk(DATAMATE_KEY, configPath)) as ExistingEntry | undefined) ?? null
+  // Reads the path it is GIVEN. Resolving independently means the snapshot can
+  // come from one file while the write goes to another — an IDE creating or
+  // removing a higher-priority config between the two is enough — after which
+  // the undo restores the first file's entry into the second, over whatever the
+  // user had there.
+  const target = configPath ?? (await resolveConfigPath(projectRoot()))
+  return ((await readMcpEntryFromDisk(DATAMATE_KEY, target)) as ExistingEntry | undefined) ?? null
 }
 
 /** Put the config back the way we found it.

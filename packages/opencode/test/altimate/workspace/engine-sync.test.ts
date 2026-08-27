@@ -2571,3 +2571,45 @@ describe("INVARIANT — an undo that fails is never silent, however it fails", (
     expect(h.toasts.length, "a second, different failure was swallowed as a repeat").toBe(2)
   })
 })
+
+describe("INVARIANT — codex round 1: identity and paths are resolved once", () => {
+  test("a re-link is not silenced by the same refusal about the workspace it left", async () => {
+    // The dedupe record is carried across a re-link, so without the workspace in
+    // the key an identical-kind refusal about A silences B — and the user is
+    // left holding guidance that names a workspace they have left.
+    let current: CachedBinding | null = binding
+    const h = install({ which: null })
+    syncInternals.resolveBinding = async () => current
+    expect((await ensure("s1")).kind).toBe("engine-missing")
+    expect(h.toasts).toHaveLength(1)
+
+    current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    expect((await ensure("s1")).kind).toBe("engine-missing")
+    expect(h.toasts.length, "the new workspace's refusal was swallowed as a repeat of the old one").toBe(2)
+    expect(h.toasts[1]!.message).toContain("other")
+  })
+
+  test("the snapshot, the write and the undo all use one resolved path", async () => {
+    let current: CachedBinding | null = binding
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    const seen: Array<string | undefined> = []
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectConfigPath = async () => "/tmp/one/.altimate-code/altimate-code.json"
+    syncInternals.projectEntry = async () => {
+      seen.push("projectEntry")
+      return null
+    }
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    await ensure("s1")
+    // Resolving twice lets the snapshot come from one file while the write goes
+    // to another, after which the undo restores the first file's entry into the
+    // second — over whatever the user had there.
+    expect(h.restorePaths, "the undo used a path other than the one the write used").toEqual([
+      "/tmp/one/.altimate-code/altimate-code.json",
+    ])
+  })
+})

@@ -1354,3 +1354,28 @@ it.instance(
   { config: { mcp: {} } },
 )
 // altimate_change end
+
+// altimate_change start — a replacement that never came up leaves no record
+it.instance(
+  "a failed replacement clears the record of the client it closed",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "replaced"
+        yield* mcp.add("replaced", { type: "local", command: ["echo", "one"] })
+        expect(localCommand(yield* mcp.spawned("replaced"))).toEqual(["echo", "one"])
+
+        // `add` over a live client closes the old one, then creates the new one.
+        // If that creation fails, nothing is running under the key — and the
+        // record must not go on describing the process that was just closed.
+        connectShouldFail = true
+        connectError = "replacement refused to start"
+        yield* mcp.add("replaced", { type: "local", command: ["echo", "two"] })
+        connectShouldFail = false
+
+        expect(yield* mcp.spawned("replaced"), "a closed client is still claimed to be running").toBeUndefined()
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end

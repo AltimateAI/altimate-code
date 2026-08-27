@@ -938,6 +938,13 @@ export const layer = Layer.effect(
       if (!result.mcpClient) {
         yield* closeClient(s, name)
         delete s.clients[name]
+        // altimate_change start — a replacement that failed to come up leaves
+        // nothing running under this key, so the record of what was running must
+        // go with it. `add` over a live client closes the old one here; keeping
+        // its record would have `spawned()` describe a closed process, which is
+        // the one thing this record exists not to do.
+        delete s.spawned[name]
+        // altimate_change end
         return result.status
       }
 

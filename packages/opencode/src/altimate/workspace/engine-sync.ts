@@ -262,10 +262,15 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
  * `engine-missing` would retain every one of them. Hanging it on the session
  * record means it is bounded by whatever bounds the sessions, which is already
  * solved and already tested. */
-function verdictSignature(outcome: Outcome): string {
+function verdictSignature(outcome: Outcome, workspaceId?: string): string {
   const detail =
     "error" in outcome ? outcome.error : "found" in outcome ? outcome.found : "declared" in outcome ? "" : ""
-  return `${outcome.kind}:${detail}`
+  // The workspace is part of the identity. Without it, a session re-linked from
+  // A to B is silenced about B by an identical-kind refusal it was told about
+  // for A — the record is carried across the re-link, so the user is left with
+  // guidance naming a workspace they have left. "Same verdict" has to mean the
+  // same verdict about the same thing.
+  return `${workspaceId ?? "-"}:${outcome.kind}:${detail}`
 }
 
 /** Forget what a session was last told, so the next verdict is announced even if
@@ -325,7 +330,7 @@ async function announceRefusal(outcome: Outcome, toast: Toast, context?: Refusal
   try {
     const record = context?.sessionID ? sessions.get(context.sessionID) : undefined
     if (record) {
-      const signature = verdictSignature(outcome)
+      const signature = verdictSignature(outcome, context?.workspaceId)
       if (record.announced === signature) {
         log.info("verdict unchanged since the last turn; not repeating it", {
           sessionID: context?.sessionID,
@@ -617,7 +622,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // on a stale world. Read at undo time, and never undo a disable.
     let now: ExistingEntry | null = null
     try {
-      now = await projectEntry()
+      now = await projectEntry(configPath)
     } catch (err) {
       // Fails CLOSED, like the guard's read and for the same reason. Restoring
       // "what we replaced" on a read we could not perform can overwrite a
@@ -1024,19 +1029,12 @@ async function run(sessionID: string): Promise<Outcome> {
   // project config previously read as "no entry here", which a later restore
   // acts on by REMOVING — so a transient read failure could delete the user's
   // own entry as the undo of an attach that was meant to leave it alone.
-  let projectBefore: ExistingEntry | null
-  try {
-    projectBefore = await projectEntry()
-  } catch (err) {
-    return await refuse({ kind: "connect-failed", error: `project config unreadable: ${String(err)}` }, {
-      title: "Workspace engine not attached",
-      message:
-        `Could not read this project's configuration, so the engine was not installed — attaching without being ` +
-        `able to undo it risks overwriting your own "${DATAMATE_KEY}" entry. Integration tools are unavailable ` +
-        `until the config file can be read.`,
-      variant: "error",
-    })
-  }
+  // The path FIRST, and then the snapshot read from that exact path. Resolving
+  // twice means the snapshot can come from one file while the write goes to
+  // another — an IDE creating or removing a higher-priority config between the
+  // two is enough — after which the undo restores the first file's entry into
+  // the second, over whatever the user had there. One resolution, used by the
+  // read, the write and the undo alike.
   let configPath: string
   try {
     configPath = await projectConfigPath()
@@ -1046,6 +1044,23 @@ async function run(sessionID: string): Promise<Outcome> {
     // guesses about which file we touched. If we cannot say where we would
     // write, we do not write.
     return await refuseUnreadable(`config path could not be resolved: ${String(err)}`)
+  }
+  // If we cannot record what to put back, we do not write. An unreadable
+  // project config previously read as "no entry here", which a later restore
+  // acts on by REMOVING — so a transient read failure could delete the user's
+  // own entry as the undo of an attach that was meant to leave it alone.
+  let projectBefore: ExistingEntry | null
+  try {
+    projectBefore = await projectEntry(configPath)
+  } catch (err) {
+    return await refuse({ kind: "connect-failed", error: `project config unreadable: ${String(err)}` }, {
+      title: "Workspace engine not attached",
+      message:
+        `Could not read this project's configuration, so the engine was not installed — attaching without being ` +
+        `able to undo it risks overwriting your own "${DATAMATE_KEY}" entry. Integration tools are unavailable ` +
+        `until the config file can be read.`,
+      variant: "error",
+    })
   }
   const beforeInstall = await worldUnchanged()
   if (beforeInstall === "disabled") return await refuseDisabled()
