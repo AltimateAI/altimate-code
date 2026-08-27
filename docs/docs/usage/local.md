@@ -27,7 +27,7 @@ altimate                # then use the CLI as normal
 
 | Tier | Hardware | Context | Notes |
 |---|---|---|---|
-| `laptop-24gb` | Apple Silicon / unified memory, 24GB+ | 131K | the default certified tier |
+| `laptop-24gb` | Apple Silicon / unified memory, 24GB+ | 65K | the default certified tier |
 | `mac-64gb-unified` | Apple Silicon, 64GB+ | 131K | same recipe, more headroom |
 | `gpu-24gb-discrete` | discrete NVIDIA 22GB+ VRAM (RTX 3090/4090-class); AMD/Intel run via Vulkan but are not auto-detected yet | 49K | certified end-to-end on NVIDIA L4 (Vulkan); context sized so weights + KV fit VRAM alone |
 | `dgx-spark-128gb` | NVIDIA DGX Spark (GB10) | 131K | managed: runs the digest-pinned SGLang NVFP4+EAGLE container (~4× llama.cpp); needs Docker + nvidia-container-toolkit |
@@ -39,7 +39,7 @@ altimate                # then use the CLI as normal
 |---|---|---|
 | macOS (Apple Silicon) | fully supported and certified | — |
 | Linux + NVIDIA | fully supported; certified on L4 | — |
-| Linux + AMD (RX 7900-class, 20GB+) | runtime works via Vulkan, but auto-detection probes NVIDIA only — tier matching falls back to system RAM. If your RAM qualifies for a tier, the runtime still offloads layers to the AMD GPU at run time (`--n-gpu-layers`). | sysfs-based AMD VRAM detection (`amdgpu` exposes it without extra tools) |
+| Linux + AMD (RX 7900-class, 20GB+) | runtime works via Vulkan, but auto-detection probes NVIDIA only, so `altimate local` reports no match rather than guessing from system RAM (a CPU-only host can have just as much RAM as an AMD box, and RAM isn't a stand-in for VRAM on non-unified-memory hardware) | sysfs-based AMD VRAM detection (`amdgpu` exposes it without extra tools) |
 | Windows (x64, native) | **experimental** — the Vulkan runtime is pinned and unpacked, memory detection works, but there is no GPU probe yet and it has not been certified on physical hardware. [WSL 2](../reference/windows-wsl.md) uses the Linux build and is the recommended path today. | native GPU probe + a hardware-certified pass to drop the experimental label |
 | Intel Arc | runs under Vulkan, but current Arc cards (≤16GB) sit below the smallest discrete-GPU tier's VRAM floor, so detection would not unlock a tier | arrives together with a smaller-model registry entry whose tier fits 12–16GB cards |
 

@@ -112,6 +112,22 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
     }
   })
 
+  test("a trailing DONE after an earlier negated DONE still classifies as explicit-done", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "The previous state was not DONE. DONE")
+    acc.onStepFinish("m1", "stop")
+    expect(acc.termination().why_model_stopped).toBe("explicit-done")
+  })
+
+  test("a trailing negated DONE after an earlier bare DONE is still not classified as explicit-done", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "DONE with step one, but overall not DONE")
+    acc.onStepFinish("m1", "stop")
+    expect(acc.termination().why_model_stopped).toBe("stop")
+  })
+
   test("a later non-DONE text clears the explicit-done classification", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })

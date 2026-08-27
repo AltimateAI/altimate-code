@@ -34,17 +34,59 @@ export function isOwnerStale(owner: { pid?: number; at?: number } | undefined, n
   return Boolean(owner?.at && now - owner.at > PID_REUSE_FALLBACK_MS)
 }
 
-async function isLockStale(dir: string, meta: string, now: number): Promise<boolean> {
-  const owner = await fs
+type Owner = { pid?: number; at?: number }
+
+async function readOwner(meta: string): Promise<Owner | undefined> {
+  return fs
     .readFile(meta, "utf8")
-    .then((raw) => JSON.parse(raw) as { pid?: number; at?: number })
+    .then((raw) => JSON.parse(raw) as Owner)
     .catch(() => undefined)
+}
+
+function sameOwner(a: Owner | undefined, b: Owner | undefined): boolean {
+  return a?.pid === b?.pid && a?.at === b?.at
+}
+
+async function isLockStale(dir: string, owner: Owner | undefined, now: number): Promise<boolean> {
   if (owner) return isOwnerStale(owner, now)
   const dirAge = await fs
     .stat(dir)
     .then((s) => now - s.mtimeMs)
     .catch(() => Infinity)
   return dirAge > OWNER_PUBLISH_GRACE_MS
+}
+
+// Reclaim a lock directory judged stale, guarding against a delayed
+// reclaimer racing a fresh acquirer. The rename itself is atomic (only one
+// renamer can succeed on a given path — see withLifecycleLock below), but
+// that alone is pathname-based: it says nothing about WHICH lock ended up at
+// `dir` when the rename ran. If the original (stale) holder's lock was
+// itself reclaimed and re-acquired by someone else between this caller's
+// staleness read (`staleOwner`, read before calling this) and the rename
+// below, this caller's rename would move that FRESH, live lock aside instead
+// of the dead one it actually observed — so verify the owner.json inside the
+// renamed-aside directory still matches what was read as stale, and restore
+// it if not.
+export async function reclaimStaleLock(dir: string, staleOwner: Owner | undefined): Promise<"reclaimed" | "restored" | "retry"> {
+  const stale = `${dir}.stale-${process.pid}-${Date.now()}`
+  try {
+    await fs.rename(dir, stale)
+  } catch {
+    return "retry"
+  }
+  const renamedOwner = await readOwner(path.join(stale, "owner.json"))
+  if (!sameOwner(staleOwner, renamedOwner)) {
+    // We moved aside a different, live lock — put it back rather than
+    // deleting it out from under its holder.
+    try {
+      await fs.rename(stale, dir)
+    } catch {
+      // `dir` was recreated again in the meantime; nothing to restore.
+    }
+    return "restored"
+  }
+  await fs.rm(stale, { recursive: true, force: true }).catch(() => {})
+  return "reclaimed"
 }
 
 // Cross-process mutex for the local-server lifecycle: concurrent
@@ -73,7 +115,13 @@ export async function withLifecycleLock<T>(run: () => Promise<T>, paths: LocalPa
       await fs.writeFile(meta, JSON.stringify({ pid: process.pid, at: Date.now() }), { mode: 0o600 })
       break
     } catch {
-      if (await isLockStale(dir, meta, Date.now())) {
+      // Captured BEFORE the reclaim rename below, and passed through to it:
+      // reclaimStaleLock compares this against what the rename actually
+      // moved aside, so a lock that got reclaimed and re-acquired by someone
+      // else in between is restored instead of destroyed. See its own
+      // comment for the full race this closes.
+      const owner = await readOwner(meta)
+      if (await isLockStale(dir, owner, Date.now())) {
         // Reclaim via an atomic rename, not a blind rm: two waiters can both
         // observe the same stale lock and both decide to reclaim it. If both
         // simply `rm`'d `dir`, the loser's rm could delete the WINNER's freshly
@@ -83,13 +131,7 @@ export async function withLifecycleLock<T>(run: () => Promise<T>, paths: LocalPa
         // atomic: only one renamer can succeed on a given path; the other's
         // rename fails (ENOENT, because the path is already gone) and it falls
         // through to retry from the top instead of destroying a live lock.
-        const stale = `${dir}.stale-${process.pid}-${Date.now()}`
-        try {
-          await fs.rename(dir, stale)
-        } catch {
-          continue
-        }
-        await fs.rm(stale, { recursive: true, force: true }).catch(() => {})
+        await reclaimStaleLock(dir, owner)
         continue
       }
       await new Promise((resolve) => setTimeout(resolve, 500))

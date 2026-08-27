@@ -2,6 +2,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
+import { mergeDeep } from "remeda"
 
 import type { LlamaRecipeTier } from "./recipes"
 import { getLocalPaths, type LocalPaths } from "./paths"
@@ -52,6 +53,29 @@ function normalizePermission(raw: unknown): Record<string, unknown> {
   return typeof raw === "string" ? { "*": raw } : ((raw ?? {}) as Record<string, unknown>)
 }
 
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
+}
+
+// Effective permission across every config file that actually exists, merged
+// in the SAME low-to-high precedence order Config itself applies (see
+// CONFIG_PRECEDENCE above and config/config.ts's mergeDeep-based loader).
+// The winning file alone can look empty while a lower-precedence file still
+// carries a rule (e.g. a global `{"*":"deny"}`) that the real loader would
+// still apply — reading only the winning file would miss it and let a
+// guard-owned "ask" key silently widen the user's effective permissions.
+async function readEffectivePermission(config: ReturnType<typeof configFile>): Promise<Record<string, unknown>> {
+  let merged: Record<string, unknown> = {}
+  for (const name of CONFIG_PRECEDENCE) {
+    const file = path.join(config.root, name)
+    const text = await fs.readFile(file, "utf8").catch(() => undefined)
+    if (text === undefined) continue
+    const parsed = parse(text, [], { allowTrailingComma: true, disallowComments: false }) as Record<string, unknown> | undefined
+    merged = mergeDeep(merged, normalizePermission(parsed?.permission)) as Record<string, unknown>
+  }
+  return merged
+}
+
 function patch(input: string, keys: (string | number)[], value: unknown) {
   return applyEdits(
     input,
@@ -90,14 +114,26 @@ export async function wireLocalProvider(input: {
   }
 
   const advertisedContext = Math.floor(input.tier.ctx / input.tier.parallel)
+  // Deep-merge onto any pre-existing `provider.local` the user already
+  // defined instead of replacing it wholesale — a prior custom provider can
+  // carry its own extra models, options, or top-level keys, and those must
+  // survive re-wiring. We only own baseURL/apiKey (under options) and our
+  // own model entry (under models); everything else the user set is spread
+  // in first and kept as-is.
+  const existingProvider = asRecord(asRecord(parsed.provider).local)
+  const existingOptions = asRecord(existingProvider.options)
+  const existingModels = asRecord(existingProvider.models)
   const provider = {
+    ...existingProvider,
     name: "Local OpenAI-compatible",
     npm: "@ai-sdk/openai-compatible",
     options: {
+      ...existingOptions,
       apiKey: "local",
       baseURL: input.baseURL,
     },
     models: {
+      ...existingModels,
       [input.modelID]: {
         name: input.modelID,
         tool_call: true,
@@ -141,8 +177,11 @@ export async function wireLocalProvider(input: {
   if (!("small_model" in parsed)) updated = patch(updated, ["small_model"], `local/${input.modelID}`)
 
   const guarded: string[] = []
+  // Winning-file-only view: still correct for the "did WE previously set this
+  // to ask" ownership check below, since we only ever write guard keys into
+  // the winning file. The "does the user already have coverage" check further
+  // down needs the full merged view instead — see readEffectivePermission.
   const permission = normalizePermission(parsed.permission)
-  const existingPermissionKeys = Object.keys(permission)
   if (input.egressGuard !== false) {
     // Carry forward ownership from a prior guard-on wiring. Without this, a key already set to
     // "ask" (because a previous guard-on run added it) matches itself in the "already covered"
@@ -157,6 +196,13 @@ export async function wireLocalProvider(input: {
     for (const key of priorOwned) {
       if ((EGRESS_PERMISSIONS as readonly string[]).includes(key) && permission[key] === "ask") guarded.push(key)
     }
+    // Checking only the winning file's own keys missed rules that live in a
+    // LOWER-precedence file Config still merges in — e.g. a global
+    // `{"*":"deny"}` with nothing in the winning file. Writing an exact "ask"
+    // rule into the winning file in that case would win under last-match-wins
+    // permission evaluation and silently widen the user's effective policy,
+    // so check every existing config file's merged effective permission.
+    const effectivePermissionKeys = Object.keys(await readEffectivePermission(config))
     for (const key of EGRESS_PERMISSIONS) {
       if (guarded.includes(key)) continue
       // Skip if the user already has ANY rule that resolves for this tool —
@@ -165,7 +211,7 @@ export async function wireLocalProvider(input: {
       // rules: adding "ask" here would widen a user's broader top-level rule
       // the moment this key happens to sort after it in the permission
       // engine's evaluation order. Never clobber their config.
-      if (existingPermissionKeys.some((existing) => Wildcard.match(key, existing))) continue
+      if (effectivePermissionKeys.some((existing) => Wildcard.match(key, existing))) continue
       updated = patch(updated, ["permission", key], "ask")
       guarded.push(key)
     }

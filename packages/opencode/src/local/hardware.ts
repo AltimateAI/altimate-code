@@ -182,14 +182,31 @@ export function matchHardwareToTier(hardware: HardwareInfo, model: ModelRecipe):
   // require a RUNTIME_ASSETS entry before letting it proceed to a download.
   const runtimeAvailable =
     laptop?.engine !== "llama.cpp" || Boolean(RUNTIME_ASSETS[`${hardware.platform}-${hardware.arch}`])
-  if (laptop && !discreteNvidia && runtimeAvailable && availableGb >= laptop.min_vram_gb) {
+  // Treating system RAM as usable accelerator memory only holds when RAM
+  // actually IS the accelerator's memory, i.e. Apple Silicon's unified
+  // memory (darwin). Without this gate, a Linux host where nvidia-smi found
+  // no GPU falls through here reporting accelerator "cpu" — and would still
+  // pass on system RAM alone, downloading ~16GB for effectively-unusable CPU
+  // inference. AMD/Intel GPUs on Linux aren't detected yet (nvidia-smi is
+  // the only probe run today), so they're also excluded here for now; that's
+  // a real gap tracked as a roadmap item, not something this fallback should
+  // paper over with an untrustworthy RAM guess.
+  const unifiedMemoryFallback = hardware.platform === "darwin"
+  if (laptop && !discreteNvidia && unifiedMemoryFallback && runtimeAvailable && availableGb >= laptop.min_vram_gb) {
     return { tier: laptop, availableGb, reason: `${availableGb}GB available memory meets the laptop tier` }
   }
 
-  if (laptop && !discreteNvidia && !runtimeAvailable && availableGb >= laptop.min_vram_gb) {
+  if (laptop && !discreteNvidia && unifiedMemoryFallback && !runtimeAvailable && availableGb >= laptop.min_vram_gb) {
     return {
       availableGb,
       reason: `No Phase 1 llama.cpp runtime is available for ${hardware.platform}-${hardware.arch}`,
+    }
+  }
+
+  if (laptop && !discreteNvidia && !unifiedMemoryFallback && availableGb >= laptop.min_vram_gb) {
+    return {
+      availableGb,
+      reason: `No confirmed GPU accelerator was detected on ${hardware.platform} (reported "${hardware.accelerator}"); AMD/Intel GPU detection is not implemented yet, so a RAM-only fallback is not offered here to avoid downloading a recipe this host cannot usefully run`,
     }
   }
 

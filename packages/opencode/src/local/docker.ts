@@ -131,6 +131,14 @@ export async function removeDockerContainer(exec: DockerExec = defaultExec) {
   return { existed: true, removed: true }
 }
 
+export interface ContainerReaper {
+  // Aborted the instant a signal arrives (before the async removeDockerContainer
+  // call below even starts) — callers in the untracked window can check this to
+  // avoid returning a "success" that races the reaper's own container removal.
+  readonly signal: AbortSignal
+  uninstall(): void
+}
+
 // The container is created (and can spend up to 45 minutes downloading weights
 // or occupying the GPU) before setupDocker ever writes state.json — that only
 // happens once startDockerServer returns. An interrupt (Ctrl-C) during that
@@ -138,20 +146,46 @@ export async function removeDockerContainer(exec: DockerExec = defaultExec) {
 // `altimate local stop`/`status` because they only act on tracked state.
 // Reaping it here — via the same ownership-checked removeDockerContainer used
 // everywhere else — closes that window without needing state to exist yet.
-export function installContainerReaper(exec: DockerExec, onExit: (code: number) => void = (code) => process.exit(code)) {
-  let handled = false
-  const handler = (signal: NodeJS.Signals) => {
-    if (handled) return
-    handled = true
-    removeDockerContainer(exec)
-      .catch(() => {})
-      .finally(() => onExit(signal === "SIGINT" ? 130 : 143))
+export function installContainerReaper(
+  exec: DockerExec,
+  onExit: (code: number) => void = (code) => process.exit(code),
+  signalSource: Pick<NodeJS.EventEmitter, "on" | "off"> = process,
+): ContainerReaper {
+  const controller = new AbortController()
+  let cleaningUp = false
+  let exited = false
+  const finishOnce = (code: number) => {
+    if (exited) return
+    exited = true
+    onExit(code)
   }
-  process.on("SIGINT", handler)
-  process.on("SIGTERM", handler)
-  return () => {
-    process.off("SIGINT", handler)
-    process.off("SIGTERM", handler)
+  const handler = (signal: NodeJS.Signals) => {
+    const code = signal === "SIGINT" ? 130 : 143
+    controller.abort()
+    if (cleaningUp) {
+      // A second signal while `docker rm` is still in flight (up to its 120s
+      // exec timeout, longer if the daemon is wedged) must not be swallowed —
+      // force immediate exit instead of making the user wait it out.
+      finishOnce(code)
+      return
+    }
+    cleaningUp = true
+    removeDockerContainer(exec)
+      .catch((error) => {
+        console.error(
+          `Failed to remove the local model container during shutdown: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      })
+      .finally(() => finishOnce(code))
+  }
+  signalSource.on("SIGINT", handler)
+  signalSource.on("SIGTERM", handler)
+  return {
+    signal: controller.signal,
+    uninstall: () => {
+      signalSource.off("SIGINT", handler)
+      signalSource.off("SIGTERM", handler)
+    },
   }
 }
 
@@ -170,6 +204,12 @@ export async function startDockerServer(input: {
   timeoutMs?: number
   pollIntervalMs?: number
   onProgress?: (line: string) => void
+  // Test-only seams (default to `process`/`process.exit`): let tests inject
+  // a fake signal source and a non-terminating exit callback instead of
+  // emitting real SIGINT/SIGTERM on — and calling process.exit() in — the
+  // shared test process.
+  signalSource?: Pick<NodeJS.EventEmitter, "on" | "off">
+  onSignalExit?: (code: number) => void
 }) {
   const exec = input.exec ?? defaultExec
   const pollIntervalMs = input.pollIntervalMs ?? 3000
@@ -182,7 +222,7 @@ export async function startDockerServer(input: {
   // first-run weight download. Reap the (ownership-checked) labeled container
   // on Ctrl-C/SIGTERM for that whole window, not just the explicit failure
   // paths already handled by the try/catches below.
-  const stopReaper = installContainerReaper(exec)
+  const reaper = installContainerReaper(exec, input.onSignalExit, input.signalSource)
   try {
     let pidRaw: { stdout: string; stderr: string }
     try {
@@ -205,7 +245,21 @@ export async function startDockerServer(input: {
       const deadline = Date.now() + (input.timeoutMs ?? 45 * 60_000)
       let lastLine = ""
       while (Date.now() < deadline) {
-        if (await dockerHealthy(input.port, input.fetchImpl)) return { pid, container: LOCAL_CONTAINER_NAME }
+        if (await dockerHealthy(input.port, input.fetchImpl)) {
+          // A signal can arrive while the dockerHealthy call above is
+          // in-flight: the reaper aborts synchronously the instant it fires,
+          // before its own removeDockerContainer starts, so this check right
+          // after resuming from the await catches it before we hand back a
+          // "success" that races the reaper's in-flight removal — returning
+          // here would let setupDocker write state.json and wire the config
+          // for a container the reaper is concurrently deleting.
+          if (reaper.signal.aborted) {
+            throw new Error(
+              "Startup was interrupted by a shutdown signal just as the server became healthy; the container is being removed.",
+            )
+          }
+          return { pid, container: LOCAL_CONTAINER_NAME }
+        }
         if (!(await dockerContainerRunning(exec))) {
           const logs = await exec("docker", ["logs", "--tail", "25", LOCAL_CONTAINER_NAME])
             .then((result) => result.stderr + result.stdout)
@@ -226,10 +280,26 @@ export async function startDockerServer(input: {
       // failure messages above — must not leave an untracked container
       // running: setupDocker only records state once this function succeeds,
       // so anything left behind here is invisible to `status`/`stop`.
-      await removeDockerContainer(exec).catch(() => {})
+      let cleanupError: unknown
+      try {
+        await removeDockerContainer(exec)
+      } catch (removeError) {
+        cleanupError = removeError
+      }
+      if (cleanupError !== undefined) {
+        // Swallowing this used to hide it entirely behind the original
+        // polling error: the container can still be running, untracked, and
+        // the failure message gave no hint that cleanup itself also failed.
+        const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        const original = error instanceof Error ? error : new Error(String(error))
+        throw new Error(
+          `${original.message}\n\nAdditionally, removing the container during cleanup failed and it may still be running untracked: ${cleanupMessage}`,
+          { cause: original },
+        )
+      }
       throw error
     }
   } finally {
-    stopReaper()
+    reaper.uninstall()
   }
 }

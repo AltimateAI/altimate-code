@@ -3,7 +3,7 @@ import path from "node:path"
 import { describe, expect, test } from "bun:test"
 
 import { tmpdir } from "../fixture/fixture"
-import { isOwnerStale, withLifecycleLock } from "../../src/local/lock"
+import { isOwnerStale, reclaimStaleLock, withLifecycleLock } from "../../src/local/lock"
 import type { LocalPaths } from "../../src/local/paths"
 
 function paths(root: string): LocalPaths {
@@ -114,6 +114,54 @@ describe("withLifecycleLock", () => {
     expect(results.sort()).toEqual(["a", "b"])
     expect(maxActive).toBe(1)
   }, 10_000)
+})
+
+describe("reclaimStaleLock", () => {
+  // A delayed reclaimer can read a stale owner, then lose the CPU before its
+  // rename runs. If a different waiter fully reclaims and re-acquires `dir`
+  // in that gap, the delayed reclaimer's pathname-only rename would move
+  // that FRESH, live lock aside — reclaimStaleLock must detect the owner
+  // mismatch and restore it instead.
+  test("restores a fresh lock that was reclaimed by someone else between the stale read and the rename", async () => {
+    await using tmp = await tmpdir()
+    const dir = path.join(tmp.path, ".lifecycle-lock")
+    const deadOwnerPid = await deadPid()
+    // What the delayed reclaimer observed as stale, before losing the race.
+    const staleOwnerSeenByLoser = { pid: deadOwnerPid, at: Date.now() - 1000 }
+
+    // Simulate the winner having already fully reclaimed and re-acquired
+    // `dir` with a fresh, live owner by the time the loser's rename runs.
+    await fs.mkdir(dir, { recursive: true })
+    const freshOwner = { pid: process.pid, at: Date.now() }
+    await fs.writeFile(path.join(dir, "owner.json"), JSON.stringify(freshOwner), { mode: 0o600 })
+
+    const result = await reclaimStaleLock(dir, staleOwnerSeenByLoser)
+    expect(result).toBe("restored")
+
+    // The winner's live lock must be intact afterward, not stolen.
+    const owner = JSON.parse(await fs.readFile(path.join(dir, "owner.json"), "utf8"))
+    expect(owner).toEqual(freshOwner)
+  })
+
+  test("reclaims cleanly when the renamed-aside owner matches what was observed stale", async () => {
+    await using tmp = await tmpdir()
+    const dir = path.join(tmp.path, ".lifecycle-lock")
+    const deadOwnerPid = await deadPid()
+    const staleOwner = { pid: deadOwnerPid, at: Date.now() - 1000 }
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "owner.json"), JSON.stringify(staleOwner), { mode: 0o600 })
+
+    const result = await reclaimStaleLock(dir, staleOwner)
+    expect(result).toBe("reclaimed")
+    await expect(fs.stat(dir)).rejects.toThrow()
+  })
+
+  test("retries when the directory is already gone by the time the rename runs", async () => {
+    await using tmp = await tmpdir()
+    const dir = path.join(tmp.path, "never-existed")
+    const result = await reclaimStaleLock(dir, { pid: 999999999, at: Date.now() })
+    expect(result).toBe("retry")
+  })
 })
 
 describe("isOwnerStale", () => {

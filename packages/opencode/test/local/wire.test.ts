@@ -265,6 +265,22 @@ describe("wireLocalProvider egress guard", () => {
     const guard = await readEgressGuard({} as NodeJS.ProcessEnv, home)
     for (const key of EGRESS_PERMISSIONS) expect(guard[key]).toBe("deny")
   })
+
+  test("respects a wildcard deny rule from a lower-precedence config file that the winning file doesn't repeat", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    // config.json is LOWER precedence than altimate-code.json (see
+    // CONFIG_PRECEDENCE); the winning file exists but says nothing about
+    // permissions, so only checking it would miss config.json's blanket deny.
+    await fs.writeFile(path.join(dir, "config.json"), JSON.stringify({ permission: { "*": "deny" } }))
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({}))
+    const wired = await wire(home)
+    expect(wired.file).toBe(path.join(dir, "altimate-code.json"))
+    expect(wired.guarded).toEqual([])
+    const config = await readConfig(wired.file)
+    for (const key of EGRESS_PERMISSIONS) expect(config.permission?.[key]).toBeUndefined()
+  })
 })
 
 describe("wireLocalProvider config file precedence", () => {
@@ -282,6 +298,35 @@ describe("wireLocalProvider config file precedence", () => {
     expect(jsoncConfig.provider.local).toBeDefined()
     const jsonConfig = await readConfig(path.join(dir, "altimate-code.json"))
     expect(jsonConfig.provider).toBeUndefined()
+  })
+})
+
+describe("wireLocalProvider provider.local merge", () => {
+  test("deep-merges onto an existing provider.local instead of replacing it wholesale", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(
+      path.join(dir, "altimate-code.json"),
+      JSON.stringify({
+        model: "local/my-model",
+        provider: {
+          local: {
+            options: { customFlag: true },
+            models: { "my-other-model": { name: "my-other-model" } },
+          },
+        },
+      }),
+    )
+    const wired = await wire(home)
+    const config = await readConfig(wired.file)
+    // Custom option survives; baseURL/apiKey are still set to what we own.
+    expect(config.provider.local.options.customFlag).toBe(true)
+    expect(config.provider.local.options.baseURL).toBe("http://127.0.0.1:42625/v1")
+    expect(config.provider.local.options.apiKey).toBe("local")
+    // The pre-existing extra model survives, and our own model is added.
+    expect(config.provider.local.models["my-other-model"]).toEqual({ name: "my-other-model" })
+    expect(config.provider.local.models["qwen3.8-27b"]).toBeDefined()
   })
 })
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { EventEmitter } from "node:events"
 
 import {
   buildDockerRunArgs,
@@ -258,9 +259,92 @@ describe("startDockerServer", () => {
     ).rejects.toThrow(/Cannot connect to the Docker daemon/)
     expect(rmCalls).toBe(1)
   })
+
+  test("preserves the cleanup error instead of hiding it behind the original polling failure", async () => {
+    // If `docker rm` itself fails during cleanup after a polling failure, the
+    // caller previously only ever saw the original error — with no hint that
+    // the container might still be running, untracked, because cleanup also
+    // failed.
+    let inspectIdCalls = 0
+    const exec = execRouter({
+      inspectId: async () => {
+        inspectIdCalls++
+        if (inspectIdCalls === 1) throw new Error("no such container") // pre-run cleanup: nothing yet
+        const error = new Error("Cannot connect to the Docker daemon") as Error & { stderr: string }
+        error.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        throw error // the cleanup attempt inside the catch block also fails
+      },
+      run: async () => ({ stdout: "container123\n", stderr: "" }),
+      inspectPid: async () => ({ stdout: "4242\n", stderr: "" }),
+      inspectRunning: async () => ({ stdout: "true\n", stderr: "" }),
+      logsTail1: async () => ({ stdout: "loading weights...\n", stderr: "" }),
+    })
+    const fetchImpl = async () => new Response(null, { status: 503 })
+
+    const failure = await startDockerServer({
+      tier,
+      modelID: model.id,
+      port: 8095,
+      exec,
+      fetchImpl,
+      pollIntervalMs: 2,
+      timeoutMs: 5,
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    const message = (failure as Error).message
+    expect(message).toMatch(/did not become healthy in time/)
+    expect(message).toMatch(/cleanup failed/i)
+    expect(message).toMatch(/Cannot connect to the Docker daemon/)
+  })
+
+  test("does not return success when a shutdown signal arrives right as the health check passes", async () => {
+    // The reaper aborts synchronously the instant a signal fires, before its
+    // own removeDockerContainer call even starts. If the health check races
+    // that abort, startDockerServer must not hand back a "success" that the
+    // caller (setupDocker) would use to write state.json and wire the config
+    // for a container the reaper is concurrently deleting.
+    const signalSource = new EventEmitter() as unknown as Pick<NodeJS.EventEmitter, "on" | "off">
+    let rmCalls = 0
+    let inspectIdCalls = 0
+    const exec = execRouter({
+      inspectId: async () => {
+        inspectIdCalls++
+        if (inspectIdCalls === 1) throw new Error("no such container") // pre-run cleanup: nothing yet
+        return { stdout: "container123\n", stderr: "" }
+      },
+      run: async () => ({ stdout: "container123\n", stderr: "" }),
+      inspectPid: async () => ({ stdout: "4242\n", stderr: "" }),
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    // "Healthy" only fires the signal first, simulating the interrupt landing
+    // in the same tick the health probe resolves true.
+    const fetchImpl = async () => {
+      ;(signalSource as EventEmitter).emit("SIGINT", "SIGINT")
+      return new Response(null, { status: 200 })
+    }
+
+    await expect(
+      startDockerServer({ tier, modelID: model.id, port: 8095, exec, fetchImpl, signalSource, onSignalExit: () => {} }),
+    ).rejects.toThrow(/interrupted by a shutdown signal/)
+    expect(rmCalls).toBeGreaterThan(0)
+  })
 })
 
 describe("installContainerReaper", () => {
+  // Signals are injected through a fresh EventEmitter rather than emitted on
+  // `process` itself: `process.emit("SIGINT", ...)` would invoke every other
+  // SIGINT listener in this test process (parallel test setup, the real CLI's
+  // own handlers), not just the one this test installed.
+  function fakeSignalSource() {
+    return new EventEmitter() as unknown as Pick<NodeJS.EventEmitter, "on" | "off"> & {
+      emit(event: "SIGINT" | "SIGTERM", signal: "SIGINT" | "SIGTERM"): boolean
+    }
+  }
+
   // The container is created before setupDocker ever writes state.json; an
   // interrupt during the (up to 45-minute) health wait must not leave it
   // orphaned and invisible to `altimate local stop`/`status`.
@@ -273,19 +357,25 @@ describe("installContainerReaper", () => {
         return { stdout: "", stderr: "" }
       },
     })
+    const signalSource = fakeSignalSource()
     let exitCode: number | undefined
-    const uninstall = installContainerReaper(exec, (code) => {
-      exitCode = code
-    })
+    const reaper = installContainerReaper(
+      exec,
+      (code) => {
+        exitCode = code
+      },
+      signalSource,
+    )
     try {
-      process.emit("SIGINT", "SIGINT")
+      signalSource.emit("SIGINT", "SIGINT")
+      expect(reaper.signal.aborted).toBe(true)
       // removeDockerContainer's exec calls are async; let them settle.
       await new Promise((resolve) => setTimeout(resolve, 0))
       await new Promise((resolve) => setTimeout(resolve, 0))
       expect(rmCalls).toBe(1)
       expect(exitCode).toBe(130)
     } finally {
-      uninstall()
+      reaper.uninstall()
     }
   })
 
@@ -298,14 +388,15 @@ describe("installContainerReaper", () => {
         return { stdout: "", stderr: "" }
       },
     })
-    const uninstall = installContainerReaper(exec, () => {})
-    uninstall()
-    process.emit("SIGINT", "SIGINT")
+    const signalSource = fakeSignalSource()
+    const reaper = installContainerReaper(exec, () => {}, signalSource)
+    reaper.uninstall()
+    signalSource.emit("SIGINT", "SIGINT")
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(rmCalls).toBe(0)
   })
 
-  test("only reaps once even if both SIGINT and SIGTERM arrive", async () => {
+  test("only removes the container once even if both SIGINT and SIGTERM arrive back-to-back", async () => {
     let rmCalls = 0
     const exec = execRouter({
       inspectId: async () => ({ stdout: "container123\n", stderr: "" }),
@@ -314,19 +405,66 @@ describe("installContainerReaper", () => {
         return { stdout: "", stderr: "" }
       },
     })
+    const signalSource = fakeSignalSource()
     let exitCalls = 0
-    const uninstall = installContainerReaper(exec, () => {
-      exitCalls++
-    })
+    const reaper = installContainerReaper(
+      exec,
+      () => {
+        exitCalls++
+      },
+      signalSource,
+    )
     try {
-      process.emit("SIGINT", "SIGINT")
-      process.emit("SIGTERM", "SIGTERM")
+      signalSource.emit("SIGINT", "SIGINT")
+      signalSource.emit("SIGTERM", "SIGTERM")
       await new Promise((resolve) => setTimeout(resolve, 0))
       await new Promise((resolve) => setTimeout(resolve, 0))
       expect(rmCalls).toBe(1)
+      // Exactly one exit call: the second signal exits immediately (see next
+      // test) rather than waiting for the first's cleanup, but the first
+      // cleanup's own exit call is suppressed once we've already exited.
       expect(exitCalls).toBe(1)
     } finally {
-      uninstall()
+      reaper.uninstall()
+    }
+  })
+
+  test("a second signal forces immediate exit without waiting for a slow docker rm", async () => {
+    let rmCalls = 0
+    let resolveRm: (() => void) | undefined
+    const exec = execRouter({
+      inspectId: async () => ({ stdout: "container123\n", stderr: "" }),
+      rm: () =>
+        new Promise((resolve) => {
+          rmCalls++
+          resolveRm = () => resolve({ stdout: "", stderr: "" })
+        }),
+    })
+    const signalSource = fakeSignalSource()
+    const exitCalls: number[] = []
+    const reaper = installContainerReaper(exec, (code) => exitCalls.push(code), signalSource)
+    try {
+      signalSource.emit("SIGINT", "SIGINT")
+      // Let the pending inspect calls ahead of `docker rm` in
+      // removeDockerContainer settle so `rm` (which we hold open) is reached.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(rmCalls).toBe(1)
+      expect(exitCalls).toEqual([])
+
+      // A second Ctrl-C while cleanup is still pending must exit right away —
+      // not wait out a potentially wedged `docker rm`.
+      signalSource.emit("SIGINT", "SIGINT")
+      expect(exitCalls).toEqual([130])
+
+      // Once the slow rm eventually resolves, its own exit call is a no-op —
+      // we already exited once.
+      resolveRm?.()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(exitCalls).toEqual([130])
+      expect(rmCalls).toBe(1)
+    } finally {
+      reaper.uninstall()
     }
   })
 })

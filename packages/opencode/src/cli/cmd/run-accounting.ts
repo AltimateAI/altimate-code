@@ -32,7 +32,10 @@ const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 const DONE_PATTERN = /\bDONE\b[.!]?\s*$/
 // A trailing DONE token preceded by a negation ("not DONE", "isn't DONE", "not yet
 // DONE") asserts the opposite of completion — must not classify as explicit-done.
-const NEGATED_DONE_PATTERN = /\b(?:not|isn'?t|not\s+yet)\s+DONE\b/i
+// Anchored to the end of the text (matching DONE_PATTERN's own anchor): an
+// earlier "not DONE" elsewhere in the message (a caveat, a quoted status, a
+// negated sub-step) must not suppress a genuine trailing affirmative "DONE".
+const NEGATED_DONE_PATTERN = /\b(?:not|isn'?t|not\s+yet)\s+DONE\b[.!]?\s*$/i
 
 export function create() {
   const agents = new Map<string, string>()

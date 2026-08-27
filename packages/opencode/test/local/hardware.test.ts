@@ -25,7 +25,10 @@ describe("local hardware tier matching", () => {
   })
 
   test("matches a 24GB unified-memory laptop to the laptop tier", () => {
-    const match = matchHardwareToTier(hardware({ memoryGb: 24, unifiedMemory: true, accelerator: "metal" }), model)
+    const match = matchHardwareToTier(
+      hardware({ platform: "darwin", arch: "arm64", memoryGb: 24, unifiedMemory: true, accelerator: "metal" }),
+      model,
+    )
     expect(match.tier?.name).toBe("laptop-24gb")
   })
 
@@ -80,9 +83,22 @@ describe("local hardware tier matching", () => {
     expect(match.tier?.engine).toBe("vllm")
   })
 
-  test("falls back to system memory when no GPU probe succeeds", () => {
-    const match = matchHardwareToTier(hardware({ memoryGb: 32 }), model)
+  test("falls back to system memory on darwin when no accelerator memory is reported", () => {
+    // Apple Silicon's RAM genuinely IS the accelerator's memory (unified
+    // memory), so treating it as usable here is correct on darwin.
+    const match = matchHardwareToTier(hardware({ platform: "darwin", arch: "arm64", memoryGb: 32 }), model)
     expect(match.tier?.name).toBe("laptop-24gb")
+  })
+
+  test("does NOT fall back to system memory on a Linux host with no detected GPU (CPU-only)", () => {
+    // nvidia-smi found nothing, so accelerator is "cpu" — system RAM is not
+    // the accelerator's memory here, unlike on unified-memory Apple Silicon.
+    // Matching the laptop tier anyway would download ~16GB of weights for a
+    // host that can't usefully run GPU-oriented inference.
+    const match = matchHardwareToTier(hardware({ platform: "linux", memoryGb: 32, accelerator: "cpu" }), model)
+    expect(match.tier).toBeUndefined()
+    expect(match.reason).toContain("No confirmed GPU accelerator")
+    expect(match.reason).toContain("AMD/Intel GPU detection is not implemented yet")
   })
 
   test("returns no match below the minimum", () => {
