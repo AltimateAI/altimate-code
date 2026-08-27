@@ -203,6 +203,33 @@ export namespace SessionCompaction {
     return undefined
   }
 
+  // altimate_change start — head-truncation fallback for un-compactable sessions
+  // A session can overflow so far past the window (huge tool result landing in
+  // one turn) that the summarization request itself no longer fits, which used
+  // to terminate the session with "too large to compact". Summarizing a
+  // truncated head is lossy; killing the session loses everything.
+  export async function fitHead(input: { head: MessageV2.WithParts[]; model: Provider.Model }) {
+    const context = input.model.limit.context
+    if (context === 0) return { head: input.head, dropped: 0 }
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const base = input.model.limit.input ?? context
+    // 0.8: Token.estimate undercounts dense code/tool output on some tokenizers.
+    const budget = Math.floor(Math.max(0, base - maxOutput - 2_000) * 0.8)
+    if (budget <= 0) return { head: input.head, dropped: 0 }
+    let head = input.head
+    let dropped = 0
+    while (head.length > 1 && (await estimate({ messages: head, model: input.model })) > budget) {
+      const step = Math.max(1, Math.floor(head.length / 8))
+      head = head.slice(step)
+      dropped += step
+      // never drop a compaction summary boundary's assistant record silently:
+      // slicing from the front only removes the OLDEST material, which is what
+      // a summary is for in the first place.
+    }
+    return { head, dropped }
+  }
+  // altimate_change end
+
   async function select(input: { messages: MessageV2.WithParts[]; cfg: ConfigInfo; model: Provider.Model }) {
     const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
     if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
@@ -500,8 +527,29 @@ When constructing the summary, try to stick to this template:
       tools: {},
       system: [],
       messages: [
-        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail
-        ...(await MessageV2.toModelMessages(selected.head, model, { stripMedia: true })),
+        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail;
+        // trim the head from the front when even the summarization request cannot fit the window
+        ...(await MessageV2.toModelMessages(
+          await (async () => {
+            const fitted = await fitHead({ head: selected.head, model })
+            if (fitted.dropped > 0) {
+              log.warn("compaction head truncated to fit window", {
+                dropped: fitted.dropped,
+                kept: fitted.head.length,
+              })
+              Telemetry.track({
+                type: "compaction_head_truncated",
+                timestamp: Date.now(),
+                session_id: input.sessionID,
+                dropped_messages: fitted.dropped,
+                kept_messages: fitted.head.length,
+              })
+            }
+            return fitted.head
+          })(),
+          model,
+          { stripMedia: true },
+        )),
         // altimate_change end
         {
           role: "user",
