@@ -300,18 +300,18 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
   return run
 }
 
-/** The engine tools a turn catalogued at its first step, kept for its later
- * steps. `resolveTools` re-snapshots MCP on every step, so a re-link applied by
+/** The engine tools a turn catalogued first, kept for its later catalogs.
+ * `resolveTools` re-snapshots MCP on every step, so a re-link applied by
  * another session's boundary mid-turn would otherwise be re-catalogued here;
  * pinning keeps this turn on the engine its boundary read. A call through a
  * pinned wrapper after a replacement reaches the closed client and fails — it
  * never routes to the other workspace. */
 const turnTools = new Map<string, Record<string, unknown>>()
 
-export function pinTurnTools<T>(sessionID: string, step: number, tools: Record<string, T>): void {
+export function pinTurnTools<T>(sessionID: string, firstCatalog: boolean, tools: Record<string, T>): void {
   if (!isEnabled() || isServe()) return
   const engine = Object.fromEntries(Object.entries(tools).filter(([key]) => key.startsWith(TOOL_PREFIX)))
-  if (step === 1) {
+  if (firstCatalog) {
     turnTools.delete(sessionID)
     turnTools.set(sessionID, engine)
     while (turnTools.size > MAX_TRACKED_SESSIONS) {

@@ -411,6 +411,11 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    // altimate_change start — first tool catalog of this loop. `step` counts loop
+    // iterations, and an iteration can `continue` before cataloguing (pending
+    // compaction, context overflow), so "step === 1" is not "first catalog".
+    let catalogued = false
+    // altimate_change end
     // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
     // single "bootstrap" span right before the first processor.process call so
     // the pre-first-generation region has a visible parent duration in traces.
@@ -1031,16 +1036,19 @@ export namespace SessionPrompt {
           { step, agent: agent.name },
           sessionID,
         )
-      // Workspace engine turn boundary (step 1): reconcile the bound workspace's
-      // engine (re-link, one retry on a failed handshake), settle this session's
-      // outcome, announce it once per verdict — then catalog the tools under the
-      // same per-directory lock, so another session's boundary cannot replace the
-      // engine between this reconcile and this snapshot. The cold engine boot
-      // happens inside MCP's own bootstrap, bounded by its per-server timeout.
-      // Every user turn starts at step 1 (see the note below on `step`). Later
-      // steps re-catalog but keep the engine tools this turn started with.
-      const tools = step === 1 ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
-      WorkspaceEngine.pinTurnTools(sessionID, step, tools)
+      // Workspace engine turn boundary, on the turn's FIRST catalog (not its first
+      // loop iteration — a compaction can run before any catalog): reconcile the
+      // bound workspace's engine (re-link, one retry on a failed handshake), settle
+      // this session's outcome, announce it once per verdict — then catalog the
+      // tools under the same per-directory lock, so another session's boundary
+      // cannot replace the engine between this reconcile and this snapshot. The
+      // cold engine boot happens inside MCP's own bootstrap, bounded by its
+      // per-server timeout. Later catalogs keep the engine tools this turn started
+      // with.
+      const firstCatalog = !catalogued
+      catalogued = true
+      const tools = firstCatalog ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
+      WorkspaceEngine.pinTurnTools(sessionID, firstCatalog, tools)
       // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled

@@ -588,10 +588,10 @@ describe("beforeTurn — what a turn boundary does", () => {
     await expect(atTurnStart("B", async () => "ok")).resolves.toBe("ok")
   })
 
-  test("a turn keeps the engine tools it catalogued at step 1 for its later steps", async () => {
+  test("a turn keeps the engine tools it catalogued first for its later catalogs", async () => {
     install({})
     const first = { datamate_a: { id: "a1" }, sql_execute: { id: "sql" } }
-    pinTurnTools("s1", 1, first)
+    pinTurnTools("s1", true, first)
     // Another session's boundary replaced the engine mid-turn: step 2 re-catalogs
     // a different tool set under the same prefix.
     const later: Record<string, { id: string }> = {
@@ -599,22 +599,22 @@ describe("beforeTurn — what a turn boundary does", () => {
       datamate_a: { id: "a2" },
       sql_execute: { id: "sql" },
     }
-    pinTurnTools("s1", 2, later)
+    pinTurnTools("s1", false, later)
     expect(later).toEqual({ sql_execute: { id: "sql" }, datamate_a: { id: "a1" } })
     // A new turn takes a fresh snapshot.
-    pinTurnTools("s1", 1, { datamate_b: { id: "b1" } })
+    pinTurnTools("s1", true, { datamate_b: { id: "b1" } })
     const step2: Record<string, { id: string }> = {}
-    pinTurnTools("s1", 2, step2)
+    pinTurnTools("s1", false, step2)
     expect(step2).toEqual({ datamate_b: { id: "b1" } })
   })
 
   test("pinning is a no-op with the flag off and for a session with no step-1 snapshot", async () => {
     install({ flag: false })
     const tools: Record<string, { id: string }> = { datamate_a: { id: "a1" } }
-    pinTurnTools("s1", 2, tools)
+    pinTurnTools("s1", false, tools)
     expect(tools).toEqual({ datamate_a: { id: "a1" } })
     install({})
-    pinTurnTools("s9", 2, tools)
+    pinTurnTools("s9", false, tools)
     expect(tools).toEqual({ datamate_a: { id: "a1" } })
   })
 
