@@ -14,7 +14,9 @@ import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 
+import { spawn } from "child_process"
 import {
+  _testing,
   DRIVER_PACKAGES,
   isModuleNotFound,
   npmInstallArgs,
@@ -39,10 +41,7 @@ function installFakePackage(root: string, name: string, body: string): string {
   const dir = path.join(root, "node_modules", ...name.split("/"))
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(path.join(dir, "index.js"), body)
-  fs.writeFileSync(
-    path.join(dir, "package.json"),
-    JSON.stringify({ name, version: "1.0.0", main: "index.js" }),
-  )
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, version: "1.0.0", main: "index.js" }))
   return dir
 }
 
@@ -186,10 +185,7 @@ describe("resolveOptionalPackage", () => {
     installFakePackage(first, "pg", "module.exports = { which: 'first' }")
     installFakePackage(second, "pg", "module.exports = { which: 'second' }")
 
-    const resolved = resolveOptionalPackage("pg", [
-      path.join(first, "node_modules"),
-      path.join(second, "node_modules"),
-    ])
+    const resolved = resolveOptionalPackage("pg", [path.join(first, "node_modules"), path.join(second, "node_modules")])
 
     expect(resolved!.startsWith(first)).toBe(true)
   })
@@ -606,7 +602,10 @@ describe("manual-install hints are copy-pasteable", () => {
     const prefix = /--prefix (\S+)/.exec(err.message)?.[1]
 
     expect(prefix).toBeDefined()
-    expect(prefix!.startsWith("'")).toBe(true)
+    // shellQuote emits double quotes on win32 and single quotes elsewhere, so a
+    // hardcoded `'` assertion fails on a Windows runner. The sibling npm-missing
+    // test above already accepts both; mirror it.
+    expect(prefix!.startsWith("'") || prefix!.startsWith('"')).toBe(true)
   })
 
   test("no source builds a --prefix hint without shellQuote", () => {
@@ -628,5 +627,41 @@ describe("manual-install hints are copy-pasteable", () => {
     }
 
     expect(offenders).toEqual([])
+  })
+})
+
+describe("killTree", () => {
+  // The timeout path had no coverage at all, and the bug it hides is ordering:
+  // killTree used to start the kill and return, so runNpm settled while the npm
+  // tree was still writing to the shared driver directory and the next queued
+  // install could overlap it. The contract under test is therefore "the tree is
+  // gone by the time the promise resolves", not merely "a kill was requested".
+  test("resolves only once the spawned tree is actually dead", async () => {
+    if (process.platform === "win32") return // taskkill ordering needs a Windows runner
+    const child = spawn("sleep 30", [], { shell: true, detached: true, stdio: "ignore" })
+    const pid = child.pid!
+    expect(pid).toBeDefined()
+
+    const alive = () => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch {
+        return false
+      }
+    }
+    expect(alive()).toBe(true)
+
+    await _testing.killTree(child)
+
+    // No polling: if killTree resolved before the group was signalled this is
+    // the assertion that fails, which is exactly the regression being pinned.
+    expect(alive()).toBe(false)
+  })
+
+  test("is awaitable when the child never started", async () => {
+    const dead = spawn("this-binary-does-not-exist-anywhere", [], { stdio: "ignore" })
+    dead.on("error", () => {})
+    await expect(_testing.killTree(dead)).resolves.toBeUndefined()
   })
 })

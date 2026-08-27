@@ -63,11 +63,7 @@ describe("driver catalogue consistency", () => {
   })
 
   test("the published package lists every driver package as an optional peer dependency", () => {
-    const block = readBlock(
-      publishScriptPath,
-      "const driverPeerDependencies: Record<string, string> = {",
-      "\n}",
-    )
+    const block = readBlock(publishScriptPath, "const driverPeerDependencies: Record<string, string> = {", "\n}")
     const listed = [...block.matchAll(/^\s*"?([@\w\-/.]+)"?\s*:/gm)].map((m) => m[1]!).sort()
 
     expect(listed).toEqual(expectedPackages)
@@ -124,7 +120,6 @@ describe("driver catalogue consistency", () => {
     )
     const types = [...mapBlock.matchAll(/^\s*([a-z0-9]+)\s*:/gm)].map((m) => m[1]!)
 
-    expect(types.length).toBeGreaterThan(12)
     for (const type of types) {
       // sqlite is bundled with the runtime and needs no optional SDK.
       if (type === "sqlite") continue
@@ -134,5 +129,20 @@ describe("driver catalogue consistency", () => {
       // that DRIVER_PACKAGES cannot actually install.
       expect(Object.keys(DRIVER_PACKAGES)).toContain(resolved!)
     }
+
+    // The reverse direction, derived from the catalogue instead of a hardcoded
+    // floor: the old `toBeGreaterThan(12)` duplicated the driver count and was
+    // trivially true (the registry has 18 types), so it guarded nothing. Every
+    // installable driver must be reachable from at least one registry type —
+    // which also fails loudly if the parse above silently yields nothing.
+    const reachable = [
+      ...new Set(
+        types
+          .filter((t) => t !== "sqlite")
+          .map((t) => driverForWarehouseType(t))
+          .filter((d) => d !== undefined),
+      ),
+    ].sort()
+    expect(reachable as string[]).toEqual(Object.keys(DRIVER_PACKAGES).sort())
   })
 })

@@ -22,7 +22,7 @@ import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 import { createRequire } from "node:module"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import { spawn } from "node:child_process"
 
 /**
@@ -192,6 +192,16 @@ export function driverSearchRoots(): string[] {
     for (const dir of nodeModulesUpward(path.dirname(fs.realpathSync(process.execPath)))) push(dir)
   } catch {
     // execPath may not be resolvable (bunfs); the roots above still apply.
+  }
+
+  // 6. Around this package itself. When the drivers package is installed as a
+  //    dependency, an SDK hoisted next to it resolves at require time but was
+  //    invisible to the roots above, so `isDriverInstalled` reported a working
+  //    driver as missing and the readiness note nagged about installing it.
+  try {
+    for (const dir of nodeModulesUpward(path.dirname(fileURLToPath(import.meta.url)))) push(dir)
+  } catch {
+    // No module URL under some bundlers; the roots above still apply.
   }
 
   return roots
@@ -399,41 +409,92 @@ export interface InstallResult {
   readonly error?: string
 }
 
-/** Terminate a spawned shell and everything it started. */
-function killTree(child: ReturnType<typeof spawn>): void {
+/**
+ * Terminate a spawned shell and everything it started.
+ *
+ * Awaitable because on Windows the kill is itself a child process: `taskkill`
+ * runs asynchronously, so returning before it exits released the install queue
+ * while the timed-out npm tree was still writing to the shared driver
+ * directory, and the next queued install could overlap it.
+ */
+function killTree(child: ReturnType<typeof spawn>): Promise<void> {
   const pid = child.pid
-  if (pid === undefined) return
+  if (pid === undefined) return Promise.resolve()
   if (process.platform === "win32") {
     // No process groups on Windows; taskkill walks the tree instead.
-    try {
-      const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
-      // spawn reports a missing binary through an asynchronous `error` event,
-      // not a throw, so the surrounding try/catch never sees it — and an
-      // unhandled `error` on a ChildProcess takes the process down while npm
-      // carries on running.
-      killer.on("error", () => {
+    return new Promise<void>((done) => {
+      const fallback = () => {
         try {
           child.kill()
         } catch {
           // Already gone.
         }
-      })
-    } catch {
-      child.kill()
-    }
-    return
+        done()
+      }
+      try {
+        const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
+        // spawn reports a missing binary through an asynchronous `error` event,
+        // not a throw, so the surrounding try/catch never sees it — and an
+        // unhandled `error` on a ChildProcess takes the process down while npm
+        // carries on running.
+        killer.on("error", fallback)
+        // Resolve only once taskkill has exited: that is the point at which the
+        // tree is actually gone and the directory is safe to hand over.
+        killer.on("close", () => done())
+      } catch {
+        fallback()
+      }
+    })
   }
-  try {
-    // Negative pid targets the whole process group created by `detached`.
-    process.kill(-pid, "SIGTERM")
-  } catch {
+  return new Promise<void>((done) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(escalation)
+      done()
+    }
+    // Signalling is not reaping: SIGTERM delivery is asynchronous, so resolving
+    // straight after `process.kill` hands the directory over while npm is still
+    // shutting down. Wait for the child to actually exit.
+    child.once("close", finish)
+    child.once("exit", finish)
+
+    let signalled = false
     try {
-      child.kill("SIGTERM")
+      // Negative pid targets the whole process group created by `detached`.
+      process.kill(-pid, "SIGTERM")
+      signalled = true
     } catch {
-      // Already gone.
+      try {
+        child.kill("SIGTERM")
+        signalled = true
+      } catch {
+        // Already gone — nothing will emit, so settle now.
+        finish()
+      }
     }
-  }
+
+    // A process group that ignores SIGTERM must not stall the install queue.
+    const escalation = signalled
+      ? setTimeout(() => {
+          try {
+            process.kill(-pid, "SIGKILL")
+          } catch {
+            try {
+              child.kill("SIGKILL")
+            } catch {
+              finish()
+            }
+          }
+        }, 2_000)
+      : undefined
+    if (escalation && typeof escalation === "object" && "unref" in escalation) escalation.unref()
+  })
 }
+
+/** @internal — exported for unit tests. Production code calls this via `runNpm`. */
+export const _testing = { killTree }
 
 function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
@@ -461,9 +522,12 @@ function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code:
       // writing to the shared driver directory long after this promise settles,
       // which the in-flight map cannot prevent — it serializes promises, not
       // processes.
-      killTree(child)
-      output += `\nTimed out after ${Math.round(timeoutMs / 1000)}s.`
-      finish(124)
+      // Settle only after the tree is down, so the in-flight queue does not hand
+      // this directory to the next install while npm is still writing to it.
+      void killTree(child).then(() => {
+        output += `\nTimed out after ${Math.round(timeoutMs / 1000)}s.`
+        finish(124)
+      })
     }, timeoutMs)
     child.stdout?.on("data", (chunk) => (output += String(chunk)))
     child.stderr?.on("data", (chunk) => (output += String(chunk)))
@@ -509,10 +573,7 @@ export function npmInstallArgs(packages: readonly string[]): string[] {
  * module exists to fix. Verified on npm 11.12.1 —
  * `added 12 packages, and removed 14 packages`.
  */
-export async function installOptionalDriver(
-  driver: DriverName,
-  options: InstallOptions = {},
-): Promise<InstallResult> {
+export async function installOptionalDriver(driver: DriverName, options: InstallOptions = {}): Promise<InstallResult> {
   const packages = DRIVER_PACKAGES[driver]
   const dir = driverInstallDir()
 
@@ -549,7 +610,6 @@ async function performInstall(
   dir: string,
   options: InstallOptions,
 ): Promise<InstallResult> {
-
   try {
     fs.mkdirSync(dir, { recursive: true })
     const manifest = path.join(dir, "package.json")
@@ -558,7 +618,15 @@ async function performInstall(
       // and marks the directory as ours rather than a stray project.
       fs.writeFileSync(
         manifest,
-        JSON.stringify({ name: "altimate-code-drivers", private: true, description: "Warehouse SDKs installed on demand by Altimate Code." }, null, 2) + "\n",
+        JSON.stringify(
+          {
+            name: "altimate-code-drivers",
+            private: true,
+            description: "Warehouse SDKs installed on demand by Altimate Code.",
+          },
+          null,
+          2,
+        ) + "\n",
       )
     }
   } catch (e) {
