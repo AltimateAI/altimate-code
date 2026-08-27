@@ -12,7 +12,12 @@ const MARKER_FILE = ".installed-version"
 // altimate_change start — written alongside MARKER_FILE by whichever installer ran
 // (postinstall.mjs, install, install.ps1) so first_launch can attribute the install.
 const SOURCE_FILE = ".install-source"
-const INSTALL_METHODS = ["curl", "powershell", "npm"] as const
+// "vscode-extension" is the dominant installer by volume: the VS Code extension's
+// native installer pulls the binary straight from GitHub releases, bypassing npm and
+// both shell scripts (it stopped spawning `curl | bash` because EDR tooling flagged
+// it — vscode-dbt-power-user#2049). It writes the marker so those installs land here
+// rather than going uncounted.
+const INSTALL_METHODS = ["curl", "powershell", "npm", "vscode-extension"] as const
 type InstallMethod = (typeof INSTALL_METHODS)[number] | "unknown"
 
 /**

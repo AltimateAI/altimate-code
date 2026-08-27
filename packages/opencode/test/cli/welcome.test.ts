@@ -150,6 +150,21 @@ describe("showWelcomeBannerIfNeeded", () => {
       fs.rmSync(cleanHome, { recursive: true, force: true })
     })
 
+    test("attributes the VS Code extension's native installer", async () => {
+      // Highest-volume installer: it pulls from GitHub releases directly, so without
+      // this value its installs would report "unknown" and be indistinguishable from
+      // pre-field markers.
+      dataFiles("1.2.3", "vscode-extension")
+      const events = captureEvents()
+      const cleanHome = fs.mkdtempSync(path.join(os.tmpdir(), "welcome-home-"))
+
+      const { showWelcomeBannerIfNeeded } = await import("../../src/cli/welcome")
+      withHome(cleanHome, () => showWelcomeBannerIfNeeded())
+
+      expect((events[0] as any).install_method).toBe("vscode-extension")
+      fs.rmSync(cleanHome, { recursive: true, force: true })
+    })
+
     test("an absent source file reports unknown rather than dropping the event", async () => {
       dataFiles("1.2.3")
       const events = captureEvents()
