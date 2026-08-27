@@ -172,10 +172,14 @@ describe("E — a throw after install bypasses undoInstall entirely", () => {
     syncInternals.mcp!.add = async (n, c) => { await prevAdd(n, c); current = other }
     syncInternals.mcp!.tools = async () => { throw new Error("tools listing exploded") }
     const outcome = await ensure("s1")
-    // ADAPTED ON LIFT: a throw no longer unwinds past the undo — the region is
-    // shaped so any non-attached exit, including one nobody wrote, gives back
-    // both halves.
-    expect(outcome).toMatchObject({ kind: "connect-failed" })
+    // ADAPTED ON LIFT, twice. A throw no longer unwinds past the undo — the
+    // region gives back both halves on any non-attached exit, including one
+    // nobody wrote. And because this throw lands AFTER a re-link, it is now the
+    // same silent `superseded` as every other refusal for a workspace the
+    // project has left: answering would name the wrong workspace, and toasting
+    // about it would be worse.
+    expect(outcome).toMatchObject({ kind: "superseded" })
+    expect(h.toasts, "announced a failure for the workspace the project had left").toHaveLength(0)
     expect(h.added.map((a) => a.cfg.command)).toEqual([["datamate", "start-stdio", "--datamate", "42"]])
     expect(h.removes, "a throw left the client registered").toContain("datamate")
     expect(h.restores, "a throw left our pin on disk").toHaveLength(1)

@@ -123,7 +123,15 @@ afterEach(() => {
 describe("T1 — the last awaited seam before every mutation is the binding read", () => {
   const MUTATIONS = new Set(["persist", "add", "remove", "connect", "persistRestore"])
 
-  function violations(trace: string[]): string[] {
+  /** Which teardowns in a scenario are binding-DEPENDENT.
+   *
+   * The split is the point: a teardown that undoes what this attach created, or
+   * that stops a disabled or below-floor engine, is right whatever the project
+   * is bound to now — requiring a binding read before those would assert the
+   * opposite of what they are for. Only acting on a pre-existing entry we did
+   * not create depends on the binding. Scenarios declare which kind they
+   * exercise, because the trace cannot tell them apart. */
+  function violations(trace: string[], removesAreBindingDependent = true): string[] {
     const out: string[] = []
     for (let i = 0; i < trace.length; i++) {
       if (!MUTATIONS.has(trace[i])) continue
@@ -145,6 +153,7 @@ describe("T1 — the last awaited seam before every mutation is the binding read
       // forbids stopping a client.
       const isWrite = trace[i] === "persist" || trace[i] === "add"
       if (isWrite && before === "existingEntry" && beforeThat === "resolveBinding") continue
+      if (!isWrite && !removesAreBindingDependent) continue
       if (!isWrite && before === "resolveBinding") continue
       out.push(`${trace[i]} at #${i} follows ${beforeThat ?? "<start>"} -> ${before ?? "<start>"}`)
     }
@@ -167,6 +176,8 @@ describe("T1 — the last awaited seam before every mutation is the binding read
     expect(violations(h.trace), h.trace.join(" > ")).toEqual([])
   })
 
+  // Its teardown is binding-INDEPENDENT: an engine below the floor serves
+  // nobody correctly whatever is bound now.
   test("pinned-but-below-floor, PATH newer", async () => {
     const h = install({
       existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
@@ -175,7 +186,7 @@ describe("T1 — the last awaited seam before every mutation is the binding read
       tools: { datamate_dbt_build_model: 1 },
     })
     await ensure("s1")
-    expect(violations(h.trace), h.trace.join(" > ")).toEqual([])
+    expect(violations(h.trace, false), h.trace.join(" > ")).toEqual([])
   })
 
   test("retry-connect of a down command entry", async () => {

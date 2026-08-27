@@ -26,20 +26,22 @@ export type PersistResult = "written" | "disabled"
 export async function persist(name: string, cfg: LocalMcpConfig, configPath?: string): Promise<PersistResult> {
   if (syncInternals.persist) return (await syncInternals.persist(name, cfg)) ?? "written"
   configPath = configPath ?? (await resolveConfigPath(projectRoot()))
-  // The LAST read before the write, and the only check a caller's guard cannot
-  // do for us. `addMcpToConfig` replaces the whole `mcp.<name>` node, so a
-  // disable that lands after the caller's guard and before this write is not
-  // merely raced — it is erased, and the post-install check then reads the file
-  // WE just wrote and finds nothing to undo. Invisible rather than reverted.
+  // The check travels WITH the write rather than preceding it. `addMcpToConfig`
+  // replaces the whole `mcp.<name>` node, so a disable landing after a caller's
+  // guard is not merely raced — it is erased, and the post-install check then
+  // reads the file WE just wrote and finds nothing to undo. Invisible rather
+  // than reverted.
   //
-  // Refusing here closes it at the only point where nothing can intervene: the
-  // caller turns this into `entry-disabled` and no config is touched at all.
-  const onDisk = (await readMcpEntryFromDisk(name, configPath)) as ExistingEntry | undefined
-  if (onDisk?.enabled === false) {
+  // It is decided on the same text the write modifies, which is as close as this
+  // can be got: a check that reads the file separately from the write has
+  // checked a different read. It does NOT make the window vanish — one read and
+  // one write to one file is not atomic, and a disable landing between the read
+  // and the `write` syscall is still lost. That residual is named on the PR
+  // rather than papered over; closing it needs write-then-verify.
+  if ((await addMcpToConfig(name, cfg, configPath, { refuseIfDisabled: true })) === null) {
     log.info("refusing to write over an entry that is disabled on disk", { name })
     return "disabled"
   }
-  await addMcpToConfig(name, cfg, configPath)
   // `Config.get()` is cached per instance, and `addMcpToConfig` is a raw file
   // write that does not touch that cache — so without this, every later
   // `existingEntry()` in this process still sees the pre-write config. That is
@@ -98,25 +100,41 @@ export async function projectEntry(): Promise<ExistingEntry | null> {
  * and MCP bootstraps every enabled entry, so a restart before the next attach
  * would start the workspace we just walked away from. Removing the runtime
  * client is only half of undoing an attach. */
-export async function persistRestore(name: string, previous: ExistingEntry | null): Promise<void> {
-  if (syncInternals.persistRestore) return syncInternals.persistRestore(name, previous)
+export async function persistRestore(
+  name: string,
+  previous: ExistingEntry | null,
+  configPath?: string,
+): Promise<"restored" | "failed"> {
+  if (syncInternals.persistRestore) return (await syncInternals.persistRestore(name, previous)) ?? "restored"
   try {
-    const configPath = await resolveConfigPath(projectRoot())
-    if (previous) await addMcpToConfig(name, previous as never, configPath)
-    else await removeMcpFromConfig(name, configPath)
+    // The SAME path the write used, not a fresh resolution: re-resolving can
+    // pick a different file than the one we wrote to, in which case the undo
+    // edits a config we never touched and leaves the one we did.
+    const target = configPath ?? (await resolveConfigPath(projectRoot()))
+    if (previous) await addMcpToConfig(name, previous as never, target)
+    else await removeMcpFromConfig(name, target)
     await Config.invalidate().catch(() => undefined)
+    return "restored"
   } catch (err) {
+    // Reported, not swallowed. An undo that could not be confirmed leaves our
+    // pin on disk, and MCP bootstraps every enabled entry — so the next restart
+    // starts the workspace this attach walked away from. That is an actionable
+    // failure, and the caller can only tell the user about it if it is told.
     log.warn("could not restore the config after a superseded attach", { name, err: String(err) })
+    return "failed"
   }
 }
 
 export async function existingEntry(name: string): Promise<ExistingEntry | null> {
   if (syncInternals.existingEntry) return syncInternals.existingEntry(name)
-  try {
-    const cfg = await freshConfig()
-    return cfg.mcp?.[name] ?? null
-  } catch (err) {
-    log.warn("could not read merged MCP config", { name, err: String(err) })
-    return null
-  }
+  // THROWS rather than returning null, for the same reason `projectEntry` does:
+  // `null` already means "there is no entry", and every caller acts on that —
+  // the guard reads it as "nothing forbids this write", the inspection plans it
+  // as "nothing here, spawn". Swallowing here made the fail-closed guard one
+  // layer above UNREACHABLE: the guard's own catch could never fire, because the
+  // failure had already been converted into a confident answer beneath it.
+  //
+  // A rule enforced at one layer and undone at the layer below is not enforced.
+  const cfg = await freshConfig()
+  return cfg.mcp?.[name] ?? null
 }

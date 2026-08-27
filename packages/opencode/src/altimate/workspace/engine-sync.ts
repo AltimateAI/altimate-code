@@ -376,7 +376,18 @@ async function run(): Promise<Outcome> {
   const enginePath = async (): Promise<{ bin: string | null; version: string | null }> => {
     if (!pathProbe) {
       const bin = which(ENGINE_BINARY)
-      pathProbe = { bin, version: bin ? await versionOf(bin) : null }
+      let version: string | null = null
+      try {
+        version = bin ? await versionOf(bin) : null
+      } catch (err) {
+        // Same rule as the entry probe: unreadable is below the floor, not a
+        // reason to abandon the turn to the catch-all.
+        log.warn("could not probe the PATH engine version; treating it as unreadable", {
+          workspaceId,
+          err: String(err),
+        })
+      }
+      pathProbe = { bin, version }
     }
     return pathProbe
   }
@@ -394,7 +405,7 @@ async function run(): Promise<Outcome> {
    * Both reads live in one function so nothing can be inserted between them, and
    * this is the LAST await before any mutation. The invariant is not "no
    * mutation on a stale binding" but "no mutation on a stale world". */
-  const worldUnchanged = async (): Promise<"ok" | "moved" | "disabled"> => {
+  const worldUnchanged = async (): Promise<"ok" | "moved" | "disabled" | "unreadable"> => {
     // Binding FIRST, intent LAST, so the only thing standing between the intent
     // check and the write is the write's own read — which does the check again,
     // at the one point nothing can intervene.
@@ -412,7 +423,10 @@ async function run(): Promise<Outcome> {
         workspaceId,
         err: String(err),
       })
-      return "moved"
+      // NOT "moved". The same failure reaching the inspection is reported to the
+      // user; reporting it here as a silent binding-move would give one failure
+      // two labels and two signal counts depending only on which read hit it.
+      return "unreadable"
     }
     if (entryNow?.enabled === false) {
       log.info("intent changed while deciding; not writing over a disable", { workspaceId })
@@ -420,6 +434,21 @@ async function run(): Promise<Outcome> {
     }
     return "ok"
   }
+
+  /** The refusal an unreadable configuration earns.
+   *
+   * One failure, one label, wherever it lands: the reader propagates rather than
+   * inventing an answer, so both the inspection and the pre-write guard reach
+   * this. Nothing is written on the way here. */
+  const refuseUnreadable = (why: string): Promise<Outcome> =>
+    refuse({ kind: "connect-failed", error: `configuration unreadable: ${why}` }, {
+      title: "Workspace engine not attached",
+      message:
+        `Could not read this project's MCP configuration, so the engine was not attached — acting on a ` +
+        `configuration we cannot read risks overwriting your own "${DATAMATE_KEY}" entry. Integration tools ` +
+        `are unavailable until it can be read.`,
+      variant: "error",
+    })
 
   /** The refusal a mid-decision disable earns.
    *
@@ -492,12 +521,11 @@ async function run(): Promise<Outcome> {
    * Restoring the merged value writes a copy of a global entry into the project,
    * which is a permanent override shadowing every later global change — undoing
    * a write is only correct if it restores what that write replaced. */
-  const undoInstall = async (projectBefore: ExistingEntry | null): Promise<Outcome> => {
+  const undoInstall = async (projectBefore: ExistingEntry | null): Promise<"restored" | "failed"> => {
     await client.remove(DATAMATE_KEY).catch((err) => {
       log.warn("could not remove the superseded engine", { err: String(err) })
     })
-    await persistRestore(DATAMATE_KEY, projectBefore)
-    return { kind: "superseded" }
+    return await persistRestore(DATAMATE_KEY, projectBefore, configPath)
   }
 
   /** The single exit for every refusal.
@@ -558,7 +586,15 @@ async function run(): Promise<Outcome> {
   // IDE added after the cache warmed would otherwise be missing from status
   // entirely — the entry check would never run and our managed entry would be
   // persisted straight over theirs.
-  let inspection = await inspectEntry()
+  let inspection: Inspection
+  try {
+    inspection = await inspectEntry()
+  } catch (err) {
+    // Planning on a configuration we could not read means planning "there is
+    // nothing here", which is a spawn — straight over whatever is actually
+    // there.
+    return await refuseUnreadable(String(err))
+  }
   let plan = planForEntry(inspection, workspaceId, false)
 
   if (plan.act === "retry-connect") {
@@ -585,6 +621,7 @@ async function run(): Promise<Outcome> {
     // taken before a status read; re-confirm both halves before acting on it.
     const beforeRevive = await worldUnchanged()
     if (beforeRevive === "disabled") return await refuseDisabled()
+    if (beforeRevive === "unreadable") return await refuseUnreadable("intent could not be confirmed")
     if (beforeRevive !== "ok") return { kind: "superseded" }
     await client.add(DATAMATE_KEY, revive).catch((err) => {
       log.warn("could not restart the engine entry", { err: String(err), workspaceId })
@@ -683,7 +720,23 @@ async function run(): Promise<Outcome> {
   }
 
   if (plan.act === "check-version") {
-    const found = await engineVersionOf(entry)
+    // A probe that THROWS is a version we could not read, which `clearsFloor`
+    // already treats as below the floor — an engine that cannot say what it is
+    // cannot be shown to lock its pin. Letting it propagate instead sent the
+    // turn to the catch-all BEFORE any teardown, so a persistent probe failure
+    // toasted every single turn while the rejected client stayed registered and
+    // serving: the advice-versus-registration split this module exists to close.
+    // Read as unreadable, it is detached and refused once, and the memo holds.
+    let found: string | null
+    try {
+      found = await engineVersionOf(entry)
+    } catch (err) {
+      log.warn("could not probe the entry's engine version; treating it as unreadable", {
+        workspaceId,
+        err: String(err),
+      })
+      found = null
+    }
     if (clearsFloor(found)) {
       // Rule 5 applies to a reused engine too. A running engine that lost an
       // integration — a connection deleted, a restart that dropped it — serves
@@ -765,7 +818,12 @@ async function run(): Promise<Outcome> {
       found,
       pathVersion,
     })
-    await detachRejected({ workspaceId, reason: "below-floor-replaceable", found })
+    // Binding-INDEPENDENT, exactly like its irreplaceable sibling: an engine
+    // below the floor serves nobody correctly, whatever the project is bound to
+    // now. Only this branch kept the default, so a re-link during the version
+    // probes skipped the teardown and left a too-old client connected and
+    // serving while the outcome said `superseded` — silently.
+    await detachRejected({ workspaceId, reason: "below-floor-replaceable", found }, false)
   }
 
   // Bounded: this lookup is reporting only, but it runs BEFORE the engine is
@@ -836,6 +894,7 @@ async function run(): Promise<Outcome> {
   const configPath = await projectConfigPath().catch(() => undefined)
   const beforeInstall = await worldUnchanged()
   if (beforeInstall === "disabled") return await refuseDisabled()
+  if (beforeInstall === "unreadable") return await refuseUnreadable("intent could not be confirmed")
   if (beforeInstall !== "ok") {
     // Re-linked while we were probing. Installing now would attach a workspace
     // this session has left, and would win by arriving first.
@@ -867,6 +926,45 @@ async function run(): Promise<Outcome> {
   // registered. A write refused at the last moment left nothing behind, and the
   // undo must not "restore" over a config it never touched.
   let installed = false
+  let undone = false
+  /** Give back both halves, once, before anything else happens.
+   *
+   * In-region refusals used to announce and let the `finally` tear down
+   * afterwards, which inverts the rule `refuse` states for every other exit:
+   * stop serving first, explain second. It is harmless while the announcement
+   * is a toast and a failed client exports nothing — but the announcement is a
+   * substitution point, and a body that waits on a person would leave a failed
+   * engine's registration and its pin outliving the dialog, with a restart
+   * inside it bootstrapping the entry we had already decided against.
+   *
+   * Idempotent, so the `finally` stays as a backstop for exits nobody wrote. */
+  const undoNow = async (): Promise<void> => {
+    if (!installed || undone) return
+    undone = true
+    const restored = await undoInstall(projectBefore).catch((err) => {
+      log.warn("could not undo a non-attached install", { err: String(err), workspaceId })
+      return "failed" as const
+    })
+    if (restored === "failed") {
+      // An undo that could not be confirmed is an actionable failure, not a
+      // quiet one. Our pin is still on disk and MCP bootstraps every enabled
+      // entry, so the next restart starts the workspace this attach walked away
+      // from — and nothing else will ever mention it. `superseded` stays silent
+      // only when there is genuinely nothing left behind.
+      await announceRefusal(
+        { kind: "connect-failed", error: "restore failed" },
+        {
+          title: "Workspace engine config left behind",
+          message:
+            `The engine entry for workspace "${binding.datamateName}" was installed and then abandoned, but the ` +
+            `previous "${DATAMATE_KEY}" entry could not be restored${configPath ? ` in ${configPath}` : ""}. ` +
+            `That pin is still on disk and will start on the next restart; edit or remove it to be sure.`,
+          variant: "error",
+        },
+        { workspaceId, workspaceName: binding.datamateName },
+      )
+    }
+  }
   try {
     if ((await persist(DATAMATE_KEY, cfg, configPath)) === "disabled") {
       // A disable landed between our guard and the write, and the write saw it.
@@ -881,6 +979,8 @@ async function run(): Promise<Outcome> {
     const after = (await client.status())[DATAMATE_KEY]
     if (after?.status !== "connected") {
       const error = after?.error ?? after?.status ?? "not connected"
+      // Undo BEFORE announcing — see `undoNow`.
+      await undoNow()
       // `which` rather than the error string: "the engine failed to start" and
       // "there is no engine" are different situations with different remedies,
       // and only the second is fixed by installing one. Reading ENOENT out of a
@@ -922,7 +1022,10 @@ async function run(): Promise<Outcome> {
       })
       // Either way the install is undone by the region. A disable reports itself
       // so the user learns their edit took effect, rather than a generic race.
-      return afterInstall === "disabled" ? await refuseDisabled() : { kind: "superseded" }
+      await undoNow()
+      if (afterInstall === "disabled") return await refuseDisabled()
+      if (afterInstall === "unreadable") return await refuseUnreadable("intent could not be confirmed")
+      return { kind: "superseded" }
     }
 
     // Ours, and staying. Answer BEFORE announcing: `announceToolsChanged` and
@@ -939,24 +1042,51 @@ async function run(): Promise<Outcome> {
     log.info("attached workspace engine", { workspaceId, available, declared: declaredCount, missing, replaced })
 
     // Announce it so a turn that had already given up waiting still learns the
-    // tools arrived.
-    await announceToolsChanged()
-    await notify({
-      title: `Workspace "${binding.datamateName}" connected`,
-      message:
-        (declaredKeys
-          ? `${available} of ${declaredCount} declared integration tools available.`
-          : `${available} integration tools available.`) +
-        describeMissing(missing) +
-        replacedNote,
-      variant: missing.length > 0 ? "warning" : "success",
-    })
-    return outcome
-  } finally {
-    if (installed && !committed) {
-      await undoInstall(projectBefore).catch((err) => {
-        log.warn("could not undo a non-attached install", { err: String(err), workspaceId })
+    // tools arrived — and never let announcing change what happened.
+    //
+    // These two awaits carry no no-throw guarantee at the seam; only the
+    // production bodies happen to swallow, and the region did not encode that
+    // dependency. A throw here escaped to the catch-all and reported
+    // `connect-failed` for an engine that is attached, connected and persisted
+    // — the single toast telling the user the attach failed while the tools are
+    // in fact there. Describing an outcome must never rewrite it, on the success
+    // path exactly as on the refusal path.
+    try {
+      await announceToolsChanged()
+      await notify({
+        title: `Workspace "${binding.datamateName}" connected`,
+        message:
+          (declaredKeys
+            ? `${available} of ${declaredCount} declared integration tools available.`
+            : `${available} integration tools available.`) +
+          describeMissing(missing) +
+          replacedNote,
+        variant: missing.length > 0 ? "warning" : "success",
       })
+    } catch (err) {
+      log.warn("could not announce the attach; the engine is attached regardless", {
+        workspaceId,
+        err: String(err),
+      })
+    }
+    return outcome
+  } catch (err) {
+    // Undo first, then decide how to report. A throw that lands after a re-link
+    // is the same situation as any other refusal for a workspace the project has
+    // left: answering names the wrong workspace and toasting is worse. The
+    // catch-all announces every throw it sees, so this one must not reach it.
+    await undoNow()
+    if (!(await stillCurrent())) {
+      log.info("attach threw after the binding moved; not answering for the old workspace", {
+        workspaceId,
+        err: String(err),
+      })
+      return { kind: "superseded" }
+    }
+    throw err
+  } finally {
+    if (!committed) {
+      await undoNow()
     }
   }
 }
@@ -1218,11 +1348,24 @@ export function ensure(sessionID: string): Promise<Outcome> {
  * Announced through the same exit as every decided refusal, and with NO
  * workspace identity — a throw can happen before a binding exists, so anything
  * downstream that wants to name a workspace has to cope with not having one. */
+/** `String(err)` on a value with a null prototype throws INSIDE the catch, and
+ * the task rejects after all — the one remaining route to a session whose
+ * outcome never settles and whose await rejects into the prompt loop. Nothing in
+ * this codebase throws such a value; the cost of being sure is three lines. */
+function describeThrown(err: unknown): string {
+  if (err instanceof Error) return err.message
+  try {
+    return String(err)
+  } catch {
+    return typeof err
+  }
+}
+
 async function failSafely(sessionID: string, task: () => Promise<Outcome>): Promise<Outcome> {
   try {
     return await task()
   } catch (err) {
-    const error = String(err)
+    const error = describeThrown(err)
     log.warn("workspace engine attach failed", { sessionID, err: error })
     const outcome: Outcome = { kind: "connect-failed", error }
     await announceRefusal(

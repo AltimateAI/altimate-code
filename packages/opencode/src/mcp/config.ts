@@ -32,7 +32,18 @@ export async function resolveConfigPath(baseDir: string, global = false) {
   return candidates[0]
 }
 
-export async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, configPath: string) {
+export async function addMcpToConfig(
+  name: string,
+  mcpConfig: ConfigMCPV1.Info,
+  configPath: string,
+  // altimate_change — refuse to replace a node that is switched off, decided on
+  // the SAME text this call is about to modify. A caller that reads the file
+  // itself and then calls this one has checked a different read than the write
+  // uses, so a disable landing between the two is replaced wholesale rather than
+  // honoured. One read, one decision, is the only version of this check that
+  // means anything.
+  opts?: { refuseIfDisabled?: boolean },
+) {
   let text = "{}"
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
@@ -50,6 +61,15 @@ export async function addMcpToConfig(name: string, mcpConfig: ConfigMCPV1.Info, 
       throw new Error(`Refusing to write MCP config: ${configPath} is not valid JSON/JSONC`)
     }
   }
+
+  // altimate_change start — see `opts.refuseIfDisabled`
+  if (opts?.refuseIfDisabled) {
+    const current = parse(text, [], { allowTrailingComma: true }) as
+      | { mcp?: Record<string, { enabled?: boolean } | undefined> }
+      | undefined
+    if (current?.mcp?.[name]?.enabled === false) return null
+  }
+  // altimate_change end
 
   const edits = modify(text, ["mcp", name], mcpConfig, {
     formattingOptions: { tabSize: 2, insertSpaces: true },

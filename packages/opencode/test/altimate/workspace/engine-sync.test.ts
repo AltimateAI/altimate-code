@@ -2017,6 +2017,17 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
       },
     ],
     [
+      // Its teardown is binding-INDEPENDENT and therefore exempt: a below-floor
+      // engine serves nobody correctly whatever is bound now.
+      "replacing an engine below the floor",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+        statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+        version: (bin: string) => (bin === "datamate" ? "0.6.5" : "0.7.0"),
+        tools: { datamate_dbt_build_model: 1 },
+      },
+    ],
+    [
       "replacing an unpinned entry",
       {
         existing: { type: "local", command: ["datamate", "start-stdio"], enabled: true },
@@ -2026,8 +2037,16 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
     ],
   ]
 
+  // Scenarios declare whether their teardowns are binding-DEPENDENT, because the
+  // trace cannot tell them apart: undoing what this attach created, and stopping
+  // a disabled or below-floor engine, are right whatever the project is bound to
+  // now, so requiring a binding read before those would assert the opposite of
+  // what they are for.
+  const bindingIndependent = new Set(["replacing an engine below the floor"])
+
   for (const [name, opts] of scenarios) {
     test(`${name}: every mutation is preceded by the world check`, async () => {
+      const bindingDependentRemoves = !bindingIndependent.has(name)
       const { trace } = traced(opts)
       await ensure("s1")
       const offenders: string[] = []
@@ -2044,7 +2063,7 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
         // anything, so intent is part of the question.
         if (step === "persist" || step === "add") {
           if (before === "existingEntry" && beforeThat === "resolveBinding") return
-        } else if (before === "resolveBinding") {
+        } else if (!bindingDependentRemoves || before === "resolveBinding") {
           // A TEARDOWN only needs the binding. Intent neither authorises nor
           // forbids stopping a client: a disabled entry is torn down regardless,
           // and the only question a foreign entry raises is whether it belongs
@@ -2111,7 +2130,13 @@ describe("INVARIANT #13 — a failed read is never an answer", () => {
     const outcome = await ensure("s1")
     expect(h.persisted, "wrote config without confirming the user still wants it").toHaveLength(0)
     expect(h.added, "started an engine without confirming the user still wants it").toHaveLength(0)
-    expect(outcome.kind).toBe("superseded")
+    // Reported, not silent, and reported the SAME way wherever the failure lands
+    // — the identical failure reaching the inspection is told to the user, so
+    // labelling this one a silent binding-move would give one failure two labels
+    // and two signal counts depending only on which read hit it.
+    expect(outcome.kind).toBe("connect-failed")
+    expect(h.toasts, "an unreadable configuration was handled silently").toHaveLength(1)
+    expect(h.toasts[0]!.message).toContain("Could not read")
   })
 
   test("a memo whose validating read THROWS is re-decided, not served", async () => {
@@ -2141,5 +2166,95 @@ describe("INVARIANT #13 — a failed read is never an answer", () => {
     // Identity is what separates "handed back the cached answer" from "worked it
     // out again".
     expect(second, "served a memo whose world could not be confirmed").not.toBe(first)
+  })
+})
+
+describe("INVARIANT — announcing never changes what happened", () => {
+  test("a throwing success announcement leaves the engine attached and installed", async () => {
+    // The two announce awaits carry no no-throw guarantee at the seam; only the
+    // production bodies happen to swallow, and the region did not encode that.
+    // A throw here reported `connect-failed` for an engine that is attached,
+    // connected and persisted — the single toast telling the user the attach
+    // failed while the tools are in fact there.
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    syncInternals.toolsChanged = async () => {
+      throw new Error("event bus exploded")
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind, "a failed announcement rewrote a successful attach").toBe("attached")
+    expect(h.removes, "a failed announcement undid a live attach").toHaveLength(0)
+    expect(h.added, "the engine was not installed").toHaveLength(1)
+  })
+
+  test("an undo that could not be confirmed is an actionable failure, not a silent one", async () => {
+    // `superseded` is silent because normally nothing is left behind. When the
+    // restore fails, our pin IS left behind and MCP bootstraps every enabled
+    // entry — so the next restart starts the workspace this attach walked away
+    // from, and nothing else will ever mention it.
+    let current: CachedBinding | null = binding
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.persistRestore = async () => {
+      h.restores.push(null)
+      return "failed"
+    }
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    const outcome = await ensure("s1")
+    expect(outcome).toEqual({ kind: "superseded" })
+    expect(h.toasts, "left our pin on disk and said nothing about it").toHaveLength(1)
+    expect(h.toasts[0]!.message, "did not say what was left behind or where").toContain("datamate")
+  })
+})
+
+describe("INVARIANT — a rejected engine is detached even when the rejection is a failure to know", () => {
+  test("a probe that THROWS detaches and refuses once, rather than toasting every turn", async () => {
+    // Letting the probe's throw propagate reached the catch-all BEFORE any
+    // teardown, so a persistent failure produced a toast on every turn while the
+    // rejected client stayed registered and serving — the outcome is advice, the
+    // registration is what the model sees.
+    const h = install({
+      existing: { type: "local", command: ["/opt/datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [{ datamate: { status: "connected" } }],
+      which: null,
+    })
+    syncInternals.versionOf = async () => {
+      throw new Error("EACCES: cannot exec")
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind).toBe("engine-too-old")
+    expect(h.removes, "left a rejected engine registered and serving").toContain("datamate")
+    expect(h.toasts).toHaveLength(1)
+
+    // And the memo holds the refusal rather than re-refusing every turn.
+    const second = await ensure("s1")
+    expect(second.kind).toBe("engine-too-old")
+  })
+
+  test("a re-link during the version probes still detaches a below-floor engine", async () => {
+    // Binding-INDEPENDENT: an engine below the floor serves nobody correctly,
+    // whatever the project is bound to now. This branch kept the default and so
+    // skipped its teardown on a re-link, leaving a too-old client connected.
+    let current: CachedBinding | null = binding
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      version: (bin) => (bin === "datamate" ? "0.6.5" : "0.7.0"),
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    const previousVersion = syncInternals.versionOf!
+    syncInternals.versionOf = async (bin: string) => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return previousVersion(bin)
+    }
+    await ensure("s1")
+    expect(h.removes, "a below-floor engine survived a re-link still connected").toContain("datamate")
   })
 })

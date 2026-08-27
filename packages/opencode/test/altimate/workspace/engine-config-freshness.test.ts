@@ -83,3 +83,29 @@ describe("INVARIANT — a config read observes writes made behind it", () => {
     expect(invalidations).toBe(2)
   })
 })
+
+describe("INVARIANT #13 at the reader — a failed read propagates, never becomes null", () => {
+  test("a config read that throws does not arrive at the caller as 'there is no entry'", async () => {
+    // The layer that matters. A guard above this one was written to fail closed
+    // on a throwing intent read — and could never fire, because this reader
+    // caught the throw and returned `null`, which every caller reads as "there
+    // is no entry": the guard as "nothing forbids this write", the inspection as
+    // "nothing here, spawn". A rule enforced at one layer and undone at the
+    // layer below is not enforced.
+    //
+    // Asserted HERE rather than through a stubbed seam, because a seam-level
+    // test cannot see a swallow that happens beneath the seam — which is exactly
+    // why the defect survived the invariant that was supposed to state it.
+    getSpy.mockImplementation(async () => {
+      throw new Error("EIO: config unreadable")
+    })
+    await expect(existingEntry("datamate")).rejects.toThrow("EIO")
+  })
+
+  test("a genuinely absent entry is still null, not an error", async () => {
+    // The distinction is the whole point: absent and unreadable must stay
+    // different answers, or the caller cannot act differently on them.
+    fileContents = { mcp: {} }
+    expect(await existingEntry("datamate")).toBeNull()
+  })
+})
