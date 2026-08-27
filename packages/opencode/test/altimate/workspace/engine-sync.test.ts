@@ -2042,3 +2042,34 @@ describe("INVARIANT — the last thing awaited before a mutation is the world ch
     })
   }
 })
+
+describe("INVARIANT — the single exit survives a failure with no workspace to name", () => {
+  test("a throw BEFORE the binding resolves still announces, exactly once", async () => {
+    // The refusal exit is the single exit for exceptions too, and an exception
+    // can happen before there is any workspace identity — the flag read, the MCP
+    // handle and the serialization chain all precede the binding. Anything in
+    // that exit that assumes a workspace will crash here, on the one path with
+    // no natural fixture.
+    const h = install({})
+    syncInternals.resolveBinding = async () => {
+      throw new Error("credentials unavailable")
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind).toBe("connect-failed")
+    expect(h.toasts, "a failure with no workspace to name went unannounced, or announced twice").toHaveLength(1)
+    expect(h.toasts[0]!.message).toContain("credentials unavailable")
+    // Nothing was installed, so nothing needs undoing.
+    expect(h.added).toHaveLength(0)
+    expect(h.persisted).toHaveLength(0)
+  })
+
+  test("a throw AFTER the binding resolves still announces exactly once", async () => {
+    const h = install({ statuses: [{}] })
+    syncInternals.declared = async () => {
+      throw new Error("allowlist exploded")
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind).toBe("connect-failed")
+    expect(h.toasts).toHaveLength(1)
+  })
+})

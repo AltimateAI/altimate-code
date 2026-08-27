@@ -269,7 +269,26 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
  * NEVER throws: "never silent" also has to mean "never relabelled". A throw here
  * reached the catch-all and turned a decided outcome into `connect-failed` with
  * a second toast, so failing to DESCRIBE a verdict silently rewrote it. */
-async function announceRefusal(outcome: Outcome, toast: Toast, context?: Record<string, unknown>): Promise<void> {
+/** What the announcement knows about the refusal beyond the outcome itself.
+ *
+ * `Outcome` carries `found` and `declared` but no workspace identity, and the
+ * announcement needs one: a message that names the workspace, and anything
+ * keyed per workspace downstream.
+ *
+ * Every field is OPTIONAL, and that is the contract rather than laziness. This
+ * function is the single exit for exceptions as well as decisions, and a throw
+ * can happen before a binding is resolved — the flag read, the MCP handle, the
+ * serialization chain all precede it. A body that assumes a workspace is here
+ * will crash on the one path nobody writes a fixture for. When identity is
+ * absent the toast still fires; anything that needs to NAME a workspace must
+ * stay silent rather than guess at one. */
+type RefusalContext = {
+  workspaceId?: string
+  workspaceName?: string
+  sessionID?: string
+}
+
+async function announceRefusal(outcome: Outcome, toast: Toast, context?: RefusalContext): Promise<void> {
   try {
     if (installWouldHelp(outcome)) {
       log.info("refusal is remediable by installing the engine", { ...context, kind: outcome.kind })
@@ -479,7 +498,7 @@ async function run(): Promise<Outcome> {
       })
       return { kind: "superseded" }
     }
-    await announceRefusal(outcome, toast, { workspaceId })
+    await announceRefusal(outcome, toast, { workspaceId, workspaceName: binding.datamateName })
     return outcome
   }
 
@@ -1063,7 +1082,13 @@ export function ensure(sessionID: string): Promise<Outcome> {
     // is silently rebuilt.
     validated: previous?.validated,
   } as SessionAttach
-  entry.task = (async (): Promise<Outcome> => {
+  // The whole task, not just the attach. `attachKey`, the memo re-validation and
+  // the serialization chain all run BEFORE the attach's own catch, so a throw in
+  // any of them escaped `ensure` as a rejected promise: no outcome, no toast,
+  // and — since the caller starts this fire-and-forget — silence, which is the
+  // one failure mode this module exists to remove. "Exactly one exit for throws
+  // too" has to mean the whole task, or it names a boundary rather than a rule.
+  entry.task = failSafely(sessionID, async (): Promise<Outcome> => {
     const key = await attachKey()
     const sameWorkspace = !!previous && previous.key === key
     // Same workspace and the attach either succeeded or is still in flight:
@@ -1101,7 +1126,7 @@ export function ensure(sessionID: string): Promise<Outcome> {
       if (previous) await previous.task.catch(() => {})
     }
     return attachOnce(sessionID)
-  })()
+  })
   entry.task.then(
     (outcome) => {
       entry.outcome = outcome
@@ -1114,28 +1139,38 @@ export function ensure(sessionID: string): Promise<Outcome> {
 
 /** One attach, serialized against every other attach in this project, with the
  * outcome logged exactly once. */
+/** Run an attach task so that NOTHING escapes as a rejection.
+ *
+ * Every explicit failure branch tells the user what is unavailable and why. An
+ * unexpected throw must not be the single path that leaves them with neither
+ * tools nor an explanation: the caller starts this fire-and-forget and
+ * `whenAttached` returns void, so a rejection here is silence.
+ *
+ * Announced through the same exit as every decided refusal, and with NO
+ * workspace identity — a throw can happen before a binding exists, so anything
+ * downstream that wants to name a workspace has to cope with not having one. */
+async function failSafely(sessionID: string, task: () => Promise<Outcome>): Promise<Outcome> {
+  try {
+    return await task()
+  } catch (err) {
+    const error = String(err)
+    log.warn("workspace engine attach failed", { sessionID, err: error })
+    const outcome: Outcome = { kind: "connect-failed", error }
+    await announceRefusal(
+      outcome,
+      {
+        title: "Workspace engine attach failed",
+        message: `Could not attach the workspace engine: ${error}. Integration tools are unavailable for this session.`,
+        variant: "error",
+      },
+      { sessionID },
+    )
+    return outcome
+  }
+}
+
 function attachOnce(sessionID: string): Promise<Outcome> {
   return serializeAttach(() => run())
-    .catch(async (err): Promise<Outcome> => {
-      const error = String(err)
-      // Every explicit failure branch tells the user what is unavailable and
-      // why. An unexpected throw — an unwritable project config, a malformed
-      // one — must not be the single path that leaves them with neither tools
-      // nor an explanation, since the caller discards this outcome and
-      // `whenAttached` returns void.
-      log.warn("workspace engine attach failed", { err: error })
-      const outcome: Outcome = { kind: "connect-failed", error }
-      await announceRefusal(
-        outcome,
-        {
-          title: "Workspace engine attach failed",
-          message: `Could not attach the workspace engine: ${error}. Integration tools are unavailable for this session.`,
-          variant: "error",
-        },
-        { sessionID },
-      )
-      return outcome
-    })
     .then((outcome) => {
       // One line per session, whatever happened — silence is the defect this
       // module exists to remove, so it must not be silent about itself.
