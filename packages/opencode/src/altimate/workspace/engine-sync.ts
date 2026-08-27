@@ -70,6 +70,7 @@ import {
   isUrlEntry,
   pinnedWorkspace,
   sameEntry,
+  entryIdentity,
   ENGINE_BINARY,
   INSTALL_HINT,
   MIN_ENGINE_VERSION,
@@ -98,6 +99,7 @@ import { serializeAttach, trackedChainsForTests, attachChains } from "./engine-c
 export {
   attributableEngine,
   sameEntry,
+  entryIdentity,
   clearsFloor,
   compareVersions,
   engineToolKeys,
@@ -806,6 +808,13 @@ async function run(sessionID: string): Promise<Outcome> {
       return "failed"
     }
     if (now?.enabled === false) {
+      if (!sameEntry(now, installed)) {
+        // Rewritten AND disabled while we held it. Neither the transport nor
+        // the disable is ours: projecting the disable onto what we replaced
+        // would overwrite the newer transport with the old one.
+        log.info("not restoring; the entry was rewritten and disabled since we installed", { workspaceId })
+        return "restored"
+      }
       log.info("the entry was disabled while we held it; keeping the disable rather than undoing it", {
         workspaceId,
       })
@@ -1102,30 +1111,35 @@ async function run(sessionID: string): Promise<Outcome> {
       //
       // The tool and allowlist reads above are two awaits; `confirmServing`
       // asks the two questions every named answer asks after them.
-      const verdict = await confirmServing(runningEngine(inspection))
-      if (verdict === "replaced" || verdict === "gone") {
-        // A replacement is someone else's and not ours to detach; a client that
-        // is gone has nothing to detach. Either way the next decision judges
-        // what is there on its own merits.
-        log.info("the engine we judged is no longer the one serving; not answering for it", {
-          workspaceId,
-          verdict,
-        })
-        return { kind: "superseded" }
-      }
-      if (verdict === "disabled") return await refuseDisabled()
-      if (verdict === "unreadable") return await refuseUnreadable("intent could not be confirmed")
-      if (verdict === "moved") {
-        // Detach, do not merely decline. The caller runs `resolveTools` whatever
-        // this returns, so leaving the old client registered hands that turn the
-        // previous workspace's tools and credentials anyway — the outcome is
-        // advice, the registration is what the model sees.
+      // What a non-`ok` verdict means for a reuse answer. Asked twice: once
+      // after the lookup awaits, and again after the announcements — which are
+      // awaits too, and every await after a guard belongs to the guard.
+      const settleReuse = async (verdict: Awaited<ReturnType<typeof confirmServing>>): Promise<Outcome | null> => {
+        if (verdict === "ok") return null
+        if (verdict === "replaced" || verdict === "gone") {
+          // A replacement is someone else's and not ours to detach; a client
+          // that is gone has nothing to detach. Either way the next decision
+          // judges what is there on its own merits.
+          log.info("the engine we judged is no longer the one serving; not answering for it", {
+            workspaceId,
+            verdict,
+          })
+          return { kind: "superseded" }
+        }
+        if (verdict === "disabled") return await refuseDisabled()
+        if (verdict === "unreadable") return await refuseUnreadable("intent could not be confirmed")
+        // Moved. Detach, do not merely decline: the caller runs `resolveTools`
+        // whatever this returns, so leaving the old client registered hands
+        // that turn the previous workspace's tools and credentials anyway — the
+        // outcome is advice, the registration is what the model sees.
         log.info("binding changed while reusing; detaching rather than answering for the old workspace", {
           workspaceId,
         })
         await removeIfOurs(runningEngine(inspection), { reason: "superseded while reusing" })
         return { kind: "superseded" }
       }
+      const settled = await settleReuse(await confirmServing(runningEngine(inspection)))
+      if (settled) return settled
       // The gap is reported only for the engine this turn is actually answered
       // with. Announcing it before the questions above would warn about an
       // engine that is then refused or found replaced — a second signal for a
@@ -1139,6 +1153,17 @@ async function run(sessionID: string): Promise<Outcome> {
           variant: "warning",
         })
       }
+      const reused: Outcome = {
+        kind: "reused",
+        available,
+        ...(declaredKeys ? { declared: declaredKeys.keys.length, missing } : {}),
+      }
+      await noteHostedNeighbours(reused)
+      // The announcements above are awaits; the answer must be true when it is
+      // given, not only when it was fixed. Same check, same handling, after
+      // the last of them.
+      const afterAnnouncing = await settleReuse(await confirmServing(runningEngine(inspection)))
+      if (afterAnnouncing) return afterAnnouncing
       clearAnnouncement(sessionID)
       log.info("reusing existing engine entry", {
         workspaceId,
@@ -1147,12 +1172,6 @@ async function run(sessionID: string): Promise<Outcome> {
         declared: declaredKeys?.keys.length,
         missing,
       })
-      const reused: Outcome = {
-        kind: "reused",
-        available,
-        ...(declaredKeys ? { declared: declaredKeys.keys.length, missing } : {}),
-      }
-      await noteHostedNeighbours(reused)
       return reused
     }
 
@@ -1589,7 +1608,10 @@ async function memoStillValid(workspaceId: string, record?: SessionAttach): Prom
     // worth naming: a binary swapped in place under an unchanged command is not
     // caught until the next session.
     const running = runningEngine(inspection)
-    const command = `${commandArgv(running).join(" ")}|${commandArgv(configuredEntry(inspection)).join(" ")}`
+    // Keyed on the whole launch identity of both halves, not their argv: a
+    // replacement with the same argv under a different PATH or working
+    // directory runs a different binary, and must be probed again.
+    const command = `${entryIdentity(running)}|${entryIdentity(configuredEntry(inspection))}`
     if (record && record.validated === command) return true
     const found = await engineVersionOf(running)
     if (!clearsFloor(found)) {

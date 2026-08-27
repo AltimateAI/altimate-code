@@ -3,6 +3,7 @@
 // Everything that asks the outside world a question: the binary, its version,
 // MCP, the workspace allowlist, and the user-facing toast. Moved verbatim — the
 // state machine buys nothing here, and every touched line is new-bug surface.
+import path from "path"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { MCP, ToolsChanged } from "@/mcp"
@@ -200,5 +201,12 @@ export async function notify(toast: Toast): Promise<void> {
 export async function engineVersionOf(entry: ExistingEntry | null): Promise<string | null> {
   const bin = commandArgv(entry)[0]
   const direct = bin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(bin) ? bin : null
-  return direct ? await versionOf(direct, { environment: entry?.environment, cwd: entry?.cwd }) : null
+  if (!direct) return null
+  // Probed the way the engine is launched: MCP resolves a relative `cwd`
+  // against the instance directory, so the probe does too. Left relative, it
+  // would resolve against wherever this process happened to start, and a
+  // relative command or PATH entry could name a different binary there.
+  const base = currentDirectory()
+  const cwd = entry?.cwd ? (base ? path.resolve(base, entry.cwd) : entry.cwd) : undefined
+  return await versionOf(direct, { environment: entry?.environment, cwd })
 }

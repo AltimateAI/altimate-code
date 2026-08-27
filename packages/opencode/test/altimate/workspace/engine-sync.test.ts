@@ -29,6 +29,7 @@ import {
   type LocalMcpConfig,
   type Outcome,
 } from "../../../src/altimate/workspace/engine-sync"
+import { engineVersionOf } from "../../../src/altimate/workspace/engine-probes"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 import type { ExistingEntry } from "../../../src/altimate/workspace/engine-sync"
 
@@ -1369,6 +1370,84 @@ describe("an answer is revalidated before it is given", () => {
     expect(h.restores).toHaveLength(1)
     expect(h.toasts.filter((t) => t.title.endsWith("connected"))).toHaveLength(1)
     expect(h.toasts.filter((t) => t.variant === "error")).toHaveLength(0)
+  })
+
+  test("a re-link during the reuse announcements is not answered with the old workspace", async () => {
+    // The reuse answer is fixed after the lookup and given after the
+    // missing-tools warning and the hosted-neighbours note, which are awaits.
+    // Same rule as the attached path: asked again after the last announcement.
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 }, // dbt_compile_model is declared but missing → a warning is announced
+    })
+    syncInternals.resolveBinding = async () => current
+    const prevNotify = syncInternals.notify!
+    syncInternals.notify = async (toast) => {
+      await prevNotify(toast)
+      if (toast.title.includes("missing declared tools")) current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    expect((await ensure("s1")).kind).toBe("superseded")
+    expect(h.removes, "left the old workspace's engine serving under the new binding").toEqual(["datamate"])
+    expect(h.added).toHaveLength(0)
+  })
+
+  test("a memo is re-probed when the running launch changes under an unchanged argv", async () => {
+    // Identity is the whole launch — a replacement with the same argv under a
+    // different PATH runs a different binary, and a cache keyed on argv alone
+    // would accept it without asking its version.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    let probes = 0
+    syncInternals.versionOf = async () => ((probes += 1), "0.7.0")
+    await ensure("s1") // reuse: probes once
+    await ensure("s1") // memo validation: probes once and records the launch identity
+    const validated = probes
+    await ensure("s1") // unchanged launch: no probe
+    expect(probes, "re-probed an unchanged launch").toBe(validated)
+    h.spawnedNow = {
+      type: "local",
+      command: ["datamate", "start-stdio", "--datamate", "42"],
+      environment: { PATH: "/somewhere/else/bin" },
+    } as never
+    await ensure("s1")
+    expect(probes, "accepted a replacement with the same argv under a different PATH without probing").toBe(validated + 1)
+  })
+
+  test("the undo keeps an entry that was rewritten AND disabled while it was held", async () => {
+    // Neither the new transport nor the disable is ours: projecting the disable
+    // onto what we replaced would overwrite the newer transport with the old one.
+    let current: CachedBinding | null = binding
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectEntry = async () =>
+      h.persisted.length
+        ? ({ type: "local", command: ["/their/datamate", "start-stdio", "--datamate", "42"], enabled: false } as ExistingEntry)
+        : null
+    const prevTools = syncInternals.mcp!.tools!
+    syncInternals.mcp!.tools = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return prevTools()
+    }
+    expect((await ensure("s1")).kind).toBe("superseded")
+    expect(h.restores, "overwrote a transport the user rewrote while we held the entry").toHaveLength(0)
+  })
+
+  test("the version probe resolves a relative cwd the way the engine is launched", async () => {
+    // MCP resolves a relative `cwd` against the instance directory. Probed
+    // against the process's own directory instead, a relative command or PATH
+    // entry can name a different binary than the one the engine runs.
+    const seen: Array<string | undefined> = []
+    syncInternals.instanceDirectory = () => "/proj/root"
+    syncInternals.versionOf = async (_bin, spawn) => ((seen.push(spawn?.cwd)), "0.7.0")
+    await engineVersionOf({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], cwd: "tools" } as ExistingEntry)
+    await engineVersionOf({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], cwd: "/abs/tools" } as ExistingEntry)
+    await engineVersionOf({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] } as ExistingEntry)
+    expect(seen).toEqual(["/proj/root/tools", "/abs/tools", undefined])
   })
 })
 

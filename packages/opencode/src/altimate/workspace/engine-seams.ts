@@ -16,6 +16,8 @@ export const syncInternals: {
   resolveBinding?: () => Promise<CachedBinding | null>
   which?: (cmd: string) => string | null
   versionOf?: (bin: string, spawn?: { environment?: Record<string, string>; cwd?: string }) => Promise<string | null>
+  /** The instance directory a relative launch `cwd` resolves against. */
+  instanceDirectory?: () => string | null
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
@@ -44,6 +46,7 @@ export function isEnabled(): boolean {
 }
 
 export function currentDirectory(): string | null {
+  if (syncInternals.instanceDirectory) return syncInternals.instanceDirectory()
   try {
     return Instance.directory
   } catch {

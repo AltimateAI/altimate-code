@@ -238,20 +238,25 @@ const IDENTITY_FIELDS: Record<Exclude<keyof ExistingEntry, "enabled">, true> = {
 }
 
 export function sameEntry(a: ExistingEntry | null | undefined, b: ExistingEntry | null | undefined): boolean {
-  const shape = (e: ExistingEntry | null | undefined) => {
-    const raw = (e ?? {}) as Record<string, unknown>
-    const parts: Record<string, unknown> = {
-      // `command` and `args` are compared as the argv they produce, since the
-      // same invocation can be spelled either way.
-      argv: commandArgv((e ?? null) as ExistingEntry | null),
-    }
-    for (const field of Object.keys(IDENTITY_FIELDS)) {
-      if (field === "command" || field === "args") continue
-      parts[field] = raw[field] ?? null
-    }
-    return JSON.stringify(parts)
+  return entryIdentity(a) === entryIdentity(b)
+}
+
+/** The identity of the process an entry describes, as one comparable string —
+ * the same fields `sameEntry` compares, usable as a cache key. A cache keyed
+ * on argv alone accepts a replacement with the same argv under a different
+ * PATH or working directory, which runs a different binary. */
+export function entryIdentity(e: ExistingEntry | null | undefined): string {
+  const raw = (e ?? {}) as Record<string, unknown>
+  const parts: Record<string, unknown> = {
+    // `command` and `args` are compared as the argv they produce, since the
+    // same invocation can be spelled either way.
+    argv: commandArgv((e ?? null) as ExistingEntry | null),
   }
-  return shape(a) === shape(b)
+  for (const field of Object.keys(IDENTITY_FIELDS)) {
+    if (field === "command" || field === "args") continue
+    parts[field] = raw[field] ?? null
+  }
+  return JSON.stringify(parts)
 }
 
 /** Is this engine version usable at all?
