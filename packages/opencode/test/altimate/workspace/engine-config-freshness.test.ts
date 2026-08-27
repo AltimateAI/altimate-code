@@ -13,39 +13,42 @@
 // This file mocks `Config` with a cache that only updates when invalidated, so
 // a stale read is directly observable: write to the "file", read, and see
 // whether the write is visible.
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import { Config } from "../../../src/config/config"
+import { existingEntry } from "../../../src/altimate/workspace/engine-config"
+import { syncInternals } from "../../../src/altimate/workspace/engine-seams"
 
+// Spies rather than a module mock. `mock.module` is registered process-wide and
+// cannot be unregistered, so mocking the config module from here took down every
+// later test file in the run that builds a real Config layer — a test file that
+// breaks unrelated suites is worse than the gap it closes.
 let fileContents: { mcp?: Record<string, unknown> } = {}
 let cached: { mcp?: Record<string, unknown> } | null = null
 let invalidations = 0
-
-mock.module("../../../src/config/config", () => ({
-  Config: {
-    // Models the real thing: `get()` is cached per instance and does NOT see a
-    // write made behind it until something invalidates.
-    get: async () => {
-      if (cached === null) cached = structuredClone(fileContents)
-      return cached
-    },
-    invalidate: async () => {
-      invalidations += 1
-      cached = null
-    },
-  },
-}))
-
-const { existingEntry } = await import("../../../src/altimate/workspace/engine-config")
-const { syncInternals } = await import("../../../src/altimate/workspace/engine-seams")
+let getSpy: ReturnType<typeof spyOn>
+let invalidateSpy: ReturnType<typeof spyOn>
 
 beforeEach(() => {
   fileContents = {}
   cached = null
   invalidations = 0
+  // Models the real thing: `get()` is cached per instance and does NOT see a
+  // write made behind it until something invalidates.
+  getSpy = spyOn(Config, "get").mockImplementation(async () => {
+    if (cached === null) cached = structuredClone(fileContents)
+    return cached as never
+  })
+  invalidateSpy = spyOn(Config, "invalidate").mockImplementation(async () => {
+    invalidations += 1
+    cached = null
+  })
   delete syncInternals.existingEntry
   delete syncInternals.freshConfig
 })
 
 afterEach(() => {
+  getSpy.mockRestore()
+  invalidateSpy.mockRestore()
   for (const key of Object.keys(syncInternals) as Array<keyof typeof syncInternals>) delete syncInternals[key]
 })
 
