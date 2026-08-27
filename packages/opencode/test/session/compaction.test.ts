@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
@@ -463,6 +463,16 @@ function autocontinue(enabled: boolean) {
 }
 
 describe("session.compaction.isOverflow", () => {
+  // These tests pin the RAW-limit boundary math, so disable the W3.1 estimator
+  // safety margin (fraction 1 = raw limit). Default-margin behavior is covered
+  // in compaction-safety-fraction.test.ts.
+  beforeAll(() => {
+    process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "1"
+  })
+  afterAll(() => {
+    delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+  })
+
   it.live(
     "returns true when token count exceeds usable context",
     provideTmpdirInstance(() =>
