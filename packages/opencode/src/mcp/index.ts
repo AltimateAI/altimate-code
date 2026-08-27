@@ -932,21 +932,32 @@ export const layer = Layer.effect(
 
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
+      // altimate_change start — the client this call is replacing, captured
+      // before creation. Creation awaits a handshake, and another caller can
+      // register its own client under this key meanwhile; a failure here must
+      // close what THIS call was replacing, not whatever is registered now.
+      const replacing = s.clients[name]
+      // altimate_change end
       const result = yield* create(name, mcp)
 
-      s.status[name] = result.status
       if (!result.mcpClient) {
+        // altimate_change start — a replacement that failed to come up leaves
+        // nothing running under this key ONLY if nobody else registered a client
+        // while it was coming up. If someone did, theirs is what is serving:
+        // leave it, its status and its launch record alone, and report this
+        // failure without touching them.
+        if (s.clients[name] !== replacing) return result.status
+        s.status[name] = result.status
         yield* closeClient(s, name)
         delete s.clients[name]
-        // altimate_change start — a replacement that failed to come up leaves
-        // nothing running under this key, so the record of what was running must
-        // go with it. `add` over a live client closes the old one here; keeping
-        // its record would have `spawned()` describe a closed process, which is
-        // the one thing this record exists not to do.
+        // `add` over a live client closes the old one here; keeping its record
+        // would have `spawned()` describe a closed process, which is the one
+        // thing this record exists not to do.
         delete s.spawned[name]
         // altimate_change end
         return result.status
       }
+      s.status[name] = result.status
 
       // altimate_change start — remember what we actually spawned, not what the
       // file says.

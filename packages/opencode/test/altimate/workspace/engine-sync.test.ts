@@ -79,8 +79,12 @@ function install(opts: {
     // A configured entry that is already CONNECTED was bootstrapped from that
     // entry, which is what MCP records. A failed one has no record: production
     // only records a spawn when the client actually came up.
-    spawnedNow: ((opts.statuses?.[0]?.["datamate"]?.status === "connected" ? opts.existing : undefined) ??
-      undefined) as ExistingEntry | undefined,
+    // A COPY, as in production: MCP's record is its own object, never the
+    // config entry itself. Aliasing them here would make "the runtime had a
+    // record" indistinguishable from "the runtime fell back to the config".
+    spawnedNow: (opts.statuses?.[0]?.["datamate"]?.status === "connected" && opts.existing
+      ? { ...opts.existing }
+      : undefined) as ExistingEntry | undefined,
   }
   syncInternals.resolveBinding = async () => (opts.binding === undefined ? binding : opts.binding)
   syncInternals.which = () => (opts.which === undefined ? "/usr/local/bin/datamate" : opts.which)
@@ -1448,6 +1452,32 @@ describe("an answer is revalidated before it is given", () => {
     await engineVersionOf({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], cwd: "/abs/tools" } as ExistingEntry)
     await engineVersionOf({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] } as ExistingEntry)
     expect(seen).toEqual(["/proj/root/tools", "/abs/tools", undefined])
+  })
+
+  test("a memo is not returned for a client that replaced the judged engine after the final binding read", async () => {
+    // Turn 2 validates the memo (reads the runtime record), then reads the
+    // binding one last time. A replacement landing between those two reads is
+    // what `resolveTools` will hand the model; the runtime is asked once more,
+    // last.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect((await ensure("s1")).kind).toBe("reused")
+    let bindingReads = 0
+    const prevBinding = syncInternals.resolveBinding!
+    syncInternals.resolveBinding = async () => {
+      bindingReads += 1
+      // attachKey, attachKeyWorkspace, then the final attachKeyWorkspace: the
+      // replacement lands as the last binding read is taken.
+      if (bindingReads === 3) h.spawnedNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] } as never
+      return prevBinding()
+    }
+    const second = await ensure("s1")
+    expect(bindingReads, "the staging assumed three binding reads on the memo path").toBeGreaterThanOrEqual(3)
+    expect(second.kind, "returned the memo for a client that had replaced the judged engine").not.toBe("reused")
+    expect(h.removes, "left the replacement registered under the cached attribution").toContain("datamate")
   })
 })
 

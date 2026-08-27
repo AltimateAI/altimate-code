@@ -1552,6 +1552,11 @@ type SessionAttach = {
   outcome?: Outcome
   /** The entry argv whose version we last verified against the floor. */
   validated?: string
+  /** The launch identity of the running engine the last memo validation
+   * judged — set only when the runtime had a record to judge. Compared once
+   * more after the final binding read, so the memo is not returned for a
+   * client that replaced it in between. */
+  judged?: string
 }
 
 /** Outcomes the user can repair without restarting: install the engine, update
@@ -1612,6 +1617,11 @@ async function memoStillValid(workspaceId: string, record?: SessionAttach): Prom
     // replacement with the same argv under a different PATH or working
     // directory runs a different binary, and must be probed again.
     const command = `${entryIdentity(running)}|${entryIdentity(configuredEntry(inspection))}`
+    // What was judged, for the caller's last question after its final binding
+    // read. Only when the runtime had a record — `runningEngine` falls back to
+    // the configured entry when it has none, and a later read of the record
+    // has nothing to disagree with in that case.
+    if (record) record.judged = running !== configuredEntry(inspection) ? entryIdentity(running) : undefined
     if (record && record.validated === command) return true
     const found = await engineVersionOf(running)
     if (!clearsFloor(found)) {
@@ -1750,8 +1760,19 @@ export function ensure(sessionID: string): Promise<Outcome> {
       // path lives outside `run()` and therefore never had its final check;
       // without one, a confirmed-valid engine for the workspace we just left is
       // returned as the answer for the one we just joined.
-      if (reusable && (await attachKeyWorkspace()) === boundTo) return previous!.task
-      log.info("cached attach is no longer connected; re-attaching", { sessionID })
+      if (reusable && (await attachKeyWorkspace()) === boundTo) {
+        // The memo names an engine, so it is given only after the same two
+        // questions every named answer asks. The binding was just confirmed;
+        // the runtime record was read inside the validation, one binding read
+        // ago — and the MCP route or the IDE's reload can replace the client
+        // in that gap. Asked again, last, because what is registered now is
+        // what `resolveTools` will hand the model.
+        const servingNow = entry.judged ? await mcp().spawned?.(DATAMATE_KEY).catch(() => undefined) : undefined
+        if (!entry.judged || (servingNow && entryIdentity(servingNow) === entry.judged)) return previous!.task
+        log.info("the running engine changed after the memo was validated; re-attaching", { sessionID })
+      } else {
+        log.info("cached attach is no longer connected; re-attaching", { sessionID })
+      }
     }
     // Recomputed AFTER the awaited validation above: a re-link landing inside it
     // would otherwise file this fresh attach under the workspace key it started

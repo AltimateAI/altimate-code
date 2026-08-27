@@ -4,7 +4,7 @@ import os, { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
 import { expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
 import { ListRootsRequestSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Fiber } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { testEffect } from "../lib/effect"
 import { TestInstance } from "../fixture/fixture"
@@ -1291,6 +1291,40 @@ it.instance(
         expect(localCommand(yield* mcp.spawned("spawnrec2"))).toEqual(["echo", "launched"])
       }),
     ),
+)
+
+it.instance(
+  "a replacement that fails does not close a client another caller registered while it was coming up",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // Creation awaits a handshake, and nothing serializes adds to one key
+        // across callers: the MCP route and an IDE reload can register their
+        // own client under it meanwhile. A failed creation must close what IT
+        // was replacing, not whatever is registered by the time it fails —
+        // otherwise it closes the other caller's successful client and drops
+        // the record of what is actually running.
+        lastCreatedClientName = "racing"
+        getOrCreateClientState("racing")
+        yield* mcp.add("racing", { type: "local", command: ["echo", "one"] })
+
+        connectShouldHang = true
+        const slow = yield* Effect.forkChild(mcp.add("racing", { type: "local", command: ["echo", "two"], timeout: 100 }))
+        yield* Effect.sleep("20 millis") // let the slow add reach its (hanging) connect
+        connectShouldHang = false
+        yield* mcp.add("racing", { type: "local", command: ["echo", "three"] })
+        expect(localCommand(yield* mcp.spawned("racing"))).toEqual(["echo", "three"])
+
+        yield* Fiber.join(slow) // times out → the failure path
+        const clients = yield* mcp.clients()
+        expect(clients["racing"], "the failed replacement closed the client another caller registered").toBeDefined()
+        expect(localCommand(yield* mcp.spawned("racing")), "the failed replacement dropped the record of what is running").toEqual([
+          "echo",
+          "three",
+        ])
+      }),
+    ),
+  { config: { mcp: {} } },
 )
 // altimate_change end
 
