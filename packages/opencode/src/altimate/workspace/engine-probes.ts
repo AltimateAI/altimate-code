@@ -117,8 +117,8 @@ export async function declared(datamateId: string): Promise<Declared | null> {
  * `MCP.add` stores the client but publishes nothing, so nothing downstream could
  * even observe a late attach. This restores that signal.
  *
- * What it does NOT do, stated plainly because this module claimed otherwise for
- * several revisions: it does not give tools to the invocation already running.
+ * What it does NOT do, stated plainly because the name suggests otherwise: it
+ * does not give tools to the invocation already running.
  * That turn's tool set was passed to the model before the attach finished and
  * cannot be rebuilt mid-call — the session's subscriber only logs, and the next
  * `resolveTools` is what picks the tools up. So exceeding the bounded wait costs

@@ -84,7 +84,7 @@ describe("INVARIANT — a config read observes writes made behind it", () => {
   })
 })
 
-describe("INVARIANT #13 at the reader — a failed read propagates, never becomes null", () => {
+describe("INVARIANT — a failed read propagates, never becomes null", () => {
   test("a config read that throws does not arrive at the caller as 'there is no entry'", async () => {
     // The layer that matters. A guard above this one was written to fail closed
     // on a throwing intent read — and could never fire, because this reader

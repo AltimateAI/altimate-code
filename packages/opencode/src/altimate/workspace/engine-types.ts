@@ -10,10 +10,7 @@ import { DATAMATE_KEY } from "@/altimate/datamate-transport"
  * 0.7.0 is the first engine that LOCKS the `--datamate` pin, so a settings
  * change cannot swap the workspace out from under a running engine. Everything
  * below it can drift, which is precisely what the attribution check in rule 1
- * exists to exclude — so the floor and that check are one mechanism, not two.
- *
- * SEQUENCING: this must not ship before `@altimateai/datamate` 0.7.0 is on npm,
- * or every bound user gets `engine-too-old` for a version they cannot install. */
+ * exists to exclude — so the floor and that check are one mechanism, not two. */
 export const MIN_ENGINE_VERSION = "0.7.0"
 export const INSTALL_HINT = "npm i -g @altimateai/datamate"
 export const ENGINE_BINARY = "datamate"
@@ -217,7 +214,7 @@ export function clearsFloor(version: string | null): boolean {
  * fails to compile until every table names it, and a removed one fails too. That
  * holds regardless of tsconfig strictness, which a `switch` with no default does
  * not. The safe answer is `false` in both tables, so the compiler asks the
- * question and the reviewer answers it deliberately. */
+ * question and the answer is chosen deliberately. */
 export const SERVING: Record<Outcome["kind"], boolean> = {
   attached: true,
   reused: true,

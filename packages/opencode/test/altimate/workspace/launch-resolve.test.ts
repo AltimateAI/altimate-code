@@ -144,7 +144,7 @@ describe("resolveWorkspaceForLaunch", () => {
     expect(getResolvedWorkspaceId()).toBe(42)
   })
 
-  test("mismatched name → env var STILL set (attaches to linked workspace with a note per AI-8504 spec)", async () => {
+  test("a mismatched name still attaches to the linked workspace, with a note", async () => {
     await resolveWorkspaceForLaunch(DIRECTORY, "Other")
     expect(getResolvedWorkspaceId()).toBe(42)
   })

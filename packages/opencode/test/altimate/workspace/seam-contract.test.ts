@@ -1,4 +1,4 @@
-// Gate lens 5 — adversarial probes of the `settledOutcome` seam and the
+// The `settledOutcome` seam and the
 // `pinnedWorkspace` parser against the precedence contract. Disposable.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
@@ -117,7 +117,7 @@ afterEach(() => {
 })
 
 // ───────────────────────────── P1: pure synchronous read ─────────────────────────────
-describe("P1 — settledOutcome is a pure synchronous read", () => {
+describe("settledOutcome is a pure synchronous read", () => {
   test("is a plain function whose body has no await/then and never touches the task", () => {
     expect(settledOutcome.constructor.name).toBe("Function")
     const src = settledOutcome.toString()
@@ -148,7 +148,7 @@ describe("P1 — settledOutcome is a pure synchronous read", () => {
 })
 
 // ───────────────────── P2: undefined means "not settled", never stale ─────────────────────
-describe("P2 — undefined for in-flight AND never-attached; no premature or stale write", () => {
+describe("undefined means in flight or never attached, and is never written early", () => {
   test("never attached → undefined; attributableEngine(undefined) → false", () => {
     expect(settledOutcome("nobody")).toBeUndefined()
     expect(attributableEngine(undefined)).toBe(false)
@@ -229,7 +229,7 @@ describe("P2 — undefined for in-flight AND never-attached; no premature or sta
     expect(settledOutcome("s1")).toBe(oa)
   })
 
-  test("OBSERVATION: on every later turn the memo is replaced by a fresh entry, so the seam reads undefined during re-validation", async () => {
+  test("the seam reads undefined while a memo is being re-validated", async () => {
     const h = install({ statuses: [{}, connected, connected, connected], tools: { datamate_dbt_build_model: 1 } })
     const first = await ensure("s1")
     expect(settledOutcome("s1")).toBe(first)
@@ -247,7 +247,7 @@ describe("P2 — undefined for in-flight AND never-attached; no premature or sta
 })
 
 // ───────────────────────────── P3: allowlist {attached, reused} ─────────────────────────────
-describe("P3 — the allowlist is exactly {attached, reused}", () => {
+describe("only attached and reused are attributable", () => {
   test("SERVING is true for exactly the consumer's two kinds", () => {
     const serving = Object.entries(SERVING)
       .filter(([, v]) => v)
@@ -281,7 +281,7 @@ describe("P3 — the allowlist is exactly {attached, reused}", () => {
 })
 
 // ─────────────────────── P4: describes the engine serving THIS session ───────────────────────
-describe("P4 — the outcome describes the engine actually serving this session", () => {
+describe("the outcome describes the engine actually serving this session", () => {
   test("`reused` is only emitted when the live entry's pin equals this binding; any other pin is replaced", async () => {
     const cases: Array<{ name: string; entry: ExistingEntry; want: "reused" | "attached" }> = [
       { name: "pinned to us", entry: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] }, want: "reused" },
@@ -371,7 +371,7 @@ describe("P4 — the outcome describes the engine actually serving this session"
     expect(second).not.toBe(first)
   })
 
-  test("OBSERVATION: the pin compared is the CONFIG entry's; MCP.status carries no argv, so a config-only rewrite is indistinguishable from a reconnect", async () => {
+  test("a config-only rewrite is indistinguishable from a reconnect through status alone", async () => {
     // Harness: config says pinned-to-42 and status says connected. Nothing in
     // run() can tell whether the connected process was launched with that argv.
     install({
@@ -385,7 +385,7 @@ describe("P4 — the outcome describes the engine actually serving this session"
 })
 
 // ───────────────────────────── P5: keyed by session ID ─────────────────────────────
-describe("P5 — keyed by session ID", () => {
+describe("attribution is keyed by session id", () => {
   test("two sessions in one project hold distinct outcomes", async () => {
     const h = install({ statuses: [{}, connected, connected, connected], tools: { datamate_dbt_build_model: 1 } })
     await ensure("s1") // spawns → attached
@@ -407,7 +407,7 @@ describe("P5 — keyed by session ID", () => {
     expect(settledOutcome("s1")).toMatchObject({ kind: "attached" })
   })
 
-  test("OBSERVATION: eviction can drop a settled outcome while the session is live (fails open)", async () => {
+  test("eviction may drop a settled outcome while its session is live, and fails open", async () => {
     install({ statuses: [{}, connected], tools: { datamate_dbt_build_model: 1 } })
     await ensure("s1")
     expect(settledOutcome("s1")).toMatchObject({ kind: "attached" })
@@ -417,7 +417,7 @@ describe("P5 — keyed by session ID", () => {
     expect(settledOutcome("s1")).toBeUndefined()
   })
 
-  test("OBSERVATION: another session's teardown leaves this session's settled `attached` stale until its next turn", async () => {
+  test("another session's teardown leaves this session's outcome stale until its next turn", async () => {
     const h = install({ statuses: [{}, connected, connected, connected], tools: { datamate_dbt_build_model: 1 } })
     await ensure("s1")
     syncInternals.existingEntry = async () => ({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false })
@@ -431,7 +431,7 @@ describe("P5 — keyed by session ID", () => {
 })
 
 // ───────────────────────────── P6: pinnedWorkspace table ─────────────────────────────
-describe("P6 — pinnedWorkspace over every argv shape", () => {
+describe("the pin is read from every argv shape", () => {
   const table: Array<{ name: string; entry: unknown; want: string | null | "THROWS" }> = [
     // contract shapes
     { name: "opencode argv, two tokens", entry: { type: "local", command: ["datamate", "start-stdio", "--datamate", "5"] }, want: "5" },
@@ -501,7 +501,7 @@ describe("P6 — pinnedWorkspace over every argv shape", () => {
 
 // ───────────── 2d8bea2d0: the connect-retry re-inspection vs the memo ─────────────
 describe("the retry re-inspects, and never writes the memo early or twice", () => {
-  // ADAPTED ON LIFT. These were written against `MCP.connect`, which the retry
+  // The retry
   // no longer uses: connect writes `enabled: true` into whichever config owns
   // the entry, so a local repair became a global config write, and it started
   // whatever MCP had retained rather than the entry the decision examined. The

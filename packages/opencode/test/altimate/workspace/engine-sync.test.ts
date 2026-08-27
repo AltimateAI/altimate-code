@@ -109,10 +109,9 @@ function install(opts: {
     h.restorePaths.push(configPath)
   }
   // The project file has no entry of its own unless a test says otherwise. This
-  // used to be supplied by accident: the real reader swallowed its own errors
-  // and returned null, so an unstubbed harness looked like an empty project
-  // file. It now throws, because "there was nothing here" and "I could not
-  // look" mean opposite things to a restore.
+  // must be stated rather than left to the reader's error handling: "there was
+  // nothing here" and "I could not look" mean opposite things to a restore, so
+  // the reader throws and the harness says which case it wants.
   syncInternals.projectEntry = async () => null
   syncInternals.projectConfigPath = async () => "/tmp/test/.altimate-code/altimate-code.json"
   syncInternals.mcp = {
@@ -715,7 +714,7 @@ describe("ensure — reuse reports the declared-vs-delivered gap (rule 5)", () =
 
 describe("ensure — an unbound project does not keep a stale MANAGED entry", () => {
   test("a pinned entry is LEFT ALONE when the binding is gone — argv is not provenance", async () => {
-    // Reversed deliberately in round 5: a hand-authored entry is byte-identical
+    // A hand-authored entry is byte-identical
     // to one we wrote, so tearing it down would take the user's server offline.
     const h = install({
       binding: null,
@@ -879,14 +878,14 @@ describe("ensure — a superseded attach cannot overwrite the current one", () =
   })
 })
 
-describe("ensure — round 4", () => {
+describe("a deliberate disable is respected", () => {
   test("an explicitly disabled entry is respected, never silently re-enabled", async () => {
     // MCP.connect persists `enabled: true` into whichever config owns the entry,
     // so retrying a DISABLED entry would undo a deliberate global disable for
     // every other project.
     const h = install({
       // A real user disable is `enabled: false` in the config. The runtime
-      // status alone is not evidence of intent — see the round-5 test below.
+      // status alone is not evidence of intent.
       existing: { type: "local", command: ["datamate", "start-stdio"], enabled: false },
       statuses: [{ datamate: { status: "disabled" } }],
     })
@@ -935,12 +934,12 @@ describe("ensure — round 4", () => {
   })
 })
 
-describe("ensure — round 5", () => {
+describe("what may be torn down, and what may not", () => {
   test("a REMOVED entry is not mistaken for a user disable — repair still works", async () => {
     // MCP.remove deletes s.status[name], and MCP.status() reports a configured
     // entry with no status as "disabled". Reading that as user intent made every
     // turn after a rejection teardown return entry-disabled, permanently —
-    // silently undoing the repairable-retry fix from the previous round.
+    // silently undoing the repairable retry.
     let onPath: string | null = null
     const h = install({
       existing: { type: "local", command: ["datamate", "start-stdio"] }, // unpinned -> rejected
@@ -998,10 +997,10 @@ describe("ensure — round 5", () => {
   })
 })
 
-describe("ensure — round 6: a stale binding must not be installed", () => {
+describe("a stale binding is never installed", () => {
   test("a re-link DURING an attach abandons it instead of installing the old workspace", async () => {
     // run() snapshots the binding, then spends seconds in status, version and
-    // API work before persisting. A re-link inside that window used to install
+    // API work before persisting. A re-link inside that window would install
     // the workspace the session had already left.
     let current: CachedBinding | null = binding // 42
     const h = install({
@@ -1031,7 +1030,7 @@ describe("ensure — round 6: a stale binding must not be installed", () => {
   })
 })
 
-describe("ensure — round 7", () => {
+describe("an unexpected failure still reaches the user", () => {
   test("an unexpected attach error still tells the user", async () => {
     // Every explicit failure branch notifies; an unexpected throw must not be
     // the one path that leaves the user with neither tools nor an explanation.
@@ -1047,7 +1046,7 @@ describe("ensure — round 7", () => {
   })
 })
 
-describe("ensure — round 8", () => {
+describe("a malformed version is refused", () => {
   test("a malformed core is refused, not treated as equal to the floor", () => {
     // parseInt("7rc") is 7, so "0.7rc.0" compared EQUAL to a 0.7.0 floor, and a
     // bare "1" won on major before its missing components were examined.
@@ -1111,7 +1110,7 @@ describe("settledOutcome — a read-only view for other modules", () => {
   })
 })
 
-describe("ensure — round 9", () => {
+describe("intent and connectivity disagree in both directions", () => {
   test("a live disconnect is honoured even when the config cache is stale", async () => {
     // MCP.disconnect writes enabled:false to disk without invalidating Config,
     // so the cached entry still says enabled:true. Believing the cache would
@@ -1149,7 +1148,7 @@ describe("ensure — round 9", () => {
   })
 })
 
-describe("ensure — round 10", () => {
+describe("announcing, bounding, and reading config fresh", () => {
   test("a successful add announces the new tools", async () => {
     // MCP.add stores the client but publishes nothing, so a late attach — after
     // the bounded wait expired, or on a repair retry — left the session with
@@ -1194,9 +1193,9 @@ describe("ensure — round 10", () => {
   })
 })
 
-describe("ensure — round 11", () => {
+describe("a stalled catalog lookup never blocks the engine", () => {
   test("a stalled catalog lookup cannot block the REUSE path either", async () => {
-    // The bound added last round covered only the fresh-spawn path; a compatible
+    // A bound that covers only the fresh-spawn path leaves a compatible
     // pinned engine still awaited the lookup with no limit, and the generic API
     // request attaches no abort signal at all.
     const h = install({
@@ -1212,7 +1211,7 @@ describe("ensure — round 11", () => {
   })
 })
 
-describe("ensure — round 12", () => {
+describe("config is read before the status it is judged against", () => {
   test("an externally added entry is seen even when MCP status has not caught up", async () => {
     // MCP.status() reads the same cached config as everything else, so an entry
     // an IDE adds after the cache is warm is absent from status. Without a fresh
@@ -1240,7 +1239,7 @@ describe("ensure — round 12", () => {
   })
 })
 
-describe("ensure — round 13", () => {
+describe("an answer is revalidated before it is given", () => {
   test("a re-link during the reuse lookup is not answered with the old workspace", async () => {
     // The reuse branch awaits the allowlist lookup for up to the bound. Returning
     // `reused` afterwards asserts the connected engine serves the CURRENT binding
@@ -1262,7 +1261,7 @@ describe("ensure — round 13", () => {
   })
 })
 
-describe("ensure — round 14", () => {
+describe("a cached success is re-probed against the floor", () => {
   test("a cached success stops being trusted if the engine drops below the floor", async () => {
     // The pin is only trustworthy because the floor is: engines below it do not
     // lock the pin. An entry reconnected behind the same pin with a pre-floor
@@ -1557,7 +1556,7 @@ describe("INVARIANT — a cached success is re-probed and re-attributed", () => 
   }
 })
 
-describe("ensure — round 18", () => {
+describe("a cached success is re-attributed before it is served", () => {
   test("a re-link DURING cached-success validation is not answered with the old workspace", async () => {
     // The memoised-success path does its own awaited validation outside run(),
     // so it never had run()'s final binding check. Status, config and version
@@ -1735,10 +1734,9 @@ describe("INVARIANT — every outcome answers both consumer questions deliberate
 
 describe("INVARIANT — the entry decision is ordered by authority and cannot await", () => {
   // The order is the contract: intent > connectivity > attribution > version.
-  // Three review rounds each found one of these checks on the wrong side of
-  // another, and every one of those defects was reachable only because an await
-  // separated them. These assert the order directly, on the function that has
-  // no awaits to separate anything.
+  // Each check is defeated by sitting on the wrong side of another, and an
+  // await between them is what lets that happen. These assert the order
+  // directly, on the function that has no awaits to separate anything.
   const live = { status: "connected" }
   const ours = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true }
   const theirs = { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"], enabled: true }
@@ -1815,9 +1813,8 @@ describe("INVARIANT — the config-writing repair primitive is unreachable", () 
   // local decision — and a disable landing in its window was destroyed on disk
   // with nothing to repair it. The flow revives with `add`, which writes nothing.
   //
-  // This used to be a set of scenarios asserting the primitive was not CALLED.
-  // It is now asserted at compile time instead, which is strictly stronger: the
-  // seam does not carry `connect` at all, so a future call cannot be written.
+  // Asserted at compile time rather than by scenario: the seam does not carry
+  // `connect` at all, so a future call cannot be written.
   // The `@ts-expect-error` is the test — if someone puts the member back, it
   // becomes unused and the build fails.
   test("the seam does not expose it, so it cannot be called", () => {
@@ -2197,10 +2194,10 @@ describe("INVARIANT — announcing never changes what happened", () => {
 
 describe("INVARIANT — a rejected engine is detached even when the rejection is a failure to know", () => {
   test("a probe that THROWS detaches and refuses, and says so once across turns", async () => {
-    // Letting the probe's throw propagate reached the catch-all BEFORE any
-    // teardown, so a persistent failure produced a toast on every turn while the
-    // rejected client stayed registered and serving — the outcome is advice, the
-    // registration is what the model sees.
+    // A probe throw that propagates reaches the catch-all BEFORE any teardown,
+    // so a persistent failure toasts every turn while the rejected client stays
+    // registered and serving — the outcome is advice, the registration is what
+    // the model sees.
     const h = install({
       existing: { type: "local", command: ["/opt/datamate", "start-stdio", "--datamate", "42"], enabled: true },
       statuses: [{ datamate: { status: "connected" } }],
@@ -2279,9 +2276,8 @@ describe("INVARIANT #13 as a property — every seam, made to throw", () => {
   // Stated once over the whole seam list rather than as a handful of cases,
   // because the defect this catches is not a wrong answer but a MISSING
   // question: nothing else here asks what a function does when a read fails.
-  // Two instances survived nineteen review rounds on this branch and two more
-  // on a sibling, and none of ordering, completeness, staleness or adjacency
-  // could see any of them — they all test what happens when reads succeed.
+  // Ordering, completeness, staleness and adjacency all test what happens when
+  // reads SUCCEED, so none of them can see this class at all.
   //
   // Three things must hold for every seam:
   //   1. no mutation is performed on the strength of a failed read;
@@ -2354,11 +2350,11 @@ describe("INVARIANT #13 as a property — every seam, made to throw", () => {
 describe("INVARIANT — an unbound project stays silent, whatever fails inside it", () => {
   test("an unreadable config in a project with no binding does not announce, on any turn", async () => {
     // The module is documented inert when nothing is linked, and most projects
-    // are not linked. Making the config reader propagate was right for the paths
-    // that DECIDE on it — and this diagnostic read, which produces a log line
-    // and nothing else, silently inherited it: the failure escaped to the
-    // catch-all and announced "attach failed" in a project that never wanted an
-    // attach. `connect-failed` is repairable, so it announced again every turn.
+    // are not linked. The config reader propagates for the paths that DECIDE on
+    // it; this read produces a log line and nothing else, so a failure here must
+    // not escape to the catch-all and announce "attach failed" in a project that
+    // never wanted an attach — `connect-failed` is repairable, so it would
+    // announce again every turn.
     const h = install({
       binding: null,
       statuses: [{ datamate: { status: "connected" } }],
@@ -2512,8 +2508,8 @@ describe("INVARIANT — the coverage the mutants demanded", () => {
 describe("INVARIANT — a revive is an install and owns its undo", () => {
   test("a throw after a successful revive removes the client we started", async () => {
     // One external failure, not two: the revive succeeds and the very next read
-    // throws. Before, that propagated to the catch-all with the client WE had
-    // just started still registered and serving — the outcome says failed, the
+    // throws. That must not reach the catch-all with the client WE just started
+    // still registered and serving — the outcome would say failed while the
     // registration says otherwise, and the registration is what the model sees.
     const h = install({
       existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
@@ -2572,7 +2568,7 @@ describe("INVARIANT — an undo that fails is never silent, however it fails", (
   })
 })
 
-describe("INVARIANT — codex round 1: identity and paths are resolved once", () => {
+describe("INVARIANT — identity and paths are resolved once", () => {
   test("a re-link is not silenced by the same refusal about the workspace it left", async () => {
     // The dedupe record is carried across a re-link, so without the workspace in
     // the key an identical-kind refusal about A silences B — and the user is
@@ -2595,8 +2591,8 @@ describe("INVARIANT — codex round 1: identity and paths are resolved once", ()
     const seen: Array<string | undefined> = []
     syncInternals.resolveBinding = async () => current
     syncInternals.projectConfigPath = async () => "/tmp/one/.altimate-code/altimate-code.json"
-    syncInternals.projectEntry = async () => {
-      seen.push("projectEntry")
+    syncInternals.projectEntry = async (configPath?: string) => {
+      seen.push(configPath)
       return null
     }
     const prevAdd = syncInternals.mcp!.add
@@ -2608,6 +2604,13 @@ describe("INVARIANT — codex round 1: identity and paths are resolved once", ()
     // Resolving twice lets the snapshot come from one file while the write goes
     // to another, after which the undo restores the first file's entry into the
     // second — over whatever the user had there.
+    // The snapshot, the write and the undo must all name the same file.
+    // Both reads — the snapshot before the write and the undo's own re-read —
+    // name the file the write will use.
+    expect(new Set(seen), "a project read used a path resolved separately").toEqual(
+      new Set(["/tmp/one/.altimate-code/altimate-code.json"]),
+    )
+    expect(seen.length).toBeGreaterThan(0)
     expect(h.restorePaths, "the undo used a path other than the one the write used").toEqual([
       "/tmp/one/.altimate-code/altimate-code.json",
     ])

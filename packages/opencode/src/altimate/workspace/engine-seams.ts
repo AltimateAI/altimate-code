@@ -30,7 +30,7 @@ export const syncInternals: {
     previous: ExistingEntry | null,
     configPath?: string,
   ) => Promise<void | "restored" | "failed">
-  projectEntry?: () => Promise<ExistingEntry | null>
+  projectEntry?: (configPath?: string) => Promise<ExistingEntry | null>
   /** The configured (merged) MCP entry under `name`, or null if none. */
   existingEntry?: (name: string) => Promise<ExistingEntry | null>
   freshConfig?: () => Promise<{ mcp?: Record<string, ExistingEntry | undefined> }>

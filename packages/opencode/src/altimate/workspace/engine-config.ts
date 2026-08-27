@@ -1,8 +1,8 @@
 // altimate_change - new file
 //
 // The module's only path to configuration. Every read refreshes first, because
-// this file has been bitten three times by a cached read after someone else's
-// write, and the writers cannot be enumerated.
+// a cached read after someone else's write is wrong in every case here, and the
+// writers cannot be enumerated.
 import { Config } from "@/config/config"
 import { addMcpToConfig, readMcpEntryFromDisk, removeMcpFromConfig, resolveConfigPath } from "@/mcp/config"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
@@ -62,11 +62,10 @@ export async function persist(name: string, cfg: LocalMcpConfig, configPath?: st
 
 /** The module's ONLY path to config, and it is always fresh.
  *
- * `Config.get()` is cached per instance, and this module has now been bitten
- * three times by reading it after someone else wrote: our own `addMcpToConfig`,
- * `MCP.disconnect` writing `enabled: false`, and an IDE rewriting the entry —
- * which never goes through `Config` at all. Two of those defeated a fix from an
- * earlier round.
+ * `Config.get()` is cached per instance, and three different writers land
+ * behind it: our own `addMcpToConfig`, `MCP.disconnect` writing
+ * `enabled: false`, and an IDE rewriting the entry — which never goes through
+ * `Config` at all.
  *
  * Enumerating the writers is therefore not possible, so freshness is structural
  * at the point of READ rather than remembered at each write site. The cost is
@@ -88,7 +87,10 @@ export async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntr
  * shadows every later global update, disable or removal, from an attach that was
  * meant to leave configuration untouched. */
 export async function projectEntry(configPath?: string): Promise<ExistingEntry | null> {
-  if (syncInternals.projectEntry) return syncInternals.projectEntry()
+  // The seam takes the path too, so a test can assert the snapshot is read from
+  // the file the write will use. A seam that never receives the argument makes
+  // dropping it invisible.
+  if (syncInternals.projectEntry) return syncInternals.projectEntry(configPath)
   // THROWS rather than returning null on a read error, because the two answers
   // mean opposite things to the caller: `null` says "the project file has no
   // entry of its own", and a restore acts on that by REMOVING ours. Conflating

@@ -124,11 +124,10 @@ export { trackedChainsForTests } from "./engine-chain"
  *
  * The order below is the contract, and it is the part of this module with the
  * worst history: intent outranks connectivity, connectivity outranks
- * attribution, attribution outranks version. Three separate review rounds each
- * found one of those checks sitting on the wrong side of another, and each time
- * the defect was reachable only because an await separated them — a config read,
- * a status call, a version probe. A function that cannot await cannot reorder
- * itself, so those defects stop being possible rather than being fixed again.
+ * attribution, attribution outranks version. Each of those checks is defeated
+ * by sitting on the wrong side of another, and an await between them — a config
+ * read, a status call, a version probe — is what lets that happen. A function
+ * that cannot await cannot reorder itself.
  *
  * `retried` is why "one retry, never two" is a property here rather than a
  * branch someone has to remember not to re-enter. */
@@ -499,11 +498,9 @@ async function run(sessionID: string): Promise<Outcome> {
     try {
       entryNow = await existingEntry(DATAMATE_KEY)
     } catch (err) {
-      // Fails CLOSED. The previous version caught this to `null`, and `null`
-      // does not look disabled — so a config read that merely FAILED was read as
-      // permission to write, and the guard was defeated by the read breaking
-      // rather than by the timing window it was built for. If intent cannot be
-      // confirmed, nothing is written.
+      // Fails CLOSED. `null` from this read means "there is no entry", which
+      // reads as permission to write — so a read that merely FAILED must not
+      // produce it. If intent cannot be confirmed, nothing is written.
       log.warn("could not confirm intent before mutating; abandoning the attach", {
         workspaceId,
         err: String(err),
@@ -597,11 +594,10 @@ async function run(sessionID: string): Promise<Outcome> {
   }
   /** Abandon an install without trace.
    *
-   * Both halves, together, because they were fixed one round apart: a supersede
-   * that undid only the runtime left our pin on disk, and MCP bootstrap starts
-   * every enabled entry — so a restart before the next attach would start the
-   * workspace this project had just walked away from. Naming them as one
-   * operation is what stops the next caller from remembering only one.
+   * Both halves, together. A supersede that undoes only the runtime leaves our
+   * pin on disk, and MCP bootstrap starts every enabled entry — so a restart
+   * before the next attach starts the workspace this project walked away from.
+   * Naming them as one operation is what stops a caller remembering only one.
    *
    * `projectBefore` is the PROJECT file's own entry, not the merged view.
    * Restoring the merged value writes a copy of a global entry into the project,
@@ -671,10 +667,9 @@ async function run(sessionID: string): Promise<Outcome> {
     // waits on a person would hold a rejected client connected until they
     // clicked. Stop serving first, explain second.
     if (detach) await detachRejected(detach, bindingDependent)
-    // Revalidate before answering — round 13's rule, which covered two of seven
-    // answers because only `reused` and `attached` applied it. A refusal is an
-    // answer too: a re-link during the config read produced `engine-missing` for
-    // the workspace the project had just left, and a toast naming it.
+    // Revalidate before answering. A refusal is an answer: without this, a
+    // re-link during the config read reports `engine-missing` for the workspace
+    // the project has just left, and toasts a message naming it.
     if (!(await stillCurrent())) {
       log.info("binding changed before this refusal could be reported; not answering for the old workspace", {
         workspaceId,
@@ -693,10 +688,9 @@ async function run(sessionID: string): Promise<Outcome> {
   // over theirs. Refreshing first is what makes the status gate trustworthy.
   // Intent, then connectivity, then attribution, then version.
   //
-  // That order is what this flow kept getting wrong: three separate review
-  // rounds each moved one of these checks past another, and every one of those
-  // mistakes was possible only because the checks were separated by an await.
-  // `planForEntry` cannot await, so none of them is expressible against it.
+  // Each check is defeated by sitting on the wrong side of another, and an
+  // await between them is what lets that happen. `planForEntry` cannot await,
+  // so no such reordering is expressible against it.
   //
   // The entry is read BEFORE the status it is judged against. `existingEntry`
   // refreshes the config cache that `MCP.status()` then reads, so an entry an
@@ -765,9 +759,9 @@ async function run(sessionID: string): Promise<Outcome> {
     // have moved in both halves while we were starting a process.
     //
     // A revive is an install, so it owns its undo like one. A throw in the
-    // re-inspection used to propagate straight to the catch-all with the client
-    // WE had just started still registered and serving — one external failure,
-    // not two, and the same advice-versus-registration split as everywhere else.
+    // re-inspection must not reach the catch-all with the client we just
+    // started still registered: the outcome is advice, the registration is what
+    // the model sees.
     try {
       inspection = await inspectEntry()
     } catch (err) {
@@ -971,9 +965,9 @@ async function run(sessionID: string): Promise<Outcome> {
     })
     // Binding-INDEPENDENT, exactly like its irreplaceable sibling: an engine
     // below the floor serves nobody correctly, whatever the project is bound to
-    // now. Only this branch kept the default, so a re-link during the version
-    // probes skipped the teardown and left a too-old client connected and
-    // serving while the outcome said `superseded` — silently.
+    // now. Gating this on the binding would let a re-link during the version
+    // probes leave a too-old client connected and serving under a silent
+    // `superseded`.
     await detachRejected({ workspaceId, reason: "below-floor-replaceable", found }, false)
   }
 
@@ -1024,11 +1018,11 @@ async function run(sessionID: string): Promise<Outcome> {
   // mutations it guards.
   // Everything readable is read HERE, above the guard. `persist` otherwise
   // probes up to nine candidate config paths on disk between the check and the
-  // write it protects — round 19's defect one call deeper than round 19 looked.
+  // write it protects, which is a window a re-link can land in.
   // If we cannot record what to put back, we do not write. An unreadable
-  // project config previously read as "no entry here", which a later restore
-  // acts on by REMOVING — so a transient read failure could delete the user's
-  // own entry as the undo of an attach that was meant to leave it alone.
+  // config read that fails must not read as "no entry here": a later restore
+  // acts on that by REMOVING, so it would delete the user's own entry as the
+  // undo of an attach meant to leave it alone.
   // The path FIRST, and then the snapshot read from that exact path. Resolving
   // twice means the snapshot can come from one file while the write goes to
   // another — an IDE creating or removing a higher-priority config between the
@@ -1046,9 +1040,9 @@ async function run(sessionID: string): Promise<Outcome> {
     return await refuseUnreadable(`config path could not be resolved: ${String(err)}`)
   }
   // If we cannot record what to put back, we do not write. An unreadable
-  // project config previously read as "no entry here", which a later restore
-  // acts on by REMOVING — so a transient read failure could delete the user's
-  // own entry as the undo of an attach that was meant to leave it alone.
+  // config read that fails must not read as "no entry here": a later restore
+  // acts on that by REMOVING, so it would delete the user's own entry as the
+  // undo of an attach meant to leave it alone.
   let projectBefore: ExistingEntry | null
   try {
     projectBefore = await projectEntry(configPath)
@@ -1099,13 +1093,12 @@ async function run(sessionID: string): Promise<Outcome> {
   let undone = false
   /** Give back both halves, once, before anything else happens.
    *
-   * In-region refusals used to announce and let the `finally` tear down
-   * afterwards, which inverts the rule `refuse` states for every other exit:
-   * stop serving first, explain second. It is harmless while the announcement
-   * is a toast and a failed client exports nothing — but the announcement is a
-   * substitution point, and a body that waits on a person would leave a failed
-   * engine's registration and its pin outliving the dialog, with a restart
-   * inside it bootstrapping the entry we had already decided against.
+   * In-region refusals undo before they announce, which is the rule `refuse`
+   * states for every other exit: stop serving first, explain second. The
+   * announcement is a substitution point, and a body that waits on a person
+   * would otherwise leave a failed engine's registration and its pin outliving
+   * the dialog, with a restart inside it bootstrapping the entry we had already
+   * decided against.
    *
    * Idempotent, so the `finally` stays as a backstop for exits nobody wrote. */
   const undoNow = async (): Promise<void> => {
@@ -1177,9 +1170,9 @@ async function run(sessionID: string): Promise<Outcome> {
     const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
     const available = present.size
     // ONE guard, placed after every await that follows the install — the
-    // handshake AND the tool listing. Both are windows in which a re-link can
-    // land, and an earlier version guarded only the first, so a flip during the
-    // tool read left the previous workspace installed and reported as attached.
+    // handshake AND the tool listing. Both are windows a re-link can land in;
+    // guarding only the first leaves a flip during the tool read with the
+    // previous workspace installed and reported as attached.
     //
     // Late rather than early on purpose: the check is only meaningful at the
     // last moment before we announce and answer, because everything before that
@@ -1200,7 +1193,7 @@ async function run(sessionID: string): Promise<Outcome> {
 
     // Ours, and staying. Answer BEFORE announcing: `announceToolsChanged` and
     // the toast are two more awaits, and the outcome asserts which workspace is
-    // served — round 13's rule, which the announces quietly put back at risk.
+    // served — so it is fixed while that assertion is still true.
     committed = true
     // The problem the user was last told about is gone. If it returns, they
     // should hear about it rather than have it deduplicated against a verdict
