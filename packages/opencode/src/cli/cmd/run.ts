@@ -31,6 +31,9 @@ import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../al
 // altimate_change start — W1.10/W1.12/W1.1 run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
 // altimate_change end
+// altimate_change start — W3.3: run implies run mode (fork-only module)
+import { applyRunModeDefault } from "./run/run-mode"
+// altimate_change end
 // altimate_change start — W2.1(c): run-mode-only idle-done fallback (fork-only modules).
 // Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
 // token contract live in session/termination.ts; delivery goes through the nudge
@@ -411,13 +414,12 @@ export const RunCommand = cmd({
       process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
     }
     // altimate_change end
-    // altimate_change start — W2.4: mark this process as run mode so run-mode-only
-    // mechanisms (starvation-breaker directives, doom-loop escalation ladder) can
-    // arm in the in-process session. Skipped for --attach: the agent runs on the
-    // remote (possibly interactive) server, where the breaker must stay disarmed.
-    if (!args.attach) {
-      process.env["ALTIMATE_RUN_MODE"] = "1"
-    }
+    // altimate_change start — W2.4/W3.3: mark this process as run mode so
+    // run-mode-only mechanisms (DONE-termination gate, starvation-breaker
+    // directives, doom-loop escalation ladder) arm in the in-process session.
+    // Explicit ALTIMATE_RUN_MODE=0 opts out; --attach skips entirely (the agent
+    // runs on the remote, possibly interactive, server). See run/run-mode.ts.
+    applyRunModeDefault(process.env, { attach: Boolean(args.attach) })
     // altimate_change end
 
     let message = [...args.message, ...(args["--"] || [])]

@@ -27,6 +27,9 @@ import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Flag } from "@/flag/flag"
 // altimate_change end
+// altimate_change start — W3.2: per-tool-result dispatch cap (fork-only module)
+import { ToolResultCap } from "./tool-result-cap"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so the upstream Effect runtime
 // (app-runtime AppLayer + httpapi server LayerNode list) can compose SessionProcessor as
 // a Service. The fork keeps the imperative `create()` namespace function below; this is a
@@ -129,6 +132,16 @@ export namespace SessionProcessor {
         const sbArmed = sbConfig.mode === "armed" && runMode && !sbExempt
         const sbMode = sbConfig.mode === "armed" ? ("armed" as const) : ("annotate" as const)
         let starvationStop = false
+        // altimate_change start — W3.2: per-tool-result dispatch cap, resolved once
+        // per step. Hard bound on the token estimate any single tool result may
+        // contribute to the conversation — closes the observed bypass where one
+        // giant query dump jumped a ~4K-token session past a 65K window in one step.
+        const toolResultCapTokens = ToolResultCap.resolve({
+          config: processConfig,
+          model: input.model,
+          safetyFraction: SessionCompaction.contextSafetyFraction(processConfig),
+        })
+        // altimate_change end
         // Nudge arbiter delivery (Global rule 5): at most ONE system-authored
         // directive block per injected turn, highest precedence wins. Run-mode-only.
         let effectiveStreamInput = streamInput
@@ -452,6 +465,21 @@ export namespace SessionProcessor {
                             text: outcome.repeatLoop.directive,
                           })
                         }
+                      }
+                    }
+                    // altimate_change end
+                    // altimate_change start — W3.2: hard per-result dispatch cap. Every
+                    // completed tool result is bounded here regardless of which tool
+                    // path produced it — the tool-level truncation service can be
+                    // bypassed, and one uncapped result overflows the whole window.
+                    if (typeof toolResultOutput === "string") {
+                      const capped = ToolResultCap.apply(toolResultOutput, toolResultCapTokens)
+                      if (capped.truncated) {
+                        toolResultOutput = capped.content
+                        log.info("tool result capped at dispatch", {
+                          tool: match.tool,
+                          capTokens: toolResultCapTokens,
+                        })
                       }
                     }
                     // altimate_change end

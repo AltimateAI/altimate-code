@@ -86,6 +86,34 @@ export namespace SessionCompaction {
 
   // altimate_change start — improved isOverflow formula with safety guard and unified headroom
   // See PR #35 — fixes upstream bugs with limit.input models and small-context models
+  //
+  // W3.1 estimator safety margin: token counts reaching this comparison include
+  // chars-based Token.estimate values that undercount real tokenization of dense
+  // SQL/JSON by up to ~1.55x (observed: estimated 45.8K = real >65K → provider
+  // 400 ContextOverflow). Compaction therefore triggers against an EFFECTIVE
+  // limit — base * context_safety_fraction, default 0.65, chosen so the worst
+  // observed underestimate still fits — never the raw limit. The raw limit
+  // stays authoritative for anything reporting actual model capability.
+  const DEFAULT_CONTEXT_SAFETY_FRACTION = 0.65
+  // Trigger floor for small-context models where the safety fraction would push
+  // the threshold to ~0 tokens — firing on a near-empty session would livelock
+  // compaction. Clamped to the raw threshold so the margin can only ever make
+  // the trigger MORE conservative than the pre-margin formula.
+  const MIN_OVERFLOW_THRESHOLD = 4_000
+
+  export function contextSafetyFraction(cfg?: { compaction?: { context_safety_fraction?: number } }) {
+    // globalThis.process: SessionCompaction.process shadows the Node global here.
+    const env = Number.parseFloat(globalThis.process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] ?? "")
+    const value = Number.isFinite(env) ? env : (cfg?.compaction?.context_safety_fraction ?? DEFAULT_CONTEXT_SAFETY_FRACTION)
+    if (!Number.isFinite(value)) return DEFAULT_CONTEXT_SAFETY_FRACTION
+    return Math.min(1, Math.max(0.1, value))
+  }
+
+  /** Portion of a declared token limit treated as usable for estimate-vs-limit decisions. */
+  export function effectiveContextLimit(base: number, fraction: number) {
+    return Math.floor(base * fraction)
+  }
+
   export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
     const config = await Config.get()
     if (config.compaction?.auto === false) return false
@@ -101,7 +129,9 @@ export namespace SessionCompaction {
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= headroom) return false
-    return count >= base - headroom
+    const effectiveBase = effectiveContextLimit(base, contextSafetyFraction(config))
+    const threshold = Math.min(base - headroom, Math.max(effectiveBase - headroom, MIN_OVERFLOW_THRESHOLD))
+    return count >= threshold
   }
   // altimate_change end
 

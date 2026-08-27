@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Instance } from "../../src/project/instance"
 import { Log } from "../../src/util/log"
@@ -404,6 +404,16 @@ function createModel(opts: {
 }
 
 describe("session.compaction.isOverflow boundary conditions", () => {
+  // These tests pin the RAW-limit boundary math, so disable the W3.1 estimator
+  // safety margin (fraction 1 = raw limit). Default-margin behavior is covered
+  // in compaction-safety-fraction.test.ts.
+  beforeAll(() => {
+    process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "1"
+  })
+  afterAll(() => {
+    delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+  })
+
   test("tokens exactly at usable limit triggers overflow", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({

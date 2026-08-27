@@ -146,6 +146,12 @@ export const Info = Schema.Struct({
       max_bytes: Schema.optional(PositiveInt).annotate({
         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
       }),
+      // altimate_change start — harness plan W3.2: per-tool-result dispatch cap
+      dispatch_max_tokens: Schema.optional(PositiveInt).annotate({
+        description:
+          "Hard cap on the estimated token size of a single tool result at dispatch time; oversized results are middle-truncated before entering the conversation (default: min(max_bytes-derived token estimate, 15% of the effective context limit))",
+      }),
+      // altimate_change end
     }),
   ).annotate({
     description:
@@ -169,6 +175,12 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      // altimate_change start — harness plan W3.1: estimator safety margin
+      context_safety_fraction: Schema.optional(Schema.Number).annotate({
+        description:
+          "Fraction of the declared context limit treated as usable when estimated token counts are compared against it for compaction/overflow decisions (default: 0.65 — chars-based estimates undercount dense SQL/JSON by up to ~1.55x, and compaction must trigger with enough margin that the worst observed underestimate still fits). Env override: ALTIMATE_CONTEXT_SAFETY_FRACTION. Clamped to [0.1, 1].",
+      }),
+      // altimate_change end
       // altimate_change start — harness plan W2.3 / item 5: post-compaction state ledger + summary carry
       state_ledger: Schema.optional(Schema.Boolean).annotate({
         description:
