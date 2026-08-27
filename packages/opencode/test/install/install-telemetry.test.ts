@@ -6,12 +6,18 @@
  * moving the advertised install path to altimate.sh/install took installs out of instrumentation
  * and showed up as a dip in the dashboard.
  *
- * The shell installers are asserted at the source level, matching windows-install.test.ts: running
- * them would download a release. What matters is that they write the marker where the CLI actually
- * looks, which is the part that fails silently.
+ * Coverage is in two layers. Source-level assertions (matching windows-install.test.ts) pin the
+ * details that fail silently — the data-dir expression, the "unknown" fallback, ordering relative
+ * to the install dispatch. Those cannot catch a syntax error or a bad variable scope, so the
+ * "executed" describe below runs the real bash installer through its `--binary` path (no network,
+ * no GitHub) against a throwaway HOME and asserts the files the CLI actually reads.
+ *
+ * install.ps1 has source-level coverage only — no pwsh on macOS/Linux runners. Its runtime
+ * behaviour is exercised by the Windows Installer (Pester) CI job.
  */
 import { describe, expect, test, afterEach, spyOn, mock } from "bun:test"
-import { readFileSync, existsSync, mkdtempSync, rmSync } from "node:fs"
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { join } from "node:path"
 import os from "os"
 import path from "path"
@@ -64,6 +70,63 @@ describe("install — post-install marker", () => {
   })
 })
 
+// altimate_change — execution coverage for the bash marker writer.
+//
+// Every assertion above reads source text, which cannot catch a syntax error, a bad
+// variable scope, or a wrong path inside write_install_marker(). These run the real
+// installer end to end via its `--binary` path (no network, no GitHub) against a
+// throwaway HOME, and assert the files the CLI actually reads.
+describe("install — marker writer, executed", () => {
+  const INSTALL_SH_PATH = join(REPO_ROOT, "install")
+  // Bash-only; skip on Windows runners rather than reporting a false pass.
+  const shtest = process.platform === "win32" ? test.skip : test
+
+  /** Runs `./install --binary <fake>` with an isolated HOME/XDG and returns the marker dir. */
+  function runInstaller(env: Record<string, string>): { code: number; stderr: string; home: string } {
+    const home = mkdtempSync(join(os.tmpdir(), "install-exec-home-"))
+    const fakeBin = join(home, "altimate")
+    writeFileSync(fakeBin, "#!/bin/sh\necho 1.2.3\n", { mode: 0o755 })
+    const res = spawnSync("bash", [INSTALL_SH_PATH, "--binary", fakeBin, "--no-modify-path"], {
+      encoding: "utf-8",
+      env: { ...process.env, HOME: home, ...env },
+    })
+    return { code: res.status ?? -1, stderr: res.stderr ?? "", home }
+  }
+
+  shtest("writes both marker files under the default data dir", () => {
+    const { code, home, stderr } = runInstaller({ XDG_DATA_HOME: "" })
+    expect(code).toBe(0)
+    const dir = join(home, ".local", "share", "altimate-code")
+    // A non-empty version is required — the CLI deletes an empty marker unread.
+    expect(readFileSync(join(dir, ".installed-version"), "utf-8").trim().length).toBeGreaterThan(0)
+    expect(readFileSync(join(dir, ".install-source"), "utf-8").trim()).toBe("curl")
+    rmSync(home, { recursive: true, force: true })
+    expect(stderr).not.toMatch(/syntax error|command not found/)
+  })
+
+  shtest("honours $XDG_DATA_HOME", () => {
+    const xdg = mkdtempSync(join(os.tmpdir(), "install-exec-xdg-"))
+    const { code, home } = runInstaller({ XDG_DATA_HOME: xdg })
+    expect(code).toBe(0)
+    expect(existsSync(join(xdg, "altimate-code", ".installed-version"))).toBe(true)
+    // Must NOT also land in the home-relative fallback.
+    expect(existsSync(join(home, ".local", "share", "altimate-code", ".installed-version"))).toBe(false)
+    rmSync(xdg, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  shtest("an unwritable data dir does not fail the install", () => {
+    // Parent is a regular file, so mkdir -p cannot succeed under it.
+    const blocked = mkdtempSync(join(os.tmpdir(), "install-exec-blocked-"))
+    const asFile = join(blocked, "not-a-dir")
+    writeFileSync(asFile, "x")
+    const { code, home } = runInstaller({ XDG_DATA_HOME: join(asFile, "nested") })
+    expect(code).toBe(0)
+    rmSync(blocked, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+  })
+})
+
 describe("install.ps1 — post-install marker", () => {
   const markerBlock = INSTALL_PS1.slice(
     INSTALL_PS1.indexOf("Post-install marker"),
@@ -103,18 +166,33 @@ describe("install.ps1 — post-install marker", () => {
   })
 })
 
-describe("is_upgrade ordering invariant", () => {
+describe("is_upgrade ordering", () => {
+  test("index.ts calls the welcome banner BEFORE Telemetry.init()", () => {
+    // The primary protection for is_upgrade. The banner probes whether
+    // ~/.altimate/machine-id exists and init() mints it, so the banner must run first.
+    // Swapping these silently flips every install to is_upgrade: true.
+    // Code only: the comment above the banner call names Telemetry.init() to explain the
+    // ordering, so a naive indexOf over the raw source finds the comment, not the call.
+    const src = readFileSync(join(REPO_ROOT, "packages/opencode/src/index.ts"), "utf-8")
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n")
+    const banner = src.indexOf("showWelcomeBannerIfNeeded()")
+    const init = src.indexOf("Telemetry.init()")
+    expect(banner).toBeGreaterThan(0)
+    expect(init).toBeGreaterThan(0)
+    expect(banner).toBeLessThan(init)
+  })
+
   afterEach(() => mock.restore())
 
   test("an unawaited Telemetry.init() has not minted a machine-id when the banner runs", async () => {
-    // src/index.ts fires Telemetry.init() WITHOUT awaiting it, then calls
-    // showWelcomeBannerIfNeeded() synchronously on the next line. is_upgrade is only
-    // meaningful because doInit() reaches its first await (Config.get) before minting the
-    // machine-id — so the banner's existsSync still sees pre-launch state.
-    //
-    // Add an await ahead of that mint, or make it synchronous, and this invariant flips:
-    // every install would then report is_upgrade: true and brand-new installs would vanish
-    // from the metric without a single test failing. Hence this test.
+    // Defence in depth behind the ordering test above. index.ts now runs the banner before
+    // init(), so is_upgrade no longer depends on this — but init() is also called from other
+    // entrypoints, and any caller that emits an install-shaped event before awaiting it still
+    // relies on the mint happening after doInit's first await (Config.get). This pins that
+    // behaviour so a refactor making the mint synchronous is caught here rather than showing
+    // up as every install reporting is_upgrade: true.
     const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
     const tmpHome = mkdtempSync(join(os.tmpdir(), "install-telemetry-home-"))

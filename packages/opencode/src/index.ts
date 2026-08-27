@@ -120,14 +120,22 @@ let cli = yargs(args)
     }
     // altimate_change end
 
+    // altimate_change start - welcome banner on first run after install/upgrade
+    //
+    // MUST run before Telemetry.init(). The banner derives `first_launch.is_upgrade`
+    // by probing whether ~/.altimate/machine-id already exists, and init() mints that
+    // file. Ordering it first makes the probe unconditionally correct instead of
+    // depending on doInit() happening to yield at `await Config.get()` before the
+    // mint — an invariant an added await would silently break, flipping every install
+    // to is_upgrade: true. Telemetry.track() buffers until init completes, so nothing
+    // is lost by emitting before init.
+    showWelcomeBannerIfNeeded()
+    // altimate_change end
+
     // altimate_change start - telemetry init
     // Initialize telemetry early so events from MCP, engine, auth are captured.
     // init() is idempotent — safe to call again later in session prompt.
     Telemetry.init().catch(() => {})
-    // altimate_change end
-
-    // altimate_change start - welcome banner on first run after install/upgrade
-    showWelcomeBannerIfNeeded()
     // altimate_change end
   })
   .usage("")
