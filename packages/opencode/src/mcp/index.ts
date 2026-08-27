@@ -293,8 +293,9 @@ interface State {
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
-  // altimate_change — what this process spawned for a key; see State.spawned
+  // altimate_change start — what this process spawned for a key; see State.spawned
   readonly spawned: (name: string) => Effect.Effect<ConfigMCPV1.Info | undefined>
+  // altimate_change end
   // altimate_change start — carry the original (pre-sanitize) client name so tool-source
   // classification works from the real name, not the flattened `<client>_<tool>` key
   // (see altimate/tool-source).
@@ -709,10 +710,11 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
-        // altimate_change — the child exited, so nothing is running under this
-        // key. The spawn record answers "what IS running" and must not outlive
-        // the process it describes.
+        // altimate_change start — the child exited, so nothing is running under
+        // this key. The spawn record answers "what IS running" and must not
+        // outlive the process it describes.
         delete s.spawned[name]
+        // altimate_change end
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
@@ -769,8 +771,9 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
-          // altimate_change — see State.spawned
+          // altimate_change start — see State.spawned
           spawned: {},
+          // altimate_change end
         }
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
@@ -802,8 +805,9 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
-                // altimate_change — bootstrap spawns too, so it records too.
+                // altimate_change start — bootstrap spawns too, so it records too.
                 s.spawned[key] = mcp
+                // altimate_change end
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -837,8 +841,9 @@ export const layer = Layer.effect(
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
-            // altimate_change — nothing is running any more; see State.spawned
+            // altimate_change start — nothing is running any more; see State.spawned
             s.spawned = {}
+            // altimate_change end
             yield* Effect.forEach(
               clients,
               (client) =>
@@ -936,8 +941,10 @@ export const layer = Layer.effect(
         return result.status
       }
 
-      // altimate_change — remember what we actually spawned, not what the file says.
+      // altimate_change start — remember what we actually spawned, not what the
+      // file says.
       s.spawned[name] = mcp
+      // altimate_change end
       return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
     })
 
@@ -965,10 +972,11 @@ export const layer = Layer.effect(
       // altimate_change end
       yield* closeClient(s, name)
       delete s.clients[name]
-      // altimate_change — nothing is running under this key now, so the spawn
-      // record must not survive it either: it answers "what IS running", and a
-      // disabled key runs nothing.
+      // altimate_change start — nothing is running under this key now, so the
+      // spawn record must not survive it either: it answers "what IS running",
+      // and a disabled key runs nothing.
       delete s.spawned[name]
+      // altimate_change end
       s.status[name] = { status: "disabled" }
       // altimate_change start — telemetry + persist enabled:false so disable survives restarts
       Telemetry.track({
@@ -1384,7 +1392,9 @@ export const layer = Layer.effect(
     return Service.of({
       status,
       clients,
+      // altimate_change start — see State.spawned
       spawned,
+      // altimate_change end
       tools,
       prompts,
       resources,

@@ -33,17 +33,21 @@ export async function resolveConfigPath(baseDir: string, global = false) {
 }
 
 export async function addMcpToConfig(
+  // altimate_change start — the parameter list is split across lines only
+  // because the added `opts` exceeds the line budget; the reformat is ours too.
+  //
+  // `opts.refuseIfDisabled` refuses to replace a node that is switched off,
+  // decided on the SAME text this call is about to modify. A caller that reads
+  // the file itself and then calls this one has checked a different read than
+  // the write uses, so a disable landing between the two is replaced wholesale
+  // rather than honoured. One read, one decision, is the only version of this
+  // check that means anything.
   name: string,
   mcpConfig: ConfigMCPV1.Info,
   configPath: string,
-  // altimate_change — refuse to replace a node that is switched off, decided on
-  // the SAME text this call is about to modify. A caller that reads the file
-  // itself and then calls this one has checked a different read than the write
-  // uses, so a disable landing between the two is replaced wholesale rather than
-  // honoured. One read, one decision, is the only version of this check that
-  // means anything.
   opts?: { refuseIfDisabled?: boolean },
 ) {
+  // altimate_change end
   let text = "{}"
   if (await Filesystem.exists(configPath)) {
     text = await Filesystem.readText(configPath)
@@ -82,15 +86,19 @@ export async function addMcpToConfig(
 }
 
 export async function removeMcpFromConfig(
+  // altimate_change start — the parameter list is split across lines only
+  // because the added `opts` exceeds the line budget; the reformat is ours too.
+  //
+  // `opts.refuseIfDisabled` refuses to delete a node that is switched off,
+  // decided on the SAME text this call is about to modify. A caller that reads
+  // the file itself and then calls this one has checked a different read, which
+  // for a DELETE is worse than for a replace: the user's edit is not
+  // overwritten, it is gone.
   name: string,
   configPath: string,
-  // altimate_change — refuse to delete a node that is switched off, decided on
-  // the SAME text this call is about to modify. A caller that reads the file
-  // itself and then calls this one has checked a different read, which for a
-  // DELETE is worse than for a replace: the user's edit is not overwritten, it
-  // is gone.
   opts?: { refuseIfDisabled?: boolean },
 ): Promise<boolean> {
+  // altimate_change end
   if (!(await Filesystem.exists(configPath))) return false
 
   const text = await Filesystem.readText(configPath)
@@ -100,13 +108,14 @@ export async function removeMcpFromConfig(
   const node = findNodeAtLocation(tree, ["mcp", name])
   if (!node) return false
 
-  // altimate_change — see `opts.refuseIfDisabled`
+  // altimate_change start — see `opts.refuseIfDisabled`
   if (opts?.refuseIfDisabled) {
     const current = parse(text, [], { allowTrailingComma: true }) as
       | { mcp?: Record<string, { enabled?: boolean } | undefined> }
       | undefined
     if (current?.mcp?.[name]?.enabled === false) return false
   }
+  // altimate_change end
 
   const edits = modify(text, ["mcp", name], undefined, {
     formattingOptions: { tabSize: 2, insertSpaces: true },
