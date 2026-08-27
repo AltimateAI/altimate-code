@@ -546,6 +546,23 @@ async function run(): Promise<Outcome> {
   }
 
   if (plan.act === "refuse-unreachable") {
+    // "It will not start" and "there is nothing to start" are different
+    // situations with different remedies, and an entry pinned to us whose binary
+    // has since been uninstalled looks exactly like the first while being the
+    // second. Reported as `connect-failed`, it produced a message with no
+    // install hint, every turn, forever — and `which` was never consulted on
+    // this path at all.
+    if (!which(ENGINE_BINARY)) {
+      const declaredForMissing = await declaredBounded(workspaceId)
+      const count = declaredForMissing?.keys.length ?? 0
+      return await refuse({ kind: "engine-missing", declared: count }, {
+        title: "Workspace integrations unavailable",
+        message:
+          `Workspace "${binding.datamateName}" declares ${count} integration tool${count === 1 ? "" : "s"}. ` +
+          `They run on the local engine, which is not installed. Install it with: ${INSTALL_HINT}`,
+        variant: "warning",
+      })
+    }
     return await refuse({ kind: "connect-failed", error: plan.error }, {
       title: "Workspace engine is not running",
       message:
