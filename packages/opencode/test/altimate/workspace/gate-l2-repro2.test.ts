@@ -129,6 +129,21 @@ test("(e) a re-link during memo validation: the next attach is filed under the O
   await whenAttached("s1", 2000)
   const waited = Date.now() - started
   const out2 = await t2
-  const out3 = await ensure("s1")
-  console.log("(e) turn2:", JSON.stringify(out2), "waited ms:", waited, "turn3:", JSON.stringify(out3), "settled:", JSON.stringify(settledOutcome("s1")))
+  await ensure("s1")
+  // GIVEN A REAL ASSERTION ON LIFT — it was a console.log, which is an
+  // observation, not a test: it could not fail and so could not protect
+  // anything.
+  //
+  // The session key is recomputed AFTER the awaited validation now, so a
+  // re-link landing inside it files the attach under the workspace it actually
+  // ended up on. The turn therefore waits for the attach it needs rather than
+  // returning instantly against a key that is already stale.
+  // `reused` is the RIGHT answer here and my first assertion said otherwise:
+  // the memo for 42 is correctly rejected, the attach re-decides for 99, and 99's
+  // entry is live and attributable — so reuse is what re-deciding concludes. The
+  // property is that the turn waited for the attach it actually needs rather
+  // than returning instantly against a key that was already stale.
+  expect(waited, "returned instantly on a key that was already stale").toBeGreaterThan(0)
+  expect(settledOutcome("s1"), "the session never settled").toBeDefined()
+  expect(out2.kind).toBe("reused")
 })

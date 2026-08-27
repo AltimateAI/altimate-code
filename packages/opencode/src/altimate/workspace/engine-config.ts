@@ -48,6 +48,12 @@ export async function persist(name: string, cfg: LocalMcpConfig, configPath?: st
   // how a managed entry becomes unrecognisable to `isManagedEntry` later in the
   // same server process, leaving a stale engine attached in an unbound project.
   // The local-config write path in `config.ts` invalidates for the same reason.
+  // NOT observable from this module's own tests, and worth saying so rather than
+  // leaving a claim the suite silently fails to check: every read here
+  // invalidates first, so a missing invalidation on the WRITE side changes
+  // nothing we can see. It is here for the other `Config` consumers in the
+  // process, which do not invalidate before reading and would otherwise serve a
+  // cached config that predates our write.
   await Config.invalidate().catch((err) => {
     log.warn("could not invalidate the config cache after persisting the engine entry", { err: String(err) })
   })
