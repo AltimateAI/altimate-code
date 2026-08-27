@@ -396,12 +396,25 @@ async function run(): Promise<Outcome> {
     // one. "Never twice" is the `retried` argument rather than a branch someone
     // has to remember not to re-enter.
     //
-    // Re-inspected whole rather than re-reading status alone: `MCP.connect`
-    // writes `enabled: true` into whichever config owns the entry, so the
-    // config after a connect attempt is not necessarily the config before it.
-    // Judging fresh runtime against stale config is the same defect in
-    // miniature.
-    await client.connect(DATAMATE_KEY).catch(() => undefined)
+    // NOT `MCP.connect`, which is the wrong primitive three times over. It
+    // writes `enabled: true` into whichever config owns the entry — a global
+    // one for an IDE-written entry — so a disable landing in its window is
+    // destroyed on disk and nothing ever repairs it, because the next read says
+    // enabled. It resolves what to spawn from MCP's own retained state rather
+    // than from the entry this decision examined, so it can revive the engine
+    // we rejected last turn, or start a workspace we have already left. And it
+    // is a mutation, so it belongs behind the same guard as every other one.
+    //
+    // `add` is none of those: it writes no config and starts exactly what it is
+    // handed. Reviving becomes the same operation as spawning, which is the
+    // real win — the retry stops being a special path with special rules.
+    const revive: LocalMcpConfig = { type: "local", command: commandArgv(inspection.entry), enabled: true }
+    if (!(await stillCurrent())) return { kind: "superseded" }
+    await client.add(DATAMATE_KEY, revive).catch((err) => {
+      log.warn("could not restart the engine entry", { err: String(err), workspaceId })
+    })
+    // Re-inspected whole rather than re-reading status alone: the world may
+    // have moved in both halves while we were starting a process.
     inspection = await inspectEntry()
     plan = planForEntry(inspection, workspaceId, true)
   }

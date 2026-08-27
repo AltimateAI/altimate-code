@@ -240,8 +240,11 @@ describe("ensure", () => {
       statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "failed", error: "exit 1" } }],
     })
     expect(await ensure("s1")).toEqual({ kind: "connect-failed", error: "exit 1" })
-    expect(h.connects).toEqual(["datamate"])
-    expect(h.added).toHaveLength(0)
+    // Revived with `add`, never `connect`: connect writes `enabled: true` into
+    // whichever config owns the entry, turning a local repair into a global
+    // config write. One restart attempt, and nothing persisted.
+    expect(h.connects, "used the config-writing primitive to repair").toHaveLength(0)
+    expect(h.added).toHaveLength(1)
     expect(h.persisted).toHaveLength(0)
   })
 
@@ -883,7 +886,8 @@ describe("ensure — round 4", () => {
       ],
     })
     expect(await ensure("s1")).toEqual({ kind: "connect-failed", error: "exit 1" })
-    expect(h.connects).toEqual(["datamate"])
+    expect(h.connects, "used the config-writing primitive to repair").toHaveLength(0)
+    expect(h.added).toHaveLength(1)
   })
 
   test("two overlapping SESSIONS in one project never attach concurrently", async () => {
@@ -1723,4 +1727,64 @@ describe("INVARIANT — the entry decision is ordered by authority and cannot aw
     expect(clearsFloor(MIN_ENGINE_VERSION)).toBe(true)
     expect(clearsFloor("1.0.0")).toBe(true)
   })
+})
+
+describe("INVARIANT — the attach flow never writes config from a repair", () => {
+  // `MCP.connect` persists `enabled: true` into whichever config owns the entry.
+  // For an IDE-written global entry that is merely down, repairing it locally
+  // would therefore write global config — and if a disable landed during the
+  // connect window, that disable is destroyed on disk with nothing to repair it,
+  // because every later read says enabled. Round 4 closed the `enabled: false`
+  // half of this; the `enabled: true` half lived on in the retry.
+  //
+  // The flow revives with `add`, which starts a process and writes nothing. This
+  // asserts the primitive is never reached, on every path that could reach it.
+  const scenarios: Array<[string, Parameters<typeof install>[0]]> = [
+    [
+      "ours and down",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+        statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      },
+    ],
+    [
+      "ours and down, staying down",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+        statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "failed", error: "x" } }],
+      },
+    ],
+    [
+      "disabled while connected",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false },
+        statuses: [{ datamate: { status: "connected" } }],
+      },
+    ],
+    [
+      "pinned elsewhere and down",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] },
+        statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      },
+    ],
+    [
+      "a dead URL entry",
+      {
+        existing: { type: "remote", url: "http://localhost:7801/sse" },
+        statuses: [{ datamate: { status: "failed" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      },
+    ],
+  ]
+
+  for (const [name, opts] of scenarios) {
+    test(`no config-writing repair: ${name}`, async () => {
+      const h = install(opts)
+      await ensure("s1")
+      expect(h.connects, `${name} repaired the entry with the config-writing primitive`).toHaveLength(0)
+    })
+  }
 })
