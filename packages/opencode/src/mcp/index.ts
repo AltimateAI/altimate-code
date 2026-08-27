@@ -957,7 +957,11 @@ export const layer = Layer.effect(
         // altimate_change end
         return result.status
       }
+      // altimate_change start — recorded after the bail-early check above, so a
+      // failed replacement never overwrites the status of a client another
+      // caller registered while it was coming up.
       s.status[name] = result.status
+      // altimate_change end
 
       // altimate_change start — remember what we actually spawned, not what the
       // file says.
