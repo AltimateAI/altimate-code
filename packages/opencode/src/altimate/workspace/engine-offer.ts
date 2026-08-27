@@ -161,7 +161,10 @@ export function runInstall(
       if (settled) return
       settled = true
       clearTimeout(timer)
-      if (hard) clearTimeout(hard)
+      // Past the deadline the escalation stays armed: npm (the group leader)
+      // usually dies on SIGTERM, but a descendant that ignores it must still
+      // get the SIGKILL, so the leader's exit does not cancel it.
+      if (hard && !timedOut) clearTimeout(hard)
       resolve({ code, timedOut, stderr })
     }
     const killTree = (signal: NodeJS.Signals) => {
@@ -187,6 +190,8 @@ export function runInstall(
       timedOut = true
       killTree("SIGTERM")
       hard = setTimeout(() => {
+        // The group outlives its leader while any member is alive, so this
+        // reaches survivors even after npm itself has exited.
         killTree("SIGKILL")
         finish(null)
       }, graceMs)

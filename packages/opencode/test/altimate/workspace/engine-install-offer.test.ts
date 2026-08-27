@@ -328,6 +328,18 @@ describe("install deadline", () => {
     expect(run.timedOut).toBe(true)
     expect(Date.now() - t0).toBeLessThan(3_000)
   })
+  test.skipIf(!posix)("a descendant that ignores SIGTERM is still killed after the leader exits", async () => {
+    // npm (the leader) dies on the deadline's SIGTERM; the escalation must
+    // survive its exit and reach the straggler.
+    const marker = `31.${process.pid}`
+    const run = await runInstall(["sh", "-c", `(trap '' TERM; exec sleep ${marker}) & sleep 30`], 200, 300)
+    expect(run.timedOut).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const survivors = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
+      .stdout.toString()
+      .trim()
+    expect(survivors).toBe("")
+  })
   test("a timed-out run is reported as such, not as an npm failure", async () => {
     syncInternals.runInstall = async () => ({ code: null, timedOut: true, stderr: "" })
     const result = await installEngine()
