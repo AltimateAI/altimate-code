@@ -81,6 +81,39 @@ describe("withLifecycleLock", () => {
     const result = await withLifecycleLock(async () => "reclaimed", testPaths)
     expect(result).toBe("reclaimed")
   }, 10_000)
+
+  // Two waiters can both observe the same stale lock (dead-pid owner) and both
+  // decide to reclaim it. Reclaiming via a blind `rm` let the loser delete the
+  // WINNER's freshly mkdir'd + owner.json'd lock directory, so both processes
+  // believed they held the lock simultaneously. The atomic-rename reclaim must
+  // keep this mutually exclusive no matter how the two reclaim attempts interleave.
+  test("two concurrent reclaimers of the same stale lock never both hold it", async () => {
+    await using tmp = await tmpdir()
+    const root = path.join(tmp.path, "concurrent-stale")
+    const testPaths = paths(root)
+    const lockDir = path.join(root, ".lifecycle-lock")
+    await fs.mkdir(lockDir, { recursive: true })
+    const deadOwnerPid = await deadPid()
+    await fs.writeFile(path.join(lockDir, "owner.json"), JSON.stringify({ pid: deadOwnerPid, at: Date.now() }), {
+      mode: 0o600,
+    })
+
+    let active = 0
+    let maxActive = 0
+    function run(label: string) {
+      return withLifecycleLock(async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        active--
+        return label
+      }, testPaths)
+    }
+
+    const results = await Promise.all([run("a"), run("b")])
+    expect(results.sort()).toEqual(["a", "b"])
+    expect(maxActive).toBe(1)
+  }, 10_000)
 })
 
 describe("isOwnerStale", () => {

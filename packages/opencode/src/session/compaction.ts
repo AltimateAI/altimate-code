@@ -258,7 +258,14 @@ export namespace SessionCompaction {
     const base = input.model.limit.input ?? context
     // 0.8: Token.estimate undercounts dense code/tool output on some tokenizers.
     const budget = Math.floor(Math.max(0, base - maxOutput - 2_000) * 0.8)
-    if (budget <= 0) return { head: input.head, dropped: 0 }
+    // altimate_change start — upstream_fix: a non-positive budget means the model's
+    // context can't fit any head alongside its own output reservation — returning
+    // `input.head` unchanged here (the original guard) reproduces the exact overflow
+    // fitHead exists to recover from. An empty head is safe for the same reason the
+    // shrink loop below treats one as safe: the caller always appends its own
+    // trailing user prompt after `head`.
+    if (budget <= 0) return { head: [], dropped: input.head.length }
+    // altimate_change end
     let head = input.head
     let dropped = 0
     // altimate_change start — upstream_fix: keep shrinking down to (and including)

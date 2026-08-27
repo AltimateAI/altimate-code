@@ -125,6 +125,29 @@ describe("local artifact sha256 verification", () => {
     await expect(fs.stat(`${destination}.partial`)).rejects.toThrow()
   })
 
+  // A proxy that ignores our Range header but still answers 206 with an
+  // absent/mismatched Content-Range must not leave the stale partial in place:
+  // every retry would resend the same Range request against the same offset
+  // and hit this same failure forever.
+  test("an invalid Content-Range on a resumed request clears the partial instead of getting stuck forever", async () => {
+    await using tmp = await tmpdir()
+    const destination = path.join(tmp.path, "artifact.gguf")
+    const partial = `${destination}.partial`
+    await fs.writeFile(partial, "hello ")
+    const fetchImpl = async () =>
+      new Response("ignored", { status: 206, headers: { "content-range": "bytes 0-4/999" } }) // mismatched offset
+
+    await expect(
+      downloadWithResume({
+        url: "https://example.invalid/artifact.gguf",
+        destination,
+        sha256: sha("hello world"),
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/invalid Content-Range/)
+    await expect(fs.stat(partial)).rejects.toThrow()
+  })
+
   test("a response with no Content-Length reports an unknown total instead of coercing it to 0", async () => {
     await using tmp = await tmpdir()
     const destination = path.join(tmp.path, "artifact.gguf")

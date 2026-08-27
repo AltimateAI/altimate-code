@@ -102,6 +102,16 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
     expect(acc.termination().why_model_stopped).toBe("explicit-done")
   })
 
+  test("a negated DONE assertion is not classified as explicit-done", () => {
+    for (const text of ["Still working on this. NOT DONE.", "I am not DONE", "not yet DONE"]) {
+      const acc = RunAccounting.create()
+      acc.onAssistantMessage({ id: "m1", agent: "build" })
+      acc.onText("m1", text)
+      acc.onStepFinish("m1", "stop")
+      expect(acc.termination().why_model_stopped).toBe("stop")
+    }
+  })
+
   test("a later non-DONE text clears the explicit-done classification", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })

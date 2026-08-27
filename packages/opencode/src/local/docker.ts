@@ -131,6 +131,30 @@ export async function removeDockerContainer(exec: DockerExec = defaultExec) {
   return { existed: true, removed: true }
 }
 
+// The container is created (and can spend up to 45 minutes downloading weights
+// or occupying the GPU) before setupDocker ever writes state.json — that only
+// happens once startDockerServer returns. An interrupt (Ctrl-C) during that
+// window kills the CLI but leaves the labeled container running, invisible to
+// `altimate local stop`/`status` because they only act on tracked state.
+// Reaping it here — via the same ownership-checked removeDockerContainer used
+// everywhere else — closes that window without needing state to exist yet.
+export function installContainerReaper(exec: DockerExec, onExit: (code: number) => void = (code) => process.exit(code)) {
+  let handled = false
+  const handler = (signal: NodeJS.Signals) => {
+    if (handled) return
+    handled = true
+    removeDockerContainer(exec)
+      .catch(() => {})
+      .finally(() => onExit(signal === "SIGINT" ? 130 : 143))
+  }
+  process.on("SIGINT", handler)
+  process.on("SIGTERM", handler)
+  return () => {
+    process.off("SIGINT", handler)
+    process.off("SIGTERM", handler)
+  }
+}
+
 async function containerLogTail(exec: DockerExec) {
   return exec("docker", ["logs", "--tail", "1", LOCAL_CONTAINER_NAME])
     .then((result) => (result.stderr || result.stdout).trim().split("\n").at(-1) ?? "")
@@ -152,49 +176,60 @@ export async function startDockerServer(input: {
   await removeDockerContainer(exec)
   const hfCache = path.join(os.homedir(), ".cache", "huggingface")
   await exec("docker", buildDockerRunArgs({ tier: input.tier, modelID: input.modelID, port: input.port, hfCache }), 30 * 60_000)
-  let pidRaw: { stdout: string; stderr: string }
+  // The container now exists but is untracked (state.json isn't written until
+  // setupDocker records this function's return value) for as long as the
+  // pid-inspect and health-wait steps below take — up to 45 minutes on a slow
+  // first-run weight download. Reap the (ownership-checked) labeled container
+  // on Ctrl-C/SIGTERM for that whole window, not just the explicit failure
+  // paths already handled by the try/catches below.
+  const stopReaper = installContainerReaper(exec)
   try {
-    pidRaw = await exec("docker", ["inspect", "-f", "{{.State.Pid}}", LOCAL_CONTAINER_NAME])
-  } catch (error) {
-    // The container is already running (docker run succeeded); an inspect
-    // failure here must not leave it orphaned and untracked.
-    await removeDockerContainer(exec)
-    throw error
-  }
-  const pid = Number(pidRaw.stdout.trim())
-  if (!Number.isInteger(pid) || pid <= 0) {
-    await removeDockerContainer(exec)
-    throw new Error("SGLang container started but did not report a pid")
-  }
-
-  // First run downloads the weights inside the container; allow a long window
-  // and surface container log lines so the wait is legible.
-  try {
-    const deadline = Date.now() + (input.timeoutMs ?? 45 * 60_000)
-    let lastLine = ""
-    while (Date.now() < deadline) {
-      if (await dockerHealthy(input.port, input.fetchImpl)) return { pid, container: LOCAL_CONTAINER_NAME }
-      if (!(await dockerContainerRunning(exec))) {
-        const logs = await exec("docker", ["logs", "--tail", "25", LOCAL_CONTAINER_NAME])
-          .then((result) => result.stderr + result.stdout)
-          .catch(() => "")
-        throw new Error(`SGLang container exited before becoming healthy.\n${logs.slice(-2000)}`)
-      }
-      const line = await containerLogTail(exec)
-      if (line && line !== lastLine) {
-        lastLine = line
-        input.onProgress?.(line)
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+    let pidRaw: { stdout: string; stderr: string }
+    try {
+      pidRaw = await exec("docker", ["inspect", "-f", "{{.State.Pid}}", LOCAL_CONTAINER_NAME])
+    } catch (error) {
+      // The container is already running (docker run succeeded); an inspect
+      // failure here must not leave it orphaned and untracked.
+      await removeDockerContainer(exec)
+      throw error
     }
-    throw new Error("SGLang container did not become healthy in time")
-  } catch (error) {
-    // Any failure while polling — including dockerContainerRunning itself
-    // throwing on a transient daemon error, not just the two explicit
-    // failure messages above — must not leave an untracked container
-    // running: setupDocker only records state once this function succeeds,
-    // so anything left behind here is invisible to `status`/`stop`.
-    await removeDockerContainer(exec).catch(() => {})
-    throw error
+    const pid = Number(pidRaw.stdout.trim())
+    if (!Number.isInteger(pid) || pid <= 0) {
+      await removeDockerContainer(exec)
+      throw new Error("SGLang container started but did not report a pid")
+    }
+
+    // First run downloads the weights inside the container; allow a long window
+    // and surface container log lines so the wait is legible.
+    try {
+      const deadline = Date.now() + (input.timeoutMs ?? 45 * 60_000)
+      let lastLine = ""
+      while (Date.now() < deadline) {
+        if (await dockerHealthy(input.port, input.fetchImpl)) return { pid, container: LOCAL_CONTAINER_NAME }
+        if (!(await dockerContainerRunning(exec))) {
+          const logs = await exec("docker", ["logs", "--tail", "25", LOCAL_CONTAINER_NAME])
+            .then((result) => result.stderr + result.stdout)
+            .catch(() => "")
+          throw new Error(`SGLang container exited before becoming healthy.\n${logs.slice(-2000)}`)
+        }
+        const line = await containerLogTail(exec)
+        if (line && line !== lastLine) {
+          lastLine = line
+          input.onProgress?.(line)
+        }
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+      }
+      throw new Error("SGLang container did not become healthy in time")
+    } catch (error) {
+      // Any failure while polling — including dockerContainerRunning itself
+      // throwing on a transient daemon error, not just the two explicit
+      // failure messages above — must not leave an untracked container
+      // running: setupDocker only records state once this function succeeds,
+      // so anything left behind here is invisible to `status`/`stop`.
+      await removeDockerContainer(exec).catch(() => {})
+      throw error
+    }
+  } finally {
+    stopReaper()
   }
 }

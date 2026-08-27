@@ -30,6 +30,9 @@ const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 // until it lands, a trailing DONE token in the final assistant text is the only
 // signal available for the "explicit-done" attribution.
 const DONE_PATTERN = /\bDONE\b[.!]?\s*$/
+// A trailing DONE token preceded by a negation ("not DONE", "isn't DONE", "not yet
+// DONE") asserts the opposite of completion — must not classify as explicit-done.
+const NEGATED_DONE_PATTERN = /\b(?:not|isn'?t|not\s+yet)\s+DONE\b/i
 
 export function create() {
   const agents = new Map<string, string>()
@@ -67,7 +70,8 @@ export function create() {
     },
     onText(messageID: string, text: string) {
       if (isCompactionStep(messageID)) return
-      lastTextExplicitDone = DONE_PATTERN.test(text.trim())
+      const trimmed = text.trim()
+      lastTextExplicitDone = DONE_PATTERN.test(trimmed) && !NEGATED_DONE_PATTERN.test(trimmed)
     },
     onSessionError(name: unknown, message?: string) {
       const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"

@@ -3,6 +3,7 @@ import fs from "node:fs/promises"
 
 import snapshot from "./recipes.json"
 import { ensureLocalDirectories, getLocalPaths, type LocalPaths } from "./paths"
+import { LLAMA_CPP_REF } from "./runtime"
 
 export type ReasoningEffort = "low" | "medium" | "xhigh"
 
@@ -218,12 +219,23 @@ function validateModel(value: unknown, label: string): ModelRecipe {
     throw new Error(`${label} has duplicate tier names`)
   const revision = string(input.revision, `${label}.revision`)
   if (!/^[a-f0-9]{40}$/i.test(revision)) throw new Error(`${label}.revision must be a pinned 40-character commit`)
+  const llama_cpp_ref = string(input.llama_cpp_ref, `${label}.llama_cpp_ref`)
+  // Runtime discovery/download in runtime.ts always installs the hard-coded
+  // LLAMA_CPP_REF build, ignoring this field entirely — a remote recipe (loaded
+  // via ALTIMATE_LOCAL_RECIPES_URL) that advances llama_cpp_ref past what the
+  // installer supports must fail loudly here rather than silently running an
+  // incompatible llama.cpp build against its updated flags/model.
+  if (tiers.some((tier) => tier.engine === "llama.cpp") && llama_cpp_ref !== LLAMA_CPP_REF) {
+    throw new Error(
+      `${label}.llama_cpp_ref (${llama_cpp_ref}) does not match the installer's supported build (${LLAMA_CPP_REF}); upgrade altimate-code before using this recipe`,
+    )
+  }
   return {
     id: pathSegment(input.id, `${label}.id`),
     name: string(input.name, `${label}.name`),
     hf_repo: string(input.hf_repo, `${label}.hf_repo`),
     revision,
-    llama_cpp_ref: string(input.llama_cpp_ref, `${label}.llama_cpp_ref`),
+    llama_cpp_ref,
     tiers,
   }
 }

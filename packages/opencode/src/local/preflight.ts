@@ -34,6 +34,14 @@ const LLAMA_DISK_GB = 24
 const DOCKER_DISK_GB = 45
 const CACHED_DISK_GB = 4
 
+// A model artifact truncated well below this floor cannot plausibly be a real
+// multi-GB gguf — checking sha256 here would be correct but means hashing a
+// file that can be 16GB+ just to decide a disk estimate, which defeats the
+// point of a fast preflight check. This floor catches the cheap, common case
+// (zero-byte or partial download) without paying that cost; downloadWithResume
+// still re-verifies the pinned sha256 before ever reusing this file.
+const CACHED_ARTIFACT_MIN_BYTES = 1024 * 1024
+
 async function artifactsCached(
   tier: RecipeTier,
   model: Pick<ModelRecipe, "id" | "revision">,
@@ -67,7 +75,7 @@ async function artifactsCached(
     const target = path.join(directory, "models", model.id, model.revision, path.basename(tier.file))
     return fs
       .stat(target)
-      .then((entry) => entry.isFile())
+      .then((entry) => entry.isFile() && entry.size >= CACHED_ARTIFACT_MIN_BYTES)
       .catch(() => false)
   }
   return false

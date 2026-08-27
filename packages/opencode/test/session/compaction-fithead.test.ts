@@ -59,6 +59,18 @@ describe("SessionCompaction.fitHead", () => {
     const result = await SessionCompaction.fitHead({ head, model: model(0) })
     expect(result.dropped).toBe(0)
   })
+
+  // A context limit at or below the output reservation leaves no positive
+  // budget for any head at all. The old guard returned `input.head` unchanged
+  // in this case, reproducing the exact overflow fitHead exists to recover
+  // from — it must drop to an empty head instead (safe: the caller always
+  // appends its own trailing user prompt after `head`).
+  test("a degenerate budget (context <= maxOutput + margin) empties the head instead of returning it unchanged", async () => {
+    const head = [userMessage("m1", "short"), userMessage("m2", "also short")]
+    const result = await SessionCompaction.fitHead({ head, model: model(2000, 2000) })
+    expect(result.head.length).toBe(0)
+    expect(result.dropped).toBe(head.length)
+  })
 })
 
 // altimate_change start — mixed-role/turn-shaped fixture: a raw array-offset cut

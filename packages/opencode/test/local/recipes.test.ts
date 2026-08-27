@@ -32,6 +32,16 @@ describe("local recipe schema", () => {
     expect(() => validateRecipes(rejected)).toThrow("must be a sha256 or a TODO_* placeholder")
   })
 
+  // runtime.ts always installs the hard-coded LLAMA_CPP_REF build regardless of
+  // this field — a remote recipe advancing llama_cpp_ref past what the
+  // installer supports must fail loudly here, not silently run an
+  // incompatible llama.cpp build against its updated flags/model.
+  test("rejects a llama_cpp_ref that does not match the installer's supported build", () => {
+    const input = structuredClone(BUNDLED_RECIPES) as any
+    input.models[0].llama_cpp_ref = "b99999"
+    expect(() => validateRecipes(input)).toThrow(/llama_cpp_ref.*does not match/)
+  })
+
   test("rejects context that cannot divide across parallel slots", () => {
     const input = structuredClone(BUNDLED_RECIPES) as any
     input.models[0].tiers[0].parallel = 3

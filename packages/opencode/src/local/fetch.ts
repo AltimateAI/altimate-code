@@ -108,7 +108,16 @@ export async function downloadWithResume(input: {
   let append = offset > 0 && response.status === 206
   if (append) {
     const range = response.headers.get("content-range")?.match(/^bytes\s+(\d+)-/i)
-    if (!range || Number(range[1]) !== offset) throw new Error("Download server returned an invalid Content-Range")
+    if (!range || Number(range[1]) !== offset) {
+      // A proxy/server that ignores our Range header but still answers 206 with
+      // an absent or mismatched Content-Range leaves us unable to trust the
+      // partial's offset. Deleting it here (rather than leaving it in place) is
+      // what makes this recoverable: every subsequent run would otherwise resend
+      // the same Range request against the same stale offset and hit this exact
+      // failure forever. The next run starts a fresh, unresumed download instead.
+      await fs.unlink(partial).catch(() => {})
+      throw new Error("Download server returned an invalid Content-Range")
+    }
   }
   const receivedAtStart = append ? offset : 0
   // `?? NaN` (not a bare `Number(null)`, which is 0): a response without a

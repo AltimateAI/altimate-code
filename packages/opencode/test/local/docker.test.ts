@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   buildDockerRunArgs,
   dockerContainerRunning,
+  installContainerReaper,
   LOCAL_CONTAINER_NAME,
   LOCAL_MANAGEMENT_LABEL_KEY,
   LOCAL_MANAGEMENT_LABEL_VALUE,
@@ -256,5 +257,76 @@ describe("startDockerServer", () => {
       startDockerServer({ tier, modelID: model.id, port: 8095, exec, fetchImpl, pollIntervalMs: 1 }),
     ).rejects.toThrow(/Cannot connect to the Docker daemon/)
     expect(rmCalls).toBe(1)
+  })
+})
+
+describe("installContainerReaper", () => {
+  // The container is created before setupDocker ever writes state.json; an
+  // interrupt during the (up to 45-minute) health wait must not leave it
+  // orphaned and invisible to `altimate local stop`/`status`.
+  test("removes the labeled container and reports a SIGINT-shaped exit code", async () => {
+    let rmCalls = 0
+    const exec = execRouter({
+      inspectId: async () => ({ stdout: "container123\n", stderr: "" }),
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    let exitCode: number | undefined
+    const uninstall = installContainerReaper(exec, (code) => {
+      exitCode = code
+    })
+    try {
+      process.emit("SIGINT", "SIGINT")
+      // removeDockerContainer's exec calls are async; let them settle.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(rmCalls).toBe(1)
+      expect(exitCode).toBe(130)
+    } finally {
+      uninstall()
+    }
+  })
+
+  test("uninstalling removes the signal listeners so a later signal does nothing", async () => {
+    let rmCalls = 0
+    const exec = execRouter({
+      inspectId: async () => ({ stdout: "container123\n", stderr: "" }),
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    const uninstall = installContainerReaper(exec, () => {})
+    uninstall()
+    process.emit("SIGINT", "SIGINT")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(rmCalls).toBe(0)
+  })
+
+  test("only reaps once even if both SIGINT and SIGTERM arrive", async () => {
+    let rmCalls = 0
+    const exec = execRouter({
+      inspectId: async () => ({ stdout: "container123\n", stderr: "" }),
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    let exitCalls = 0
+    const uninstall = installContainerReaper(exec, () => {
+      exitCalls++
+    })
+    try {
+      process.emit("SIGINT", "SIGINT")
+      process.emit("SIGTERM", "SIGTERM")
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(rmCalls).toBe(1)
+      expect(exitCalls).toBe(1)
+    } finally {
+      uninstall()
+    }
   })
 })

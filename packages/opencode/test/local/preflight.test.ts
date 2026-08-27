@@ -177,7 +177,9 @@ describe("runPreflight", () => {
     await using tmp = await tmpdir()
     const target = path.join(tmp.path, "models", model.id, model.revision, path.basename(llamaTier.file))
     await fs.mkdir(path.dirname(target), { recursive: true })
-    await fs.writeFile(target, "the target artifact")
+    // Plausibly-sized (well above the truncation floor below) — a real gguf is
+    // multi-GB; this only needs to clear the cheap sanity floor.
+    await fs.writeFile(target, Buffer.alloc(2 * 1024 * 1024))
 
     const result = await runPreflight({
       tier: llamaTier,
@@ -191,6 +193,30 @@ describe("runPreflight", () => {
     const disk = result.checks.find((check) => check.name === "disk_space")!
     expect(disk.detail).toContain("already cached")
     expect(disk.ok).toBe(true)
+  })
+
+  // A truncated/corrupt cached file must not get the "already cached" 4GB
+  // discount: downloadWithResume would detect the checksum mismatch, delete
+  // it, and start a full download — potentially on a filesystem preflight
+  // just approved for only 4GB of headroom.
+  test("a truncated cached gguf below the plausibility floor does not discount the disk estimate", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "models", model.id, model.revision, path.basename(llamaTier.file))
+    await fs.mkdir(path.dirname(target), { recursive: true })
+    await fs.writeFile(target, "truncated") // a handful of bytes, not a real gguf
+
+    const result = await runPreflight({
+      tier: llamaTier,
+      model: { id: model.id, revision: model.revision },
+      hardware: nvidia,
+      availableGb: 22.5,
+      directory: tmp.path,
+      platform: "linux",
+      exec: exec({ df: DF_10GB, ldconfig: VULKAN_OK }),
+    })
+    const disk = result.checks.find((check) => check.name === "disk_space")!
+    expect(disk.detail).not.toContain("already cached")
+    expect(disk.ok).toBe(false)
   })
 
   test("docker tier: cached HF weights alone do not discount the estimate when the SGLang image is missing", async () => {

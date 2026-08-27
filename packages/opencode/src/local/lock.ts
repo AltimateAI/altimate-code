@@ -74,7 +74,22 @@ export async function withLifecycleLock<T>(run: () => Promise<T>, paths: LocalPa
       break
     } catch {
       if (await isLockStale(dir, meta, Date.now())) {
-        await fs.rm(dir, { recursive: true, force: true })
+        // Reclaim via an atomic rename, not a blind rm: two waiters can both
+        // observe the same stale lock and both decide to reclaim it. If both
+        // simply `rm`'d `dir`, the loser's rm could delete the WINNER's freshly
+        // mkdir'd + owner.json'd lock directory (the loser's stale-check ran
+        // against the old, dead owner before the winner ever acquired) — both
+        // processes then believe they hold the lock. Renaming `dir` aside is
+        // atomic: only one renamer can succeed on a given path; the other's
+        // rename fails (ENOENT, because the path is already gone) and it falls
+        // through to retry from the top instead of destroying a live lock.
+        const stale = `${dir}.stale-${process.pid}-${Date.now()}`
+        try {
+          await fs.rename(dir, stale)
+        } catch {
+          continue
+        }
+        await fs.rm(stale, { recursive: true, force: true }).catch(() => {})
         continue
       }
       await new Promise((resolve) => setTimeout(resolve, 500))
