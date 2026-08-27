@@ -1395,7 +1395,7 @@ describe("INVARIANT — every config read is fresh", () => {
   })
 })
 
-describe("INVARIANT — an actionable failure always tells the user", () => {
+describe("INVARIANT — an actionable failure tells the user exactly once", () => {
   const actionable: Array<{ name: string; opts: Parameters<typeof install>[0]; kind: string }> = [
     { name: "engine-missing", opts: { which: null }, kind: "engine-missing" },
     { name: "engine-too-old", opts: { version: "0.5.9" }, kind: "engine-too-old" },
@@ -1426,9 +1426,56 @@ describe("INVARIANT — an actionable failure always tells the user", () => {
       const h = install(c.opts)
       const outcome = await ensure("s1")
       expect(outcome.kind).toBe(c.kind as never)
-      expect(h.toasts.length, `${c.name} returned without telling the user`).toBeGreaterThan(0)
+      // EXACTLY one, not at least one. "At least one" accepts a double signal,
+      // and a double signal is what a refusal path grows when a second way of
+      // reaching the user is added beside the first — a dialog and a toast
+      // saying the same thing. A suite asserting a toast fires and a suite
+      // asserting an offer is raised can both be green while the user sees two.
+      expect(h.toasts.length, `${c.name} told the user ${h.toasts.length} times, not once`).toBe(1)
     })
   }
+
+  test("a refusal for a workspace the project has left says nothing at all", async () => {
+    // Zero, not one: the message would name a workspace this project no longer
+    // holds. The teardown still happens — it is binding-independent — but the
+    // answer becomes `superseded` and the user hears nothing about a decision
+    // that no longer applies to them.
+    let current: CachedBinding | null = binding
+    const h = install({
+      which: null,
+      statuses: [{}],
+    })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.declared = async () => {
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+      return { keys: ["dbt_build_model"], extensionKeys: [] }
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.toasts.length, "announced a refusal for the workspace the project had left").toBe(0)
+  })
+
+  test("the teardown happens before the announcement, not after", async () => {
+    // Load-bearing rather than incidental: the announcement is a substitution
+    // point, and a body that waits on a person — a dialog — would hold a
+    // rejected client connected until they clicked. Stop serving first, explain
+    // second.
+    const order: string[] = []
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false },
+      statuses: [{ datamate: { status: "connected" } }],
+    })
+    const previousRemove = syncInternals.mcp!.remove
+    syncInternals.mcp!.remove = async (name: string) => {
+      order.push("teardown")
+      return previousRemove(name)
+    }
+    syncInternals.notify = async (toast) => {
+      order.push("announce")
+      h.toasts.push(toast)
+    }
+    expect(await ensure("s1")).toEqual({ kind: "entry-disabled" })
+    expect(order, "explained before it stopped serving").toEqual(["teardown", "announce"])
+  })
 })
 
 describe("INVARIANT — a superseded attach leaves nothing installed", () => {
@@ -1904,4 +1951,94 @@ describe("INVARIANT — never write what you cannot undo, and never stop waiting
     expect(settledOutcome("s1"), "no settled outcome at the point tools are resolved").toBeDefined()
     expect(h.added, "re-validating a good memo spawned a second engine").toHaveLength(1)
   })
+})
+
+describe("INVARIANT — the last thing awaited before a mutation is the world check", () => {
+  // The mechanical form of "every await after a guard belongs to the guard's
+  // problem". Individual tests flip a binding at one seam and check one
+  // outcome; that only ever catches the seam someone thought of, which is why
+  // an await inserted after the final guard survived the whole suite, and why
+  // deleting a teardown's guard outright survived it too.
+  //
+  // This records the order seams are awaited in and asserts adjacency: for every
+  // binding-DEPENDENT mutation, the seam awaited immediately before it is the
+  // binding read. persist -> add is sanctioned as one commit, since the guard
+  // covers the pair.
+  //
+  // Binding-INDEPENDENT teardowns are deliberately out of scope: a disabled or
+  // below-floor engine is torn down whatever is bound, so requiring a binding
+  // read before those would assert the opposite of what they are for. The
+  // scenarios below exercise only paths whose mutations are binding-dependent.
+  const MUTATIONS = new Set(["persist", "add", "remove", "connect", "persistRestore"])
+
+  function traced(opts: Parameters<typeof install>[0]) {
+    const h = install(opts)
+    const trace: string[] = []
+    const wrapRead = <T extends (...args: never[]) => Promise<unknown>>(name: string, fn: T) =>
+      (async (...args: never[]) => {
+        const out = await fn(...args)
+        trace.push(name)
+        return out
+      }) as T
+    const wrapMutation = <T extends (...args: never[]) => Promise<unknown>>(name: string, fn: T) =>
+      (async (...args: never[]) => {
+        trace.push(name)
+        return await fn(...args)
+      }) as T
+
+    syncInternals.resolveBinding = wrapRead("resolveBinding", syncInternals.resolveBinding!)
+    syncInternals.existingEntry = wrapRead("existingEntry", syncInternals.existingEntry!)
+    syncInternals.projectEntry = wrapRead("projectEntry", syncInternals.projectEntry!)
+    syncInternals.declared = wrapRead("declared", syncInternals.declared!)
+    syncInternals.versionOf = wrapRead("versionOf", syncInternals.versionOf!)
+    syncInternals.persist = wrapMutation("persist", syncInternals.persist!)
+    syncInternals.persistRestore = wrapMutation("persistRestore", syncInternals.persistRestore!)
+    const m = syncInternals.mcp!
+    syncInternals.mcp = {
+      ...m,
+      status: wrapRead("status", m.status),
+      tools: wrapRead("tools", m.tools!),
+      spawned: m.spawned ? wrapRead("spawned", m.spawned) : undefined,
+      add: wrapMutation("add", m.add),
+      remove: wrapMutation("remove", m.remove),
+      connect: wrapMutation("connect", m.connect),
+    }
+    return { h, trace }
+  }
+
+  const scenarios: Array<[string, Parameters<typeof install>[0]]> = [
+    ["a fresh spawn", { statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } }],
+    [
+      "replacing an entry pinned elsewhere",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"], enabled: true },
+        statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      },
+    ],
+    [
+      "replacing an unpinned entry",
+      {
+        existing: { type: "local", command: ["datamate", "start-stdio"], enabled: true },
+        statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      },
+    ],
+  ]
+
+  for (const [name, opts] of scenarios) {
+    test(`${name}: every mutation is preceded by the world check`, async () => {
+      const { trace } = traced(opts)
+      await ensure("s1")
+      const offenders: string[] = []
+      trace.forEach((step, i) => {
+        if (!MUTATIONS.has(step)) return
+        const before = trace[i - 1]
+        if (before === "resolveBinding") return
+        if (step === "add" && before === "persist") return // one commit, one guard
+        offenders.push(`${step} followed ${before ?? "(nothing)"}`)
+      })
+      expect(offenders, `${name}: ${offenders.join("; ")} — trace was ${trace.join(" -> ")}`).toEqual([])
+    })
+  }
 })

@@ -243,6 +243,47 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
   return { act: "check-version" }
 }
 
+/** Tell the user about a refusal — exactly once, from one place.
+ *
+ * This is a whole function for what is currently one call because it is a
+ * substitution point, and the substitution is easy to get wrong in a way no
+ * test on either side would catch.
+ *
+ * `installWouldHelp` names the refusals an install would actually fix. Those
+ * belong to an install offer when one exists, and the offer owns the MESSAGING
+ * for them: it replaces this toast rather than joining it, and falls back to
+ * this same toast whenever it cannot reach a surface. So "an actionable failure
+ * is never silent" holds either way, and neither path emits twice.
+ *
+ * The toast and the offer are alternatives, not a sequence. A refusal that
+ * raises both is the double signal — a dialog and a toast saying the same thing
+ * — and it would pass a suite asserting a toast fires alongside one asserting an
+ * offer is raised, because neither asserts the user sees exactly ONE thing.
+ * Replace this function's body; do not add beside it.
+ *
+ * Module-level so the unexpected-throw path uses it too. That path had grown its
+ * own toast — a second place a refusal reaches the user, which is exactly the
+ * kind of site an offer would double up on, and the kind nobody writes a fixture
+ * for.
+ *
+ * NEVER throws: "never silent" also has to mean "never relabelled". A throw here
+ * reached the catch-all and turned a decided outcome into `connect-failed` with
+ * a second toast, so failing to DESCRIBE a verdict silently rewrote it. */
+async function announceRefusal(outcome: Outcome, toast: Toast, context?: Record<string, unknown>): Promise<void> {
+  try {
+    if (installWouldHelp(outcome)) {
+      log.info("refusal is remediable by installing the engine", { ...context, kind: outcome.kind })
+    }
+    await notify(toast)
+  } catch (err) {
+    log.warn("could not announce the refusal; the outcome stands", {
+      ...context,
+      kind: outcome.kind,
+      err: String(err),
+    })
+  }
+}
+
 async function run(): Promise<Outcome> {
   if (!isEnabled()) return { kind: "disabled" }
 
@@ -386,43 +427,6 @@ async function run(): Promise<Outcome> {
     return { kind: "superseded" }
   }
 
-  /** Tell the user about a refusal — exactly once.
-   *
-   * This is a whole function for what is currently one call because it is a
-   * substitution point, and the substitution is easy to get wrong in a way no
-   * test on either side would catch.
-   *
-   * `installWouldHelp` names the refusals an install would actually fix. Those
-   * belong to an install offer when one exists, and the offer owns the
-   * MESSAGING for them: it replaces this toast rather than joining it, and
-   * falls back to this same toast whenever it cannot reach a surface. So
-   * "an actionable failure is never silent" holds either way, and neither path
-   * emits twice.
-   *
-   * The toast and the offer are alternatives, not a sequence. A refusal that
-   * raises both is the double signal — a dialog and a toast saying the same
-   * thing — and it would pass a suite that asserts a toast fires alongside one
-   * that asserts an offer is raised, because neither asserts the user sees
-   * exactly one thing. Replace this function's body; do not add beside it. */
-  const announceRefusal = async (outcome: Outcome, toast: Toast): Promise<void> => {
-    try {
-      if (installWouldHelp(outcome)) {
-        log.info("refusal is remediable by installing the engine", { workspaceId, kind: outcome.kind })
-      }
-      await notify(toast)
-    } catch (err) {
-      // "Never silent" has to also mean "never relabelled". A throw here reached
-      // the catch-all and turned a decided outcome — `entry-disabled`, say —
-      // into `connect-failed`, with a second toast, so a failure to DESCRIBE the
-      // verdict silently rewrote the verdict.
-      log.warn("could not announce the refusal; the outcome stands", {
-        workspaceId,
-        kind: outcome.kind,
-        err: String(err),
-      })
-    }
-  }
-
   /** The single exit for every refusal.
    *
    * Three properties that were previously spread across six branches, each of
@@ -460,7 +464,7 @@ async function run(): Promise<Outcome> {
       })
       return { kind: "superseded" }
     }
-    await announceRefusal(outcome, toast)
+    await announceRefusal(outcome, toast, { workspaceId })
     return outcome
   }
 
@@ -1090,12 +1094,17 @@ function attachOnce(sessionID: string): Promise<Outcome> {
       // nor an explanation, since the caller discards this outcome and
       // `whenAttached` returns void.
       log.warn("workspace engine attach failed", { err: error })
-      await notify({
-        title: "Workspace engine attach failed",
-        message: `Could not attach the workspace engine: ${error}. Integration tools are unavailable for this session.`,
-        variant: "error",
-      })
-      return { kind: "connect-failed", error }
+      const outcome: Outcome = { kind: "connect-failed", error }
+      await announceRefusal(
+        outcome,
+        {
+          title: "Workspace engine attach failed",
+          message: `Could not attach the workspace engine: ${error}. Integration tools are unavailable for this session.`,
+          variant: "error",
+        },
+        { sessionID },
+      )
+      return outcome
     })
     .then((outcome) => {
       // One line per session, whatever happened — silence is the defect this
