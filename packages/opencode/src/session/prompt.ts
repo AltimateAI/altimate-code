@@ -817,11 +817,37 @@ export namespace SessionPrompt {
       }
 
       // context overflow, needs compaction
+      // altimate_change start — proactive overflow check: the recorded usage is
+      // from the LAST assistant turn; tool results appended since then are not
+      // counted, and one oversized output can jump the session past the window
+      // between checks, silently killing otherwise-recoverable sessions.
+      // Estimate the uncounted tail and include it.
+      const uncountedTail = (() => {
+        if (!lastFinished) return 0
+        const index = msgs.findIndex((m) => m.info.id === lastFinished.id)
+        if (index < 0) return 0
+        let chars = 0
+        for (const m of msgs.slice(index + 1)) {
+          for (const part of m.parts) {
+            if (part.type === "text") chars += part.text?.length ?? 0
+            if (part.type === "tool" && part.state?.status === "completed") chars += part.state.output?.length ?? 0
+          }
+        }
+        return Math.ceil(chars / 4)
+      })()
       if (
         lastFinished &&
         lastFinished.summary !== true &&
-        (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
+        (await SessionCompaction.isOverflow({
+          tokens: {
+            ...lastFinished.tokens,
+            input: (lastFinished.tokens.input ?? 0) + uncountedTail,
+            total: lastFinished.tokens.total ? lastFinished.tokens.total + uncountedTail : lastFinished.tokens.total,
+          },
+          model,
+        }))
       ) {
+        // altimate_change end
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,

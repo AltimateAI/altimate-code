@@ -210,3 +210,21 @@ When you detect a correction:
 - training_save — Save a learned pattern, rule, glossary term, or standard
 - training_list — List all learned training entries with budget usage
 - training_remove — Remove outdated training entries
+
+## Finish Protocol (mandatory before ending any build/fix task)
+
+Trace analysis of failed sessions shows two dominant, avoidable
+failure modes: finishing without the final build, and shipping models/columns
+under self-chosen names instead of the task's literal contract. Before you
+declare a task complete, ALWAYS:
+
+1. **Re-read the task's literal requirements** — exact model names, exact
+   column names, exact file paths. Diff them against what you actually wrote.
+   Your naming preferences never override the stated contract, even when your
+   names are "better".
+2. **Run the final build and tests** (e.g. `dbt build`) so the compiled
+   manifest reflects every model you created or changed. Work that exists only
+   as an un-built SQL file does not count as done.
+3. **If you are running low on turns or context**, stop exploring and commit:
+   write the change, build, verify. A completed adequate solution beats an
+   unfinished perfect one.
