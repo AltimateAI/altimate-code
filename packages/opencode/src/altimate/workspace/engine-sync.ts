@@ -394,14 +394,53 @@ async function run(): Promise<Outcome> {
    * Both reads live in one function so nothing can be inserted between them, and
    * this is the LAST await before any mutation. The invariant is not "no
    * mutation on a stale binding" but "no mutation on a stale world". */
-  const worldUnchanged = async (): Promise<boolean> => {
-    const entryNow = await existingEntry(DATAMATE_KEY).catch(() => null)
+  const worldUnchanged = async (): Promise<"ok" | "moved" | "disabled"> => {
+    // Binding FIRST, intent LAST, so the only thing standing between the intent
+    // check and the write is the write's own read — which does the check again,
+    // at the one point nothing can intervene.
+    if (!(await stillCurrent())) return "moved"
+    let entryNow: ExistingEntry | null
+    try {
+      entryNow = await existingEntry(DATAMATE_KEY)
+    } catch (err) {
+      // Fails CLOSED. The previous version caught this to `null`, and `null`
+      // does not look disabled — so a config read that merely FAILED was read as
+      // permission to write, and the guard was defeated by the read breaking
+      // rather than by the timing window it was built for. If intent cannot be
+      // confirmed, nothing is written.
+      log.warn("could not confirm intent before mutating; abandoning the attach", {
+        workspaceId,
+        err: String(err),
+      })
+      return "moved"
+    }
     if (entryNow?.enabled === false) {
       log.info("intent changed while deciding; not writing over a disable", { workspaceId })
-      return false
+      return "disabled"
     }
-    return await stillCurrent()
+    return "ok"
   }
+
+  /** The refusal a mid-decision disable earns.
+   *
+   * Reported as `entry-disabled` rather than `superseded` because the guard
+   * knows WHICH half of the world moved, and the two mean different things to a
+   * user: one says "something changed, try again", the other says "you switched
+   * this off, and it stays off". Collapsing them would throw away the more
+   * useful answer at the point we finally have it. */
+  const refuseDisabled = (): Promise<Outcome> =>
+    refuse(
+      { kind: "entry-disabled" },
+      {
+        title: "Workspace engine is disabled",
+        message:
+          `The "${DATAMATE_KEY}" MCP entry is disabled, so workspace "${binding.datamateName}" ` +
+          `integration tools are unavailable. Enable it to use them.`,
+        variant: "warning",
+      },
+      { reason: "the entry is disabled" },
+      false,
+    )
 
   /** Stop serving an entry we have judged untrustworthy for this workspace.
    *
@@ -540,7 +579,13 @@ async function run(): Promise<Outcome> {
     // handed. Reviving becomes the same operation as spawning, which is the
     // real win — the retry stops being a special path with special rules.
     const revive: LocalMcpConfig = { type: "local", command: commandArgv(inspection.entry), enabled: true }
-    if (!(await stillCurrent())) return { kind: "superseded" }
+    // The whole world, not just the binding: this starts a process, and a
+    // disable that landed since the inspection forbids starting it just as
+    // surely as it forbids writing config. The plan was derived from a snapshot
+    // taken before a status read; re-confirm both halves before acting on it.
+    const beforeRevive = await worldUnchanged()
+    if (beforeRevive === "disabled") return await refuseDisabled()
+    if (beforeRevive !== "ok") return { kind: "superseded" }
     await client.add(DATAMATE_KEY, revive).catch((err) => {
       log.warn("could not restart the engine entry", { err: String(err), workspaceId })
     })
@@ -789,11 +834,12 @@ async function run(): Promise<Outcome> {
     })
   }
   const configPath = await projectConfigPath().catch(() => undefined)
-  if (!(await worldUnchanged())) {
-    // Re-linked or disabled while we were probing. Installing now would attach a
-    // workspace this session has left, or overwrite a disable that landed while
-    // we were deciding — and would win by arriving first.
-    log.info("abandoning attach; the world changed before the engine was installed", { workspaceId })
+  const beforeInstall = await worldUnchanged()
+  if (beforeInstall === "disabled") return await refuseDisabled()
+  if (beforeInstall !== "ok") {
+    // Re-linked while we were probing. Installing now would attach a workspace
+    // this session has left, and would win by arriving first.
+    log.info("abandoning attach; the binding changed before the engine was installed", { workspaceId })
     return { kind: "superseded" }
   }
 
@@ -817,8 +863,18 @@ async function run(): Promise<Outcome> {
   // undo itself. One rule, one place, and exits nobody anticipated are covered
   // by construction rather than by review.
   let committed = false
+  // Distinct from `committed`: whether anything was actually written or
+  // registered. A write refused at the last moment left nothing behind, and the
+  // undo must not "restore" over a config it never touched.
+  let installed = false
   try {
-    await persist(DATAMATE_KEY, cfg, configPath)
+    if ((await persist(DATAMATE_KEY, cfg, configPath)) === "disabled") {
+      // A disable landed between our guard and the write, and the write saw it.
+      // Nothing was written and nothing registered.
+      log.info("write refused: the entry is disabled on disk", { workspaceId })
+      return await refuseDisabled()
+    }
+    installed = true
     await client.add(DATAMATE_KEY, cfg)
 
     // Rule 4 — a failed local engine is reported, never routed around.
@@ -858,9 +914,15 @@ async function run(): Promise<Outcome> {
     // Late rather than early on purpose: the check is only meaningful at the
     // last moment before we announce and answer, because everything before that
     // is still revocable. The undo itself now belongs to the region.
-    if (!(await worldUnchanged())) {
-      log.info("the world changed before the attach could be reported; undoing what we installed", { workspaceId })
-      return { kind: "superseded" }
+    const afterInstall = await worldUnchanged()
+    if (afterInstall !== "ok") {
+      log.info("the world changed before the attach could be reported; undoing what we installed", {
+        workspaceId,
+        why: afterInstall,
+      })
+      // Either way the install is undone by the region. A disable reports itself
+      // so the user learns their edit took effect, rather than a generic race.
+      return afterInstall === "disabled" ? await refuseDisabled() : { kind: "superseded" }
     }
 
     // Ours, and staying. Answer BEFORE announcing: `announceToolsChanged` and
@@ -891,7 +953,7 @@ async function run(): Promise<Outcome> {
     })
     return outcome
   } finally {
-    if (!committed) {
+    if (installed && !committed) {
       await undoInstall(projectBefore).catch((err) => {
         log.warn("could not undo a non-attached install", { err: String(err), workspaceId })
       })
@@ -988,8 +1050,15 @@ async function memoStillValid(workspaceId: string, record?: SessionAttach): Prom
     if (record) record.validated = command
     return true
   } catch (err) {
-    log.warn("could not re-probe the engine attribution; keeping the cached attach", { err: String(err) })
-    return true
+    // Fails CLOSED, and the earlier comment claiming otherwise was wrong about
+    // the cost. Returning true serves a memo whose world could not be confirmed
+    // — a disabled entry or a moved pin rides a transient probe error, on the
+    // path taken by every turn after the first. Returning false does not discard
+    // anything: it routes back through `run()`, which re-inspects under the
+    // per-project lock and either attaches or refuses through the single exit,
+    // with no mutation. A failed read is never an answer.
+    log.warn("could not confirm the cached attach; re-deciding rather than serving it", { err: String(err) })
+    return false
   }
 }
 

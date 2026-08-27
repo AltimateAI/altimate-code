@@ -1953,7 +1953,7 @@ describe("INVARIANT — never write what you cannot undo, and never stop waiting
   })
 })
 
-describe("INVARIANT — the last thing awaited before a mutation is the world check", () => {
+describe("INVARIANT — the last thing awaited before a mutation is the whole world check", () => {
   // The mechanical form of "every await after a guard belongs to the guard's
   // problem". Individual tests flip a binding at one seam and check one
   // outcome; that only ever catches the seam someone thought of, which is why
@@ -2033,10 +2033,25 @@ describe("INVARIANT — the last thing awaited before a mutation is the world ch
       const offenders: string[] = []
       trace.forEach((step, i) => {
         if (!MUTATIONS.has(step)) return
+        // The world check is TWO reads in a fixed order — binding, then intent —
+        // so the adjacency to assert is the pair, not one seam. Intent goes last
+        // deliberately: the only thing left between confirming intent and
+        // writing is the write's own read of the node it replaces.
         const before = trace[i - 1]
-        if (before === "resolveBinding") return
+        const beforeThat = trace[i - 2]
         if (step === "add" && before === "persist") return // one commit, one guard
-        offenders.push(`${step} followed ${before ?? "(nothing)"}`)
+        // A WRITE needs the whole world: `enabled: false` forbids creating
+        // anything, so intent is part of the question.
+        if (step === "persist" || step === "add") {
+          if (before === "existingEntry" && beforeThat === "resolveBinding") return
+        } else if (before === "resolveBinding") {
+          // A TEARDOWN only needs the binding. Intent neither authorises nor
+          // forbids stopping a client: a disabled entry is torn down regardless,
+          // and the only question a foreign entry raises is whether it belongs
+          // to the workspace we are now bound to.
+          return
+        }
+        offenders.push(`${step} followed ${beforeThat ?? "(nothing)"} -> ${before ?? "(nothing)"}`)
       })
       expect(offenders, `${name}: ${offenders.join("; ")} — trace was ${trace.join(" -> ")}`).toEqual([])
     })
@@ -2071,5 +2086,60 @@ describe("INVARIANT — the single exit survives a failure with no workspace to 
     const outcome = await ensure("s1")
     expect(outcome.kind).toBe("connect-failed")
     expect(h.toasts).toHaveLength(1)
+  })
+})
+
+describe("INVARIANT #13 — a failed read is never an answer", () => {
+  // The class: a failure to LEARN something, encoded as a confident fact. It is
+  // invisible to every other invariant here, because they all test what happens
+  // when a read succeeds — ordering, completeness, staleness, adjacency. None
+  // asks what a function does when the read throws.
+  //
+  // A guard that fails open is worse than no guard, because its presence is what
+  // stops the next person looking.
+
+  test("a guard whose intent read THROWS writes nothing", async () => {
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    const good = syncInternals.existingEntry!
+    let reads = 0
+    syncInternals.existingEntry = async (name: string) => {
+      reads += 1
+      // The inspection succeeds; the guard's confirming read fails.
+      if (reads > 1) throw new Error("EIO: config unreadable")
+      return good(name)
+    }
+    const outcome = await ensure("s1")
+    expect(h.persisted, "wrote config without confirming the user still wants it").toHaveLength(0)
+    expect(h.added, "started an engine without confirming the user still wants it").toHaveLength(0)
+    expect(outcome.kind).toBe("superseded")
+  })
+
+  test("a memo whose validating read THROWS is re-decided, not served", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+
+    const good = syncInternals.existingEntry!
+    let failNext = true
+    syncInternals.existingEntry = async (name: string) => {
+      if (failNext) {
+        failNext = false
+        throw new Error("EIO: config unreadable")
+      }
+      return good(name)
+    }
+    // Serving the memo would mean answering with a world we could not confirm —
+    // a disabled entry or a moved pin riding a transient probe error, on the
+    // path every turn after the first takes. Re-deciding costs an inspection.
+    const first = settledOutcome("s1")
+    const second = await ensure("s1")
+    // The property is that the memo was not SERVED, not that the re-decision
+    // reaches a different verdict — re-deciding may well conclude reuse, and
+    // that is fine, because it concluded it from a world it could actually read.
+    // Identity is what separates "handed back the cached answer" from "worked it
+    // out again".
+    expect(second, "served a memo whose world could not be confirmed").not.toBe(first)
   })
 })

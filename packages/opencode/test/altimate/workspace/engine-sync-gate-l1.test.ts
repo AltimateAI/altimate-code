@@ -131,10 +131,22 @@ describe("T1 — the last awaited seam before every mutation is the binding read
       let j = i - 1
       while (j >= 0 && MUTATIONS.has(trace[j])) j--
       const before = trace[j]
+      const beforeThat = trace[j - 1]
       // persist→add is the one sanctioned adjacency (persist has no seam of its own
-      // to re-read after); everything else must sit directly on a binding read.
+      // to re-read after); everything else must sit directly on the world check.
       if (trace[i] === "add" && trace[i - 1] === "persist") continue
-      if (before !== "resolveBinding") out.push(`${trace[i]} at #${i} follows ${before ?? "<start>"}`)
+      // ADAPTED ON LIFT: the world check is now TWO reads in a fixed order —
+      // binding, then intent — because a guard that confirms only the binding is
+      // a guard on half the world. Intent goes last so the only thing between
+      // confirming it and the write is the write's own read of the node it
+      // replaces, which checks again where nothing can intervene.
+      // A WRITE needs the whole world (intent forbids creating anything); a
+      // TEARDOWN needs only the binding, since intent neither authorises nor
+      // forbids stopping a client.
+      const isWrite = trace[i] === "persist" || trace[i] === "add"
+      if (isWrite && before === "existingEntry" && beforeThat === "resolveBinding") continue
+      if (!isWrite && before === "resolveBinding") continue
+      out.push(`${trace[i]} at #${i} follows ${beforeThat ?? "<start>"} -> ${before ?? "<start>"}`)
     }
     return out
   }

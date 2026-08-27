@@ -89,7 +89,7 @@ describe("L3 (a') — a disable lands INSIDE the retry's connect window", () => 
     }
     const outcome = await ensure("s1")
     expect(h.connects, "repaired with the config-writing primitive").toHaveLength(0)
-    expect(h.reads).toEqual([true, false]) // two inspections
+    expect(h.reads, "inspection, pre-revive guard, re-inspection").toEqual([true, true, false]) // two inspections
     expect(outcome.kind).toBe("entry-disabled")
     expect(h.removes).toEqual(["datamate"])
   })
@@ -112,7 +112,9 @@ describe("L3 (a') — a disable lands INSIDE the retry's connect window", () => 
     }
     expect((await ensure("s1")).kind).toBe("reused")
     expect((await ensure("s1")).kind).toBe("reused")
-    expect(h.reads).toEqual([true, true, true])
+    // One more read than before: the pre-revive guard now confirms intent as
+    // well as the binding before starting anything.
+    expect(h.reads).toEqual([true, true, true, true])
     expect(h.removes).toEqual([])
   })
 })
@@ -181,8 +183,10 @@ describe("L3 (f) — the plan derived from an Inspection is held across the prob
     // it documented was the defect: the plan was held across the probes and then
     // persisted our `enabled: true` over a disable that had landed meanwhile,
     // after which the memo read our own entry and stood forever. The guard
-    // re-reads intent as well as the binding now, so the write never happens.
-    expect(first.kind).toBe("superseded")
+    // re-reads intent as well as the binding now, so the write never happens —
+    // and it reports WHICH half moved, so the user learns their edit took
+    // effect rather than being told about a generic race.
+    expect(first.kind).toBe("entry-disabled")
     expect(h.persisted, "wrote our pinned enabled:true over a disable that landed during the probes").toHaveLength(0)
     expect(h.added, "installed over a disable that landed during the probes").toHaveLength(0)
 
@@ -191,10 +195,11 @@ describe("L3 (f) — the plan derived from an Inspection is held across the prob
     // The next turn re-decides rather than riding a memo: it reads the disable
     // and reports it by name.
     expect(second.kind).toBe("entry-disabled")
-    // Two teardowns now, both correct: the pre-spawn detach of the unpinned
-    // entry, and the disabled entry's own teardown on the next turn — a disabled
-    // entry serves nothing, so it is not left registered.
-    expect(h.removes).toEqual(["datamate", "datamate"])
+    // Three teardowns now, all correct: the pre-spawn detach of the unpinned
+    // entry, the disabled entry's teardown when the guard catches the disable
+    // before the write, and its teardown again on the next turn. A disabled
+    // entry serves nothing, so it is never left registered.
+    expect(h.removes).toEqual(["datamate", "datamate", "datamate"])
   })
 
   test("same shape on the pinned-but-below-floor path", async () => {
@@ -211,10 +216,8 @@ describe("L3 (f) — the plan derived from an Inspection is held across the prob
       onDisk = { type: "local", command: cfg.command, enabled: cfg.enabled }
     }
     const first = await ensure("s1")
-    // INVERTED ON LIFT — same shape, same fix. Here the disable is caught by the
-    // pre-write world check rather than by a re-inspection, so it reports
-    // `superseded`; either way the write never happens, which is the property.
-    expect(first.kind).toBe("superseded")
+    // INVERTED ON LIFT — same shape, same fix.
+    expect(first.kind).toBe("entry-disabled")
     expect(h.persisted, "wrote our pinned enabled:true over a disable that landed during the probes").toHaveLength(0)
   })
 

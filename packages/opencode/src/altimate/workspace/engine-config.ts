@@ -20,9 +20,25 @@ export async function projectConfigPath(): Promise<string> {
   return resolveConfigPath(projectRoot())
 }
 
-export async function persist(name: string, cfg: LocalMcpConfig, configPath?: string): Promise<void> {
-  if (syncInternals.persist) return syncInternals.persist(name, cfg)
+/** Why a write did not happen. `written` is the ordinary case. */
+export type PersistResult = "written" | "disabled"
+
+export async function persist(name: string, cfg: LocalMcpConfig, configPath?: string): Promise<PersistResult> {
+  if (syncInternals.persist) return (await syncInternals.persist(name, cfg)) ?? "written"
   configPath = configPath ?? (await resolveConfigPath(projectRoot()))
+  // The LAST read before the write, and the only check a caller's guard cannot
+  // do for us. `addMcpToConfig` replaces the whole `mcp.<name>` node, so a
+  // disable that lands after the caller's guard and before this write is not
+  // merely raced — it is erased, and the post-install check then reads the file
+  // WE just wrote and finds nothing to undo. Invisible rather than reverted.
+  //
+  // Refusing here closes it at the only point where nothing can intervene: the
+  // caller turns this into `entry-disabled` and no config is touched at all.
+  const onDisk = (await readMcpEntryFromDisk(name, configPath)) as ExistingEntry | undefined
+  if (onDisk?.enabled === false) {
+    log.info("refusing to write over an entry that is disabled on disk", { name })
+    return "disabled"
+  }
   await addMcpToConfig(name, cfg, configPath)
   // `Config.get()` is cached per instance, and `addMcpToConfig` is a raw file
   // write that does not touch that cache — so without this, every later
@@ -33,6 +49,7 @@ export async function persist(name: string, cfg: LocalMcpConfig, configPath?: st
   await Config.invalidate().catch((err) => {
     log.warn("could not invalidate the config cache after persisting the engine entry", { err: String(err) })
   })
+  return "written"
 }
 
 /** The module's ONLY path to config, and it is always fresh.
