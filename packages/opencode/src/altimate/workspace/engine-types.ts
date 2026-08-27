@@ -37,6 +37,13 @@ export type LocalMcpConfig = {
   enabled: true
 }
 
+/** A configured MCP entry as the loader hands it to MCP (any transport). */
+export type McpEntry = { type: string } & Record<string, unknown>
+
+export function isMcpEntry(value: unknown): value is McpEntry {
+  return typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string"
+}
+
 export type Toast = { title: string; message: string; variant: "info" | "success" | "warning" | "error" }
 
 export type McpStatus = Record<string, { status: string; error?: string } | undefined>

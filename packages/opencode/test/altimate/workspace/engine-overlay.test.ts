@@ -20,6 +20,7 @@ import {
   trackedSessionsForTests,
   type Declared,
   type LocalMcpConfig,
+  type McpEntry,
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
@@ -39,7 +40,7 @@ type Harness = {
   statusError?: string
   onAdd?: () => void
   tools: Record<string, unknown>
-  added: LocalMcpConfig[]
+  added: Array<LocalMcpConfig | McpEntry>
   removes: number
   gets: number
   invalidates: number
@@ -126,10 +127,11 @@ function install(opts: {
     },
     get: async () => {
       h.gets += 1
-      if (loaded) return
+      if (loaded) return h.config
       h.config = opts.noMcpKey ? {} : { mcp: structuredClone(initialMcp ?? {}) }
       await overlay(DIR, h.config)
       loaded = true
+      return h.config
     },
   }
   return h
@@ -396,6 +398,9 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(managedWorkspace()).toEqual({ id: "7", name: "growth" })
     syncInternals.instanceDirectory = () => DIR
     expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+    // An Effect-side caller passes the instance directory explicitly.
+    expect(managedWorkspace(DIR_B)).toEqual({ id: "7", name: "growth" })
+    expect(managedWorkspace("/tmp/elsewhere")).toBeNull()
     // A's turn boundary sees A's overlay: nothing to reapply, no engine started for B.
     await beforeTurn("s1")
     expect(h.added).toEqual([])
@@ -433,9 +438,34 @@ describe("beforeTurn — what a turn boundary does", () => {
     h.binding = null
     await beforeTurn("s1")
     expect(h.removes).toBe(1)
+    expect(h.added).toEqual([])
     expect(h.config.mcp!.datamate).toBeUndefined()
     expect(managedWorkspace()).toBeNull()
     expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+  })
+
+  test("an unlink hands the key back to the entry the reloaded config restores", async () => {
+    // The overlay had shadowed the user's own hosted entry; once unbound, config
+    // reloads with that entry and MCP must be told to start it, because MCP only
+    // enumerates live clients.
+    const h = install({ mcp: { datamate: HOSTED_ENTRY } })
+    await beforeTurn("s1")
+    expect(pinnedWorkspace(h.config.mcp!.datamate as LocalMcpConfig)).toBe("42")
+    h.binding = null
+    await beforeTurn("s1")
+    expect(h.removes).toBe(1)
+    expect(h.added).toEqual([HOSTED_ENTRY])
+    expect(h.config.mcp!.datamate).toEqual(HOSTED_ENTRY)
+    expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+  })
+
+  test("an unlink does not start an entry the user had disabled", async () => {
+    const h = install({ mcp: { datamate: { ...HOSTED_ENTRY, enabled: false } } })
+    await beforeTurn("s1")
+    h.binding = null
+    await beforeTurn("s1")
+    expect(h.removes).toBe(1)
+    expect(h.added).toEqual([])
   })
 
   test("an engine installed after a refusal is picked up once the probe is asked again", async () => {

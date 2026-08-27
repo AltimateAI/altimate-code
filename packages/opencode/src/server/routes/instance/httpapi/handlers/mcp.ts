@@ -4,6 +4,11 @@ import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { McpServerNotFoundError } from "../errors"
 import { AddPayload, AuthCallbackPayload, StatusMap, UnsupportedOAuthError } from "../groups/mcp"
+// altimate_change start — workspace mode owns the datamate key
+import { InstanceState } from "@/effect/instance-state"
+import { DATAMATE_KEY } from "@/altimate/datamate-transport"
+import { managedWorkspace } from "@/altimate/workspace/engine-overlay"
+// altimate_change end
 
 export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handlers) =>
   Effect.gen(function* () {
@@ -14,6 +19,21 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     })
 
     const add = Effect.fn("McpHttpApi.add")(function* (ctx: { payload: typeof AddPayload.Type }) {
+      // altimate_change start — in workspace mode the `datamate` key is the bound
+      // workspace's own engine, derived at config load; adding over it would replace
+      // the engine underneath a turn. Refuse and say why.
+      if (ctx.payload.name === DATAMATE_KEY) {
+        const managed = managedWorkspace(yield* InstanceState.directory)
+        if (managed) {
+          // BadRequest carries no body on this endpoint; the reason is logged.
+          yield* Effect.logWarning("mcp add refused: key is managed by a workspace", {
+            name: DATAMATE_KEY,
+            workspace: managed.id,
+          })
+          return yield* new HttpApiError.BadRequest({})
+        }
+      }
+      // altimate_change end
       const result = (yield* mcp.add(ctx.payload.name, ctx.payload.config)).status
       return yield* Schema.decodeUnknownEffect(StatusMap)(
         "status" in result ? { [ctx.payload.name]: result } : result,

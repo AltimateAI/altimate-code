@@ -37,8 +37,10 @@ import {
   describeRefusal,
   engineEntry,
   engineToolKeys,
+  isMcpEntry,
   type Declared,
   type LocalMcpConfig,
+  type McpEntry,
   type McpStatus,
   type Outcome,
   type Toast,
@@ -182,8 +184,7 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
  * Synchronous, for the in-process writers of that key (the reload endpoint,
  * the HTTP add route, `datamate_manager add`): in workspace mode they refuse
  * the key and say why, instead of replacing the engine underneath a turn. */
-export function managedWorkspace(): { id: string; name: string } | null {
-  const directory = currentDirectory()
+export function managedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
   if (!directory) return null
   return directories.get(directory)?.current?.workspace ?? null
 }
@@ -219,7 +220,7 @@ function mcp() {
   return (
     syncInternals.mcp ?? {
       status: () => MCP.status() as Promise<McpStatus>,
-      add: (name: string, cfg: LocalMcpConfig) => MCP.add(name, cfg),
+      add: (name: string, cfg: LocalMcpConfig | McpEntry) => MCP.add(name, cfg as Parameters<typeof MCP.add>[1]),
       remove: (name: string) => MCP.remove(name),
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,
     }
@@ -230,11 +231,22 @@ function config() {
   return (
     syncInternals.config ?? {
       invalidate: () => Config.invalidate(),
-      get: async () => {
-        await Config.get()
-      },
+      get: async () => (await Config.get()) as { mcp?: Record<string, unknown> },
     }
   )
+}
+
+/** Hand the key back to whatever the reloaded config says now that the overlay
+ * no longer fills it: the user's own hosted or IDE-written entry, if any. MCP
+ * enumerates live clients only, so a restored config entry must be started or
+ * the project's standalone datamate tools stay gone for the rest of the process. */
+async function releaseKey(loaded: { mcp?: Record<string, unknown> } | undefined): Promise<void> {
+  await mcp().remove(DATAMATE_KEY)
+  const restored = loaded?.mcp?.[DATAMATE_KEY]
+  if (isMcpEntry(restored) && restored.enabled !== false) {
+    log.info("workspace engine released the datamate key; starting the configured entry", { type: restored.type })
+    await mcp().add(DATAMATE_KEY, restored)
+  }
 }
 
 async function declaredFor(workspaceId: string): Promise<Declared | null> {
@@ -275,11 +287,12 @@ async function reconcile(sessionID: string): Promise<void> {
   const binding = await resolveBinding(directory)
   if (!binding) {
     // Unlinked (or never linked): the key is not ours to fill.
+    let loaded: { mcp?: Record<string, unknown> } | undefined
     if (state.current || state.applied) {
       await config().invalidate()
-      await config().get()
+      loaded = await config().get()
     }
-    if (state.applied?.entry) await mcp().remove(DATAMATE_KEY)
+    if (state.applied?.entry) await releaseKey(loaded)
     state.applied = null
     record(sessionID, { kind: "unbound" })
     return
@@ -293,14 +306,15 @@ async function reconcile(sessionID: string): Promise<void> {
     const probe = await probeEngine()
     reload = probe.kind === "ok"
   }
+  let loaded: { mcp?: Record<string, unknown> } | undefined
   if (reload) {
     await config().invalidate()
-    await config().get()
+    loaded = await config().get()
   }
 
   const overlayNow = state.current
   if (!overlayNow) {
-    if (state.applied?.entry) await mcp().remove(DATAMATE_KEY)
+    if (state.applied?.entry) await releaseKey(loaded)
     state.applied = null
     record(sessionID, { kind: "unbound" })
     return

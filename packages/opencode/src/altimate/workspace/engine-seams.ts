@@ -6,7 +6,7 @@ import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { CachedBinding } from "./state"
-import type { Declared, LocalMcpConfig, McpStatus, Toast } from "./engine-types"
+import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./engine-types"
 
 export const log = Log.create({ service: "workspace-engine" })
 
@@ -24,14 +24,15 @@ export const syncInternals: {
   now?: () => number
   mcp?: {
     status: () => Promise<McpStatus>
-    add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
+    add: (name: string, cfg: LocalMcpConfig | McpEntry) => Promise<unknown>
     remove: (name: string) => Promise<unknown>
     tools: () => Promise<Record<string, unknown>>
   }
   config?: {
     invalidate: () => Promise<void>
-    /** Loads config, which runs the overlay as a side effect. */
-    get: () => Promise<void>
+    /** Loads config, which runs the overlay as a side effect, and returns the
+     * loaded `mcp` map. */
+    get: () => Promise<{ mcp?: Record<string, unknown> }>
   }
 } = {}
 
