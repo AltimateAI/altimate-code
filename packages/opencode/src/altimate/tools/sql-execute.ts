@@ -53,6 +53,20 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         limit: args.limit,
       })
 
+      // The dispatcher's sql.execute handler catches driver errors and returns
+      // { columns: [], rows: [], row_count: 0, truncated: false, error: <msg> }
+      // instead of throwing. Surface the error so the caller sees the real
+      // failure instead of a bare "(0 rows)" — the previous behavior made
+      // syntax errors and semantic failures indistinguishable from successful
+      // zero-row queries. Found by the 2026-08-25 snowflake-setup live eval.
+      if (result.error) {
+        return {
+          title: "SQL: ERROR",
+          metadata: { rowCount: 0, truncated: false, error: result.error },
+          output: `Failed to execute SQL: ${result.error}`,
+        }
+      }
+
       let output = formatResult(result)
       // altimate_change start — emit SQL structure fingerprint telemetry
       try {
