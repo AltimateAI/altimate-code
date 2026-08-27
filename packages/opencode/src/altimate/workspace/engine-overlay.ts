@@ -32,6 +32,7 @@ import {
   ENGINE_BINARY,
   INSTALL_COMMAND,
   REPAIRABLE,
+  TOOL_PREFIX,
   clearsFloor,
   describeMissing,
   describeRefusal,
@@ -266,23 +267,64 @@ async function declaredFor(workspaceId: string): Promise<Declared | null> {
 /** Reconcile, settle and announce for one session. Runs at the start of every
  * user turn, before the tool list is resolved. Never throws. */
 export async function beforeTurn(sessionID: string): Promise<void> {
+  await atTurnStart(sessionID, async () => undefined)
+}
+
+/** Run the turn boundary and then `body` — the turn's tool cataloguing — under
+ * the directory's lock, so no other session's boundary can replace the engine
+ * between this session's reconcile and its catalog snapshot. The hook's own
+ * failures are logged and swallowed; `body`'s propagate. */
+export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>): Promise<T> {
   if (!isEnabled() || isServe()) {
     record(sessionID, { kind: "disabled" })
-    return
+    return body()
   }
   const directory = currentDirectory()
   if (!directory) {
     record(sessionID, { kind: "unbound" })
-    return
+    return body()
   }
   const state = stateFor(directory)
-  const run = state.chain.then(() => reconcile(sessionID, directory, state))
-  state.chain = run.catch(() => undefined)
-  try {
-    await run
-  } catch (err) {
-    log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
+  const run = state.chain.then(async () => {
+    try {
+      await reconcile(sessionID, directory, state)
+    } catch (err) {
+      log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
+    }
+    return body()
+  })
+  state.chain = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
+}
+
+/** The engine tools a turn catalogued at its first step, kept for its later
+ * steps. `resolveTools` re-snapshots MCP on every step, so a re-link applied by
+ * another session's boundary mid-turn would otherwise be re-catalogued here;
+ * pinning keeps this turn on the engine its boundary read. A call through a
+ * pinned wrapper after a replacement reaches the closed client and fails — it
+ * never routes to the other workspace. */
+const turnTools = new Map<string, Record<string, unknown>>()
+
+export function pinTurnTools<T>(sessionID: string, step: number, tools: Record<string, T>): void {
+  if (!isEnabled() || isServe()) return
+  const engine = Object.fromEntries(Object.entries(tools).filter(([key]) => key.startsWith(TOOL_PREFIX)))
+  if (step === 1) {
+    turnTools.delete(sessionID)
+    turnTools.set(sessionID, engine)
+    while (turnTools.size > MAX_TRACKED_SESSIONS) {
+      const oldest = turnTools.keys().next().value
+      if (oldest === undefined) break
+      turnTools.delete(oldest)
+    }
+    return
   }
+  const pinned = turnTools.get(sessionID)
+  if (!pinned) return
+  for (const key of Object.keys(engine)) delete tools[key]
+  for (const [key, tool] of Object.entries(pinned)) tools[key] = tool as T
 }
 
 async function reconcile(sessionID: string, directory: string, state: DirectoryState): Promise<void> {
@@ -460,6 +502,7 @@ export function resetForTests(): void {
   directories.clear()
   probeMemo = null
   sessions.clear()
+  turnTools.clear()
   declaredCache.clear()
 }
 

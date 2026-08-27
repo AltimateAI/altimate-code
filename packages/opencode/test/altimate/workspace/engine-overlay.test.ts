@@ -8,8 +8,10 @@ import {
   FAILED_PROBE_TTL_MS,
   INSTALL_COMMAND,
   MAX_TRACKED_SESSIONS,
+  atTurnStart,
   beforeTurn,
   invalidateProbe,
+  pinTurnTools,
   managedWorkspace,
   overlay,
   overlayForTests,
@@ -549,6 +551,71 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toHaveLength(1)
     expect(pinnedWorkspace(h.added[0] as LocalMcpConfig)).toBe("7")
     expect(managedWorkspace()?.id).toBe("7")
+  })
+
+  test("the lock is held through the turn's catalog, so another boundary waits for the snapshot", async () => {
+    const h = install({})
+    let releaseCatalog: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      releaseCatalog = resolve
+    })
+    let catalogued = ""
+    const a = atTurnStart("A", async () => {
+      await gate
+      catalogued = managedWorkspace()?.id ?? "none"
+      return "A-catalog"
+    })
+    await new Promise((r) => setTimeout(r, 5))
+    h.binding = bound(7, "growth")
+    const b = beforeTurn("B")
+    await new Promise((r) => setTimeout(r, 5))
+    expect(h.added).toEqual([])
+    releaseCatalog()
+    expect(await a).toBe("A-catalog")
+    await b
+    // A catalogued while its own workspace was still the one applied.
+    expect(catalogued).toBe("42")
+    expect(managedWorkspace()?.id).toBe("7")
+  })
+
+  test("a body failure propagates to the caller but does not wedge the directory's lock", async () => {
+    install({})
+    await expect(
+      atTurnStart("A", async () => {
+        throw new Error("catalog exploded")
+      }),
+    ).rejects.toThrow("catalog exploded")
+    await expect(atTurnStart("B", async () => "ok")).resolves.toBe("ok")
+  })
+
+  test("a turn keeps the engine tools it catalogued at step 1 for its later steps", async () => {
+    install({})
+    const first = { datamate_a: { id: "a1" }, sql_execute: { id: "sql" } }
+    pinTurnTools("s1", 1, first)
+    // Another session's boundary replaced the engine mid-turn: step 2 re-catalogs
+    // a different tool set under the same prefix.
+    const later: Record<string, { id: string }> = {
+      datamate_b: { id: "b1" },
+      datamate_a: { id: "a2" },
+      sql_execute: { id: "sql" },
+    }
+    pinTurnTools("s1", 2, later)
+    expect(later).toEqual({ sql_execute: { id: "sql" }, datamate_a: { id: "a1" } })
+    // A new turn takes a fresh snapshot.
+    pinTurnTools("s1", 1, { datamate_b: { id: "b1" } })
+    const step2: Record<string, { id: string }> = {}
+    pinTurnTools("s1", 2, step2)
+    expect(step2).toEqual({ datamate_b: { id: "b1" } })
+  })
+
+  test("pinning is a no-op with the flag off and for a session with no step-1 snapshot", async () => {
+    install({ flag: false })
+    const tools: Record<string, { id: string }> = { datamate_a: { id: "a1" } }
+    pinTurnTools("s1", 2, tools)
+    expect(tools).toEqual({ datamate_a: { id: "a1" } })
+    install({})
+    pinTurnTools("s9", 2, tools)
+    expect(tools).toEqual({ datamate_a: { id: "a1" } })
   })
 
   test("the turn hook never throws", async () => {

@@ -1009,36 +1009,38 @@ export namespace SessionPrompt {
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
-      // altimate_change start — workspace engine turn boundary. Reconciles the bound
-      // workspace's engine (re-link, one retry on a failed handshake), settles this
-      // session's outcome and announces it once per verdict. Runs before
-      // `resolveTools` so the engine's tools are in this turn's tool list; the cold
-      // engine boot happens inside MCP's own bootstrap, bounded by its per-server
-      // timeout. Every user turn starts at step 1 (see the note below on `step`).
-      if (step === 1) await WorkspaceEngine.beforeTurn(sessionID)
-      // altimate_change end
-
       // altimate_change start (AI-7519) — trace resolveTools per step.
       // Included in the parent `bootstrap` span on step===1; on later steps
       // this measures the per-turn tool-listing overhead (MCP.tools connect
       // cost etc.). Distinct span name per phase so telemetry doesn't
       // double-count non-bootstrap turns under "bootstrap.*", and the TUI
       // falls back to the safe "Thinking..." label on later turns.
-      const tools = await traceSpan(
-        step === 1 ? "bootstrap.resolve-tools" : "turn.resolve-tools",
-        () =>
-          resolveTools({
-            agent,
-            session,
-            model,
-            tools: lastUser.tools,
-            processor,
-            bypassAgentCheck,
-            messages: msgs,
-          }),
-        { step, agent: agent.name },
-        sessionID,
-      )
+      const catalog = () =>
+        traceSpan(
+          step === 1 ? "bootstrap.resolve-tools" : "turn.resolve-tools",
+          () =>
+            resolveTools({
+              agent,
+              session,
+              model,
+              tools: lastUser.tools,
+              processor,
+              bypassAgentCheck,
+              messages: msgs,
+            }),
+          { step, agent: agent.name },
+          sessionID,
+        )
+      // Workspace engine turn boundary (step 1): reconcile the bound workspace's
+      // engine (re-link, one retry on a failed handshake), settle this session's
+      // outcome, announce it once per verdict — then catalog the tools under the
+      // same per-directory lock, so another session's boundary cannot replace the
+      // engine between this reconcile and this snapshot. The cold engine boot
+      // happens inside MCP's own bootstrap, bounded by its per-server timeout.
+      // Every user turn starts at step 1 (see the note below on `step`). Later
+      // steps re-catalog but keep the engine tools this turn started with.
+      const tools = step === 1 ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
+      WorkspaceEngine.pinTurnTools(sessionID, step, tools)
       // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
