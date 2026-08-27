@@ -31,7 +31,7 @@ export const syncInternals: {
   printLine?: (line: string) => void
   /** Install-offer seams (see engine-offer.ts). */
   offer?: (offer: EngineOffer) => boolean
-  publishOffer?: () => Promise<boolean>
+  publishOffer?: (sessionID: string) => Promise<boolean>
   nodeMajor?: () => Promise<number | null>
   npmAvailable?: () => boolean
   install?: (spec: string) => Promise<InstallResult>

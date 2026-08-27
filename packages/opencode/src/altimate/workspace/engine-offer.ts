@@ -32,6 +32,11 @@ export const OFFER_COMMAND = "altimate.workspace.engineInstallOffer"
  * the per-session announce dedupe both key on this, so a session that
  * outlives the latch sees the offer again instead of waiting for a new one. */
 export const OFFER_SKIP_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/** Once a session's offer is older than the latch, how often it is raised
+ * again while the verdict stands. The TUI's latch starts when "Not now" is
+ * chosen, not when the offer was raised, so the attach side cannot know when
+ * it ends: it re-raises at this cadence and the TUI suppresses until then. */
+export const OFFER_RECHECK_MS = 60 * 60 * 1000
 
 /** A "no usable engine" state, described well enough for an interactive
  * surface to act on it without re-deriving anything. */
@@ -156,12 +161,16 @@ export async function installEngine(): Promise<InstallResult> {
   }
 }
 
-/** Ask the TUI to raise the offer. False when the bus is unavailable. */
-async function publishOffer(): Promise<boolean> {
-  if (syncInternals.publishOffer) return syncInternals.publishOffer()
+/** Ask the TUI to raise the offer. False when the bus is unavailable. The
+ * session is carried so an attached headless run, which reads the same event
+ * stream, prints the offer raised for its own session only. */
+async function publishOffer(sessionID: string): Promise<boolean> {
+  if (syncInternals.publishOffer) return syncInternals.publishOffer(sessionID)
   try {
     await AppRuntime.runPromise(
-      EventV2Bridge.Service.use((events) => events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND })),
+      EventV2Bridge.Service.use((events) =>
+        events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND, sessionID }),
+      ),
     )
     return true
   } catch (err) {
@@ -192,12 +201,12 @@ export function describeOfferLine(offer: EngineOffer): string {
 
 /** Offer via the dialog surface when there is one; otherwise print (headless)
  * or toast (bus unavailable). Exactly one of these happens. */
-export async function offerOrNotify(offer: EngineOffer, toast: Toast): Promise<void> {
+export async function offerOrNotify(offer: EngineOffer, toast: Toast, sessionID: string): Promise<void> {
   if (isHeadless()) {
     printLine(describeOfferLine(offer))
     return
   }
   if (offerInstall(offer)) return
-  if (await publishOffer()) return
+  if (await publishOffer(sessionID)) return
   await notify(toast)
 }

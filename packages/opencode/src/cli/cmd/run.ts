@@ -935,9 +935,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // which has no handler for it, is the only thing the user is looking at.
           // Placed before the idle break: the loop stops on idle, so a handler
           // after it never runs for an offer that arrives in the same batch.
+          // The stream carries every session's events for this directory; only
+          // the offer raised for this run's session is this run's to print.
           if (
             event.type === "tui.command.execute" &&
-            (event.properties as { command?: string }).command === OFFER_COMMAND
+            (event.properties as { command?: string }).command === OFFER_COMMAND &&
+            (event.properties as { sessionID?: string }).sessionID === sessionID
           ) {
             // stderr: stdout is raw JSON events under --format json.
             process.stderr.write(

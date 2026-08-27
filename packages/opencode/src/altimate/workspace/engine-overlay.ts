@@ -36,7 +36,7 @@ import {
   type ScopedBinding,
 } from "./engine-seams"
 import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
-import { OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
+import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
 import {
   ENGINE_BINARY,
   INSTALL_HELPS,
@@ -681,7 +681,11 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
  *
  * The offer route's "once" expires with the "Not now" latch: a session that
  * stays open past `OFFER_SKIP_TTL_MS` is offered again, so the latch (which
- * the TUI checks on every offer) decides, not the age of the session. */
+ * the TUI checks on every offer) decides, not the age of the session. The
+ * latch is measured from the user's "Not now", which can come well after the
+ * offer was raised, so after the first expiry the offer is re-raised every
+ * `OFFER_RECHECK_MS` rather than once per further window — the TUI keeps
+ * suppressing it until its latch really ends. */
 export async function announceRefusal(
   sessionID: string,
   outcome: Outcome,
@@ -694,14 +698,16 @@ export async function announceRefusal(
   const signature = `${outcome.kind}:${detail}:${declared}:${toast.title}`
   const offering = !!offer && INSTALL_HELPS[outcome.kind]
   const at = now()
+  let repeat = false
   if (rec.announced === signature) {
     const expired = offering && rec.announcedAt !== undefined && at - rec.announcedAt >= OFFER_SKIP_TTL_MS
     if (!expired) return
+    repeat = true
   }
   rec.announced = signature
-  rec.announcedAt = at
+  rec.announcedAt = repeat ? at - OFFER_SKIP_TTL_MS + OFFER_RECHECK_MS : at
   if (offering) {
-    await offerOrNotify(offer, toast)
+    await offerOrNotify(offer, toast, sessionID)
     return
   }
   if (isHeadless()) {

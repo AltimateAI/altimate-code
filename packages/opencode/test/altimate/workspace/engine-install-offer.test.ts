@@ -20,7 +20,7 @@ import {
   type EngineOffer,
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
-import { OFFER_SKIP_TTL_MS } from "../../../src/altimate/workspace/engine-offer"
+import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS } from "../../../src/altimate/workspace/engine-offer"
 import { Process } from "../../../src/util/process"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 
@@ -36,7 +36,7 @@ const binding: CachedBinding = {
   linkedAt: 0,
 } as CachedBinding
 
-type Harness = { offers: EngineOffer[]; toasts: Toast[]; printed: string[]; published: number }
+type Harness = { offers: EngineOffer[]; toasts: Toast[]; printed: string[]; published: number; publishedFor: string[] }
 
 /** No engine on PATH (or an old one) plus captured surfaces. */
 function install(opts: {
@@ -48,7 +48,7 @@ function install(opts: {
   surface?: boolean
   bound?: boolean
 }): Harness {
-  const h: Harness = { offers: [], toasts: [], printed: [], published: 0 }
+  const h: Harness = { offers: [], toasts: [], printed: [], published: 0, publishedFor: [] }
   process.env.ALTIMATE_WORKSPACE = "1"
   syncInternals.serve = () => false
   syncInternals.headless = () => opts.headless === true
@@ -66,9 +66,10 @@ function install(opts: {
   syncInternals.printLine = (line) => {
     h.printed.push(line)
   }
-  syncInternals.publishOffer = async () => {
+  syncInternals.publishOffer = async (sessionID) => {
     if (opts.bus === false) return false
     h.published += 1
+    h.publishedFor.push(sessionID)
     return true
   }
   if (opts.surface) {
@@ -178,13 +179,16 @@ describe("offer routing — engine missing", () => {
     await beforeTurn("s1")
     expect(h.printed[0]).toContain("1 integration tool need")
   })
-  test("the offer is raised once per session per verdict", async () => {
+  test("the offer is raised once per session per verdict, naming the session it is for", async () => {
     const h = install({})
     await beforeTurn("s1")
     await beforeTurn("s1")
     expect(h.published).toBe(1)
     await beforeTurn("s2")
     expect(h.published).toBe(2)
+    // An attached headless run reads every session's events for the directory
+    // and prints only the offer raised for its own session.
+    expect(h.publishedFor).toEqual(["s1", "s2"])
   })
   test("a session that outlives the Not-now latch is offered again", async () => {
     // The TUI re-checks its 7-day latch on every offer; the dedupe here must
@@ -202,6 +206,15 @@ describe("offer routing — engine missing", () => {
     expect(h.published).toBe(2)
     await beforeTurn("s1")
     expect(h.published).toBe(2)
+    // The latch runs from "Not now", which may come long after the offer was
+    // raised, so once the window has passed the offer is re-raised hourly —
+    // never held for another full window.
+    clock += OFFER_RECHECK_MS - 1
+    await beforeTurn("s1")
+    expect(h.published).toBe(2)
+    clock += 1
+    await beforeTurn("s1")
+    expect(h.published).toBe(3)
   })
 })
 
