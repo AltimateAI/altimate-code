@@ -243,6 +243,32 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
   return { act: "check-version" }
 }
 
+/** The last verdict announced to each session.
+ *
+ * Repairable refusals are re-decided every turn — deliberately, because that is
+ * how a repair gets noticed — but re-DECIDING is not a reason to re-TELL. A
+ * missing engine, an unreadable config or a below-floor binary that has not
+ * changed produced an identical toast on every single turn, which is nagging
+ * rather than informing. It matters more once the toast becomes a dialog: one
+ * dialog per turn would be unusable.
+ *
+ * Keyed by session and by the verdict itself, so a CHANGED verdict speaks, and a
+ * successful attach clears the record so the next problem is heard. */
+const lastAnnounced = new Map<string, string>()
+
+function verdictSignature(outcome: Outcome): string {
+  const detail =
+    "error" in outcome ? outcome.error : "found" in outcome ? outcome.found : "declared" in outcome ? "" : ""
+  return `${outcome.kind}:${detail}`
+}
+
+/** Forget what a session was last told, so the next verdict is announced even if
+ * it repeats an older one. Called when an attach succeeds: the problem the user
+ * was told about is gone, and if it comes back they should hear about it. */
+function clearAnnouncement(sessionID: string): void {
+  lastAnnounced.delete(sessionID)
+}
+
 /** Tell the user about a refusal — exactly once, from one place.
  *
  * This is a whole function for what is currently one call because it is a
@@ -290,6 +316,15 @@ type RefusalContext = {
 
 async function announceRefusal(outcome: Outcome, toast: Toast, context?: RefusalContext): Promise<void> {
   try {
+    const sessionID = context?.sessionID
+    if (sessionID) {
+      const signature = verdictSignature(outcome)
+      if (lastAnnounced.get(sessionID) === signature) {
+        log.info("verdict unchanged since the last turn; not repeating it", { sessionID, kind: outcome.kind })
+        return
+      }
+      lastAnnounced.set(sessionID, signature)
+    }
     if (installWouldHelp(outcome)) {
       log.info("refusal is remediable by installing the engine", { ...context, kind: outcome.kind })
     }
@@ -303,7 +338,7 @@ async function announceRefusal(outcome: Outcome, toast: Toast, context?: Refusal
   }
 }
 
-async function run(): Promise<Outcome> {
+async function run(sessionID: string): Promise<Outcome> {
   if (!isEnabled()) return { kind: "disabled" }
 
   const client = mcp()
@@ -422,12 +457,29 @@ async function run(): Promise<Outcome> {
    *
    * Both reads live in one function so nothing can be inserted between them, and
    * this is the LAST await before any mutation. The invariant is not "no
-   * mutation on a stale binding" but "no mutation on a stale world". */
+   * mutation on a stale binding" but "no mutation on a stale world".
+   *
+   * It does NOT make the window vanish. The write re-checks intent on the same
+   * text it modifies, which is as close as that can be got, but one read and one
+   * write to one file is not atomic — see the note on `persist`. This guard
+   * narrows the window; it does not close it. */
   const worldUnchanged = async (): Promise<"ok" | "moved" | "disabled" | "unreadable"> => {
-    // Binding FIRST, intent LAST, so the only thing standing between the intent
-    // check and the write is the write's own read — which does the check again,
-    // at the one point nothing can intervene.
-    if (!(await stillCurrent())) return "moved"
+    // Intent FIRST, binding LAST — reversed again, and this is the considered
+    // order rather than the obvious one.
+    //
+    // Reading the binding first put it one whole config read away from every
+    // mutation it guards, so a re-link landing inside that read installed for the
+    // workspace the project had just left and was only undone after the engine
+    // had booted with the per-project lock held. That is the exact defect this
+    // guard was written for, reintroduced by the guard's own ordering.
+    //
+    // Intent does not need to be last, because the write re-checks intent on the
+    // same text it modifies — so the intent window is covered whichever read
+    // comes first. The binding has no such second line of defence, so it takes
+    // the adjacent position. On the re-add path there is no write-side check at
+    // all and one half is necessarily a read away; the binding still goes last,
+    // because a stale binding starting another workspace's engine under the lock
+    // is the worse of the two harms.
     let entryNow: ExistingEntry | null
     try {
       entryNow = await existingEntry(DATAMATE_KEY)
@@ -450,6 +502,7 @@ async function run(): Promise<Outcome> {
       log.info("intent changed while deciding; not writing over a disable", { workspaceId })
       return "disabled"
     }
+    if (!(await stillCurrent())) return "moved"
     return "ok"
   }
 
@@ -556,10 +609,16 @@ async function run(): Promise<Outcome> {
     try {
       now = await projectEntry()
     } catch (err) {
-      log.warn("could not read the project entry before undoing; restoring what we replaced", {
+      // Fails CLOSED, like the guard's read and for the same reason. Restoring
+      // "what we replaced" on a read we could not perform can overwrite a
+      // disable that landed while we held the entry — writing blind is how the
+      // undo becomes the thing that needs undoing. Leave the file alone and let
+      // the caller tell the user what is still there.
+      log.warn("could not read the project entry before undoing; leaving the file alone", {
         workspaceId,
         err: String(err),
       })
+      return "failed"
     }
     if (now?.enabled === false) {
       log.info("the entry was disabled while we held it; keeping the disable rather than undoing it", {
@@ -608,7 +667,7 @@ async function run(): Promise<Outcome> {
       })
       return { kind: "superseded" }
     }
-    await announceRefusal(outcome, toast, { workspaceId, workspaceName: binding.datamateName })
+    await announceRefusal(outcome, toast, { workspaceId, workspaceName: binding.datamateName, sessionID })
     return outcome
   }
 
@@ -666,12 +725,31 @@ async function run(): Promise<Outcome> {
     if (beforeRevive === "disabled") return await refuseDisabled()
     if (beforeRevive === "unreadable") return await refuseUnreadable("intent could not be confirmed")
     if (beforeRevive !== "ok") return { kind: "superseded" }
-    await client.add(DATAMATE_KEY, revive).catch((err) => {
-      log.warn("could not restart the engine entry", { err: String(err), workspaceId })
-    })
+    let revived = false
+    await client
+      .add(DATAMATE_KEY, revive)
+      .then(() => {
+        revived = true
+      })
+      .catch((err) => {
+        log.warn("could not restart the engine entry", { err: String(err), workspaceId })
+      })
     // Re-inspected whole rather than re-reading status alone: the world may
     // have moved in both halves while we were starting a process.
-    inspection = await inspectEntry()
+    //
+    // A revive is an install, so it owns its undo like one. A throw in the
+    // re-inspection used to propagate straight to the catch-all with the client
+    // WE had just started still registered and serving — one external failure,
+    // not two, and the same advice-versus-registration split as everywhere else.
+    try {
+      inspection = await inspectEntry()
+    } catch (err) {
+      if (revived) {
+        log.info("undoing the revive we started, since we cannot decide about it", { workspaceId })
+        await client.remove(DATAMATE_KEY).catch(() => undefined)
+      }
+      throw err
+    }
     plan = planForEntry(inspection, workspaceId, true)
   }
   const entry = inspection.entry
@@ -817,6 +895,7 @@ async function run(): Promise<Outcome> {
         })
         return { kind: "superseded" }
       }
+      clearAnnouncement(sessionID)
       log.info("reusing existing engine entry", {
         workspaceId,
         available,
@@ -1013,7 +1092,7 @@ async function run(): Promise<Outcome> {
             `That pin is still on disk and will start on the next restart; edit or remove it to be sure.`,
           variant: "error",
         },
-        { workspaceId, workspaceName: binding.datamateName },
+        { workspaceId, workspaceName: binding.datamateName, sessionID },
       )
     }
   }
@@ -1084,6 +1163,10 @@ async function run(): Promise<Outcome> {
     // the toast are two more awaits, and the outcome asserts which workspace is
     // served — round 13's rule, which the announces quietly put back at risk.
     committed = true
+    // The problem the user was last told about is gone. If it returns, they
+    // should hear about it rather than have it deduplicated against a verdict
+    // from before the repair.
+    clearAnnouncement(sessionID)
     const outcome: Outcome = {
       kind: "attached",
       available,
@@ -1127,7 +1210,9 @@ async function run(): Promise<Outcome> {
     // is the same situation as any other refusal for a workspace the project has
     // left: answering names the wrong workspace and toasting is worse. The
     // catch-all announces every throw it sees, so this one must not reach it.
-    await undoNow()
+    // The `finally` performs the undo — one backstop, not two. It runs before
+    // this function's value reaches the caller, and before the catch-all
+    // announces anything, so the ordering that matters still holds.
     if (!(await stillCurrent())) {
       log.info("attach threw after the binding moved; not answering for the old workspace", {
         workspaceId,
@@ -1440,7 +1525,7 @@ async function failSafely(sessionID: string, task: () => Promise<Outcome>): Prom
 }
 
 function attachOnce(sessionID: string): Promise<Outcome> {
-  return serializeAttach(() => run())
+  return serializeAttach(() => run(sessionID))
     .then((outcome) => {
       // One line per session, whatever happened — silence is the defect this
       // module exists to remove, so it must not be silent about itself.
@@ -1511,4 +1596,5 @@ export async function whenAttached(sessionID: string, timeoutMs: number = ATTACH
 export function resetForTests(): void {
   sessions.clear()
   attachChains.clear()
+  lastAnnounced.clear()
 }

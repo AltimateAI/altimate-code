@@ -13,6 +13,7 @@ import { TestInstance } from "../fixture/fixture"
 
 // Per-client state for controlling mock behavior
 interface MockClientState {
+  instance?: { onclose?: () => void }
   capabilities: { tools?: object; prompts?: object; resources?: object }
   capabilitiesShouldThrow: boolean
   tools: Array<{ name: string; description?: string; inputSchema: object; outputSchema?: object }>
@@ -159,6 +160,9 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       clientCreateCount++
       this._state = getOrCreateClientState(lastCreatedClientName)
       this._state.clientOptions = options
+      // altimate_change — expose the instance so a test can trigger `onclose`,
+      // which is how production learns the child exited.
+      this._state.instance = this as unknown as { onclose?: () => void }
     }
 
     async connect(transport: { start: () => Promise<void> }) {
@@ -1308,6 +1312,43 @@ it.instance(
         yield* mcp.remove("forget")
         expect(Object.keys(yield* mcp.status()), "the key survived its own removal").not.toContain("forget")
         expect(yield* mcp.spawned("forget")).toBeUndefined()
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
+
+// altimate_change start — the spawn record's other two clearing paths
+it.instance(
+  "disconnecting a client clears the spawn record",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // The record answers "what IS running". A disabled key runs nothing, so
+        // leaving it would tell a later caller that a stopped engine is serving.
+        lastCreatedClientName = "disc"
+        yield* mcp.add("disc", { type: "local", command: ["echo", "one"] })
+        expect(localCommand(yield* mcp.spawned("disc"))).toEqual(["echo", "one"])
+        yield* mcp.disconnect("disc")
+        expect(yield* mcp.spawned("disc"), "a disconnected key still claims to be running").toBeUndefined()
+      }),
+    ),
+  { config: { mcp: { disc: { type: "local", command: ["echo", "one"] } } } },
+)
+
+it.instance(
+  "a client whose child exits clears the spawn record",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "closed"
+        yield* mcp.add("closed", { type: "local", command: ["echo", "one"] })
+        expect(localCommand(yield* mcp.spawned("closed"))).toEqual(["echo", "one"])
+
+        // The transport closes under us — the engine died.
+        const state = getOrCreateClientState("closed")
+        state.instance?.onclose?.()
+        expect(yield* mcp.spawned("closed"), "a dead child still claims to be running").toBeUndefined()
       }),
     ),
   { config: { mcp: {} } },

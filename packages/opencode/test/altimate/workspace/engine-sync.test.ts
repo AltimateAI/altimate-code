@@ -47,6 +47,7 @@ type Harness = {
   toasts: Array<{ title: string; message: string; variant: string }>
   toolsChanged: number
   restores: Array<unknown>
+  restorePaths: Array<string | undefined>
   statusQueue: Array<Record<string, { status: string; error?: string } | undefined>>
   tools: Record<string, unknown>
   spawnedNow?: ExistingEntry
@@ -69,6 +70,7 @@ function install(opts: {
     toasts: [],
     toolsChanged: 0,
     restores: [],
+    restorePaths: [],
     statusQueue: opts.statuses ?? [{}],
     tools: opts.tools ?? {},
     // A configured entry that is already CONNECTED was bootstrapped from that
@@ -102,8 +104,9 @@ function install(opts: {
   syncInternals.toolsChanged = async () => {
     h.toolsChanged += 1
   }
-  syncInternals.persistRestore = async (_name, previous) => {
+  syncInternals.persistRestore = async (_name, previous, configPath?: string) => {
     h.restores.push(previous ?? null)
+    h.restorePaths.push(configPath)
   }
   // The project file has no entry of its own unless a test says otherwise. This
   // used to be supplied by accident: the real reader swallowed its own errors
@@ -1946,6 +1949,9 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
     syncInternals.projectEntry = wrapRead("projectEntry", syncInternals.projectEntry!)
     syncInternals.declared = wrapRead("declared", syncInternals.declared!)
     syncInternals.versionOf = wrapRead("versionOf", syncInternals.versionOf!)
+    syncInternals.projectConfigPath = wrapRead("projectConfigPath", syncInternals.projectConfigPath!)
+    syncInternals.notify = wrapRead("notify", syncInternals.notify!)
+    syncInternals.toolsChanged = wrapRead("toolsChanged", syncInternals.toolsChanged!)
     syncInternals.persist = wrapMutation("persist", syncInternals.persist!)
     syncInternals.persistRestore = wrapMutation("persistRestore", syncInternals.persistRestore!)
     const m = syncInternals.mcp!
@@ -1996,6 +2002,11 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
   // a disabled or below-floor engine, are right whatever the project is bound to
   // now, so requiring a binding read before those would assert the opposite of
   // what they are for.
+  //
+  // LIMIT, stated rather than left implicit: the exemption is per SCENARIO, not
+  // per teardown. It is precise today only because no single run() produces both
+  // a binding-dependent and a binding-independent teardown — if one ever does,
+  // this needs the reason threaded through the trace instead.
   const bindingIndependent = new Set(["replacing an engine below the floor"])
 
   for (const [name, opts] of scenarios) {
@@ -2016,7 +2027,10 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
         // A WRITE needs the whole world: `enabled: false` forbids creating
         // anything, so intent is part of the question.
         if (step === "persist" || step === "add") {
-          if (before === "existingEntry" && beforeThat === "resolveBinding") return
+          // The BINDING read is the one that must be adjacent: intent has a
+          // second line of defence in the write's own same-text check, and the
+          // binding has none.
+          if (before === "resolveBinding" && beforeThat === "existingEntry") return
         } else if (!bindingDependentRemoves || before === "resolveBinding") {
           // A TEARDOWN only needs the binding. Intent neither authorises nor
           // forbids stopping a client: a disabled entry is torn down regardless,
@@ -2168,7 +2182,7 @@ describe("INVARIANT — announcing never changes what happened", () => {
 })
 
 describe("INVARIANT — a rejected engine is detached even when the rejection is a failure to know", () => {
-  test("a probe that THROWS detaches and refuses once, rather than toasting every turn", async () => {
+  test("a probe that THROWS detaches and refuses, and says so once across turns", async () => {
     // Letting the probe's throw propagate reached the catch-all BEFORE any
     // teardown, so a persistent failure produced a toast on every turn while the
     // rejected client stayed registered and serving — the outcome is advice, the
@@ -2186,9 +2200,15 @@ describe("INVARIANT — a rejected engine is detached even when the rejection is
     expect(h.removes, "left a rejected engine registered and serving").toContain("datamate")
     expect(h.toasts).toHaveLength(1)
 
-    // And the memo holds the refusal rather than re-refusing every turn.
+    // Repairable refusals are re-DECIDED every turn — that is how a repair gets
+    // noticed — but re-deciding is not a reason to re-TELL. The title of this
+    // test used to claim that and assert only the first turn; it asserts the
+    // claim now.
     const second = await ensure("s1")
     expect(second.kind).toBe("engine-too-old")
+    const third = await ensure("s1")
+    expect(third.kind).toBe("engine-too-old")
+    expect(h.toasts.length, "repeated an unchanged verdict on every turn").toBe(1)
   })
 
   test("a re-link during the version probes still detaches a below-floor engine", async () => {
@@ -2337,5 +2357,203 @@ describe("INVARIANT — an unbound project stays silent, whatever fails inside i
       expect(outcome.kind, `turn ${turn}: an unbound project reported an attach failure`).toBe("unbound")
     }
     expect(h.toasts, "an unbound project announced something").toHaveLength(0)
+  })
+})
+
+describe("INVARIANT — an unchanged verdict is announced once, a changed one speaks", () => {
+  // Repairable refusals re-enter the machine every turn by design: re-probing is
+  // how a repair gets noticed. Re-deciding is not a reason to re-tell, and the
+  // difference matters more once the toast becomes a dialog — one dialog per
+  // turn would be unusable.
+  test("three turns of the same verdict produce one signal", async () => {
+    const h = install({ which: null })
+    for (const _ of [1, 2, 3]) expect((await ensure("s1")).kind).toBe("engine-missing")
+    expect(h.toasts.length, "nagged on every turn about a verdict that had not changed").toBe(1)
+  })
+
+  test("a verdict that CHANGES is announced again", async () => {
+    const h = install({ which: null })
+    expect((await ensure("s1")).kind).toBe("engine-missing")
+    // The user installs something, but it is too old — a different problem, and
+    // one they need to hear about.
+    syncInternals.which = () => "/usr/local/bin/datamate"
+    syncInternals.versionOf = async () => "0.5.9"
+    expect((await ensure("s1")).kind).toBe("engine-too-old")
+    expect(h.toasts.length, "a changed verdict was swallowed as a repeat").toBe(2)
+  })
+
+  test("after a repair succeeds, the next problem is heard again", async () => {
+    const h = install({
+      which: null,
+      statuses: [
+        {},
+        {},
+        { datamate: { status: "connected" } },
+        { datamate: { status: "failed", error: "exit 1" } },
+        { datamate: { status: "failed", error: "exit 1" } },
+      ],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    expect((await ensure("s1")).kind).toBe("engine-missing")
+    // Repair.
+    syncInternals.which = () => "/usr/local/bin/datamate"
+    expect((await ensure("s1")).kind).toBe("attached")
+    // The engine then dies AND the binary goes away — the same problem as turn
+    // one, and news again, because it was fixed in between.
+    syncInternals.which = () => null
+    expect((await ensure("s1")).kind).toBe("engine-missing")
+    expect(h.toasts.filter((t) => t.title.includes("unavailable")).length, "silenced a problem that had returned").toBe(
+      2,
+    )
+  })
+})
+
+describe("INVARIANT — the coverage the mutants demanded", () => {
+  test("a disable inside the boot window is caught even when the binding never moves", async () => {
+    // The only test that staged a disable during the boot window ALSO flipped
+    // the binding, so the post-install guard's intent half was never the thing
+    // doing the work — the binding half would have caught it either way.
+    let projectNow: ExistingEntry | null = null
+    let entryNow: ExistingEntry = { type: "local", command: ["datamate", "start-stdio"], enabled: true }
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.existingEntry = async () => entryNow
+    syncInternals.projectEntry = async () => projectNow
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      // The user switches it off while the engine boots. The binding is
+      // untouched, so only the intent half of the guard can see this.
+      entryNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false }
+      projectNow = entryNow
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind, "the guard's intent half was not load-bearing").toBe("entry-disabled")
+    expect(h.removes, "left a disabled engine registered").toContain("datamate")
+  })
+
+  test("an in-region refusal tears down BEFORE it announces", async () => {
+    // The `finally` would undo either way, so the ORDER was unpinned — and the
+    // order is the point: the announcement is a substitution point, and a body
+    // that waits on a person would hold a failed engine's registration and its
+    // pin for as long as the dialog is open.
+    const order: string[] = []
+    const h = install({ statuses: [{}, { datamate: { status: "failed", error: "exit 1" } }] })
+    const prevRemove = syncInternals.mcp!.remove
+    syncInternals.mcp!.remove = async (name: string) => {
+      order.push("teardown")
+      return prevRemove(name)
+    }
+    syncInternals.notify = async (toast) => {
+      order.push("announce")
+      h.toasts.push(toast)
+    }
+    await ensure("s1")
+    expect(order.indexOf("teardown"), "announced before it stopped serving").toBeLessThan(order.indexOf("announce"))
+  })
+
+  test("the undo restores through the path the write used, not one it resolves again", async () => {
+    // Re-resolving can pick a different file than the one we wrote to, in which
+    // case the undo edits a config we never touched and leaves the one we did.
+    let current: CachedBinding | null = binding
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectConfigPath = async () => "/tmp/test/.altimate-code/altimate-code.json"
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    await ensure("s1")
+    expect(h.restorePaths, "the undo resolved its own path instead of using the write's").toEqual([
+      "/tmp/test/.altimate-code/altimate-code.json",
+    ])
+  })
+
+  test("a FIRST-read-only failure at the inspection does not plan as 'nothing here'", async () => {
+    // The seam property throws on every read, so the guard stops the write and
+    // the property passes without the inspection's handling ever mattering. With
+    // only the first read failing, planning a failed read as "no entry" writes.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio"], enabled: true },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const good = syncInternals.existingEntry!
+    let reads = 0
+    syncInternals.existingEntry = async (name: string) => {
+      reads += 1
+      if (reads === 1) throw new Error("EIO: first read only")
+      return good(name)
+    }
+    const outcome = await ensure("s1")
+    expect(h.persisted, "planned a failed inspection read as 'nothing here' and wrote").toHaveLength(0)
+    expect(h.added, "planned a failed inspection read as 'nothing here' and spawned").toHaveLength(0)
+    expect(outcome.kind).toBe("connect-failed")
+  })
+})
+
+describe("INVARIANT — a revive is an install and owns its undo", () => {
+  test("a throw after a successful revive removes the client we started", async () => {
+    // One external failure, not two: the revive succeeds and the very next read
+    // throws. Before, that propagated to the catch-all with the client WE had
+    // just started still registered and serving — the outcome says failed, the
+    // registration says otherwise, and the registration is what the model sees.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
+    })
+    const good = syncInternals.existingEntry!
+    let reads = 0
+    syncInternals.existingEntry = async (name: string) => {
+      reads += 1
+      // Reads: inspection (1), the pre-revive guard's intent read (2), then the
+      // re-inspection — which is the one that fails.
+      if (reads === 3) throw new Error("EIO: re-inspection failed")
+      return good(name)
+    }
+    const outcome = await ensure("s1")
+    expect(h.added, "the revive happened").toHaveLength(1)
+    expect(h.removes, "left the engine this attach started registered and serving").toContain("datamate")
+    expect(outcome.kind).toBe("connect-failed")
+  })
+})
+
+describe("INVARIANT — an undo that fails is never silent, however it fails", () => {
+  test("a persistRestore that THROWS does not become a silent superseded", async () => {
+    // The undo reports failure by returning "failed"; a throw is the other way
+    // it can fail, and the catch around it is load-bearing precisely because
+    // nothing else would notice. Dropping that catch turns a left-behind pin
+    // into a quiet `superseded`.
+    let current: CachedBinding | null = binding
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.persistRestore = async () => {
+      throw new Error("EROFS: read-only file system")
+    }
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    const outcome = await ensure("s1")
+    expect(outcome).toEqual({ kind: "superseded" })
+    expect(h.toasts, "an undo that threw left a pin on disk and said nothing").toHaveLength(1)
+    expect(h.toasts[0]!.title).toContain("left behind")
+  })
+
+  test("two distinct failures are two signals; one failure is one", async () => {
+    // The dedupe is by VERDICT, not by turn, so a second and different failure
+    // must still be heard — otherwise deduplication becomes suppression.
+    const h = install({ which: null })
+    await ensure("s1")
+    await ensure("s1")
+    expect(h.toasts.length, "one unchanged failure spoke more than once").toBe(1)
+    syncInternals.which = () => "/usr/local/bin/datamate"
+    syncInternals.versionOf = async () => null
+    await ensure("s1")
+    expect(h.toasts.length, "a second, different failure was swallowed as a repeat").toBe(2)
   })
 })

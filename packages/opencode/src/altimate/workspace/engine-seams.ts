@@ -25,7 +25,11 @@ export const syncInternals: {
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void | "written" | "disabled">
   projectConfigPath?: () => Promise<string>
-  persistRestore?: (name: string, previous: ExistingEntry | null) => Promise<void | "restored" | "failed">
+  persistRestore?: (
+    name: string,
+    previous: ExistingEntry | null,
+    configPath?: string,
+  ) => Promise<void | "restored" | "failed">
   projectEntry?: () => Promise<ExistingEntry | null>
   /** The configured (merged) MCP entry under `name`, or null if none. */
   existingEntry?: (name: string) => Promise<ExistingEntry | null>

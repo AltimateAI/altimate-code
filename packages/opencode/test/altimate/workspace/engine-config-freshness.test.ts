@@ -109,3 +109,27 @@ describe("INVARIANT #13 at the reader — a failed read propagates, never become
     expect(await existingEntry("datamate")).toBeNull()
   })
 })
+
+describe("INVARIANT — the restore reports failure from the real write, not just the seam", () => {
+  test("an unwritable config file yields 'failed', which is what raises the toast", async () => {
+    // The suite's "undo that could not be confirmed" test stubs the seam to
+    // RETURN "failed" — so the production path that decides to return it was
+    // never exercised, and making it return "restored" instead left everything
+    // green. Same layer-below shape that hid the reader's swallow.
+    const { persistRestore } = await import("../../../src/altimate/workspace/engine-config")
+    const { mkdtempSync, writeFileSync, chmodSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const path = await import("node:path")
+
+    const dir = mkdtempSync(path.join(tmpdir(), "restore-"))
+    const file = path.join(dir, "altimate-code.json")
+    writeFileSync(file, JSON.stringify({ mcp: { datamate: { type: "local", command: ["datamate"] } } }, null, 2))
+    chmodSync(file, 0o444)
+    try {
+      const result = await persistRestore("datamate", { type: "local", command: ["datamate", "old"] }, file)
+      expect(result, "an unwritable file was reported as a successful restore").toBe("failed")
+    } finally {
+      chmodSync(file, 0o644)
+    }
+  })
+})

@@ -148,7 +148,7 @@ describe("T1 — the last awaited seam before every mutation is the binding read
       // TEARDOWN needs only the binding, since intent neither authorises nor
       // forbids stopping a client.
       const isWrite = trace[i] === "persist" || trace[i] === "add"
-      if (isWrite && before === "existingEntry" && beforeThat === "resolveBinding") continue
+      if (isWrite && before === "resolveBinding" && beforeThat === "existingEntry") continue
       if (!isWrite && !removesAreBindingDependent) continue
       if (!isWrite && before === "resolveBinding") continue
       out.push(`${trace[i]} at #${i} follows ${beforeThat ?? "<start>"} -> ${before ?? "<start>"}`)

@@ -111,14 +111,38 @@ export async function persistRestore(
   previous: ExistingEntry | null,
   configPath?: string,
 ): Promise<"restored" | "failed"> {
-  if (syncInternals.persistRestore) return (await syncInternals.persistRestore(name, previous)) ?? "restored"
+  // The seam takes the path too, so a test can assert the undo uses the path the
+  // write used. Without it, dropping that argument was invisible: the stub
+  // discarded what it was never given.
+  if (syncInternals.persistRestore) return (await syncInternals.persistRestore(name, previous, configPath)) ?? "restored"
   try {
     // The SAME path the write used, not a fresh resolution: re-resolving can
     // pick a different file than the one we wrote to, in which case the undo
     // edits a config we never touched and leaves the one we did.
     const target = configPath ?? (await resolveConfigPath(projectRoot()))
-    if (previous) await addMcpToConfig(name, previous as never, target)
-    else await removeMcpFromConfig(name, target)
+    // The undo's write needs the same same-text check as the write it undoes.
+    // Without it the restore has its own version of the window `persist` closes:
+    // a disable landing before this write is replaced wholesale — and in the
+    // `previous === null` case it is DELETED, which is worse than overwritten.
+    if (previous) {
+      if ((await addMcpToConfig(name, previous as never, target, { refuseIfDisabled: true })) === null) {
+        log.info("not restoring over an entry that is disabled on disk", { name })
+        return "restored"
+      }
+    } else {
+      const onDisk = (await readMcpEntryFromDisk(name, target)) as ExistingEntry | undefined
+      if (onDisk?.enabled === false) {
+        // We were going to remove our entry because there was none before. The
+        // user has since switched this one off, which is an instruction about
+        // this node — honour it rather than deleting the node they just edited.
+        log.info("not removing an entry the user has disabled", { name })
+        return "restored"
+      }
+      await removeMcpFromConfig(name, target)
+    }
+    // Unobservable from this module's own tests for the same reason `persist`'s
+    // is — every read here invalidates first. It is here for the other `Config`
+    // consumers in the process.
     await Config.invalidate().catch(() => undefined)
     return "restored"
   } catch (err) {

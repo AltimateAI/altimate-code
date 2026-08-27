@@ -11,7 +11,8 @@ test("AH: UNBOUND project, config read throws in the diagnostic branch → must 
   syncInternals.notify = async (t) => { toasts.push(t) }
   syncInternals.mcp = { status: async () => ({ datamate: { status: "connected" } }), add: async () => {}, remove: async () => {}, tools: async () => ({}) }
   const out = await ensure("s1")
-  console.log("AH unbound:", JSON.stringify(out), "| toasts:", toasts.map((t) => t.title), "| settled:", JSON.stringify(settledOutcome("s1")))
+  // GIVEN AN ASSERTION ON LIFT — this was the reviewer's unasserted observation.
+    void 0; console.log("AH unbound:", JSON.stringify(out), "| toasts:", toasts.map((t) => t.title), "| settled:", JSON.stringify(settledOutcome("s1")))
   expect(out.kind).toBe("unbound")
   expect(toasts).toHaveLength(0)
 })
@@ -29,5 +30,8 @@ test("AH: the unbound escalation repeats every turn (connect-failed is REPAIRABL
   syncInternals.notify = async (t) => { toasts.push(t) }
   syncInternals.mcp = { status: async () => ({ datamate: { status: "connected" } }), add: async () => {}, remove: async () => {}, tools: async () => ({}) }
   await ensure("s1"); await ensure("s1"); await ensure("s1")
-  console.log("AH repeat: toasts over 3 turns =", toasts.length, toasts.map((t) => t.title))
+  // GIVEN AN ASSERTION ON LIFT — it was the reviewer's unasserted observation,
+  // which could not fail and so protected nothing. An unbound project announces
+  // nothing at all, on any turn, whatever fails inside it.
+  expect(toasts, `an unbound project announced ${toasts.length} times`).toHaveLength(0)
 })

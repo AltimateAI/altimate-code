@@ -185,11 +185,17 @@ describe("R2 — retry path: a disable between inspection #1 and the revive add"
       [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
       () => ({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled }),
     )
-    const realBinding = syncInternals.resolveBinding!
-    syncInternals.resolveBinding = async () => {
-      // the retry's stillCurrent() — after inspection #1 read intent
+    // RE-STAGED ON LIFT (twice). The disable has to land after inspection #1 and
+    // before the revive guard reads intent, and the guard's read order moved
+    // under this test — binding-first, then back to intent-first — so keying the
+    // trigger to a binding read no longer places it in the intended window. It
+    // lands at the end of inspection #1 instead, which is that window's opening
+    // edge and is stable against the guard's internal ordering.
+    const realEntry = syncInternals.existingEntry!
+    syncInternals.existingEntry = async (name: string) => {
+      const e = await realEntry(name)
       if (h.reads.length === 1) enabled = false
-      return realBinding()
+      return e
     }
     const outcome = await ensure("s1")
     // INVERTED ON LIFT: the revive guard checks the whole world now, so the
