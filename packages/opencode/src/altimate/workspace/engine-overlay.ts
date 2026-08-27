@@ -36,7 +36,7 @@ import {
   type ScopedBinding,
 } from "./engine-seams"
 import { declaredBounded, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
-import { installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
+import { OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
 import {
   ENGINE_BINARY,
   INSTALL_HELPS,
@@ -285,14 +285,19 @@ export async function managedWorkspaceLoaded(
 
 /** `retried`: this session already spent its one re-add on a failed handshake.
  * Per session, so "start a new session to try again" is true. */
-type SessionRecord = { outcome: Outcome; announced?: string; retried?: boolean }
+type SessionRecord = { outcome: Outcome; announced?: string; announcedAt?: number; retried?: boolean }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 
 function record(sessionID: string, outcome: Outcome): SessionRecord {
   const previous = sessions.get(sessionID)
   sessions.delete(sessionID)
-  const next: SessionRecord = { outcome, announced: previous?.announced, retried: previous?.retried }
+  const next: SessionRecord = {
+    outcome,
+    announced: previous?.announced,
+    announcedAt: previous?.announcedAt,
+    retried: previous?.retried,
+  }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
     const oldest = sessions.keys().next().value
@@ -660,7 +665,11 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
  * The substitution point for the install offer: when installing would help
  * and an `offer` is supplied, the offer surface (dialog, headless line, or
  * toast fallback) replaces the toast — never adds to it. Otherwise headless
- * `run` prints one stderr line and the TUI gets the toast. */
+ * `run` prints one stderr line and the TUI gets the toast.
+ *
+ * The offer route's "once" expires with the "Not now" latch: a session that
+ * stays open past `OFFER_SKIP_TTL_MS` is offered again, so the latch (which
+ * the TUI checks on every offer) decides, not the age of the session. */
 export async function announceRefusal(
   sessionID: string,
   outcome: Outcome,
@@ -671,9 +680,15 @@ export async function announceRefusal(
   const detail = "error" in outcome ? outcome.error : "found" in outcome ? String(outcome.found) : ""
   const declared = "declared" in outcome ? String(outcome.declared ?? "?") : ""
   const signature = `${outcome.kind}:${detail}:${declared}:${toast.title}`
-  if (rec.announced === signature) return
+  const offering = !!offer && INSTALL_HELPS[outcome.kind]
+  const at = now()
+  if (rec.announced === signature) {
+    const expired = offering && rec.announcedAt !== undefined && at - rec.announcedAt >= OFFER_SKIP_TTL_MS
+    if (!expired) return
+  }
   rec.announced = signature
-  if (offer && INSTALL_HELPS[outcome.kind]) {
+  rec.announcedAt = at
+  if (offering) {
     await offerOrNotify(offer, toast)
     return
   }

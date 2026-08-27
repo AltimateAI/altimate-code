@@ -20,6 +20,7 @@ import {
   type EngineOffer,
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
+import { OFFER_SKIP_TTL_MS } from "../../../src/altimate/workspace/engine-offer"
 import { Process } from "../../../src/util/process"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 
@@ -183,6 +184,23 @@ describe("offer routing — engine missing", () => {
     await beforeTurn("s1")
     expect(h.published).toBe(1)
     await beforeTurn("s2")
+    expect(h.published).toBe(2)
+  })
+  test("a session that outlives the Not-now latch is offered again", async () => {
+    // The TUI re-checks its 7-day latch on every offer; the dedupe here must
+    // not outlast that latch, or a long-lived session never sees the offer
+    // return after "Not now" expires.
+    let clock = 1_000_000
+    syncInternals.now = () => clock
+    const h = install({})
+    await beforeTurn("s1")
+    clock += OFFER_SKIP_TTL_MS - 1
+    await beforeTurn("s1")
+    expect(h.published).toBe(1)
+    clock += 1
+    await beforeTurn("s1")
+    expect(h.published).toBe(2)
+    await beforeTurn("s1")
     expect(h.published).toBe(2)
   })
 })

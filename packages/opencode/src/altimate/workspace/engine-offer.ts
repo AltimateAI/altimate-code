@@ -28,6 +28,10 @@ export const INSTALL_TIMEOUT_MS = 300_000
  * `CommandExecute` carries no payload, so the plugin re-derives the offer
  * with `describeOffer()`. */
 export const OFFER_COMMAND = "altimate.workspace.engineInstallOffer"
+/** How long "Not now" silences the offer for a workspace. The TUI latch and
+ * the per-session announce dedupe both key on this, so a session that
+ * outlives the latch sees the offer again instead of waiting for a new one. */
+export const OFFER_SKIP_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 /** A "no usable engine" state, described well enough for an interactive
  * surface to act on it without re-deriving anything. */

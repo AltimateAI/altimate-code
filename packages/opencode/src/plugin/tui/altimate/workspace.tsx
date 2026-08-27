@@ -57,6 +57,7 @@ import {
   npmAvailable,
   MIN_NODE_MAJOR,
   OFFER_COMMAND,
+  OFFER_SKIP_TTL_MS,
   type EngineOffer,
 } from "@/altimate/workspace/engine-offer"
 import { useClipboard } from "@opencode-ai/tui/context/clipboard"
@@ -1176,7 +1177,8 @@ function engineSkipKey(workspaceId: string, scope: LatchScope | null): string {
   )
 }
 
-/** Same 7-day TTL and clock-rewind handling as the post-scan latch. */
+/** Same clock-rewind handling as the post-scan latch; the TTL is the one the
+ * attach side's announce dedupe expires on, so both agree on "7 days". */
 function isEngineSkipActive(
   api: TuiPluginApi,
   workspaceId: string,
@@ -1187,7 +1189,7 @@ function isEngineSkipActive(
   if (!rec || typeof rec.skippedAt !== "number") return false
   const delta = nowMs - rec.skippedAt
   if (delta < 0) return false
-  return delta < SKIP_TTL_MS
+  return delta < OFFER_SKIP_TTL_MS
 }
 
 function recordEngineSkip(
