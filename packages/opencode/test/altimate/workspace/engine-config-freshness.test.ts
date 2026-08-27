@@ -133,3 +133,48 @@ describe("INVARIANT — the restore reports failure from the real write, not jus
     }
   })
 })
+
+describe("INVARIANT — the restore's write refuses on the same text, both ways", () => {
+  async function tempConfig(entry: unknown): Promise<string> {
+    const { mkdtempSync, writeFileSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const nodePath = await import("node:path")
+    const dir = mkdtempSync(nodePath.join(tmpdir(), "restore-refuse-"))
+    const file = nodePath.join(dir, "altimate-code.json")
+    writeFileSync(file, JSON.stringify({ mcp: { datamate: entry } }, null, 2))
+    return file
+  }
+
+  async function readBack(file: string): Promise<{ mcp: { datamate?: { enabled?: boolean } } }> {
+    const { readFileSync } = await import("node:fs")
+    return JSON.parse(readFileSync(file, "utf8"))
+  }
+
+  test("REPLACING does not overwrite a node the user has disabled", async () => {
+    // The lifted real-file test pins the delete half and the failed-re-read
+    // half; this is the third, which survived both. A restore that replaces is
+    // still a write, and a disable landing before it is still the user's
+    // instruction about that node.
+    const { persistRestore } = await import("../../../src/altimate/workspace/engine-config")
+    const file = await tempConfig({
+      type: "local",
+      command: ["datamate", "start-stdio", "--datamate", "42"],
+      enabled: false,
+    })
+    await persistRestore("datamate", { type: "local", command: ["datamate", "start-stdio"] }, file)
+    const after = await readBack(file)
+    expect(after.mcp.datamate?.enabled, "the undo overwrote a disable the user had just made").toBe(false)
+  })
+
+  test("REMOVING does not delete a node the user has disabled", async () => {
+    const { persistRestore } = await import("../../../src/altimate/workspace/engine-config")
+    const file = await tempConfig({
+      type: "local",
+      command: ["datamate", "start-stdio", "--datamate", "42"],
+      enabled: false,
+    })
+    await persistRestore("datamate", null, file)
+    const after = await readBack(file)
+    expect(after.mcp.datamate, "the undo deleted the node the user had just disabled").toBeDefined()
+  })
+})

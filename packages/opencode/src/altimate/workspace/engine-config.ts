@@ -130,15 +130,16 @@ export async function persistRestore(
         return "restored"
       }
     } else {
-      const onDisk = (await readMcpEntryFromDisk(name, target)) as ExistingEntry | undefined
-      if (onDisk?.enabled === false) {
-        // We were going to remove our entry because there was none before. The
-        // user has since switched this one off, which is an instruction about
-        // this node — honour it rather than deleting the node they just edited.
-        log.info("not removing an entry the user has disabled", { name })
-        return "restored"
+      // We were going to remove our entry because there was none before. If the
+      // user has since switched this one off, that is an instruction about this
+      // node — honour it rather than deleting what they just edited.
+      //
+      // Decided on the same text the delete modifies, like the replace case. A
+      // separate read followed by a delete is worse than a separate read
+      // followed by a replace: the user's edit is not overwritten, it is gone.
+      if (!(await removeMcpFromConfig(name, target, { refuseIfDisabled: true }))) {
+        log.info("did not remove the entry; it is absent or the user has disabled it", { name })
       }
-      await removeMcpFromConfig(name, target)
     }
     // Unobservable from this module's own tests for the same reason `persist`'s
     // is — every read here invalidates first. It is here for the other `Config`

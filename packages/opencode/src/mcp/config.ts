@@ -81,7 +81,16 @@ export async function addMcpToConfig(
   return configPath
 }
 
-export async function removeMcpFromConfig(name: string, configPath: string): Promise<boolean> {
+export async function removeMcpFromConfig(
+  name: string,
+  configPath: string,
+  // altimate_change — refuse to delete a node that is switched off, decided on
+  // the SAME text this call is about to modify. A caller that reads the file
+  // itself and then calls this one has checked a different read, which for a
+  // DELETE is worse than for a replace: the user's edit is not overwritten, it
+  // is gone.
+  opts?: { refuseIfDisabled?: boolean },
+): Promise<boolean> {
   if (!(await Filesystem.exists(configPath))) return false
 
   const text = await Filesystem.readText(configPath)
@@ -90,6 +99,14 @@ export async function removeMcpFromConfig(name: string, configPath: string): Pro
 
   const node = findNodeAtLocation(tree, ["mcp", name])
   if (!node) return false
+
+  // altimate_change — see `opts.refuseIfDisabled`
+  if (opts?.refuseIfDisabled) {
+    const current = parse(text, [], { allowTrailingComma: true }) as
+      | { mcp?: Record<string, { enabled?: boolean } | undefined> }
+      | undefined
+    if (current?.mcp?.[name]?.enabled === false) return false
+  }
 
   const edits = modify(text, ["mcp", name], undefined, {
     formattingOptions: { tabSize: 2, insertSpaces: true },
