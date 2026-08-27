@@ -806,7 +806,19 @@ export namespace Telemetry {
         /** `search_all` means the user opened the full catalogue; the provider they then chose
          *  arrives as a second event with `via_search`. `other` is any provider outside the
          *  curated five. */
-        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all" | "other"
+        // altimate_change start — upstream_fix: "local" is a real classifyProvider() output (see
+        // CURATED_PROVIDER_ENUM below), but was missing from this union so the TUI's `as` cast at
+        // the emit site let it through untyped, silently defeating consumers that switch on this type.
+        provider:
+          | "altimate_gateway"
+          | "anthropic"
+          | "openai"
+          | "google"
+          | "big_pickle"
+          | "local"
+          | "search_all"
+          | "other"
+        // altimate_change end
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */

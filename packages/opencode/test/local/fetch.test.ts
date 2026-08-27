@@ -81,6 +81,50 @@ describe("local artifact sha256 verification", () => {
     await expect(fs.stat(partial)).rejects.toThrow()
   })
 
+  // Regression: a completed destination file that fails its pinned checksum (disk corruption, an
+  // older interrupted downloader that skipped verification, ...) used to be left in place, so a
+  // retry hit the same stat+verify and failed identically forever instead of redownloading.
+  test("a corrupt completed artifact is deleted and redownloaded instead of getting stuck forever", async () => {
+    await using tmp = await tmpdir()
+    const destination = path.join(tmp.path, "artifact.gguf")
+    await fs.writeFile(destination, "corrupt bytes")
+    let calls = 0
+    const fetchImpl = async () => {
+      calls++
+      return new Response("good bytes", { status: 200, headers: { "content-length": "10" } })
+    }
+
+    const result = await downloadWithResume({
+      url: "https://example.invalid/artifact.gguf",
+      destination,
+      sha256: sha("good bytes"),
+      fetchImpl,
+    })
+    expect(calls).toBe(1) // redownloaded exactly once, not retried in a loop
+    expect(result.resumed).toBe(false)
+    expect(await fs.readFile(destination, "utf8")).toBe("good bytes")
+  })
+
+  // A repeat mismatch on the redownload must still fail closed (not loop forever) and clean up
+  // after itself — same guarantee the existing download path already provides.
+  test("a corrupt completed artifact that fails checksum again after redownload still errors and cleans up", async () => {
+    await using tmp = await tmpdir()
+    const destination = path.join(tmp.path, "artifact.gguf")
+    await fs.writeFile(destination, "corrupt bytes")
+    const fetchImpl = async () => new Response("still wrong bytes", { status: 200 })
+
+    await expect(
+      downloadWithResume({
+        url: "https://example.invalid/artifact.gguf",
+        destination,
+        sha256: sha("expected bytes"),
+        fetchImpl,
+      }),
+    ).rejects.toBeInstanceOf(ChecksumMismatchError)
+    await expect(fs.stat(destination)).rejects.toThrow()
+    await expect(fs.stat(`${destination}.partial`)).rejects.toThrow()
+  })
+
   test("a response with no Content-Length reports an unknown total instead of coercing it to 0", async () => {
     await using tmp = await tmpdir()
     const destination = path.join(tmp.path, "artifact.gguf")

@@ -43,6 +43,15 @@ async function winningConfigFile(config: ReturnType<typeof configFile>) {
   return config.defaultFile
 }
 
+// The config schema accepts a bare `"permission": "deny"` shorthand string, which
+// ConfigPermissionV1's own decoder normalizes to `{ "*": "deny" }` — but that normalization lives
+// in the Config schema pipeline, not in raw JSON. Every reader of the raw parsed permission value
+// in this file goes through this so a shorthand string can't reach `Object.keys()` (returns
+// character indices, not pattern keys) or a bare `key in permission` (throws on a primitive).
+function normalizePermission(raw: unknown): Record<string, unknown> {
+  return typeof raw === "string" ? { "*": raw } : ((raw ?? {}) as Record<string, unknown>)
+}
+
 function patch(input: string, keys: (string | number)[], value: unknown) {
   return applyEdits(
     input,
@@ -132,10 +141,24 @@ export async function wireLocalProvider(input: {
   if (!("small_model" in parsed)) updated = patch(updated, ["small_model"], `local/${input.modelID}`)
 
   const guarded: string[] = []
-  const permission = (parsed.permission ?? {}) as Record<string, unknown>
+  const permission = normalizePermission(parsed.permission)
   const existingPermissionKeys = Object.keys(permission)
   if (input.egressGuard !== false) {
+    // Carry forward ownership from a prior guard-on wiring. Without this, a key already set to
+    // "ask" (because a previous guard-on run added it) matches itself in the "already covered"
+    // check below and gets skipped — so `guarded` would only ever contain keys added on THIS
+    // run, and a second guard-on run in a row would report `guarded: []`. That empty list then
+    // overwrites `guarded_permissions` in environment.json, and a later --no-egress-guard reads
+    // it back as "the guard owns nothing", removing none of the "ask" rules it actually added.
+    // Only keys still set to exactly "ask" are carried forward — if the user has since changed
+    // the value, we no longer own it.
+    const priorEnvironment = await readLocalEnvironment(paths)
+    const priorOwned = priorEnvironment?.egress_guard === true ? (priorEnvironment.guarded_permissions ?? EGRESS_PERMISSIONS) : []
+    for (const key of priorOwned) {
+      if ((EGRESS_PERMISSIONS as readonly string[]).includes(key) && permission[key] === "ask") guarded.push(key)
+    }
     for (const key of EGRESS_PERMISSIONS) {
+      if (guarded.includes(key)) continue
       // Skip if the user already has ANY rule that resolves for this tool —
       // an exact key or a wildcard/pattern key (e.g. "*": "deny") that would
       // already cover it. Checking only exact-key presence missed wildcard
@@ -205,6 +228,6 @@ export async function readEgressGuard(env?: NodeJS.ProcessEnv, home?: string) {
   const parsed = parse(text, [], { allowTrailingComma: true, disallowComments: false }) as
     | Record<string, unknown>
     | undefined
-  const permission = (parsed?.permission ?? {}) as Record<string, unknown>
+  const permission = normalizePermission(parsed?.permission)
   return Object.fromEntries(EGRESS_PERMISSIONS.map((key) => [key, resolveEgressAction(permission, key)]))
 }

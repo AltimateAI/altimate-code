@@ -133,6 +133,23 @@ function tryKill(pid: number, signal: NodeJS.Signals) {
   }
 }
 
+// altimate_change start — upstream_fix: split out so the win32 PowerShell invocation can be
+// unit-tested (args array only, no PowerShell execution) from CI that doesn't run on Windows.
+export function windowsProcessCommandArgs(pid: number): string[] {
+  return [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    // PowerShell's default host wraps string output at the (fake, redirected-console) buffer
+    // width — commonly 80 or 120 columns — inserting a newline mid-string. A command line longer
+    // than that would get split, breaking the `.includes(runtimePath)` / `.includes(modelPath)`
+    // substring checks in managedProcess() below with a false negative. 32767 matches Windows'
+    // own max command-line length, so no real command line can exceed it.
+    `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine | Out-String -Width 32767`,
+  ]
+}
+// altimate_change end
+
 async function processCommand(pid: number) {
   if (process.platform === "linux") {
     return fs
@@ -147,12 +164,7 @@ async function processCommand(pid: number) {
     // Windows). Without this, the command lookup always returned "", so
     // managedProcess() below always reported false and `altimate local
     // stop` refused to signal a live, managed llama-server.exe.
-    return execFileAsync("powershell", [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
-    ])
+    return execFileAsync("powershell", windowsProcessCommandArgs(pid))
       .then((result) => result.stdout)
       .catch(() => "")
   }

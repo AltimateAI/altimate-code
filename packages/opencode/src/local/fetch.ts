@@ -70,7 +70,13 @@ export async function downloadWithResume(input: {
     input.onProgress?.({ received: stat.size, total: stat.size, resumed: false })
     return { path: input.destination, sha256: actual, bytes: stat.size, resumed: false }
   } catch (error) {
-    if (error instanceof ChecksumMismatchError) throw error
+    // altimate_change start — upstream_fix: a completed file that fails its pinned checksum
+    // (disk corruption, an older interrupted downloader that skipped verification, ...) must not
+    // be left in place — every subsequent `altimate local` run would hit this same stat+verify
+    // and fail identically forever. Delete it and fall through to the normal download path below,
+    // which re-verifies the fresh download and cleans up + throws on a repeat mismatch (no loop).
+    if (error instanceof ChecksumMismatchError) await fs.unlink(input.destination).catch(() => {})
+    // altimate_change end
   }
 
   const partial = `${input.destination}.partial`

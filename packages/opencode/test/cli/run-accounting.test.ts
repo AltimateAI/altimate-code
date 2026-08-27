@@ -132,6 +132,19 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
     expect(acc.termination().why_harness_stopped).toBe("none")
   })
 
+  // Regression: onPromptResult used to route a terminal ContextOverflowError through
+  // onSessionError's recoverable-name filter — the same filter that (correctly) suppresses the
+  // MID-RUN streamed overflow event, since auto-compaction usually recovers from that one. But
+  // `info` here is the prompt() call's FINAL returned message: a ContextOverflowError reaching
+  // this point means auto-compaction itself already gave up (SessionCompaction.process's
+  // `result === "compact"` terminal path), so it must always be fatal, unlike the streamed case.
+  test("a terminal ContextOverflowError (compaction itself gave up) is fatal, unlike the recoverable mid-run event", () => {
+    const acc = RunAccounting.create()
+    acc.onPromptResult({ finish: "error", error: { name: "ContextOverflowError", data: { message: "too large" } } })
+    expect(acc.fatal).toBe(true)
+    expect(acc.termination().why_harness_stopped).toBe("error")
+  })
+
   test("terminal message with abnormal finish (error/other) is fatal (swallowed transport failure)", () => {
     for (const finish of ["error", "other"]) {
       const acc = RunAccounting.create()

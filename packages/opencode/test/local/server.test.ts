@@ -3,7 +3,15 @@ import path from "node:path"
 import { describe, expect, test } from "bun:test"
 
 import { tmpdir } from "../fixture/fixture"
-import { getServerStatus, pickPort, readServerState, startServer, stopServer, writeServerState } from "../../src/local/server"
+import {
+  getServerStatus,
+  pickPort,
+  readServerState,
+  startServer,
+  stopServer,
+  windowsProcessCommandArgs,
+  writeServerState,
+} from "../../src/local/server"
 import type { ServerState } from "../../src/local/server"
 import { LOCAL_CONTAINER_NAME, LOCAL_MANAGEMENT_LABEL_KEY, LOCAL_MANAGEMENT_LABEL_VALUE } from "../../src/local/docker"
 import type { DockerExec } from "../../src/local/docker"
@@ -355,5 +363,17 @@ describe("startServer / getServerStatus / stopServer — llama.cpp engine", () =
     const result = await stopServer({ paths, graceMs: 2_000 })
     expect(result.stopped).toBe(true)
     expect(await readServerState(paths)).toBeUndefined()
+  })
+})
+
+describe("windowsProcessCommandArgs", () => {
+  // Regression: PowerShell's default host wraps string output at the (fake, redirected-console)
+  // buffer width, which can split a long command line mid-string and break the .includes()
+  // substring checks in managedProcess(). `Out-String -Width 32767` disables that wrapping.
+  test("pipes the command line through Out-String with a width wide enough for any real command line", () => {
+    const args = windowsProcessCommandArgs(4242)
+    const command = args[args.length - 1]!
+    expect(command).toContain("ProcessId=4242")
+    expect(command).toContain("| Out-String -Width 32767")
   })
 })

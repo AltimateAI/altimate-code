@@ -27,6 +27,26 @@
 import { describe, expect, test } from "bun:test"
 import { Telemetry } from "../../src/altimate/telemetry"
 
+// Regression: classifyProvider("local") produces `provider: "local"` (curated entry above),
+// but the tui.ts emit site forwards it through an `as` cast, which hides any mismatch with the
+// declared provider_selected union from the type checker. This only catches a regression at
+// `bun run typecheck` time — if "local" is ever dropped from the union again, this assignment
+// stops compiling even though the runtime assertion below would still pass.
+describe("provider_selected event union stays honest about classifyProvider's output", () => {
+  test("'local' is assignable to provider_selected.provider", () => {
+    type ProviderSelected = Extract<Telemetry.Event, { type: "provider_selected" }>
+    // The literal "local" (not a cast) is what actually exercises the union — if "local" is
+    // ever dropped from provider_selected.provider, this object literal fails to typecheck.
+    const event: ProviderSelected = {
+      type: "provider_selected",
+      timestamp: 0,
+      session_id: "s",
+      provider: "local",
+    }
+    expect(Telemetry.classifyProvider("local").provider).toBe(event.provider)
+  })
+})
+
 describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
   describe("curated providers", () => {
     test.each([

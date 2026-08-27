@@ -186,6 +186,65 @@ describe("wireLocalProvider egress guard", () => {
     expect(config.permission.codesearch).toBeUndefined() // guard-owned: removed
   })
 
+  // Regression: a second guard-on run used to see every EGRESS_PERMISSIONS key already set to
+  // "ask" (from the first run), skip re-adding all of them, and report `guarded: []` — which then
+  // overwrote guarded_permissions in environment.json with an empty list. A later
+  // --no-egress-guard read that empty list back as "the guard owns nothing" and removed nothing.
+  test("--no-egress-guard still removes the rules after guard-on runs twice in a row", async () => {
+    const home = await makeHome()
+    const first = await wire(home)
+    expect(first.guarded).toEqual([...EGRESS_PERMISSIONS])
+
+    const second = await wire(home)
+    expect(second.guarded).toEqual([...EGRESS_PERMISSIONS]) // ownership carried forward, not dropped
+
+    const off = await wire(home, { egressGuard: false })
+    const config = await readConfig(off.file)
+    for (const key of EGRESS_PERMISSIONS) expect(config.permission?.[key]).toBeUndefined()
+  })
+
+  // A key a guard-on run carried forward as owned, but the user has since changed away from
+  // "ask" (e.g. to "deny"), must not be re-claimed as guard-owned on the next guard-on run.
+  test("a user override away from 'ask' drops that key from guard ownership on the next guard-on run", async () => {
+    const home = await makeHome()
+    const first = await wire(home)
+    expect(first.guarded).toEqual([...EGRESS_PERMISSIONS])
+
+    const dir = path.join(home, ".config", "altimate-code")
+    const file = path.join(dir, "altimate-code.json")
+    const contents = JSON.parse(await fs.readFile(file, "utf8"))
+    contents.permission.webfetch = "deny"
+    await fs.writeFile(file, JSON.stringify(contents))
+
+    const second = await wire(home)
+    expect(second.guarded).toEqual(["websearch", "codesearch"])
+
+    const off = await wire(home, { egressGuard: false })
+    const config = await readConfig(off.file)
+    expect(config.permission.webfetch).toBe("deny") // user's override survives
+    expect(config.permission.websearch).toBeUndefined()
+    expect(config.permission.codesearch).toBeUndefined()
+  })
+
+  // The config schema accepts a bare `"permission": "deny"` shorthand string (normalized to
+  // `{ "*": "deny" }` by ConfigPermissionV1's decoder), but wire.ts reads the raw JSON directly
+  // and used to cast that string straight to a Record — Object.keys() on a string returns
+  // character indices, and `key in permission` in resolveEgressAction throws on a primitive.
+  test("a scalar permission shorthand (\"permission\": \"deny\") does not crash and is respected", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ permission: "deny" }))
+
+    const wired = await wire(home)
+    expect(wired.guarded).toEqual([]) // "*": "deny" already covers every egress key
+    const config = await readConfig(wired.file)
+    expect(config.permission).toBe("deny")
+
+    const guard = await readEgressGuard({} as NodeJS.ProcessEnv, home)
+    for (const key of EGRESS_PERMISSIONS) expect(guard[key]).toBe("deny")
+  })
+
   test("respects a wildcard top-level rule instead of adding a more specific guard rule over it", async () => {
     const home = await makeHome()
     const dir = path.join(home, ".config", "altimate-code")

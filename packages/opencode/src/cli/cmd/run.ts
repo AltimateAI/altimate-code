@@ -600,11 +600,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
 
       // altimate_change start — W1.1: abortable event subscription. A fatal send
-      // failure (exhausted retries, or a non-retryable enqueue error — see the
-      // retry loop below) throws before `await loopPromise`, and this open SSE
-      // connection would otherwise keep the process alive indefinitely (observed:
-      // `run` hung instead of exiting nonzero). Both throw sites abort this signal
-      // first so the connection closes and the process can reach its natural exit.
+      // failure (exhausted retries, a non-retryable enqueue error, or a non-retryable
+      // send() exception — see the retry loop below) throws before `await loopPromise`,
+      // and this open SSE connection would otherwise keep the process alive indefinitely
+      // (observed: `run` hung instead of exiting nonzero). All non-retryable throw sites
+      // in that loop abort this signal first so the connection closes and the process can
+      // reach its natural exit.
       const eventsAbort = new AbortController()
       const events = await sdk.event.subscribe(undefined, { signal: eventsAbort.signal })
       // altimate_change end
@@ -1025,7 +1026,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // unconditionally, before the message-text retry classification below.
           if (e instanceof NonRetryableSendError) throw e
           // altimate_change end
-          if (!RunAccounting.isRetryableThrown(e)) throw e
+          // altimate_change start — upstream_fix: see the eventsAbort comment above. This throw
+          // site was missing the abort the other two non-retryable throw sites already have, so
+          // a non-retryable `send()` exception (not already a NonRetryableSendError, and not
+          // classified as retryable) left the SSE subscription open and could hang the process
+          // instead of exiting nonzero.
+          if (!RunAccounting.isRetryableThrown(e)) {
+            eventsAbort.abort()
+            throw e
+          }
+          // altimate_change end
           reason = e instanceof Error ? e.message : String(e)
         }
         if (sendAttempt >= retryMax) {

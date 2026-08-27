@@ -97,8 +97,19 @@ export function create() {
     onPromptResult(info: { finish?: string; error?: { name?: unknown; data?: unknown } } | undefined) {
       if (!info) return
       if (info.error) {
+        // altimate_change start — upstream_fix: do NOT route through onSessionError's
+        // RECOVERABLE_ERROR_NAMES filter here. That filter exists for the mid-run streamed
+        // session.error events, where a ContextOverflowError is routinely recoverable — auto-
+        // compaction runs and the turn continues. `info` here is the prompt() call's FINAL
+        // returned message; a ContextOverflowError reaching this point means auto-compaction
+        // itself already exhausted its retries and gave up (SessionCompaction.process's
+        // `result === "compact"` terminal path returns "stop", ending the run) — there is no
+        // later step left to recover it, so it must always be fatal.
         const data = (info.error.data ?? {}) as Record<string, unknown>
-        this.onSessionError(info.error.name, typeof data.message === "string" ? data.message : undefined)
+        const errorName = typeof info.error.name === "string" && info.error.name.length > 0 ? info.error.name : "UnknownError"
+        const message = typeof data.message === "string" ? data.message : undefined
+        fatalError ??= { name: errorName, timeout: TIMEOUT_PATTERN.test(errorName) || TIMEOUT_PATTERN.test(message ?? "") }
+        // altimate_change end
         return
       }
       if (info.finish === "error" || info.finish === "other") {
