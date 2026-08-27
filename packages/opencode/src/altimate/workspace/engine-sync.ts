@@ -74,6 +74,7 @@ import {
   INSTALL_HINT,
   MIN_ENGINE_VERSION,
   type ExistingEntry,
+  type McpStatus,
   type LocalMcpConfig,
   type Outcome,
   type Toast,
@@ -154,6 +155,12 @@ export type Inspection = {
    * module agree with itself while the live client served another workspace's
    * data under this workspace's name. */
   runtime?: ExistingEntry | undefined
+  /** Every server MCP knows about, not only ours.
+   *
+   * Kept from the status read the inspection already performs, so a question
+   * about the neighbours costs no second call — and is answered from the same
+   * moment as everything else this inspection decided from. */
+  all?: McpStatus
 }
 
 /** Config and runtime, read together, in the one correct order.
@@ -203,9 +210,9 @@ export function configuredEntry(inspection: Inspection): ExistingEntry | null {
 async function inspectEntry(): Promise<Inspection> {
   const entry = await existingEntry(DATAMATE_KEY)
   const client = mcp()
-  const observed = (await client.status())[DATAMATE_KEY]
+  const all = await client.status()
   const runtime = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
-  return { entry, observed, runtime }
+  return { entry, observed: all[DATAMATE_KEY], runtime, all }
 }
 
 export function planForEntry(inspection: Inspection, workspaceId: string, retried: boolean): EntryPlan {
@@ -576,6 +583,50 @@ async function run(sessionID: string): Promise<Outcome> {
     }
     if (!(await stillCurrent())) return "moved"
     return "ok"
+  }
+
+  /** Say once that a hosted datamate is also serving this session.
+   *
+   * `datamate_manager` can add standalone `datamate-<name>` entries pointing at
+   * the hosted endpoint, and those keep their own clients. This flow owns one
+   * key and does not touch theirs, so after a successful attach the model can
+   * hold both tool sets at once — ours for the bound workspace, and another
+   * datamate's under its own credentials.
+   *
+   * Not filtered: the user added those servers deliberately, and removing a
+   * server from their turns is not this module's decision to make. Surfaced
+   * instead, so the ambiguity is visible rather than silent.
+   *
+   * One signal per session per SET, so a stable configuration says it once and a
+   * change says it again. Separate from the attach toast on purpose: two
+   * different things happened, so there are two signals — the rule is one signal
+   * per event, not one element per screen. */
+  const noteHostedNeighbours = async (outcome: Outcome): Promise<void> => {
+    if (!attributableEngine(outcome)) return
+    try {
+      const hosted = Object.entries(inspection.all ?? {})
+        .filter(
+          ([key, value]) =>
+            key !== DATAMATE_KEY && key.startsWith(`${DATAMATE_KEY}-`) && value?.status === "connected",
+        )
+        .map(([key]) => key)
+        .sort()
+      if (hosted.length === 0) return
+      const signature = hosted.join(",")
+      const record = sessions.get(sessionID)
+      if (record?.announcedHosted === signature) return
+      if (record) record.announcedHosted = signature
+      await notify({
+        title: "Another datamate is also connected",
+        message:
+          `Workspace "${binding.datamateName}" is attached, and ${hosted.join(", ")} ` +
+          `${hosted.length === 1 ? "is" : "are"} also connected. Tools from ${hosted.length === 1 ? "it" : "them"} ` +
+          `serve a different datamate, under its own credentials — check which you are using before running one.`,
+        variant: "warning",
+      })
+    } catch (err) {
+      log.warn("could not check for other connected datamate servers", { workspaceId, err: String(err) })
+    }
   }
 
   /** The refusal an unreadable configuration earns.
@@ -1028,11 +1079,13 @@ async function run(sessionID: string): Promise<Outcome> {
         declared: declaredKeys?.keys.length,
         missing,
       })
-      return {
+      const reused: Outcome = {
         kind: "reused",
         available,
         ...(declaredKeys ? { declared: declaredKeys.keys.length, missing } : {}),
       }
+      await noteHostedNeighbours(reused)
+      return reused
     }
 
     // Pinned to us, but below the floor or unreadable. Prefer a newer engine on
@@ -1338,6 +1391,7 @@ async function run(sessionID: string): Promise<Outcome> {
         err: String(err),
       })
     }
+    await noteHostedNeighbours(outcome)
     return outcome
   } catch (err) {
     // Undo first, then decide how to report. A throw that lands after a re-link
@@ -1381,6 +1435,8 @@ type SessionAttach = {
   key?: string
   /** The last verdict this session was told about — see `verdictSignature`. */
   announced?: string
+  /** The set of hosted datamate servers this session has been told about. */
+  announcedHosted?: string
   task: Promise<Outcome>
   waitTimedOut?: boolean
   outcome?: Outcome
@@ -1557,6 +1613,7 @@ export function ensure(sessionID: string): Promise<Outcome> {
     // per call, so state that is not copied is state that is silently rebuilt —
     // and rebuilding this one turns "say it once" back into "say it every turn".
     announced: previous?.announced,
+    announcedHosted: previous?.announcedHosted,
   } as SessionAttach
   // The whole task, not just the attach. `attachKey`, the memo re-validation and
   // the serialization chain all run BEFORE the attach's own catch, so a throw in

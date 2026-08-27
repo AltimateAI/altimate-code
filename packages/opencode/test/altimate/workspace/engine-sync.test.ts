@@ -2868,3 +2868,74 @@ describe("INVARIANT — the version probe runs where the engine would run", () =
     void h
   })
 })
+
+describe("INVARIANT — a hosted datamate serving alongside us is surfaced, once", () => {
+  const hostedConnected = {
+    datamate: { status: "connected" },
+    "datamate-acme": { status: "connected" },
+  }
+
+  function withHosted(extra: Record<string, { status: string }> = {}) {
+    const statuses = [{ ...hostedConnected, ...extra }, { ...hostedConnected, ...extra }, { ...hostedConnected, ...extra }]
+    return install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: statuses as never,
+      tools: { datamate_dbt_build_model: 1 },
+    })
+  }
+
+  test("three turns with the same hosted set produce one signal", async () => {
+    const h = withHosted()
+    for (const _ of [1, 2, 3]) await ensure("s1")
+    const notes = h.toasts.filter((t) => t.title.includes("Another datamate"))
+    expect(notes.length, `told the user ${notes.length} times about an unchanged set`).toBe(1)
+    expect(notes[0]!.message).toContain("datamate-acme")
+  })
+
+  test("a change to the hosted set is announced again", async () => {
+    const h = withHosted()
+    await ensure("s1")
+    // A second standalone server appears, and the memo is no longer valid — so
+    // this turn re-decides and sees the new set.
+    syncInternals.mcp!.status = async () =>
+      ({ ...hostedConnected, "datamate-beta": { status: "connected" } }) as never
+    h.spawnedNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] } as never
+    await ensure("s1")
+    expect(h.toasts.filter((t) => t.title.includes("Another datamate")).length).toBe(2)
+    expect(h.toasts.filter((t) => t.title.includes("Another datamate"))[1]!.message).toContain("datamate-beta")
+  })
+
+  test("the note is attached to a decision, so a memoised turn does not repeat or refresh it", async () => {
+    // Named rather than hidden: the signal rides the flow's decisions, so a set
+    // that changes while a memo stays valid is surfaced at the next
+    // re-decision, not the moment it changes. That is the cost of not adding a
+    // read to every turn for a warning.
+    const h = withHosted()
+    await ensure("s1")
+    syncInternals.mcp!.status = async () =>
+      ({ ...hostedConnected, "datamate-beta": { status: "connected" } }) as never
+    await ensure("s1") // memo still valid — no re-decision, so no new note
+    expect(h.toasts.filter((t) => t.title.includes("Another datamate")).length).toBe(1)
+  })
+
+  test("no hosted server means no signal at all", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    await ensure("s1")
+    expect(h.toasts.filter((t) => t.title.includes("Another datamate"))).toHaveLength(0)
+  })
+
+  test("it is a second signal, not a rewrite of the attach toast", async () => {
+    // Two different things happened — an attach, and an ambiguity about whose
+    // tools the model is holding — so the user gets two signals. The rule is one
+    // signal per event, not one element per screen.
+    const h = withHosted()
+    await ensure("s1")
+    const titles = h.toasts.map((t) => t.title)
+    expect(titles.some((t) => t.includes("Another datamate")), "the ambiguity went unmentioned").toBe(true)
+    expect(titles.length, "the two events did not produce two signals").toBeGreaterThanOrEqual(2)
+  })
+})
