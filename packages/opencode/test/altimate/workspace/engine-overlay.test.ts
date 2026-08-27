@@ -459,6 +459,21 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
   })
 
+  test("an unlink after a refused overlay still hands the key back to the restored entry", async () => {
+    // The overlay had removed the user's hosted entry (no engine, no fallback);
+    // once unbound there is nothing to remove but the restored entry must start.
+    const h = install({ which: null, mcp: { datamate: HOSTED_ENTRY } })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("engine-missing")
+    expect(h.config.mcp!.datamate).toBeUndefined()
+    h.binding = null
+    await beforeTurn("s1")
+    expect(h.removes).toBe(0)
+    expect(h.added).toEqual([HOSTED_ENTRY])
+    expect(h.config.mcp!.datamate).toEqual(HOSTED_ENTRY)
+    expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+  })
+
   test("an unlink does not start an entry the user had disabled", async () => {
     const h = install({ mcp: { datamate: { ...HOSTED_ENTRY, enabled: false } } })
     await beforeTurn("s1")

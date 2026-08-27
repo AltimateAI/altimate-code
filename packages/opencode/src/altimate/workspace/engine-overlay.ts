@@ -246,8 +246,8 @@ function config() {
  * no longer fills it: the user's own hosted or IDE-written entry, if any. MCP
  * enumerates live clients only, so a restored config entry must be started or
  * the project's standalone datamate tools stay gone for the rest of the process. */
-async function releaseKey(loaded: { mcp?: Record<string, unknown> } | undefined): Promise<void> {
-  await mcp().remove(DATAMATE_KEY)
+async function releaseKey(loaded: { mcp?: Record<string, unknown> } | undefined, hadEngine: boolean): Promise<void> {
+  if (hadEngine) await mcp().remove(DATAMATE_KEY)
   const restored = loaded?.mcp?.[DATAMATE_KEY]
   if (isMcpEntry(restored) && restored.enabled !== false) {
     log.info("workspace engine released the datamate key; starting the configured entry", { type: restored.type })
@@ -300,7 +300,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       await config().invalidate()
       loaded = await config().get()
     }
-    if (state.applied?.entry) await releaseKey(loaded)
+    // Whether the overlay had an engine running or had refused one (and so had
+    // removed the key from the config it shadowed), the key is handed back.
+    if (state.applied) await releaseKey(loaded, !!state.applied.entry)
     state.applied = null
     record(sessionID, { kind: "unbound" })
     return
@@ -322,7 +324,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 
   const overlayNow = state.current
   if (!overlayNow) {
-    if (state.applied?.entry) await releaseKey(loaded)
+    if (state.applied) await releaseKey(loaded, !!state.applied.entry)
     state.applied = null
     record(sessionID, { kind: "unbound" })
     return
