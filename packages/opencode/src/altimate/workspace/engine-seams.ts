@@ -19,7 +19,6 @@ export const syncInternals: {
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
-    connect: (name: string) => Promise<unknown>
     remove: (name: string) => Promise<unknown>
     spawned?: (name: string) => Promise<ExistingEntry | undefined>
     tools: () => Promise<Record<string, unknown>>

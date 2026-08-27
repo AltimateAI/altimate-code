@@ -525,6 +525,31 @@ async function run(): Promise<Outcome> {
     await client.remove(DATAMATE_KEY).catch((err) => {
       log.warn("could not remove the superseded engine", { err: String(err) })
     })
+    // "Restore what the write replaced" stops being right the moment the user
+    // edits the thing we wrote. Between our install and this undo there is a
+    // whole engine boot, and a disable landing in that window lands on OUR
+    // entry — so restoring the pre-install state deletes the edit they just
+    // made, and the next turn, seeing no entry at all, spawns and re-enables.
+    // Round 4 arriving through the undo path.
+    //
+    // The same rule as the guard, applied to the undo's own write: no mutation
+    // on a stale world. Read at undo time, and never undo a disable.
+    let now: ExistingEntry | null = null
+    try {
+      now = await projectEntry()
+    } catch (err) {
+      log.warn("could not read the project entry before undoing; restoring what we replaced", {
+        workspaceId,
+        err: String(err),
+      })
+    }
+    if (now?.enabled === false) {
+      log.info("the entry was disabled while we held it; keeping the disable rather than undoing it", {
+        workspaceId,
+      })
+      const keep = projectBefore ? ({ ...projectBefore, enabled: false } as ExistingEntry) : now
+      return await persistRestore(DATAMATE_KEY, keep, configPath)
+    }
     return await persistRestore(DATAMATE_KEY, projectBefore, configPath)
   }
 
@@ -891,7 +916,16 @@ async function run(): Promise<Outcome> {
       variant: "error",
     })
   }
-  const configPath = await projectConfigPath().catch(() => undefined)
+  let configPath: string
+  try {
+    configPath = await projectConfigPath()
+  } catch (err) {
+    // Falling back to persist's own resolution would write to a path we could
+    // not resolve here, which the undo then re-resolves independently — two
+    // guesses about which file we touched. If we cannot say where we would
+    // write, we do not write.
+    return await refuseUnreadable(`config path could not be resolved: ${String(err)}`)
+  }
   const beforeInstall = await worldUnchanged()
   if (beforeInstall === "disabled") return await refuseDisabled()
   if (beforeInstall === "unreadable") return await refuseUnreadable("intent could not be confirmed")
@@ -1306,16 +1340,22 @@ export function ensure(sessionID: string): Promise<Outcome> {
       if (reusable && (await attachKeyWorkspace()) === boundTo) return previous!.task
       log.info("cached attach is no longer connected; re-attaching", { sessionID })
     }
-    entry.key = key
-    if (sameWorkspace) {
+    // Recomputed AFTER the awaited validation above: a re-link landing inside it
+    // would otherwise file this fresh attach under the workspace key it started
+    // with, and the turn would drop its wait for an attach that is no longer the
+    // one it needs. Self-healing next turn, but a turn is what this exists to
+    // save.
+    const settledKey = await attachKey()
+    entry.key = settledKey
+    if (settledKey === key && sameWorkspace) {
       // Re-probing a repairable failure. Do NOT re-arm the wait: this runs on
       // every turn, and a retry that blocks would charge each one the full cap
       // (a `connect-failed` retry can sit in MCP's 30s connect budget). The
       // repaired engine's tools arrive over `tools/list_changed` instead.
       entry.waitTimedOut = true
     } else {
-      // The binding changed under this session. A fresh attach gets a fresh wait
-      // budget — the previous one was spent on a different workspace's engine.
+      // The binding changed under this session (or changed while we validated).
+      // A fresh attach gets a fresh wait budget — the previous one was spent on a different workspace's engine.
       entry.waitTimedOut = false
       // Serialize against the attach being superseded. Both tasks end in
       // `MCP.add`, and whichever completes LAST owns the runtime client, so a

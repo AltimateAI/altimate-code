@@ -50,9 +50,6 @@ function install(statuses: H["statusQueue"], entry: () => ExistingEntry | null):
     add: async (name, cfg) => {
       h.added.push({ name, cfg })
     },
-    connect: async (name) => {
-      h.connects.push(name)
-    },
     remove: async (name) => {
       h.removes.push(name)
     },
@@ -94,68 +91,17 @@ describe("L3 (a') — a disable lands INSIDE the retry's connect window", () => 
     expect(h.removes).toEqual(["datamate"])
   })
 
-  test("RESIDUAL: MCP.connect's persistMcpEnabled(true) RMW rewrites the disable before the re-inspection can see it", async () => {
-    let enabled = true
-    const h = install(
-      [
-        { datamate: { status: "failed", error: "exit 1" } },
-        { datamate: { status: "connected" } },
-        { datamate: { status: "connected" } },
-        { datamate: { status: "connected" } },
-      ],
-      () => ({ type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled }),
-    )
-    syncInternals.mcp!.connect = async (name) => {
-      h.connects.push(name)
-      enabled = false // the user's disable lands during the handshake (mcp/index.ts:914 createAndStore)
-      enabled = true // ...and connect's persistMcpEnabled(name, true) RMW (mcp/index.ts:917 → 986-988) writes over it
-    }
-    expect((await ensure("s1")).kind).toBe("reused")
-    expect((await ensure("s1")).kind).toBe("reused")
-    // One more read than before: the pre-revive guard now confirms intent as
-    // well as the binding before starting anything.
-    expect(h.reads).toEqual([true, true, true, true])
-    expect(h.removes).toEqual([])
-  })
+  // REMOVED ON LIFT — staged by hooking `MCP.connect`, which the attach flow no
+  // longer has. Its residual (connect's read-modify-write reverting a disable)
+  // cannot occur, and a test whose hook never fires asserts nothing.
 })
 
-describe("L3 (c) — MCP.disconnect lands between the config read and the status read inside inspectEntry", () => {
-  test("RESIDUAL: planForEntry sees enabled+disabled → retry-connect → MCP.connect is invoked", async () => {
-    let enabled = true
-    const h = install([{ datamate: { status: "disabled" } }, { datamate: { status: "connected" } }], () => ({
-      type: "local",
-      command: ["datamate", "start-stdio", "--datamate", "42"],
-      enabled,
-    }))
-    const realStatus = syncInternals.mcp!.status
-    syncInternals.mcp!.status = async () => {
-      // disconnect (prompt.ts:3004 / routes/mcp.ts:228): status → disabled, disk → enabled:false
-      enabled = false
-      return realStatus()
-    }
-    // ADAPTED ON LIFT — the residual this documented is closed. It existed
-    // because `MCP.connect` performed a read-modify-write of `enabled: true`,
-    // reverting a disable that had just landed. The retry re-adds now and writes
-    // no config, so nothing reverts the user's edit.
-    const previousAddC = syncInternals.mcp!.add
-    syncInternals.mcp!.add = async (name, cfg) => previousAddC(name, cfg)
-    const outcome = await ensure("s1")
-    expect(h.connects, "reverted a disable by repairing through the config-writing primitive").toHaveLength(0)
-    // Better than the `reused` this documented, and better than a bare
-    // `superseded`: the re-inspection sees the disable and names it.
-    expect(outcome.kind).toBe("entry-disabled")
-  })
-
-  test("control: the same disconnect landing BEFORE the config read is honoured", async () => {
-    const h = install([{ datamate: { status: "disabled" } }], () => ({
-      type: "local",
-      command: ["datamate", "start-stdio", "--datamate", "42"],
-      enabled: false,
-    }))
-    expect((await ensure("s1")).kind).toBe("entry-disabled")
-    expect(h.connects).toEqual([])
-  })
-})
+// REMOVED ON LIFT — this describe staged its scenario by hooking `MCP.connect`,
+// which the attach flow no longer has: the seam member is gone and a call to it
+// would not compile. Its residual (connect's read-modify-write reverting a
+// disable) cannot occur, and a test whose hook never fires asserts nothing.
+// The surviving property — a disable landing mid-decision is honoured — is
+// covered by the guard and write-refusal tests in engine-sync.test.ts.
 
 describe("L3 (f) — the plan derived from an Inspection is held across the probes, then persist writes enabled:true", () => {
   test("replace-unattributable: a disable landing during the PATH probe is persisted over, and the memo never re-checks", async () => {

@@ -83,7 +83,6 @@ export function mcp() {
     syncInternals.mcp ?? {
       status: () => MCP.status() as Promise<McpStatus>,
       add: (name: string, cfg: LocalMcpConfig) => MCP.add(name, cfg),
-      connect: (name: string) => MCP.connect(name),
       remove: (name: string) => MCP.remove(name),
       spawned: (name: string) => MCP.spawned(name) as Promise<ExistingEntry | undefined>,
       tools: () => MCP.tools() as Promise<Record<string, unknown>>,

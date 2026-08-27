@@ -74,9 +74,6 @@ function install(
       h.added.push({ name, cfg })
       h.spawnedNow = cfg as ExistingEntry
     },
-    connect: async (name) => {
-      h.connects.push(name)
-    },
     remove: async (name) => {
       h.removes.push(name)
       h.spawnedNow = undefined

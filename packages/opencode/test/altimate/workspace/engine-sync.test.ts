@@ -118,9 +118,6 @@ function install(opts: {
       h.added.push({ name, cfg })
       h.spawnedNow = cfg as ExistingEntry
     },
-    connect: async (name) => {
-      h.connects.push(name)
-    },
     remove: async (name) => {
       h.removes.push(name)
       h.spawnedNow = undefined
@@ -1795,64 +1792,22 @@ describe("INVARIANT — the entry decision is ordered by authority and cannot aw
   })
 })
 
-describe("INVARIANT — the attach flow never writes config from a repair", () => {
-  // `MCP.connect` persists `enabled: true` into whichever config owns the entry.
-  // For an IDE-written global entry that is merely down, repairing it locally
-  // would therefore write global config — and if a disable landed during the
-  // connect window, that disable is destroyed on disk with nothing to repair it,
-  // because every later read says enabled. Round 4 closed the `enabled: false`
-  // half of this; the `enabled: true` half lived on in the retry.
+describe("INVARIANT — the config-writing repair primitive is unreachable", () => {
+  // `MCP.connect` persists `enabled: true` into whichever config owns the entry,
+  // so repairing a down IDE-written global entry wrote global config from a
+  // local decision — and a disable landing in its window was destroyed on disk
+  // with nothing to repair it. The flow revives with `add`, which writes nothing.
   //
-  // The flow revives with `add`, which starts a process and writes nothing. This
-  // asserts the primitive is never reached, on every path that could reach it.
-  const scenarios: Array<[string, Parameters<typeof install>[0]]> = [
-    [
-      "ours and down",
-      {
-        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
-        statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
-        tools: { datamate_dbt_build_model: 1 },
-      },
-    ],
-    [
-      "ours and down, staying down",
-      {
-        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
-        statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "failed", error: "x" } }],
-      },
-    ],
-    [
-      "disabled while connected",
-      {
-        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false },
-        statuses: [{ datamate: { status: "connected" } }],
-      },
-    ],
-    [
-      "pinned elsewhere and down",
-      {
-        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] },
-        statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
-        tools: { datamate_dbt_build_model: 1 },
-      },
-    ],
-    [
-      "a dead URL entry",
-      {
-        existing: { type: "remote", url: "http://localhost:7801/sse" },
-        statuses: [{ datamate: { status: "failed" } }, { datamate: { status: "connected" } }],
-        tools: { datamate_dbt_build_model: 1 },
-      },
-    ],
-  ]
-
-  for (const [name, opts] of scenarios) {
-    test(`no config-writing repair: ${name}`, async () => {
-      const h = install(opts)
-      await ensure("s1")
-      expect(h.connects, `${name} repaired the entry with the config-writing primitive`).toHaveLength(0)
-    })
-  }
+  // This used to be a set of scenarios asserting the primitive was not CALLED.
+  // It is now asserted at compile time instead, which is strictly stronger: the
+  // seam does not carry `connect` at all, so a future call cannot be written.
+  // The `@ts-expect-error` is the test — if someone puts the member back, it
+  // becomes unused and the build fails.
+  test("the seam does not expose it, so it cannot be called", () => {
+    const seam = syncInternals.mcp
+    // @ts-expect-error `connect` is deliberately absent from the MCP seam.
+    expect(seam?.connect).toBeUndefined()
+  })
 })
 
 describe("INVARIANT — attribution asks the running engine, not only the config", () => {
@@ -1969,7 +1924,7 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
   // below-floor engine is torn down whatever is bound, so requiring a binding
   // read before those would assert the opposite of what they are for. The
   // scenarios below exercise only paths whose mutations are binding-dependent.
-  const MUTATIONS = new Set(["persist", "add", "remove", "connect", "persistRestore"])
+  const MUTATIONS = new Set(["persist", "add", "remove", "persistRestore"])
 
   function traced(opts: Parameters<typeof install>[0]) {
     const h = install(opts)
@@ -2001,7 +1956,6 @@ describe("INVARIANT — the last thing awaited before a mutation is the whole wo
       spawned: m.spawned ? wrapRead("spawned", m.spawned) : undefined,
       add: wrapMutation("add", m.add),
       remove: wrapMutation("remove", m.remove),
-      connect: wrapMutation("connect", m.connect),
     }
     return { h, trace }
   }
@@ -2257,4 +2211,108 @@ describe("INVARIANT — a rejected engine is detached even when the rejection is
     await ensure("s1")
     expect(h.removes, "a below-floor engine survived a re-link still connected").toContain("datamate")
   })
+})
+
+describe("INVARIANT — the undo obeys the world it undoes into", () => {
+  test("a disable that lands while we hold the entry is kept, not undone", async () => {
+    // Between the install and the undo there is a whole engine boot, and a
+    // disable landing in that window lands on OUR entry. Restoring the
+    // pre-install state deletes the edit the user just made — and the next turn,
+    // finding no entry at all, spawns and re-enables. Round 4 arriving through
+    // the undo path.
+    let current: CachedBinding | null = binding
+    let projectNow: ExistingEntry | null = null
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectEntry = async () => projectNow
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      // The user switches the entry off during the boot window, and the binding
+      // moves, so the attach is superseded and must undo.
+      projectNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: false }
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    await ensure("s1")
+    expect(h.restores, "the undo ran").toHaveLength(1)
+    const restored = h.restores[0] as ExistingEntry | null
+    expect(restored, "deleted the entry the user had just disabled").not.toBeNull()
+    expect(restored?.enabled, "undid the user's disable").toBe(false)
+  })
+})
+
+describe("INVARIANT #13 as a property — every seam, made to throw", () => {
+  // Stated once over the whole seam list rather than as a handful of cases,
+  // because the defect this catches is not a wrong answer but a MISSING
+  // question: nothing else here asks what a function does when a read fails.
+  // Two instances survived nineteen review rounds on this branch and two more
+  // on a sibling, and none of ordering, completeness, staleness or adjacency
+  // could see any of them — they all test what happens when reads succeed.
+  //
+  // Three things must hold for every seam:
+  //   1. no mutation is performed on the strength of a failed read;
+  //   2. the session settles with an outcome — never a rejected promise, which
+  //      the caller starts fire-and-forget and would therefore never see;
+  //   3. the user is told at most once, and never twice.
+  //
+  // NOTE THE LIMIT, because it is the same limit that hid the original defect:
+  // these throw from the SEAM, so they prove the CALLERS handle a failed read.
+  // They cannot see a reader that swallows beneath the seam and hands up a
+  // confident `null` — restoring exactly that swallow leaves every test here
+  // green. That layer is covered in `engine-config-freshness.test.ts`, which
+  // throws from the config module itself. A property is only as deep as the
+  // layer it is written at, and this class lives at whichever layer answers.
+  const SEAMS = [
+    "resolveBinding",
+    "existingEntry",
+    "projectEntry",
+    "projectConfigPath",
+    "versionOf",
+    "declared",
+    "persist",
+    "persistRestore",
+  ] as const
+
+  for (const seam of SEAMS) {
+    test(`${seam} throwing never becomes an answer`, async () => {
+      const h = install({
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+        statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      })
+      const boom = async () => {
+        throw new Error(`${seam} exploded`)
+      }
+      ;(syncInternals as Record<string, unknown>)[seam] = boom
+
+      // (2) settles rather than rejecting
+      const outcome = await ensure("s1")
+      expect(outcome, `${seam}: the session never settled`).toBeDefined()
+      expect(typeof outcome.kind).toBe("string")
+
+      // (1) a failed read never authorises a write
+      if (seam !== "persist" && seam !== "persistRestore") {
+        expect(h.persisted, `${seam}: wrote config on the strength of a failed read`).toHaveLength(0)
+      }
+
+      // (3) told at most once
+      expect(h.toasts.length, `${seam}: told the user ${h.toasts.length} times`).toBeLessThanOrEqual(1)
+    })
+  }
+
+  for (const seam of ["status", "tools", "spawned"] as const) {
+    test(`mcp.${seam} throwing never becomes an answer`, async () => {
+      const h = install({
+        existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+        statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+        tools: { datamate_dbt_build_model: 1 },
+      })
+      ;(syncInternals.mcp as unknown as Record<string, unknown>)[seam] = async () => {
+        throw new Error(`${seam} exploded`)
+      }
+      const outcome = await ensure("s1")
+      expect(outcome, `mcp.${seam}: the session never settled`).toBeDefined()
+      expect(h.toasts.length, `mcp.${seam}: told the user ${h.toasts.length} times`).toBeLessThanOrEqual(1)
+    })
+  }
 })

@@ -90,10 +90,6 @@ function install(opts: {
       seam("add")
       h.added.push({ name, cfg })
     },
-    connect: async (name) => {
-      seam("connect")
-      h.connects.push(name)
-    },
     remove: async (name) => {
       seam("remove")
       h.removes.push(name)

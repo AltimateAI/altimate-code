@@ -23,7 +23,6 @@ function base(opts: { existing: unknown; statuses: Record<string, { status: stri
   syncInternals.mcp = {
     status: async () => (q.length > 1 ? q.shift()! : q[0]!),
     add: async (n, c) => { h.added.push({ n, c }) },
-    connect: async (n) => { h.connects.push(n) },
     remove: async (n) => { h.removes.push(n) },
     tools: async () => ({ datamate_dbt_build_model: {} }),
   }

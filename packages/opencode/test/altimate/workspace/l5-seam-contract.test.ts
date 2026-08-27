@@ -93,9 +93,6 @@ function install(opts: {
     add: async (name, cfg) => {
       h.added.push({ name, cfg })
     },
-    connect: async (name) => {
-      h.connects.push(name)
-    },
     remove: async (name) => {
       h.removes.push(name)
     },

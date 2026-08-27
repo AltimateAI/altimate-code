@@ -31,7 +31,6 @@ test("ensure: a project `datamate: { enabled: false }` marker is not spawned ove
     // The entry has no `type`, so status() never lists it — until WE add it.
     status: async () => (live ? { datamate: { status: "connected" } } : {}),
     add: async (n, c) => { added.push({ n, c }); live = true },
-    connect: async () => {},
     remove: async () => {},
     tools: async () => ({ datamate_dbt_build_model: {} }),
   }

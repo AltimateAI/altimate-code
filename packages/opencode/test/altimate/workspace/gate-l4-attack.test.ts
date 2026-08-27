@@ -50,7 +50,6 @@ function install(opts: {
   syncInternals.mcp = {
     status: async () => (h.statusQueue.length > 1 ? h.statusQueue.shift()! : h.statusQueue[0]!),
     add: async (name, cfg) => { h.added.push({ name, cfg }) },
-    connect: async (name) => { h.connects.push(name) },
     remove: async (name) => { h.removes.push(name) },
     tools: async () => h.tools,
   }
@@ -132,6 +131,8 @@ describe("F — connect-failed after install, superseded: stale pin stays on dis
     // The re-link lands during the add, so the refusal revalidates and declines
     // to answer for the workspace the project has left.
     expect(outcome).toMatchObject({ kind: "superseded" })
+    // Both halves: the pin WAS written, and it was given back.
+    expect(h.persisted.map((p) => p.cfg.command)).toEqual([["datamate", "start-stdio", "--datamate", "42"]])
     expect(h.restores.length, "the failed spawn's pin was left on disk to wedge the next turn").toBeGreaterThan(0)
   })
   test("turn 2 under binding 99: the failing 42 pin is retried once and refused — 99 never spawns", async () => {
@@ -193,10 +194,19 @@ describe("C — retry-connect calls MCP.connect on a global-only entry (persists
       statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
     })
     await ensure("s1")
-    // ADAPTED ON LIFT: the finding is fixed. Repairing a down IDE-shaped entry
-    // used `MCP.connect`, which persists `enabled: true` into the file that owns
-    // the entry — a global write from a local decision. It re-adds now.
-    expect(h.connects, "repaired a global entry by writing to it").toHaveLength(0)
+    // ADAPTED ON LIFT, then STRENGTHENED. The finding is fixed: repairing a down
+    // IDE-shaped entry used `MCP.connect`, which persists `enabled: true` into
+    // the file that owns the entry — a global write from a local decision.
+    //
+    // Asserting only "connect was not called" is now vacuous, since the seam no
+    // longer carries it. What earns its place is that the repair happened, with
+    // the right primitive and the entry we judged, and wrote nothing.
+    // And the scenario no longer reaches the repair at all: an IDE-shaped entry
+    // is UNPINNED, so attribution replaces it before connectivity is ever
+    // consulted. What lands is our own pinned entry, written to the project
+    // config — not a global write to theirs, which was the defect.
+    expect(h.added.map((a) => a.cfg.command)).toEqual([["datamate", "start-stdio", "--datamate", "42"]])
+    expect(h.persisted.map((p) => p.cfg.command)).toEqual([["datamate", "start-stdio", "--datamate", "42"]])
   })
 })
 

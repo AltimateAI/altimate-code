@@ -273,11 +273,22 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
       // tools — and its credentials. A pin for a different workspace is replaced,
       // which is what the user asked for by naming a datamate explicitly.
       const configuredEntry = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
-      const pinnedElsewhere = isPinnedToOtherWorkspace(configuredEntry, args.datamate_id)
+      // Attribution is a claim about the RUNNING engine, so the running engine
+      // gets a vote here too. The config says what should run; MCP's spawn
+      // record says what IS running, and they diverge while a re-pin is in
+      // flight — during which this branch reported "already connected via
+      // datamate (N tools)" about a process serving a different workspace's
+      // data, under this workspace's name. Judging on the config alone is the
+      // same defect the attach flow was fixed for, surviving in its consumer.
+      const runningEntry = await MCP.spawned(DATAMATE_KEY).catch(() => undefined)
+      const pinnedElsewhere =
+        isPinnedToOtherWorkspace(configuredEntry, args.datamate_id) ||
+        (!!runningEntry && isPinnedToOtherWorkspace(runningEntry, args.datamate_id))
       if (pinnedElsewhere) {
         log.info("handleAdd: existing entry is pinned to another workspace; replacing", {
           serverName: DATAMATE_KEY,
           pinnedTo: pinnedWorkspace((configuredEntry ?? null) as never),
+          runningPinnedTo: pinnedWorkspace((runningEntry ?? null) as never),
           requested: args.datamate_id,
         })
       }
