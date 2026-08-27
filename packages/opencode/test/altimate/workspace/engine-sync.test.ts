@@ -17,6 +17,7 @@ import {
   MIN_ENGINE_VERSION,
   MAX_TRACKED_SESSIONS,
   trackedSessionsForTests,
+  sessionsForTests,
   trackedChainsForTests,
   settledOutcome,
   attributableEngine,
@@ -104,6 +105,13 @@ function install(opts: {
   syncInternals.persistRestore = async (_name, previous) => {
     h.restores.push(previous ?? null)
   }
+  // The project file has no entry of its own unless a test says otherwise. This
+  // used to be supplied by accident: the real reader swallowed its own errors
+  // and returned null, so an unstubbed harness looked like an empty project
+  // file. It now throws, because "there was nothing here" and "I could not
+  // look" mean opposite things to a restore.
+  syncInternals.projectEntry = async () => null
+  syncInternals.projectConfigPath = async () => "/tmp/test/.altimate-code/altimate-code.json"
   syncInternals.mcp = {
     status: async () => h.statusQueue.length > 1 ? h.statusQueue.shift()! : h.statusQueue[0]!,
     add: async (name, cfg) => {
@@ -1845,5 +1853,55 @@ describe("INVARIANT — attribution asks the running engine, not only the config
     const outcome = await ensure("s1")
     expect(outcome, "answered `reused` about a process serving another workspace").toMatchObject({ kind: "attached" })
     expect(h.added, "did not replace the misattributed engine").toHaveLength(1)
+  })
+})
+
+describe("INVARIANT — never write what you cannot undo, and never stop waiting forever", () => {
+  test("an unreadable project config refuses to install rather than installing something it cannot undo", async () => {
+    // The restore reads the project file to learn what to put back. If that read
+    // fails and is reported as "no entry here", the undo REMOVES — so a
+    // transient read failure could delete the user's own entry as the undo of an
+    // attach meant to leave it alone.
+    const h = install({ statuses: [{}], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.projectEntry = async () => {
+      throw new Error("EACCES: permission denied")
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind, "installed an engine it had no way to undo").toBe("connect-failed")
+    expect(h.persisted, "wrote config it could not restore").toHaveLength(0)
+    expect(h.added, "registered a client it could not undo").toHaveLength(0)
+    expect(h.toasts, "failed silently").toHaveLength(1)
+  })
+
+  test("a settled memo is re-validated inside the turn's wait, even after an earlier timeout", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    // Turn 1 gave up waiting. That must not silence the wait for every later
+    // turn: re-validating a settled memo is a status read and a config read with
+    // no spawn, and during that window the outcome reads as "not settled" — a
+    // consumer that fails open on it stops routing for the turn and says so.
+    sessionsForTests().get("s1")!.waitTimedOut = true
+
+    // Deterministic on purpose: the first draft of this test observed a flag
+    // during the wait and passed with the defect reinstated, because the task
+    // had not reached the seam yet when the check ran. It proved the fixture.
+    // Elapsed time is the thing that actually differs — with the wait silenced,
+    // `whenAttached` returns before the re-validation has happened at all.
+    const previousEntry = syncInternals.existingEntry!
+    syncInternals.existingEntry = async (name: string) => {
+      await new Promise((r) => setTimeout(r, 25))
+      return previousEntry(name)
+    }
+    const started = performance.now()
+    const pending = ensure("s1")
+    await whenAttached("s1", 2000)
+    const waited = performance.now() - started
+    await pending
+    expect(waited, "resolved the turn's tools without waiting for the memo re-validation").toBeGreaterThanOrEqual(20)
+    expect(settledOutcome("s1"), "no settled outcome at the point tools are resolved").toBeDefined()
+    expect(h.added, "re-validating a good memo spawned a second engine").toHaveLength(1)
   })
 })

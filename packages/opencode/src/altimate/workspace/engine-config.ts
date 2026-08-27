@@ -64,13 +64,14 @@ export async function freshConfig(): Promise<{ mcp?: Record<string, ExistingEntr
  * meant to leave configuration untouched. */
 export async function projectEntry(): Promise<ExistingEntry | null> {
   if (syncInternals.projectEntry) return syncInternals.projectEntry()
-  try {
-    const configPath = await resolveConfigPath(projectRoot())
-    return ((await readMcpEntryFromDisk(DATAMATE_KEY, configPath)) as ExistingEntry | undefined) ?? null
-  } catch (err) {
-    log.warn("could not read the project-level engine entry", { err: String(err) })
-    return null
-  }
+  // THROWS rather than returning null on a read error, because the two answers
+  // mean opposite things to the caller: `null` says "the project file has no
+  // entry of its own", and a restore acts on that by REMOVING ours. Conflating
+  // "there was nothing here" with "I could not look" turned an unreadable
+  // project config into a deletion of the user's own entry. If we cannot record
+  // what to put back, we must not write in the first place.
+  const configPath = await resolveConfigPath(projectRoot())
+  return ((await readMcpEntryFromDisk(DATAMATE_KEY, configPath)) as ExistingEntry | undefined) ?? null
 }
 
 /** Put the config back the way we found it.

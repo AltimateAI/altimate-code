@@ -718,7 +718,23 @@ async function run(): Promise<Outcome> {
   // Everything readable is read HERE, above the guard. `persist` otherwise
   // probes up to nine candidate config paths on disk between the check and the
   // write it protects — round 19's defect one call deeper than round 19 looked.
-  const projectBefore = await projectEntry()
+  // If we cannot record what to put back, we do not write. An unreadable
+  // project config previously read as "no entry here", which a later restore
+  // acts on by REMOVING — so a transient read failure could delete the user's
+  // own entry as the undo of an attach that was meant to leave it alone.
+  let projectBefore: ExistingEntry | null
+  try {
+    projectBefore = await projectEntry()
+  } catch (err) {
+    return await refuse({ kind: "connect-failed", error: `project config unreadable: ${String(err)}` }, {
+      title: "Workspace engine not attached",
+      message:
+        `Could not read this project's configuration, so the engine was not installed — attaching without being ` +
+        `able to undo it risks overwriting your own "${DATAMATE_KEY}" entry. Integration tools are unavailable ` +
+        `until the config file can be read.`,
+      variant: "error",
+    })
+  }
   const configPath = await projectConfigPath().catch(() => undefined)
   if (!(await worldUnchanged())) {
     // Re-linked or disabled while we were probing. Installing now would attach a
@@ -947,6 +963,11 @@ function rememberSession(sessionID: string, entry: SessionAttach): void {
 }
 
 /** Test seam — how many sessions are currently remembered. */
+/** Test seam — the session map itself, for asserting wait bookkeeping. */
+export function sessionsForTests(): Map<string, { waitTimedOut?: boolean }> {
+  return sessions as unknown as Map<string, { waitTimedOut?: boolean }>
+}
+
 export function trackedSessionsForTests(): number {
   return sessions.size
 }
@@ -992,9 +1013,17 @@ export function ensure(sessionID: string): Promise<Outcome> {
   // turn. Failing to wait costs a turn's tools, which `tools/list_changed`
   // repairs; waiting wrongly costs every turn 15 seconds.
   const repairRetry = !!previous && isRepairable(previous.outcome)
+  // A previous timeout must not silence the wait forever. Re-validating a
+  // settled memo is a status read and a config read with no spawn — bounded, and
+  // cheap enough that a turn should always wait for it, because during that
+  // window the outcome reads as "not settled" and a consumer that fails open on
+  // that will quietly stop routing for the turn and announce it. The no-wait
+  // rule belongs to the attach that earned it: a repair that can spawn, or a
+  // spawn still in flight from an earlier turn.
+  const stillInFlight = !!previous && previous.outcome === undefined
   const entry = {
     key: previous?.key,
-    waitTimedOut: previous?.waitTimedOut || repairRetry,
+    waitTimedOut: repairRetry || (!!previous?.waitTimedOut && stillInFlight),
     // Carried forward, or the version re-probe spawns a process every turn: a
     // fresh entry is built per call, so state that is not copied is state that
     // is silently rebuilt.
