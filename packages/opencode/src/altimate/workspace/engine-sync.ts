@@ -305,6 +305,31 @@ async function run(): Promise<Outcome> {
     return { kind: "superseded" }
   }
 
+  /** Tell the user about a refusal — exactly once.
+   *
+   * This is a whole function for what is currently one call because it is a
+   * substitution point, and the substitution is easy to get wrong in a way no
+   * test on either side would catch.
+   *
+   * `installWouldHelp` names the refusals an install would actually fix. Those
+   * belong to an install offer when one exists, and the offer owns the
+   * MESSAGING for them: it replaces this toast rather than joining it, and
+   * falls back to this same toast whenever it cannot reach a surface. So
+   * "an actionable failure is never silent" holds either way, and neither path
+   * emits twice.
+   *
+   * The toast and the offer are alternatives, not a sequence. A refusal that
+   * raises both is the double signal — a dialog and a toast saying the same
+   * thing — and it would pass a suite that asserts a toast fires alongside one
+   * that asserts an offer is raised, because neither asserts the user sees
+   * exactly one thing. Replace this function's body; do not add beside it. */
+  const announceRefusal = async (outcome: Outcome, toast: Toast): Promise<void> => {
+    if (installWouldHelp(outcome)) {
+      log.info("refusal is remediable by installing the engine", { workspaceId, kind: outcome.kind })
+    }
+    await notify(toast)
+  }
+
   /** The single exit for every refusal.
    *
    * Three properties that were previously spread across six branches, each of
@@ -322,10 +347,7 @@ async function run(): Promise<Outcome> {
    *    offered an install for the engine they already have and switched off. */
   const refuse = async (outcome: Outcome, toast: Toast, detach?: Record<string, unknown>): Promise<Outcome> => {
     if (detach) await detachRejected(detach)
-    await notify(toast)
-    if (installWouldHelp(outcome)) {
-      log.info("refusal is remediable by installing the engine", { workspaceId, kind: outcome.kind })
-    }
+    await announceRefusal(outcome, toast)
     return outcome
   }
 
