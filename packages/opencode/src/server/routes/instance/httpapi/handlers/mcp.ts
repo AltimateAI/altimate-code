@@ -6,13 +6,18 @@ import { McpServerNotFoundError } from "../errors"
 import { AddPayload, AuthCallbackPayload, StatusMap, UnsupportedOAuthError } from "../groups/mcp"
 // altimate_change start — workspace mode owns the datamate key
 import { InstanceState } from "@/effect/instance-state"
+import { Config } from "@/config/config"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { managedWorkspace } from "@/altimate/workspace/engine-overlay"
+import { McpServerManagedError } from "../groups/mcp"
 // altimate_change end
 
 export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handlers) =>
   Effect.gen(function* () {
     const mcp = yield* MCP.Service
+    // altimate_change start — config is loaded before the managed-key check
+    const configSvc = yield* Config.Service
+    // altimate_change end
 
     const status = Effect.fn("McpHttpApi.status")(function* () {
       return yield* mcp.status()
@@ -23,14 +28,18 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
       // workspace's own engine, derived at config load; adding over it would replace
       // the engine underneath a turn. Refuse and say why.
       if (ctx.payload.name === DATAMATE_KEY) {
+        // The overlay runs inside config load; on a fresh instance this can be
+        // the first request, so load before asking who owns the key.
+        yield* configSvc.get()
         const managed = managedWorkspace(yield* InstanceState.directory)
         if (managed) {
-          // BadRequest carries no body on this endpoint; the reason is logged.
           yield* Effect.logWarning("mcp add refused: key is managed by a workspace", {
             name: DATAMATE_KEY,
             workspace: managed.id,
           })
-          return yield* new HttpApiError.BadRequest({})
+          return yield* new McpServerManagedError({
+            error: `MCP server "${DATAMATE_KEY}" is managed by workspace "${managed.name}" in this project`,
+          })
         }
       }
       // altimate_change end

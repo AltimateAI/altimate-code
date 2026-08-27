@@ -33,6 +33,9 @@ import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigManaged } from "./managed"
+// altimate_change start — the workspace engine overlay yields to managed config for this key
+import { DATAMATE_KEY } from "../altimate/datamate-transport"
+// altimate_change end
 import { ConfigParse } from "./parse"
 import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
@@ -641,6 +644,9 @@ export const layer = Layer.effect(
           )
         }
 
+        // altimate_change start — whether organisation-managed config sets the datamate MCP key
+        let managedOwnsDatamate = false
+        // altimate_change end
         const managedDir = ConfigManaged.managedConfigDir()
         if (existsSync(managedDir)) {
           // altimate_change start - support altimate-code.json config filename
@@ -654,20 +660,25 @@ export const layer = Layer.effect(
           ]) {
             // altimate_change end
             const source = path.join(managedDir, file)
-            yield* merge(source, yield* loadFile(source), "global")
+            // altimate_change start — note a managed datamate key before merging
+            const managedFile = yield* loadFile(source)
+            if (managedFile?.mcp && DATAMATE_KEY in managedFile.mcp) managedOwnsDatamate = true
+            yield* merge(source, managedFile, "global")
+            // altimate_change end
           }
         }
 
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
-          result = mergeConfigConcatArrays(
-            result,
-            yield* loadConfig(managed.text, {
-              dir: path.dirname(managed.source),
-              source: managed.source,
-            }),
-          )
+          // altimate_change start — note a managed datamate key before merging
+          const managedPrefs = yield* loadConfig(managed.text, {
+            dir: path.dirname(managed.source),
+            source: managed.source,
+          })
+          if (managedPrefs.mcp && DATAMATE_KEY in managedPrefs.mcp) managedOwnsDatamate = true
+          result = mergeConfigConcatArrays(result, managedPrefs)
+          // altimate_change end
         }
 
         for (const [name, mode] of Object.entries(result.mode ?? {})) {
@@ -747,7 +758,9 @@ export const layer = Layer.effect(
         // to any file. See altimate/workspace/engine-overlay.ts.
         if (Flag.ALTIMATE_WORKSPACE) {
           const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
-          yield* Effect.promise(() => overlay(ctx.directory, result as { mcp?: Record<string, unknown> }))
+          yield* Effect.promise(() =>
+            overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),
+          )
         }
         // altimate_change end
 

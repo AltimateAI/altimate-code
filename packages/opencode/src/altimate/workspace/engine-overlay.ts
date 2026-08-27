@@ -121,6 +121,9 @@ type DirectoryState = {
    * invalidate and reload config between turns, re-running the overlay without
    * touching MCP. */
   applied: Overlay | null | undefined
+  /** When the last overlay attempt threw. A failed attempt is retried at the
+   * probe TTL, not on every turn — each retry invalidates the whole config. */
+  failedAt?: number
 }
 const directories = new Map<string, DirectoryState>()
 
@@ -142,10 +145,23 @@ function sameEntry(a: LocalMcpConfig | null, b: LocalMcpConfig | null): boolean 
  * Called from the config loader after external MCP discovery, so it has the
  * last word over every other source of the key. Mutates `config.mcp` only when
  * the directory is bound with the pilot on. Never throws. */
-export async function overlay(directory: string, config: { mcp?: Record<string, unknown> }): Promise<void> {
+export async function overlay(
+  directory: string,
+  config: { mcp?: Record<string, unknown> },
+  opts: { managed?: boolean } = {},
+): Promise<void> {
   const state = stateFor(directory)
+  state.failedAt = undefined
   try {
     if (!isEnabled() || isServe()) {
+      state.current = null
+      return
+    }
+    if (opts.managed) {
+      // Organisation-managed config (MDM) is authoritative over everything,
+      // this overlay included: the key stays as managed, and nothing here
+      // claims it, so its writers are not refused either.
+      log.info("workspace engine overlay skipped: the datamate key is set by managed preferences", { directory })
       state.current = null
       return
     }
@@ -182,6 +198,7 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
   } catch (err) {
     log.warn("workspace engine overlay failed; leaving the MCP config as loaded", { err: String(err) })
     state.current = null
+    state.failedAt = now()
   }
 }
 
@@ -194,6 +211,17 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
 export function managedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
   if (!directory) return null
   return directories.get(directory)?.current?.workspace ?? null
+}
+
+/** `managedWorkspace` once the overlay has run for this instance. The overlay
+ * runs inside config load, and on a fresh instance a writer's request can be
+ * the first thing that happens — asked before the load, the key looks free. */
+export async function managedWorkspaceLoaded(
+  directory: string | null = currentDirectory(),
+): Promise<{ id: string; name: string } | null> {
+  if (!directory) return null
+  await config().get()
+  return managedWorkspace(directory)
 }
 
 // ── per-session outcome ─────────────────────────────────────────────────────
@@ -353,7 +381,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 
   // Reload the overlay when the binding moved, or when a refused engine may
   // have appeared since (the probe memo bounds how often that is asked).
-  let reload = !state.current || state.current.workspace.id !== workspaceId
+  let reload = state.current
+    ? state.current.workspace.id !== workspaceId
+    : state.failedAt === undefined || now() - state.failedAt >= FAILED_PROBE_TTL_MS
   if (!reload && state.current && !state.current.entry) {
     const probe = await probeEngine()
     reload = probe.kind === "ok"
@@ -377,7 +407,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // derived entry changed, drop it when there is none any more.
   if (overlayNow.entry) {
     if (!sameEntry(state.applied?.entry ?? null, overlayNow.entry)) await mcp().add(DATAMATE_KEY, overlayNow.entry)
-  } else if (state.applied?.entry) {
+  } else if (state.applied?.entry || DATAMATE_KEY in (await mcp().status())) {
+    // Ours to drop — or a client that predates the link, which MCP bootstrapped
+    // from an IDE or hosted entry while the directory was unbound. With the
+    // overlay refusing, nothing may serve the workspace under the key.
     await mcp().remove(DATAMATE_KEY)
   }
   state.applied = overlayNow
@@ -480,7 +513,8 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 export async function announceRefusal(sessionID: string, outcome: Outcome, toast: Toast): Promise<void> {
   const rec = sessions.get(sessionID) ?? record(sessionID, outcome)
   const detail = "error" in outcome ? outcome.error : "found" in outcome ? String(outcome.found) : ""
-  const signature = `${outcome.kind}:${detail}:${toast.title}`
+  const declared = "declared" in outcome ? String(outcome.declared ?? "?") : ""
+  const signature = `${outcome.kind}:${detail}:${declared}:${toast.title}`
   if (rec.announced === signature) return
   rec.announced = signature
   if (isHeadless()) {

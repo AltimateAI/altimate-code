@@ -35,26 +35,48 @@ export function which(cmd: string): string | null {
  *
  * cross-spawn, not execFile: an npm-installed engine on Windows resolves to a
  * `.cmd` shim that Node cannot execute without a shell. */
+/** How long `--version` may take before the engine counts as unreadable. */
+export const VERSION_TIMEOUT_MS = 5_000
+
 export function versionOf(bin: string): Promise<string | null> {
   if (syncInternals.versionOf) return syncInternals.versionOf(bin)
   return new Promise((resolve) => {
     let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     const done = (value: string | null) => {
       if (settled) return
       settled = true
+      if (timer) clearTimeout(timer)
       resolve(value)
     }
     try {
-      const child = launch(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 })
+      const child = launch(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"] })
       let out = ""
       child.stdout?.on("data", (chunk) => {
         out += String(chunk)
       })
+      // Settle on `exit`, not `close`: a descendant that inherited stdout would
+      // keep `close` from firing after the engine itself has answered. The
+      // deadline is ours as well — the runtime's `timeout` only signals the
+      // direct child, so it could not end a wait on a straggler's pipe.
+      timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL")
+        } catch {
+          // Already gone.
+        }
+        child.stdout?.destroy()
+        done(null)
+      }, VERSION_TIMEOUT_MS)
       child.on("error", () => done(null))
-      child.on("close", (code) => {
-        if (code !== 0) return done(null)
-        const line = out.trim().split(/\r?\n/)[0] ?? ""
-        done(line || null)
+      child.on("exit", (code) => {
+        // Let any bytes still in flight land before reading `out`.
+        setImmediate(() => {
+          child.stdout?.destroy()
+          if (code !== 0) return done(null)
+          const line = out.trim().split(/\r?\n/)[0] ?? ""
+          done(line || null)
+        })
       })
     } catch {
       done(null)

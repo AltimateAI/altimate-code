@@ -26,6 +26,7 @@ import {
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
+import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
 const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
@@ -50,6 +51,9 @@ type Harness = {
   toasts: Toast[]
   lines: string[]
   clock: number
+  /** Whether MCP holds a client under the key — set when MCP "bootstraps" from
+   * the first config load, then tracked through add/remove, as in the runtime. */
+  live?: boolean
 }
 
 function install(opts: {
@@ -107,12 +111,15 @@ function install(opts: {
   }
   syncInternals.now = () => h.clock
   syncInternals.mcp = {
-    status: async () => ({ datamate: { status: h.status, ...(h.statusError ? { error: h.statusError } : {}) } }),
+    status: async () =>
+      h.live ? { datamate: { status: h.status, ...(h.statusError ? { error: h.statusError } : {}) } } : {},
     add: async (_name, cfg) => {
+      h.live = true
       h.added.push(cfg)
       h.onAdd?.()
     },
     remove: async () => {
+      h.live = false
       h.removes += 1
     },
     tools: async () => h.tools,
@@ -132,6 +139,9 @@ function install(opts: {
       if (loaded) return h.config
       h.config = opts.noMcpKey ? {} : { mcp: structuredClone(initialMcp ?? {}) }
       await overlay(DIR, h.config)
+      // MCP bootstraps from the config as first loaded — after the overlay had
+      // its say — and keeps whatever client that started until told otherwise.
+      if (h.live === undefined) h.live = DATAMATE_KEY in (h.config.mcp ?? {})
       loaded = true
       return h.config
     },
@@ -444,6 +454,49 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.config.mcp!.datamate).toBeUndefined()
     expect(managedWorkspace()).toBeNull()
     expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+  })
+
+  test("a client that predates a mid-session link is removed when the overlay refuses", async () => {
+    // Unbound at boot with an IDE entry, so MCP bootstrapped that client. The
+    // directory is then linked with no engine on PATH: the overlay refuses, and
+    // the pre-link client must not go on serving the workspace under the key.
+    const h = install({ binding: null, mcp: { datamate: IDE_ENTRY }, which: null })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+    expect(h.removes).toBe(0)
+    h.binding = bound(42)
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("engine-missing")
+    expect(h.removes).toBe(1)
+    expect(h.config.mcp!.datamate).toBeUndefined()
+    await beforeTurn("s1")
+    expect(h.removes).toBe(1)
+  })
+
+  test("an overlay that threw is retried at the probe TTL, not on every turn", async () => {
+    // Each retry invalidates the whole config cache; a persistent fault must
+    // not turn every turn boundary into a full config reload.
+    const h = install({})
+    syncInternals.which = () => {
+      throw new Error("PATH unreadable")
+    }
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.invalidates).toBe(0)
+    h.clock += FAILED_PROBE_TTL_MS
+    await beforeTurn("s1")
+    expect(h.invalidates).toBe(1)
+    await beforeTurn("s1")
+    expect(h.invalidates).toBe(1)
+  })
+
+  test("a datamate key set by managed preferences is left alone and is not managed here", async () => {
+    const h = install({ mcp: { datamate: IDE_ENTRY } })
+    await overlay(DIR, h.config, { managed: true })
+    expect(h.config.mcp).toEqual({ datamate: IDE_ENTRY })
+    expect(managedWorkspace()).toBeNull()
+    expect(h.probes).toBe(0)
   })
 
   test("an unlink hands the key back to the entry the reloaded config restores", async () => {

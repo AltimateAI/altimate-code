@@ -35,7 +35,7 @@ import { MCP } from "../mcp"
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
 import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
 // altimate_change - workspace mode owns the datamate key
-import { managedWorkspace } from "../altimate/workspace/engine-overlay"
+import { managedWorkspaceLoaded } from "../altimate/workspace/engine-overlay"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
@@ -689,7 +689,7 @@ export namespace Server {
           const directory = Instance.directory
           // In workspace mode the `datamate` key is the bound workspace's own engine,
           // derived at config load; an IDE reload must not replace it under a turn.
-          const managed = managedWorkspace()
+          const managed = await managedWorkspaceLoaded()
           if (managed) {
             log.info("reload-datamate: refused, key is managed by a workspace", { workspace: managed.id })
             return c.json(
