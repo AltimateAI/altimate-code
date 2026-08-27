@@ -347,6 +347,21 @@ async function run(): Promise<Outcome> {
     return !!now && String(now.datamateId) === workspaceId
   }
 
+  /** The PATH engine's version, probed at most once per attach.
+   *
+   * Probing spawns a process and takes about a second. Two paths ask the same
+   * question — "is there something better on PATH than the entry we just
+   * rejected" and "what would we spawn" — and the below-floor path reaches both,
+   * so a replaced pre-floor engine paid for the same answer twice. */
+  let pathProbe: { bin: string | null; version: string | null } | undefined
+  const enginePath = async (): Promise<{ bin: string | null; version: string | null }> => {
+    if (!pathProbe) {
+      const bin = which(ENGINE_BINARY)
+      pathProbe = { bin, version: bin ? await versionOf(bin) : null }
+    }
+    return pathProbe
+  }
+
   /** Is the world this decision was made in still the world we are mutating?
    *
    * `stillCurrent` asks only about the binding, and a mutation guarded on half
@@ -663,8 +678,7 @@ async function run(): Promise<Outcome> {
     // PATH is probed HERE rather than inside the plan because probing spawns a
     // process: folding it into the pure decision would charge the reuse path —
     // the common one, run on every turn — for a question it never asks.
-    const onPath = which(ENGINE_BINARY)
-    const pathVersion = onPath ? await versionOf(onPath) : null
+    const { version: pathVersion } = await enginePath()
     if (!clearsFloor(pathVersion)) {
       const label = found ?? "unknown"
       // Rejected and irreplaceable: detach anyway. Leaving it connected would
@@ -698,7 +712,7 @@ async function run(): Promise<Outcome> {
   const declaredCount = declaredKeys?.keys.length ?? 0
 
   // Rule 2 / 3 — opportunistic use, or an offer. Never an install.
-  const bin = which(ENGINE_BINARY)
+  const { bin, version: found } = await enginePath()
   if (!bin) {
     return await refuse({ kind: "engine-missing", declared: declaredCount }, {
       title: "Workspace integrations unavailable",
@@ -709,7 +723,6 @@ async function run(): Promise<Outcome> {
     })
   }
 
-  const found = await versionOf(bin)
   if (!clearsFloor(found)) {
     const label = found ?? "unknown"
     return await refuse({ kind: "engine-too-old", found: label }, {
