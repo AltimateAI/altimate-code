@@ -56,7 +56,7 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onStepStart("m1")
     acc.onStepFinish("m1", "stop")
-    expect(acc.termination()).toEqual({ why_model_stopped: "stop", why_harness_stopped: "none" })
+    expect(acc.termination()).toEqual({ why_model_stopped: "stop", why_harness_stopped: "none", done_reason: "none" })
     expect(acc.fatal).toBe(false)
   })
 
@@ -66,7 +66,7 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
     acc.onStepStart("m1")
     acc.onStepFinish("m1", "tool-calls")
     acc.onBudgetExhausted()
-    expect(acc.termination()).toEqual({ why_model_stopped: "tool-call", why_harness_stopped: "budget-exhausted" })
+    expect(acc.termination()).toEqual({ why_model_stopped: "tool-call", why_harness_stopped: "budget-exhausted", done_reason: "none" })
     expect(acc.fatal).toBe(true)
   })
 
@@ -184,5 +184,75 @@ describe("RunAccounting retry classification (W1.1)", () => {
     expect(RunAccounting.isRetryableThrown(new Error("fetch failed"))).toBe(true)
     expect(RunAccounting.isRetryableThrown(new Error("model not found"))).toBe(false)
     expect(RunAccounting.isRetryableThrown(undefined)).toBe(false)
+  })
+})
+
+describe("RunAccounting done_reason + idle-done bookkeeping (W2.1)", () => {
+  test("bare finishReason stop is NEVER reported as done (W2.1a)", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "Let me now read the schema file.")
+    acc.onStepFinish("m1", "stop")
+    expect(acc.termination().done_reason).toBe("none")
+  })
+
+  test("unprompted stop+DONE reports done_reason=explicit_done", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "All checks green. DONE")
+    acc.onStepFinish("m1", "stop")
+    const t = acc.termination()
+    expect(t.done_reason).toBe("explicit_done")
+    expect(t.why_model_stopped).toBe("explicit-done")
+    expect(t.why_harness_stopped).toBe("none")
+  })
+
+  test("DONE elicited by the idle-done challenge reports idle_heuristic + harness idle-done", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onIdleDoneChallengeIssued()
+    acc.onText("m1", "Confirmed. DONE")
+    acc.onStepFinish("m1", "stop")
+    const t = acc.termination()
+    expect(t.done_reason).toBe("idle_heuristic")
+    expect(t.why_harness_stopped).toBe("idle-done")
+    expect(acc.fatal).toBe(false)
+  })
+
+  test("challenge issued but model continues without DONE: done_reason=none, harness=none", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onIdleDoneChallengeIssued()
+    acc.onText("m1", "Remaining: wire the config flag. Continuing.")
+    acc.onStepFinish("m1", "stop")
+    const t = acc.termination()
+    expect(t.done_reason).toBe("none")
+    expect(t.why_harness_stopped).toBe("none")
+  })
+
+  test("the harness-initiated challenge abort is not scored as a fatal error", () => {
+    const acc = RunAccounting.create()
+    acc.onIdleDoneChallengeIssued()
+    acc.onSessionError("MessageAbortedError", "aborted")
+    acc.onPromptResult({ finish: "error" })
+    expect(acc.fatal).toBe(false)
+    expect(acc.termination().why_harness_stopped).toBe("none")
+  })
+
+  test("an abort BEFORE any challenge is still fatal (guard is challenge-scoped)", () => {
+    const acc = RunAccounting.create()
+    acc.onSessionError("MessageAbortedError", "aborted")
+    expect(acc.fatal).toBe(true)
+  })
+
+  test("a real error during the challenge continuation still wins over idle-done", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onIdleDoneChallengeIssued()
+    acc.onText("m1", "DONE")
+    acc.onStepFinish("m1", "stop")
+    acc.onSessionError("APIError", "boom")
+    expect(acc.termination().why_harness_stopped).toBe("error")
+    expect(acc.fatal).toBe(true)
   })
 })

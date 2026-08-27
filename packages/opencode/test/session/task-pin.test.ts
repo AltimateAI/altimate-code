@@ -1,0 +1,325 @@
+// harness plan W2.2 / item 2 — pin the original task verbatim through compaction.
+// Pure-function unit tests: pin-source selection (mode-aware, incl. the
+// mid-session-redirect case), verbatim/head+tail+contract-card assembly,
+// dynamic budget math with the livelock invariant, and the livelock guard
+// that halves the pin after two consecutive failed compactions.
+import { beforeEach, describe, expect, test } from "bun:test"
+import { SessionPrompt } from "../../src/session/prompt"
+import { SessionCompaction } from "../../src/session/compaction"
+import { Token } from "@/util/token"
+import type { MessageV2 } from "../../src/session/message-v2"
+import type { Provider } from "@/provider/provider"
+
+let seq = 0
+function nextID() {
+  seq += 1
+  return `msg_${String(seq).padStart(6, "0")}`
+}
+
+function userMsg(
+  text: string,
+  opts: { synthetic?: boolean; compaction?: boolean } = {},
+): MessageV2.WithParts {
+  const id = nextID()
+  const parts: any[] = []
+  if (opts.compaction) parts.push({ id: nextID(), messageID: id, sessionID: "ses_test", type: "compaction" })
+  if (text)
+    parts.push({
+      id: nextID(),
+      messageID: id,
+      sessionID: "ses_test",
+      type: "text",
+      text,
+      ...(opts.synthetic ? { synthetic: true } : {}),
+    })
+  return { info: { id, role: "user", sessionID: "ses_test" }, parts } as unknown as MessageV2.WithParts
+}
+
+function assistantMsg(opts: { summary?: boolean; finish?: string; error?: unknown } = {}): MessageV2.WithParts {
+  const id = nextID()
+  return {
+    info: {
+      id,
+      role: "assistant",
+      sessionID: "ses_test",
+      summary: opts.summary,
+      finish: opts.finish ?? "stop",
+      error: opts.error,
+    },
+    parts: [],
+  } as unknown as MessageV2.WithParts
+}
+
+function model(input: { context: number; input?: number; output?: number }): Provider.Model {
+  return {
+    limit: { context: input.context, input: input.input, output: input.output ?? 4_096 },
+  } as unknown as Provider.Model
+}
+
+function cfg(compaction?: Record<string, unknown>) {
+  return { compaction } as any
+}
+
+const TASK_RUN = "Build the orders model in models/marts/orders.sql and verify row counts."
+const TASK_REDIRECT =
+  "Stop working on orders. Instead rename the output file to final_report.csv and do not touch models/marts/orders.sql again."
+
+function historyWithRedirect() {
+  const first = userMsg(TASK_RUN)
+  const a1 = assistantMsg()
+  const redirect = userMsg(TASK_REDIRECT)
+  const a2 = assistantMsg()
+  const marker = userMsg("", { compaction: true })
+  const summary = assistantMsg({ summary: true })
+  const cont = userMsg("Continue if you have next steps.", { synthetic: true })
+  return { history: [first, a1, redirect, a2, marker, summary, cont], first, redirect, summary, cont }
+}
+
+describe("selectPinSource — mode-aware pin selection", () => {
+  test("run mode pins the FIRST non-synthetic user message", () => {
+    const { history } = historyWithRedirect()
+    const source = SessionPrompt.selectPinSource(history, true)
+    expect(source?.text).toBe(TASK_RUN)
+  })
+
+  test("interactive pins the MOST RECENT substantive instruction (mid-session redirect)", () => {
+    const { history, redirect } = historyWithRedirect()
+    const source = SessionPrompt.selectPinSource(history, false)
+    expect(source?.id).toBe(redirect.info.id)
+    expect(source?.text).toBe(TASK_REDIRECT)
+  })
+
+  test("synthetic-only and compaction-marker user messages are never pin sources", () => {
+    const { history, cont } = historyWithRedirect()
+    // interactive: latest substantive is the redirect, NOT the synthetic continue msg
+    const source = SessionPrompt.selectPinSource(history, false)
+    expect(source?.id).not.toBe(cont.info.id)
+    // a history of only synthetic/marker messages yields no pin
+    const empty = SessionPrompt.selectPinSource(
+      [userMsg("", { compaction: true }), userMsg("continue", { synthetic: true })],
+      false,
+    )
+    expect(empty).toBeUndefined()
+  })
+
+  test("empty history yields no pin", () => {
+    expect(SessionPrompt.selectPinSource([], true)).toBeUndefined()
+  })
+})
+
+describe("taskPinText — compaction-gated assembly", () => {
+  test("mid-session redirect: after compaction the interactive pin reflects the LATER instruction", () => {
+    const { history, summary, cont } = historyWithRedirect()
+    const visible = [summary, cont]
+    const pin = SessionPrompt.taskPinText({
+      history,
+      visible,
+      runMode: false,
+      capTokens: 4_096,
+      cardCapTokens: 500,
+    })
+    expect(pin).toBeDefined()
+    expect(pin!).toContain("Original task — authoritative over any summary")
+    expect(pin!).toContain(TASK_REDIRECT)
+    expect(pin!).not.toContain(TASK_RUN)
+  })
+
+  test("run mode pins the ORIGINAL first task through the same compaction", () => {
+    const { history, summary, cont } = historyWithRedirect()
+    const pin = SessionPrompt.taskPinText({
+      history,
+      visible: [summary, cont],
+      runMode: true,
+      capTokens: 4_096,
+      cardCapTokens: 500,
+    })
+    expect(pin).toBeDefined()
+    expect(pin!).toContain(TASK_RUN)
+  })
+
+  test("skipped while the pin source is still visible verbatim in context", () => {
+    const { history, redirect, summary, cont } = historyWithRedirect()
+    const pin = SessionPrompt.taskPinText({
+      history,
+      visible: [redirect, summary, cont],
+      runMode: false,
+      capTokens: 4_096,
+      cardCapTokens: 500,
+    })
+    expect(pin).toBeUndefined()
+  })
+
+  test("zero budget yields no pin", () => {
+    const { history, summary, cont } = historyWithRedirect()
+    const pin = SessionPrompt.taskPinText({
+      history,
+      visible: [summary, cont],
+      runMode: true,
+      capTokens: 0,
+      cardCapTokens: 500,
+    })
+    expect(pin).toBeUndefined()
+  })
+})
+
+describe("buildPinnedTask — verbatim under cap, head+tail + contract card over cap", () => {
+  const filler = Array.from({ length: 400 }, (_, i) => `Background paragraph ${i} with routine detail.`).join(" ")
+  const longTask = [
+    "Rebuild the daily channel sales mart.",
+    `Output MUST go to reports/final_output.csv and the model lives in models/marts/fct_daily_channel_sales.sql.`,
+    filler,
+    "Use the column customer_lifetime_value and run `make verify` after every change.",
+    'Do not modify the "legacy_billing" schema under any circumstances.',
+    filler,
+    "Finish by summarizing results.",
+  ].join("\n")
+
+  test("under cap: text is pinned verbatim, unmodified", () => {
+    const out = SessionPrompt.buildPinnedTask({ text: TASK_RUN, capTokens: 4_096, cardCapTokens: 500 })
+    expect(out).toBe(TASK_RUN)
+  })
+
+  test("over cap: verbatim head + tail, budget respected, contract card preserves mid-task literals", () => {
+    const cap = 1_000
+    expect(Token.estimate(longTask)).toBeGreaterThan(cap)
+    const out = SessionPrompt.buildPinnedTask({ text: longTask, capTokens: cap, cardCapTokens: 500 })
+    expect(out).toBeDefined()
+    expect(Token.estimate(out!)).toBeLessThanOrEqual(cap)
+    // verbatim head and tail
+    expect(out!.startsWith("Rebuild the daily channel sales mart.")).toBe(true)
+    expect(out!).toContain("truncated")
+    // mid-task literals that middle-truncation alone would delete survive in the card
+    expect(out!).toContain("Contract card")
+    expect(out!).toContain("fct_daily_channel_sales")
+    expect(out!).toContain("final_output.csv")
+  })
+
+  test("contract card entries are verbatim substrings of the task — never paraphrased", () => {
+    const card = SessionPrompt.extractContractCard(longTask, 500)
+    expect(card).not.toBe("")
+    expect(Token.estimate(card)).toBeLessThanOrEqual(500)
+    for (const line of card.split("\n").slice(1)) {
+      const body = line.replace(/^- (files\/paths|identifiers|code\/commands|quoted terms): /, "").replace(/^- constraints \(verbatim lines\):$/, "").replace(/^ {2}- /, "")
+      if (!body) continue
+      for (const item of body.split(", ")) {
+        if (!item) continue
+        expect(longTask).toContain(item)
+      }
+    }
+  })
+
+  test("contract card is deterministic and extracts all literal families", () => {
+    const a = SessionPrompt.extractContractCard(longTask, 500)
+    const b = SessionPrompt.extractContractCard(longTask, 500)
+    expect(a).toBe(b)
+    expect(a).toContain("reports/final_output.csv")
+    expect(a).toContain("customer_lifetime_value")
+    expect(a).toContain("make verify")
+    expect(a).toContain("legacy_billing")
+    expect(a).toContain('Do not modify the "legacy_billing" schema under any circumstances.')
+  })
+
+  test("contract card respects a tiny cap by tail-truncating", () => {
+    const tiny = SessionPrompt.extractContractCard(longTask, 30)
+    expect(Token.estimate(tiny)).toBeLessThanOrEqual(30)
+  })
+})
+
+describe("pinBudget — dynamic cap min(4k, fraction × usable) with the livelock invariant", () => {
+  beforeEach(() => SessionCompaction.resetPinState())
+
+  test("large window: capped at PIN_MAX_TOKENS (4k)", () => {
+    // context 200k, output 8k → reserved default 20k, threshold 180k;
+    // fraction cap 31.5k, invariant cap 158k → min is 4096.
+    const budget = SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 200_000, output: 8_192 }) })
+    expect(budget).toBe(SessionCompaction.PIN_MAX_TOKENS)
+  })
+
+  test("mid window: fraction of the post-overhead usable window wins over 4k", () => {
+    // context 16k, output 2k, reserved 2k (config) → headroom 2k, threshold 14k;
+    // fraction cap floor(14k × 0.175) = 2450; invariant cap 14k − 2k − 2k = 10k.
+    const budget = SessionCompaction.pinBudget({
+      cfg: cfg({ reserved: 2_000 }),
+      model: model({ context: 16_000, output: 2_000 }),
+    })
+    expect(budget).toBe(Math.floor(14_000 * SessionCompaction.PIN_WINDOW_FRACTION))
+    expect(budget).toBeLessThan(SessionCompaction.PIN_MAX_TOKENS)
+  })
+
+  test("small window: invariant pin + reserved + 2k slack < threshold forces pin to 0 (skip, never violate)", () => {
+    // context 32k, output 4k → reserved default 20k, threshold 12k;
+    // invariant cap 12k − 20k − 2k < 0 → no pin fits.
+    const budget = SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 32_000, output: 4_096 }) })
+    expect(budget).toBe(0)
+  })
+
+  test("config overrides: pin_task=false disables; pin_max_tokens respected", () => {
+    const m = model({ context: 200_000, output: 8_192 })
+    expect(SessionCompaction.pinBudget({ cfg: cfg({ pin_task: false }), model: m })).toBe(0)
+    expect(SessionCompaction.pinBudget({ cfg: cfg({ pin_max_tokens: 1_024 }), model: m })).toBe(1_024)
+  })
+
+  test("zero-context model yields no pin", () => {
+    expect(SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 0 }) })).toBe(0)
+  })
+})
+
+describe("livelock guard — two consecutive failed compactions halve the pin", () => {
+  beforeEach(() => SessionCompaction.resetPinState())
+  const SID = "ses_livelock"
+
+  function immediateRefire() {
+    // a completed summary followed by only ONE finished non-summary assistant:
+    // the previous compaction did not get the session below threshold.
+    return [assistantMsg({ summary: true }), userMsg("continue", { synthetic: true }), assistantMsg()]
+  }
+
+  function normalProgress() {
+    return [
+      assistantMsg({ summary: true }),
+      userMsg("continue", { synthetic: true }),
+      assistantMsg(),
+      assistantMsg(),
+      assistantMsg(),
+    ]
+  }
+
+  test("first compaction of a session never counts as a failure", () => {
+    SessionCompaction.notePinCompaction(SID, [userMsg(TASK_RUN), assistantMsg()] as any)
+    expect(SessionCompaction.pinScale(SID)).toBe(1)
+  })
+
+  test("two consecutive immediate re-fires halve the pin; budget scales down", () => {
+    SessionCompaction.notePinCompaction(SID, immediateRefire() as any)
+    expect(SessionCompaction.pinScale(SID)).toBe(1)
+    SessionCompaction.notePinCompaction(SID, immediateRefire() as any)
+    expect(SessionCompaction.pinScale(SID)).toBe(0.5)
+    const budget = SessionCompaction.pinBudget({
+      cfg: cfg(),
+      model: model({ context: 200_000, output: 8_192 }),
+      sessionID: SID,
+    })
+    expect(budget).toBe(SessionCompaction.PIN_MAX_TOKENS / 2)
+  })
+
+  test("a compaction after real progress resets the consecutive-failure count", () => {
+    SessionCompaction.notePinCompaction(SID, immediateRefire() as any)
+    SessionCompaction.notePinCompaction(SID, normalProgress() as any)
+    SessionCompaction.notePinCompaction(SID, immediateRefire() as any)
+    expect(SessionCompaction.pinScale(SID)).toBe(1)
+  })
+
+  test("further failure pairs keep halving; state is per-session", () => {
+    for (let i = 0; i < 4; i++) SessionCompaction.notePinCompaction(SID, immediateRefire() as any)
+    expect(SessionCompaction.pinScale(SID)).toBe(0.25)
+    expect(SessionCompaction.pinScale("ses_other")).toBe(1)
+  })
+})
+
+describe("summary-template addition", () => {
+  test("is an addition constant, phrased as do-not-restate + pinned-task authority", () => {
+    expect(SessionCompaction.PIN_SUMMARY_ADDITION).toContain("Do NOT restate")
+    expect(SessionCompaction.PIN_SUMMARY_ADDITION).toContain("pinned")
+    expect(SessionCompaction.PIN_SUMMARY_ADDITION).toContain("authoritative")
+  })
+})

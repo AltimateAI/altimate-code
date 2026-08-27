@@ -13,6 +13,8 @@ import { Instance } from "../../src/project/instance"
 import { Log } from "../../src/util/log"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
+import { NudgeArbiter } from "../../src/session/nudge"
+import { SessionTermination } from "../../src/session/termination"
 
 Log.init({ print: false })
 
@@ -223,10 +225,10 @@ describe("session.compaction continue-message contract (W1.5 / item 12)", () => 
     expect(continueMsg.system).toBe("custom system prompt")
     expect(continueMsg.variant).toBe("high")
     expect(continueMsg.format).toEqual({ type: "json" })
-    // The continue prompt itself is unchanged.
+    // W2.1(b): the continue prompt is the three-option completion-aware nudge.
     const continuePart = store.parts.find((p) => p.messageID === continueMsg.id && p.type === "text")
     expect(continuePart?.synthetic).toBe(true)
-    expect(continuePart?.text).toContain("Continue if you have next steps")
+    expect(continuePart?.text).toContain("reply with DONE")
   })
 
   test("continue message leaves fields unset when the original user message never set them", async () => {
@@ -312,5 +314,69 @@ describe("session.compaction summarizer integrity (W1.6 / item 3)", () => {
     // The failed summary must NOT be committed as a compaction continue turn.
     const continueTurn = store.parts.find((p) => p.type === "text" && p.synthetic)
     expect(continueTurn).toBeUndefined()
+  })
+})
+
+// ─── Harness plan W2.1(b)+(d) (item 1): completion-aware continue nudge via the
+// nudge arbiter, and the mechanism-accurate overflow notice ──────────────────────
+describe("session.compaction continue-nudge termination path (W2.1b/d)", () => {
+  test("continue message carries the three-option completion-aware nudge", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+
+    const result = await run({ sessionID, messages, markerID })
+
+    expect(result).toBe("continue")
+    const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
+    expect(continuePart?.text).toContain(SessionTermination.COMPLETION_NUDGE)
+    expect(continuePart?.text).toContain("reply with DONE")
+    expect(continuePart?.text).toContain("ask for clarification")
+  })
+
+  test("Global rule 5: exactly ONE directive block — pending lower-precedence directives are consumed", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+    // A starvation-breaker directive is pending from an earlier step.
+    NudgeArbiter.register(sessionID, {
+      source: "starvation_breaker",
+      kind: "starvation",
+      text: "STARVATION-DIRECTIVE-TEXT",
+    })
+
+    const result = await run({ sessionID, messages, markerID })
+
+    expect(result).toBe("continue")
+    const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
+    // The termination nudge (top precedence) wins; the starvation text is NOT
+    // stacked into the same injected turn…
+    expect(continuePart?.text).toContain(SessionTermination.COMPLETION_NUDGE)
+    expect(continuePart?.text).not.toContain("STARVATION-DIRECTIVE-TEXT")
+    // …and nothing is left pending to leak into the next generation.
+    expect(NudgeArbiter.pending(sessionID)).toHaveLength(0)
+  })
+
+  test("W2.1(d): overflow notice is mechanism-accurate — never blames media attachments", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+
+    const result = await SessionCompaction.process({
+      sessionID,
+      messages,
+      parentID: markerID,
+      abort: new AbortController().signal,
+      auto: true,
+      overflow: true,
+    })
+
+    expect(result).toBe("continue")
+    const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
+    expect(continuePart?.text).toContain(SessionTermination.OVERFLOW_NOTICE)
+    expect(continuePart?.text).not.toContain("large media attachments")
+    expect(continuePart?.text).toContain("context limit")
+    // The completion nudge still follows the notice.
+    expect(continuePart?.text).toContain("reply with DONE")
   })
 })

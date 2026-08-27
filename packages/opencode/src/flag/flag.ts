@@ -63,6 +63,14 @@ export namespace Flag {
   // altimate_change start - opt-out for AI Teammate training system
   export const ALTIMATE_DISABLE_TRAINING = altTruthy("ALTIMATE_DISABLE_TRAINING", "OPENCODE_DISABLE_TRAINING")
   // altimate_change end
+  // altimate_change start — W2.4: run-mode marker. Set by `cli/cmd/run.ts` for
+  // in-process (non-attach) runs so run-mode-only mechanisms (starvation breaker
+  // directives, doom-loop escalation ladder) can arm. Never set by the TUI or
+  // `serve`, so interactive behavior is untouched by construction. Declared here,
+  // defined via dynamic getter below (run.ts sets the env var at handler time,
+  // after module load).
+  export declare const ALTIMATE_RUN_MODE: boolean
+  // altimate_change end
   export const OPENCODE_DISABLE_TERMINAL_TITLE = truthy("OPENCODE_DISABLE_TERMINAL_TITLE")
   export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
   export const OPENCODE_DISABLE_DEFAULT_PLUGINS = truthy("OPENCODE_DISABLE_DEFAULT_PLUGINS")
@@ -186,6 +194,17 @@ Object.defineProperty(Flag, "ALTIMATE_CLI_YOLO", {
     }
     const oc = process.env["OPENCODE_YOLO"]?.toLowerCase()
     return oc === "true" || oc === "1"
+  },
+  enumerable: true,
+  configurable: false,
+})
+// altimate_change end
+
+// altimate_change start — W2.4: run-mode flag (dynamic getter; run.ts sets the env var at handler time)
+Object.defineProperty(Flag, "ALTIMATE_RUN_MODE", {
+  get() {
+    const v = process.env["ALTIMATE_RUN_MODE"]?.toLowerCase()
+    return v === "true" || v === "1"
   },
   enumerable: true,
   configurable: false,

@@ -850,6 +850,11 @@ export namespace SessionPrompt {
         }))
       ) {
         // altimate_change end
+        // altimate_change start — harness plan W2.2 livelock guard: record this
+        // auto-compaction so consecutive threshold-reduction failures halve the
+        // task pin instead of livelocking (fire → cannot reduce → re-fire).
+        SessionCompaction.notePinCompaction(sessionID, msgs)
+        // altimate_change end
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -1412,7 +1417,7 @@ export namespace SessionPrompt {
       const validatorCount = ValidatorRegistry.list().length
       // Always emit to opencode's file log. Mirror to stderr only when
       // ALTIMATE_VALIDATORS_DEBUG=1 — needed during framework bring-up so
-      // benchmark harness logs capture the hook signal, but noisy enough
+      // automated harness logs capture the hook signal, but noisy enough
       // that we keep it off by default for normal sessions.
       const diag = {
         kind: "validator_hook_reached",
@@ -1564,6 +1569,10 @@ export namespace SessionPrompt {
       if (result === "compact") {
         // altimate_change start — track compaction count
         compactionCount++
+        // altimate_change end
+        // altimate_change start — harness plan W2.2 livelock guard (see the
+        // proactive-overflow site above for rationale).
+        SessionCompaction.notePinCompaction(sessionID, msgs)
         // altimate_change end
         await SessionCompaction.create({
           sessionID,
@@ -2409,6 +2418,230 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — harness plan W2.2 / item 2: pin the original task
+  // verbatim through compaction.
+  //
+  // After compaction the model sees only a lossy summary of the task; the
+  // evidence corpus shows summaries dropping or mutating literal contract terms
+  // (hallucinated table names, renamed output files). The pin re-injects the
+  // task instruction VERBATIM as a trusted reminder, labeled authoritative over
+  // any summary, and is hoisted into the system prompt on non-Anthropic models
+  // via the trustedReminderParts path below.
+  //
+  // Mode-aware pin selection: run mode (`run` CLI, CI/headless — signaled
+  // by the ALTIMATE_RUN_MODE marker, with ALTIMATE_NON_INTERACTIVE=1 — the same
+  // signal question.ts uses — as a fallback) pins the
+  // FIRST non-synthetic user message (the CLI task). Interactive sessions pin
+  // the MOST RECENT substantive user instruction — users pivot mid-session, and
+  // hoisting message #1 as "authoritative" would fight later redirections in
+  // exactly the long sessions that compact.
+  //
+  // Budget: SessionCompaction.pinBudget — min(4k, ~17.5% of the post-overhead
+  // usable window), hard invariant pin + reserved + ≥2k slack < compaction
+  // threshold, halved by the livelock guard. When a task exceeds the budget we
+  // keep verbatim head+tail plus a deterministic ≤500-token contract card of
+  // regex-extracted literals. Never paraphrase.
+
+  /** Exported for unit tests. Selects the message whose text gets pinned. */
+  export function selectPinSource(
+    history: MessageV2.WithParts[],
+    runMode: boolean,
+  ): { id: MessageID; text: string } | undefined {
+    const candidates: { id: MessageID; text: string }[] = []
+    for (const msg of history) {
+      if (msg.info.role !== "user") continue
+      if (msg.parts.some((p) => p.type === "compaction")) continue
+      const text = msg.parts
+        .filter((p): p is MessageV2.TextPart => p.type === "text" && !p.synthetic)
+        .map((p) => p.text)
+        .join("\n\n")
+        .trim()
+      if (!text) continue
+      candidates.push({ id: msg.info.id, text })
+    }
+    if (!candidates.length) return undefined
+    return runMode ? candidates[0] : candidates[candidates.length - 1]
+  }
+
+  // Deterministic contract card: regex-extracted literals from the task text
+  // (paths, identifier-shaped names, code spans, quoted terms, constraint
+  // lines), every entry a verbatim substring of the original — never a
+  // paraphrase. Patterns are GENERIC lexical shapes only; no vertical (dbt/
+  // warehouse) tokens (Global rule 4). Budget enforced by tail-truncation:
+  // stop adding once the cap is reached.
+  export function extractContractCard(text: string, capTokens: number): string {
+    if (capTokens <= 0) return ""
+    const seen = new Set<string>()
+    const take = (raw: string | undefined) => {
+      const v = raw?.trim()
+      if (!v || v.length > 200 || seen.has(v)) return undefined
+      seen.add(v)
+      return v
+    }
+    const collect = (re: RegExp, group = 0) => {
+      const out: string[] = []
+      for (const m of text.matchAll(re)) {
+        const v = take(m[group])
+        if (v) out.push(v)
+      }
+      return out
+    }
+    // Paths: contain a slash, or bare filename with a dot-extension.
+    const paths = collect(/(?:[\w.@~-]+\/)+[\w.-]+|\b[\w-]+\.[A-Za-z]\w{0,7}\b/g)
+    // snake_case identifier shape (column/model/variable names) — generic.
+    const identifiers = collect(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)
+    // Inline code spans (commands, expressions).
+    const codeSpans = collect(/`([^`\n]{1,160})`/g, 1)
+    // Quoted terms.
+    const quoted: string[] = []
+    for (const m of text.matchAll(/"([^"\n]{2,120})"|'([^'\n]{2,120})'/g)) {
+      const v = take(m[1] ?? m[2])
+      if (v) quoted.push(v)
+    }
+    // Constraint/prohibition lines, kept verbatim in full.
+    const constraints: string[] = []
+    for (const line of text.split("\n")) {
+      if (/\b(do not|don'?t|never|must(?: not)?|should not|shall not|avoid|only|require[sd]?|forbidden|prohibited)\b/i.test(line)) {
+        const v = take(line)
+        if (v) constraints.push(v)
+      }
+    }
+
+    const header = "Contract card — literals extracted verbatim from the task (never paraphrased):"
+    if (Token.estimate(header) > capTokens) return ""
+    const out: string[] = [header]
+    // Budget enforced on the ACTUAL rendered card (labels and separators
+    // included), tail-truncating: stop adding once the cap would be exceeded.
+    const fits = (candidate: string[]) => Token.estimate(candidate.join("\n")) <= capTokens
+    const emitList = (label: string, items: string[]) => {
+      if (!items.length) return
+      let line = ""
+      for (const item of items) {
+        const next = line ? `${line}, ${item}` : `- ${label}: ${item}`
+        if (!fits([...out, next])) break
+        line = next
+      }
+      if (line) out.push(line)
+    }
+    emitList("files/paths", paths)
+    emitList("identifiers", identifiers)
+    emitList("code/commands", codeSpans)
+    emitList("quoted terms", quoted)
+    if (constraints.length) {
+      const kept: string[] = ["- constraints (verbatim lines):"]
+      for (const line of constraints) {
+        const next = [...kept, `  - ${line}`]
+        if (!fits([...out, ...next])) break
+        kept.push(`  - ${line}`)
+      }
+      if (kept.length > 1) out.push(...kept)
+    }
+    if (out.length <= 1) return ""
+    return out.join("\n")
+  }
+
+  /**
+   * Exported for unit tests. Returns the pin body: the task verbatim when it
+   * fits the cap; otherwise verbatim head+tail plus the contract card.
+   */
+  export function buildPinnedTask(input: { text: string; capTokens: number; cardCapTokens: number }): string | undefined {
+    if (input.capTokens <= 0) return undefined
+    const text = input.text
+    if (Token.estimate(text) <= input.capTokens) return text
+    // Over cap: middle truncation alone deletes exactly the mid-prompt facts
+    // the evidence shows decaying — pair verbatim head+tail with the card.
+    const cardCap = Math.min(input.cardCapTokens, Math.floor(input.capTokens / 2))
+    const card = extractContractCard(text, cardCap)
+    const marker = "\n\n[... middle of the original task truncated — literal terms preserved in the contract card below ...]\n\n"
+    const bodyBudget = input.capTokens - Token.estimate(card) - Token.estimate(marker) - 8
+    if (bodyBudget <= 0) return card || undefined
+    // Token.estimate is ratio-based; shrink the char budget geometrically until
+    // the assembled result fits. Deterministic for a given input.
+    let charBudget = Math.floor(bodyBudget * 3.7)
+    while (charBudget >= 100) {
+      const half = Math.floor(charBudget / 2)
+      const candidate = text.slice(0, half) + marker + text.slice(text.length - half) + (card ? "\n\n" + card : "")
+      if (Token.estimate(candidate) <= input.capTokens) return candidate
+      charBudget = Math.floor(charBudget * 0.85)
+    }
+    return card || undefined
+  }
+
+  /**
+   * Exported for unit tests (mid-session-redirect case is covered here without
+   * DB fixtures). Pure: assembles the labeled reminder text from the full
+   * chronological history and the currently visible (compaction-filtered)
+   * messages, or returns undefined when no pin should be injected.
+   */
+  export function taskPinText(input: {
+    history: MessageV2.WithParts[]
+    visible: MessageV2.WithParts[]
+    runMode: boolean
+    capTokens: number
+    cardCapTokens: number
+  }): string | undefined {
+    const source = selectPinSource(input.history, input.runMode)
+    if (!source) return undefined
+    // Skip while the source message is still in visible context verbatim — the
+    // pin exists to survive compaction, not to duplicate live messages.
+    if (input.visible.some((m) => m.info.id === source.id)) return undefined
+    const body = buildPinnedTask({ text: source.text, capTokens: input.capTokens, cardCapTokens: input.cardCapTokens })
+    if (!body) return undefined
+    return [
+      "<system-reminder>",
+      "Original task — authoritative over any summary. The conversation above was compacted into a summary; the task below is the user's own instruction, reproduced verbatim. If the summary and this task conflict, this task wins.",
+      "",
+      body,
+      "</system-reminder>",
+    ].join("\n")
+  }
+
+  // Compaction-gated entry point used by insertReminders: fires only when the
+  // visible context already contains a completed summary, the pin budget is
+  // positive, and the pinned source message is no longer visible.
+  async function taskPinReminder(input: {
+    visible: MessageV2.WithParts[]
+    session: Session.Info
+    model: Provider.Model
+  }): Promise<string | undefined> {
+    // Compaction gate FIRST — it is pure message inspection, so never-compacted
+    // sessions (the common path) pay no Config/DB cost here.
+    const compacted = input.visible.some(
+      (m) => m.info.role === "assistant" && m.info.summary && m.info.finish && !m.info.error,
+    )
+    if (!compacted) return undefined
+    // Fail-safe from here on: the pin is an additive reminder — a session that
+    // cannot compute it must still run the turn.
+    try {
+      const cfg = await Config.get()
+      if (!SessionCompaction.pinEnabled(cfg)) return undefined
+      const cap = SessionCompaction.pinBudget({ cfg, model: input.model, sessionID: input.session.id })
+      if (cap <= 0) return undefined
+      // Full chronological history — the pinned source was dropped from the
+      // compaction-filtered view, which is exactly why it must be re-read here.
+      const history = [...MessageV2.stream(input.session.id)].reverse()
+      // Run mode = the dedicated ALTIMATE_RUN_MODE marker (set by run.ts, never
+      // by TUI/serve), with ALTIMATE_NON_INTERACTIVE=1 as a fallback signal for
+      // headless drivers that predate the marker. The marker is checked first so
+      // a user opting out of NON_INTERACTIVE for its reply semantics cannot flip
+      // pin selection to interactive mode inside a `run` session (where a later
+      // synthetic prompt, e.g. the idle-done confirm challenge, must never be
+      // pinned as "the original task").
+      const runMode = Flag.ALTIMATE_RUN_MODE || process.env["ALTIMATE_NON_INTERACTIVE"] === "1"
+      return taskPinText({
+        history,
+        visible: input.visible,
+        runMode,
+        capTokens: cap,
+        cardCapTokens: SessionCompaction.pinCardBudget(cfg),
+      })
+    } catch (e) {
+      log.warn("task pin skipped", { error: e instanceof Error ? e.message : String(e) })
+      return undefined
+    }
+  }
+  // altimate_change end
+
   // altimate_change start — return the trusted reminder parts insertReminders just appended
   // so the caller can hoist them into the system prompt on non-Anthropic models.
   // The returned-parts contract is the trust boundary: only parts that *this function*
@@ -2440,6 +2673,29 @@ export namespace SessionPrompt {
     // altimate_change end
     const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
     if (!userMessage) return { messages: input.messages, trustedReminderParts }
+
+    // altimate_change start — harness plan W2.2 / item 2: pin the original task
+    // verbatim through compaction, hoisted via the trustedReminderParts path
+    // and labeled "Original task — authoritative over any summary". The pin
+    // text embeds the user's OWN instruction verbatim — the user's directive,
+    // not third-party file/resource content — so promoting it through
+    // trustedReminderParts does not cross the trust boundary documented above.
+    // Not persisted: recomputed per turn, like the plan reminder below.
+    const pinText = await taskPinReminder({ visible: input.messages, session: input.session, model: input.model })
+    if (pinText) {
+      const part: MessageV2.TextPart = {
+        id: PartID.ascending(),
+        messageID: userMessage.info.id,
+        sessionID: userMessage.info.sessionID,
+        type: "text",
+        text: pinText,
+        synthetic: true,
+        ...(nonAnthropic ? { ignored: true } : {}),
+      }
+      userMessage.parts.push(part)
+      trustedReminderParts.push(part)
+    }
+    // altimate_change end
 
     // Original logic when experimental plan mode is disabled
     if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {

@@ -19,6 +19,14 @@ import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
 // altimate_change end
+// altimate_change start — W2.4: write-starvation breaker + loop detection (fork-only
+// modules) and the run-mode flag that gates armed behavior.
+import { SessionStarvation } from "./starvation"
+import { NudgeArbiter } from "./nudge"
+// W2.1(a): completion-token contract for the explicit-DONE stop path
+import { SessionTermination } from "./termination"
+import { Flag } from "@/flag/flag"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so the upstream Effect runtime
 // (app-runtime AppLayer + httpapi server LayerNode list) can compose SessionProcessor as
 // a Service. The fork keeps the imperative `create()` namespace function below; this is a
@@ -103,7 +111,56 @@ export namespace SessionProcessor {
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
-        const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
+        // altimate_change start — W2.4: resolve breaker config + arm state once per step.
+        // ANNOTATE-ONLY by default (mode "annotate"): directives and the hard stop
+        // require mode "armed" AND run mode. Skipped entirely for plan/review-class
+        // agents (read-only deliverables are their normal outcome). Interactive
+        // TUI/serve sessions never set ALTIMATE_RUN_MODE, so they can at most
+        // receive informational annotations — never directives or stops.
+        const processConfig = await Config.get()
+        const shouldBreak = processConfig.experimental?.continue_loop_on_deny !== true
+        const sbConfig = SessionStarvation.resolveConfig(
+          processConfig.experimental?.starvation_breaker as SessionStarvation.ConfigShape | undefined,
+        )
+        const runMode = Flag.ALTIMATE_RUN_MODE
+        const sbExempt = sbConfig.exemptAgents.includes(input.assistantMessage.agent)
+        const starvation =
+          sbConfig.mode === "off" || sbExempt ? undefined : SessionStarvation.forSession(input.sessionID, sbConfig)
+        const sbArmed = sbConfig.mode === "armed" && runMode && !sbExempt
+        const sbMode = sbConfig.mode === "armed" ? ("armed" as const) : ("annotate" as const)
+        let starvationStop = false
+        // Nudge arbiter delivery (Global rule 5): at most ONE system-authored
+        // directive block per injected turn, highest precedence wins. Run-mode-only.
+        let effectiveStreamInput = streamInput
+        if (runMode) {
+          const directive = NudgeArbiter.take(input.sessionID)
+          if (directive) {
+            Telemetry.track({
+              type: "starvation_breaker",
+              timestamp: Date.now(),
+              session_id: input.sessionID,
+              mode: sbMode,
+              kind: "nudge",
+              action: "injected",
+            })
+            log.info("nudge arbiter directive injected", {
+              sessionID: input.sessionID,
+              source: directive.source,
+              kind: directive.kind,
+            })
+            effectiveStreamInput = {
+              ...streamInput,
+              messages: [
+                ...streamInput.messages,
+                {
+                  role: "user" as const,
+                  content: `<system-directive source="${directive.source}">\n${directive.text}\n</system-directive>`,
+                },
+              ],
+            }
+          }
+        }
+        // altimate_change end
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
@@ -113,7 +170,9 @@ export namespace SessionProcessor {
               // before the LLM stream can execute provider-side tools.
               snapshot = await Snapshot.track()
             }
-            const stream = await LLM.stream(streamInput)
+            // altimate_change start — W2.4: stream with the (possibly directive-augmented) input
+            const stream = await LLM.stream(effectiveStreamInput)
+            // altimate_change end
 
             for await (const value of stream.fullStream) {
               input.abort.throwIfAborted()
@@ -232,38 +291,47 @@ export namespace SessionProcessor {
                     sessionToolCallsMade++
                     // altimate_change end
 
-                    const parts = await MessageV2.parts(input.assistantMessage.id)
-                    const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
+                    // altimate_change start — W2.4: doom-loop guard re-keyed + escalation ladder.
+                    // Interactive sessions keep the existing (toolName + identical args)
+                    // permission ask EXACTLY as before. Run mode bypasses the permission
+                    // channel entirely — code-truth confirmed yolo auto-approves the ask,
+                    // making the old guard a no-op there — and instead climbs the ladder
+                    // below (nudge → forced status-check → stop; never straight to stop).
+                    if (!runMode) {
+                      const parts = await MessageV2.parts(input.assistantMessage.id)
+                      const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
 
-                    if (
-                      lastThree.length === DOOM_LOOP_THRESHOLD &&
-                      lastThree.every(
-                        (p) =>
-                          p.type === "tool" &&
-                          p.tool === value.toolName &&
-                          p.state.status !== "pending" &&
-                          JSON.stringify(p.state.input) === JSON.stringify(value.input),
-                      )
-                    ) {
-                      const agent = await Agent.get(input.assistantMessage.agent)
-                      await PermissionNext.ask({
-                        permission: "doom_loop",
-                        patterns: [value.toolName],
-                        sessionID: input.assistantMessage.sessionID,
-                        metadata: {
-                          tool: value.toolName,
-                          input: value.input,
-                        },
-                        always: [value.toolName],
-                        ruleset: agent.permission,
-                      })
+                      if (
+                        lastThree.length === DOOM_LOOP_THRESHOLD &&
+                        lastThree.every(
+                          (p) =>
+                            p.type === "tool" &&
+                            p.tool === value.toolName &&
+                            p.state.status !== "pending" &&
+                            JSON.stringify(p.state.input) === JSON.stringify(value.input),
+                        )
+                      ) {
+                        const agent = await Agent.get(input.assistantMessage.agent)
+                        await PermissionNext.ask({
+                          permission: "doom_loop",
+                          patterns: [value.toolName],
+                          sessionID: input.assistantMessage.sessionID,
+                          metadata: {
+                            tool: value.toolName,
+                            input: value.input,
+                          },
+                          always: [value.toolName],
+                          ruleset: agent.permission,
+                        })
+                      }
                     }
+                    // altimate_change end
 
-                    // altimate_change start — per-tool repeat counter (catches varied-input loops like todowrite 2,080x)
-                    // Counter is scoped to the processor lifetime (create() call), so it accumulates
-                    // across multiple process() invocations within a session. This is intentional:
-                    // cross-turn accumulation catches slow-burn loops that stay under the threshold
-                    // per-turn but add up over the session.
+                    // altimate_change start — per-tool repeat counter, DEMOTED to telemetry only (W2.4).
+                    // The per-NAME counter (30 calls of any kind per tool) was crossed by
+                    // 13/28 legitimate runs — attaching any hard consequence to it would
+                    // kill ~half of legitimate work. It remains as telemetry; consequences
+                    // hang off the (toolName + normalized args) ladder below instead.
                     toolCallCounts[value.toolName] = (toolCallCounts[value.toolName] ?? 0) + 1
                     if (toolCallCounts[value.toolName] >= TOOL_REPEAT_THRESHOLD) {
                       Telemetry.track({
@@ -273,20 +341,61 @@ export namespace SessionProcessor {
                         tool_name: value.toolName,
                         repeat_count: toolCallCounts[value.toolName],
                       })
-                      const agent = await Agent.get(input.assistantMessage.agent)
-                      await PermissionNext.ask({
-                        permission: "doom_loop",
-                        patterns: [value.toolName],
-                        sessionID: input.assistantMessage.sessionID,
-                        metadata: {
-                          tool: value.toolName,
-                          input: value.input,
-                          repeat_count: toolCallCounts[value.toolName],
-                        },
-                        always: [value.toolName],
-                        ruleset: agent.permission,
-                      })
                       toolCallCounts[value.toolName] = 0
+                    }
+                    // altimate_change end
+
+                    // altimate_change start — W2.4: (toolName + normalized args) escalation ladder.
+                    // Polling patterns (sleep/watch/status probes) get a raised threshold
+                    // inside the tracker. Annotate mode only logs would-fire events; armed
+                    // run mode registers outcome-neutral directives via the nudge arbiter
+                    // and hard-stops only at the ladder's final rung.
+                    if (starvation) {
+                      const call = starvation.onToolCall({ tool: value.toolName, input: value.input })
+                      if (call.doomLoop) {
+                        const wouldStop = call.doomLoop.escalation === "stop"
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "doom_loop",
+                          action: sbArmed ? (wouldStop ? "stop" : "registered") : "would_fire",
+                          tool_name: value.toolName,
+                          count: call.doomLoop.count,
+                          escalation: call.doomLoop.escalation,
+                        })
+                        log.warn("doom-loop ladder rung crossed", {
+                          sessionID: input.sessionID,
+                          tool: value.toolName,
+                          count: call.doomLoop.count,
+                          escalation: call.doomLoop.escalation,
+                          armed: sbArmed,
+                        })
+                        if (sbArmed) {
+                          if (wouldStop) {
+                            starvationStop = true
+                            await Session.updatePart({
+                              id: PartID.ascending(),
+                              messageID: input.assistantMessage.id,
+                              sessionID: input.assistantMessage.sessionID,
+                              type: "text",
+                              synthetic: true,
+                              text:
+                                `altimate-code: stopping — the same \`${value.toolName}\` call with identical ` +
+                                `arguments was repeated ${call.doomLoop.count} times despite a nudge and a ` +
+                                `forced status-check (doom-loop escalation ladder, run mode).`,
+                              time: { start: Date.now(), end: Date.now() },
+                            })
+                          } else {
+                            NudgeArbiter.register(input.sessionID, {
+                              source: "starvation_breaker",
+                              kind: call.doomLoop.escalation === "nudge" ? "doom_loop_nudge" : "doom_loop_status_check",
+                              text: call.doomLoop.directive,
+                            })
+                          }
+                        }
+                      }
                     }
                     // altimate_change end
                   }
@@ -298,12 +407,62 @@ export namespace SessionProcessor {
                   const match = toolcalls[toolResultCallID]
                   // altimate_change end
                   if (match && match.state.status === "running") {
+                    // altimate_change start — W2.4: unchanged-read annotation (content hash
+                    // at read time; annotate, NEVER suppress — generated paths exempt) and
+                    // repeat-signature loop detection on successful results. The annotation
+                    // is appended to the persisted output in all modes; the loop directive
+                    // is arbiter-registered only when armed (run mode).
+                    let toolResultOutput = value.output.output
+                    if (starvation) {
+                      const resultInput = value.input ?? match.state.input
+                      const touched = (resultInput as any)?.filePath
+                      const outcome = starvation.onToolResult({
+                        tool: match.tool,
+                        input: resultInput,
+                        output: typeof toolResultOutput === "string" ? toolResultOutput : undefined,
+                        touchedFiles: typeof touched === "string" ? [touched] : undefined,
+                      })
+                      if (outcome.readAnnotation && typeof toolResultOutput === "string") {
+                        toolResultOutput = `${toolResultOutput}\n\n${outcome.readAnnotation}`
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "unchanged_read",
+                          action: "annotated",
+                          tool_name: match.tool,
+                        })
+                      }
+                      if (outcome.repeatLoop) {
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "repeat_signature",
+                          action: sbArmed ? "registered" : "would_fire",
+                          tool_name: match.tool,
+                          count: outcome.repeatLoop.count,
+                        })
+                        if (sbArmed) {
+                          NudgeArbiter.register(input.sessionID, {
+                            source: "starvation_breaker",
+                            kind: "repeat_signature",
+                            text: outcome.repeatLoop.directive,
+                          })
+                        }
+                      }
+                    }
+                    // altimate_change end
                     await Session.updatePart({
                       ...match,
                       state: {
                         status: "completed",
                         input: value.input ?? match.state.input,
-                        output: value.output.output,
+                        // altimate_change start — W2.4: annotated output (append-only)
+                        output: toolResultOutput,
+                        // altimate_change end
                         metadata: value.output.metadata,
                         title: value.output.title,
                         time: {
@@ -327,6 +486,40 @@ export namespace SessionProcessor {
                   const match = toolcalls[toolErrorCallID]
                   // altimate_change end
                   if (match && match.state.status === "running") {
+                    // altimate_change start — W2.4: repeat-signature loop detection on
+                    // failures — hash(tool + normalized args + touched files + failure
+                    // message). Catches edit-verify-fail-revert-reedit loops that mutate
+                    // files every turn but make no progress.
+                    if (starvation) {
+                      const errorInput = value.input ?? match.state.input
+                      const touched = (errorInput as any)?.filePath
+                      const outcome = starvation.onToolResult({
+                        tool: match.tool,
+                        input: errorInput,
+                        failureMessage: (value.error as any)?.toString?.() ?? String(value.error),
+                        touchedFiles: typeof touched === "string" ? [touched] : undefined,
+                      })
+                      if (outcome.repeatLoop) {
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "repeat_signature",
+                          action: sbArmed ? "registered" : "would_fire",
+                          tool_name: match.tool,
+                          count: outcome.repeatLoop.count,
+                        })
+                        if (sbArmed) {
+                          NudgeArbiter.register(input.sessionID, {
+                            source: "starvation_breaker",
+                            kind: "repeat_signature",
+                            text: outcome.repeatLoop.directive,
+                          })
+                        }
+                      }
+                    }
+                    // altimate_change end
                     await Session.updatePart({
                       ...match,
                       state: {
@@ -498,6 +691,11 @@ export namespace SessionProcessor {
                     cost: usage.cost,
                   })
                   await Session.updateMessage(input.assistantMessage)
+                  // altimate_change start — W2.4: capture the snapshot diff as the generic,
+                  // command-agnostic mutation ground truth (also catches bash-mediated
+                  // writes like `sed -i`/heredocs, which emit no edit event).
+                  let stepPatchFiles: string[] = []
+                  // altimate_change end
                   if (snapshot) {
                     const patch = await Snapshot.patch(snapshot)
                     if (patch.files.length) {
@@ -510,8 +708,42 @@ export namespace SessionProcessor {
                         files: patch.files,
                       })
                     }
+                    // altimate_change start — W2.4
+                    stepPatchFiles = [...patch.files]
+                    // altimate_change end
                     snapshot = undefined
                   }
+                  // altimate_change start — W2.4: per-step write-starvation evaluation.
+                  // Annotate mode only logs a would-fire event; armed run mode registers
+                  // the outcome-neutral directive (with its DONE alternative) via the
+                  // nudge arbiter for delivery on the next generation.
+                  if (starvation) {
+                    const stepOutcome = starvation.onStepFinish({ mutatedFiles: stepPatchFiles })
+                    if (stepOutcome.starvation) {
+                      Telemetry.track({
+                        type: "starvation_breaker",
+                        timestamp: Date.now(),
+                        session_id: input.sessionID,
+                        mode: sbMode,
+                        kind: "starvation",
+                        action: sbArmed ? "registered" : "would_fire",
+                        turns_without_mutation: stepOutcome.turnsWithoutMutation,
+                      })
+                      log.warn("write-starvation breaker", {
+                        sessionID: input.sessionID,
+                        turnsWithoutMutation: stepOutcome.turnsWithoutMutation,
+                        armed: sbArmed,
+                      })
+                      if (sbArmed) {
+                        NudgeArbiter.register(input.sessionID, {
+                          source: "starvation_breaker",
+                          kind: "starvation",
+                          text: stepOutcome.starvation.directive,
+                        })
+                      }
+                    }
+                  }
+                  // altimate_change end
                   SessionSummary.summarize({
                     sessionID: input.sessionID,
                     messageID: input.assistantMessage.parentID,
@@ -705,9 +937,41 @@ export namespace SessionProcessor {
           }
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
+          // altimate_change start — W2.1(a): explicit model DONE is the PRIMARY
+          // termination path. A turn that finished with "stop", has no error, and
+          // asserts completion (trailing DONE token per the SessionTermination
+          // contract) terminates the session EVEN IF overflow was detected.
+          // Returning "compact" here is the termination-impossibility triangle:
+          // the finished session gets summarized and the post-compaction continue
+          // message breeds further turns. Deferring compaction is safe in every
+          // mode — prompt.ts's pre-dispatch overflow check compacts before the
+          // next request. Never bare finishReason "stop" (that ends nearly every
+          // ordinary text turn), and never for the compaction summarizer itself.
+          if (
+            needsCompaction &&
+            !input.assistantMessage.summary &&
+            SessionTermination.explicitDoneStop({
+              finish: input.assistantMessage.finish,
+              hasError: input.assistantMessage.error !== undefined,
+              parts: p,
+            })
+          ) {
+            log.info("explicit DONE with pending compaction — terminating instead of compacting", {
+              sessionID: input.sessionID,
+              messageID: input.assistantMessage.id,
+            })
+            return "stop"
+          }
+          // altimate_change end
           if (needsCompaction) return "compact"
           if (blocked) return "stop"
           if (input.assistantMessage.error) return "stop"
+          // altimate_change start — W2.4: doom-loop escalation ladder final rung.
+          // Reachable only when mode is "armed" AND the process is in run mode
+          // (never TUI/serve) AND the same (toolName + normalized args) call
+          // repeated through nudge and forced status-check without changing.
+          if (starvationStop) return "stop"
+          // altimate_change end
           return "continue"
         }
       },

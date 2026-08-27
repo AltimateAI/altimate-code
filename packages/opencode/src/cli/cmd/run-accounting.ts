@@ -11,12 +11,24 @@
 //           different fixes and were indistinguishable under rc-only accounting).
 //   W1.1  — real error serialization: never a bare name, "[object Object]", or a
 //           literal `{}` — automation needs the actual name/message/status.
+//   W2.1  — done_reason emission (explicit_done vs idle_heuristic vs none) and the
+//           idle-done challenge bookkeeping; DONE detection delegates to the
+//           SessionTermination completion-token contract.
+import { SessionTermination } from "../../session/termination"
+
 export namespace RunAccounting {
   export type WhyModelStopped = "stop" | "tool-call" | "explicit-done"
   export type WhyHarnessStopped = "budget-exhausted" | "timeout" | "error" | "idle-done" | "none"
+  // W2.1(e): done_reason distinguishes an unprompted completion assertion
+  // (explicit_done — the PRIMARY termination path) from one elicited by the
+  // idle-done confirm challenge (idle_heuristic). "none" = the session ended
+  // without any completion assertion — bare finishReason "stop" is NEVER
+  // reported as done (W2.1a).
+  export type DoneReason = "explicit_done" | "idle_heuristic" | "none"
   export type Termination = {
     why_model_stopped: WhyModelStopped
     why_harness_stopped: WhyHarnessStopped
+    done_reason: DoneReason
   }
 
   // Recoverable by design: auto-compaction handles context overflow and the session
@@ -27,10 +39,10 @@ export namespace RunAccounting {
   // Timeout classification for why_harness_stopped="timeout" and retry decisions.
   const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 
-  // W2.1 will make an explicit model DONE assertion the primary termination path;
-  // until it lands, a trailing DONE token in the final assistant text is the only
-  // signal available for the "explicit-done" attribution.
-  const DONE_PATTERN = /\bDONE\b[.!]?\s*$/
+  // W2.1(a): the explicit model DONE assertion is the primary termination path.
+  // Detection delegates to the SessionTermination completion-token contract —
+  // the single detector shared with the processor stop-path and the idle-done
+  // challenge, so instruction and detection can never drift apart.
 
   export function create() {
     const agents = new Map<string, string>()
@@ -39,6 +51,9 @@ export namespace RunAccounting {
     let lastTextExplicitDone = false
     let budgetExhausted = false
     let fatalError: { name: string; timeout: boolean } | undefined
+    // W2.1(c)/(e): set when the run-mode idle-done fallback issued its one-shot
+    // confirm-DONE challenge (see cli/cmd/idle-done.ts).
+    let idleDoneChallengeIssued = false
 
     function isCompactionStep(messageID: string) {
       return agents.get(messageID) === "compaction"
@@ -68,11 +83,19 @@ export namespace RunAccounting {
       },
       onText(messageID: string, text: string) {
         if (isCompactionStep(messageID)) return
-        lastTextExplicitDone = DONE_PATTERN.test(text.trim())
+        lastTextExplicitDone = SessionTermination.isExplicitDone(text)
+      },
+      /** W2.1(c): the idle-done fallback issued its one-shot confirm-DONE challenge. */
+      onIdleDoneChallengeIssued() {
+        idleDoneChallengeIssued = true
       },
       onSessionError(name: unknown, message?: string) {
         const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
         if (RECOVERABLE_ERROR_NAMES.has(errorName)) return
+        // W2.1(c): the idle-done challenge is delivered by aborting the in-flight
+        // prompt first; that harness-initiated abort surfaces as a
+        // MessageAbortedError and must not be scored as a fatal run error.
+        if (idleDoneChallengeIssued && errorName === "MessageAbortedError") return
         fatalError = {
           name: errorName,
           timeout: TIMEOUT_PATTERN.test(errorName) || TIMEOUT_PATTERN.test(message ?? ""),
@@ -98,6 +121,9 @@ export namespace RunAccounting {
           return
         }
         if (info.finish === "error" || info.finish === "other") {
+          // W2.1(c): the terminal message of a prompt the idle-done fallback
+          // aborted (to deliver its challenge) finishes abnormally by design.
+          if (idleDoneChallengeIssued) return
           fatalError ??= { name: `AbnormalFinish:${info.finish}`, timeout: false }
         }
       },
@@ -105,23 +131,32 @@ export namespace RunAccounting {
       get fatal() {
         return budgetExhausted || fatalError !== undefined
       },
-      /** E4 dual-attribution fields for the run record/output (W1.12). */
+      /** E4 dual-attribution fields + done_reason for the run record/output (W1.12, W2.1e). */
       termination(): Termination {
         const model: WhyModelStopped = (() => {
           if (lastFinishReason === "stop" && lastTextExplicitDone) return "explicit-done"
           if (lastFinishReason === "tool-calls" || lastFinishReason === "tool-call") return "tool-call"
           return "stop"
         })()
+        // W2.1(a)+(e): a completion assertion requires finishReason "stop" PLUS
+        // the explicit DONE token — never bare "stop". If the assertion followed
+        // the idle-done confirm challenge, it is honestly attributed to the
+        // heuristic, not to unprompted model completion.
+        const done: DoneReason = (() => {
+          if (lastFinishReason !== "stop" || !lastTextExplicitDone) return "none"
+          return idleDoneChallengeIssued ? "idle_heuristic" : "explicit_done"
+        })()
         const harness: WhyHarnessStopped = (() => {
           if (budgetExhausted) return "budget-exhausted"
           if (fatalError?.timeout) return "timeout"
           if (fatalError) return "error"
-          // "idle-done" is reserved for the run-mode idle-done heuristic (W2.1);
-          // a session that idles because the model finished is attributed to the
+          // W2.1(c): the session ended on (or after) the idle-done challenge.
+          if (done === "idle_heuristic") return "idle-done"
+          // A session that idles because the model finished is attributed to the
           // model, so the harness reason is "none".
           return "none"
         })()
-        return { why_model_stopped: model, why_harness_stopped: harness }
+        return { why_model_stopped: model, why_harness_stopped: harness, done_reason: done }
       },
     }
   }

@@ -31,6 +31,14 @@ import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../al
 // altimate_change start — W1.10/W1.12/W1.1 run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
 // altimate_change end
+// altimate_change start — W2.1(c): run-mode-only idle-done fallback (fork-only modules).
+// Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
+// token contract live in session/termination.ts; delivery goes through the nudge
+// arbiter (Global rule 5 — one system-authored directive block per injected turn).
+import { IdleDone } from "./idle-done"
+import { NudgeArbiter } from "../../session/nudge"
+import { SessionTermination } from "../../session/termination"
+// altimate_change end
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change end
@@ -403,6 +411,14 @@ export const RunCommand = cmd({
       process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
     }
     // altimate_change end
+    // altimate_change start — W2.4: mark this process as run mode so run-mode-only
+    // mechanisms (starvation-breaker directives, doom-loop escalation ladder) can
+    // arm in the in-process session. Skipped for --attach: the agent runs on the
+    // remote (possibly interactive) server, where the breaker must stay disarmed.
+    if (!args.attach) {
+      process.env["ALTIMATE_RUN_MODE"] = "1"
+    }
+    // altimate_change end
 
     let message = [...args.message, ...(args["--"] || [])]
       .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
@@ -602,6 +618,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
       // altimate_change end
+      // altimate_change start — W2.1(c): idle-done fallback state (run-mode-only by
+      // construction — this exists only in the run command). Thresholds are
+      // config-exposed via env with first-principles provenance (see idle-done.ts).
+      const idleDone = IdleDone.create(IdleDone.optionsFromEnv(), {
+        isCompactionStep: (messageID) => accounting.isCompactionStep(messageID),
+      })
+      // altimate_change end
 
       // Build tracer from config + CLI flags — must never crash the run command
       const tracer = await (async () => {
@@ -635,13 +658,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       })()
 
-      async function loop() {
+      // altimate_change start — W2.1(c): the event loop takes its stream as a
+      // parameter so the idle-done challenge phase can re-run it over a fresh
+      // subscription after the deliberate mid-run abort (same accounting, same
+      // max-turns budget — the challenge continuation stays budget-enforced).
+      // requireBusyFirst: the challenge-phase loop ignores idle events until the
+      // challenge turn has actually started (a straggler idle from the abort
+      // would otherwise end the phase before the challenge prompt begins).
+      async function loop(stream: typeof events.stream, options?: { requireBusyFirst?: boolean }) {
+        let sawBusy = false
+        // altimate_change end
         const toggles = new Map<string, boolean>()
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = args.maxTurns
         // altimate_change end
 
-        for await (const event of events.stream) {
+        // altimate_change start — W2.1(c): parameterized stream
+        for await (const event of stream) {
+          // altimate_change end
           // altimate_change start — W1.10: record each assistant message's agent so
           // step-start parts (which carry only messageID/sessionID) can be attributed.
           // The assistant message row is persisted — and this event published — before
@@ -678,6 +712,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "message.part.updated") {
             const part = event.properties.part
             if (part.sessionID !== sessionID) continue
+
+            // altimate_change start — W2.1(c): feed every part event through the
+            // idle-done observer (event-stream ordering for build-after-last-write,
+            // text-only-turn counting, outstanding-tool suppression).
+            idleDone.observePart(part as unknown as IdleDone.PartSlice)
+            // altimate_change end
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
               tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
@@ -727,6 +767,27 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // altimate_change start — W1.12: record the model-side finish reason
               accounting.onStepFinish(part.messageID, (part as { reason?: string }).reason)
               // altimate_change end
+              // altimate_change start — W2.1(c): idle-done fallback firing point.
+              // All hard preconditions are checked in idle-done.ts (compaction-gated,
+              // build-after-last-write green verify, no outstanding tools/permissions,
+              // one-shot). Firing aborts the churning prompt and hands off to the
+              // confirm-DONE challenge phase after the event loop drains. Checked
+              // BEFORE the json-mode emit-continue so non-interactive runs take this path too.
+              if (idleDone.shouldChallenge()) {
+                idleDone.markChallengeIssued()
+                accounting.onIdleDoneChallengeIssued()
+                const detail = idleDone.snapshot()
+                if (!emit("idle_done_challenge", { detail })) {
+                  UI.println(
+                    UI.Style.TEXT_WARNING_BOLD + "!",
+                    UI.Style.TEXT_NORMAL +
+                      ` idle-done: completion signature detected (green verify after last write, ${detail.idle_turns} idle turns, ${detail.compactions} compactions) — issuing one-shot confirm-DONE challenge`,
+                  )
+                }
+                await sdk.session.abort({ sessionID })
+                break
+              }
+              // altimate_change end
               if (emit("step_finish", { part })) continue
             }
 
@@ -766,6 +827,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "session.error") {
             const props = event.properties
             if (props.sessionID !== sessionID || !props.error) continue
+            // altimate_change start — W2.1(c): the idle-done challenge is delivered
+            // by aborting the in-flight prompt; that harness-initiated abort is not
+            // a run error — don't display it or fold it into the error record.
+            if (idleDone.challengeIssued && props.error.name === "MessageAbortedError") continue
+            // altimate_change end
             // altimate_change start — W1.1: serialize the real error name/message/status
             // (never a bare name, "[object Object]", or a literal {}); W1.12: feed the
             // harness-stop attribution (recoverable overflow errors are excluded there).
@@ -782,17 +848,33 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.error(err)
           }
 
+          // altimate_change start — W2.1(c): track busy for the challenge-phase guard
+          if (
+            event.type === "session.status" &&
+            event.properties.sessionID === sessionID &&
+            event.properties.status.type === "busy"
+          ) {
+            sawBusy = true
+          }
+          // altimate_change end
           if (
             event.type === "session.status" &&
             event.properties.sessionID === sessionID &&
             event.properties.status.type === "idle"
           ) {
+            // altimate_change start — W2.1(c): ignore stale pre-challenge idles
+            if (options?.requireBusyFirst && !sawBusy) continue
+            // altimate_change end
             break
           }
 
           if (event.type === "permission.asked") {
             const permission = event.properties
             if (permission.sessionID !== sessionID) continue
+            // altimate_change start — W2.1(c): idle-done is suppressed while a
+            // permission request is outstanding (hard precondition iii).
+            idleDone.onPermissionAsked(permission.id)
+            // altimate_change end
             // altimate_change start - yolo mode: auto-approve but respect explicit deny rules.
             // --dangerously-skip-permissions (backport of upstream PR #21266) is treated as
             // an alias — same auto-approve behavior, plus our deny-rule safety net which
@@ -841,6 +923,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 reply: "reject",
               })
             }
+            // altimate_change end
+            // altimate_change start — W2.1(c): every branch above replied; clear the pending flag
+            idleDone.onPermissionResolved(permission.id)
             // altimate_change end
           }
         }
@@ -918,7 +1003,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       process.on("beforeExit", onBeforeExit)
 
       // Start event listener before sending the prompt so no events are missed
-      const loopPromise = loop().catch((e) => {
+      // altimate_change start — W2.1(c): pass the stream explicitly (see loop signature)
+      const loopPromise = loop(events.stream).catch((e) => {
+        // altimate_change end
         console.error(e)
         process.exit(1)
       })
@@ -996,20 +1083,80 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
 
+      // altimate_change start — W2.1(c.iv): one-shot confirm-DONE challenge phase.
+      // Reached only when the idle-done detector fired (all hard preconditions
+      // held) and aborted the churning prompt. The challenge is a normal prompt:
+      // the model either confirms DONE (session ends, done_reason=idle_heuristic)
+      // or states what remains and continues working — budget enforcement,
+      // accounting, and display all flow through the same loop() over a fresh
+      // event subscription. Recursion guard: the detector is one-shot, so the
+      // challenge can never breed further challenges (Stop-hook 'eight-block'
+      // analogue). The directive is delivered via the nudge arbiter (Global rule
+      // 5) so this injected turn carries exactly ONE system-authored directive.
+      if (idleDone.challengeIssued && !accounting.fatal) {
+        const challengeEvents = await sdk.event.subscribe()
+        NudgeArbiter.register(sessionID, {
+          source: "termination_challenge",
+          kind: "confirm_done",
+          text: SessionTermination.CONFIRM_DONE_CHALLENGE,
+        })
+        const challengeDirective = NudgeArbiter.take(sessionID)
+        let challengeSendFailed!: () => void
+        const challengeFailure = new Promise<void>((resolveFailure) => {
+          challengeSendFailed = resolveFailure
+        })
+        const challengePromise = (async () => {
+          // The abort releases the session lock asynchronously — retry briefly
+          // while the server still reports the session busy. Bounded so a
+          // persistent failure surfaces instead of hanging the run.
+          for (let challengeAttempt = 0; ; challengeAttempt++) {
+            const res = (await sdk.session
+              .prompt({
+                sessionID,
+                agent,
+                model: args.model ? Provider.parseModel(args.model) : undefined,
+                variant: args.variant,
+                parts: [
+                  { type: "text", text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE },
+                ],
+              })
+              .catch((e) => ({ error: e }) as SendResult)) as SendResult
+            if (!res?.error) return res
+            if (challengeAttempt >= 8) {
+              emit("idle_done_challenge_failed", { error: RunAccounting.serializeSessionError(res.error) })
+              throw new Error(`idle-done challenge prompt failed: ${RunAccounting.serializeSessionError(res.error)}`)
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250 * (challengeAttempt + 1)))
+          }
+        })()
+        challengePromise.catch(() => challengeSendFailed())
+        await Promise.race([
+          loop(challengeEvents.stream, { requireBusyFirst: true }).catch((e) => {
+            console.error(e)
+            process.exit(1)
+          }),
+          challengeFailure,
+        ])
+        const challengeResult = await challengePromise.catch(() => undefined)
+        accounting.onPromptResult(challengeResult?.data?.info)
+      }
+      // altimate_change end
+
       // Remove crash handlers — trace will be finalized cleanly
       process.removeListener("SIGINT", onSigint)
       process.removeListener("SIGTERM", onSigterm)
       process.removeListener("beforeExit", onBeforeExit)
 
-      // altimate_change start — W1.12 E4: dual-attribution termination record.
-      // why_model_stopped and why_harness_stopped are independent fields so
-      // model-looping, tight budgets, and harness errors are distinguishable
-      // in the run output (rc alone conflates them).
+      // altimate_change start — W1.12 E4 + W2.1(e): dual-attribution termination
+      // record with done_reason. why_model_stopped and why_harness_stopped are
+      // independent fields so model-looping, tight budgets, and harness errors
+      // are distinguishable in the run output (rc alone conflates them);
+      // done_reason distinguishes explicit_done vs idle_heuristic vs none.
       const termination = accounting.termination()
       if (!emit("termination", { ...termination }) && process.stdout.isTTY) {
         UI.println(
           UI.Style.TEXT_DIM +
-            `why_model_stopped=${termination.why_model_stopped} why_harness_stopped=${termination.why_harness_stopped}` +
+            `why_model_stopped=${termination.why_model_stopped} why_harness_stopped=${termination.why_harness_stopped} done_reason=${termination.done_reason}` +
             UI.Style.TEXT_NORMAL,
         )
       }

@@ -19,6 +19,10 @@ import { ModelID, ProviderID } from "@/provider/schema"
 // altimate_change start — summarizer-integrity error (harness plan W1.6 / item 3)
 import { NamedError } from "@opencode-ai/util/error"
 import type { LLM } from "./llm"
+// altimate_change start — W2.1(b)+(d): completion-aware continue nudge via the nudge arbiter
+import { NudgeArbiter } from "./nudge"
+import { SessionTermination } from "./termination"
+// altimate_change end
 // altimate_change end
 // altimate_change start — Effect Context.Service facade for the upstream runtime
 import { Context, Effect, Layer } from "effect"
@@ -368,8 +372,350 @@ export namespace SessionCompaction {
     }
   }
 
+  // altimate_change start — harness plan W2.3 / item 5: post-compaction state ledger (5a),
+  // append-only summary carry (5b), first-person summary reframe (5c).
+  //
+  // 5a: a deterministic, corroborated-facts-only ledger appended to the synthetic
+  // post-compaction continue message. Facts come from harness tool events ONLY:
+  // write/edit/apply_patch completion events (path + event timestamp) and the last N
+  // tool calls with exit codes where recorded. Command-agnostic by design — no
+  // "build/test" classifier, no vertical (dbt/warehouse) token matching (Global rule 4).
+  // Bash-mediated file changes produce no edit event, so they are flagged as possible
+  // but unverified rather than guessed at. The re-read directive is advisory and
+  // mtime-anchored, never an absolute prohibition (the model's read-before-edit habit
+  // is load-bearing, and external IDE edits can change disk mid-session).
+  //
+  // Thresholds are config-exposed (compaction.ledger_max_tokens / ledger_recent_calls).
+  // Provenance: 500-token cap is the harness plan W2.3 5a bound ("≤500 tokens,
+  // tail-truncate") — first-principles, the ledger must cost less than the duplicate
+  // re-reads it prevents (a single mid-size file re-read is ~1–3k tokens). 10 recent
+  // calls covers several median edit→verify cycles (~1.8 calls/cycle, expert-corpus
+  // statistic) without dominating the budget. Neither is fitted to a specific evaluation corpus.
+  export const LEDGER_MAX_TOKENS = 500
+  export const LEDGER_RECENT_CALLS = 10
+
+  // Harness-corroborated write events: tools whose completion PROVES a file write.
+  // Deliberately excludes bash — shell writes are unverifiable from tool events.
+  const LEDGER_WRITE_TOOLS = new Set(["write", "edit"])
+  const LEDGER_DETAIL_MAX = 100
+
+  export type LedgerWrite = { path: string; mtime: number; tool: string }
+  export type LedgerCall = {
+    tool: string
+    detail: string
+    exit?: number | null
+    errored: boolean
+  }
+  export type Ledger = { writes: LedgerWrite[]; calls: LedgerCall[]; sawBash: boolean }
+
+  function callDetail(input: Record<string, any> | null | undefined): string {
+    if (!input || typeof input !== "object") return ""
+    // Generic primary-argument pick — identical treatment for every tool.
+    const candidate = input.command ?? input.filePath ?? input.path ?? input.pattern ?? ""
+    const str = typeof candidate === "string" ? candidate.replace(/\s+/g, " ").trim() : ""
+    return str.length > LEDGER_DETAIL_MAX ? str.slice(0, LEDGER_DETAIL_MAX) + "…" : str
+  }
+
+  /** Deterministic: output depends only on the message list passed in. */
+  export function buildLedger(messages: MessageV2.WithParts[]): Ledger {
+    const writes = new Map<string, LedgerWrite>()
+    const calls: LedgerCall[] = []
+    let sawBash = false
+    for (const msg of messages) {
+      for (const part of msg.parts) {
+        if (part.type !== "tool") continue
+        const state = part.state
+        if (state.status !== "completed" && state.status !== "error") continue
+        const errored = state.status === "error"
+        const metadata: Record<string, any> = (state.status === "completed" ? state.metadata : state.metadata) ?? {}
+        const exit = typeof metadata.exit === "number" || metadata.exit === null ? metadata.exit : undefined
+        calls.push({ tool: part.tool, detail: callDetail(state.input), exit, errored })
+        if (part.tool === "bash") sawBash = true
+        if (errored) continue
+        if (LEDGER_WRITE_TOOLS.has(part.tool)) {
+          const filePath = typeof state.input?.filePath === "string" ? state.input.filePath : undefined
+          // mtime = tool-event completion time, NOT an fs.stat — corroborated facts only.
+          if (filePath) writes.set(filePath, { path: filePath, mtime: state.time.end, tool: part.tool })
+        }
+        if (part.tool === "apply_patch") {
+          const files = Array.isArray(metadata.files) ? metadata.files : []
+          for (const f of files)
+            if (typeof f?.filePath === "string")
+              writes.set(f.filePath, { path: f.filePath, mtime: state.time.end, tool: "apply_patch" })
+        }
+      }
+    }
+    return {
+      writes: [...writes.values()].sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path)),
+      calls,
+      sawBash,
+    }
+  }
+
+  /**
+   * Render the ledger for the continue message. ≤ maxTokens, tail-truncated:
+   * content is ordered by importance (verified writes → unverified-shell note →
+   * advisory → recent calls newest-first) so truncation drops the oldest calls first.
+   */
+  export function renderLedger(ledger: Ledger, opts?: { maxTokens?: number; recentCalls?: number }): string {
+    const maxTokens = opts?.maxTokens ?? LEDGER_MAX_TOKENS
+    const recentCalls = opts?.recentCalls ?? LEDGER_RECENT_CALLS
+    if (!ledger.writes.length && !ledger.calls.length) return ""
+    const lines: string[] = ["[Session state ledger — harness-recorded facts, generated automatically at compaction]"]
+    if (ledger.writes.length) {
+      lines.push("Files you wrote this session (verified write/edit tool events):")
+      for (const w of ledger.writes) {
+        lines.push(`- ${w.path} — last written by you at ${new Date(w.mtime).toISOString()} via ${w.tool}`)
+      }
+    }
+    if (ledger.sawBash) {
+      lines.push(
+        "Shell commands also ran this session; any file changes they made are possible but unverified (shell writes produce no edit event).",
+      )
+    }
+    lines.push(
+      "Advisory: these files were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it.",
+    )
+    if (ledger.calls.length) {
+      const recent = ledger.calls.slice(-recentCalls).reverse()
+      lines.push(`Recent tool calls, newest first (last ${recent.length} of ${ledger.calls.length}):`)
+      for (const c of recent) {
+        const status = c.errored ? "errored" : c.exit === undefined ? "ok" : c.exit === null ? "exit ?" : `exit ${c.exit}`
+        lines.push(`- ${c.tool} (${status})${c.detail ? ` — ${c.detail}` : ""}`)
+      }
+    }
+    while (lines.length > 1 && Token.estimate(lines.join("\n")) > maxTokens) lines.pop()
+    return lines.join("\n")
+  }
+
+  // ── 5b: append-only summary carry ─────────────────────────────────────────
+  // Previous round's Accomplished items are threaded into the next summarization
+  // as anchors. An item carries as FACT ([verified]) only when a corroborating
+  // ledger event exists (a write/edit event, or a zero-exit command naming the
+  // artifact); otherwise it carries tagged "claimed, unverified". A naive carry
+  // would REMEMBER invented deliverables (the corpus shows summaries fabricating
+  // them) and propagate them to every later summary and subagent.
+
+  export type CarryStatus = "verified" | "claimed, unverified"
+  export type CarryItem = { text: string; status: CarryStatus }
+
+  const CARRY_TAG_RE = /^\[(verified|claimed, unverified)\]\s*(.*)$/i
+
+  /** Extract bullet items under the "## Accomplished" heading of a summary. */
+  export function extractAccomplished(summary: string): { text: string; priorStatus?: CarryStatus }[] {
+    const out: { text: string; priorStatus?: CarryStatus }[] = []
+    let inSection = false
+    for (const raw of summary.split("\n")) {
+      const line = raw.trim()
+      if (/^#{1,6}\s/.test(line)) {
+        inSection = /^#{1,6}\s*accomplished\b/i.test(line)
+        continue
+      }
+      if (!inSection) continue
+      const m = line.match(/^[-*]\s+(.*\S)\s*$/)
+      if (!m) continue
+      let text = m[1]!
+      let priorStatus: CarryStatus | undefined
+      const tag = text.match(CARRY_TAG_RE)
+      if (tag) {
+        priorStatus = tag[1]!.toLowerCase() as CarryStatus
+        text = tag[2]!
+      }
+      if (text) out.push({ text, priorStatus })
+    }
+    return out
+  }
+
+  /** Path-like tokens (contain a dot or slash) — the artifact names a claim can be checked against. */
+  function artifactTokens(text: string): string[] {
+    return (text.match(/[A-Za-z0-9_@-]*[./][A-Za-z0-9_./-]+/g) ?? []).filter((t) => t.length >= 3 && /[A-Za-z]/.test(t))
+  }
+
+  function itemCorroborated(text: string, ledger: Ledger): boolean {
+    for (const token of artifactTokens(text)) {
+      const base = token.split("/").pop() ?? ""
+      for (const w of ledger.writes) {
+        if (w.path === token || w.path.endsWith("/" + token)) return true
+        if (base && w.path.split("/").pop() === base) return true
+      }
+      // A zero-exit command naming the artifact also corroborates (command-agnostic —
+      // no build/test classifier; the exit code plus artifact mention is the evidence).
+      for (const c of ledger.calls) {
+        if (!c.errored && c.exit === 0 && c.detail.includes(token)) return true
+      }
+    }
+    return false
+  }
+
+  /**
+   * Append-only status resolution: once [verified], always [verified] — the
+   * corroborating event may have been compacted out of the retained window, so a
+   * prior verified tag is preserved. Unverified claims may be promoted when
+   * evidence appears, never silently demoted or dropped.
+   */
+  export function corroborateCarry(items: { text: string; priorStatus?: CarryStatus }[], ledger: Ledger): CarryItem[] {
+    return items.map((item) => ({
+      text: item.text,
+      status:
+        item.priorStatus === "verified" || itemCorroborated(item.text, ledger)
+          ? "verified"
+          : ("claimed, unverified" as const),
+    }))
+  }
+
+  export function renderCarryAnchors(items: CarryItem[], maxTokens: number = LEDGER_MAX_TOKENS): string {
+    if (!items.length) return ""
+    const header = [
+      "## Previous-summary anchors (append-only carry)",
+      "Earlier compaction rounds recorded these Accomplished items. Carry EVERY item below into the new summary's Accomplished section with its tag verbatim, then append newly accomplished work after them:",
+    ]
+    const footer = [
+      "Items tagged [claimed, unverified] had no corroborating tool event (no write/edit event or successful command naming that artifact); keep the tag so later agents do not treat them as established fact. Never promote or remove a tag yourself.",
+    ]
+    let body = items.map((i) => `- [${i.status}] ${i.text}`)
+    // Append-only carry grows monotonically; when over budget drop the OLDEST
+    // items (front of the list) — the freshest anchors are the ones the next
+    // round needs to not lose.
+    while (body.length > 1 && Token.estimate([...header, ...body, ...footer].join("\n")) > maxTokens) {
+      body = body.slice(1)
+    }
+    return [...header, ...body, ...footer].join("\n")
+  }
+
+  /** Most recent committed summary text, if any (assistant, summary, finished, no error). */
+  export function latestSummaryText(messages: MessageV2.WithParts[]): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]!
+      if (msg.info.role !== "assistant" || !msg.info.summary || !msg.info.finish || msg.info.error) continue
+      const text = msg.parts
+        .filter((p): p is MessageV2.TextPart => p.type === "text")
+        .map((p) => p.text)
+        .join("\n")
+      return text.trim() ? text : undefined
+    }
+    return undefined
+  }
+
+  // ── 5c: first-person summary reframe — layered as an ADDITION to whatever
+  // summary prompt is active (default or plugin-provided), never a replacement.
+  export const FIRST_PERSON_REFRAME =
+    "Additionally: write the summary in the first person, as your own working memory — you are summarizing YOUR OWN work in progress, and the agent reading it next is you, continuing the same task. Say \"I edited…\", \"I verified…\", \"I still need to…\" rather than describing the work as another agent's or the user's."
+  // altimate_change end
+
   // altimate_change start — compaction attempt tracking for loop protection
   const compactionAttempts = new Map<string, number>()
+  // altimate_change end
+
+  // altimate_change start — harness plan W2.2 / item 2: pin the original task
+  // verbatim through compaction (budget math + livelock guard).
+  //
+  // Threshold provenance (config-exposed, defaults from the harness plan /
+  // first principles — NOT fitted to any specific evaluation corpus):
+  // - PIN_MAX_TOKENS 4096: the plan's `min(4k, …)` cap. Task statements rarely
+  //   exceed ~4k tokens; larger ones keep verbatim head+tail plus a contract card.
+  // - PIN_WINDOW_FRACTION 0.175: midpoint of the plan's 15–20% band — the pin
+  //   must stay a small minority of the post-overhead usable window so working
+  //   context dominates.
+  // - PIN_WORKING_SLACK 2000: the plan's hard invariant
+  //   `pin + reserved + ≥2k working slack < compaction threshold`. A fixed 4k
+  //   pin on a small window would otherwise produce a compaction livelock
+  //   (fires, cannot reduce below threshold, re-fires). Shrink the pin, never
+  //   violate the invariant.
+  // - PIN_CARD_MAX_TOKENS 500: the plan's contract-card budget.
+  export const PIN_MAX_TOKENS = 4_096
+  export const PIN_WINDOW_FRACTION = 0.175
+  export const PIN_WORKING_SLACK = 2_000
+  export const PIN_CARD_MAX_TOKENS = 500
+
+  export function pinEnabled(cfg: ConfigInfo) {
+    return cfg.compaction?.pin_task !== false
+  }
+
+  export function pinCardBudget(cfg: ConfigInfo) {
+    return cfg.compaction?.pin_card_max_tokens ?? PIN_CARD_MAX_TOKENS
+  }
+
+  // Dynamic cap: min(pin_max_tokens, pin_window_fraction × post-overhead usable
+  // window), clamped by the livelock invariant and any per-session livelock
+  // halving. Returns 0 when no pin fits — the pin is then skipped entirely.
+  export function pinBudget(input: { cfg: ConfigInfo; model: Provider.Model; sessionID?: string }): number {
+    if (!pinEnabled(input.cfg)) return 0
+    const context = input.model.limit.context
+    if (context === 0) return 0
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const reserved = input.cfg.compaction?.reserved ?? COMPACTION_BUFFER
+    const headroom = Math.max(reserved, maxOutput)
+    const base = input.model.limit.input ?? context
+    // isOverflow() fires at count >= base - headroom: that boundary is both the
+    // compaction threshold and the post-overhead usable window.
+    const threshold = base - headroom
+    if (threshold <= 0) return 0
+    const maxTokens = input.cfg.compaction?.pin_max_tokens ?? PIN_MAX_TOKENS
+    const fraction = input.cfg.compaction?.pin_window_fraction ?? PIN_WINDOW_FRACTION
+    // Hard invariant: pin + reserved + ≥2k working slack < compaction threshold.
+    const invariantCap = threshold - reserved - PIN_WORKING_SLACK
+    const cap = Math.min(maxTokens, Math.floor(threshold * fraction), invariantCap)
+    if (cap <= 0) return 0
+    return Math.max(0, Math.floor(cap * pinScale(input.sessionID)))
+  }
+
+  // Livelock guard: two CONSECUTIVE auto-compactions that failed to get the
+  // session below threshold halve the pin for the rest of the session (and
+  // halve again on each further pair). "Failed to reduce below threshold" is
+  // detected structurally: a new auto-compaction fires while at most one
+  // finished non-summary assistant turn exists after the previous completed
+  // summary — i.e. the session re-overflowed immediately.
+  const pinState = new Map<string, { failures: number; scale: number }>()
+
+  export function pinScale(sessionID?: string): number {
+    if (!sessionID) return 1
+    return pinState.get(sessionID)?.scale ?? 1
+  }
+
+  /** Test hook: clear livelock state for one session, or all sessions. */
+  export function resetPinState(sessionID?: string) {
+    if (sessionID) pinState.delete(sessionID)
+    else pinState.clear()
+  }
+
+  /** Called by the auto-overflow paths in prompt.ts BEFORE creating a new compaction. */
+  export function notePinCompaction(sessionID: string, msgs: MessageV2.WithParts[]) {
+    const state = pinState.get(sessionID) ?? { failures: 0, scale: 1 }
+    let lastSummary = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const info = msgs[i].info
+      if (info.role === "assistant" && info.summary && info.finish && !info.error) {
+        lastSummary = i
+        break
+      }
+    }
+    let immediate = false
+    if (lastSummary >= 0) {
+      let finished = 0
+      for (let i = lastSummary + 1; i < msgs.length; i++) {
+        const info = msgs[i].info
+        if (info.role === "assistant" && info.finish && !info.summary) finished++
+      }
+      immediate = finished <= 1
+    }
+    state.failures = immediate ? state.failures + 1 : 0
+    if (state.failures >= 2) {
+      state.scale /= 2
+      state.failures = 0
+      log.warn("task pin halved — consecutive compactions failed to reduce below threshold", {
+        sessionID,
+        scale: state.scale,
+      })
+    }
+    pinState.set(sessionID, state)
+  }
+
+  // Summary-template line, layered as an ADDITION to the active summary prompt
+  // (never a replacement — a plugin-supplied custom prompt REPLACES the
+  // platform's preservation prompt, which is exactly the failure mode the plan
+  // warns about; this constant is only ever appended).
+  export const PIN_SUMMARY_ADDITION =
+    "Do NOT restate the original task requirements in the summary — the original task text is pinned separately and stays visible alongside this summary. If anything in this summary conflicts with the pinned original task, the pinned task is authoritative."
   // altimate_change end
 
   export async function process(input: {
@@ -440,6 +786,15 @@ export namespace SessionCompaction {
         await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
     // altimate_change start — upstream_fix: restore tail-preserving compaction selection
     const cfg = await Config.get()
+    // altimate_change start — harness plan W2.3: state ledger + summary carry wiring
+    const ledgerEnabled = cfg.compaction?.state_ledger !== false
+    const carryEnabled = cfg.compaction?.summary_carry !== false
+    const firstPersonEnabled = cfg.compaction?.summary_first_person !== false
+    const ledgerMaxTokens = cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS
+    const ledgerRecentCalls = cfg.compaction?.ledger_recent_calls ?? LEDGER_RECENT_CALLS
+    const ledger: Ledger =
+      ledgerEnabled || carryEnabled ? buildLedger(input.messages) : { writes: [], calls: [], sawBash: false }
+    // altimate_change end
     const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
     const prior = completedCompactions(history)
     const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
@@ -525,7 +880,28 @@ When constructing the summary, try to stick to this template:
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
 
-    const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
+    // altimate_change start — harness plan W2.3 5b/5c: layered ADDITIONS to whichever
+    // summary prompt is active (default or plugin-provided) — never a replacement.
+    let promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
+    if (carryEnabled) {
+      const previousSummary = latestSummaryText(input.messages)
+      if (previousSummary) {
+        const anchors = renderCarryAnchors(
+          corroborateCarry(extractAccomplished(previousSummary), ledger),
+          ledgerMaxTokens,
+        )
+        if (anchors) promptText += "\n\n" + anchors
+      }
+    }
+    if (firstPersonEnabled) promptText += "\n\n" + FIRST_PERSON_REFRAME
+    // altimate_change end
+    // altimate_change start — harness plan W2.2 / item 2: when task pinning is
+    // active, tell the summarizer not to burn summary tokens restating the task
+    // (the original task is pinned separately and re-injected after compaction).
+    // Layered as an ADDITION to whichever summary prompt is active — never a
+    // replacement.
+    if (pinEnabled(cfg)) promptText += "\n\n" + PIN_SUMMARY_ADDITION
+    // altimate_change end
     // altimate_change start — summarizer integrity (harness plan W1.6 / item 3):
     // hoist the summarizer input so a failed attempt can be retried with identical
     // input, and pass an explicit toolChoice "none". Previously toolChoice was
@@ -671,11 +1047,36 @@ When constructing the summary, try to stick to this template:
           variant: original?.variant ?? userMessage.variant,
         })
         // altimate_change end
+        // altimate_change start — harness plan W2.3 5a: deterministic corroborated-facts-only
+        // state ledger appended to the synthetic continue message (all-modes, compaction-gated).
+        const ledgerText = ledgerEnabled
+          ? renderLedger(ledger, { maxTokens: ledgerMaxTokens, recentCalls: ledgerRecentCalls })
+          : ""
+        // altimate_change end
+        // altimate_change start — harness plan W2.1(b)+(d) / item 1:
+        // (b) the continue message carries the three-option completion-aware nudge
+        //     (continue / ask for clarification / assert DONE), giving a finished
+        //     session a termination path. Delivered via the NudgeArbiter (Global
+        //     rule 5): this injection point registers its candidate and takes the
+        //     single winner, so pending lower-precedence directives (starvation
+        //     breaker, budget reminder) are consumed here and the injected turn
+        //     never carries two system-authored directive blocks. The termination
+        //     nudge has top precedence, so it always wins at this site.
+        // (d) the overflow notice is mechanism-accurate — the old text falsely
+        //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE).
+        NudgeArbiter.register(input.sessionID, {
+          source: "termination_challenge",
+          kind: "completion_nudge",
+          text: SessionTermination.COMPLETION_NUDGE,
+        })
+        const directive = NudgeArbiter.take(input.sessionID)
         const text =
-          (input.overflow
-            ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
-            : "") +
-          "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+          (input.overflow ? SessionTermination.OVERFLOW_NOTICE + "\n\n" : "") +
+          (directive?.text ?? SessionTermination.COMPLETION_NUDGE) +
+          // altimate_change end
+          // altimate_change start — harness plan W2.3 5a
+          (ledgerText ? "\n\n" + ledgerText : "")
+        // altimate_change end
         await Session.updatePart({
           id: PartID.ascending(),
           messageID: continueMsg.id,
