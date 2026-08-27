@@ -74,11 +74,30 @@ describe("Truncate", () => {
       }),
     )
 
-    it.live("truncates from head by default", () =>
+    // altimate_change start — W1.7: default direction is "middle" (head+tail,
+    // tail-weighted), not pure head. Pure head truncation is still available
+    // via an explicit `direction: "head"` override, covered below.
+    it.live("truncates from the middle by default (head+tail, tail-weighted)", () =>
       Effect.gen(function* () {
         const svc = yield* Truncate.Service
         const lines = Array.from({ length: 10 }, (_, i) => `line${i}`).join("\n")
         const result = yield* svc.output(lines, { maxLines: 3 })
+
+        // 1/3 head : 2/3 tail split of a 3-line budget = 1 head line + 2 tail lines.
+        expect(result.truncated).toBe(true)
+        expect(result.content).toContain("line0")
+        expect(result.content).toContain("line8")
+        expect(result.content).toContain("line9")
+        expect(result.content).not.toContain("line1")
+        expect(result.content).not.toContain("line5")
+      }),
+    )
+
+    it.live("explicit direction 'head' still truncates from the head only", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const lines = Array.from({ length: 10 }, (_, i) => `line${i}`).join("\n")
+        const result = yield* svc.output(lines, { maxLines: 3, direction: "head" })
 
         expect(result.truncated).toBe(true)
         expect(result.content).toContain("line0")
@@ -87,6 +106,39 @@ describe("Truncate", () => {
         expect(result.content).not.toContain("line9")
       }),
     )
+
+    it.live("default middle truncation preserves a trailing success line in a >50KB log", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const noise = Array.from({ length: 3000 }, (_, i) => `build step ${i}: compiling module_${i}.ts`)
+        const successLine = "Done. PASS=42 FAIL=0"
+        const text = [...noise, successLine].join("\n")
+        expect(text.split("\n").length).toBeGreaterThan(Truncate.MAX_LINES)
+        expect(Buffer.byteLength(text, "utf-8")).toBeGreaterThan(Truncate.MAX_BYTES)
+
+        const result = yield* svc.output(text)
+
+        expect(result.truncated).toBe(true)
+        expect(result.content).toContain(successLine)
+      }),
+    )
+
+    it.live("default middle truncation preserves the first error line in a >50KB log", () =>
+      Effect.gen(function* () {
+        const svc = yield* Truncate.Service
+        const firstError = "ERROR: schema.sql:1: syntax error near CREAT"
+        const noise = Array.from({ length: 3000 }, (_, i) => `build step ${i}: compiling module_${i}.ts`)
+        const text = [firstError, ...noise].join("\n")
+        expect(text.split("\n").length).toBeGreaterThan(Truncate.MAX_LINES)
+        expect(Buffer.byteLength(text, "utf-8")).toBeGreaterThan(Truncate.MAX_BYTES)
+
+        const result = yield* svc.output(text)
+
+        expect(result.truncated).toBe(true)
+        expect(result.content).toContain(firstError)
+      }),
+    )
+    // altimate_change end
 
     it.live("truncates from tail when direction is tail", () =>
       Effect.gen(function* () {

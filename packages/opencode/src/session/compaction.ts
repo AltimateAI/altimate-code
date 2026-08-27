@@ -16,6 +16,10 @@ import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — summarizer-integrity error (harness plan W1.6 / item 3)
+import { NamedError } from "@opencode-ai/util/error"
+import type { LLM } from "./llm"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade for the upstream runtime
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -522,13 +526,19 @@ When constructing the summary, try to stick to this template:
 ---`
 
     const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
-    const result = await processor.process({
+    // altimate_change start — summarizer integrity (harness plan W1.6 / item 3):
+    // hoist the summarizer input so a failed attempt can be retried with identical
+    // input, and pass an explicit toolChoice "none". Previously toolChoice was
+    // undefined, which the AI SDK defaults to "auto" — models could spend the
+    // summary step on a tool call and commit a summary with no text.
+    const summarizerInput: LLM.StreamInput = {
       user: userMessage,
       agent,
       abort: input.abort,
       sessionID: input.sessionID,
       tools: {},
       system: [],
+      toolChoice: "none" as const,
       messages: [
         // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail;
         // trim the head from the front when even the summarization request cannot fit the window
@@ -565,7 +575,29 @@ When constructing the summary, try to stick to this template:
         },
       ],
       model,
-    })
+    }
+    // A "continue" result was previously committed regardless of whether the
+    // summary step produced any text — an empty summary erases history (the
+    // post-compaction amnesia signature). Guard the commit: retry ONCE with
+    // identical input, then mark the summary message as errored and stop.
+    const summaryHasText = () =>
+      MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).parts.some(
+        (part) => part.type === "text" && part.text.trim().length > 0,
+      )
+    let result = await processor.process(summarizerInput)
+    if (result === "continue" && !summaryHasText()) {
+      log.warn("compaction summary empty, retrying once", { sessionID: input.sessionID })
+      result = await processor.process(summarizerInput)
+      if (result === "continue" && !summaryHasText()) {
+        processor.message.error = new NamedError.Unknown({
+          message: "Compaction summarizer produced no summary text after retry",
+        }).toObject()
+        processor.message.finish = "error"
+        await Session.updateMessage(processor.message)
+        result = "stop"
+      }
+    }
+    // altimate_change end
 
     if (result === "compact") {
       processor.message.error = new MessageV2.ContextOverflowError({
@@ -616,6 +648,16 @@ When constructing the summary, try to stick to this template:
           })
         }
       } else {
+        // altimate_change start — harness plan W1.5 / item 12: the continue message
+        // carries the original format/tools/system/variant, exactly as the replay
+        // branch above copies them from the original user message. Dropping them made
+        // the first auto-compaction silently reset the session's tool allowlist,
+        // custom system prompt, output format, and variant. The compaction marker
+        // (this branch's userMessage) never carries these fields, so source them from
+        // the most recent real (non-compaction) user message; no-op when never set.
+        const original = messages.findLast(
+          (m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"),
+        )?.info as MessageV2.User | undefined
         const continueMsg = await Session.updateMessage({
           id: MessageID.ascending(),
           role: "user",
@@ -623,7 +665,12 @@ When constructing the summary, try to stick to this template:
           time: { created: Date.now() },
           agent: userMessage.agent,
           model: userMessage.model,
+          format: original?.format ?? userMessage.format,
+          tools: original?.tools ?? userMessage.tools,
+          system: original?.system ?? userMessage.system,
+          variant: original?.variant ?? userMessage.variant,
         })
+        // altimate_change end
         const text =
           (input.overflow
             ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"

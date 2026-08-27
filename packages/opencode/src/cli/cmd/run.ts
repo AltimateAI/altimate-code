@@ -28,6 +28,9 @@ import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
+// altimate_change start — W1.10/W1.12/W1.1 run accounting helpers (fork-only module)
+import { RunAccounting } from "./run-accounting"
+// altimate_change end
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change end
@@ -595,6 +598,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       const events = await sdk.event.subscribe()
       let error: string | undefined
+      // altimate_change start — W1.10/W1.12: turn accounting + dual-attribution
+      // termination state for this run (see run-accounting.ts).
+      const accounting = RunAccounting.create()
+      // altimate_change end
 
       // Build tracer from config + CLI flags — must never crash the run command
       const tracer = await (async () => {
@@ -630,12 +637,23 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       async function loop() {
         const toggles = new Map<string, boolean>()
-        // altimate_change start — max-turns budget enforcement
-        let turnCount = 0
+        // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = args.maxTurns
         // altimate_change end
 
         for await (const event of events.stream) {
+          // altimate_change start — W1.10: record each assistant message's agent so
+          // step-start parts (which carry only messageID/sessionID) can be attributed.
+          // The assistant message row is persisted — and this event published — before
+          // its first step-start part streams, so the lookup is populated in time.
+          if (
+            event.type === "message.updated" &&
+            event.properties.info.role === "assistant" &&
+            event.properties.info.sessionID === sessionID
+          ) {
+            accounting.onAssistantMessage(event.properties.info)
+          }
+          // altimate_change end
           if (
             event.type === "message.updated" &&
             event.properties.info.role === "assistant" &&
@@ -689,8 +707,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "step-start") {
               tracer?.logStepStart(part)
               // altimate_change start — enforce max-turns budget
-              turnCount++
-              if (maxTurns && turnCount > maxTurns) {
+              // W1.10: compaction-machinery steps are excluded from turn accounting —
+              // the owning message's agent is resolved via the message.updated lookup
+              // above, so compacting models are not differentially charged turns.
+              const counted = accounting.onStepStart(part.messageID)
+              if (counted && maxTurns && accounting.turnCount > maxTurns) {
+                accounting.onBudgetExhausted()
                 error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
                 UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
                 await sdk.session.abort({ sessionID })
@@ -702,11 +724,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "step-finish") {
               tracer?.logStepFinish(part)
+              // altimate_change start — W1.12: record the model-side finish reason
+              accounting.onStepFinish(part.messageID, (part as { reason?: string }).reason)
+              // altimate_change end
               if (emit("step_finish", { part })) continue
             }
 
             if (part.type === "text" && part.time?.end) {
               tracer?.logText(part)
+              // altimate_change start — W1.12: explicit-done attribution input
+              accounting.onText(part.messageID, part.text)
+              // altimate_change end
               if (emit("text", { part })) continue
               const text = part.text.trim()
               if (!text) continue
@@ -738,10 +766,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "session.error") {
             const props = event.properties
             if (props.sessionID !== sessionID || !props.error) continue
-            let err = String(props.error.name)
-            if ("data" in props.error && props.error.data && "message" in props.error.data) {
-              err = String(props.error.data.message)
-            }
+            // altimate_change start — W1.1: serialize the real error name/message/status
+            // (never a bare name, "[object Object]", or a literal {}); W1.12: feed the
+            // harness-stop attribution (recoverable overflow errors are excluded there).
+            const err = RunAccounting.serializeSessionError(props.error)
+            accounting.onSessionError(
+              props.error.name,
+              "data" in props.error && props.error.data && "message" in props.error.data
+                ? String(props.error.data.message)
+                : undefined,
+            )
+            // altimate_change end
             error = error ? error + EOL + err : err
             if (emit("error", { error: props.error })) continue
             UI.error(err)
@@ -869,6 +904,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       const onBeforeExit = () => {
         tracer?.flushSync("Process exited")
+        // altimate_change start — W1.1: honest rc on fatal abort. beforeExit firing
+        // while this handler is still registered means the event loop drained before
+        // the run completed — the prompt/event stream was abandoned (observed: a
+        // mid-stream provider failure tears everything down and the process used to
+        // die here with rc 0). The handler is removed once the run loop drains
+        // normally, so completed runs are unaffected.
+        process.exitCode = 1
+        // altimate_change end
       }
       process.on("SIGINT", onSigint)
       process.on("SIGTERM", onSigterm)
@@ -880,18 +923,33 @@ You are speaking to a non-technical business executive. Follow these rules stric
         process.exit(1)
       })
 
-      if (args.command) {
-        await sdk.session.command({
-          sessionID,
-          agent,
-          model: args.model,
-          command: args.command,
-          arguments: message,
-          variant: args.variant,
-        })
-      } else {
+      // altimate_change start — W1.1: bounded retry-with-backoff on provider 5xx/timeout
+      // at the enqueue boundary. Bounds are config-exposed via env (provenance:
+      // FINAL-PLAN W1.1 requires bounded retries with every retry logged so they can
+      // never mask a persistent provider failure; defaults mirror the in-stream
+      // SessionRetry posture — bounded and visible). On exhaustion the error is thrown
+      // so the process exits nonzero instead of hanging on an idle event that will
+      // never arrive.
+      const envBound = (name: string, fallback: number) => {
+        const raw = process.env[name]?.trim()
+        if (!raw) return fallback
+        const parsed = Number(raw)
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+      }
+      const retryMax = envBound("ALTIMATE_RUN_RETRY_MAX", 3)
+      const retryBaseMs = envBound("ALTIMATE_RUN_RETRY_BASE_MS", 1000)
+      const send = () => {
+        if (args.command)
+          return sdk.session.command({
+            sessionID,
+            agent,
+            model: args.model,
+            command: args.command,
+            arguments: message,
+            variant: args.variant,
+          })
         const model = args.model ? Provider.parseModel(args.model) : undefined
-        await sdk.session.prompt({
+        return sdk.session.prompt({
           sessionID,
           agent,
           model,
@@ -900,6 +958,40 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ...(audienceSystem ? { system: audienceSystem } : {}),
         })
       }
+      type SendResult = {
+        error?: unknown
+        response?: Response
+        data?: { info?: { finish?: string; error?: { name?: unknown; data?: unknown } } }
+      }
+      let sendResult: SendResult | undefined
+      for (let sendAttempt = 0; ; sendAttempt++) {
+        let reason: string
+        try {
+          const res = (await send()) as SendResult
+          const status = res?.response?.status
+          if (!res?.error || !RunAccounting.isRetryableStatus(status)) {
+            sendResult = res
+            break
+          }
+          reason = `provider returned status ${status}`
+        } catch (e) {
+          if (!RunAccounting.isRetryableThrown(e)) throw e
+          reason = e instanceof Error ? e.message : String(e)
+        }
+        if (sendAttempt >= retryMax) throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)
+        const delay = retryBaseMs * 2 ** sendAttempt
+        if (!emit("retry", { attempt: sendAttempt + 1, max: retryMax, reason, delayMs: delay })) {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL + ` retrying prompt (${sendAttempt + 1}/${retryMax}) in ${delay}ms — ${reason}`,
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+      // W1.1/W1.12: the prompt response carries the TERMINAL assistant message —
+      // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
+      accounting.onPromptResult(sendResult?.data?.info)
+      // altimate_change end
 
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
@@ -908,6 +1000,20 @@ You are speaking to a non-technical business executive. Follow these rules stric
       process.removeListener("SIGINT", onSigint)
       process.removeListener("SIGTERM", onSigterm)
       process.removeListener("beforeExit", onBeforeExit)
+
+      // altimate_change start — W1.12 E4: dual-attribution termination record.
+      // why_model_stopped and why_harness_stopped are independent fields so
+      // model-looping, tight budgets, and harness errors are distinguishable
+      // in the run output (rc alone conflates them).
+      const termination = accounting.termination()
+      if (!emit("termination", { ...termination }) && process.stdout.isTTY) {
+        UI.println(
+          UI.Style.TEXT_DIM +
+            `why_model_stopped=${termination.why_model_stopped} why_harness_stopped=${termination.why_harness_stopped}` +
+            UI.Style.TEXT_NORMAL,
+        )
+      }
+      // altimate_change end
 
       // Finalize trace and save to disk
       if (tracer) {
@@ -928,6 +1034,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
         await Bun.write(outputPath, content)
         process.stderr.write(`\n✓ Output saved to: ${outputPath}\n`)
       }
+
+      // altimate_change start — W1.1: honest rc — exit nonzero on fatal abort
+      // (budget exhaustion or an unrecovered session error). Uses process.exitCode
+      // (not process.exit) so pending stdout/trace writes still flush.
+      if (accounting.fatal) process.exitCode = 1
+      // altimate_change end
     }
 
     if (args.attach) {
