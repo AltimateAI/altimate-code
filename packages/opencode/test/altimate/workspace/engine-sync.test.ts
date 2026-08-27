@@ -24,6 +24,7 @@ import {
   installWouldHelp,
   planForEntry,
   clearsFloor,
+  runningEngine,
   type LocalMcpConfig,
   type Outcome,
 } from "../../../src/altimate/workspace/engine-sync"
@@ -2708,5 +2709,85 @@ describe("INVARIANT — a memo is validated against the engine that is running",
     const second = await ensure("s1")
     expect(second.kind, "served a memo for a running pre-floor engine").not.toBe("reused")
     expect(h.removes, "left the pre-floor engine registered and serving").toContain("datamate")
+  })
+})
+
+describe("INVARIANT — there is one place that answers 'the engine that is running'", () => {
+  // Not a behaviour test. The same question was asked correctly at one site and
+  // incorrectly at the site beside it twice over, and both times the second site
+  // was found by someone reading the two together — not by the person fixing the
+  // first. A shared EXPRESSION invites that; a shared FUNCTION does not, because
+  // there is no second place to write it.
+  //
+  // So this asserts the shape rather than an outcome: the fallback expression
+  // appears once, inside the accessor, and every other site calls it.
+  test("the runtime-or-config fallback is written exactly once, in the accessor", async () => {
+    const { readFileSync } = await import("node:fs")
+    const source = readFileSync(
+      new URL("../../../src/altimate/workspace/engine-sync.ts", import.meta.url).pathname,
+      "utf8",
+    )
+    const occurrences = source.split("\n").filter((l) => /inspection\.runtime\s*\?\?/.test(l))
+    expect(
+      occurrences.length,
+      `the runtime-or-config fallback is written ${occurrences.length} times; it belongs only in runningEngine()`,
+    ).toBe(1)
+    expect(
+      source.includes("export function runningEngine(inspection: Inspection)"),
+      "the accessor every running-engine question goes through is missing",
+    ).toBe(true)
+    expect(
+      source.includes("export function configuredEntry(inspection: Inspection)"),
+      "the mirror accessor is missing, which leaves the other question unnamed",
+    ).toBe(true)
+
+    // And no site reads either field bare. Naming only one of the two questions
+    // would leave the other implicit, which is the condition this class of
+    // defect grows in — a field access whose meaning has to be inferred from
+    // what happens to surround it.
+    const bare = source
+      .split("\n")
+      .map((l, i) => [i + 1, l] as const)
+      .filter(([, l]) => /inspection\.(entry|runtime)\b/.test(l))
+      .filter(([, l]) => !/return inspection\.runtime \?\? inspection\.entry|return inspection\.entry/.test(l))
+    expect(
+      bare.map(([n, l]) => `${n}: ${l.trim()}`),
+      "these read the inspection's fields directly instead of asking a named question",
+    ).toEqual([])
+  })
+
+  test("the accessor prefers what is running and falls back to what is configured", () => {
+    const configured = { type: "local", command: ["/new/datamate", "start-stdio", "--datamate", "42"] }
+    const running = { type: "local", command: ["/old/datamate", "start-stdio", "--datamate", "42"] }
+    expect(runningEngine({ entry: configured, observed: undefined, runtime: running })).toBe(running)
+    // Nothing of ours running: the configured entry is the only evidence there is.
+    expect(runningEngine({ entry: configured, observed: undefined, runtime: undefined })).toBe(configured)
+  })
+})
+
+describe("INVARIANT — identity covers everything that changes the process", () => {
+  test("an edit to the environment under unchanged argv is not rolled back", async () => {
+    // `environment`, `cwd` and `timeout` all change the process an entry
+    // describes. Comparing argv alone reads such an edit as "still the entry I
+    // wrote", so the undo reverts it while believing it is reverting its own
+    // write — the same wrongness as rolling back a changed command, arriving
+    // through a field the comparison did not look at.
+    let current: CachedBinding | null = binding
+    let projectNow: ExistingEntry | null = null
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectEntry = async () => projectNow
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      // Same argv as ours, different environment — a deliberate edit.
+      projectNow = {
+        ...(cfg as unknown as ExistingEntry),
+        environment: { DATAMATE_LOG: "debug" },
+      } as unknown as ExistingEntry
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    await ensure("s1")
+    expect(h.restores, "rolled back an environment edit it had not made").toHaveLength(0)
   })
 })

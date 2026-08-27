@@ -192,13 +192,29 @@ export function describeMissing(missing: string[]): string {
   return ` Declared but not available: ${shown}${more}.`
 }
 
-/** Do these two entries name the same command?
+/** Are these two entries the same entry?
  *
- * The identity an undo needs: is what is here still what I put here. Compared on
- * argv rather than by reference, because the value that comes back from disk or
- * from MCP is a different object carrying the same meaning. */
-export function sameCommand(a: ExistingEntry | null | undefined, b: ExistingEntry | null | undefined): boolean {
-  return commandArgv(a ?? null).join(" ") === commandArgv(b ?? null).join(" ")
+ * The identity a destructive act needs: is what is here still what I put here.
+ * Compared by value rather than by reference, because what comes back from disk
+ * or from MCP is a different object carrying the same meaning — and across
+ * everything that changes the process it describes, not argv alone. */
+export function sameEntry(a: ExistingEntry | null | undefined, b: ExistingEntry | null | undefined): boolean {
+  const shape = (e: ExistingEntry | null | undefined) => {
+    const raw = (e ?? {}) as Record<string, unknown>
+    return JSON.stringify({
+      type: raw.type ?? null,
+      url: raw.url ?? null,
+      argv: commandArgv((e ?? null) as ExistingEntry | null),
+      // Everything else that changes the process this entry describes. Comparing
+      // argv alone treats an edit to the environment, the working directory or
+      // the timeout as "unchanged", so an undo rolls it back believing it is
+      // reverting its own write.
+      environment: raw.environment ?? null,
+      cwd: raw.cwd ?? null,
+      timeout: raw.timeout ?? null,
+    })
+  }
+  return shape(a) === shape(b)
 }
 
 /** Is this engine version usable at all?

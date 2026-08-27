@@ -69,7 +69,7 @@ import {
   installWouldHelp,
   isUrlEntry,
   pinnedWorkspace,
-  sameCommand,
+  sameEntry,
   ENGINE_BINARY,
   INSTALL_HINT,
   MIN_ENGINE_VERSION,
@@ -166,6 +166,39 @@ export type Inspection = {
  * describe the same moment. Passing them as two arguments left it to each
  * caller to pair them correctly, and "the caller remembers" is the property
  * this whole rewrite is trying to stop relying on. */
+/** The engine that is RUNNING, else the one configured.
+ *
+ * Every question about the running engine — its version, its pin, how it is
+ * described to a user — goes through here, because the answer is not always the
+ * config: a config edit can change the command while the existing client stays
+ * connected, so the two can carry the same pin and be different binaries.
+ *
+ * It is one function rather than an expression at each call site so that there
+ * is no second place to write it. The same question was asked correctly in one
+ * site and incorrectly in the site beside it twice, and both times the second
+ * site was found by someone reading the two together rather than by the person
+ * fixing the first. A shared expression is a trap of exactly that shape.
+ *
+ * The fallback matters: with no runtime record, nothing of ours is running and
+ * the configured entry is the only evidence there is. */
+export function runningEngine(inspection: Inspection): ExistingEntry | null {
+  return inspection.runtime ?? inspection.entry
+}
+
+/** The entry the user CONFIGURED, whatever may be running.
+ *
+ * The mirror of `runningEngine`, and it exists for the same reason: so that
+ * every read is a named question rather than a field access whose meaning has
+ * to be inferred from its surroundings. Naming only one of the two would leave
+ * the other implicit, which is the condition this class of defect grows in.
+ *
+ * Use this where the question really is about configuration — what the user
+ * asked for, what a pin declares, what a message should describe — and
+ * `runningEngine` where it is about the process that is actually up. */
+export function configuredEntry(inspection: Inspection): ExistingEntry | null {
+  return inspection.entry
+}
+
 async function inspectEntry(): Promise<Inspection> {
   const entry = await existingEntry(DATAMATE_KEY)
   const client = mcp()
@@ -175,7 +208,8 @@ async function inspectEntry(): Promise<Inspection> {
 }
 
 export function planForEntry(inspection: Inspection, workspaceId: string, retried: boolean): EntryPlan {
-  const { entry, observed } = inspection
+  const entry = configuredEntry(inspection)
+  const { observed } = inspection
 
   // 1. INTENT. Outranks everything, including whether anything is observed at
   // all. `{ "datamate": { "enabled": false } }` with no `type` is the upstream
@@ -211,11 +245,13 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
   // a vote. A config entry that names this workspace while MCP is serving a
   // process started from a different one is the silent case: every check agrees,
   // and the tools, and the credentials, belong to somewhere else.
-  const runtimePin = inspection.runtime ? pinnedWorkspace(inspection.runtime) : null
-  if (inspection.runtime && runtimePin !== workspaceId) {
+  const running = runningEngine(inspection)
+  const runtimeKnown = running !== entry
+  const runtimePin = runtimeKnown ? pinnedWorkspace(running) : null
+  if (runtimeKnown && runtimePin !== workspaceId) {
     return {
       act: "replace-unattributable",
-      entry: describeEntry(inspection.runtime),
+      entry: describeEntry(running),
       pinnedTo: runtimePin,
     }
   }
@@ -568,6 +604,37 @@ async function run(sessionID: string): Promise<Outcome> {
    * connected, and the turn's `resolveTools` would hand the model exactly the
    * tools we just decided it must not have. It also closes the client `MCP.add`
    * would otherwise overwrite without closing, which orphans a second engine. */
+  /** Close the client, but only if it is still the one we judged.
+   *
+   * Every destructive act verifies identity first, and it does so HERE so there
+   * is no second place to remember it. The MCP route and the IDE's reload both
+   * call `MCP.add` outside this flow's serialization, so between judging a
+   * client and closing it, someone else's replacement can take its place — and
+   * closing that leaves the engine they just asked for disconnected, with its
+   * tools and credentials gone from the turn. */
+  const removeIfOurs = async (
+    judged: ExistingEntry | null,
+    why: Record<string, unknown>,
+    bindingDependent = false,
+  ): Promise<void> => {
+    // Identity FIRST, binding LAST, so the binding read stays the last await
+    // before the mutation. Both checks live here rather than one here and one at
+    // the call site, because ordering two guards across two functions is how one
+    // of them ends up on the wrong side of the other.
+    const runningNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
+    if (runningNow && judged && !sameEntry(runningNow, judged)) {
+      log.info("not detaching; something else replaced this client since we judged it", { workspaceId, ...why })
+      return
+    }
+    if (bindingDependent && !(await stillCurrent())) {
+      log.info("skipping teardown; the binding changed while this attach was deciding", { workspaceId, ...why })
+      return
+    }
+    await client.remove(DATAMATE_KEY).catch((err) => {
+      log.warn("could not detach the rejected engine entry", { err: String(err), ...why })
+    })
+  }
+
   const detachRejected = async (why: Record<string, unknown>, bindingDependent = true): Promise<void> => {
     // The guard exists to stop us destroying something that may legitimately
     // belong to the NEW binding. That applies to exactly one of the three
@@ -585,13 +652,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // Binding-DEPENDENT, and the only case the guard is for:
     //   - a pre-existing entry we did not create and judged unattributable. If
     //     the binding moved, that entry may be exactly what the new one wants.
-    if (bindingDependent && !(await stillCurrent())) {
-      log.info("skipping teardown; the binding changed while this attach was deciding", { workspaceId, ...why })
-      return
-    }
-    await client.remove(DATAMATE_KEY).catch((err) => {
-      log.warn("could not detach the rejected engine entry", { err: String(err), ...why })
-    })
+    await removeIfOurs(runningEngine(inspection), why, bindingDependent)
   }
   /** Abandon an install without trace.
    *
@@ -614,14 +675,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // and an IDE or the user may rewrite the file. Removing or restoring blindly
     // destroys someone else's work while believing it is tidying up after
     // itself.
-    const runningNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
-    if (runningNow && !sameCommand(runningNow, installed as unknown as ExistingEntry)) {
-      log.info("not removing the engine; something else replaced it since we installed", { workspaceId })
-    } else {
-      await client.remove(DATAMATE_KEY).catch((err) => {
-        log.warn("could not remove the superseded engine", { err: String(err) })
-      })
-    }
+    await removeIfOurs(installed as unknown as ExistingEntry, { reason: "undoing our install" })
     // "Restore what the write replaced" stops being right the moment anything
     // edits the thing we wrote. Between the install and this undo there is a
     // whole engine boot: a disable landing in that window lands on OUR entry,
@@ -653,7 +707,7 @@ async function run(sessionID: string): Promise<Outcome> {
       const keep = projectBefore ? ({ ...projectBefore, enabled: false } as ExistingEntry) : now
       return await persistRestore(DATAMATE_KEY, keep, configPath)
     }
-    if (now && !sameCommand(now, installed as unknown as ExistingEntry)) {
+    if (now && !sameEntry(now, installed as unknown as ExistingEntry)) {
       // Rewritten while we held it — a different command, or a URL where we
       // wrote a command. That edit is newer than our pin and not ours to undo.
       log.info("not restoring; the entry was rewritten since we installed", { workspaceId })
@@ -759,7 +813,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // `add` is none of those: it writes no config and starts exactly what it is
     // handed. Reviving becomes the same operation as spawning, which is the
     // real win — the retry stops being a special path with special rules.
-    const revive: LocalMcpConfig = { type: "local", command: commandArgv(inspection.entry), enabled: true }
+    const revive: LocalMcpConfig = { type: "local", command: commandArgv(configuredEntry(inspection)), enabled: true }
     // The whole world, not just the binding: this starts a process, and a
     // disable that landed since the inspection forbids starting it just as
     // surely as it forbids writing config. The plan was derived from a snapshot
@@ -788,13 +842,13 @@ async function run(sessionID: string): Promise<Outcome> {
     } catch (err) {
       if (revived) {
         log.info("undoing the revive we started, since we cannot decide about it", { workspaceId })
-        await client.remove(DATAMATE_KEY).catch(() => undefined)
+        await removeIfOurs(revive as unknown as ExistingEntry, { reason: "undoing our revive" })
       }
       throw err
     }
     plan = planForEntry(inspection, workspaceId, true)
   }
-  const entry = inspection.entry
+  const entry = configuredEntry(inspection)
 
   if (plan.act === "honour-disable") {
     // The user turned this entry off deliberately. Do NOT call `MCP.connect` to
@@ -900,7 +954,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // and the floor are one mechanism, so both are asked of the same thing.
     let found: string | null
     try {
-      found = await engineVersionOf(inspection.runtime ?? entry)
+      found = await engineVersionOf(runningEngine(inspection))
     } catch (err) {
       log.warn("could not probe the entry's engine version; treating it as unreadable", {
         workspaceId,
@@ -940,9 +994,7 @@ async function run(sessionID: string): Promise<Outcome> {
         log.info("binding changed while reusing; detaching rather than answering for the old workspace", {
           workspaceId,
         })
-        await client.remove(DATAMATE_KEY).catch((err) => {
-          log.warn("could not detach the superseded engine", { err: String(err) })
-        })
+        await removeIfOurs(runningEngine(inspection), { reason: "superseded while reusing" })
         return { kind: "superseded" }
       }
       clearAnnouncement(sessionID)
@@ -1366,8 +1418,8 @@ async function memoStillValid(workspaceId: string, record?: SessionAttach): Prom
     // needs re-probing, so the key carries both. The residual is narrow and
     // worth naming: a binary swapped in place under an unchanged command is not
     // caught until the next session.
-    const running = inspection.runtime ?? inspection.entry
-    const command = `${commandArgv(running).join(" ")}|${commandArgv(inspection.entry).join(" ")}`
+    const running = runningEngine(inspection)
+    const command = `${commandArgv(running).join(" ")}|${commandArgv(configuredEntry(inspection)).join(" ")}`
     if (record && record.validated === command) return true
     const found = await engineVersionOf(running)
     if (!clearsFloor(found)) {
