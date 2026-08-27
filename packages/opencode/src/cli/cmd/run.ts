@@ -50,6 +50,8 @@ import { SessionTermination } from "../../session/termination"
 // altimate_change end
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+// altimate_change - render the workspace engine offer in an attached run
+import { OFFER_COMMAND, installCommand } from "@/altimate/workspace/engine-offer"
 // altimate_change end
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
@@ -925,6 +927,27 @@ You are speaking to a non-technical business executive. Follow these rules stric
             sawBusy = true
           }
           // altimate_change end
+
+          // altimate_change start — an attached run is the only surface that can
+          // show the workspace engine offer. With --attach the turn boundary and
+          // isHeadless() run in the server process, which publishes the offer
+          // command and treats the publish as delivery — while this event loop,
+          // which has no handler for it, is the only thing the user is looking at.
+          // Placed before the idle break: the loop stops on idle, so a handler
+          // after it never runs for an offer that arrives in the same batch.
+          if (
+            event.type === "tui.command.execute" &&
+            (event.properties as { command?: string }).command === OFFER_COMMAND
+          ) {
+            // stderr: stdout is raw JSON events under --format json.
+            process.stderr.write(
+              `This workspace's integration tools need the local engine on the server. Install it there with: ${installCommand()}` +
+                EOL,
+            )
+            continue
+          }
+          // altimate_change end
+
           if (
             event.type === "session.status" &&
             event.properties.sessionID === sessionID &&

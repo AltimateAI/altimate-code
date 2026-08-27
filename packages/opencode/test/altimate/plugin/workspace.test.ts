@@ -28,7 +28,7 @@ afterAll(() => {
   }
 })
 
-const { isSkipActive, recordSkip } = await import(
+const { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip } = await import(
   "../../../src/plugin/tui/altimate/workspace"
 )
 const { projectNameFromRemote, detectProjectRemote } = await import(
@@ -531,5 +531,75 @@ describe("Skip latch", () => {
     expect(
       isSkipActive(api, ident, { tenant: "acme", apiUrl: "https://api.other.example.com" }, now),
     ).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine install-offer latch — "Not now" silences the offer for 7 days, per
+// workspace. Keyed on the workspace id so a rename doesn't reset it, and
+// scoped by (tenant, apiUrl) like the post-scan latch.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("Engine install-offer latch", () => {
+  const scope = { tenant: "acme", apiUrl: "https://api.acme.example.com" }
+  const workspaceId = "42"
+  const DAY = 24 * 60 * 60 * 1000
+
+  test("no record → not active", () => {
+    const api = { kv: makeKv() } as any
+    expect(isEngineSkipActive(api, workspaceId, scope, Date.now())).toBe(false)
+  })
+
+  test("recorded within 7 days → active", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordEngineSkip(api, workspaceId, scope, now)
+    expect(isEngineSkipActive(api, workspaceId, scope, now + 6 * DAY)).toBe(true)
+  })
+
+  test("recorded past 7 days → not active", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordEngineSkip(api, workspaceId, scope, now)
+    expect(isEngineSkipActive(api, workspaceId, scope, now + 8 * DAY)).toBe(false)
+  })
+
+  test("boundary at exactly 7 days → not active", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordEngineSkip(api, workspaceId, scope, now)
+    expect(isEngineSkipActive(api, workspaceId, scope, now + 7 * DAY)).toBe(false)
+  })
+
+  test("latching one workspace does not silence another", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordEngineSkip(api, "42", scope, now)
+    expect(isEngineSkipActive(api, "42", scope, now + DAY)).toBe(true)
+    expect(isEngineSkipActive(api, "43", scope, now + DAY)).toBe(false)
+  })
+
+  test("a latch in one account does not apply to another", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordEngineSkip(api, workspaceId, scope, now)
+    const other = { tenant: "globex", apiUrl: "https://api.globex.example.com" }
+    expect(isEngineSkipActive(api, workspaceId, other, now + DAY)).toBe(false)
+  })
+
+  test("a future timestamp (clock rewind) re-offers instead of latching forever", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    recordEngineSkip(api, workspaceId, scope, now + 5 * DAY)
+    expect(isEngineSkipActive(api, workspaceId, scope, now)).toBe(false)
+  })
+
+  test("the post-scan latch and the engine latch are independent", () => {
+    const api = { kv: makeKv() } as any
+    const now = 1_700_000_000_000
+    const ident = { repoRemote: "git@github.com:acme/proj-a.git", projectPath: "/work/proj-a" }
+    recordSkip(api, ident, scope, now)
+    expect(isSkipActive(api, ident, scope, now + DAY)).toBe(true)
+    expect(isEngineSkipActive(api, workspaceId, scope, now + DAY)).toBe(false)
   })
 })

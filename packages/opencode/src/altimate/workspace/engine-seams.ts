@@ -7,6 +7,7 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { CachedBinding } from "./state"
 import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./engine-types"
+import type { EngineOffer, InstallResult } from "./engine-offer"
 
 export const log = Log.create({ service: "workspace-engine" })
 
@@ -27,6 +28,12 @@ export const syncInternals: {
   declared?: (workspaceId: string) => Promise<Declared | null>
   notify?: (toast: Toast) => Promise<void>
   printLine?: (line: string) => void
+  /** Install-offer seams (see engine-offer.ts). */
+  offer?: (offer: EngineOffer) => boolean
+  publishOffer?: () => Promise<boolean>
+  nodeMajor?: () => Promise<number | null>
+  npmAvailable?: () => boolean
+  install?: (spec: string) => Promise<InstallResult>
   instanceDirectory?: () => string | null
   headless?: () => boolean
   serve?: () => boolean

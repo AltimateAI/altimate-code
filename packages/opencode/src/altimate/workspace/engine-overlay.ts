@@ -36,9 +36,10 @@ import {
   type ScopedBinding,
 } from "./engine-seams"
 import { declaredBounded, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
+import { installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
 import {
   ENGINE_BINARY,
-  INSTALL_COMMAND,
+  INSTALL_HELPS,
   REPAIRABLE,
   TOOL_PREFIX,
   clearsFloor,
@@ -56,6 +57,7 @@ import {
 } from "./engine-types"
 
 export * from "./engine-types"
+export * from "./engine-offer"
 export { isEnabled, isHeadless, isServe, syncInternals } from "./engine-seams"
 
 /** Sessions remembered per process. It is a memo; an evicted session just re-settles. */
@@ -78,10 +80,16 @@ function now(): number {
 
 async function probeEngine(): Promise<Probe> {
   const at = now()
-  if (probeMemo && (probeMemo.result.kind === "ok" || at - probeMemo.at < FAILED_PROBE_TTL_MS)) {
+  const bin = which(ENGINE_BINARY)
+  // A usable engine is remembered for the process. A missing one is asked
+  // about on every call — `which` is a PATH scan, no process spawn — so an
+  // install made from the offer dialog (which runs in another module realm and
+  // cannot reach this memo) is seen on the next turn. A too-old or broken one
+  // costs a spawn to re-check, so that is rate-limited by the TTL.
+  if (probeMemo && probeMemo.result.kind === "ok") return probeMemo.result
+  if (probeMemo && probeMemo.result.kind === "too-old" && bin && at - probeMemo.at < FAILED_PROBE_TTL_MS) {
     return probeMemo.result
   }
-  const bin = which(ENGINE_BINARY)
   let result: Probe
   if (!bin) {
     result = { kind: "missing" }
@@ -545,19 +553,43 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
         count === undefined
           ? `Workspace "${workspace.name}" has integration tools that run on the local engine, which is not installed.`
           : `Workspace "${workspace.name}" declares ${count} integration tool${count === 1 ? "" : "s"}. They run on the local engine, which is not installed.`
-      await announceRefusal(sessionID, outcome, {
-        title: `Workspace "${workspace.name}" needs the local engine`,
-        message: `${what} Install it with: ${INSTALL_COMMAND}`,
-        variant: "warning",
-      })
+      await announceRefusal(
+        sessionID,
+        outcome,
+        {
+          title: `Workspace "${workspace.name}" needs the local engine`,
+          message: `${what} Install it with: ${installCommand()}`,
+          variant: "warning",
+        },
+        {
+          reason: "engine-missing",
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          declared: count ?? 0,
+          command: installCommand(),
+        },
+      )
       return
     }
     record(sessionID, refusal)
-    await announceRefusal(sessionID, refusal, {
-      title: `Workspace "${workspace.name}": engine not usable`,
-      message: describeRefusal(refusal.found, workspace.name),
-      variant: "warning",
-    })
+    const declared = (await declaredFor(workspace.id))?.keys.length ?? 0
+    await announceRefusal(
+      sessionID,
+      refusal,
+      {
+        title: `Workspace "${workspace.name}": engine not usable`,
+        message: describeRefusal(refusal.found, workspace.name),
+        variant: "warning",
+      },
+      {
+        reason: "engine-too-old",
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        declared,
+        found: refusal.found ?? "unknown",
+        command: installCommand(),
+      },
+    )
     return
   }
 
@@ -625,16 +657,26 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 
 /** Tell the session about a refusal, once per unchanged verdict.
  *
- * The substitution point for the install offer: when `installWouldHelp(outcome)`
- * a dialog replaces the toast here; it never adds a second message. Headless
- * `run` prints one stderr line instead. */
-export async function announceRefusal(sessionID: string, outcome: Outcome, toast: Toast): Promise<void> {
+ * The substitution point for the install offer: when installing would help
+ * and an `offer` is supplied, the offer surface (dialog, headless line, or
+ * toast fallback) replaces the toast — never adds to it. Otherwise headless
+ * `run` prints one stderr line and the TUI gets the toast. */
+export async function announceRefusal(
+  sessionID: string,
+  outcome: Outcome,
+  toast: Toast,
+  offer?: EngineOffer,
+): Promise<void> {
   const rec = sessions.get(sessionID) ?? record(sessionID, outcome)
   const detail = "error" in outcome ? outcome.error : "found" in outcome ? String(outcome.found) : ""
   const declared = "declared" in outcome ? String(outcome.declared ?? "?") : ""
   const signature = `${outcome.kind}:${detail}:${declared}:${toast.title}`
   if (rec.announced === signature) return
   rec.announced = signature
+  if (offer && INSTALL_HELPS[outcome.kind]) {
+    await offerOrNotify(offer, toast)
+    return
+  }
   if (isHeadless()) {
     printLine(`${toast.title}: ${toast.message}`)
     return

@@ -1,0 +1,330 @@
+// altimate_change - new file
+//
+// The "no usable engine" offer: which surface gets it, what the fallback
+// emits when there is no surface, what the TUI re-derives, and the install
+// path's gates and verification. Everything routes through `syncInternals`.
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import {
+  ENGINE_BINARY,
+  ENGINE_PACKAGE,
+  MIN_ENGINE_VERSION,
+  beforeTurn,
+  describeOffer,
+  installCommand,
+  installEngine,
+  installSpec,
+  nodeMajor,
+  resetForTests,
+  settledOutcome,
+  syncInternals,
+  type EngineOffer,
+  type Toast,
+} from "../../../src/altimate/workspace/engine-overlay"
+import { Process } from "../../../src/util/process"
+import type { CachedBinding } from "../../../src/altimate/workspace/state"
+
+const DIR = "/tmp/analytics"
+const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+const ORIGINAL_SPEC = process.env.ALTIMATE_ENGINE_INSTALL_SPEC
+
+const binding: CachedBinding = {
+  datamateId: 42,
+  datamateName: "analytics",
+  repoRemote: null,
+  projectPath: DIR,
+  linkedAt: 0,
+} as CachedBinding
+
+type Harness = { offers: EngineOffer[]; toasts: Toast[]; printed: string[]; published: number }
+
+/** No engine on PATH (or an old one) plus captured surfaces. */
+function install(opts: {
+  which?: string | null
+  version?: string | null
+  declaredKeys?: string[]
+  headless?: boolean
+  bus?: boolean
+  surface?: boolean
+  bound?: boolean
+}): Harness {
+  const h: Harness = { offers: [], toasts: [], printed: [], published: 0 }
+  process.env.ALTIMATE_WORKSPACE = "1"
+  syncInternals.serve = () => false
+  syncInternals.headless = () => opts.headless === true
+  syncInternals.instanceDirectory = () => DIR
+  syncInternals.resolveBinding = async () => (opts.bound === false ? null : binding)
+  syncInternals.which = () => (opts.which === undefined ? null : opts.which)
+  syncInternals.versionOf = async () => (opts.version === undefined ? null : opts.version)
+  syncInternals.declared = async () => ({
+    keys: opts.declaredKeys ?? ["dbt_build_model", "dbt_compile_model"],
+    extensionKeys: [],
+  })
+  syncInternals.notify = async (toast) => {
+    h.toasts.push(toast)
+  }
+  syncInternals.printLine = (line) => {
+    h.printed.push(line)
+  }
+  syncInternals.publishOffer = async () => {
+    if (opts.bus === false) return false
+    h.published += 1
+    return true
+  }
+  if (opts.surface) {
+    syncInternals.offer = (offer) => {
+      h.offers.push(offer)
+      return true
+    }
+  }
+  const config: { mcp?: Record<string, unknown> } = { mcp: {} }
+  let loaded = false
+  syncInternals.config = {
+    invalidate: async () => {
+      loaded = false
+    },
+    get: async () => {
+      if (!loaded) {
+        const { overlay } = await import("../../../src/altimate/workspace/engine-overlay")
+        config.mcp = {}
+        await overlay(DIR, config)
+        loaded = true
+      }
+      return config
+    },
+  }
+  syncInternals.mcp = {
+    status: async () => ({ datamate: { status: "connected" } }),
+    add: async () => {},
+    remove: async () => {},
+    tools: async () => ({}),
+  }
+  return h
+}
+
+beforeEach(() => resetForTests())
+afterEach(() => {
+  resetForTests()
+  for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
+  if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+  if (ORIGINAL_SPEC === undefined) delete process.env.ALTIMATE_ENGINE_INSTALL_SPEC
+  else process.env.ALTIMATE_ENGINE_INSTALL_SPEC = ORIGINAL_SPEC
+})
+
+describe("install command", () => {
+  test("pins the minimum engine version by default", () => {
+    delete process.env.ALTIMATE_ENGINE_INSTALL_SPEC
+    expect(installSpec()).toBe(`${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`)
+    expect(installCommand()).toBe(`npm i -g ${ENGINE_PACKAGE}@${MIN_ENGINE_VERSION}`)
+  })
+  test("honours ALTIMATE_ENGINE_INSTALL_SPEC so E2E can point at a tarball", () => {
+    process.env.ALTIMATE_ENGINE_INSTALL_SPEC = "/tmp/datamate.tgz"
+    expect(installCommand()).toBe("npm i -g /tmp/datamate.tgz")
+  })
+})
+
+describe("nodeMajor", () => {
+  test("null when node is not on PATH", async () => {
+    syncInternals.which = () => null
+    expect(await nodeMajor()).toBeNull()
+  })
+})
+
+describe("offer routing — engine missing", () => {
+  test("a same-realm surface takes the offer and nothing else is emitted", async () => {
+    const h = install({ surface: true })
+    await beforeTurn("s1")
+    expect(h.offers).toEqual([
+      {
+        reason: "engine-missing",
+        workspaceId: "42",
+        workspaceName: "analytics",
+        declared: 2,
+        command: installCommand(),
+      },
+    ])
+    expect(h.published).toBe(0)
+    expect(h.toasts).toEqual([])
+    expect(h.printed).toEqual([])
+    expect(settledOutcome("s1")).toEqual({ kind: "engine-missing", declared: 2 })
+  })
+  test("in a TUI the offer is published over the bus and nothing is printed or toasted", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    expect(h.published).toBe(1)
+    expect(h.toasts).toEqual([])
+    expect(h.printed).toEqual([])
+  })
+  test("falls back to the toast only when the bus is unavailable", async () => {
+    const h = install({ bus: false })
+    await beforeTurn("s1")
+    expect(h.published).toBe(0)
+    expect(h.toasts).toHaveLength(1)
+    expect(h.toasts[0].message).toContain(installCommand())
+  })
+  test("headless prints exactly one line naming workspace and command, and no toast", async () => {
+    const h = install({ headless: true })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.printed).toEqual([
+      `Workspace "analytics": 2 integration tools need the local engine, which is not installed. Install it with: ${installCommand()}`,
+    ])
+    expect(h.toasts).toEqual([])
+    expect(h.published).toBe(0)
+  })
+  test("singularises the tool count", async () => {
+    const h = install({ headless: true, declaredKeys: ["dbt_build_model"] })
+    await beforeTurn("s1")
+    expect(h.printed[0]).toContain("1 integration tool need")
+  })
+  test("the offer is raised once per session per verdict", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(h.published).toBe(1)
+    await beforeTurn("s2")
+    expect(h.published).toBe(2)
+  })
+})
+
+describe("offer routing — engine too old", () => {
+  test("carries the found version and the update command", async () => {
+    const h = install({ surface: true, which: "/usr/local/bin/datamate", version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(h.offers).toEqual([
+      {
+        reason: "engine-too-old",
+        workspaceId: "42",
+        workspaceName: "analytics",
+        declared: 2,
+        found: "0.6.3",
+        command: installCommand(),
+      },
+    ])
+    expect(settledOutcome("s1")).toEqual({ kind: "engine-too-old", found: "0.6.3" })
+  })
+  test("headless, the printed line names the found version", async () => {
+    const h = install({ headless: true, which: "/usr/local/bin/datamate", version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(h.printed).toEqual([
+      `Workspace "analytics": 2 integration tools need ${ENGINE_BINARY} ${MIN_ENGINE_VERSION}+ (found 0.6.3). Update with: ${installCommand()}`,
+    ])
+  })
+  test("a broken engine reports 'unknown' rather than a version", async () => {
+    const h = install({ surface: true, which: "/usr/local/bin/datamate", version: null })
+    await beforeTurn("s1")
+    expect(h.offers[0]).toMatchObject({ reason: "engine-too-old", found: "unknown" })
+  })
+})
+
+describe("offer is not raised when an engine is usable", () => {
+  test("a healthy engine never reaches the offer path", async () => {
+    const h = install({ surface: true, which: "/usr/local/bin/datamate", version: "0.7.0" })
+    await beforeTurn("s1")
+    expect(h.offers).toEqual([])
+    expect(h.published).toBe(0)
+    expect(h.printed).toEqual([])
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+  })
+})
+
+describe("describeOffer — the TUI re-derives its own detail", () => {
+  test("describes a missing engine", async () => {
+    install({})
+    expect(await describeOffer(DIR)).toEqual({
+      reason: "engine-missing",
+      workspaceId: "42",
+      workspaceName: "analytics",
+      declared: 2,
+      command: installCommand(),
+    })
+  })
+  test("describes an engine below the floor, naming the version found", async () => {
+    install({ which: "/usr/local/bin/datamate", version: "0.6.3" })
+    expect(await describeOffer(DIR)).toMatchObject({ reason: "engine-too-old", found: "0.6.3" })
+  })
+  test("returns null when an engine already clears the floor", async () => {
+    install({ which: "/usr/local/bin/datamate", version: "0.7.0" })
+    expect(await describeOffer(DIR)).toBeNull()
+  })
+  test("returns null when the project is not bound", async () => {
+    install({ bound: false })
+    expect(await describeOffer(DIR)).toBeNull()
+  })
+})
+
+describe("headless notice stream", () => {
+  test("the default printer writes to stderr, never stdout", async () => {
+    const h = install({ headless: true })
+    delete syncInternals.printLine
+    const err = spyOn(process.stderr, "write").mockImplementation(() => true)
+    const out = spyOn(process.stdout, "write").mockImplementation(() => true)
+    try {
+      await beforeTurn("s1")
+      expect(err).toHaveBeenCalledTimes(1)
+      expect(String(err.mock.calls[0]?.[0])).toContain(installCommand())
+      expect(out).not.toHaveBeenCalled()
+    } finally {
+      err.mockRestore()
+      out.mockRestore()
+    }
+    expect(h.printed).toEqual([])
+  })
+})
+
+describe("install deadline", () => {
+  test("passes an abort signal to the spawn, not just a timeout", async () => {
+    syncInternals.which = () => "/usr/local/bin/datamate"
+    syncInternals.versionOf = async () => "0.7.0"
+    const run = spyOn(Process, "run").mockImplementation(async (_cmd, opts) => {
+      expect(opts?.abort).toBeInstanceOf(AbortSignal)
+      return { code: 0, stdout: Buffer.from(""), stderr: Buffer.from("") } as never
+    })
+    try {
+      expect(await installEngine()).toEqual({ ok: true })
+      expect(run).toHaveBeenCalledTimes(1)
+    } finally {
+      run.mockRestore()
+    }
+  })
+})
+
+describe("install success is verified, not assumed", () => {
+  test("a zero exit with the engine still absent from PATH is a failure", async () => {
+    syncInternals.which = () => null
+    const run = spyOn(Process, "run").mockImplementation(
+      async () => ({ code: 0, stdout: Buffer.from(""), stderr: Buffer.from("") }) as never,
+    )
+    try {
+      const result = await installEngine()
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error).toContain("not on PATH")
+    } finally {
+      run.mockRestore()
+    }
+  })
+  test("a zero exit with a below-floor engine on PATH is a failure", async () => {
+    syncInternals.which = () => "/usr/local/bin/datamate"
+    syncInternals.versionOf = async () => "0.6.3"
+    const run = spyOn(Process, "run").mockImplementation(
+      async () => ({ code: 0, stdout: Buffer.from(""), stderr: Buffer.from("") }) as never,
+    )
+    try {
+      const result = await installEngine()
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error).toContain("0.6.3")
+    } finally {
+      run.mockRestore()
+    }
+  })
+  test("a non-zero exit reports npm's last lines", async () => {
+    const run = spyOn(Process, "run").mockImplementation(
+      async () => ({ code: 1, stdout: Buffer.from(""), stderr: Buffer.from("boom\nEACCES denied") }) as never,
+    )
+    try {
+      expect(await installEngine()).toEqual({ ok: false, error: "boom EACCES denied" })
+    } finally {
+      run.mockRestore()
+    }
+  })
+})
