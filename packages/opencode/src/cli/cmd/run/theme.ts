@@ -10,7 +10,11 @@ import type { TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import type { EntryKind } from "./types"
 // altimate_change start — share the TUI's mode-resolution chain with the direct-run renderer
 // Shared with the full-screen TUI so both renderers agree on how a mode is chosen.
-import { resolveInitialMode } from "@opencode-ai/tui/terminal-detection"
+import {
+  detectModeFromCOLORFGBG,
+  detectSystemAppearance,
+  resolveInitialMode,
+} from "@opencode-ai/tui/terminal-detection"
 // altimate_change end
 
 type Tone = {
@@ -688,6 +692,22 @@ export function runThemeFallback(mode: "dark" | "light"): RunTheme {
 
 /** Dark instance, kept as the default for callers with no mode to hand. */
 export const RUN_THEME_FALLBACK: RunTheme = runThemeFallback("dark")
+
+// altimate_change start — upstream_fix: recognise every per-mode fallback.
+/**
+ * True for any fallback instance, not just the dark one.
+ *
+ * `footer.ts` keeps the last known-good theme when a runtime palette refresh
+ * fails, and used to detect that by comparing against `RUN_THEME_FALLBACK`.
+ * Now that the fallback is per-mode, a light terminal produced a *different*
+ * instance, that check missed, and the footer replaced a good theme with the
+ * fallback. Membership in the memo map is the identity test that survives.
+ */
+export function isRunThemeFallback(theme: RunTheme): boolean {
+  for (const cached of fallbackByMode.values()) if (cached === theme) return true
+  return false
+}
+// altimate_change end
 // altimate_change end
 
 // altimate_change start — resolve a mode instead of always falling back to dark
@@ -699,11 +719,17 @@ export const RUN_THEME_FALLBACK: RunTheme = runThemeFallback("dark")
  * higher-traffic sibling of the startup detection in packages/tui — it drives
  * the direct-run and scrollback renderer.
  */
-function fallbackMode(renderer: CliRenderer): "dark" | "light" {
-  return resolveInitialMode({
-    colorfgbg: process.env["COLORFGBG"],
-    osc: renderer.themeMode ?? null,
-  })
+async function fallbackMode(renderer: CliRenderer): Promise<"dark" | "light"> {
+  const colorfgbg = process.env["COLORFGBG"]
+  const osc = renderer.themeMode ?? null
+  // Ask the OS only when neither cheap signal answered. Without this the
+  // direct-run path did not actually agree with the startup path it shares
+  // `resolveInitialMode` with: on a light Apple Terminal — no COLORFGBG, no
+  // OSC 11 reply — it still resolved "dark" and repainted a light terminal
+  // dark, which is the #809 symptom this change exists to remove. The probe
+  // spawns `defaults`, so it stays behind the two free signals.
+  const appearance = osc || detectModeFromCOLORFGBG(colorfgbg) ? null : await detectSystemAppearance()
+  return resolveInitialMode({ colorfgbg, osc, appearance })
 }
 // altimate_change end
 
@@ -715,7 +741,7 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
     const bg = colors.defaultBackground ?? colors.palette[0]
     if (!bg) {
       // altimate_change start — light terminals must not get the dark fallback
-      return runThemeFallback(fallbackMode(renderer))
+      return runThemeFallback(await fallbackMode(renderer))
       // altimate_change end
     }
 
@@ -742,7 +768,7 @@ export async function resolveRunTheme(renderer: CliRenderer): Promise<RunTheme> 
     )
   } catch {
     // altimate_change start — light terminals must not get the dark fallback
-    return runThemeFallback(fallbackMode(renderer))
+    return runThemeFallback(await fallbackMode(renderer))
     // altimate_change end
   }
 }

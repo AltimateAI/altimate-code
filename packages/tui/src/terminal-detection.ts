@@ -109,8 +109,13 @@ export function detectSystemAppearance(
           // silently reported as light.
           const err = error as NodeJS.ErrnoException & { killed?: boolean; status?: number | null; stderr?: string }
           const notFound = /does not exist/i.test(String(err.stderr ?? err.message ?? ""))
-          const clean = err.code === undefined && err.killed !== true
-          resolve(notFound || clean ? "light" : null)
+          // Only the missing-key diagnostic means light. A previous `clean`
+          // clause also accepted "no `code` and not killed", which execFile
+          // never produces (it sets `code` to the errno string on spawn failure
+          // and the exit status otherwise) — and had it ever fired it would have
+          // reported light for an unknown failure, the exact thing the comment
+          // above forbids. Unknown stays null so the caller can keep looking.
+          resolve(notFound ? "light" : null)
         },
       )
     } catch {
