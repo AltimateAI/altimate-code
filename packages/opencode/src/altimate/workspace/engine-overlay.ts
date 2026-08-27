@@ -300,6 +300,8 @@ export async function managedWorkspaceLoaded(
 type SessionRecord = { outcome: Outcome; announced?: string; announcedAt?: number; retried?: boolean }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
+/** Verdict signatures a headless process has already printed to stderr. */
+const headlessPrinted = new Set<string>()
 
 function record(sessionID: string, outcome: Outcome): SessionRecord {
   const previous = sessions.get(sessionID)
@@ -706,6 +708,13 @@ export async function announceRefusal(
   }
   rec.announced = signature
   rec.announcedAt = repeat ? at - OFFER_SKIP_TTL_MS + OFFER_RECHECK_MS : at
+  if (isHeadless()) {
+    // A headless `run` is one process with one stderr, whatever sessions it
+    // creates along the way (a sub-agent's session settles the same verdict
+    // and would print the same line). One line per verdict per process.
+    if (headlessPrinted.has(signature)) return
+    headlessPrinted.add(signature)
+  }
   if (offering) {
     await offerOrNotify(offer, toast, sessionID)
     return
@@ -731,6 +740,7 @@ export function resetForTests(): void {
   sessions.clear()
   turnTools.clear()
   declaredCache.clear()
+  headlessPrinted.clear()
 }
 
 /** Test-only views. */

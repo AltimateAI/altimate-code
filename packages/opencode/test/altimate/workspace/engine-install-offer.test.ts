@@ -241,6 +241,15 @@ describe("offer routing — engine too old", () => {
       `Workspace "analytics": 2 integration tools need ${ENGINE_BINARY} ${MIN_ENGINE_VERSION}+ (found 0.6.3). Update with: ${installCommand()}`,
     ])
   })
+  test("headless, a sub-agent's session in the same process prints nothing more", async () => {
+    // One `run` is one process with one stderr: the task tool's child session
+    // settles the same verdict and must not repeat the line.
+    const h = install({ headless: true, which: "/usr/local/bin/datamate", version: "0.6.3" })
+    await beforeTurn("parent")
+    await beforeTurn("child")
+    await beforeTurn("parent")
+    expect(h.printed).toHaveLength(1)
+  })
   test("a broken engine reports 'unknown' rather than a version", async () => {
     const h = install({ surface: true, which: "/usr/local/bin/datamate", version: null })
     await beforeTurn("s1")
