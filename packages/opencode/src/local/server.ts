@@ -120,11 +120,40 @@ function processAlive(pid: number) {
   }
 }
 
+// process.kill throws ESRCH if the process already exited between our last
+// liveness check and this call — a real race under a fast-crashing or
+// already-terminating llama-server. Swallowing it here (rather than at each
+// call site) keeps that TOCTOU window from turning into an uncaught
+// exception that skips the state cleanup that must always follow.
+function tryKill(pid: number, signal: NodeJS.Signals) {
+  try {
+    process.kill(pid, signal)
+  } catch {
+    // Already exited — nothing to signal.
+  }
+}
+
 async function processCommand(pid: number) {
   if (process.platform === "linux") {
     return fs
       .readFile(`/proc/${pid}/cmdline`, "utf8")
       .then((value) => value.replaceAll("\0", " "))
+      .catch(() => "")
+  }
+  if (process.platform === "win32") {
+    // Native Windows has no `ps`. PowerShell's CIM cmdlets are the standard
+    // way to read another process's full command line (tasklist only
+    // exposes the image name, and `wmic` is deprecated/removed on newer
+    // Windows). Without this, the command lookup always returned "", so
+    // managedProcess() below always reported false and `altimate local
+    // stop` refused to signal a live, managed llama-server.exe.
+    return execFileAsync("powershell", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`,
+    ])
+      .then((result) => result.stdout)
       .catch(() => "")
   }
   return execFileAsync("ps", ["-p", String(pid), "-o", "command="])
@@ -135,7 +164,12 @@ async function processCommand(pid: number) {
 async function managedProcess(state: ServerState) {
   if (!processAlive(state.pid)) return false
   const command = await processCommand(state.pid)
-  return command.includes("llama-server") && command.includes(state.modelPath)
+  // Match the exact recorded runtime binary path (works with a custom
+  // ALTIMATE_LOCAL_LLAMA_SERVER binary name) plus the model path, instead of
+  // a hard-coded "llama-server" substring: that both false-negatives on a
+  // renamed binary and false-positives on any unrelated process whose
+  // command line happens to mention both strings.
+  return command.includes(state.runtimePath) && command.includes(state.modelPath)
 }
 
 export async function checkHealth(port: number, fetchImpl: Fetch = fetch) {
@@ -160,7 +194,13 @@ export async function getServerStatus(
     const healthy = running && (await dockerHealthy(state.port, options.fetchImpl))
     return { state, processAlive: running, healthy, stale: !running }
   }
-  const alive = processAlive(state.pid)
+  // Raw PID liveness alone is not identity: if the recorded pid gets
+  // recycled by the OS onto an unrelated process, a bare `processAlive`
+  // check reports "alive" and a subsequent health probe on the recorded
+  // port could hit an unrelated loopback service, marking a dead server
+  // healthy. managedProcess() also checks the command line against the
+  // recorded runtime + model path.
+  const alive = await managedProcess(state)
   const healthy = alive && (await checkHealth(state.port, options.fetchImpl))
   return { state, processAlive: alive, healthy, stale: !alive }
 }
@@ -320,16 +360,22 @@ export async function startServer(input: {
     // Covers state-write failures too (e.g. ENOSPC right after the model
     // download): a spawned server must never outlive its tracking state.
     // Same escalation as stopServer — a child that ignores SIGTERM would
-    // otherwise be orphaned with its state already cleared.
-    if (processAlive(child.pid)) {
-      process.kill(child.pid, "SIGTERM")
-      const deadline = Date.now() + 10_000
-      while (processAlive(child.pid) && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 100))
+    // otherwise be orphaned with its state already cleared. tryKill absorbs
+    // the child exiting on its own between the liveness check and the
+    // signal (ESRCH), so that race can't skip clearServerState below and
+    // replace `error` with a kill-time exception.
+    try {
+      if (processAlive(child.pid)) {
+        tryKill(child.pid, "SIGTERM")
+        const deadline = Date.now() + 10_000
+        while (processAlive(child.pid) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        if (processAlive(child.pid)) tryKill(child.pid, "SIGKILL")
       }
-      if (processAlive(child.pid)) process.kill(child.pid, "SIGKILL")
+    } finally {
+      await clearServerState(paths)
     }
-    await clearServerState(paths)
     throw error
   }
 }
@@ -354,12 +400,16 @@ export async function stopServer(options: { paths?: LocalPaths; graceMs?: number
     throw new Error(`Refusing to signal pid ${state.pid}: it is not the managed llama-server process`)
   }
 
-  process.kill(state.pid, "SIGTERM")
+  // tryKill absorbs the process exiting on its own between the managedProcess
+  // check above (or the liveness poll below) and the signal call — without
+  // it, that race throws ESRCH and skips clearServerState, leaving stale
+  // state.json behind for an already-dead server.
+  tryKill(state.pid, "SIGTERM")
   const deadline = Date.now() + (options.graceMs ?? 10_000)
   while (processAlive(state.pid) && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  if (processAlive(state.pid)) process.kill(state.pid, "SIGKILL")
+  if (processAlive(state.pid)) tryKill(state.pid, "SIGKILL")
   await clearServerState(paths)
   return { stopped: true, reason: "stopped" as const, pid: state.pid }
 }

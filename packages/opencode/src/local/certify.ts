@@ -35,13 +35,28 @@ export function flagsHash(flags: readonly string[]) {
   return createHash("sha256").update(JSON.stringify(flags)).digest("hex")
 }
 
-export function certificateCacheKey(input: { modelSha256: string; runtimeVersion: string; flags: readonly string[] }) {
+export function certificateCacheKey(input: {
+  modelSha256: string
+  runtimeVersion: string
+  flags: readonly string[]
+  reasoningEffort: string
+  temperature: number
+}) {
   const hash = createHash("sha256")
   hash.update(input.modelSha256)
   hash.update("\0")
   hash.update(input.runtimeVersion)
   hash.update("\0")
   hash.update(flagsHash(input.flags))
+  hash.update("\0")
+  // The certification probes send these on every request (see chat() call
+  // sites below) but the Docker recipe's `flags` don't encode either — a
+  // refreshed recipe changing just reasoningEffort/temperature would
+  // otherwise silently reuse an old certificate that never actually ran
+  // under the new configuration.
+  hash.update(input.reasoningEffort)
+  hash.update("\0")
+  hash.update(String(input.temperature))
   return hash.digest("hex")
 }
 
@@ -246,11 +261,17 @@ export async function certify(input: {
     reasoning_render: await check(() => reasoningRender(common)),
     prompt_prefill_8k: await check(() => promptPrefill(common)),
   }
+  // `cached` is deliberately excluded from the signed payload: it is
+  // call-site metadata (whether THIS caller got a cache hit), not part of
+  // what the digest is meant to attest to. Including it would make the
+  // digest computed at write time (cached: false) mismatch the one implied
+  // by every later cache-hit read (cached: true) — a consumer validating
+  // the digest against the returned object would reject every cached
+  // certificate.
   const unsigned = {
     schema: 1 as const,
     key,
     passed: Object.values(checks).every((item) => item.ok),
-    cached: false,
     model_sha256: input.modelSha256,
     runtime_version: input.runtimeVersion,
     flags_sha256: flagsHash(input.flags),
@@ -261,6 +282,7 @@ export async function certify(input: {
   }
   const certificate: LocalCertificate = {
     ...unsigned,
+    cached: false,
     certificate_sha256: createHash("sha256").update(JSON.stringify(unsigned)).digest("hex"),
   }
   await ensureLocalDirectories(paths)

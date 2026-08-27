@@ -276,7 +276,12 @@ export namespace SessionCompaction {
       // rejected by providers with a 400, defeating the fallback entirely.
       let cut = step
       while (cut < head.length && head[cut]!.info.role !== "user") cut++
-      if (cut >= head.length) cut = step
+      // No user boundary exists anywhere in the remainder — reverting to the
+      // raw `step` offset would still start the head mid-turn, the exact 400
+      // this rounding exists to prevent. Drop the whole remaining head
+      // instead: safe for the same reason the empty-head case above is safe
+      // (the caller always appends its own trailing user prompt).
+      if (cut >= head.length) cut = head.length
       head = head.slice(cut)
       dropped += cut
     }

@@ -340,7 +340,13 @@ export namespace LLM {
   // "none". Injecting stubs here would instead advertise callable tools on a call
   // that must produce text only.
   export function addHistoricalToolStubs(tools: Record<string, Tool>, referenced: Iterable<string>) {
-    if (Object.keys(tools).length === 0) return tools
+    // upstream_fix: "invalid" is the AI-SDK fallback tool for malformed tool calls
+    // (see the retrieval exemption above), not a real user-facing tool. A resolved
+    // set containing ONLY "invalid" is functionally the zero-real-tools case this
+    // guard exists for — treating it as non-empty injected historical stubs that
+    // then became active/callable on a turn that was meant to have no real tools.
+    const realToolCount = Object.keys(tools).filter((name) => name !== "invalid").length
+    if (realToolCount === 0) return tools
     for (const name of referenced) {
       if (!Object.hasOwn(tools, name)) {
         tools[name] = tool({

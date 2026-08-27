@@ -134,6 +134,14 @@ describe("MessageV2.sanitizeToolCallID", () => {
     expect(MessageV2.sanitizeToolCallID(1)).not.toBe(MessageV2.sanitizeToolCallID(2))
   })
 
+  test("uses a widened (64-bit) digest, not a 32-bit one, to keep collisions negligible", () => {
+    // "call_" + 8 hex chars is a 32-bit digest with only ~4B buckets; regenerated
+    // ids must use a wider digest so two distinct malformed ids are vanishingly
+    // unlikely to collide onto the same toolCallId.
+    const id = MessageV2.sanitizeToolCallID(12345)
+    expect(id).toMatch(/^call_[0-9a-f]{16}$/)
+  })
+
   test("handles empty string, null, undefined, and objects without throwing", () => {
     for (const raw of ["", null, undefined, { id: 1 }, []]) {
       const out = MessageV2.sanitizeToolCallID(raw)
@@ -163,6 +171,17 @@ describe("SessionProcessor.createToolCallIDCoercer (ingestion half)", () => {
   test("valid string ids are untouched so healthy providers see no behavior change", () => {
     const coerce = SessionProcessor.createToolCallIDCoercer()
     expect(coerce("call_ok")).toBe("call_ok")
+  })
+
+  test("reserved Object.prototype property names are not confused with cached aliases", () => {
+    // A plain `{}` cache would read these back as inherited functions/objects
+    // (Object.prototype.toString, .constructor, ...) instead of `undefined` on
+    // first sight — corrupting the alias for a provider-supplied id that happens
+    // to equal one of these names.
+    const coerce = SessionProcessor.createToolCallIDCoercer()
+    for (const reserved of ["toString", "constructor", "valueOf", "hasOwnProperty", "__proto__"]) {
+      expect(coerce(reserved)).toBe(reserved)
+    }
   })
 })
 

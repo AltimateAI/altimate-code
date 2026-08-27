@@ -1040,6 +1040,11 @@ export namespace Telemetry {
     anthropic: "anthropic",
     openai: "openai",
     google: "google",
+    // upstream_fix: the welcome picker's "Local model" row uses providerID
+    // "local" (see altimate-onboarding.tsx) — without this entry it fell through
+    // to `other` with the id stripped, indistinguishable from any unrecognized
+    // provider in the funnel.
+    local: "local",
   })
 
   /** Classify a provider id for `provider_selected`. Returns the enum value plus the raw id when

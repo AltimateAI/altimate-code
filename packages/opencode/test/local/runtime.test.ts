@@ -37,16 +37,24 @@ describe("locateLlamaServer", () => {
     expect(result).toBeUndefined()
   }, 10_000)
 
-  test("returns the installed runtime once it is executable and reports a version", async () => {
-    await using tmp = await tmpdir()
-    const binary = path.join(tmp.path, BIN_NAME)
-    await fs.writeFile(binary, '#!/bin/sh\necho "llama-server build 1"\nexit 0\n')
-    await fs.chmod(binary, 0o755)
+  // Skipped on win32: this fixture is a POSIX #!/bin/sh script written to a
+  // path ending in .exe. Windows dispatches execution by file extension, not
+  // shebang, so a real win32 run can't launch it at all — that's a genuine
+  // difference from every other platform here, not something this fixture
+  // can paper over without a real compiled Windows binary.
+  test.skipIf(process.platform === "win32")(
+    "returns the installed runtime once it is executable and reports a version",
+    async () => {
+      await using tmp = await tmpdir()
+      const binary = path.join(tmp.path, BIN_NAME)
+      await fs.writeFile(binary, '#!/bin/sh\necho "llama-server build 1"\nexit 0\n')
+      await fs.chmod(binary, 0o755)
 
-    const result = await locateLlamaServer({ env: {}, paths: paths(tmp.path) })
-    expect(result?.source).toBe("installed")
-    expect(result?.version).toBe("llama-server build 1")
-  })
+      const result = await locateLlamaServer({ env: {}, paths: paths(tmp.path) })
+      expect(result?.source).toBe("installed")
+      expect(result?.version).toBe("llama-server build 1")
+    },
+  )
 })
 
 describe("isWorkingRuntime", () => {
@@ -64,7 +72,9 @@ describe("isWorkingRuntime", () => {
     expect(await isWorkingRuntime(binary)).toBe(false)
   })
 
-  test("is true for a binary that runs and reports a version", async () => {
+  // Same reason as the skip above: a POSIX shebang script named *.exe cannot
+  // actually run on native Windows.
+  test.skipIf(process.platform === "win32")("is true for a binary that runs and reports a version", async () => {
     await using tmp = await tmpdir()
     const binary = path.join(tmp.path, BIN_NAME)
     await fs.writeFile(binary, '#!/bin/sh\necho "llama-server build 1"\nexit 0\n')

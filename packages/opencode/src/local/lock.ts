@@ -10,6 +10,16 @@ import { getLocalPaths, type LocalPaths } from "./paths"
 // run well past ten minutes) or it forcibly evicts a live, working lock.
 const PID_REUSE_FALLBACK_MS = 24 * 60 * 60_000
 
+// Acquisition is two steps — mkdir(dir) publishes exclusivity, then
+// owner.json is written into it — so a waiter can observe the dir existing
+// with owner.json still missing. That's not proof the holder crashed: it
+// may just be mid-way through those two steps. Only treat a missing
+// owner.json as stale once the dir itself has existed longer than any
+// legitimate mkdir-then-write gap could take; otherwise a waiter would
+// delete the lock out from under a live holder and steal it while the
+// holder still believes it holds it exclusively.
+const OWNER_PUBLISH_GRACE_MS = 2_000
+
 export function isOwnerStale(owner: { pid?: number; at?: number } | undefined, now: number): boolean {
   const dead = (() => {
     if (!owner?.pid) return true
@@ -22,6 +32,19 @@ export function isOwnerStale(owner: { pid?: number; at?: number } | undefined, n
   })()
   if (dead) return true
   return Boolean(owner?.at && now - owner.at > PID_REUSE_FALLBACK_MS)
+}
+
+async function isLockStale(dir: string, meta: string, now: number): Promise<boolean> {
+  const owner = await fs
+    .readFile(meta, "utf8")
+    .then((raw) => JSON.parse(raw) as { pid?: number; at?: number })
+    .catch(() => undefined)
+  if (owner) return isOwnerStale(owner, now)
+  const dirAge = await fs
+    .stat(dir)
+    .then((s) => now - s.mtimeMs)
+    .catch(() => Infinity)
+  return dirAge > OWNER_PUBLISH_GRACE_MS
 }
 
 // Cross-process mutex for the local-server lifecycle: concurrent
@@ -38,21 +61,22 @@ export async function withLifecycleLock<T>(run: () => Promise<T>, paths: LocalPa
   // forever without ever reaching the deadline check.
   await fs.mkdir(paths.root, { recursive: true })
   for (;;) {
+    // Checked unconditionally at the top of every attempt (not only in the
+    // "live owner, keep waiting" branch below): a persistent filesystem
+    // error (ENOSPC, EACCES) makes `mkdir` fail for a reason that is neither
+    // EEXIST nor a stale lock, so `meta` never exists either — the old
+    // deadline check, reachable only from the non-stale branch, was never
+    // hit and the loop spun forever.
+    if (Date.now() > deadline) throw new Error(`Timed out acquiring the local lifecycle lock at ${dir}.`)
     try {
       await fs.mkdir(dir)
       await fs.writeFile(meta, JSON.stringify({ pid: process.pid, at: Date.now() }), { mode: 0o600 })
       break
     } catch {
-      const owner = await fs
-        .readFile(meta, "utf8")
-        .then((raw) => JSON.parse(raw) as { pid?: number; at?: number })
-        .catch(() => undefined)
-      if (isOwnerStale(owner, Date.now())) {
+      if (await isLockStale(dir, meta, Date.now())) {
         await fs.rm(dir, { recursive: true, force: true })
         continue
       }
-      if (Date.now() > deadline)
-        throw new Error(`Another altimate local command (pid ${owner?.pid}) is running. Retry in a moment.`)
       await new Promise((resolve) => setTimeout(resolve, 500))
     }
   }

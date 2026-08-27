@@ -57,7 +57,12 @@ export namespace Retrieval {
   export function compactDescription(text: string | undefined, max = 160): string {
     if (!text) return ""
     const normalized = text.replace(/\s+/g, " ").trim()
-    const sentence = normalized.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? normalized
+    // A terminator only ends the first sentence when followed by whitespace-then-
+    // uppercase (a new sentence starting) or the end of the string. This avoids
+    // mis-cutting on abbreviations ("e.g. run the linter") and decimals ("v2.0
+    // models"), which a bare "terminator followed by whitespace" test would stop
+    // at prematurely.
+    const sentence = normalized.match(/^.*?[.!?](?=\s+[A-Z]|\s*$)/)?.[0] ?? normalized
     if (sentence.length <= max) return sentence
     return sentence.slice(0, max - 1).trimEnd() + "…"
   }

@@ -15,7 +15,7 @@
           "quant": "UD-Q4_K_M",
           "file": "Qwen3.8-27B-UD-Q4_K_M.gguf",
           "sha256": "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
-          "ctx": 131072,
+          "ctx": 65536,
           "parallel": 1,
           "kv": "f16",
           "mtp": {

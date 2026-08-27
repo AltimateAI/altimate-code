@@ -8,6 +8,13 @@ import type { DockerRecipeTier } from "./recipes"
 const execFileAsync = promisify(execFile)
 
 export const LOCAL_CONTAINER_NAME = "altimate-local-model"
+// Stamped on every container `altimate local` creates so removeDockerContainer
+// can verify ownership before force-removing whatever currently holds this
+// fixed, globally-visible name — without it, an unrelated workload that
+// happens to use the same container name would be destroyed on the next
+// `altimate local` / `stop` run.
+export const LOCAL_MANAGEMENT_LABEL_KEY = "ai.altimate.local-model"
+export const LOCAL_MANAGEMENT_LABEL_VALUE = "managed"
 
 export type DockerExec = (file: string, args: string[], timeoutMs?: number) => Promise<{ stdout: string; stderr: string }>
 
@@ -25,6 +32,8 @@ export function buildDockerRunArgs(input: { tier: DockerRecipeTier; modelID: str
     "-d",
     "--name",
     LOCAL_CONTAINER_NAME,
+    "--label",
+    `${LOCAL_MANAGEMENT_LABEL_KEY}=${LOCAL_MANAGEMENT_LABEL_VALUE}`,
     "--gpus",
     "all",
     "--ipc=host",
@@ -96,6 +105,26 @@ export async function removeDockerContainer(exec: DockerExec = defaultExec) {
     exists = false
   }
   if (!exists) return { existed: false, removed: false }
+
+  // Force-removing by this fixed, globally-visible name is only safe if we
+  // created it: verify the management label every `altimate local` docker
+  // run stamps (see buildDockerRunArgs) before touching a container that
+  // some unrelated workload might happen to also be using under this name.
+  // Left unguarded (unlike the existence check above): a docker/exec failure
+  // here is a real error to propagate, not evidence of "not ours" — only an
+  // empty/mismatched label value means that.
+  const label = await exec("docker", [
+    "inspect",
+    "-f",
+    `{{index .Config.Labels "${LOCAL_MANAGEMENT_LABEL_KEY}"}}`,
+    LOCAL_CONTAINER_NAME,
+  ])
+  if (label.stdout.trim() !== LOCAL_MANAGEMENT_LABEL_VALUE) {
+    throw new Error(
+      `A container named "${LOCAL_CONTAINER_NAME}" already exists but was not created by \`altimate local\` — refusing to force-remove a container this tool does not own. Remove it manually if that is safe.`,
+    )
+  }
+
   // rm failure must NOT look like success: callers keep state so the
   // container is never orphaned silently.
   await exec("docker", ["rm", "-f", LOCAL_CONTAINER_NAME], 120_000)
@@ -140,24 +169,32 @@ export async function startDockerServer(input: {
 
   // First run downloads the weights inside the container; allow a long window
   // and surface container log lines so the wait is legible.
-  const deadline = Date.now() + (input.timeoutMs ?? 45 * 60_000)
-  let lastLine = ""
-  while (Date.now() < deadline) {
-    if (await dockerHealthy(input.port, input.fetchImpl)) return { pid, container: LOCAL_CONTAINER_NAME }
-    if (!(await dockerContainerRunning(exec))) {
-      const logs = await exec("docker", ["logs", "--tail", "25", LOCAL_CONTAINER_NAME])
-        .then((result) => result.stderr + result.stdout)
-        .catch(() => "")
-      await removeDockerContainer(exec)
-      throw new Error(`SGLang container exited before becoming healthy.\n${logs.slice(-2000)}`)
+  try {
+    const deadline = Date.now() + (input.timeoutMs ?? 45 * 60_000)
+    let lastLine = ""
+    while (Date.now() < deadline) {
+      if (await dockerHealthy(input.port, input.fetchImpl)) return { pid, container: LOCAL_CONTAINER_NAME }
+      if (!(await dockerContainerRunning(exec))) {
+        const logs = await exec("docker", ["logs", "--tail", "25", LOCAL_CONTAINER_NAME])
+          .then((result) => result.stderr + result.stdout)
+          .catch(() => "")
+        throw new Error(`SGLang container exited before becoming healthy.\n${logs.slice(-2000)}`)
+      }
+      const line = await containerLogTail(exec)
+      if (line && line !== lastLine) {
+        lastLine = line
+        input.onProgress?.(line)
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
     }
-    const line = await containerLogTail(exec)
-    if (line && line !== lastLine) {
-      lastLine = line
-      input.onProgress?.(line)
-    }
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+    throw new Error("SGLang container did not become healthy in time")
+  } catch (error) {
+    // Any failure while polling — including dockerContainerRunning itself
+    // throwing on a transient daemon error, not just the two explicit
+    // failure messages above — must not leave an untracked container
+    // running: setupDocker only records state once this function succeeds,
+    // so anything left behind here is invisible to `status`/`stop`.
+    await removeDockerContainer(exec).catch(() => {})
+    throw error
   }
-  await removeDockerContainer(exec)
-  throw new Error("SGLang container did not become healthy in time")
 }

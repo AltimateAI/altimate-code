@@ -83,9 +83,18 @@ export async function downloadWithResume(input: {
   const response = await fetchImpl(input.url, { headers })
 
   if (response.status === 416 && offset > 0) {
-    const actual = await verifySha256(partial, expected)
-    await fs.rename(partial, input.destination)
-    return { path: input.destination, sha256: actual, bytes: offset, resumed: true }
+    try {
+      const actual = await verifySha256(partial, expected)
+      await fs.rename(partial, input.destination)
+      return { path: input.destination, sha256: actual, bytes: offset, resumed: true }
+    } catch (error) {
+      // A stale/oversized .partial that fails the pinned checksum must not
+      // be left in place: every subsequent run would resume from the same
+      // offset, get 416 again, and fail identically forever. Same cleanup
+      // as the post-download mismatch path below.
+      if (error instanceof ChecksumMismatchError) await fs.unlink(partial).catch(() => {})
+      throw error
+    }
   }
   if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}: ${input.url}`)
   if (!response.body) throw new Error(`Download returned no response body: ${input.url}`)
@@ -96,7 +105,12 @@ export async function downloadWithResume(input: {
     if (!range || Number(range[1]) !== offset) throw new Error("Download server returned an invalid Content-Range")
   }
   const receivedAtStart = append ? offset : 0
-  const length = Number(response.headers.get("content-length"))
+  // `?? NaN` (not a bare `Number(null)`, which is 0): a response without a
+  // Content-Length header (chunked/gzip transfers) must report an unknown
+  // total, not a total that equals whatever's already been received —
+  // which would make `received` immediately exceed `total` as new bytes
+  // arrive, corrupting progress percentages downstream.
+  const length = Number(response.headers.get("content-length") ?? NaN)
   const total = Number.isFinite(length) && length >= 0 ? receivedAtStart + length : undefined
   let received = receivedAtStart
   const progress = new Transform({

@@ -134,6 +134,32 @@ describe("TruncateCore", () => {
     expect(result.content).toContain("bytes truncated")
   })
 
+  test("middle direction: a boundary line too big for either half's split budget still survives if it fits the overall maxBytes", () => {
+    // Two 80-byte lines (161 bytes total, over the 100-byte cap, so this doesn't
+    // fit and truncation runs). maxBytes=100 with the default 1/3 head ratio
+    // splits into a ~33-byte head budget and a ~67-byte tail budget — neither
+    // half can hold an 80-byte line on its own, even though the FIRST line alone
+    // fits the undivided 100-byte total.
+    const firstLine = "x".repeat(80)
+    const secondLine = "y".repeat(80)
+    const text = `${firstLine}\n${secondLine}`
+    const result = assembleDefault(text, { maxLines: 10, maxBytes: 100, direction: "middle" })
+    expect(result.truncated).toBe(true)
+    expect(result.content).toContain(firstLine)
+  })
+
+  test("middle direction: an out-of-range headRatio is clamped instead of blowing the byte budget", () => {
+    const text = Array.from({ length: 20 }, (_, i) => `line${i}`).join("\n")
+    for (const badRatio of [5, -3, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const result = assembleDefault(text, { maxLines: 6, maxBytes: 40, direction: "middle", headRatio: badRatio })
+      expect(result.truncated).toBe(true)
+      // The two halves together must never exceed the byte budget they were split from.
+      const headBytes = Buffer.byteLength(result.preview!.head, "utf-8")
+      const tailBytes = Buffer.byteLength(result.preview!.tail, "utf-8")
+      expect(headBytes + tailBytes).toBeLessThanOrEqual(40)
+    }
+  })
+
   test("assemble() places the elision marker and hint between head and tail for middle direction", () => {
     const p: TruncateCore.Preview = { head: "HEAD", tail: "TAIL", removed: 5, unit: "lines" }
     const content = TruncateCore.assemble(p, "HINT", "middle")

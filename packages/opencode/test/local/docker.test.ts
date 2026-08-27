@@ -4,6 +4,8 @@ import {
   buildDockerRunArgs,
   dockerContainerRunning,
   LOCAL_CONTAINER_NAME,
+  LOCAL_MANAGEMENT_LABEL_KEY,
+  LOCAL_MANAGEMENT_LABEL_VALUE,
   removeDockerContainer,
   startDockerServer,
   type DockerExec,
@@ -21,6 +23,9 @@ describe("buildDockerRunArgs", () => {
     expect(args).toContain(`${tier.image}@${tier.image_digest}`)
     expect(args).toContain(`127.0.0.1:8095:${tier.container_port}`)
     expect(args).toContain(LOCAL_CONTAINER_NAME)
+    // Ownership label: lets removeDockerContainer refuse to force-remove a
+    // container this tool did not create.
+    expect(args.join(" ")).toContain(`--label ${LOCAL_MANAGEMENT_LABEL_KEY}=${LOCAL_MANAGEMENT_LABEL_VALUE}`)
     expect(args.join(" ")).toContain(`--model-path ${tier.model_hf}`)
     expect(args.join(" ")).toContain(`--served-model-name ${model.id}`)
     expect(args.join(" ")).toContain(`--context-length ${tier.ctx}`)
@@ -39,19 +44,27 @@ describe("buildDockerRunArgs", () => {
 
 type ExecResult = { stdout: string; stderr: string }
 
+// Default: a container that exists and passes the label-ownership check.
+// Tests that need to simulate a foreign (unmanaged) container override
+// inspectLabel to return something else.
+const managedLabel = async (): Promise<ExecResult> => ({ stdout: `${LOCAL_MANAGEMENT_LABEL_VALUE}\n`, stderr: "" })
+
 function execRouter(handlers: {
   inspectId?: () => Promise<ExecResult>
   run?: () => Promise<ExecResult>
   inspectPid?: () => Promise<ExecResult>
   inspectRunning?: () => Promise<ExecResult>
+  inspectLabel?: () => Promise<ExecResult>
   logsTail1?: () => Promise<ExecResult>
   logsTail25?: () => Promise<ExecResult>
   rm?: () => Promise<ExecResult>
 }): DockerExec {
+  const inspectLabel = handlers.inspectLabel ?? managedLabel
   return async (file, args) => {
     if (args[0] === "inspect" && args[2] === "{{.Id}}" && handlers.inspectId) return handlers.inspectId()
     if (args[0] === "inspect" && args[2] === "{{.State.Pid}}" && handlers.inspectPid) return handlers.inspectPid()
     if (args[0] === "inspect" && args[2] === "{{.State.Running}}" && handlers.inspectRunning) return handlers.inspectRunning()
+    if (args[0] === "inspect" && args[2] === `{{index .Config.Labels "${LOCAL_MANAGEMENT_LABEL_KEY}"}}`) return inspectLabel()
     if (args[0] === "run" && handlers.run) return handlers.run()
     if (args[0] === "logs" && args[2] === "1" && handlers.logsTail1) return handlers.logsTail1()
     if (args[0] === "logs" && args[2] === "25" && handlers.logsTail25) return handlers.logsTail25()
@@ -106,6 +119,22 @@ describe("removeDockerContainer", () => {
       },
     })
     await expect(removeDockerContainer(exec)).rejects.toThrow(/Docker daemon/)
+    expect(rmCalls).toBe(0)
+  })
+
+  // The container name is fixed and globally visible; force-removing
+  // whatever currently holds it is only safe if `altimate local` created it.
+  test("refuses to force-remove a container that exists but was not created by altimate local", async () => {
+    let rmCalls = 0
+    const exec = execRouter({
+      inspectId: async () => ({ stdout: "someOtherContainerId\n", stderr: "" }),
+      inspectLabel: async () => ({ stdout: "\n", stderr: "" }), // label absent: not ours
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    await expect(removeDockerContainer(exec)).rejects.toThrow(/not created by `altimate local`/)
     expect(rmCalls).toBe(0)
   })
 })
@@ -192,6 +221,39 @@ describe("startDockerServer", () => {
 
     await expect(
       startDockerServer({ tier, modelID: model.id, port: 8095, exec, fetchImpl }),
+    ).rejects.toThrow(/Cannot connect to the Docker daemon/)
+    expect(rmCalls).toBe(1)
+  })
+
+  test("removes the container when the docker daemon errors mid-poll, instead of leaving it untracked", async () => {
+    // dockerContainerRunning throwing (not just returning false) inside the
+    // health-polling loop used to propagate straight out of startDockerServer,
+    // skipping cleanup entirely — setupDocker only records state once this
+    // function succeeds, so the container would be invisible to status/stop.
+    let rmCalls = 0
+    let inspectIdCalls = 0
+    const exec = execRouter({
+      inspectId: async () => {
+        inspectIdCalls++
+        if (inspectIdCalls === 1) throw new Error("no such container") // pre-run cleanup: nothing yet
+        return { stdout: "container123\n", stderr: "" }
+      },
+      run: async () => ({ stdout: "container123\n", stderr: "" }),
+      inspectPid: async () => ({ stdout: "4242\n", stderr: "" }),
+      inspectRunning: async () => {
+        const error = new Error("Cannot connect to the Docker daemon") as Error & { stderr: string }
+        error.stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+        throw error
+      },
+      rm: async () => {
+        rmCalls++
+        return { stdout: "", stderr: "" }
+      },
+    })
+    const fetchImpl = async () => new Response(null, { status: 503 }) // never healthy, forces the running-check
+
+    await expect(
+      startDockerServer({ tier, modelID: model.id, port: 8095, exec, fetchImpl, pollIntervalMs: 1 }),
     ).rejects.toThrow(/Cannot connect to the Docker daemon/)
     expect(rmCalls).toBe(1)
   })

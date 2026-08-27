@@ -111,6 +111,22 @@ describe("session.llm.addHistoricalToolStubs", () => {
     expect(Object.keys(tools)).toEqual(["bash"])
     expect(tools.bash).toBe(real)
   })
+
+  test("treats a tool set containing only the SDK fallback 'invalid' tool as empty", () => {
+    const invalid = { description: "fallback for malformed tool calls" } as Tool
+    const tools: Record<string, Tool> = { invalid }
+    const result = LLM.addHistoricalToolStubs(tools, new Set(["old_mcp_tool"]))
+    expect(result).toBe(tools)
+    expect(Object.keys(tools)).toEqual(["invalid"])
+  })
+
+  test("still injects stubs for referenced tools when real tools sit alongside 'invalid'", () => {
+    const real = { description: "real bash" } as Tool
+    const invalid = { description: "fallback" } as Tool
+    const tools: Record<string, Tool> = { bash: real, invalid }
+    LLM.addHistoricalToolStubs(tools, new Set(["bash", "old_mcp_tool"]))
+    expect(Object.keys(tools).sort()).toEqual(["bash", "invalid", "old_mcp_tool"])
+  })
 })
 
 type Capture = {

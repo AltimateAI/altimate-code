@@ -43,8 +43,8 @@ describe("SessionCompaction.fitHead", () => {
   })
 
   test("drops oldest messages until an oversized head fits the window", async () => {
-    // ~64 chars/token estimate baseline: 40 messages x 20k chars ≈ 200k tokens,
-    // far over a 32k window minus output reserve.
+    // ~3.7-4 chars/token estimate baseline (Token.estimate): 40 messages x 20k
+    // chars = 800k chars ≈ 200k tokens, far over a 32k window minus output reserve.
     const head = Array.from({ length: 40 }, (_, i) => userMessage(`m${i}`, "x".repeat(20_000)))
     const result = await SessionCompaction.fitHead({ head, model: model(32768, 8192) })
     expect(result.dropped).toBeGreaterThan(0)
@@ -150,6 +150,25 @@ describe("SessionCompaction.fitHead single-message overflow", () => {
     const result = await SessionCompaction.fitHead({ head, model: model(131072) })
     expect(result.head.length).toBe(1)
     expect(result.dropped).toBe(0)
+  })
+})
+// altimate_change end
+
+// altimate_change start — upstream_fix: no-later-user-boundary must not revert to a mid-turn cut
+describe("SessionCompaction.fitHead no later user boundary", () => {
+  test("empties the head instead of reverting to a mid-turn cut when no user boundary follows step", async () => {
+    // A single leading user message followed by a long run of assistant
+    // messages with no further user turn: the forward scan for a user
+    // boundary after `step` never finds one. The old fallback reverted to
+    // the raw `step` offset, which starts the resulting head on an
+    // assistant message — the exact provider-400 shape this rounding exists
+    // to prevent. The fix must empty the head instead (safe: the caller
+    // always appends its own trailing user prompt).
+    const head: MessageV2.WithParts[] = [userMessage("u0", "q".repeat(8_000))]
+    for (let i = 0; i < 8; i++) head.push(assistantMessage(`a${i}`, "r".repeat(8_000)))
+    const result = await SessionCompaction.fitHead({ head, model: model(16384, 4096) })
+    expect(result.head.length).toBe(0)
+    expect(result.dropped).toBe(head.length)
   })
 })
 // altimate_change end

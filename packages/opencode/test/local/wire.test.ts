@@ -164,6 +164,89 @@ describe("wireLocalProvider egress guard", () => {
     const config = await readConfig(wired.file)
     for (const key of EGRESS_PERMISSIONS) expect(config.permission?.[key]).toBeUndefined()
   })
+
+  // Guard ownership is tracked per key (guarded_permissions), not just as a
+  // boolean: a user rule the guard-on wiring SKIPPED adding (because it
+  // already existed) must survive a later --no-egress-guard, even though the
+  // guard was on and did add other keys.
+  test("--no-egress-guard removes only the keys the guard actually added, keeping a user-set rule it skipped", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    // User independently set websearch to "ask" before ever running `altimate local`.
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ permission: { websearch: "ask" } }))
+
+    const on = await wire(home)
+    expect(on.guarded).toEqual(["webfetch", "codesearch"]) // websearch skipped: already set
+
+    const off = await wire(home, { egressGuard: false })
+    const config = await readConfig(off.file)
+    expect(config.permission.websearch).toBe("ask") // user's own rule survives
+    expect(config.permission.webfetch).toBeUndefined() // guard-owned: removed
+    expect(config.permission.codesearch).toBeUndefined() // guard-owned: removed
+  })
+
+  test("respects a wildcard top-level rule instead of adding a more specific guard rule over it", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ permission: { "*": "deny" } }))
+    const wired = await wire(home)
+    expect(wired.guarded).toEqual([])
+    const config = await readConfig(wired.file)
+    expect(config.permission["*"]).toBe("deny")
+    for (const key of EGRESS_PERMISSIONS) expect(config.permission[key]).toBeUndefined()
+  })
+
+  test("readEgressGuard resolves a wildcard rule instead of reporting allow (no rule)", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ permission: { "*": "deny" } }))
+    const guard = await readEgressGuard({} as NodeJS.ProcessEnv, home)
+    for (const key of EGRESS_PERMISSIONS) expect(guard[key]).toBe("deny")
+  })
+})
+
+describe("wireLocalProvider config file precedence", () => {
+  test("targets the higher-precedence .jsonc file when both .json and .jsonc already exist", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ model: "old-json" }))
+    await fs.writeFile(path.join(dir, "altimate-code.jsonc"), JSON.stringify({}))
+    const wired = await wire(home)
+    // Config's own load order applies altimate-code.jsonc AFTER altimate-code.json,
+    // so writes must land in .jsonc or they would be silently shadowed.
+    expect(wired.file).toBe(path.join(dir, "altimate-code.jsonc"))
+    const jsoncConfig = await readConfig(wired.file)
+    expect(jsoncConfig.provider.local).toBeDefined()
+    const jsonConfig = await readConfig(path.join(dir, "altimate-code.json"))
+    expect(jsonConfig.provider).toBeUndefined()
+  })
+})
+
+describe("wireLocalProvider agent tuning", () => {
+  test("tunes the real 'builder' agent, not a phantom 'build' agent", async () => {
+    const home = await makeHome()
+    const wired = await wire(home)
+    const config = await readConfig(wired.file)
+    expect(config.agent.builder.temperature).toBe(TIER.agent.temperature)
+    expect(config.agent.builder.options.reasoningEffort).toBe(TIER.agent.reasoning_effort)
+    expect(config.agent.general.temperature).toBe(TIER.agent.temperature)
+    expect(config.agent.build).toBeUndefined()
+  })
+
+  test("does not tune the shared builder/general agents when the user's cloud default model is kept", async () => {
+    const home = await makeHome()
+    const dir = path.join(home, ".config", "altimate-code")
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(path.join(dir, "altimate-code.json"), JSON.stringify({ model: "anthropic/claude-sonnet-5" }))
+    const wired = await wire(home)
+    expect(wired.defaultModelIsLocal).toBe(false)
+    const config = await readConfig(wired.file)
+    expect(config.agent).toBeUndefined()
+  })
 })
 
 describe("wireLocalProvider default model reporting", () => {

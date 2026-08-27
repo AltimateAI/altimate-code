@@ -60,4 +60,42 @@ describe("local artifact sha256 verification", () => {
     expect(result.resumed).toBe(true)
     expect(await fs.readFile(destination, "utf8")).toBe("hello world")
   })
+
+  test("a checksum mismatch after HTTP 416 deletes the stale partial instead of getting stuck forever", async () => {
+    await using tmp = await tmpdir()
+    const destination = path.join(tmp.path, "artifact.gguf")
+    const partial = `${destination}.partial`
+    await fs.writeFile(partial, "stale wrong bytes")
+    const fetchImpl = async () => new Response(null, { status: 416 })
+
+    await expect(
+      downloadWithResume({
+        url: "https://example.invalid/artifact.gguf",
+        destination,
+        sha256: sha("expected different bytes"),
+        fetchImpl,
+      }),
+    ).rejects.toBeInstanceOf(ChecksumMismatchError)
+    // Without cleanup, a retry resumes from the same offset, gets 416 again,
+    // and fails identically forever.
+    await expect(fs.stat(partial)).rejects.toThrow()
+  })
+
+  test("a response with no Content-Length reports an unknown total instead of coercing it to 0", async () => {
+    await using tmp = await tmpdir()
+    const destination = path.join(tmp.path, "artifact.gguf")
+    const progress: Array<{ received: number; total?: number }> = []
+    const fetchImpl = async () => new Response("hello world", { status: 200 }) // deliberately no content-length
+
+    const result = await downloadWithResume({
+      url: "https://example.invalid/artifact.gguf",
+      destination,
+      sha256: sha("hello world"),
+      fetchImpl,
+      onProgress: (progressUpdate) => progress.push(progressUpdate),
+    })
+    expect(result.bytes).toBe("hello world".length)
+    expect(progress.length).toBeGreaterThan(0)
+    expect(progress.every((p) => p.total === undefined)).toBe(true)
+  })
 })

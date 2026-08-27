@@ -14,7 +14,7 @@ import { ensureLlamaServer } from "./runtime"
 import { getServerStatus, startServer, stopServer, type ServerState } from "./server"
 import { readEgressGuard, wireLocalProvider } from "./wire"
 
-interface LocalArgs {
+export interface LocalArgs {
   model?: string
   egressGuard?: boolean
   port?: number
@@ -44,12 +44,22 @@ function replaceFlag(flags: string[], name: string, value: string) {
   if (index >= 0 && index + 1 < flags.length) flags[index + 1] = value
 }
 
-function withOverrides(tier: LlamaRecipeTier, args: LocalArgs): LlamaRecipeTier {
+// Exported for unit testing — setup()'s full pipeline (recipe loading,
+// hardware detection, preflight, download, server start) has no dedicated
+// test seam, but the override-validation logic here is pure and worth
+// testing directly.
+export function withOverrides(tier: LlamaRecipeTier, args: LocalArgs): LlamaRecipeTier {
   const result = structuredClone(tier)
   if (args.ctx !== undefined) result.ctx = args.ctx
   if (args.parallel !== undefined) result.parallel = args.parallel
-  if (result.ctx <= 0 || result.parallel <= 0 || result.ctx % result.parallel !== 0) {
-    throw new Error("--ctx must divide evenly across a positive --parallel slot count")
+  if (
+    !Number.isInteger(result.ctx) ||
+    !Number.isInteger(result.parallel) ||
+    result.ctx <= 0 ||
+    result.parallel <= 0 ||
+    result.ctx % result.parallel !== 0
+  ) {
+    throw new Error("--ctx and --parallel must be positive integers, with --ctx dividing evenly across --parallel slots")
   }
   if (args.kv) result.kv = args.kv
   if (args.effort) result.agent.reasoning_effort = args.effort
@@ -111,7 +121,7 @@ function printReady(wired: { file: string; guarded: string[]; defaultModelIsLoca
 
 async function setupDocker(model: ModelRecipe, tier: DockerRecipeTier, args: LocalArgs) {
   console.log(`◇ Recommended: ${model.name} ${tier.quant} · SGLang + EAGLE in the pinned container · ${tier.ctx} context`)
-  const port = await pickPort(8095)
+  const port = await pickPort(args.port && args.port > 0 ? args.port : 8095)
   console.log("◇ Starting SGLang container (first run downloads the weights — this can take a while)")
   const started = await startDockerServer({
     tier,
@@ -176,20 +186,19 @@ async function setup(args: LocalArgs) {
   const match = matchHardwareToTier(hardware, model)
   if (!match.tier) throw new Error(`${match.reason}. No Phase 1 recipe matches this machine.`)
   const matched = match.tier
-  const existing = await getServerStatus()
-  if (existing.state) {
-    console.log(`◇ Stopping existing managed server (${existing.state.tier}) before reconfiguring`)
-    await stopServer()
-  }
   if (matched.engine !== "llama.cpp" && matched.engine !== "docker-sglang") {
     console.log(`◇ Recommended: ${matched.name}`)
     throw new Error(matched.guidance)
   }
+  // Validate CLI overrides before anything else, including stopping a
+  // working existing server below — a bad --ctx/--parallel must fail before
+  // any destructive step, not after.
+  const tier = matched.engine === "llama.cpp" ? withOverrides(matched, args) : matched
 
   const paths = getLocalPaths()
   await ensureLocalDirectories(paths)
   const preflight = await runPreflight({
-    tier: matched,
+    tier,
     model: { id: model.id, revision: model.revision },
     hardware,
     availableGb: match.availableGb,
@@ -201,14 +210,24 @@ async function setup(args: LocalArgs) {
     throw new Error(`This machine cannot run the ${matched.name} recipe yet: ${fatal.map((check) => check.detail).join("; ")}`)
   }
 
-  if (matched.engine === "docker-sglang") {
-    await setupDocker(model, matched, args)
+  // Only stop a working existing server once we're confident the
+  // replacement will actually be attempted (guidance-only engines and
+  // preflight failures are both handled above): a failed new setup must not
+  // leave the user with no working server when they had one before
+  // re-running this command.
+  const existing = await getServerStatus()
+  if (existing.state) {
+    console.log(`◇ Stopping existing managed server (${existing.state.tier}) before reconfiguring`)
+    await stopServer()
+  }
+
+  if (tier.engine === "docker-sglang") {
+    await setupDocker(model, tier, args)
     return
   }
   // No runtime build for this platform-arch (e.g. Intel macOS) must fail
   // BEFORE the multi-GB model download, not after.
   runtimeAsset({})
-  const tier = withOverrides(matched, args)
   console.log(
     `◇ Recommended: ${model.name} ${tier.quant} · ${Math.floor(tier.ctx / tier.parallel)} context/slot · ` +
       `${tier.agent.tool_retrieval ? "tool-slim" : "all tools"} · ${tier.mtp ? "MTP speculative" : "no MTP"}`,
@@ -271,6 +290,8 @@ const LocalStatusCommand = {
         modelSha256: status.state.modelSha256,
         runtimeVersion: status.state.runtimeVersion,
         flags: status.state.flags,
+        reasoningEffort: status.state.reasoningEffort,
+        temperature: status.state.temperature,
       })
       console.log(`Certificate: ${key}`)
       const guard = await readEgressGuard()

@@ -108,18 +108,37 @@ export function preview(lines: string[], totalBytes: number, opts: ResolvedOptio
   }
 
   if (direction === "middle") {
-    const headBudgetLines = Math.max(1, Math.floor(maxLines * headRatio))
+    // A non-finite or out-of-[0,1] headRatio would make one sub-budget larger
+    // than the total maxBytes, letting the assembled preview exceed it. Clamp
+    // finite values and fall back to the default for invalid ones.
+    const safeHeadRatio = Number.isFinite(headRatio) ? Math.min(1, Math.max(0, headRatio)) : DEFAULT_HEAD_RATIO
+    const headBudgetLines = Math.max(1, Math.floor(maxLines * safeHeadRatio))
     // Not `Math.max(1, ...)`: flooring the tail budget to 1 would let the
     // two halves together exceed maxLines (e.g. maxLines=1 -> head claims
     // the only line, but tail would still floor up to 1 and add a second).
     const tailBudgetLines = Math.max(0, maxLines - headBudgetLines)
-    const headBudgetBytes = Math.max(1, Math.floor(maxBytes * headRatio))
+    const headBudgetBytes = Math.max(1, Math.floor(maxBytes * safeHeadRatio))
     const tailBudgetBytes = Math.max(0, maxBytes - headBudgetBytes)
 
     const headSel = selectFromHead(lines, headBudgetLines, headBudgetBytes)
     // notBefore = headSel.lines.length: the tail walk stops at the boundary
     // of what the head half already claimed, so the two halves never overlap.
     const tailSel = selectFromTail(lines, tailBudgetLines, tailBudgetBytes, headSel.lines.length)
+
+    // A boundary line bigger than its own head/tail share of the split budget
+    // used to be dropped by BOTH halves even when it fits the overall maxBytes,
+    // returning only the marker/hint with no content. Fall back to a plain head
+    // selection against the full (undivided) budget so it survives.
+    if (headSel.lines.length === 0 && tailSel.lines.length === 0 && lines.length > 0) {
+      const fallback = selectFromHead(lines, maxLines, maxBytes)
+      const removed = fallback.hitBytes ? totalBytes - fallback.bytes : lines.length - fallback.lines.length
+      return {
+        head: fallback.lines.join("\n"),
+        tail: "",
+        removed,
+        unit: fallback.hitBytes ? "bytes" : "lines",
+      }
+    }
 
     const keptLines = headSel.lines.length + tailSel.lines.length
     const keptBytes = headSel.bytes + tailSel.bytes

@@ -39,6 +39,48 @@ describe("withLifecycleLock", () => {
     // The lock directory is released after the run.
     await expect(fs.stat(path.join(root, ".lifecycle-lock"))).rejects.toThrow()
   }, 10_000)
+
+  // Acquisition is two steps (mkdir, then write owner.json). A waiter that
+  // observes the dir but not yet owner.json must not assume the holder
+  // crashed and steal the lock out from under it — it should wait out a
+  // short grace window instead.
+  test("a waiter does not steal the lock while the holder is still publishing owner.json", async () => {
+    await using tmp = await tmpdir()
+    const root = path.join(tmp.path, "race")
+    const testPaths = paths(root)
+    const lockDir = path.join(root, ".lifecycle-lock")
+    await fs.mkdir(lockDir, { recursive: true }) // holder has mkdir'd but not yet written owner.json
+
+    let waiterRan = false
+    const waiter = withLifecycleLock(async () => {
+      waiterRan = true
+      return "waiter"
+    }, testPaths)
+
+    // Still inside the grace window: the waiter must not have proceeded.
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(waiterRan).toBe(false)
+
+    // Holder finishes publishing and releases normally.
+    await fs.writeFile(path.join(lockDir, "owner.json"), JSON.stringify({ pid: process.pid, at: Date.now() }), {
+      mode: 0o600,
+    })
+    await fs.rm(lockDir, { recursive: true, force: true })
+
+    expect(await waiter).toBe("waiter")
+    expect(waiterRan).toBe(true)
+  }, 10_000)
+
+  test("reclaims a lock whose owner.json never appears (holder crashed right after mkdir)", async () => {
+    await using tmp = await tmpdir()
+    const root = path.join(tmp.path, "crashed")
+    const testPaths = paths(root)
+    const lockDir = path.join(root, ".lifecycle-lock")
+    await fs.mkdir(lockDir, { recursive: true }) // dir exists, owner.json never written — simulates a crash
+
+    const result = await withLifecycleLock(async () => "reclaimed", testPaths)
+    expect(result).toBe("reclaimed")
+  }, 10_000)
 })
 
 describe("isOwnerStale", () => {

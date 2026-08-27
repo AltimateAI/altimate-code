@@ -47,8 +47,32 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
   test("both fields are always present with valid enum values", () => {
     const acc = RunAccounting.create()
     const t = acc.termination()
-    expect(["stop", "tool-call", "explicit-done"]).toContain(t.why_model_stopped)
+    expect(["stop", "tool-call", "explicit-done", "length", "content-filter", "unknown"]).toContain(
+      t.why_model_stopped,
+    )
     expect(["budget-exhausted", "timeout", "error", "idle-done", "none"]).toContain(t.why_harness_stopped)
+  })
+
+  test("a run with no step-finish at all attributes model=unknown, not a false 'stop'", () => {
+    // No onStepFinish call means lastFinishReason is undefined (e.g. a fatal abort
+    // before any model output). Previously this fell through to a default "stop",
+    // falsely claiming a clean model-side finish for a generation that never
+    // completed.
+    const acc = RunAccounting.create()
+    expect(acc.termination().why_model_stopped).toBe("unknown")
+  })
+
+  test("length/content-filter finish reasons are attributed distinctly, not collapsed into stop", () => {
+    for (const [reason, expected] of [
+      ["length", "length"],
+      ["content-filter", "content-filter"],
+    ] as const) {
+      const acc = RunAccounting.create()
+      acc.onAssistantMessage({ id: "m1", agent: "build" })
+      acc.onStepStart("m1")
+      acc.onStepFinish("m1", reason)
+      expect(acc.termination().why_model_stopped).toBe(expected)
+    }
   })
 
   test("natural finish: model=stop, harness=none", () => {
@@ -137,6 +161,15 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
     acc.onBudgetExhausted()
     acc.onSessionError("MessageAbortedError", "aborted")
     expect(acc.termination().why_harness_stopped).toBe("budget-exhausted")
+  })
+
+  test("the FIRST fatal error is preserved when a second, unrelated error follows", () => {
+    // A later cleanup/abort error (e.g. torn down after the original failure)
+    // must not overwrite the root cause that actually stopped the run.
+    const acc = RunAccounting.create()
+    acc.onSessionError("UnknownError", "request timed out waiting for provider")
+    acc.onSessionError("MessageAbortedError", "aborted during cleanup")
+    expect(acc.termination().why_harness_stopped).toBe("timeout")
   })
 })
 

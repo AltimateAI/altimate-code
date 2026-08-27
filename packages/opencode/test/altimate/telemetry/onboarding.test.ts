@@ -71,6 +71,41 @@ describe("onboarding abandonment", () => {
     expect((abandoned[0] as any).last_stage).toBe("provider_setup")
   })
 
+  test("acknowledging the local-model interstitial and quitting is not reported as a stall at model_picker", async () => {
+    const events = captureEvents()
+
+    // The picker cannot run the multi-minute `altimate local` setup itself — it
+    // hands the user a command and closes. There is no gateway/auth follow-up,
+    // so `opts.connected` never suppresses this the way it does for gateway
+    // providers. A real, completed choice must still advance the funnel past
+    // model_picker, the same way picking a gateway provider does.
+    await Onboarding.emit({ type: "onboarding_started" })
+    await Onboarding.emit({ type: "model_picker_shown", trigger: "first_run" })
+    await Onboarding.emit({ type: "local_model_info_shown" })
+    await Onboarding.emit({ type: "local_model_choice", choice: "acknowledge" })
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    const abandoned = events.filter((e) => e.type === "onboarding_abandoned")
+    expect(abandoned).toHaveLength(1)
+    expect((abandoned[0] as any).last_stage).toBe("provider_setup")
+  })
+
+  test("cancelling or backing out of the local-model interstitial does not advance the funnel", async () => {
+    const events = captureEvents()
+
+    await Onboarding.emit({ type: "onboarding_started" })
+    await Onboarding.emit({ type: "model_picker_shown", trigger: "first_run" })
+    await Onboarding.emit({ type: "local_model_info_shown" })
+    await Onboarding.emit({ type: "local_model_choice", choice: "cancel" })
+    await Onboarding.emitAbandonedIfIncomplete()
+    await settle()
+
+    const abandoned = events.filter((e) => e.type === "onboarding_abandoned")
+    expect(abandoned).toHaveLength(1)
+    expect((abandoned[0] as any).last_stage).toBe("model_picker")
+  })
+
   test("a completed onboarding is never reported as abandoned", async () => {
     const events = captureEvents()
 

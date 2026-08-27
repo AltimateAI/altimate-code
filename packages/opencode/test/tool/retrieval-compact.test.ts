@@ -27,4 +27,22 @@ describe("Retrieval.compactDescription", () => {
     expect(Retrieval.compactDescription(undefined)).toBe("")
     expect(Retrieval.compactDescription("   ")).toBe("")
   })
+
+  test("does not mis-cut on an abbreviation's period", () => {
+    expect(Retrieval.compactDescription("e.g. run the linter before committing.")).toBe(
+      "e.g. run the linter before committing.",
+    )
+  })
+
+  test("does not mis-cut on a decimal version number", () => {
+    expect(Retrieval.compactDescription("Supports v2.0 models and newer releases.")).toBe(
+      "Supports v2.0 models and newer releases.",
+    )
+  })
+
+  test("does not mis-cut on a bare URL", () => {
+    expect(Retrieval.compactDescription("See https://example.com for details and more context here.")).toBe(
+      "See https://example.com for details and more context here.",
+    )
+  })
 })

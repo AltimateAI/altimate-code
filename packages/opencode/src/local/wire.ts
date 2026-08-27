@@ -6,11 +6,41 @@ import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import type { LlamaRecipeTier } from "./recipes"
 import { getLocalPaths, type LocalPaths } from "./paths"
 import { writeLocalEnvironment, readLocalEnvironment } from "./environment"
+import { Wildcard } from "@/util/wildcard"
+
+// Precedence Config actually applies when merging (lowest to highest —
+// see config/config.ts's load order; each later file overrides the earlier
+// ones). If more than one of these exists, the LAST one here is the file
+// that actually takes effect.
+const CONFIG_PRECEDENCE = ["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"]
+// Default target when nothing exists yet, so a fresh install still lands in
+// the expected file.
+const DEFAULT_CONFIG_FILE = "altimate-code.json"
 
 function configFile(env: NodeJS.ProcessEnv, home: string) {
   const root = path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "altimate-code")
-  const candidates = ["altimate-code.json", "altimate-code.jsonc", "opencode.jsonc", "opencode.json", "config.json"]
-  return { root, candidates: candidates.map((name) => path.join(root, name)) }
+  return {
+    root,
+    defaultFile: path.join(root, DEFAULT_CONFIG_FILE),
+    // Highest precedence first: the file that wins if it exists.
+    precedence: [...CONFIG_PRECEDENCE].reverse().map((name) => path.join(root, name)),
+  }
+}
+
+// Which existing config file actually wins under Config's merge order.
+// Writing to (or reading from) any lower-precedence file that also exists
+// would be silently shadowed by this one — see config/config.ts's load order.
+async function winningConfigFile(config: ReturnType<typeof configFile>) {
+  for (const file of config.precedence) {
+    if (
+      await fs
+        .stat(file)
+        .then(() => true)
+        .catch(() => false)
+    )
+      return file
+  }
+  return config.defaultFile
 }
 
 function patch(input: string, keys: (string | number)[], value: unknown) {
@@ -42,16 +72,7 @@ export async function wireLocalProvider(input: {
   const paths = input.paths ?? getLocalPaths(env, home)
   const config = configFile(env, home)
   await fs.mkdir(config.root, { recursive: true })
-  const existing = await Promise.all(
-    config.candidates.map(async (file) => ({
-      file,
-      exists: await fs
-        .stat(file)
-        .then(() => true)
-        .catch(() => false),
-    })),
-  )
-  const file = existing.find((candidate) => candidate.exists)?.file ?? config.candidates[0]!
+  const file = await winningConfigFile(config)
   const before = await fs.readFile(file, "utf8").catch(() => "{}")
   const errors: ParseError[] = []
   const parsed = parse(before, errors, { allowTrailingComma: true, disallowComments: false }) as Record<string, unknown>
@@ -82,11 +103,28 @@ export async function wireLocalProvider(input: {
   let updated = before
   if (!("$schema" in parsed)) updated = patch(updated, ["$schema"], "https://altimate.ai/config.json")
   updated = patch(updated, ["provider", "local"], provider)
-  for (const agent of ["build", "general"] as const) {
-    updated = patch(updated, ["agent", agent, "temperature"], input.tier.agent.temperature)
-    updated = patch(updated, ["agent", agent, "options", "reasoningEffort"], input.tier.agent.reasoning_effort)
-  }
   if (!("model" in parsed)) updated = patch(updated, ["model"], `local/${input.modelID}`)
+  // Whether the config's default `model` actually resolves to this local model:
+  // the patch above never overwrites an existing value (see comment above),
+  // so a user with a cloud default keeps using it silently after setup
+  // reports "Ready" — callers use this to warn instead of implying the
+  // switch happened. Computed here (before the agent-tuning patch below)
+  // because that patch is itself gated on this.
+  const defaultModelIsLocal = !("model" in parsed) || parsed.model === `local/${input.modelID}`
+  if (defaultModelIsLocal) {
+    // "builder" is the real built-in agent; "build" is only a config-lookup
+    // alias that fires when no `agent.build` entry exists (agent/agent.ts).
+    // Writing to "build" here would materialize a phantom non-native agent
+    // that shadows the alias, so these settings would never reach the actual
+    // builder agent. Only tune when the default model is actually local:
+    // "builder"/"general" are shared agents also used for cloud sessions, so
+    // clobbering their tuning when the user's cloud default is left in place
+    // (never-clobbered above) would silently change cloud behavior too.
+    for (const agent of ["builder", "general"] as const) {
+      updated = patch(updated, ["agent", agent, "temperature"], input.tier.agent.temperature)
+      updated = patch(updated, ["agent", agent, "options", "reasoningEffort"], input.tier.agent.reasoning_effort)
+    }
+  }
 
   // Keep internal machinery (compaction, title generation) on the local model:
   // getSmallModel falls back to the session model today, but an explicit value
@@ -95,24 +133,36 @@ export async function wireLocalProvider(input: {
 
   const guarded: string[] = []
   const permission = (parsed.permission ?? {}) as Record<string, unknown>
+  const existingPermissionKeys = Object.keys(permission)
   if (input.egressGuard !== false) {
     for (const key of EGRESS_PERMISSIONS) {
-      // Only where the user has not already decided — never clobber their config.
-      if (key in permission) continue
+      // Skip if the user already has ANY rule that resolves for this tool —
+      // an exact key or a wildcard/pattern key (e.g. "*": "deny") that would
+      // already cover it. Checking only exact-key presence missed wildcard
+      // rules: adding "ask" here would widen a user's broader top-level rule
+      // the moment this key happens to sort after it in the permission
+      // engine's evaluation order. Never clobber their config.
+      if (existingPermissionKeys.some((existing) => Wildcard.match(key, existing))) continue
       updated = patch(updated, ["permission", key], "ask")
       guarded.push(key)
     }
   } else {
-    // Reversible: --no-egress-guard removes only rules the guard plausibly owns
-    // (value is exactly "ask" AND a prior `altimate local` wiring actually turned
-    // the guard on — recorded in environment.json's egress_guard field). Without
-    // that check, an "ask" rule the user wrote themselves (or one from a run that
-    // never applied the guard) would be silently deleted just because it matches
-    // the value the guard happens to use.
+    // Reversible: --no-egress-guard removes only permission keys THIS wiring
+    // actually added under the guard, recorded in environment.json's
+    // guarded_permissions (see writeLocalEnvironment below) — never a value
+    // the user configured independently, and never rules from a run that
+    // had the guard off in the first place. Older environment files (written
+    // before guarded_permissions existed) only recorded the boolean; fall
+    // back to the previous coarse heuristic (treat every egress permission
+    // as possibly guard-owned) for those so upgrading doesn't stop honoring
+    // --no-egress-guard on state from an older setup.
     const priorEnvironment = await readLocalEnvironment(paths)
     if (priorEnvironment?.egress_guard === true) {
-      for (const key of EGRESS_PERMISSIONS) {
-        if (permission[key] === "ask") updated = patch(updated, ["permission", key], undefined)
+      const ownedKeys = priorEnvironment.guarded_permissions ?? EGRESS_PERMISSIONS
+      for (const key of ownedKeys) {
+        if ((EGRESS_PERMISSIONS as readonly string[]).includes(key) && permission[key] === "ask") {
+          updated = patch(updated, ["permission", key], undefined)
+        }
       }
     }
   }
@@ -124,14 +174,23 @@ export async function wireLocalProvider(input: {
     await fs.rename(temp, file)
   }
   await fs.chmod(file, 0o600)
-  await writeLocalEnvironment(input.tier.agent.tool_retrieval, paths, input.egressGuard !== false)
-  // Whether the config's default `model` actually resolves to this local model:
-  // the patch above never overwrites an existing value (see comment at the top of
-  // this function), so a user with a cloud default keeps using it silently after
-  // setup reports "Ready" — callers use this to warn instead of implying the
-  // switch happened.
-  const defaultModelIsLocal = !("model" in parsed) || parsed.model === `local/${input.modelID}`
+  await writeLocalEnvironment(input.tier.agent.tool_retrieval, paths, input.egressGuard !== false, guarded)
   return { file, changed: updated !== before, advertisedContext, guarded, defaultModelIsLocal }
+}
+
+// Resolve the effective action for `key` the way the permission engine does:
+// the LAST rule (in config key order) whose pattern matches wins, including
+// wildcard/pattern keys like "*". A non-string value at the exact key is a
+// nested per-pattern ruleset, not a simple top-level decision — report it as
+// "custom" rather than trying to resolve a single winner from it.
+function resolveEgressAction(permission: Record<string, unknown>, key: string): string {
+  if (key in permission && typeof permission[key] !== "string") return "custom"
+  let resolved: string | undefined
+  for (const [pattern, value] of Object.entries(permission)) {
+    if (typeof value !== "string") continue
+    if (Wildcard.match(key, pattern)) resolved = value
+  }
+  return resolved ?? "allow (no rule)"
 }
 
 // Effective egress-guard state for `altimate local status`: what each
@@ -140,19 +199,12 @@ export async function readEgressGuard(env?: NodeJS.ProcessEnv, home?: string) {
   const resolvedEnv = env ?? process.env
   const resolvedHome = home ?? resolvedEnv.OPENCODE_TEST_HOME ?? os.homedir()
   const config = configFile(resolvedEnv, resolvedHome)
-  for (const file of config.candidates) {
-    const text = await fs.readFile(file, "utf8").catch(() => undefined)
-    if (text === undefined) continue
-    const parsed = parse(text, [], { allowTrailingComma: true, disallowComments: false }) as
-      | Record<string, unknown>
-      | undefined
-    const permission = (parsed?.permission ?? {}) as Record<string, unknown>
-    return Object.fromEntries(
-      EGRESS_PERMISSIONS.map((key) => {
-        const value = permission[key]
-        return [key, typeof value === "string" ? value : value === undefined ? "allow (no rule)" : "custom"]
-      }),
-    )
-  }
-  return Object.fromEntries(EGRESS_PERMISSIONS.map((key) => [key, "allow (no rule)"]))
+  const file = await winningConfigFile(config)
+  const text = await fs.readFile(file, "utf8").catch(() => undefined)
+  if (text === undefined) return Object.fromEntries(EGRESS_PERMISSIONS.map((key) => [key, "allow (no rule)"]))
+  const parsed = parse(text, [], { allowTrailingComma: true, disallowComments: false }) as
+    | Record<string, unknown>
+    | undefined
+  const permission = (parsed?.permission ?? {}) as Record<string, unknown>
+  return Object.fromEntries(EGRESS_PERMISSIONS.map((key) => [key, resolveEgressAction(permission, key)]))
 }

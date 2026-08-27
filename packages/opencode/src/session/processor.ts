@@ -49,7 +49,13 @@ export namespace SessionProcessor {
   // Exported as a factory so the ingestion half is unit-testable against the replay
   // half in message-v2.ts (they must produce identical output for a pair).
   export function createToolCallIDCoercer() {
-    const aliases: Record<string, string> = {}
+    // upstream_fix: null-prototype map. A plain `{}` resolves reserved keys like
+    // "toString"/"constructor"/"__proto__" to inherited Object.prototype values —
+    // a provider emitting one of those as a raw tool-call id would read back a
+    // FUNCTION where a sanitized string id is expected, and writing "__proto__"
+    // reassigns the object's prototype instead of storing an alias. Mirrors the
+    // same guard on CURATED_PROVIDER_ENUM in altimate/telemetry/index.ts.
+    const aliases: Record<string, string> = Object.create(null)
     return (raw: unknown): string => {
       const key = typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw))
       const existing = aliases[key]

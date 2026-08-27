@@ -492,6 +492,39 @@ it.instance("loop exits without an LLM request for interrupted orphan tool calls
   }),
 )
 
+it.instance("re-delivering the same messageID does not duplicate user parts", () =>
+  Effect.gen(function* () {
+    yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "idempotent",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    const messageID = MessageID.ascending()
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      messageID,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello once" }],
+    })
+    const first = MessageV2.get({ sessionID: chat.id, messageID })
+    // Same messageID re-delivered (the run command's retry path after an
+    // ambiguous network failure) must not append a second copy of the parts.
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      messageID,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello once" }],
+    })
+    const second = MessageV2.get({ sessionID: chat.id, messageID })
+    expect(second.parts.length).toBe(first.parts.length)
+    expect(second.parts.filter((p) => p.type === "text")).toHaveLength(1)
+  }),
+)
+
 it.instance("loop calls LLM and returns assistant message", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)

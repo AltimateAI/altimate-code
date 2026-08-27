@@ -42,12 +42,23 @@ export namespace MessageV2 {
   export function sanitizeToolCallID(id: unknown): string {
     if (typeof id === "string" && id.length > 0) return id
     const raw = typeof id === "string" ? id : (JSON.stringify(id) ?? String(id))
-    let hash = 0x811c9dc5
+    // upstream_fix: two independent FNV-1a passes (different seeds) concatenated
+    // into a 64-bit digest instead of one 32-bit pass. A single 32-bit digest has
+    // only ~4B buckets, so two DISTINCT malformed ids can collide and get the same
+    // toolCallId, breaking replay/provider pairing; widening cuts that collision
+    // probability from ~1e-9 to ~1e-19 for the same volume of malformed ids, with
+    // no loss of determinism — both ingestion (processor.ts) and replay call this
+    // same function, so they still agree on the mapping.
+    let hashA = 0x811c9dc5
+    let hashB = 0x9e3779b9
     for (let i = 0; i < raw.length; i++) {
-      hash ^= raw.charCodeAt(i)
-      hash = Math.imul(hash, 0x01000193)
+      const c = raw.charCodeAt(i)
+      hashA ^= c
+      hashA = Math.imul(hashA, 0x01000193)
+      hashB ^= c
+      hashB = Math.imul(hashB, 0x85ebca6b)
     }
-    return "call_" + (hash >>> 0).toString(16).padStart(8, "0")
+    return "call_" + (hashA >>> 0).toString(16).padStart(8, "0") + (hashB >>> 0).toString(16).padStart(8, "0")
   }
   // altimate_change end
 

@@ -599,7 +599,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
         return false
       }
 
-      const events = await sdk.event.subscribe()
+      // altimate_change start — W1.1: abortable event subscription. A fatal send
+      // failure (exhausted retries, or a non-retryable enqueue error — see the
+      // retry loop below) throws before `await loopPromise`, and this open SSE
+      // connection would otherwise keep the process alive indefinitely (observed:
+      // `run` hung instead of exiting nonzero). Both throw sites abort this signal
+      // first so the connection closes and the process can reach its natural exit.
+      const eventsAbort = new AbortController()
+      const events = await sdk.event.subscribe(undefined, { signal: eventsAbort.signal })
+      // altimate_change end
       let error: string | undefined
       // altimate_change start — W1.10/W1.12: turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
@@ -983,22 +991,49 @@ You are speaking to a non-technical business executive. Follow these rules stric
         response?: Response
         data?: { info?: { finish?: string; error?: { name?: unknown; data?: unknown } } }
       }
+      // altimate_change start — upstream_fix: dedicated marker so a non-retryable send
+      // error can never be misclassified as retryable by isRetryableThrown() just
+      // because the provider's own error message happens to contain a word like
+      // "timeout" — see the throw site below.
+      class NonRetryableSendError extends Error {}
+      // altimate_change end
       let sendResult: SendResult | undefined
       for (let sendAttempt = 0; ; sendAttempt++) {
         let reason: string
         try {
           const res = (await send()) as SendResult
           const status = res?.response?.status
-          if (!res?.error || !RunAccounting.isRetryableStatus(status)) {
+          if (!res?.error) {
             sendResult = res
             break
           }
+          // altimate_change start — upstream_fix: a non-retryable send error (4xx/429)
+          // used to share the same success break as `!res?.error`, so it was silently
+          // treated as a clean enqueue. `res.data` is undefined on error, so
+          // `accounting.onPromptResult` below no-ops and `accounting.fatal` stays
+          // false — the run then either hung on `await loopPromise` (no idle event
+          // ever arrives for a rejected enqueue) or exited 0 despite the failed
+          // prompt. Throw immediately instead, same as exhausted retries.
+          if (!RunAccounting.isRetryableStatus(status)) {
+            eventsAbort.abort()
+            throw new NonRetryableSendError(`prompt rejected: ${RunAccounting.serializeSessionError(res.error)}`)
+          }
+          // altimate_change end
           reason = `provider returned status ${status}`
         } catch (e) {
+          // altimate_change start — upstream_fix: propagate the non-retryable marker
+          // unconditionally, before the message-text retry classification below.
+          if (e instanceof NonRetryableSendError) throw e
+          // altimate_change end
           if (!RunAccounting.isRetryableThrown(e)) throw e
           reason = e instanceof Error ? e.message : String(e)
         }
-        if (sendAttempt >= retryMax) throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)
+        if (sendAttempt >= retryMax) {
+          // altimate_change start — W1.1: see the eventsAbort comment above.
+          eventsAbort.abort()
+          // altimate_change end
+          throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)
+        }
         const delay = retryBaseMs * 2 ** sendAttempt
         if (!emit("retry", { attempt: sendAttempt + 1, max: retryMax, reason, delayMs: delay })) {
           UI.println(

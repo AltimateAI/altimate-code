@@ -1954,6 +1954,23 @@ export namespace SessionPrompt {
   }
 
   async function createUserMessage(input: PromptInput) {
+    // altimate_change start — upstream_fix: idempotent re-delivery for a client-supplied
+    // messageID. The run command retries with a stable messageID after an ambiguous
+    // network failure; the message row upserts by id, but parts always get fresh
+    // ascending ids, so a re-send appended a duplicate copy of every user part to the
+    // same message. If the message already landed with parts, return it untouched —
+    // no duplicate parts, no double plugin trigger.
+    if (input.messageID) {
+      try {
+        const existing = MessageV2.get({ sessionID: input.sessionID, messageID: input.messageID })
+        if (existing.info.role === "user" && existing.parts.length > 0) {
+          return { info: existing.info, parts: existing.parts }
+        }
+      } catch {
+        // Not found — first delivery of this message, proceed normally.
+      }
+    }
+    // altimate_change end
     const agentName = input.agent ?? (await Agent.defaultAgent())
     const agent = await Agent.get(agentName)
     if (!agent) {

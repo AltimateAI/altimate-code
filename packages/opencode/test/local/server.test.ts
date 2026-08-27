@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test"
 import { tmpdir } from "../fixture/fixture"
 import { getServerStatus, pickPort, readServerState, startServer, stopServer, writeServerState } from "../../src/local/server"
 import type { ServerState } from "../../src/local/server"
-import { LOCAL_CONTAINER_NAME } from "../../src/local/docker"
+import { LOCAL_CONTAINER_NAME, LOCAL_MANAGEMENT_LABEL_KEY, LOCAL_MANAGEMENT_LABEL_VALUE } from "../../src/local/docker"
 import type { DockerExec } from "../../src/local/docker"
 import type { LocalPaths } from "../../src/local/paths"
 import type { RuntimeInfo } from "../../src/local/runtime"
@@ -90,11 +90,19 @@ describe("local server port selection", () => {
 
   test("auto-picks the next candidate when the preferred port is occupied", async () => {
     const requested: number[] = []
-    const selected = await pickPort(8080, async (candidate) => {
-      requested.push(candidate)
-      if (candidate === 8080) throw Object.assign(new Error("occupied"), { code: "EADDRINUSE" })
-      return candidate === 0 ? 43124 : candidate
-    })
+    const selected = await pickPort(
+      8080,
+      async (candidate) => {
+        requested.push(candidate)
+        if (candidate === 8080) throw Object.assign(new Error("occupied"), { code: "EADDRINUSE" })
+        return candidate === 0 ? 43124 : candidate
+      },
+      // Explicit always-false probe: without this, pickPort defaults to the
+      // real respondsToHttp and makes an actual HTTP request to
+      // 127.0.0.1:8081, which flakes whenever anything else on the machine
+      // happens to be listening on that port during the test run.
+      async () => false,
+    )
     expect(requested[0]).toBe(8080)
     expect(selected).toBe(8081)
   })
@@ -158,6 +166,10 @@ describe("getServerStatus / stopServer — docker-sglang engine", () => {
     const dockerExec = fakeDockerExec({
       [`docker inspect -f {{.State.Running}} ${LOCAL_CONTAINER_NAME}`]: { stdout: "true\n", stderr: "" },
       [`docker inspect -f {{.Id}} ${LOCAL_CONTAINER_NAME}`]: { stdout: "abc123\n", stderr: "" },
+      [`docker inspect -f {{index .Config.Labels "${LOCAL_MANAGEMENT_LABEL_KEY}"}} ${LOCAL_CONTAINER_NAME}`]: {
+        stdout: `${LOCAL_MANAGEMENT_LABEL_VALUE}\n`,
+        stderr: "",
+      },
       [`docker rm -f ${LOCAL_CONTAINER_NAME}`]: { stdout: `${LOCAL_CONTAINER_NAME}\n`, stderr: "" },
     })
 
@@ -174,6 +186,10 @@ describe("getServerStatus / stopServer — docker-sglang engine", () => {
     const dockerExec = fakeDockerExec({
       [`docker inspect -f {{.State.Running}} ${LOCAL_CONTAINER_NAME}`]: { stdout: "true\n", stderr: "" },
       [`docker inspect -f {{.Id}} ${LOCAL_CONTAINER_NAME}`]: { stdout: "abc123\n", stderr: "" },
+      [`docker inspect -f {{index .Config.Labels "${LOCAL_MANAGEMENT_LABEL_KEY}"}} ${LOCAL_CONTAINER_NAME}`]: {
+        stdout: `${LOCAL_MANAGEMENT_LABEL_VALUE}\n`,
+        stderr: "",
+      },
       [`docker rm -f ${LOCAL_CONTAINER_NAME}`]: new Error("docker daemon busy"),
     })
 
@@ -248,5 +264,81 @@ describe("startServer / getServerStatus / stopServer — llama.cpp engine", () =
     await expect(stopServer({ paths })).rejects.toThrow(/Refusing to signal pid/)
     // Untouched: state stays exactly as written, and the real process is unharmed.
     expect((await readServerState(paths))?.pid).toBe(process.pid)
+  })
+
+  test("getServerStatus treats a recorded pid resolving to an unrelated process as not alive (PID-recycle guard)", async () => {
+    await using tmp = await tmpdir()
+    const paths = testPaths(tmp.path)
+    // process.pid is genuinely alive, but its command line matches neither
+    // the tracked runtime nor model path — simulating the OS having
+    // recycled the recorded pid onto an unrelated process. A raw
+    // processAlive() check alone would (wrongly) call this "alive" and go
+    // on to health-probe the recorded port.
+    await writeServerState(
+      {
+        schema: 1,
+        pid: process.pid,
+        host: "127.0.0.1",
+        port: 42625,
+        baseURL: "http://127.0.0.1:42625/v1",
+        modelID: "test-model",
+        modelPath: "/models/does-not-match.gguf",
+        modelSha256: "sha256:deadbeef",
+        runtimePath: "/usr/local/bin/llama-server",
+        runtimeVersion: "test-runtime",
+        tier: llamaTier.name,
+        flags: [],
+        reasoningEffort: "medium",
+        temperature: 0,
+        startedAt: new Date().toISOString(),
+        logPath: path.join(tmp.path, "server.log"),
+      },
+      paths,
+    )
+
+    // Even a health check that would report "ok" must not be trusted unless
+    // identity checks out first.
+    const status = await getServerStatus({
+      paths,
+      fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }),
+    })
+    expect(status.processAlive).toBe(false)
+    expect(status.healthy).toBe(false)
+    expect(status.stale).toBe(true)
+  })
+
+  test("stop/status work with a custom-named runtime binary, matched by its exact recorded path", async () => {
+    await using tmp = await tmpdir()
+    const paths = testPaths(tmp.path)
+    // Deliberately not named "llama-server": a hard-coded name substring
+    // check would false-negative here (ALTIMATE_LOCAL_LLAMA_SERVER lets
+    // users point at any binary name).
+    const scriptPath = path.join(tmp.path, "custom-runtime-binary")
+    await fs.writeFile(scriptPath, "#!/bin/sh\nsleep 5\n")
+    await fs.chmod(scriptPath, 0o755)
+    const modelPath = path.join(tmp.path, "model.gguf")
+    const runtime: RuntimeInfo = { path: scriptPath, version: "test-runtime", source: "path" }
+
+    await startServer({
+      runtime,
+      modelID: "test-model",
+      modelPath,
+      modelSha256: "sha256:deadbeef",
+      tier: llamaTier,
+      paths,
+      timeoutMs: 5_000,
+      fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }),
+    })
+
+    const status = await getServerStatus({
+      paths,
+      fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }),
+    })
+    expect(status.processAlive).toBe(true)
+    expect(status.healthy).toBe(true)
+
+    const result = await stopServer({ paths, graceMs: 2_000 })
+    expect(result.stopped).toBe(true)
+    expect(await readServerState(paths)).toBeUndefined()
   })
 })

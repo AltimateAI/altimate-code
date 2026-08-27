@@ -192,4 +192,62 @@ describe("runPreflight", () => {
     expect(disk.detail).toContain("already cached")
     expect(disk.ok).toBe(true)
   })
+
+  test("docker tier: cached HF weights alone do not discount the estimate when the SGLang image is missing", async () => {
+    await using tmp = await tmpdir()
+    if (dockerTier.engine !== "docker-sglang") throw new Error("expected docker tier fixture")
+    const home = tmp.path
+    const repo = dockerTier.model_hf.replace("/", "--")
+    const snapshot = path.join(home, ".cache", "huggingface", "hub", `models--${repo}`, "snapshots", dockerTier.model_revision)
+    await fs.mkdir(snapshot, { recursive: true })
+
+    const result = await runPreflight({
+      tier: dockerTier,
+      model: { id: model.id, revision: model.revision },
+      hardware: spark,
+      availableGb: 119,
+      directory: tmp.path,
+      platform: "linux",
+      home,
+      exec: exec({
+        df: DF_10GB, // enough for the "cached" 4GB floor but not the ~45GB fresh-download estimate
+        "docker version": { stdout: "27.1.1\n", stderr: "" },
+        "docker info": { stdout: '{"nvidia":{"path":"nvidia-container-runtime"}}\n', stderr: "" },
+        "docker image inspect": new Error("no such image"), // weights cached, but the image was never pulled
+      }),
+      readFile: (async () => "MemAvailable: 41943040 kB\n") as never,
+    })
+    const disk = result.checks.find((check) => check.name === "disk_space")!
+    expect(disk.detail).not.toContain("already cached")
+    expect(disk.ok).toBe(false)
+  })
+
+  test("docker tier: HF weights and the SGLang image both cached discounts the estimate", async () => {
+    await using tmp = await tmpdir()
+    if (dockerTier.engine !== "docker-sglang") throw new Error("expected docker tier fixture")
+    const home = tmp.path
+    const repo = dockerTier.model_hf.replace("/", "--")
+    const snapshot = path.join(home, ".cache", "huggingface", "hub", `models--${repo}`, "snapshots", dockerTier.model_revision)
+    await fs.mkdir(snapshot, { recursive: true })
+
+    const result = await runPreflight({
+      tier: dockerTier,
+      model: { id: model.id, revision: model.revision },
+      hardware: spark,
+      availableGb: 119,
+      directory: tmp.path,
+      platform: "linux",
+      home,
+      exec: exec({
+        df: DF_10GB,
+        "docker version": { stdout: "27.1.1\n", stderr: "" },
+        "docker info": { stdout: '{"nvidia":{"path":"nvidia-container-runtime"}}\n', stderr: "" },
+        "docker image inspect": { stdout: "sha256:deadbeef\n", stderr: "" },
+      }),
+      readFile: (async () => "MemAvailable: 41943040 kB\n") as never,
+    })
+    const disk = result.checks.find((check) => check.name === "disk_space")!
+    expect(disk.detail).toContain("already cached")
+    expect(disk.ok).toBe(true)
+  })
 })

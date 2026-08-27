@@ -34,6 +34,10 @@ describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
       ["anthropic", "anthropic"],
       ["openai", "openai"],
       ["google", "google"],
+      // The welcome picker's "Local model" row (altimate-onboarding.tsx) uses
+      // providerID "local" — without a curated entry it fell through to `other`
+      // with the id stripped, indistinguishable from any unrecognized provider.
+      ["local", "local"],
     ])("providerID %j → provider %j, keeps raw id", (providerID, expected) => {
       const result = Telemetry.classifyProvider(providerID)
       expect(result).toEqual({ provider: expected, provider_id: providerID })

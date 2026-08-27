@@ -37,6 +37,32 @@ describe("local recipe schema", () => {
     input.models[0].tiers[0].parallel = 3
     expect(() => validateRecipes(input)).toThrow("ctx must divide evenly")
   })
+
+  // fetchModelArtifacts joins model.id directly into a filesystem path with no
+  // further sanitization — a remote (pinned-by-sha256, but not otherwise
+  // trusted) recipe containing path separators here could write outside the
+  // managed model cache directory.
+  test("rejects a model id containing path separators", () => {
+    const traversal = structuredClone(BUNDLED_RECIPES) as any
+    traversal.models[0].id = "../../etc"
+    expect(() => validateRecipes(traversal)).toThrow(/must not contain path separators/)
+
+    const slash = structuredClone(BUNDLED_RECIPES) as any
+    slash.models[0].id = "foo/bar"
+    expect(() => validateRecipes(slash)).toThrow(/must not contain path separators/)
+
+    const dotdot = structuredClone(BUNDLED_RECIPES) as any
+    dotdot.models[0].id = ".."
+    expect(() => validateRecipes(dotdot)).toThrow(/must not contain path separators/)
+  })
+
+  test("rejects a docker tier container_port outside the valid port range", () => {
+    const dockerModel = structuredClone(BUNDLED_RECIPES) as any
+    const dockerTier = dockerModel.models[0].tiers.find((tier: any) => tier.engine === "docker-sglang")
+    expect(dockerTier).toBeDefined()
+    dockerTier.container_port = 70000
+    expect(() => validateRecipes(dockerModel)).toThrow(/container_port must be between 1 and 65535/)
+  })
 })
 
 describe("selectModel", () => {

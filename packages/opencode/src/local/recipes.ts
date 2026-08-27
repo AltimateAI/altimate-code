@@ -91,6 +91,19 @@ function string(value: unknown, label: string) {
   return value
 }
 
+// fetchModelArtifacts joins this value directly into a filesystem path
+// (paths.models/<id>/<revision>/...) without further sanitization. A remote
+// recipe (loaded via ALTIMATE_LOCAL_RECIPES_URL, pinned by sha256 but not
+// otherwise trusted) containing "../" here could escape the managed model
+// cache directory.
+function pathSegment(value: unknown, label: string) {
+  const result = string(value, label)
+  if (result === "." || result === ".." || /[\\/]/.test(result)) {
+    throw new Error(`${label} must not contain path separators or be "." or ".."`)
+  }
+  return result
+}
+
 function finite(value: unknown, label: string) {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number`)
   return value
@@ -99,6 +112,12 @@ function finite(value: unknown, label: string) {
 function positiveInteger(value: unknown, label: string) {
   const result = finite(value, label)
   if (!Number.isInteger(result) || result <= 0) throw new Error(`${label} must be a positive integer`)
+  return result
+}
+
+function port(value: unknown, label: string) {
+  const result = positiveInteger(value, label)
+  if (result > 65535) throw new Error(`${label} must be between 1 and 65535`)
   return result
 }
 
@@ -164,7 +183,7 @@ function validateTier(value: unknown, label: string): RecipeTier {
         return revision
       })(),
       ctx: positiveInteger(input.ctx, `${label}.ctx`),
-      container_port: positiveInteger(input.container_port, `${label}.container_port`),
+      container_port: port(input.container_port, `${label}.container_port`),
       server_args: [...input.server_args] as string[],
       agent: validateAgent(input.agent, `${label}.agent`),
       guidance: string(input.guidance, `${label}.guidance`),
@@ -200,7 +219,7 @@ function validateModel(value: unknown, label: string): ModelRecipe {
   const revision = string(input.revision, `${label}.revision`)
   if (!/^[a-f0-9]{40}$/i.test(revision)) throw new Error(`${label}.revision must be a pinned 40-character commit`)
   return {
-    id: string(input.id, `${label}.id`),
+    id: pathSegment(input.id, `${label}.id`),
     name: string(input.name, `${label}.name`),
     hf_repo: string(input.hf_repo, `${label}.hf_repo`),
     revision,
