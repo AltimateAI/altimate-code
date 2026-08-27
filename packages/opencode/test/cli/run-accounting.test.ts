@@ -38,7 +38,7 @@ describe("RunAccounting turn accounting (W1.10)", () => {
     acc.onStepFinish("msg_work", "stop")
     // compaction machinery finishing later must not overwrite the model's reason
     acc.onStepFinish("msg_compact", "tool-calls")
-    acc.onText("msg_compact", "summary text DONE")
+    acc.onText("msg_compact", "summary text\nDONE")
     expect(acc.termination().why_model_stopped).toBe("stop")
   })
 })
@@ -73,7 +73,7 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
   test("explicit DONE assertion in the final text classifies as explicit-done", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onText("m1", "All checks pass. DONE")
+    acc.onText("m1", "All checks pass.\nDONE")
     acc.onStepFinish("m1", "stop")
     expect(acc.termination().why_model_stopped).toBe("explicit-done")
   })
@@ -199,7 +199,7 @@ describe("RunAccounting done_reason + idle-done bookkeeping (W2.1)", () => {
   test("unprompted stop+DONE reports done_reason=explicit_done", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
-    acc.onText("m1", "All checks green. DONE")
+    acc.onText("m1", "All checks green.\nDONE")
     acc.onStepFinish("m1", "stop")
     const t = acc.termination()
     expect(t.done_reason).toBe("explicit_done")
@@ -211,7 +211,7 @@ describe("RunAccounting done_reason + idle-done bookkeeping (W2.1)", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onIdleDoneChallengeIssued()
-    acc.onText("m1", "Confirmed. DONE")
+    acc.onText("m1", "Confirmed.\nDONE")
     acc.onStepFinish("m1", "stop")
     const t = acc.termination()
     expect(t.done_reason).toBe("idle_heuristic")
@@ -237,6 +237,21 @@ describe("RunAccounting done_reason + idle-done bookkeeping (W2.1)", () => {
     acc.onPromptResult({ finish: "error" })
     expect(acc.fatal).toBe(false)
     expect(acc.termination().why_harness_stopped).toBe("none")
+  })
+
+  test("regression: an exhausted challenge send is fatal — the run must not exit 0", () => {
+    // The confirm-DONE challenge never reached the model: completion was NOT
+    // confirmed, so the run exits nonzero with harness attribution "error".
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onText("m1", "still churning")
+    acc.onStepFinish("m1", "stop")
+    acc.onIdleDoneChallengeIssued()
+    acc.onSessionError("IdleDoneChallengeFailed", "idle-done challenge prompt failed: ProviderError(503)")
+    expect(acc.fatal).toBe(true)
+    const t = acc.termination()
+    expect(t.why_harness_stopped).toBe("error")
+    expect(t.done_reason).toBe("none")
   })
 
   test("an abort BEFORE any challenge is still fatal (guard is challenge-scoped)", () => {

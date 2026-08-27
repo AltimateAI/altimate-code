@@ -7,7 +7,7 @@ import { Scheduler } from "../scheduler"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { ToolID } from "./schema"
-// altimate_change start — W1.7: shared truncation algorithm (see truncate-core.ts
+// altimate_change start — shared truncation algorithm (see truncate-core.ts
 // header) so this twin and tool/truncate.ts's Effect Service can't drift.
 import { TruncateCore } from "./truncate-core"
 // altimate_change end
@@ -60,7 +60,7 @@ export namespace Truncate {
     return rule.action !== "deny"
   }
 
-  // altimate_change start — W1.7: default direction "middle" (head+tail,
+  // altimate_change start — default direction "middle" (head+tail,
   // tail-weighted elision) via the shared truncate-core.ts algorithm.
   export async function output(text: string, options: Options = {}, agent?: Agent.Info): Promise<Result> {
     const maxLines = options.maxLines ?? MAX_LINES

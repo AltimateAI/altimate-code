@@ -44,10 +44,17 @@ describe("ToolResultCap.resolve", () => {
     expect(cap).toBe(Math.ceil(9_000 / ToolResultCap.MIN_CHARS_PER_TOKEN))
   })
 
-  test("unknown model limits fall back to the byte-derived cap", () => {
-    expect(ToolResultCap.resolve({})).toBe(Math.ceil(TruncateCore.MAX_BYTES / ToolResultCap.MIN_CHARS_PER_TOKEN))
-    expect(ToolResultCap.resolve({ model: { limit: { context: 0 } } })).toBe(
+  test("unknown model limits fall back to the CONSERVATIVE small-window bound, not ~17K", () => {
+    // The byte-derived cap (~17K tokens) can overwhelm a small window on its
+    // own; unknown limits assume the smallest protected window instead.
+    expect(ToolResultCap.UNKNOWN_MODEL_CAP_TOKENS).toBeLessThan(
       Math.ceil(TruncateCore.MAX_BYTES / ToolResultCap.MIN_CHARS_PER_TOKEN),
+    )
+    expect(ToolResultCap.resolve({})).toBe(ToolResultCap.UNKNOWN_MODEL_CAP_TOKENS)
+    expect(ToolResultCap.resolve({ model: { limit: { context: 0 } } })).toBe(ToolResultCap.UNKNOWN_MODEL_CAP_TOKENS)
+    // A configured max_bytes below the bound stays binding.
+    expect(ToolResultCap.resolve({ config: { tool_output: { max_bytes: 3_000 } } })).toBe(
+      Math.ceil(3_000 / ToolResultCap.MIN_CHARS_PER_TOKEN),
     )
   })
 
@@ -88,7 +95,7 @@ describe("ToolResultCap.apply", () => {
     const result = ToolResultCap.apply(output, cap)
     expect(result.truncated).toBe(true)
     // Bounded: kept bytes ≤ cap * 3 chars/token, plus the ~fixed-size notice.
-    expect(Token.estimate(result.content)).toBeLessThanOrEqual(cap + 200)
+    expect(Token.estimate(result.content)).toBeLessThanOrEqual(cap)
     // Middle truncation keeps head AND tail, with the standard marker + notice.
     expect(result.content.startsWith('{"order_id":0,')).toBe(true)
     expect(result.content).toContain('"order_id":7999')
@@ -104,9 +111,28 @@ describe("ToolResultCap.apply", () => {
 
     const result = ToolResultCap.apply(giant, cap)
     expect(result.truncated).toBe(true)
-    expect(Token.estimate(result.content)).toBeLessThanOrEqual(cap + 200)
+    expect(Token.estimate(result.content)).toBeLessThanOrEqual(cap)
     expect(result.content.startsWith('{"rows":[')).toBe(true)
     expect(result.content.trimEnd().endsWith("]}")).toBe(true)
+  })
+
+  test("framing is reserved INSIDE the cap: final output estimate <= cap", () => {
+    const rows = Array.from({ length: 4_000 }, (_, i) => `{"id":${i},"value":"row-${i}"}`)
+    const output = rows.join("\n")
+    for (const cap of [200, 500, 2_000]) {
+      const result = ToolResultCap.apply(output, cap)
+      expect(result.truncated).toBe(true)
+      expect(Token.estimate(result.content)).toBeLessThanOrEqual(cap)
+      expect(result.content).toContain("per-result context budget")
+    }
+  })
+
+  test("cap=1 edge: result is still bounded by the cap (framing dropped when it cannot fit)", () => {
+    const giant = "x".repeat(100_000)
+    const result = ToolResultCap.apply(giant, 1)
+    expect(result.truncated).toBe(true)
+    expect(Token.estimate(result.content)).toBeLessThanOrEqual(1)
+    expect(result.content.length).toBeGreaterThan(0)
   })
 
   test("incident replay: 4K conversation + one giant result stays far below a 65K window", () => {

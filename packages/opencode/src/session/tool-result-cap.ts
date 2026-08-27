@@ -1,14 +1,14 @@
 import { Token } from "@/util/token"
 import { TruncateCore } from "@/tool/truncate-core"
 
-// W3.2 per-tool-result dispatch cap: a single tool result must never exceed a
+// Per-tool-result dispatch cap: a single tool result must never exceed a
 // bounded token estimate when it enters the conversation. The per-tool
 // truncation service (tool.ts:wrap → truncate.ts) already middle-truncates
 // most outputs, but observed production bypasses let one giant duckdb/query
 // dump jump a ~4K-token conversation past a 65K window in a single step. This
 // module is the session-side hard cap enforced in processor.ts on every
 // completed tool result, sized relative to the EFFECTIVE context limit (the
-// declared limit scaled by the W3.1 estimator safety fraction).
+// declared limit scaled by the estimator safety fraction).
 export namespace ToolResultCap {
   // Fraction of the effective context limit one tool result may occupy.
   export const DEFAULT_LIMIT_FRACTION = 0.15
@@ -22,10 +22,17 @@ export namespace ToolResultCap {
   // tail instead of dropping the entire line.
   const LINE_CHUNK_CHARS = 2_000
 
+  // Conservative bound when the model's limits are unknown: size the cap as if
+  // the model had the smallest window this cap protects (64K, scaled by the
+  // default 0.65 safety fraction) rather than trusting the byte-derived cap
+  // (~17K tokens), which can overwhelm a small window on its own.
+  export const UNKNOWN_MODEL_CAP_TOKENS = Math.floor(Math.floor(65_536 * 0.65) * DEFAULT_LIMIT_FRACTION)
+
   /**
    * Resolve the per-result token cap: an explicit `tool_output.dispatch_max_tokens`
    * config wins; otherwise min(existing byte-cap expressed in tokens, 15% of the
-   * effective context limit). Returns 0 (uncapped) only when nothing is known.
+   * effective context limit). Unknown or degenerate model limits fall back to a
+   * conservative small-window bound, never the raw byte-derived cap alone.
    */
   export function resolve(input: {
     config?: {
@@ -33,7 +40,7 @@ export namespace ToolResultCap {
       compaction?: { context_safety_fraction?: number }
     }
     model?: { limit?: { context?: number; input?: number } }
-    /** W3.1 safety fraction; callers pass SessionCompaction.contextSafetyFraction(config). */
+    /** Estimator safety fraction; callers pass SessionCompaction.contextSafetyFraction(config). */
     safetyFraction?: number
   }): number {
     const configured = input.config?.tool_output?.dispatch_max_tokens
@@ -43,12 +50,12 @@ export namespace ToolResultCap {
     const existingCapTokens = Math.ceil(maxBytes / MIN_CHARS_PER_TOKEN)
 
     const base = input.model?.limit?.input ?? input.model?.limit?.context ?? 0
-    if (base <= 0) return existingCapTokens
+    if (base <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)
 
     const fraction = input.safetyFraction ?? 1
     const effectiveLimit = Math.floor(base * fraction)
     const limitCapTokens = Math.floor(effectiveLimit * DEFAULT_LIMIT_FRACTION)
-    if (limitCapTokens <= 0) return existingCapTokens
+    if (limitCapTokens <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)
     return Math.min(existingCapTokens, limitCapTokens)
   }
 
@@ -62,7 +69,6 @@ export namespace ToolResultCap {
     if (capTokens <= 0) return { content: output, truncated: false }
     if (Token.estimate(output) <= capTokens) return { content: output, truncated: false }
 
-    const maxBytes = Math.max(1, Math.floor(capTokens * MIN_CHARS_PER_TOKEN))
     const lines: string[] = []
     for (const line of output.split("\n")) {
       if (line.length <= LINE_CHUNK_CHARS) {
@@ -72,14 +78,35 @@ export namespace ToolResultCap {
       for (let i = 0; i < line.length; i += LINE_CHUNK_CHARS) lines.push(line.slice(i, i + LINE_CHUNK_CHARS))
     }
     const totalBytes = Buffer.byteLength(output, "utf-8")
-    const preview = TruncateCore.preview(lines, totalBytes, {
-      maxLines: Number.MAX_SAFE_INTEGER,
-      maxBytes,
-      direction: "middle",
-      headRatio: TruncateCore.DEFAULT_HEAD_RATIO,
-    })
     const hint =
       "The tool call succeeded but the output exceeded the per-result context budget and was truncated before dispatch. Re-run the tool with a narrower query (filters, LIMIT, offset/limit) to view specific sections."
-    return { content: TruncateCore.assemble(preview, hint, "middle"), truncated: true }
+    const frame = (bodyBytes: number) => {
+      const preview = TruncateCore.preview(lines, totalBytes, {
+        maxLines: Number.MAX_SAFE_INTEGER,
+        maxBytes: bodyBytes,
+        direction: "middle",
+        headRatio: TruncateCore.DEFAULT_HEAD_RATIO,
+      })
+      return TruncateCore.assemble(preview, hint, "middle")
+    }
+
+    // The marker/hint framing counts against the cap: build, re-measure, and
+    // shrink the body budget until the ASSEMBLED result fits. Spending the full
+    // cap on the preview and then appending framing produced results above cap.
+    let bodyBytes = Math.max(1, Math.floor(capTokens * MIN_CHARS_PER_TOKEN))
+    let content = frame(bodyBytes)
+    for (let i = 0; i < 6; i++) {
+      const over = Token.estimate(content) - capTokens
+      if (over <= 0) return { content, truncated: true }
+      // Remove at least the overage at the loosest chars-per-token ratio (4.0)
+      // so each pass makes definite progress.
+      bodyBytes -= Math.ceil(over * 4)
+      if (bodyBytes <= 0) break
+      content = frame(bodyBytes)
+    }
+    if (Token.estimate(content) <= capTokens) return { content, truncated: true }
+    // Degenerate caps (smaller than the framing itself): drop the framing and
+    // hard-slice — a ≤ capTokens * 3-char head can never estimate above the cap.
+    return { content: output.slice(0, Math.max(1, Math.floor(capTokens * MIN_CHARS_PER_TOKEN))), truncated: true }
   }
 }

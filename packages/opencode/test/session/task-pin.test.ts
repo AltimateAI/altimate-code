@@ -235,15 +235,32 @@ describe("pinBudget — dynamic cap min(4k, fraction × usable) with the liveloc
     expect(budget).toBe(SessionCompaction.PIN_MAX_TOKENS)
   })
 
-  test("mid window: fraction of the post-overhead usable window wins over 4k", () => {
-    // context 16k, output 2k, reserved 2k (config) → headroom 2k, threshold 14k;
-    // fraction cap floor(14k × 0.175) = 2450; invariant cap 14k − 2k − 2k = 10k.
+  test("mid window: fraction of the effective threshold wins over 4k", () => {
+    // context 16k, output 2k, reserved 2k (config) → headroom 2k; effective
+    // threshold min(14k, max(floor(16k × 0.65) − 2k, 4k)) = 8,400;
+    // fraction cap floor(8,400 × 0.175) = 1,470; invariant cap 8,400 − 2k − 2k = 4,400.
+    const threshold = SessionCompaction.overflowThreshold({ base: 16_000, headroom: 2_000, fraction: 0.65 })
+    expect(threshold).toBe(8_400)
     const budget = SessionCompaction.pinBudget({
       cfg: cfg({ reserved: 2_000 }),
       model: model({ context: 16_000, output: 2_000 }),
     })
-    expect(budget).toBe(Math.floor(14_000 * SessionCompaction.PIN_WINDOW_FRACTION))
+    expect(budget).toBe(Math.floor(threshold * SessionCompaction.PIN_WINDOW_FRACTION))
     expect(budget).toBeLessThan(SessionCompaction.PIN_MAX_TOKENS)
+  })
+
+  test("pin capacity comes from the SAME threshold isOverflow uses — 65,536/20,000 boundary case", () => {
+    // context 65,536, reserved 20,000, output 8,192 → headroom 20,000.
+    // Overflow trigger: min(45,536, max(floor(65,536 × 0.65) − 20,000, 4,000)) = 22,598.
+    // A pin computed from the raw base − headroom boundary (45,536) admitted the
+    // full 4,096 pin, but pin + reserved + 2k slack = 26,096 > 22,598 — the
+    // session re-overflowed immediately after every compaction (livelock).
+    const threshold = SessionCompaction.overflowThreshold({ base: 65_536, headroom: 20_000, fraction: 0.65 })
+    expect(threshold).toBe(22_598)
+    const budget = SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 65_536, output: 8_192 }) })
+    expect(budget).toBe(598)
+    // The livelock invariant holds against the ACTUAL trigger.
+    expect(budget + 20_000 + SessionCompaction.PIN_WORKING_SLACK).toBeLessThanOrEqual(threshold)
   })
 
   test("small window: invariant pin + reserved + 2k slack < threshold forces pin to 0 (skip, never violate)", () => {
@@ -321,5 +338,22 @@ describe("summary-template addition", () => {
     expect(SessionCompaction.PIN_SUMMARY_ADDITION).toContain("Do NOT restate")
     expect(SessionCompaction.PIN_SUMMARY_ADDITION).toContain("pinned")
     expect(SessionCompaction.PIN_SUMMARY_ADDITION).toContain("authoritative")
+  })
+})
+
+describe("resolvePinRunMode — explicit run-mode value wins over the legacy fallback", () => {
+  test("explicit ALTIMATE_RUN_MODE=0 wins even when ALTIMATE_NON_INTERACTIVE=1", () => {
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "0", ALTIMATE_NON_INTERACTIVE: "1" })).toBe(false)
+  })
+
+  test("explicit ALTIMATE_RUN_MODE=1 wins regardless of the fallback", () => {
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "1" })).toBe(true)
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "1", ALTIMATE_NON_INTERACTIVE: "0" })).toBe(true)
+  })
+
+  test("legacy fallback applies only when the marker is undefined or blank", () => {
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_NON_INTERACTIVE: "1" })).toBe(true)
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "  ", ALTIMATE_NON_INTERACTIVE: "1" })).toBe(true)
+    expect(SessionPrompt.resolvePinRunMode({})).toBe(false)
   })
 })

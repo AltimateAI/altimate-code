@@ -57,6 +57,18 @@ describe("config defaults (annotate-only ships by default)", () => {
   })
 })
 
+describe("applyReadAnnotation — output mutation is run-mode-only", () => {
+  test("run mode appends the annotation to the tool output", () => {
+    const out = SessionStarvation.applyReadAnnotation("file contents", "[harness note: unchanged]", true)
+    expect(out).toBe("file contents\n\n[harness note: unchanged]")
+  })
+
+  test("interactive session: output stays byte-identical (telemetry-only shadow)", () => {
+    const out = SessionStarvation.applyReadAnnotation("file contents", "[harness note: unchanged]", false)
+    expect(out).toBe("file contents")
+  })
+})
+
 describe("no vertical tokens in generic classifiers (leak-lens hard requirement)", () => {
   test("starvation.ts contains no dbt/warehouse vertical tokens", () => {
     const source = readFileSync(path.join(import.meta.dir, "../../src/session/starvation.ts"), "utf8")

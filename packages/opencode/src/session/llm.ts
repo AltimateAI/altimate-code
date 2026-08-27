@@ -332,7 +332,7 @@ export namespace LLM {
   // Mutates `tools`, adding a stub definition for every referenced historical tool
   // name that has no real definition (see toolNamesFromMessages above / issue #678).
   //
-  // Harness plan W1.6 / item 3: when the call exposes ZERO real tools (e.g. the
+  // When the call exposes ZERO real tools (e.g. the
   // compaction summarizer, which passes tools: {} and toolChoice "none"), skip stub
   // injection entirely. With an empty tool set the AI SDK omits both `tools` and
   // `tool_choice` from the request, which every provider accepts — this is the

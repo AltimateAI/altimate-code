@@ -146,7 +146,7 @@ export const Info = Schema.Struct({
       max_bytes: Schema.optional(PositiveInt).annotate({
         description: "Maximum bytes of tool output before it is truncated and saved to disk (default: 51200)",
       }),
-      // altimate_change start — harness plan W3.2: per-tool-result dispatch cap
+      // altimate_change start — per-tool-result dispatch cap
       dispatch_max_tokens: Schema.optional(PositiveInt).annotate({
         description:
           "Hard cap on the estimated token size of a single tool result at dispatch time; oversized results are middle-truncated before entering the conversation (default: min(max_bytes-derived token estimate, 15% of the effective context limit))",
@@ -175,24 +175,24 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
-      // altimate_change start — harness plan W3.1: estimator safety margin
+      // altimate_change start — estimator safety margin
       context_safety_fraction: Schema.optional(Schema.Number).annotate({
         description:
-          "Fraction of the declared context limit treated as usable when estimated token counts are compared against it for compaction/overflow decisions (default: 0.65 — chars-based estimates undercount dense SQL/JSON by up to ~1.55x, and compaction must trigger with enough margin that the worst observed underestimate still fits). Env override: ALTIMATE_CONTEXT_SAFETY_FRACTION. Clamped to [0.1, 1].",
+          "Fraction of the declared context limit treated as usable when estimated token counts are compared against it for compaction/overflow decisions (default: 0.65 — chars-based estimates can substantially undercount dense SQL/JSON, and compaction must trigger with enough margin that a worst-case underestimate still fits). Env override: ALTIMATE_CONTEXT_SAFETY_FRACTION. Clamped to [0.1, 1].",
       }),
       // altimate_change end
-      // altimate_change start — harness plan W2.3 / item 5: post-compaction state ledger + summary carry
+      // altimate_change start — post-compaction state ledger + summary carry
       state_ledger: Schema.optional(Schema.Boolean).annotate({
         description:
           "Append a harness-computed state ledger (files written with timestamps, recent tool calls with exit codes) to the post-compaction continue message (default: true)",
       }),
       ledger_max_tokens: Schema.optional(NonNegativeInt).annotate({
         description:
-          "Token cap for the state ledger and carry anchors, tail-truncated (default: 500 — harness plan W2.3 cap: the ledger must cost less than the duplicate re-reads it prevents; one mid-size file re-read is ~1-3k tokens)",
+          "Token cap for the state ledger and carry anchors, tail-truncated (default: 500 — the ledger must cost less than the duplicate re-reads it prevents; one mid-size file re-read is ~1-3k tokens)",
       }),
       ledger_recent_calls: Schema.optional(NonNegativeInt).annotate({
         description:
-          "How many recent tool calls the state ledger lists, newest first (default: 10 — covers several median edit-verify cycles, ~1.8 calls/cycle corpus statistic, without dominating the ledger budget)",
+          "How many recent tool calls the state ledger lists, newest first (default: 10 — covers several typical edit-verify cycles without dominating the ledger budget)",
       }),
       summary_carry: Schema.optional(Schema.Boolean).annotate({
         description:
@@ -203,22 +203,22 @@ export const Info = Schema.Struct({
           "Ask the compaction summarizer to write in the first person, as the agent's own working memory (default: true)",
       }),
       // altimate_change end
-      // altimate_change start — harness plan W2.2 / item 2: pin the original task verbatim through compaction
+      // altimate_change start — pin the original task verbatim through compaction
       pin_task: Schema.optional(Schema.Boolean).annotate({
         description:
           "Pin the original task instruction verbatim through compaction, hoisted as an authoritative reminder alongside the summary (default: true)",
       }),
       pin_max_tokens: Schema.optional(NonNegativeInt).annotate({
         description:
-          "Hard token cap for the pinned original task (default: 4096 — harness plan W2.2 cap: min(4k, pin_window_fraction of the post-overhead usable window); larger tasks keep verbatim head+tail plus a contract card of extracted literals)",
+          "Hard token cap for the pinned original task (default: 4096 — effective cap is min(4k, pin_window_fraction of the post-overhead usable window); larger tasks keep verbatim head+tail plus a contract card of extracted literals)",
       }),
       pin_window_fraction: Schema.optional(Schema.Number).annotate({
         description:
-          "Fraction of the post-overhead usable context window the pinned task may occupy (default: 0.175 — midpoint of the harness plan W2.2 15-20% band; the pin must stay a small minority of the window so working context dominates)",
+          "Fraction of the post-overhead usable context window the pinned task may occupy (default: 0.175 — the pin must stay a small minority of the window so working context dominates)",
       }),
       pin_card_max_tokens: Schema.optional(NonNegativeInt).annotate({
         description:
-          "Token cap for the contract card of regex-extracted task literals appended when the pinned task exceeds its cap (default: 500 — harness plan W2.2 contract-card budget)",
+          "Token cap for the contract card of regex-extracted task literals appended when the pinned task exceeds its cap (default: 500)",
       }),
       // altimate_change end
     }),
@@ -286,13 +286,13 @@ export const Info = Schema.Struct({
           "Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup (default: true). Set to false to disable.",
       }),
       // altimate_change end
-      // altimate_change start — W2.4: write-starvation circuit breaker + loop detection.
+      // altimate_change start — write-starvation circuit breaker + loop detection.
       // Ships ANNOTATE-ONLY by default: mode "annotate" logs breaker-would-fire events
       // and appends informational annotations; "armed" additionally injects outcome-neutral
       // directives (run mode only) and enables the doom-loop escalation ladder's hard stop.
-      // Threshold defaults carry corpus-or-first-principles provenance (see
-      // session/starvation.ts DEFAULTS) and are exposed here so they are never
-      // constants fitted to any one evaluation run.
+      // Threshold defaults carry their rationale in session/starvation.ts DEFAULTS
+      // and are exposed here so they are never constants fitted to any one
+      // workload.
       starvation_breaker: Schema.optional(
         Schema.Struct({
           mode: Schema.optional(Schema.Literals(["off", "annotate", "armed"])).annotate({
@@ -301,7 +301,7 @@ export const Info = Schema.Struct({
           }),
           max_turns_without_mutation: Schema.optional(PositiveInt).annotate({
             description:
-              "Consecutive assistant turns with zero corroborated file mutation before the write-starvation breaker fires (default: 12; first-principles, see session/starvation.ts).",
+              "Consecutive assistant turns with zero corroborated file mutation before the write-starvation breaker fires (default: 12; see session/starvation.ts).",
           }),
           repeat_signature_threshold: Schema.optional(PositiveInt).annotate({
             description:

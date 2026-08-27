@@ -1,4 +1,4 @@
-// Fork-only module (W2.4 / FINAL-PLAN Global rule 5) — nudge arbiter.
+// Fork-only module — nudge arbiter.
 //
 // At most ONE system-authored directive block may be injected per turn.
 // Precedence (highest first):
@@ -14,7 +14,7 @@
 export namespace NudgeArbiter {
   export type Source = "termination_challenge" | "starvation_breaker" | "budget_reminder"
 
-  // Precedence order — index 0 wins. Per FINAL-PLAN Global rule 5.
+  // Precedence order — index 0 wins.
   export const PRECEDENCE: readonly Source[] = ["termination_challenge", "starvation_breaker", "budget_reminder"]
 
   export interface Directive {

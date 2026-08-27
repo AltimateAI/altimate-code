@@ -87,6 +87,65 @@ describe("Config", () => {
     }),
   )
 
+  // altimate_change start — V2 parity round-trip for the fork reliability keys
+  // (dispatch cap, compaction safety fraction, task pin, state ledger,
+  // starvation breaker). A V2 cutover must not silently drop these controls.
+  it.effect("round-trips the fork reliability keys through ConfigMigrateV1 into valid v2", () =>
+    Effect.sync(() => {
+      const v1: typeof ConfigV1.Info.Type = {
+        tool_output: { max_lines: 100, max_bytes: 9_000, dispatch_max_tokens: 5_000 },
+        compaction: {
+          auto: true,
+          reserved: 12_000,
+          context_safety_fraction: 0.7,
+          state_ledger: true,
+          ledger_max_tokens: 400,
+          ledger_recent_calls: 8,
+          summary_carry: false,
+          summary_first_person: true,
+          pin_task: true,
+          pin_max_tokens: 2_048,
+          pin_window_fraction: 0.15,
+          pin_card_max_tokens: 300,
+        },
+        experimental: {
+          starvation_breaker: {
+            mode: "armed",
+            max_turns_without_mutation: 10,
+            repeat_signature_threshold: 4,
+            doom_loop_threshold: 5,
+            polling_threshold_multiplier: 6,
+            polling_pattern: "\\b(sleep)\\b",
+            exempt_agents: ["plan"],
+            generated_path_patterns: ["dist/"],
+          },
+        },
+      }
+      const migrated = ConfigMigrateV1.migrate(v1)
+      const decoded = Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" })
+      expect(decoded.tool_output?.dispatch_max_tokens).toBe(5_000)
+      expect(decoded.compaction?.context_safety_fraction).toBe(0.7)
+      expect(decoded.compaction?.state_ledger).toBe(true)
+      expect(decoded.compaction?.ledger_max_tokens).toBe(400)
+      expect(decoded.compaction?.ledger_recent_calls).toBe(8)
+      expect(decoded.compaction?.summary_carry).toBe(false)
+      expect(decoded.compaction?.summary_first_person).toBe(true)
+      expect(decoded.compaction?.pin_task).toBe(true)
+      expect(decoded.compaction?.pin_max_tokens).toBe(2_048)
+      expect(decoded.compaction?.pin_window_fraction).toBe(0.15)
+      expect(decoded.compaction?.pin_card_max_tokens).toBe(300)
+      expect(decoded.experimental?.starvation_breaker?.mode).toBe("armed")
+      expect(decoded.experimental?.starvation_breaker?.max_turns_without_mutation).toBe(10)
+      expect(decoded.experimental?.starvation_breaker?.repeat_signature_threshold).toBe(4)
+      expect(decoded.experimental?.starvation_breaker?.doom_loop_threshold).toBe(5)
+      expect(decoded.experimental?.starvation_breaker?.polling_threshold_multiplier).toBe(6)
+      expect(decoded.experimental?.starvation_breaker?.polling_pattern).toBe("\\b(sleep)\\b")
+      expect(decoded.experimental?.starvation_breaker?.exempt_agents).toEqual(["plan"])
+      expect(decoded.experimental?.starvation_breaker?.generated_path_patterns).toEqual(["dist/"])
+    }),
+  )
+  // altimate_change end
+
   it.effect("migrates v1 provider setup options into AISDK settings", () =>
     Effect.sync(() => {
       const migrated = ConfigMigrateV1.migrate({

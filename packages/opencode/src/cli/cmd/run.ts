@@ -28,16 +28,16 @@ import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
-// altimate_change start — W1.10/W1.12/W1.1 run accounting helpers (fork-only module)
+// altimate_change start — run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
 // altimate_change end
-// altimate_change start — W3.3: run implies run mode (fork-only module)
+// altimate_change start — run implies run mode (fork-only module)
 import { applyRunModeDefault } from "./run/run-mode"
 // altimate_change end
-// altimate_change start — W2.1(c): run-mode-only idle-done fallback (fork-only modules).
+// altimate_change start — run-mode-only idle-done fallback (fork-only modules).
 // Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
 // token contract live in session/termination.ts; delivery goes through the nudge
-// arbiter (Global rule 5 — one system-authored directive block per injected turn).
+// arbiter (at most one system-authored directive block per injected turn).
 import { IdleDone } from "./idle-done"
 import { NudgeArbiter } from "../../session/nudge"
 import { SessionTermination } from "../../session/termination"
@@ -414,7 +414,7 @@ export const RunCommand = cmd({
       process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
     }
     // altimate_change end
-    // altimate_change start — W2.4/W3.3: mark this process as run mode so
+    // altimate_change start — mark this process as run mode so
     // run-mode-only mechanisms (DONE-termination gate, starvation-breaker
     // directives, doom-loop escalation ladder) arm in the in-process session.
     // Explicit ALTIMATE_RUN_MODE=0 opts out; --attach skips entirely (the agent
@@ -616,16 +616,25 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       const events = await sdk.event.subscribe()
       let error: string | undefined
-      // altimate_change start — W1.10/W1.12: turn accounting + dual-attribution
+      // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
       // altimate_change end
-      // altimate_change start — W2.1(c): idle-done fallback state (run-mode-only by
+      // altimate_change start — idle-done fallback state (run-mode-only by
       // construction — this exists only in the run command). Thresholds are
       // config-exposed via env with first-principles provenance (see idle-done.ts).
-      const idleDone = IdleDone.create(IdleDone.optionsFromEnv(), {
-        isCompactionStep: (messageID) => accounting.isCompactionStep(messageID),
-      })
+      // Armed ONLY for a local run with run mode active: --attach targets a
+      // remote, possibly shared/interactive session, and ALTIMATE_RUN_MODE=0 is
+      // the documented opt-out for every run-mode-only mechanism.
+      const idleDone = IdleDone.create(
+        IdleDone.armedOptions(IdleDone.optionsFromEnv(), {
+          attach: Boolean(args.attach),
+          runMode: Flag.ALTIMATE_RUN_MODE,
+        }),
+        {
+          isCompactionStep: (messageID) => accounting.isCompactionStep(messageID),
+        },
+      )
       // altimate_change end
 
       // Build tracer from config + CLI flags — must never crash the run command
@@ -660,7 +669,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       })()
 
-      // altimate_change start — W2.1(c): the event loop takes its stream as a
+      // altimate_change start — the event loop takes its stream as a
       // parameter so the idle-done challenge phase can re-run it over a fresh
       // subscription after the deliberate mid-run abort (same accounting, same
       // max-turns budget — the challenge continuation stays budget-enforced).
@@ -675,10 +684,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const maxTurns = args.maxTurns
         // altimate_change end
 
-        // altimate_change start — W2.1(c): parameterized stream
+        // altimate_change start — parameterized stream
         for await (const event of stream) {
           // altimate_change end
-          // altimate_change start — W1.10: record each assistant message's agent so
+          // altimate_change start — record each assistant message's agent so
           // step-start parts (which carry only messageID/sessionID) can be attributed.
           // The assistant message row is persisted — and this event published — before
           // its first step-start part streams, so the lookup is populated in time.
@@ -715,7 +724,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             const part = event.properties.part
             if (part.sessionID !== sessionID) continue
 
-            // altimate_change start — W2.1(c): feed every part event through the
+            // altimate_change start — feed every part event through the
             // idle-done observer (event-stream ordering for build-after-last-write,
             // text-only-turn counting, outstanding-tool suppression).
             idleDone.observePart(part as unknown as IdleDone.PartSlice)
@@ -749,7 +758,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "step-start") {
               tracer?.logStepStart(part)
               // altimate_change start — enforce max-turns budget
-              // W1.10: compaction-machinery steps are excluded from turn accounting —
+              // compaction-machinery steps are excluded from turn accounting —
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
@@ -766,15 +775,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "step-finish") {
               tracer?.logStepFinish(part)
-              // altimate_change start — W1.12: record the model-side finish reason
+              // altimate_change start — record the model-side finish reason
               accounting.onStepFinish(part.messageID, (part as { reason?: string }).reason)
               // altimate_change end
-              // altimate_change start — W2.1(c): idle-done fallback firing point.
+              // altimate_change start — idle-done fallback firing point.
               // All hard preconditions are checked in idle-done.ts (compaction-gated,
               // build-after-last-write green verify, no outstanding tools/permissions,
               // one-shot). Firing aborts the churning prompt and hands off to the
               // confirm-DONE challenge phase after the event loop drains. Checked
-              // BEFORE the json-mode emit-continue so non-interactive runs take this path too.
+              // BEFORE the json-mode emit-continue so headless drivers take this path too.
               if (idleDone.shouldChallenge()) {
                 idleDone.markChallengeIssued()
                 accounting.onIdleDoneChallengeIssued()
@@ -795,7 +804,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "text" && part.time?.end) {
               tracer?.logText(part)
-              // altimate_change start — W1.12: explicit-done attribution input
+              // altimate_change start — explicit-done attribution input
               accounting.onText(part.messageID, part.text)
               // altimate_change end
               if (emit("text", { part })) continue
@@ -829,13 +838,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "session.error") {
             const props = event.properties
             if (props.sessionID !== sessionID || !props.error) continue
-            // altimate_change start — W2.1(c): the idle-done challenge is delivered
+            // altimate_change start — the idle-done challenge is delivered
             // by aborting the in-flight prompt; that harness-initiated abort is not
             // a run error — don't display it or fold it into the error record.
             if (idleDone.challengeIssued && props.error.name === "MessageAbortedError") continue
             // altimate_change end
-            // altimate_change start — W1.1: serialize the real error name/message/status
-            // (never a bare name, "[object Object]", or a literal {}); W1.12: feed the
+            // altimate_change start — serialize the real error name/message/status
+            // (never a bare name, "[object Object]", or a literal {}); feed the
             // harness-stop attribution (recoverable overflow errors are excluded there).
             const err = RunAccounting.serializeSessionError(props.error)
             accounting.onSessionError(
@@ -850,7 +859,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.error(err)
           }
 
-          // altimate_change start — W2.1(c): track busy for the challenge-phase guard
+          // altimate_change start — track busy for the challenge-phase guard
           if (
             event.type === "session.status" &&
             event.properties.sessionID === sessionID &&
@@ -864,7 +873,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             event.properties.sessionID === sessionID &&
             event.properties.status.type === "idle"
           ) {
-            // altimate_change start — W2.1(c): ignore stale pre-challenge idles
+            // altimate_change start — ignore stale pre-challenge idles
             if (options?.requireBusyFirst && !sawBusy) continue
             // altimate_change end
             break
@@ -873,7 +882,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "permission.asked") {
             const permission = event.properties
             if (permission.sessionID !== sessionID) continue
-            // altimate_change start — W2.1(c): idle-done is suppressed while a
+            // altimate_change start — idle-done is suppressed while a
             // permission request is outstanding (hard precondition iii).
             idleDone.onPermissionAsked(permission.id)
             // altimate_change end
@@ -926,7 +935,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               })
             }
             // altimate_change end
-            // altimate_change start — W2.1(c): every branch above replied; clear the pending flag
+            // altimate_change start — every branch above replied; clear the pending flag
             idleDone.onPermissionResolved(permission.id)
             // altimate_change end
           }
@@ -991,7 +1000,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       const onBeforeExit = () => {
         tracer?.flushSync("Process exited")
-        // altimate_change start — W1.1: honest rc on fatal abort. beforeExit firing
+        // altimate_change start — honest rc on fatal abort. beforeExit firing
         // while this handler is still registered means the event loop drained before
         // the run completed — the prompt/event stream was abandoned (observed: a
         // mid-stream provider failure tears everything down and the process used to
@@ -1005,16 +1014,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
       process.on("beforeExit", onBeforeExit)
 
       // Start event listener before sending the prompt so no events are missed
-      // altimate_change start — W2.1(c): pass the stream explicitly (see loop signature)
+      // altimate_change start — pass the stream explicitly (see loop signature)
       const loopPromise = loop(events.stream).catch((e) => {
         // altimate_change end
         console.error(e)
         process.exit(1)
       })
 
-      // altimate_change start — W1.1: bounded retry-with-backoff on provider 5xx/timeout
+      // altimate_change start — bounded retry-with-backoff on provider 5xx/timeout
       // at the enqueue boundary. Bounds are config-exposed via env (provenance:
-      // FINAL-PLAN W1.1 requires bounded retries with every retry logged so they can
+      // bounded retries with every retry logged so they can
       // never mask a persistent provider failure; defaults mirror the in-stream
       // SessionRetry posture — bounded and visible). On exhaustion the error is thrown
       // so the process exits nonzero instead of hanging on an idle event that will
@@ -1077,7 +1086,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
         await new Promise((resolve) => setTimeout(resolve, delay))
       }
-      // W1.1/W1.12: the prompt response carries the TERMINAL assistant message —
+      // the prompt response carries the TERMINAL assistant message —
       // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
       accounting.onPromptResult(sendResult?.data?.info)
       // altimate_change end
@@ -1085,18 +1094,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
 
-      // altimate_change start — W2.1(c.iv): one-shot confirm-DONE challenge phase.
+      // altimate_change start — one-shot confirm-DONE challenge phase.
       // Reached only when the idle-done detector fired (all hard preconditions
       // held) and aborted the churning prompt. The challenge is a normal prompt:
       // the model either confirms DONE (session ends, done_reason=idle_heuristic)
       // or states what remains and continues working — budget enforcement,
       // accounting, and display all flow through the same loop() over a fresh
       // event subscription. Recursion guard: the detector is one-shot, so the
-      // challenge can never breed further challenges (Stop-hook 'eight-block'
-      // analogue). The directive is delivered via the nudge arbiter (Global rule
-      // 5) so this injected turn carries exactly ONE system-authored directive.
+      // challenge can never breed further challenges. The directive is
+      // delivered via the nudge arbiter so this injected turn carries exactly
+      // ONE system-authored directive.
       if (idleDone.challengeIssued && !accounting.fatal) {
-        const challengeEvents = await sdk.event.subscribe()
+        // Dedicated abort for the challenge subscription so a failed challenge
+        // send can cancel the event-stream loop deterministically (the SSE
+        // generator exits cleanly on abort; the loop's for-await then drains).
+        const challengeAbort = new AbortController()
+        const challengeEvents = await sdk.event.subscribe(undefined, { signal: challengeAbort.signal })
         NudgeArbiter.register(sessionID, {
           source: "termination_challenge",
           kind: "confirm_done",
@@ -1139,7 +1152,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
           }),
           challengeFailure,
         ])
-        const challengeResult = await challengePromise.catch(() => undefined)
+        // A failed challenge send must never be swallowed: the completion
+        // confirmation did not happen, so the run cannot report success (rc 0)
+        // — record it as a fatal harness error (why_harness_stopped=error) and
+        // cancel the still-pending event subscription so nothing keeps
+        // listening on a session whose confirmation path is dead.
+        const challengeResult = await challengePromise.catch((e) => {
+          accounting.onSessionError(
+            "IdleDoneChallengeFailed",
+            e instanceof Error ? e.message : String(e),
+          )
+          challengeAbort.abort()
+          return undefined
+        })
         accounting.onPromptResult(challengeResult?.data?.info)
       }
       // altimate_change end
@@ -1149,7 +1174,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       process.removeListener("SIGTERM", onSigterm)
       process.removeListener("beforeExit", onBeforeExit)
 
-      // altimate_change start — W1.12 E4 + W2.1(e): dual-attribution termination
+      // altimate_change start — dual-attribution termination
       // record with done_reason. why_model_stopped and why_harness_stopped are
       // independent fields so model-looping, tight budgets, and harness errors
       // are distinguishable in the run output (rc alone conflates them);
@@ -1184,7 +1209,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         process.stderr.write(`\n✓ Output saved to: ${outputPath}\n`)
       }
 
-      // altimate_change start — W1.1: honest rc — exit nonzero on fatal abort
+      // altimate_change start — honest rc — exit nonzero on fatal abort
       // (budget exhaustion or an unrecovered session error). Uses process.exitCode
       // (not process.exit) so pending stdout/trace writes still flush.
       if (accounting.fatal) process.exitCode = 1

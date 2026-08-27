@@ -1,29 +1,29 @@
-// Fork-only helpers for the `run` command (see FINAL harness-improvement plan):
-//   W1.10 — honest turn accounting: compaction-machinery steps must not consume the
-//           --max-turns budget. `step-start` parts carry only messageID/sessionID, so
-//           the owning message's agent is resolved via a lookup populated from
-//           `message.updated` events (the assistant message row is persisted — and its
-//           event published — before its first step-start part streams).
-//   W1.12 — E4 dual-attribution termination logging: every run records TWO independent
-//           fields instead of one rc: `why_model_stopped` and `why_harness_stopped`,
-//           so model-looping, tight budgets, and harness errors stop being conflated
-//           into a single exit code (SWE-agent #1262 vs OpenHands #9344 needed
-//           different fixes and were indistinguishable under rc-only accounting).
-//   W1.1  — real error serialization: never a bare name, "[object Object]", or a
-//           literal `{}` — automation needs the actual name/message/status.
-//   W2.1  — done_reason emission (explicit_done vs idle_heuristic vs none) and the
-//           idle-done challenge bookkeeping; DONE detection delegates to the
-//           SessionTermination completion-token contract.
+// Fork-only helpers for the `run` command:
+//   - honest turn accounting: compaction-machinery steps must not consume the
+//     --max-turns budget. `step-start` parts carry only messageID/sessionID, so
+//     the owning message's agent is resolved via a lookup populated from
+//     `message.updated` events (the assistant message row is persisted — and its
+//     event published — before its first step-start part streams).
+//   - dual-attribution termination logging: every run records TWO independent
+//     fields instead of one rc: `why_model_stopped` and `why_harness_stopped`,
+//     so model-looping, tight budgets, and harness errors stop being conflated
+//     into a single exit code (SWE-agent #1262 vs OpenHands #9344 needed
+//     different fixes and were indistinguishable under rc-only accounting).
+//   - real error serialization: never a bare name, "[object Object]", or a
+//     literal `{}` — automation needs the actual name/message/status.
+//   - done_reason emission (explicit_done vs idle_heuristic vs none) and the
+//     idle-done challenge bookkeeping; DONE detection delegates to the
+//     SessionTermination completion-token contract.
 import { SessionTermination } from "../../session/termination"
 
 export namespace RunAccounting {
   export type WhyModelStopped = "stop" | "tool-call" | "explicit-done"
   export type WhyHarnessStopped = "budget-exhausted" | "timeout" | "error" | "idle-done" | "none"
-  // W2.1(e): done_reason distinguishes an unprompted completion assertion
+  // done_reason distinguishes an unprompted completion assertion
   // (explicit_done — the PRIMARY termination path) from one elicited by the
   // idle-done confirm challenge (idle_heuristic). "none" = the session ended
   // without any completion assertion — bare finishReason "stop" is NEVER
-  // reported as done (W2.1a).
+  // reported as done.
   export type DoneReason = "explicit_done" | "idle_heuristic" | "none"
   export type Termination = {
     why_model_stopped: WhyModelStopped
@@ -39,7 +39,7 @@ export namespace RunAccounting {
   // Timeout classification for why_harness_stopped="timeout" and retry decisions.
   const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 
-  // W2.1(a): the explicit model DONE assertion is the primary termination path.
+  // the explicit model DONE assertion is the primary termination path.
   // Detection delegates to the SessionTermination completion-token contract —
   // the single detector shared with the processor stop-path and the idle-done
   // challenge, so instruction and detection can never drift apart.
@@ -51,7 +51,7 @@ export namespace RunAccounting {
     let lastTextExplicitDone = false
     let budgetExhausted = false
     let fatalError: { name: string; timeout: boolean } | undefined
-    // W2.1(c)/(e): set when the run-mode idle-done fallback issued its one-shot
+    // set when the run-mode idle-done fallback issued its one-shot
     // confirm-DONE challenge (see cli/cmd/idle-done.ts).
     let idleDoneChallengeIssued = false
 
@@ -85,14 +85,14 @@ export namespace RunAccounting {
         if (isCompactionStep(messageID)) return
         lastTextExplicitDone = SessionTermination.isExplicitDone(text)
       },
-      /** W2.1(c): the idle-done fallback issued its one-shot confirm-DONE challenge. */
+      /** the idle-done fallback issued its one-shot confirm-DONE challenge. */
       onIdleDoneChallengeIssued() {
         idleDoneChallengeIssued = true
       },
       onSessionError(name: unknown, message?: string) {
         const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
         if (RECOVERABLE_ERROR_NAMES.has(errorName)) return
-        // W2.1(c): the idle-done challenge is delivered by aborting the in-flight
+        // the idle-done challenge is delivered by aborting the in-flight
         // prompt first; that harness-initiated abort surfaces as a
         // MessageAbortedError and must not be scored as a fatal run error.
         if (idleDoneChallengeIssued && errorName === "MessageAbortedError") return
@@ -121,24 +121,24 @@ export namespace RunAccounting {
           return
         }
         if (info.finish === "error" || info.finish === "other") {
-          // W2.1(c): the terminal message of a prompt the idle-done fallback
+          // the terminal message of a prompt the idle-done fallback
           // aborted (to deliver its challenge) finishes abnormally by design.
           if (idleDoneChallengeIssued) return
           fatalError ??= { name: `AbnormalFinish:${info.finish}`, timeout: false }
         }
       },
-      /** True when the run ended by fatal abort — the process must exit nonzero (W1.1). */
+      /** True when the run ended by fatal abort — the process must exit nonzero. */
       get fatal() {
         return budgetExhausted || fatalError !== undefined
       },
-      /** E4 dual-attribution fields + done_reason for the run record/output (W1.12, W2.1e). */
+      /** Dual-attribution fields + done_reason for the run record/output. */
       termination(): Termination {
         const model: WhyModelStopped = (() => {
           if (lastFinishReason === "stop" && lastTextExplicitDone) return "explicit-done"
           if (lastFinishReason === "tool-calls" || lastFinishReason === "tool-call") return "tool-call"
           return "stop"
         })()
-        // W2.1(a)+(e): a completion assertion requires finishReason "stop" PLUS
+        // A completion assertion requires finishReason "stop" PLUS
         // the explicit DONE token — never bare "stop". If the assertion followed
         // the idle-done confirm challenge, it is honestly attributed to the
         // heuristic, not to unprompted model completion.
@@ -150,7 +150,7 @@ export namespace RunAccounting {
           if (budgetExhausted) return "budget-exhausted"
           if (fatalError?.timeout) return "timeout"
           if (fatalError) return "error"
-          // W2.1(c): the session ended on (or after) the idle-done challenge.
+          // the session ended on (or after) the idle-done challenge.
           if (done === "idle_heuristic") return "idle-done"
           // A session that idles because the model finished is attributed to the
           // model, so the harness reason is "none".
@@ -164,7 +164,7 @@ export namespace RunAccounting {
 
   /**
    * Serialize a session error event's payload to a real name/message/status string.
-   * Never returns a bare "[object Object]" or a literal "{}" (W1.1).
+   * Never returns a bare "[object Object]" or a literal "{}".
    */
   export function serializeSessionError(error: unknown): string {
     if (error === undefined || error === null) return "UnknownError"
@@ -188,7 +188,7 @@ export namespace RunAccounting {
     return message ? `${head}: ${message}` : head
   }
 
-  /** Provider 5xx responses are retryable at the enqueue boundary (W1.1). */
+  /** Provider 5xx responses are retryable at the enqueue boundary. */
   export function isRetryableStatus(status: unknown): boolean {
     return typeof status === "number" && status >= 500 && status <= 599
   }

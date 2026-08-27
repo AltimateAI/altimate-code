@@ -87,6 +87,39 @@ describe("IdleDone.optionsFromEnv (config-exposed thresholds)", () => {
   })
 })
 
+describe("IdleDone.armedOptions (run-mode/attach arming gate)", () => {
+  const base: IdleDone.Options = { enabled: true, minCompactions: 2, idleTurns: 3 }
+
+  test("armed only for a local run with run mode active", () => {
+    expect(IdleDone.armedOptions(base, { attach: false, runMode: true }).enabled).toBe(true)
+  })
+
+  test("regression: explicit ALTIMATE_RUN_MODE=0 opt-out disarms idle-done", () => {
+    // The run handler preserves an explicit "0" (applyRunModeDefault) so the
+    // flag reads false — idle-done must never arm in that session.
+    expect(IdleDone.armedOptions(base, { attach: false, runMode: false }).enabled).toBe(false)
+  })
+
+  test("regression: --attach disarms idle-done regardless of run mode", () => {
+    // The remote (possibly shared/interactive) session must never be aborted
+    // by the local idle-done challenge.
+    expect(IdleDone.armedOptions(base, { attach: true, runMode: true }).enabled).toBe(false)
+    expect(IdleDone.armedOptions(base, { attach: true, runMode: false }).enabled).toBe(false)
+  })
+
+  test("an env-disabled fallback can never be re-enabled by the gate", () => {
+    const disabled: IdleDone.Options = { ...base, enabled: false }
+    expect(IdleDone.armedOptions(disabled, { attach: false, runMode: true }).enabled).toBe(false)
+  })
+
+  test("a disarmed detector never challenges even when every precondition holds", () => {
+    // Same event sequence that arms the fully-satisfied detector above.
+    expect(satisfied().shouldChallenge()).toBe(true)
+    expect(satisfied(IdleDone.armedOptions(base, { attach: false, runMode: false })).shouldChallenge()).toBe(false)
+    expect(satisfied(IdleDone.armedOptions(base, { attach: true, runMode: true })).shouldChallenge()).toBe(false)
+  })
+})
+
 describe("IdleDone.isReadOnlyCommand (generic classifier, W2.1c.ii)", () => {
   test("plain read-only commands are read-only", () => {
     for (const cmd of ["ls -la", "cat file.txt", "grep -r pattern .", "pwd", "git status", "git log --oneline -5"]) {

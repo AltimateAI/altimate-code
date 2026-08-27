@@ -68,6 +68,17 @@ describe("contextSafetyFraction resolution", () => {
     expect(SessionCompaction.contextSafetyFraction(undefined)).toBe(0.65)
   })
 
+  test("numeric-prefix garbage is ignored (Number over the full value, not parseFloat)", () => {
+    process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "0.9junk"
+    expect(SessionCompaction.contextSafetyFraction(undefined)).toBe(0.65)
+    expect(SessionCompaction.contextSafetyFraction({ compaction: { context_safety_fraction: 0.5 } })).toBe(0.5)
+  })
+
+  test("surrounding whitespace is tolerated", () => {
+    process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = " 0.9 "
+    expect(SessionCompaction.contextSafetyFraction(undefined)).toBe(0.9)
+  })
+
   test("clamps to [0.1, 1]", () => {
     expect(SessionCompaction.contextSafetyFraction({ compaction: { context_safety_fraction: 2 } })).toBe(1)
     expect(SessionCompaction.contextSafetyFraction({ compaction: { context_safety_fraction: 0.01 } })).toBe(0.1)

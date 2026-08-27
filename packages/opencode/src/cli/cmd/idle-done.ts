@@ -1,15 +1,15 @@
-// Fork-only helper for the `run` command — FINAL harness-improvement plan W2.1(c)
-// (item 1): idle-done detection, the RUN-MODE-ONLY FALLBACK termination path.
+// Fork-only helper for the `run` command — idle-done detection, the
+// RUN-MODE-ONLY FALLBACK termination path.
 //
-// Explicit model DONE (SessionTermination, W2.1a) is the primary termination path.
+// Explicit model DONE (SessionTermination) is the primary termination path.
 // This module detects the completed-but-not-terminating churn signature — a session
 // whose work is done (green verify AFTER the last file mutation) but that keeps
 // cycling text-only post-compaction turns instead of ending — and arms a ONE-SHOT
 // confirm-DONE challenge. It lives under cli/cmd and is wired only by run.ts, so
-// TUI/serve behavior is untouched by construction (the plan's hard scope rule: the
+// TUI/serve behavior is untouched by construction (the
 // interactive loop legitimately idles awaiting user input).
 //
-// HARD preconditions, all required before the challenge may fire (W2.1c):
+// HARD preconditions, all required before the challenge may fire:
 //   (i)   build-after-last-write ordering FROM THE EVENT STREAM: the most recent
 //         verify-candidate bash command completed green (exit 0) at a stream
 //         position strictly AFTER the last observed file mutation. Mutations are
@@ -20,7 +20,7 @@
 //   (ii)  GENERIC verify classification: the project-configured verify command
 //         (ALTIMATE_RUN_VERIFY_COMMAND) when set; otherwise the most recent
 //         side-effecting bash command (a conservative read-only-head classifier —
-//         NO vertical/product tokens, per Global rule 4). Classifier errs toward
+//         NO vertical/product tokens). Classifier errs toward
 //         "read-only" so a trivial `ls`/`git status` can never count as a verify.
 //   (iii) suppressed while ANY tool call (incl. task-tool subagents) is still
 //         running or a permission request is pending.
@@ -30,13 +30,11 @@
 //   (v)   one-shot: after the challenge is issued it can never re-arm (recursion
 //         guard — the challenge cannot breed further challenges).
 //
-// Threshold provenance (Global rule 4 — config-exposed, first-principles, NOT
-// fitted to any specific evaluation run set):
+// Threshold rationale (config-exposed, not fitted to any one workload):
 //   minCompactions=2 — one compaction can be a single oversized tool output; two
 //     completed cycles with no progress in between is the churn signature.
-//   idleTurns=3 — Stop-hook "eight-block" analogue from the expert corpus, scaled
-//     down because each candidate turn here already passed the much stronger
-//     green-verify-after-last-write precondition.
+//   idleTurns=3 — kept small because each candidate turn here already passed the
+//     much stronger green-verify-after-last-write precondition.
 
 export namespace IdleDone {
   export interface Options {
@@ -66,12 +64,23 @@ export namespace IdleDone {
     }
   }
 
-  // ── Generic bash classifier (W2.1c.ii) ────────────────────────────────────
+  /**
+   * Arming gate for the run command. The fallback may arm ONLY for a local
+   * (non-attach) run with run mode active: `--attach` targets a remote,
+   * possibly shared/interactive server session where aborting the in-flight
+   * prompt is never acceptable, and an explicit `ALTIMATE_RUN_MODE=0` is the
+   * documented opt-out for every run-mode-only mechanism (see run/run-mode.ts).
+   */
+  export function armedOptions(options: Options, gate: { attach: boolean; runMode: boolean }): Options {
+    return { ...options, enabled: options.enabled && !gate.attach && gate.runMode }
+  }
+
+  // ── Generic bash classifier ───────────────────────────────────────────────
   // Conservative read-only-head allowlist. Direction of safety: a read-only
   // command misclassified as side-effecting could count as a green "verify", so
   // the allowlist is GREEDY — when in doubt a command is read-only and therefore
   // NOT a verify candidate (idle-done then simply never fires). Generic shell
-  // vocabulary only — no vertical/product tokens (Global rule 4).
+  // vocabulary only — no vertical/product tokens.
   const READ_ONLY_HEADS = new Set([
     "ls",
     "cat",

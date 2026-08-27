@@ -8,7 +8,7 @@ import { evaluate } from "@/permission/evaluate"
 import { Config } from "@/config/config"
 import { ToolID } from "./schema"
 import { TRUNCATION_DIR } from "./truncation-dir"
-// altimate_change start — W1.7: shared truncation algorithm (see truncate-core.ts
+// altimate_change start — shared truncation algorithm (see truncate-core.ts
 // header) so this Service and the tool/truncation.ts twin can't drift.
 import { TruncateCore } from "./truncate-core"
 // altimate_change end
@@ -92,7 +92,7 @@ export const layer = Layer.effect(
       }
     })
 
-    // altimate_change start — W1.7: default direction "middle" (head+tail,
+    // altimate_change start — default direction "middle" (head+tail,
     // tail-weighted elision) via the shared truncate-core.ts algorithm.
     const output = Effect.fn("Truncate.output")(function* (text: string, options: Options = {}, agent?: Agent.Info) {
       const resolved = yield* limits()

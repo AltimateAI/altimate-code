@@ -63,13 +63,29 @@ export namespace Flag {
   // altimate_change start - opt-out for AI Teammate training system
   export const ALTIMATE_DISABLE_TRAINING = altTruthy("ALTIMATE_DISABLE_TRAINING", "OPENCODE_DISABLE_TRAINING")
   // altimate_change end
-  // altimate_change start — W2.4: run-mode marker. Set by `cli/cmd/run.ts` for
+  // altimate_change start — run-mode marker. Set by `cli/cmd/run.ts` for
   // in-process (non-attach) runs so run-mode-only mechanisms (starvation breaker
   // directives, doom-loop escalation ladder) can arm. Never set by the TUI or
   // `serve`, so interactive behavior is untouched by construction. Declared here,
   // defined via dynamic getter below (run.ts sets the env var at handler time,
   // after module load).
   export declare const ALTIMATE_RUN_MODE: boolean
+
+  // Strict trimmed boolean parser for the run-mode env var: " 1 " arms, "0" /
+  // "false" / blank disarm, and any other value warns once and disarms — a typo
+  // must never silently flip run-mode mechanisms without a trace.
+  const runModeWarned = new Set<string>()
+  export function parseRunModeValue(raw: string | undefined): boolean {
+    const value = raw?.trim().toLowerCase()
+    if (!value) return false
+    if (value === "1" || value === "true") return true
+    if (value === "0" || value === "false") return false
+    if (!runModeWarned.has(value)) {
+      runModeWarned.add(value)
+      console.warn(`invalid ALTIMATE_RUN_MODE value ${JSON.stringify(raw)} ignored — use 1/0/true/false`)
+    }
+    return false
+  }
   // altimate_change end
   export const OPENCODE_DISABLE_TERMINAL_TITLE = truthy("OPENCODE_DISABLE_TERMINAL_TITLE")
   export const OPENCODE_PERMISSION = process.env["OPENCODE_PERMISSION"]
@@ -200,11 +216,10 @@ Object.defineProperty(Flag, "ALTIMATE_CLI_YOLO", {
 })
 // altimate_change end
 
-// altimate_change start — W2.4: run-mode flag (dynamic getter; run.ts sets the env var at handler time)
+// altimate_change start — run-mode flag (dynamic getter; run.ts sets the env var at handler time)
 Object.defineProperty(Flag, "ALTIMATE_RUN_MODE", {
   get() {
-    const v = process.env["ALTIMATE_RUN_MODE"]?.toLowerCase()
-    return v === "true" || v === "1"
+    return Flag.parseRunModeValue(process.env["ALTIMATE_RUN_MODE"])
   },
   enumerable: true,
   configurable: false,

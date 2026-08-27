@@ -19,15 +19,15 @@ import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
 // altimate_change end
-// altimate_change start — W2.4: write-starvation breaker + loop detection (fork-only
+// altimate_change start — write-starvation breaker + loop detection (fork-only
 // modules) and the run-mode flag that gates armed behavior.
 import { SessionStarvation } from "./starvation"
 import { NudgeArbiter } from "./nudge"
-// W2.1(a): completion-token contract for the explicit-DONE stop path
+// completion-token contract for the explicit-DONE stop path
 import { SessionTermination } from "./termination"
 import { Flag } from "@/flag/flag"
 // altimate_change end
-// altimate_change start — W3.2: per-tool-result dispatch cap (fork-only module)
+// altimate_change start — per-tool-result dispatch cap (fork-only module)
 import { ToolResultCap } from "./tool-result-cap"
 // altimate_change end
 // altimate_change start — Effect Context.Service facade so the upstream Effect runtime
@@ -50,7 +50,7 @@ export namespace SessionProcessor {
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
-  // altimate_change start — W1.8: per-processor tool-call id coercer. Malformed
+  // altimate_change start — per-processor tool-call id coercer. Malformed
   // (non-string) ids from OpenAI-compatible servers are regenerated deterministically
   // via MessageV2.sanitizeToolCallID; the raw→sanitized alias map (keyed on the JSON
   // form) makes the propagation to paired tool-result/tool-error events atomic — even
@@ -79,7 +79,7 @@ export namespace SessionProcessor {
     abort: AbortSignal
   }) {
     const toolcalls: Record<string, MessageV2.ToolPart> = {}
-    // altimate_change start — W1.8: coerce malformed tool-call ids at ingestion;
+    // altimate_change start — coerce malformed tool-call ids at ingestion;
     // sanitized ids are used as BOTH the persisted callID and the pairing key.
     const coerceToolCallID = createToolCallIDCoercer()
     // altimate_change end
@@ -107,14 +107,14 @@ export namespace SessionProcessor {
         return input.assistantMessage
       },
       partFromToolCall(toolCallID: string) {
-        // altimate_change start — W1.8: tool-execution lookups use the same coercion
+        // altimate_change start — tool-execution lookups use the same coercion
         return toolcalls[coerceToolCallID(toolCallID)]
         // altimate_change end
       },
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
-        // altimate_change start — W2.4: resolve breaker config + arm state once per step.
+        // altimate_change start — resolve breaker config + arm state once per step.
         // ANNOTATE-ONLY by default (mode "annotate"): directives and the hard stop
         // require mode "armed" AND run mode. Skipped entirely for plan/review-class
         // agents (read-only deliverables are their normal outcome). Interactive
@@ -132,7 +132,7 @@ export namespace SessionProcessor {
         const sbArmed = sbConfig.mode === "armed" && runMode && !sbExempt
         const sbMode = sbConfig.mode === "armed" ? ("armed" as const) : ("annotate" as const)
         let starvationStop = false
-        // altimate_change start — W3.2: per-tool-result dispatch cap, resolved once
+        // altimate_change start — per-tool-result dispatch cap, resolved once
         // per step. Hard bound on the token estimate any single tool result may
         // contribute to the conversation — closes the observed bypass where one
         // giant query dump jumped a ~4K-token session past a 65K window in one step.
@@ -142,7 +142,7 @@ export namespace SessionProcessor {
           safetyFraction: SessionCompaction.contextSafetyFraction(processConfig),
         })
         // altimate_change end
-        // Nudge arbiter delivery (Global rule 5): at most ONE system-authored
+        // Nudge arbiter delivery: at most ONE system-authored
         // directive block per injected turn, highest precedence wins. Run-mode-only.
         let effectiveStreamInput = streamInput
         if (runMode) {
@@ -183,7 +183,7 @@ export namespace SessionProcessor {
               // before the LLM stream can execute provider-side tools.
               snapshot = await Snapshot.track()
             }
-            // altimate_change start — W2.4: stream with the (possibly directive-augmented) input
+            // altimate_change start — stream with the (possibly directive-augmented) input
             const stream = await LLM.stream(effectiveStreamInput)
             // altimate_change end
 
@@ -246,7 +246,7 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-input-start":
-                  // altimate_change start — W1.8: sanitize the incoming id before it
+                  // altimate_change start — sanitize the incoming id before it
                   // becomes the persisted callID and the pairing key.
                   const inputStartCallID = coerceToolCallID(value.id)
                   const part = await Session.updatePart({
@@ -273,7 +273,7 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-call": {
-                  // altimate_change start — W1.8: resolve the pair via the coerced id
+                  // altimate_change start — resolve the pair via the coerced id
                   const toolCallCallID = coerceToolCallID(value.toolCallId)
                   const match = toolcalls[toolCallCallID]
                   // altimate_change end
@@ -297,14 +297,14 @@ export namespace SessionProcessor {
                         : value.providerMetadata,
                       // altimate_change end
                     })
-                    // altimate_change start — W1.8: key by the coerced id
+                    // altimate_change start — key by the coerced id
                     toolcalls[toolCallCallID] = part as MessageV2.ToolPart
                     // altimate_change end
                     // altimate_change start — session has now tool-called; suppresses plan refusal warning
                     sessionToolCallsMade++
                     // altimate_change end
 
-                    // altimate_change start — W2.4: doom-loop guard re-keyed + escalation ladder.
+                    // altimate_change start — doom-loop guard re-keyed + escalation ladder.
                     // Interactive sessions keep the existing (toolName + identical args)
                     // permission ask EXACTLY as before. Run mode bypasses the permission
                     // channel entirely — code-truth confirmed yolo auto-approves the ask,
@@ -340,9 +340,9 @@ export namespace SessionProcessor {
                     }
                     // altimate_change end
 
-                    // altimate_change start — per-tool repeat counter, DEMOTED to telemetry only (W2.4).
+                    // altimate_change start — per-tool repeat counter, DEMOTED to telemetry only.
                     // The per-NAME counter (30 calls of any kind per tool) was crossed by
-                    // 13/28 legitimate runs — attaching any hard consequence to it would
+                    // legitimate multi-step work — attaching any hard consequence to it would
                     // kill ~half of legitimate work. It remains as telemetry; consequences
                     // hang off the (toolName + normalized args) ladder below instead.
                     toolCallCounts[value.toolName] = (toolCallCounts[value.toolName] ?? 0) + 1
@@ -358,7 +358,7 @@ export namespace SessionProcessor {
                     }
                     // altimate_change end
 
-                    // altimate_change start — W2.4: (toolName + normalized args) escalation ladder.
+                    // altimate_change start — (toolName + normalized args) escalation ladder.
                     // Polling patterns (sleep/watch/status probes) get a raised threshold
                     // inside the tracker. Annotate mode only logs would-fire events; armed
                     // run mode registers outcome-neutral directives via the nudge arbiter
@@ -415,16 +415,17 @@ export namespace SessionProcessor {
                   break
                 }
                 case "tool-result": {
-                  // altimate_change start — W1.8: resolve the pair via the coerced id
+                  // altimate_change start — resolve the pair via the coerced id
                   const toolResultCallID = coerceToolCallID(value.toolCallId)
                   const match = toolcalls[toolResultCallID]
                   // altimate_change end
                   if (match && match.state.status === "running") {
-                    // altimate_change start — W2.4: unchanged-read annotation (content hash
+                    // altimate_change start — unchanged-read annotation (content hash
                     // at read time; annotate, NEVER suppress — generated paths exempt) and
                     // repeat-signature loop detection on successful results. The annotation
-                    // is appended to the persisted output in all modes; the loop directive
-                    // is arbiter-registered only when armed (run mode).
+                    // is appended to the persisted output in run mode only (interactive
+                    // sessions get a telemetry-only shadow); the loop directive is
+                    // arbiter-registered only when armed (run mode).
                     let toolResultOutput = value.output.output
                     if (starvation) {
                       const resultInput = value.input ?? match.state.input
@@ -436,14 +437,21 @@ export namespace SessionProcessor {
                         touchedFiles: typeof touched === "string" ? [touched] : undefined,
                       })
                       if (outcome.readAnnotation && typeof toolResultOutput === "string") {
-                        toolResultOutput = `${toolResultOutput}\n\n${outcome.readAnnotation}`
+                        // Persisted-output mutation is run-mode-only: interactive
+                        // (TUI/serve) sessions keep tool output byte-identical and
+                        // get a telemetry-only shadow event instead.
+                        toolResultOutput = SessionStarvation.applyReadAnnotation(
+                          toolResultOutput,
+                          outcome.readAnnotation,
+                          runMode,
+                        )
                         Telemetry.track({
                           type: "starvation_breaker",
                           timestamp: Date.now(),
                           session_id: input.sessionID,
                           mode: sbMode,
                           kind: "unchanged_read",
-                          action: "annotated",
+                          action: runMode ? "annotated" : "would_annotate",
                           tool_name: match.tool,
                         })
                       }
@@ -468,7 +476,7 @@ export namespace SessionProcessor {
                       }
                     }
                     // altimate_change end
-                    // altimate_change start — W3.2: hard per-result dispatch cap. Every
+                    // altimate_change start — hard per-result dispatch cap. Every
                     // completed tool result is bounded here regardless of which tool
                     // path produced it — the tool-level truncation service can be
                     // bypassed, and one uncapped result overflows the whole window.
@@ -488,7 +496,7 @@ export namespace SessionProcessor {
                       state: {
                         status: "completed",
                         input: value.input ?? match.state.input,
-                        // altimate_change start — W2.4: annotated output (append-only)
+                        // altimate_change start — annotated output (append-only)
                         output: toolResultOutput,
                         // altimate_change end
                         metadata: value.output.metadata,
@@ -501,7 +509,7 @@ export namespace SessionProcessor {
                       },
                     })
 
-                    // altimate_change start — W1.8: delete by the coerced id
+                    // altimate_change start — delete by the coerced id
                     delete toolcalls[toolResultCallID]
                     // altimate_change end
                   }
@@ -509,12 +517,12 @@ export namespace SessionProcessor {
                 }
 
                 case "tool-error": {
-                  // altimate_change start — W1.8: resolve the pair via the coerced id
+                  // altimate_change start — resolve the pair via the coerced id
                   const toolErrorCallID = coerceToolCallID(value.toolCallId)
                   const match = toolcalls[toolErrorCallID]
                   // altimate_change end
                   if (match && match.state.status === "running") {
-                    // altimate_change start — W2.4: repeat-signature loop detection on
+                    // altimate_change start — repeat-signature loop detection on
                     // failures — hash(tool + normalized args + touched files + failure
                     // message). Catches edit-verify-fail-revert-reedit loops that mutate
                     // files every turn but make no progress.
@@ -567,7 +575,7 @@ export namespace SessionProcessor {
                     ) {
                       blocked = shouldBreak
                     }
-                    // altimate_change start — W1.8: delete by the coerced id
+                    // altimate_change start — delete by the coerced id
                     delete toolcalls[toolErrorCallID]
                     // altimate_change end
                   }
@@ -719,7 +727,7 @@ export namespace SessionProcessor {
                     cost: usage.cost,
                   })
                   await Session.updateMessage(input.assistantMessage)
-                  // altimate_change start — W2.4: capture the snapshot diff as the generic,
+                  // altimate_change start — capture the snapshot diff as the generic,
                   // command-agnostic mutation ground truth (also catches bash-mediated
                   // writes like `sed -i`/heredocs, which emit no edit event).
                   let stepPatchFiles: string[] = []
@@ -736,12 +744,12 @@ export namespace SessionProcessor {
                         files: patch.files,
                       })
                     }
-                    // altimate_change start — W2.4
+                    // altimate_change start
                     stepPatchFiles = [...patch.files]
                     // altimate_change end
                     snapshot = undefined
                   }
-                  // altimate_change start — W2.4: per-step write-starvation evaluation.
+                  // altimate_change start — per-step write-starvation evaluation.
                   // Annotate mode only logs a would-fire event; armed run mode registers
                   // the outcome-neutral directive (with its DONE alternative) via the
                   // nudge arbiter for delivery on the next generation.
@@ -965,7 +973,7 @@ export namespace SessionProcessor {
           }
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
-          // altimate_change start — W2.1(a): explicit model DONE is the PRIMARY
+          // altimate_change start — explicit model DONE is the PRIMARY
           // termination path. A turn that finished with "stop", has no error, and
           // asserts completion (trailing DONE token per the SessionTermination
           // contract) terminates the session EVEN IF overflow was detected.
@@ -994,7 +1002,7 @@ export namespace SessionProcessor {
           if (needsCompaction) return "compact"
           if (blocked) return "stop"
           if (input.assistantMessage.error) return "stop"
-          // altimate_change start — W2.4: doom-loop escalation ladder final rung.
+          // altimate_change start — doom-loop escalation ladder final rung.
           // Reachable only when mode is "armed" AND the process is in run mode
           // (never TUI/serve) AND the same (toolName + normalized args) call
           // repeated through nudge and forced status-check without changing.

@@ -7,12 +7,12 @@ import { describe, expect, test } from "bun:test"
 import { SessionTermination } from "../../src/session/termination"
 
 describe("SessionTermination.isExplicitDone (W2.1a)", () => {
-  test("accepts a trailing DONE assertion", () => {
+  test("accepts a standalone final-line DONE assertion", () => {
     expect(SessionTermination.isExplicitDone("DONE")).toBe(true)
-    expect(SessionTermination.isExplicitDone("All 14 checks green. DONE")).toBe(true)
-    expect(SessionTermination.isExplicitDone("Verified the build.\n\nDONE.")).toBe(true)
-    expect(SessionTermination.isExplicitDone("**DONE**")).toBe(true)
-    expect(SessionTermination.isExplicitDone("DONE!")).toBe(true)
+    expect(SessionTermination.isExplicitDone("All 14 checks green.\nDONE")).toBe(true)
+    expect(SessionTermination.isExplicitDone("Verified the build.\n\nDONE")).toBe(true)
+    expect(SessionTermination.isExplicitDone("DONE  ")).toBe(true)
+    expect(SessionTermination.isExplicitDone("DONE\n\n")).toBe(true)
     expect(SessionTermination.isExplicitDone("  DONE  ")).toBe(true)
   })
 
@@ -21,6 +21,30 @@ describe("SessionTermination.isExplicitDone (W2.1a)", () => {
     expect(SessionTermination.isExplicitDone("marked the TODO as DONE and moving on")).toBe(false)
     expect(SessionTermination.isExplicitDone("DONE with step 1, continuing to step 2")).toBe(false)
     expect(SessionTermination.isExplicitDone("")).toBe(false)
+  })
+
+  test("requires exactly DONE on the final line — no punctuation or markup wrappers", () => {
+    expect(SessionTermination.isExplicitDone("All checks green. DONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("Verified the build.\n\nDONE.")).toBe(false)
+    expect(SessionTermination.isExplicitDone("DONE!")).toBe(false)
+    expect(SessionTermination.isExplicitDone("**DONE**")).toBe(false)
+    expect(SessionTermination.isExplicitDone("`DONE`")).toBe(false)
+  })
+
+  test("code-fenced text ending in DONE never terminates", () => {
+    // Closed fence: the final line is the closing fence, not DONE.
+    expect(SessionTermination.isExplicitDone("Example output:\n```\nDONE\n```")).toBe(false)
+    // Unclosed fence: the final DONE line is inside quoted code.
+    expect(SessionTermination.isExplicitDone("Reply like this:\n```\nDONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("~~~\nDONE")).toBe(false)
+    // A closed fence FOLLOWED by a real plaintext DONE still terminates.
+    expect(SessionTermination.isExplicitDone("```\nbuild ok\n```\nDONE")).toBe(true)
+  })
+
+  test("quoted and indented-code DONE never terminates", () => {
+    expect(SessionTermination.isExplicitDone("The instructions said:\n> DONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("Example:\n    DONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("Example:\n\tDONE")).toBe(false)
   })
 
   test("is case-sensitive: prose 'done' never counts", () => {
@@ -43,7 +67,7 @@ describe("SessionTermination.explicitDoneStop (W2.1a stop-path decision)", () =>
       SessionTermination.explicitDoneStop({
         finish: "stop",
         hasError: false,
-        parts: [{ type: "tool" }, textPart("Everything verified. DONE")],
+        parts: [{ type: "tool" }, textPart("Everything verified.\nDONE")],
       }),
     ).toBe(true)
   })

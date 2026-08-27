@@ -1,11 +1,11 @@
-// Fork-only module (W2.4 / FINAL-PLAN item 4) — write-starvation circuit breaker,
-// signature-hash loop detection, unchanged-read annotation, and the re-keyed
-// doom-loop escalation ladder.
+// Fork-only module — write-starvation circuit breaker, signature-hash loop
+// detection, unchanged-read annotation, and the re-keyed doom-loop escalation
+// ladder.
 //
-// Design constraints (from FINAL-PLAN.md, corrected mechanism):
+// Design constraints:
 //   - ANNOTATE-ONLY BY DEFAULT: directive injection and any hard consequence are
-//     config-gated OFF (`mode: "annotate"`) until ≥3-seed dual-lane validation
-//     shows no lane regresses. In annotate mode the harness only logs
+//     config-gated OFF (`mode: "annotate"`) until validation shows no session
+//     class regresses. In annotate mode the harness only logs
 //     breaker-would-fire events and appends informational annotations.
 //   - Directives are OUTCOME-NEUTRAL and always carry a DONE alternative — never
 //     an unconditional "produce the edit now" (fabricated-edit risk on read-only
@@ -17,9 +17,9 @@
 //   - Unchanged-read detection is by CONTENT HASH at read time; generated paths
 //     are exempt; the annotation NEVER suppresses content.
 //   - Doom-loop counting is keyed on (toolName + normalized args) — the legacy
-//     per-NAME counter is telemetry only (it was crossed by 13/28 legitimate
-//     runs). Escalation ladder: nudge → forced status-check → stop; never
-//     straight to stop.
+//     per-NAME counter is telemetry only (legitimate multi-step work routinely
+//     crosses a name-only counter). Escalation ladder: nudge → forced
+//     status-check → stop; never straight to stop.
 //   - Armed behavior is run-mode-only and skipped for plan/review-class agents;
 //     directive delivery goes through the NudgeArbiter (one directive per turn).
 import { createHash } from "node:crypto"
@@ -49,19 +49,19 @@ export namespace SessionStarvation {
     generatedPathPatterns: string[]
   }
 
-  // Threshold provenance (FINAL-PLAN item 4 hard requirement — corpus-or-first-
-  // principles, config-exposed, NEVER fitted to the 28 v2 bench runs):
+  // Threshold rationale (config-exposed defaults, never fitted to any one
+  // workload):
   //   - doomLoopThreshold = 3: matches the pre-existing upstream DOOM_LOOP_THRESHOLD;
-  //     the expert trace corpus shows a median of 1.8 tool calls per edit→verify
-  //     cycle (bench-independent statistic), so 3 consecutive byte-identical
-  //     (tool+args) calls sits outside any legitimate cycle shape.
-  //   - repeatSignatureThreshold = 3: same corpus statistic; three identical
-  //     (tool+args+touched-files+failure) signatures means three attempts produced
-  //     the same failure — external loop-detection fold-in (cf. SWE-agent #1262).
-  //   - maxTurnsWithoutMutation = 12: first-principles — legitimate exploration
-  //     bursts (read/search before a first edit or a final answer) span a handful
-  //     of assistant turns; 12 consecutive assistant turns with zero corroborated
-  //     file mutation is well beyond that regime while still permitting long
+  //     a legitimate edit→verify cycle takes only a couple of tool calls, so 3
+  //     consecutive byte-identical (tool+args) calls sits outside any
+  //     legitimate cycle shape.
+  //   - repeatSignatureThreshold = 3: three identical (tool+args+touched-files+
+  //     failure) signatures means three attempts produced the same failure —
+  //     repeating the call cannot change the outcome.
+  //   - maxTurnsWithoutMutation = 12: legitimate exploration bursts (read/search
+  //     before a first edit or a final answer) span a handful of assistant
+  //     turns; 12 consecutive assistant turns with zero corroborated file
+  //     mutation is well beyond that regime while still permitting long
   //     read-only research tasks to proceed (the directive is outcome-neutral).
   //   - pollingThresholdMultiplier = 5: identical polling commands (sleep/watch/
   //     status probes) are legitimately repetitive; raising, not exempting,
@@ -215,6 +215,16 @@ export namespace SessionStarvation {
       `If this task requires an edit, produce it now; if the correct deliverable is analysis with no ` +
       `file changes, state your final answer and say DONE.`
     )
+  }
+
+  /**
+   * Run-mode gate for ANY persisted-output mutation. Interactive (TUI/serve)
+   * sessions must see tool output byte-identical to what the tool produced —
+   * they get a telemetry-only shadow instead of an appended annotation.
+   */
+  export function applyReadAnnotation(output: string, annotation: string, runMode: boolean): string {
+    if (!runMode) return output
+    return `${output}\n\n${annotation}`
   }
 
   export function repeatSignatureDirective(input: { count: number; tool: string }): string {

@@ -59,6 +59,18 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
         tokens: info.compaction.preserve_recent_tokens,
       },
       buffer: info.compaction.reserved,
+      // altimate_change start — carry the fork compaction keys (same names in V2)
+      context_safety_fraction: info.compaction.context_safety_fraction,
+      state_ledger: info.compaction.state_ledger,
+      ledger_max_tokens: info.compaction.ledger_max_tokens,
+      ledger_recent_calls: info.compaction.ledger_recent_calls,
+      summary_carry: info.compaction.summary_carry,
+      summary_first_person: info.compaction.summary_first_person,
+      pin_task: info.compaction.pin_task,
+      pin_max_tokens: info.compaction.pin_max_tokens,
+      pin_window_fraction: info.compaction.pin_window_fraction,
+      pin_card_max_tokens: info.compaction.pin_card_max_tokens,
+      // altimate_change end
     },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],
     commands: info.command,
@@ -67,7 +79,15 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     plugins: info.plugin?.map((plugin) =>
       typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
     ),
-    experimental: info.experimental?.policies && { policies: info.experimental.policies },
+    // altimate_change start — carry starvation_breaker alongside policies
+    experimental:
+      info.experimental?.policies || info.experimental?.starvation_breaker
+        ? {
+            policies: info.experimental?.policies,
+            starvation_breaker: info.experimental?.starvation_breaker,
+          }
+        : undefined,
+    // altimate_change end
     providers: providers(info.provider),
   }
 }

@@ -54,6 +54,19 @@ describe("SessionCompaction.fitHead", () => {
     expect(result.head.at(-1)).toBe(head.at(-1)!)
   })
 
+  test("budget derives from the shared safety-fraction helper, not the raw limit", async () => {
+    // A head sized to fit the RAW window (minus output + prompt allowance) but
+    // NOT the safety-fraction-scaled window must still be trimmed — the
+    // summarization request itself would otherwise overflow under estimator error.
+    // 32k ctx, 8k out: raw budget ≈ 22.5k tokens; effective (0.65) ≈ 11.1k.
+    const head = Array.from({ length: 30 }, (_, i) => userMessage(`m${i}`, "x".repeat(2_400)))
+    const result = await SessionCompaction.fitHead({ head, model: model(32768, 8192), fraction: 0.65 })
+    expect(result.dropped).toBeGreaterThan(0)
+    // At fraction 1 the same head fits the raw window untrimmed.
+    const raw = await SessionCompaction.fitHead({ head, model: model(32768, 8192), fraction: 1 })
+    expect(raw.dropped).toBe(0)
+  })
+
   test("zero-context models pass through unchanged", async () => {
     const head = [userMessage("m1", "x".repeat(100_000))]
     const result = await SessionCompaction.fitHead({ head, model: model(0) })

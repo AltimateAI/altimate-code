@@ -16,10 +16,10 @@ import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
-// altimate_change start — summarizer-integrity error (harness plan W1.6 / item 3)
+// altimate_change start — summarizer-integrity error
 import { NamedError } from "@opencode-ai/util/error"
 import type { LLM } from "./llm"
-// altimate_change start — W2.1(b)+(d): completion-aware continue nudge via the nudge arbiter
+// altimate_change start — completion-aware continue nudge via the nudge arbiter
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 // altimate_change end
@@ -87,12 +87,12 @@ export namespace SessionCompaction {
   // altimate_change start — improved isOverflow formula with safety guard and unified headroom
   // See PR #35 — fixes upstream bugs with limit.input models and small-context models
   //
-  // W3.1 estimator safety margin: token counts reaching this comparison include
-  // chars-based Token.estimate values that undercount real tokenization of dense
-  // SQL/JSON by up to ~1.55x (observed: estimated 45.8K = real >65K → provider
-  // 400 ContextOverflow). Compaction therefore triggers against an EFFECTIVE
-  // limit — base * context_safety_fraction, default 0.65, chosen so the worst
-  // observed underestimate still fits — never the raw limit. The raw limit
+  // Estimator safety margin: token counts reaching this comparison include
+  // chars-based Token.estimate values that substantially undercount real
+  // tokenization of dense SQL/JSON (a request can exceed the provider limit
+  // while the estimate still looks safe). Compaction therefore triggers against an EFFECTIVE
+  // limit — base * context_safety_fraction, default 0.65, chosen so a worst-case
+  // underestimate still fits — never the raw limit. The raw limit
   // stays authoritative for anything reporting actual model capability.
   const DEFAULT_CONTEXT_SAFETY_FRACTION = 0.65
   // Trigger floor for small-context models where the safety fraction would push
@@ -103,7 +103,14 @@ export namespace SessionCompaction {
 
   export function contextSafetyFraction(cfg?: { compaction?: { context_safety_fraction?: number } }) {
     // globalThis.process: SessionCompaction.process shadows the Node global here.
-    const env = Number.parseFloat(globalThis.process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] ?? "")
+    // Number() over the full trimmed value — parseFloat would accept numeric
+    // prefixes ("0.65junk") and silently override configuration.
+    const raw = globalThis.process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]?.trim()
+    let env = Number.NaN
+    if (raw) {
+      env = Number(raw)
+      if (!Number.isFinite(env)) log.warn("invalid ALTIMATE_CONTEXT_SAFETY_FRACTION ignored", { value: raw })
+    }
     const value = Number.isFinite(env) ? env : (cfg?.compaction?.context_safety_fraction ?? DEFAULT_CONTEXT_SAFETY_FRACTION)
     if (!Number.isFinite(value)) return DEFAULT_CONTEXT_SAFETY_FRACTION
     return Math.min(1, Math.max(0.1, value))
@@ -112,6 +119,18 @@ export namespace SessionCompaction {
   /** Portion of a declared token limit treated as usable for estimate-vs-limit decisions. */
   export function effectiveContextLimit(base: number, fraction: number) {
     return Math.floor(base * fraction)
+  }
+
+  /**
+   * THE compaction-trigger threshold — the single formula shared by isOverflow
+   * (when to compact) and pinBudget (how much pinned content may survive
+   * compaction). Any consumer computing its own boundary from `base - headroom`
+   * risks admitting more retained content than the trigger allows, which
+   * re-fires compaction immediately (livelock).
+   */
+  export function overflowThreshold(input: { base: number; headroom: number; fraction: number }) {
+    const effectiveBase = effectiveContextLimit(input.base, input.fraction)
+    return Math.min(input.base - input.headroom, Math.max(effectiveBase - input.headroom, MIN_OVERFLOW_THRESHOLD))
   }
 
   export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
@@ -129,8 +148,7 @@ export namespace SessionCompaction {
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= headroom) return false
-    const effectiveBase = effectiveContextLimit(base, contextSafetyFraction(config))
-    const threshold = Math.min(base - headroom, Math.max(effectiveBase - headroom, MIN_OVERFLOW_THRESHOLD))
+    const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(config) })
     return count >= threshold
   }
   // altimate_change end
@@ -246,13 +264,17 @@ export namespace SessionCompaction {
   // one turn) that the summarization request itself no longer fits, which used
   // to terminate the session with "too large to compact". Summarizing a
   // truncated head is lossy; killing the session loses everything.
-  export async function fitHead(input: { head: MessageV2.WithParts[]; model: Provider.Model }) {
+  export async function fitHead(input: { head: MessageV2.WithParts[]; model: Provider.Model; fraction?: number }) {
     const context = input.model.limit.context
     if (context === 0) return { head: input.head, dropped: 0 }
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
     const base = input.model.limit.input ?? context
-    // 0.8: Token.estimate undercounts dense code/tool output on some tokenizers.
-    const budget = Math.floor(Math.max(0, base - maxOutput - 2_000) * 0.8)
+    // The summarization-request budget derives from the SAME safety-fraction
+    // helper as the overflow trigger — Token.estimate undercounts dense
+    // code/tool output, and a fallback sized against the raw limit can itself
+    // overflow under that estimator error. 2k covers the summary prompt.
+    const fraction = input.fraction ?? contextSafetyFraction()
+    const budget = Math.max(0, effectiveContextLimit(base, fraction) - maxOutput - 2_000)
     if (budget <= 0) return { head: input.head, dropped: 0 }
     let head = input.head
     let dropped = 0
@@ -402,25 +424,24 @@ export namespace SessionCompaction {
     }
   }
 
-  // altimate_change start — harness plan W2.3 / item 5: post-compaction state ledger (5a),
+  // altimate_change start — post-compaction state ledger (5a),
   // append-only summary carry (5b), first-person summary reframe (5c).
   //
   // 5a: a deterministic, corroborated-facts-only ledger appended to the synthetic
   // post-compaction continue message. Facts come from harness tool events ONLY:
   // write/edit/apply_patch completion events (path + event timestamp) and the last N
   // tool calls with exit codes where recorded. Command-agnostic by design — no
-  // "build/test" classifier, no vertical (dbt/warehouse) token matching (Global rule 4).
+  // "build/test" classifier, no vertical (dbt/warehouse) token matching.
   // Bash-mediated file changes produce no edit event, so they are flagged as possible
   // but unverified rather than guessed at. The re-read directive is advisory and
   // mtime-anchored, never an absolute prohibition (the model's read-before-edit habit
   // is load-bearing, and external IDE edits can change disk mid-session).
   //
   // Thresholds are config-exposed (compaction.ledger_max_tokens / ledger_recent_calls).
-  // Provenance: 500-token cap is the harness plan W2.3 5a bound ("≤500 tokens,
-  // tail-truncate") — first-principles, the ledger must cost less than the duplicate
-  // re-reads it prevents (a single mid-size file re-read is ~1–3k tokens). 10 recent
-  // calls covers several median edit→verify cycles (~1.8 calls/cycle, expert-corpus
-  // statistic) without dominating the budget. Neither is fitted to a specific evaluation corpus.
+  // Rationale: the 500-token cap (tail-truncate) keeps the ledger cheaper than the
+  // duplicate re-reads it prevents (a single mid-size file re-read is ~1–3k tokens).
+  // 10 recent calls covers several typical edit→verify cycles without dominating
+  // the budget. Neither is fitted to any one workload.
   export const LEDGER_MAX_TOKENS = 500
   export const LEDGER_RECENT_CALLS = 10
 
@@ -523,8 +544,8 @@ export namespace SessionCompaction {
   // as anchors. An item carries as FACT ([verified]) only when a corroborating
   // ledger event exists (a write/edit event, or a zero-exit command naming the
   // artifact); otherwise it carries tagged "claimed, unverified". A naive carry
-  // would REMEMBER invented deliverables (the corpus shows summaries fabricating
-  // them) and propagate them to every later summary and subagent.
+  // would REMEMBER invented deliverables (summaries can fabricate them) and
+  // propagate them to every later summary and subagent.
 
   export type CarryStatus = "verified" | "claimed, unverified"
   export type CarryItem = { text: string; status: CarryStatus }
@@ -636,22 +657,20 @@ export namespace SessionCompaction {
   const compactionAttempts = new Map<string, number>()
   // altimate_change end
 
-  // altimate_change start — harness plan W2.2 / item 2: pin the original task
+  // altimate_change start — pin the original task
   // verbatim through compaction (budget math + livelock guard).
   //
-  // Threshold provenance (config-exposed, defaults from the harness plan /
-  // first principles — NOT fitted to any specific evaluation corpus):
-  // - PIN_MAX_TOKENS 4096: the plan's `min(4k, …)` cap. Task statements rarely
-  //   exceed ~4k tokens; larger ones keep verbatim head+tail plus a contract card.
-  // - PIN_WINDOW_FRACTION 0.175: midpoint of the plan's 15–20% band — the pin
-  //   must stay a small minority of the post-overhead usable window so working
-  //   context dominates.
-  // - PIN_WORKING_SLACK 2000: the plan's hard invariant
+  // Threshold rationale (config-exposed defaults, not fitted to any one workload):
+  // - PIN_MAX_TOKENS 4096: task statements rarely exceed ~4k tokens; larger
+  //   ones keep verbatim head+tail plus a contract card.
+  // - PIN_WINDOW_FRACTION 0.175: the pin must stay a small minority of the
+  //   post-overhead usable window so working context dominates.
+  // - PIN_WORKING_SLACK 2000: hard invariant
   //   `pin + reserved + ≥2k working slack < compaction threshold`. A fixed 4k
   //   pin on a small window would otherwise produce a compaction livelock
   //   (fires, cannot reduce below threshold, re-fires). Shrink the pin, never
   //   violate the invariant.
-  // - PIN_CARD_MAX_TOKENS 500: the plan's contract-card budget.
+  // - PIN_CARD_MAX_TOKENS 500: contract-card budget.
   export const PIN_MAX_TOKENS = 4_096
   export const PIN_WINDOW_FRACTION = 0.175
   export const PIN_WORKING_SLACK = 2_000
@@ -676,9 +695,13 @@ export namespace SessionCompaction {
     const reserved = input.cfg.compaction?.reserved ?? COMPACTION_BUFFER
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
-    // isOverflow() fires at count >= base - headroom: that boundary is both the
-    // compaction threshold and the post-overhead usable window.
-    const threshold = base - headroom
+    // The pin capacity is computed from the EXACT overflow trigger isOverflow()
+    // uses (shared overflowThreshold helper). Computing it from the raw
+    // `base - headroom` boundary instead admitted pins that, together with the
+    // reserved buffer and working slack, exceeded the (safety-fraction-scaled)
+    // trigger — the session re-overflowed immediately after every compaction.
+    if (base <= headroom) return 0
+    const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(input.cfg) })
     if (threshold <= 0) return 0
     const maxTokens = input.cfg.compaction?.pin_max_tokens ?? PIN_MAX_TOKENS
     const fraction = input.cfg.compaction?.pin_window_fraction ?? PIN_WINDOW_FRACTION
@@ -816,7 +839,7 @@ export namespace SessionCompaction {
         await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
     // altimate_change start — upstream_fix: restore tail-preserving compaction selection
     const cfg = await Config.get()
-    // altimate_change start — harness plan W2.3: state ledger + summary carry wiring
+    // altimate_change start — state ledger + summary carry wiring
     const ledgerEnabled = cfg.compaction?.state_ledger !== false
     const carryEnabled = cfg.compaction?.summary_carry !== false
     const firstPersonEnabled = cfg.compaction?.summary_first_person !== false
@@ -910,7 +933,7 @@ When constructing the summary, try to stick to this template:
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
 
-    // altimate_change start — harness plan W2.3 5b/5c: layered ADDITIONS to whichever
+    // altimate_change start — summary carry + first-person reframe: layered ADDITIONS to whichever
     // summary prompt is active (default or plugin-provided) — never a replacement.
     let promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
     if (carryEnabled) {
@@ -925,14 +948,14 @@ When constructing the summary, try to stick to this template:
     }
     if (firstPersonEnabled) promptText += "\n\n" + FIRST_PERSON_REFRAME
     // altimate_change end
-    // altimate_change start — harness plan W2.2 / item 2: when task pinning is
+    // altimate_change start — when task pinning is
     // active, tell the summarizer not to burn summary tokens restating the task
     // (the original task is pinned separately and re-injected after compaction).
     // Layered as an ADDITION to whichever summary prompt is active — never a
     // replacement.
     if (pinEnabled(cfg)) promptText += "\n\n" + PIN_SUMMARY_ADDITION
     // altimate_change end
-    // altimate_change start — summarizer integrity (harness plan W1.6 / item 3):
+    // altimate_change start — summarizer integrity:
     // hoist the summarizer input so a failed attempt can be retried with identical
     // input, and pass an explicit toolChoice "none". Previously toolChoice was
     // undefined, which the AI SDK defaults to "auto" — models could spend the
@@ -950,7 +973,7 @@ When constructing the summary, try to stick to this template:
         // trim the head from the front when even the summarization request cannot fit the window
         ...(await MessageV2.toModelMessages(
           await (async () => {
-            const fitted = await fitHead({ head: selected.head, model })
+            const fitted = await fitHead({ head: selected.head, model, fraction: contextSafetyFraction(cfg) })
             if (fitted.dropped > 0) {
               log.warn("compaction head truncated to fit window", {
                 dropped: fitted.dropped,
@@ -1054,7 +1077,7 @@ When constructing the summary, try to stick to this template:
           })
         }
       } else {
-        // altimate_change start — harness plan W1.5 / item 12: the continue message
+        // altimate_change start — the continue message
         // carries the original format/tools/system/variant, exactly as the replay
         // branch above copies them from the original user message. Dropping them made
         // the first auto-compaction silently reset the session's tool allowlist,
@@ -1077,13 +1100,13 @@ When constructing the summary, try to stick to this template:
           variant: original?.variant ?? userMessage.variant,
         })
         // altimate_change end
-        // altimate_change start — harness plan W2.3 5a: deterministic corroborated-facts-only
+        // altimate_change start — deterministic corroborated-facts-only
         // state ledger appended to the synthetic continue message (all-modes, compaction-gated).
         const ledgerText = ledgerEnabled
           ? renderLedger(ledger, { maxTokens: ledgerMaxTokens, recentCalls: ledgerRecentCalls })
           : ""
         // altimate_change end
-        // altimate_change start — harness plan W2.1(b)+(d) / item 1:
+        // altimate_change start — completion-aware termination path:
         // (b) the continue message carries the three-option completion-aware nudge
         //     (continue / ask for clarification / assert DONE), giving a finished
         //     session a termination path. Delivered via the NudgeArbiter (Global
@@ -1104,7 +1127,7 @@ When constructing the summary, try to stick to this template:
           (input.overflow ? SessionTermination.OVERFLOW_NOTICE + "\n\n" : "") +
           (directive?.text ?? SessionTermination.COMPLETION_NUDGE) +
           // altimate_change end
-          // altimate_change start — harness plan W2.3 5a
+          // altimate_change start — state ledger
           (ledgerText ? "\n\n" + ledgerText : "")
         // altimate_change end
         await Session.updatePart({

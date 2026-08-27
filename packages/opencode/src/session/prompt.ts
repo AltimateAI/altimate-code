@@ -821,8 +821,8 @@ export namespace SessionPrompt {
       // altimate_change start — proactive overflow check: the recorded usage is
       // from the LAST assistant turn; tool results appended since then are not
       // counted, and one oversized output can jump the session past the window
-      // between checks, silently killing otherwise-recoverable sessions.
-      // Estimate the uncounted tail and include it.
+      // between checks (a common failure mode for long headless runs). Estimate the
+      // uncounted tail and include it.
       const uncountedTail = (() => {
         if (!lastFinished) return 0
         const index = msgs.findIndex((m) => m.info.id === lastFinished.id)
@@ -850,7 +850,7 @@ export namespace SessionPrompt {
         }))
       ) {
         // altimate_change end
-        // altimate_change start — harness plan W2.2 livelock guard: record this
+        // altimate_change start — task-pin livelock guard: record this
         // auto-compaction so consecutive threshold-reduction failures halve the
         // task pin instead of livelocking (fire → cannot reduce → re-fire).
         SessionCompaction.notePinCompaction(sessionID, msgs)
@@ -1570,7 +1570,7 @@ export namespace SessionPrompt {
         // altimate_change start — track compaction count
         compactionCount++
         // altimate_change end
-        // altimate_change start — harness plan W2.2 livelock guard (see the
+        // altimate_change start — task-pin livelock guard (see the
         // proactive-overflow site above for rationale).
         SessionCompaction.notePinCompaction(sessionID, msgs)
         // altimate_change end
@@ -2418,11 +2418,11 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
-  // altimate_change start — harness plan W2.2 / item 2: pin the original task
+  // altimate_change start — pin the original task
   // verbatim through compaction.
   //
   // After compaction the model sees only a lossy summary of the task; the
-  // evidence corpus shows summaries dropping or mutating literal contract terms
+  // summarizer can drop or mutate literal contract terms
   // (hallucinated table names, renamed output files). The pin re-injects the
   // task instruction VERBATIM as a trusted reminder, labeled authoritative over
   // any summary, and is hoisted into the system prompt on non-Anthropic models
@@ -2467,7 +2467,7 @@ export namespace SessionPrompt {
   // (paths, identifier-shaped names, code spans, quoted terms, constraint
   // lines), every entry a verbatim substring of the original — never a
   // paraphrase. Patterns are GENERIC lexical shapes only; no vertical (dbt/
-  // warehouse) tokens (Global rule 4). Budget enforced by tail-truncation:
+  // warehouse) tokens. Budget enforced by tail-truncation:
   // stop adding once the cap is reached.
   export function extractContractCard(text: string, capTokens: number): string {
     if (capTokens <= 0) return ""
@@ -2596,6 +2596,20 @@ export namespace SessionPrompt {
     ].join("\n")
   }
 
+  /**
+   * Run mode = the dedicated ALTIMATE_RUN_MODE marker (set by run.ts, never by
+   * TUI/serve), with ALTIMATE_NON_INTERACTIVE=1 as a fallback signal for
+   * headless drivers that predate the marker. An EXPLICITLY set run-mode value
+   * always wins — a user exporting ALTIMATE_RUN_MODE=0 has opted out of
+   * run-mode semantics and must not be flipped back by the legacy fallback;
+   * the fallback applies only when the marker is undefined/blank.
+   * Exported for unit tests.
+   */
+  export function resolvePinRunMode(env: Record<string, string | undefined> = process.env): boolean {
+    if (env["ALTIMATE_RUN_MODE"]?.trim()) return Flag.parseRunModeValue(env["ALTIMATE_RUN_MODE"])
+    return env["ALTIMATE_NON_INTERACTIVE"] === "1"
+  }
+
   // Compaction-gated entry point used by insertReminders: fires only when the
   // visible context already contains a completed summary, the pin budget is
   // positive, and the pinned source message is no longer visible.
@@ -2620,14 +2634,7 @@ export namespace SessionPrompt {
       // Full chronological history — the pinned source was dropped from the
       // compaction-filtered view, which is exactly why it must be re-read here.
       const history = [...MessageV2.stream(input.session.id)].reverse()
-      // Run mode = the dedicated ALTIMATE_RUN_MODE marker (set by run.ts, never
-      // by TUI/serve), with ALTIMATE_NON_INTERACTIVE=1 as a fallback signal for
-      // headless drivers that predate the marker. The marker is checked first so
-      // a user opting out of NON_INTERACTIVE for its reply semantics cannot flip
-      // pin selection to interactive mode inside a `run` session (where a later
-      // synthetic prompt, e.g. the idle-done confirm challenge, must never be
-      // pinned as "the original task").
-      const runMode = Flag.ALTIMATE_RUN_MODE || process.env["ALTIMATE_NON_INTERACTIVE"] === "1"
+      const runMode = resolvePinRunMode()
       return taskPinText({
         history,
         visible: input.visible,
@@ -2674,7 +2681,7 @@ export namespace SessionPrompt {
     const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
     if (!userMessage) return { messages: input.messages, trustedReminderParts }
 
-    // altimate_change start — harness plan W2.2 / item 2: pin the original task
+    // altimate_change start — pin the original task
     // verbatim through compaction, hoisted via the trustedReminderParts path
     // and labeled "Original task — authoritative over any summary". The pin
     // text embeds the user's OWN instruction verbatim — the user's directive,

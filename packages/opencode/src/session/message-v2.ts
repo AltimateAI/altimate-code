@@ -31,7 +31,7 @@ export namespace MessageV2 {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
 
-  // altimate_change start — W1.8: deterministic tool-call id sanitation. Some
+  // altimate_change start — deterministic tool-call id sanitation. Some
   // OpenAI-compatible servers emit non-string (numeric/object) tool-call ids;
   // providers reject any request whose tool_use/tool_result pair carries a
   // malformed or mismatched id. Valid non-empty strings pass through untouched.
@@ -801,7 +801,7 @@ export namespace MessageV2 {
             })
           if (part.type === "tool") {
             toolNames.add(part.tool)
-            // altimate_change start — W1.8: defensive replay-side id coercion. Parts
+            // altimate_change start — defensive replay-side id coercion. Parts
             // persisted after the ingestion fix already carry sanitized string ids;
             // transcripts written before it may hold malformed (non-string) callIDs.
             // Computing the sanitized id ONCE per tool part and using it for every
@@ -844,7 +844,7 @@ export namespace MessageV2 {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-available",
-                // altimate_change start — W1.8 replay-side id coercion
+                // altimate_change start — replay-side id coercion
                 toolCallId: replayCallID,
                 // altimate_change end
                 input: part.state.input,
@@ -882,7 +882,7 @@ export namespace MessageV2 {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
-                // altimate_change start — W1.8 replay-side id coercion
+                // altimate_change start — replay-side id coercion
                 toolCallId: replayCallID,
                 // altimate_change end
                 input: part.state.input,

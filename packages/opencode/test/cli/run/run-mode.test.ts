@@ -76,3 +76,43 @@ describe("Flag.ALTIMATE_RUN_MODE integration", () => {
     expect(Flag.ALTIMATE_RUN_MODE).toBe(false)
   })
 })
+
+describe("Flag.parseRunModeValue (strict trimmed boolean parser)", () => {
+  test("trimmed truthy values arm", () => {
+    expect(Flag.parseRunModeValue("1")).toBe(true)
+    expect(Flag.parseRunModeValue(" 1 ")).toBe(true)
+    expect(Flag.parseRunModeValue("true")).toBe(true)
+    expect(Flag.parseRunModeValue(" TRUE ")).toBe(true)
+  })
+
+  test("falsy and blank values disarm", () => {
+    expect(Flag.parseRunModeValue("0")).toBe(false)
+    expect(Flag.parseRunModeValue(" false ")).toBe(false)
+    expect(Flag.parseRunModeValue("")).toBe(false)
+    expect(Flag.parseRunModeValue("   ")).toBe(false)
+    expect(Flag.parseRunModeValue(undefined)).toBe(false)
+  })
+
+  test("invalid values warn and disarm rather than silently flipping", () => {
+    const warnings: string[] = []
+    const original = console.warn
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "))
+    try {
+      expect(Flag.parseRunModeValue("yes-please")).toBe(false)
+      expect(warnings.some((w) => w.includes("ALTIMATE_RUN_MODE"))).toBe(true)
+    } finally {
+      console.warn = original
+    }
+  })
+
+  test("whitespace-padded env value arms the flag end to end", () => {
+    const saved = process.env["ALTIMATE_RUN_MODE"]
+    process.env["ALTIMATE_RUN_MODE"] = " 1 "
+    try {
+      expect(Flag.ALTIMATE_RUN_MODE).toBe(true)
+    } finally {
+      if (saved === undefined) delete process.env["ALTIMATE_RUN_MODE"]
+      else process.env["ALTIMATE_RUN_MODE"] = saved
+    }
+  })
+})

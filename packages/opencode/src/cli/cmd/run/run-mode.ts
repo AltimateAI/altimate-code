@@ -1,6 +1,6 @@
-// W3.3: `altimate-code run` implies run mode. External drivers (harbor, CI)
-// invoke `run` without exporting ALTIMATE_RUN_MODE, which used to leave
-// run-mode-only mechanisms (W2 DONE-termination gate, starvation-breaker
+// `altimate-code run` implies run mode. External drivers (CI, headless
+// harnesses) invoke `run` without exporting ALTIMATE_RUN_MODE, which used to
+// leave run-mode-only mechanisms (DONE-termination gate, starvation-breaker
 // directives, doom-loop escalation ladder) disarmed. The run command applies
 // this default at handler startup; interactive TUI/serve entrypoints never
 // call it, so their behavior is unchanged.
