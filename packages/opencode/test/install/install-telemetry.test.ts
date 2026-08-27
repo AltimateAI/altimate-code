@@ -21,7 +21,7 @@
  * reason for -Encoding ascii — is still not exercised anywhere.
  */
 import { describe, expect, test, afterEach, spyOn, mock } from "bun:test"
-import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, readdirSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { join } from "node:path"
 import os from "os"
@@ -86,6 +86,16 @@ describe("install — post-install marker", () => {
     expect(version).toBeGreaterThan(source)
   })
 
+  test("publishes the trigger atomically, not with a truncating write", () => {
+    // Companion-first only closes the attribution window. A plain redirect truncates
+    // before filling, so a reader mid-write can see an EMPTY .installed-version and
+    // delete it unread — losing the install. All four writers use temp+rename.
+    const start = INSTALL_SH.indexOf("write_install_marker() {")
+    const fn = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start))
+    expect(fn).toMatch(/installed-version\.\$\$/)
+    expect(fn).toMatch(/mv -f/)
+  })
+
   test("attributes --binary installs as local, not curl", () => {
     // That branch sets specific_version="local"; folding it into the curl metric would
     // misreport both source and version.
@@ -127,37 +137,64 @@ describe("install — marker writer, executed", () => {
 
   shtest("writes both marker files under the default data dir", () => {
     const { code, home, stderr } = runInstaller({ XDG_DATA_HOME: "" })
-    expect(code).toBe(0)
-    const dir = join(home, ".local", "share", "altimate-code")
-    // A non-empty version is required — the CLI deletes an empty marker unread.
-    expect(readFileSync(join(dir, ".installed-version"), "utf-8").trim().length).toBeGreaterThan(0)
-    // "local", not "curl": runInstaller uses --binary, which is deliberately attributed
-    // separately so a dev/air-gapped install cannot inflate the curl metric.
-    expect(readFileSync(join(dir, ".install-source"), "utf-8").trim()).toBe("local")
-    rmSync(home, { recursive: true, force: true })
-    expect(stderr).not.toMatch(/syntax error|command not found/)
+    try {
+      expect(code).toBe(0)
+      const dir = join(home, ".local", "share", "altimate-code")
+      // A non-empty version is required — the CLI deletes an empty marker unread.
+      expect(readFileSync(join(dir, ".installed-version"), "utf-8").trim().length).toBeGreaterThan(0)
+      // "local", not "curl": runInstaller uses --binary, which is deliberately attributed
+      // separately so a dev/air-gapped install cannot inflate the curl metric.
+      expect(readFileSync(join(dir, ".install-source"), "utf-8").trim()).toBe("local")
+      expect(stderr).not.toMatch(/syntax error|command not found/)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
   shtest("honours $XDG_DATA_HOME", () => {
     const xdg = mkdtempSync(join(os.tmpdir(), "install-exec-xdg-"))
     const { code, home } = runInstaller({ XDG_DATA_HOME: xdg })
-    expect(code).toBe(0)
-    expect(existsSync(join(xdg, "altimate-code", ".installed-version"))).toBe(true)
-    // Must NOT also land in the home-relative fallback.
-    expect(existsSync(join(home, ".local", "share", "altimate-code", ".installed-version"))).toBe(false)
-    rmSync(xdg, { recursive: true, force: true })
-    rmSync(home, { recursive: true, force: true })
+    try {
+      expect(code).toBe(0)
+      expect(existsSync(join(xdg, "altimate-code", ".installed-version"))).toBe(true)
+      // Must NOT also land in the home-relative fallback.
+      expect(existsSync(join(home, ".local", "share", "altimate-code", ".installed-version"))).toBe(false)
+    } finally {
+      rmSync(xdg, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 
-  shtest("an unwritable data dir does not fail the install", () => {
+  shtest("an unwritable data dir does not fail the install, and writes no marker", () => {
     // Parent is a regular file, so mkdir -p cannot succeed under it.
     const blocked = mkdtempSync(join(os.tmpdir(), "install-exec-blocked-"))
     const asFile = join(blocked, "not-a-dir")
     writeFileSync(asFile, "x")
     const { code, home } = runInstaller({ XDG_DATA_HOME: join(asFile, "nested") })
-    expect(code).toBe(0)
-    rmSync(blocked, { recursive: true, force: true })
-    rmSync(home, { recursive: true, force: true })
+    try {
+      expect(code).toBe(0)
+      // Exit 0 alone would pass with the marker writer deleted entirely. Asserting
+      // no marker exists proves the fixture actually hit the failure path.
+      expect(existsSync(join(asFile, "nested", "altimate-code", ".installed-version"))).toBe(false)
+    } finally {
+      rmSync(blocked, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  shtest("leaves no temp file behind from the atomic trigger publish", () => {
+    // The trigger is written to `.installed-version.$$` then mv'd. A leftover temp
+    // file would be read by nobody and would accumulate one per install.
+    const xdg = mkdtempSync(join(os.tmpdir(), "install-exec-tmp-"))
+    const { code, home } = runInstaller({ XDG_DATA_HOME: xdg })
+    try {
+      expect(code).toBe(0)
+      const entries = readdirSync(join(xdg, "altimate-code"))
+      expect(entries.sort()).toEqual([".install-source", ".installed-version"])
+    } finally {
+      rmSync(xdg, { recursive: true, force: true })
+      rmSync(home, { recursive: true, force: true })
+    }
   })
 })
 
@@ -215,6 +252,11 @@ describe("install.ps1 — post-install marker", () => {
     const version = markerCode.indexOf('".installed-version"')
     expect(source).toBeGreaterThan(0)
     expect(version).toBeGreaterThan(source)
+  })
+
+  test("publishes the trigger atomically", () => {
+    expect(markerCode).toMatch(/installed-version\.tmp/)
+    expect(markerCode).toMatch(/Move-Item -Force/)
   })
 
   test("writes without a BOM", () => {

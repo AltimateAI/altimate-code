@@ -1,10 +1,18 @@
 # Pester behavioral tests for install.ps1 (the Windows standalone installer).
 #
-# These run the real script as a subprocess on Windows PowerShell so they
-# exercise actual behavior - not just substring matching. They deliberately
-# stop the script early (via -Help or an unknown -Version) so no 268 MB binary
-# is ever downloaded, while still covering the risky branches: argument
-# parsing, the WOW64 architecture fix, and unknown-version rejection.
+# Two layers, because no single one reaches everything:
+#
+# 1. SUBPROCESS tests run the real script and exercise actual behavior - not just
+#    substring matching. They deliberately stop it early (via -Help or an unknown
+#    -Version) so no 268 MB binary is ever downloaded, covering argument parsing,
+#    the WOW64 architecture fix, and unknown-version rejection. Because they stop
+#    early they never reach anything past version resolution.
+#
+# 2. AST-EXTRACTED tests parse install.ps1, pull a single function out of the tree
+#    and dot-source it, so code the subprocess tests can never reach is still
+#    executed. Used for Test-Checksum and Write-InstallMarker. These must set
+#    $ErrorActionPreference = "Stop" themselves to match the installer's own
+#    semantics - see the note in the Write-InstallMarker BeforeAll.
 #
 # Run locally on Windows:  Invoke-Pester ./test/windows/install.Tests.ps1
 # CI runs this on windows-latest (see .github/workflows/ci.yml).
@@ -204,6 +212,16 @@ Describe "install.ps1 Write-InstallMarker" {
     if (-not $def) { throw "Write-InstallMarker not found in install.ps1" }
     . ([ScriptBlock]::Create($def.Extent.Text))
 
+    # MUST match the installer's own error semantics. install.ps1:28 sets
+    # $ErrorActionPreference = "Stop" at script scope, and that is the entire reason
+    # Write-InstallMarker needs its try/catch: under "Stop" a failing cmdlet is
+    # TERMINATING. Dot-sourcing the function out of the AST lands it in a session
+    # where pwsh's default "Continue" applies, under which a New-Item failure merely
+    # writes to the error stream — so "Should -Not -Throw" would pass with the
+    # try/catch deleted, and the test could not fail.
+    $ErrorActionPreference = "Stop"
+    $script:ErrorActionPreference = "Stop"
+
     # Mirrors welcome.ts::getDataDir(): $XDG_DATA_HOME, else <home>/.local/share.
     function Get-MarkerDir {
       param([string]$Root)
@@ -261,17 +279,44 @@ Describe "install.ps1 Write-InstallMarker" {
     # The regression guard for path computation inside the try. With
     # $ErrorActionPreference = "Stop", computing this outside the try raised a
     # terminating error that aborted the installer AFTER the binary was placed but
-    # BEFORE the PATH write — leaving an installed binary that is not on PATH.
+    # BEFORE the PATH write - leaving an installed binary that is not on PATH.
+    #
+    # Runs inside the sandbox via Push-Location. [IO.Path]::Combine("", ".local",
+    # "share") does NOT throw - it returns the RELATIVE path ".local\share" - so the
+    # marker is created under the current working directory. Without Push-Location
+    # that is the git checkout root, and every CI run would litter it.
     $env:XDG_DATA_HOME = ""
     $env:USERPROFILE = ""
-    { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+    Push-Location $script:Sandbox
+    try {
+      { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+      # Documents where an empty profile actually lands: relative to cwd, not $HOME.
+      Test-Path ([IO.Path]::Combine(".local", "share", "altimate-code", ".installed-version")) |
+        Should -BeTrue
+    } finally {
+      Pop-Location
+    }
   }
 
-  It "does not throw when the data dir cannot be created" {
-    # A regular file where a directory must go.
+  It "does not throw when the data dir cannot be created, and writes no marker" {
+    # Runs under $ErrorActionPreference = "Stop" (set in BeforeAll), so New-Item's
+    # failure here is terminating and the try/catch is what makes this pass. Deleting
+    # the try/catch must fail this case — that is what makes it a real guard.
     $blocker = Join-Path $script:Sandbox "blocker"
     Set-Content -Path $blocker -Value "x" -NoNewline
     $env:XDG_DATA_HOME = [IO.Path]::Combine($blocker, "nested")
+
     { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+
+    # Proves the fixture actually hit the intended failure path rather than quietly
+    # succeeding somewhere else: no marker may exist under the blocked root.
+    Test-Path ([IO.Path]::Combine($blocker, "nested", "altimate-code", ".installed-version")) |
+      Should -BeFalse
+  }
+
+  It "runs under the installer's Stop semantics" {
+    # Guards the BeforeAll above: if this drifts back to "Continue", the two
+    # "does not throw" cases silently stop being able to fail.
+    $ErrorActionPreference | Should -Be "Stop"
   }
 }

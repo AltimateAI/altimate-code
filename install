@@ -514,7 +514,13 @@ write_install_marker() {
     # between report install_method "unknown", and a truncated .installed-version is
     # deleted unread — losing the install rather than just its attribution.
     printf '%s' "$marker_source" > "$data_dir/.install-source" 2>/dev/null || return 0
-    printf '%s' "${marker_version#v}" > "$data_dir/.installed-version" 2>/dev/null || return 0
+    # The trigger is published atomically. Companion-first alone only closes the
+    # "attribution lost" window; a plain redirect truncates before filling, so a CLI
+    # starting mid-write can still observe an EMPTY .installed-version, which it
+    # deletes unread — losing the install itself. mv within one directory is atomic.
+    local tmp="$data_dir/.installed-version.$$"
+    printf '%s' "${marker_version#v}" > "$tmp" 2>/dev/null || return 0
+    mv -f "$tmp" "$data_dir/.installed-version" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
 }
 
 if [ -n "$binary_path" ]; then

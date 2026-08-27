@@ -24,12 +24,16 @@ const INSTALL_METHODS = ["curl", "powershell", "npm", "vscode-extension", "local
 type InstallMethod = (typeof INSTALL_METHODS)[number] | "unknown"
 
 /** Remove SOURCE_FILE, tolerating absence. Kept separate so the empty-marker path can
- * clear an orphan without pretending to read a value it will not use. */
+ * clear an orphan without pretending to read a value it will not use.
+ *
+ * rmSync with recursive, not unlinkSync: unlinkSync throws EPERM/EISDIR on a directory,
+ * so a directory-shaped `.install-source` would survive every launch and keep the read
+ * path returning "unknown" forever. force:true also absorbs the ordinary ENOENT case. */
 function clearInstallSource(dataDir: string): void {
   try {
-    fs.unlinkSync(path.join(dataDir, SOURCE_FILE))
+    fs.rmSync(path.join(dataDir, SOURCE_FILE), { force: true, recursive: true })
   } catch {
-    // Absent, or unlink refused — nothing further to do either way.
+    // Removal refused (read-only dir, EACCES on the parent) — nothing further to do.
   }
 }
 

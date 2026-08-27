@@ -356,7 +356,12 @@ function Write-InstallMarker {
     # truncates before writing, and an empty .installed-version is deleted unread,
     # which would lose the install outright.
     Set-Content -Path ([IO.Path]::Combine($dataDir, ".install-source")) -Value "powershell" -NoNewline -Encoding ascii
-    Set-Content -Path ([IO.Path]::Combine($dataDir, ".installed-version")) -Value $markerVersion -NoNewline -Encoding ascii
+    # Trigger published atomically: Set-Content truncates before writing, so a CLI
+    # starting mid-write could observe an EMPTY .installed-version and delete it
+    # unread, losing the install. Move-Item within one directory is atomic.
+    $tmpMarker = [IO.Path]::Combine($dataDir, ".installed-version.tmp")
+    Set-Content -Path $tmpMarker -Value $markerVersion -NoNewline -Encoding ascii
+    Move-Item -Force -Path $tmpMarker -Destination ([IO.Path]::Combine($dataDir, ".installed-version"))
   } catch {
     # Non-fatal - a missing marker only costs us the install event, never the install.
   }

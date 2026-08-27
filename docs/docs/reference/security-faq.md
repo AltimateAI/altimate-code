@@ -140,7 +140,7 @@ A single `first_launch` event is sent containing only:
 
 - The installed version (e.g., "0.5.9")
 - Whether this is a fresh install or upgrade (boolean)
-- Which installer was used (`curl`, `powershell`, `npm`, `vscode-extension`, or `local`)
+- Which installer was used (`curl`, `powershell`, `npm`, `vscode-extension`, `local`, or `unknown` — what every upgrade from a version predating this field reports)
 - Your anonymous machine ID (random UUID)
 
 No code, queries, file paths, or personal information is included. This event helps us understand adoption and is fully opt-out-able.

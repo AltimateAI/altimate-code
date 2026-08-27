@@ -190,6 +190,26 @@ describe("showWelcomeBannerIfNeeded", () => {
       fs.rmSync(cleanHome, { recursive: true, force: true })
     })
 
+    test("clears a directory-shaped source file rather than leaving it forever", async () => {
+      // unlinkSync throws EPERM/EISDIR on a directory. If it were used here, a
+      // directory-shaped .install-source would survive every launch and pin
+      // install_method to "unknown" permanently.
+      const dir = path.join(tmpDir, "altimate-code")
+      fs.writeFileSync(path.join(dir, ".installed-version"), "1.2.3")
+      fs.mkdirSync(path.join(dir, ".install-source"), { recursive: true })
+      const events = captureEvents()
+      const cleanHome = fs.mkdtempSync(path.join(os.tmpdir(), "welcome-home-"))
+      try {
+        const { showWelcomeBannerIfNeeded } = await import("../../src/cli/welcome")
+        withHome(cleanHome, () => showWelcomeBannerIfNeeded())
+
+        expect((events[0] as any).install_method).toBe("unknown")
+        expect(fs.existsSync(path.join(dir, ".install-source"))).toBe(false)
+      } finally {
+        fs.rmSync(cleanHome, { recursive: true, force: true })
+      }
+    })
+
     test("an empty marker emits nothing and clears the orphaned source file", async () => {
       const dir = dataFiles("", "curl")
       const events = captureEvents()

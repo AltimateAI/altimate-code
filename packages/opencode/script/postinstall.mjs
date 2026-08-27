@@ -238,10 +238,20 @@ function writeUpgradeMarker(version) {
     const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share")
     const dataDir = path.join(xdgData, "altimate-code")
     fs.mkdirSync(dataDir, { recursive: true })
-    fs.writeFileSync(path.join(dataDir, ".installed-version"), version.replace(/^v/, ""))
-    // Record the installer so first_launch can distinguish npm from the curl /
-    // PowerShell install scripts, which write the same marker.
+    // Companion first, trigger last. `.installed-version` is what the CLI keys on:
+    // it returns early unless that file exists, then consumes `.install-source`.
+    // Trigger-first left two windows — a CLI starting in between reports
+    // install_method "unknown", and writeFileSync truncates before writing, so a
+    // reader could observe an EMPTY `.installed-version` and delete it unread,
+    // losing the install outright. Matches `install` and `install.ps1`.
     fs.writeFileSync(path.join(dataDir, ".install-source"), "npm")
+    // Trigger published atomically: writeFileSync truncates before filling, so a CLI
+    // starting mid-write could observe an EMPTY `.installed-version` and delete it
+    // unread, losing the install. renameSync within one directory is atomic.
+    const versionPath = path.join(dataDir, ".installed-version")
+    const tmpPath = `${versionPath}.${process.pid}.tmp`
+    fs.writeFileSync(tmpPath, version.replace(/^v/, ""))
+    fs.renameSync(tmpPath, versionPath)
   } catch {
     // Non-fatal — the CLI just won't show a welcome banner
   }
