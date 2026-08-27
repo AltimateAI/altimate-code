@@ -709,6 +709,10 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client) return
         delete s.clients[name]
         delete s.defs[name]
+        // altimate_change — the child exited, so nothing is running under this
+        // key. The spawn record answers "what IS running" and must not outlive
+        // the process it describes.
+        delete s.spawned[name]
         s.status[name] = { status: "failed", error: "Connection closed" }
         bridge.fork(
           Effect.logWarning("MCP connection closed", { server: name }).pipe(
@@ -961,6 +965,10 @@ export const layer = Layer.effect(
       // altimate_change end
       yield* closeClient(s, name)
       delete s.clients[name]
+      // altimate_change — nothing is running under this key now, so the spawn
+      // record must not survive it either: it answers "what IS running", and a
+      // disabled key runs nothing.
+      delete s.spawned[name]
       s.status[name] = { status: "disabled" }
       // altimate_change start — telemetry + persist enabled:false so disable survives restarts
       Telemetry.track({
@@ -985,10 +993,19 @@ export const layer = Layer.effect(
       yield* closeClient(s, name)
       delete s.clients[name]
       delete s.status[name]
-      // altimate_change — nothing is running under this key any more, so nothing
-      // was spawned under it. Leaving the record behind makes a later caller
-      // believe a torn-down engine is still serving.
+      // altimate_change start — nothing is running under this key any more, so
+      // neither the spawn record nor the runtime config may outlive it.
+      //
+      // `s.config` is what `getMcpConfig` prefers over the file, so a stale entry
+      // here outlives the client it described: `status()` keeps synthesising
+      // "disabled" from it for the rest of the process, and `connect` re-spawns
+      // whatever it holds rather than what the file now says. "Removed" has to
+      // mean the runtime forgets it, for every server key — a caller that has
+      // torn a client down and then asks about the key should be told nothing is
+      // there, not handed the description of the thing it just removed.
       delete s.spawned[name]
+      delete s.config[name]
+      // altimate_change end
       yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
     })
     // altimate_change end

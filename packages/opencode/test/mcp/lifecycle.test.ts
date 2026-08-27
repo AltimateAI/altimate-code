@@ -1289,3 +1289,27 @@ it.instance(
     ),
 )
 // altimate_change end
+
+// altimate_change start — "removed means the runtime forgets it"
+it.instance(
+  "removing a client clears the runtime config, not just the client",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // `getMcpConfig` prefers the runtime config over the file, so an entry
+        // left behind here outlives the client it described: `status()` keeps
+        // synthesising "disabled" from it, and `connect` re-spawns what it holds
+        // rather than what the file now says. A caller that removed a client and
+        // then asks about the key must be told nothing is there.
+        lastCreatedClientName = "forget"
+        yield* mcp.add("forget", { type: "local", command: ["echo", "one"] })
+        expect(Object.keys(yield* mcp.status())).toContain("forget")
+
+        yield* mcp.remove("forget")
+        expect(Object.keys(yield* mcp.status()), "the key survived its own removal").not.toContain("forget")
+        expect(yield* mcp.spawned("forget")).toBeUndefined()
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
