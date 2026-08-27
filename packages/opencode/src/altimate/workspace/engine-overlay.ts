@@ -124,6 +124,9 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
     }
     const binding = await resolveBinding(directory)
     if (!binding) {
+      // Logged because "flag on, nothing happened" is the question every
+      // first-run report asks; the directory is the usual answer.
+      log.info("workspace engine overlay skipped: directory is not bound", { directory })
       current = null
       return
     }
@@ -345,6 +348,10 @@ async function reconcile(sessionID: string): Promise<void> {
 
   const present = engineToolKeys(await mcp().tools())
   const missing = declared ? declared.keys.filter((k) => !present.has(k)) : undefined
+  // `available` is everything the engine serves under the key. The engine adds
+  // tools beyond the allowlist (knowledge, memory) when the workspace enables
+  // them, so the "N of M declared" line counts only the declared ones present.
+  const served = declared ? declared.keys.length - (missing?.length ?? 0) : present.size
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,
@@ -366,7 +373,7 @@ async function reconcile(sessionID: string): Promise<void> {
   await notify({
     title: `Workspace "${workspace.name}"`,
     message: declared
-      ? `${outcome.available} of ${declared.keys.length} declared integration tools available.${describeMissing(missing ?? [])}`
+      ? `${served} of ${declared.keys.length} declared integration tools available.${describeMissing(missing ?? [])}`
       : `${outcome.available} integration tools available.`,
     variant: missing && missing.length > 0 ? "warning" : "info",
   })

@@ -293,6 +293,16 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 
+  test("the inventory counts declared tools that are present, not every tool the engine serves", async () => {
+    const h = install({
+      tools: { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {}, datamate_altimate_knowledge_search: {} },
+      declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] },
+    })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [] })
+    expect(h.toasts[0].message).toBe("2 of 2 declared integration tools available.")
+  })
+
   test("attached without an allowlist reports only what is available", async () => {
     const h = install({ declared: null })
     await beforeTurn("s1")
