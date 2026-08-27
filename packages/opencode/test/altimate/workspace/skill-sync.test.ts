@@ -20,7 +20,6 @@ mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 mkdirSync(path.join(SANDBOX, "home", ".altimate"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
-process.env.ALTIMATE_WORKSPACE = "1"
 
 const API_URL = "https://api.example.test"
 const TENANT = "acme"
@@ -36,7 +35,7 @@ writeFileSync(
   }),
 )
 
-const { syncSkills } = await import("@/altimate/workspace/skill-sync")
+const { syncSkills, recentlySynced } = await import("@/altimate/workspace/skill-sync")
 const { cachePath } = await import("@/altimate/workspace/state")
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
@@ -67,6 +66,10 @@ function bindTo(datamateId: number) {
 }
 
 beforeEach(() => {
+  // Scoped per test, not set at module load: bun may run other test files in
+  // this process, and a live workspace flag makes their prompt path attempt a
+  // real sync against this file's sandbox credentials.
+  process.env.ALTIMATE_WORKSPACE = "1"
   project = path.join(SANDBOX, `proj-${Math.random().toString(36).slice(2)}`)
   mkdirSync(project, { recursive: true })
   bindTo(1)
@@ -74,6 +77,8 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
 })
 
 afterAll(() => {
@@ -413,6 +418,37 @@ describe("workspace skill sync", () => {
     serveWithServerBinding({ "pub-2": { "SKILL.md": "after recovery" } })
     await syncSkills(project)
     expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+  })
+
+  test("recentlySynced rate-limits the per-message poll", async () => {
+    // The caller on the per-message path skips the network while this is true.
+    // If it never went true, every turn would pay an HTTP round trip; if it
+    // never went false, a skill added in the SaaS would never reach an open
+    // session.
+    expect(recentlySynced(project)).toBe(false)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(recentlySynced(project)).toBe(true)
+
+    // Scoped per project — a different directory is still due a check.
+    expect(recentlySynced(path.join(SANDBOX, "some-other-proj"))).toBe(false)
+  })
+
+  test("a skill added later is picked up by a subsequent sync", async () => {
+    // The SaaS-adds-a-skill case: the same project, already synced, gains a
+    // second skill upstream. A later sync must report changed and land it.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    serve(
+      { "pub-1": { "SKILL.md": "one" }, "pub-9": { "SKILL.md": "added in the saas" } },
+      "2026-05-05T00:00:00Z",
+    )
+    const { changed } = await syncSkills(project)
+    expect(changed).toBe(true)
+    expect(existsSync(skillFile("pub-9", "SKILL.md"))).toBe(true)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("does nothing when the workspace flag is off", async () => {

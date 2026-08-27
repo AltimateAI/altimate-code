@@ -96,9 +96,9 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
-  // altimate_change start — see the workspace skill block in `prompt`: projects
-  // whose skills have already been pulled in this process.
-  const workspaceSkillsPulled = new Set<string>()
+  // altimate_change start — how long a turn will wait for the workspace skill
+  // sync before proceeding without it. See the block in `prompt`.
+  const WORKSPACE_SKILL_WAIT_MS = 2000
   // altimate_change end
 
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
@@ -277,27 +277,39 @@ export namespace SessionPrompt {
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
 
-    // altimate_change start — pull the bound workspace's custom skills before the
-    // agent is resolved. `createUserMessage` -> `Agent.get` -> `Skill.dirs()` is
-    // what first materialises the skill registry, so a session that starts with
-    // a bound project picks the skills up on its first turn.
+    // altimate_change start — make the bound workspace's custom skills visible
+    // before the agent is resolved. `createUserMessage` -> `Agent.get` ->
+    // `Skill.dirs()` is what first materialises the skill registry, so acting
+    // here lands the skills on this turn rather than the next one.
     //
-    // Once per project per process: `prompt` runs per message, and an HTTP
-    // round-trip on every turn is not acceptable in the one code path whose
-    // first-answer latency is measured.
+    // `prompt` runs per message, so the pull is rate-limited by
+    // `recentlySynced`. Between polls a skill added in the SaaS is at most one
+    // interval away; syncing once per process would mean it never arrives in an
+    // open session at all.
     //
-    // Note the limit this accepts: the registry is cached per instance, so a
-    // bind that happens MID-session lands the files but does not make them
-    // visible until the next start. Refreshing in place needs the invalidation
-    // to run inside the server's Effect context — the imperative facade builds
-    // its own runtime and invalidates a different instance — so it is not the
-    // few lines it looks like, and is deliberately left out of v0.
+    // The wait is bounded and the sync is NOT cancelled on timeout. This is the
+    // one path whose first-answer latency is measured, and the workspace request
+    // budget is 15s — long enough that a slow backend would otherwise be felt as
+    // the agent hanging before it even starts. Past the bound the sync keeps
+    // running and simply lands on a later turn, which is what it would have done
+    // anyway had the interval not elapsed yet.
+    //
+    // Refresh only on a real change: dropping the caches costs a config reread
+    // for every instance plus a full re-scan. This runs under the instance ALS,
+    // which `attach()` propagates into the facade's runtime, so it invalidates
+    // THIS session's registry — verified by harness test.
     try {
+      const { syncSkills, recentlySynced } = await import("../altimate/workspace/skill-sync")
       const dir = Instance.directory
-      if (!workspaceSkillsPulled.has(dir)) {
-        workspaceSkillsPulled.add(dir)
-        const { syncSkills } = await import("../altimate/workspace/skill-sync")
-        await syncSkills(dir)
+      if (!recentlySynced(dir)) {
+        const applied = syncSkills(dir).then(async ({ changed }) => {
+          if (!changed) return
+          const { Config } = await import("../config/config")
+          await Config.invalidate()
+          await import("../skill").then((m) => m.Skill.refresh())
+        })
+        applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
+        await Promise.race([applied, new Promise((r) => setTimeout(r, WORKSPACE_SKILL_WAIT_MS))])
       }
     } catch (err) {
       log.warn("workspace skill sync failed", { err: String(err) })

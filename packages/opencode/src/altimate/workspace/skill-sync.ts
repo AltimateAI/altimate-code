@@ -87,6 +87,26 @@ function managedRoot(directory: string): string {
  * start racing on the same project do not both stage and swap. */
 const inFlight = new Map<string, Promise<void>>()
 
+/** How long a snapshot is trusted before the next turn re-checks the workspace.
+ *
+ * `prompt` runs per message, so syncing on every turn would put an HTTP round
+ * trip in the one path whose first-answer latency is measured. Syncing once per
+ * process is the other extreme: a skill added in the SaaS never reaches a
+ * session that is already open. This bounds the staleness instead — at most one
+ * list call per project per interval, and the list is Postgres-only server-side
+ * (no S3 reads), so the check is cheap when nothing changed. */
+const POLL_INTERVAL_MS = 5 * 60 * 1000
+
+/** Last completed sync per canonical project, for the interval above. */
+const lastSyncedAt = new Map<string, number>()
+
+/** Has this project's snapshot been checked within the poll interval? Callers
+ * on a per-message path use this to skip the network entirely. */
+export function recentlySynced(directory: string): boolean {
+  const at = lastSyncedAt.get(path.resolve(directory))
+  return at !== undefined && Date.now() - at < POLL_INTERVAL_MS
+}
+
 async function readManifest(directory: string): Promise<Manifest | null> {
   try {
     const raw = await fs.readFile(path.join(managedRoot(directory), MANIFEST_NAME), "utf8")
@@ -307,6 +327,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   } finally {
     inFlight.delete(canon)
   }
+  lastSyncedAt.set(canon, Date.now())
   return { changed }
 }
 
