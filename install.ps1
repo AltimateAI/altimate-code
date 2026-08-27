@@ -305,6 +305,71 @@ if (-not $needsBaseline) {
 }
 
 # ---------------------------------------------------------------------------
+# Post-install marker (install telemetry)
+# ---------------------------------------------------------------------------
+# Mirrors npm's postinstall.mjs (and ./install's write_install_marker) so the CLI
+# emits its `first_launch` event on the next run; without it this install path is
+# invisible in install metrics.
+#
+# A function, not inline code, so the Pester suite can AST-extract and execute it
+# against a temp profile the same way it does Test-Checksum. The subprocess tests
+# deliberately stop the installer before this point, so inline code here would have
+# no runtime coverage on the riskiest of the writers.
+function Write-InstallMarker {
+  param([string]$Version)
+
+  # The directory MUST match welcome.ts's resolution - $XDG_DATA_HOME, else
+  # <home>\.local\share - because the CLI reads it through Node's os.homedir() and
+  # never looks at %LOCALAPPDATA%. Writing to LOCALAPPDATA here would be silently
+  # ignored at read time.
+  #
+  # No network call and no identifier is written; only the installed version is
+  # recorded. The CLI's existing telemetry opt-out gates still decide whether
+  # anything is ever sent.
+  #
+  # EVERYTHING is inside the try, path computation included. $ErrorActionPreference is
+  # "Stop", and Join-Path resolves provider-qualified paths - so a null or empty
+  # $env:USERPROFILE (pwsh on non-Windows, a stripped service profile) or an
+  # XDG_DATA_HOME naming a non-existent PSDrive raises a TERMINATING error. Computed
+  # outside the try, that error would abort the installer after the binary is placed
+  # but before the PATH registry write and the "Get started" output, leaving the user
+  # with an installed binary that is not on PATH. [IO.Path]::Combine also keeps
+  # PSDrive resolution out of it entirely.
+  try {
+    $dataRoot = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } else { [IO.Path]::Combine($env:USERPROFILE, ".local", "share") }
+    $dataDir = [IO.Path]::Combine($dataRoot, "altimate-code")
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    # The CLI deletes an empty marker without reporting, so fall back to "unknown"
+    # when the version could not be resolved (GitHub API unreachable).
+    $markerVersion = if ($Version) { $Version -replace '^v', '' } else { "unknown" }
+    # -NoNewline: the CLI trims, but keep the file byte-identical to the npm path.
+    #
+    # -Encoding ascii, not utf8: the documented entrypoint is `powershell -c "irm ... | iex"`,
+    # i.e. Windows PowerShell 5.1, where `-Encoding utf8` prepends a UTF-8 BOM. Both values are
+    # ASCII by construction, so ascii is lossless here and cannot emit one. The CLI's .trim()
+    # happens to strip a leading BOM (U+FEFF is JS whitespace), but the install-source value is
+    # matched against a fixed allowlist and must not depend on that.
+    #
+    # Companion first, trigger last. The CLI returns early unless .installed-version
+    # exists, then consumes .install-source - so writing the trigger first would let a
+    # CLI starting in between report install_method "unknown". Set-Content also
+    # truncates before writing, and an empty .installed-version is deleted unread,
+    # which would lose the install outright.
+    Set-Content -Path ([IO.Path]::Combine($dataDir, ".install-source")) -Value "powershell" -NoNewline -Encoding ascii
+    # Trigger published atomically: Set-Content truncates before writing, so a CLI
+    # starting mid-write could observe an EMPTY .installed-version and delete it
+    # unread, losing the install. Move-Item within one directory is atomic.
+    $tmpMarker = [IO.Path]::Combine($dataDir, ".installed-version.tmp")
+    Set-Content -Path $tmpMarker -Value $markerVersion -NoNewline -Encoding ascii
+    Move-Item -Force -Path $tmpMarker -Destination ([IO.Path]::Combine($dataDir, ".installed-version"))
+  } catch {
+    # Non-fatal - a missing marker only costs us the install event, never the install.
+  }
+}
+
+Write-InstallMarker -Version $specificVersion
+
+# ---------------------------------------------------------------------------
 # PATH (user scope, via registry + broadcast)
 # ---------------------------------------------------------------------------
 # Write the user PATH through the registry (not setx, which truncates at 1024
