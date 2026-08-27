@@ -1336,17 +1336,11 @@ function wasServing(outcome: Outcome | undefined): boolean {
 
 /** Is the memoised success still true?
  *
- * Validated by the SAME reader and the SAME decision as a fresh attach, because
- * this was a second copy of the intent/attribution/floor logic in a different
- * order — it read status before config, the reverse of what the reader
- * documents — and it is the common path, taken on every turn after the first.
- * A second implementation of a decision is a second place for the decision to
- * be wrong, and this one was: it never consulted intent at all, so a memo
- * outlived a disable for the life of the session.
+ * Validated by the SAME reader and the SAME decision as a fresh attach. This is
+ * the common path — every turn after the first takes it — and a second
+ * implementation of the decision would be a second place for it to be wrong.
  *
- * "Still valid" is defined as the plan saying reuse. Nothing else.
- *
- * Fails OPEN: a read that throws must not invalidate a good attach. */
+ * "Still valid" is the plan saying reuse. Nothing else. */
 async function memoStillValid(workspaceId: string, record?: SessionAttach): Promise<boolean> {
   try {
     const inspection = await inspectEntry()
@@ -1362,13 +1356,20 @@ async function memoStillValid(workspaceId: string, record?: SessionAttach): Prom
     }
 
     // The FLOOR is what makes the pin trustworthy, since engines below it do not
-    // lock it. Re-probed only when the command CHANGES, because probing spawns a
-    // process and this runs every turn. The residual is narrow and worth naming:
-    // a binary swapped in place under an unchanged command is not caught until
-    // the next session.
-    const command = commandArgv(inspection.entry).join(" ")
+    // lock it — and like the pin, it is a question about the engine that is
+    // RUNNING. Probing the configured command instead lets a newly configured
+    // modern binary vouch for a running pre-floor one under the same pin, and
+    // record that as validated for the rest of the session.
+    //
+    // Re-probed when either command changes, because probing spawns a process
+    // and this runs every turn. A divergence between the two IS the case that
+    // needs re-probing, so the key carries both. The residual is narrow and
+    // worth naming: a binary swapped in place under an unchanged command is not
+    // caught until the next session.
+    const running = inspection.runtime ?? inspection.entry
+    const command = `${commandArgv(running).join(" ")}|${commandArgv(inspection.entry).join(" ")}`
     if (record && record.validated === command) return true
-    const found = await engineVersionOf(inspection.entry)
+    const found = await engineVersionOf(running)
     if (!clearsFloor(found)) {
       log.info("cached attach no longer clears the version floor; re-attaching", { workspaceId, found })
       return false
@@ -1378,13 +1379,12 @@ async function memoStillValid(workspaceId: string, record?: SessionAttach): Prom
     if (record) record.validated = command
     return true
   } catch (err) {
-    // Fails CLOSED, and the earlier comment claiming otherwise was wrong about
-    // the cost. Returning true serves a memo whose world could not be confirmed
-    // — a disabled entry or a moved pin rides a transient probe error, on the
-    // path taken by every turn after the first. Returning false does not discard
-    // anything: it routes back through `run()`, which re-inspects under the
-    // per-project lock and either attaches or refuses through the single exit,
-    // with no mutation. A failed read is never an answer.
+    // Fails CLOSED. Returning true would serve a memo whose world could not be
+    // confirmed — a disabled entry or a moved pin riding a transient probe
+    // error, on the path every turn after the first takes. Returning false
+    // discards nothing: it routes back through `run()`, which re-inspects under
+    // the per-project lock and either attaches or refuses through the single
+    // exit, with no mutation. A failed read is never an answer.
     log.warn("could not confirm the cached attach; re-deciding rather than serving it", { err: String(err) })
     return false
   }

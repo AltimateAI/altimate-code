@@ -2679,3 +2679,34 @@ describe("INVARIANT — the floor is asked of the engine that is running", () =>
     expect(h.removes, "left the pre-floor engine registered").toContain("datamate")
   })
 })
+
+describe("INVARIANT — a memo is validated against the engine that is running", () => {
+  test("editing the config to a modern binary does not validate a running pre-floor engine", async () => {
+    // The same question as the fresh path, on the path every later turn takes.
+    // A memo attached to a running pre-floor engine, then a config edit to a
+    // floor-clearing command under the same pin: probing the CONFIG command
+    // clears the floor, records it as validated, and the running pre-floor
+    // engine — which does not lock its pin — keeps serving for the session.
+    const h = install({
+      existing: { type: "local", command: ["/old/datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [
+        { datamate: { status: "connected" } },
+        { datamate: { status: "connected" } },
+        { datamate: { status: "connected" } },
+      ],
+      version: (bin) => (bin.startsWith("/old") ? "0.7.0" : "0.7.0"),
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    h.spawnedNow = { type: "local", command: ["/old/datamate", "start-stdio", "--datamate", "42"] } as never
+    expect((await ensure("s1")).kind).toBe("reused")
+
+    // The running engine is now known to be pre-floor, and the config is edited
+    // to a modern binary under the same pin.
+    syncInternals.versionOf = async (bin: string) => (bin.startsWith("/old") ? "0.6.5" : "0.7.0")
+    syncInternals.existingEntry = async () =>
+      ({ type: "local", command: ["/new/datamate", "start-stdio", "--datamate", "42"], enabled: true }) as never
+    const second = await ensure("s1")
+    expect(second.kind, "served a memo for a running pre-floor engine").not.toBe("reused")
+    expect(h.removes, "left the pre-floor engine registered and serving").toContain("datamate")
+  })
+})
