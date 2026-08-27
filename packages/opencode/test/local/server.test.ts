@@ -77,6 +77,21 @@ async function fakeLlamaServerScript(dir: string) {
   return scriptPath
 }
 
+// Node's "spawn" event fires when the child is created (post-fork), not when
+// execve has completed — on a loaded runner, /proc/<pid>/cmdline read
+// immediately after startServer can still show the parent's command line, so
+// the managedProcess() identity match transiently fails. Real flows never
+// race this (health polling precedes any status check by seconds); tests
+// assert immediately, so they poll until the identity settles.
+async function statusOnceSettled(options: Parameters<typeof getServerStatus>[0]) {
+  let status = await getServerStatus(options)
+  for (let attempt = 0; attempt < 40 && !status.processAlive; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    status = await getServerStatus(options)
+  }
+  return status
+}
+
 describe("local server port selection", () => {
   test("asks the OS for a free loopback port", async () => {
     const requested: number[] = []
@@ -224,7 +239,7 @@ describe("startServer / getServerStatus / stopServer — llama.cpp engine", () =
     expect(persisted).toEqual(state)
     expect(state.modelPath).toBe(modelPath)
 
-    const status = await getServerStatus({ paths, fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }) })
+    const status = await statusOnceSettled({ paths, fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }) })
     expect(status.processAlive).toBe(true)
     expect(status.healthy).toBe(true)
 
@@ -330,7 +345,7 @@ describe("startServer / getServerStatus / stopServer — llama.cpp engine", () =
       fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }),
     })
 
-    const status = await getServerStatus({
+    const status = await statusOnceSettled({
       paths,
       fetchImpl: async () => new Response(JSON.stringify({ status: "ok" }), { status: 200 }),
     })
