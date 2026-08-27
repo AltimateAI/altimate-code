@@ -7,7 +7,8 @@
 // the detail here from disk and PATH rather than from the overlay's memory.
 // Offer, never install on the flow's own account — `installEngine` only ever
 // runs from an explicit "Install now".
-import { execFile } from "node:child_process"
+import { execFile, type ChildProcess } from "node:child_process"
+import launch from "cross-spawn"
 import { Process } from "@/util/process"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -117,48 +118,117 @@ export function npmAvailable(): boolean {
   return which(process.platform === "win32" ? "npm.cmd" : "npm") !== null
 }
 
-/** Run the global install. Only ever reached from an explicit user choice.
- *
- * `npm.cmd` on Windows: a normal Node install exposes npm as a command shim,
- * and nothing here spawns a shell. The deadline comes from an abort signal:
- * `Process.spawn` consults `timeout` only inside its abort handler. A zero
- * exit is not a usable engine — npm's global bin directory need not be on
- * PATH — so the same discovery the turn boundary does runs before success. */
+/** Options are the process-group and deadline handling for the one command
+ * the offer runs. Nothing here spawns a shell. */
+export type InstallRun = { code: number | null; timedOut: boolean; stderr: string }
+/** After the deadline's SIGTERM, how long the tree gets before SIGKILL and the
+ * run is reported as timed out regardless of what is still alive. */
+export const INSTALL_KILL_GRACE_MS = 5_000
+
+/** Run the install command with a real deadline. npm forks a tree (scripts,
+ * node), and a descendant that outlives npm can keep the stderr pipe open, so
+ * the run settles on the child's `exit`, never on `close`, and the deadline
+ * signals the whole process group (POSIX: the child is its own group leader;
+ * Windows: taskkill /T) — SIGTERM first, SIGKILL after the grace, then the run
+ * reports the timeout whether or not anything is still holding a pipe. */
+export function runInstall(
+  argv: string[],
+  timeoutMs = INSTALL_TIMEOUT_MS,
+  graceMs = INSTALL_KILL_GRACE_MS,
+): Promise<InstallRun> {
+  if (syncInternals.runInstall) return syncInternals.runInstall(argv, timeoutMs)
+  return new Promise((resolve) => {
+    const grouped = process.platform !== "win32"
+    let child: ChildProcess
+    try {
+      child = launch(argv[0], argv.slice(1), {
+        stdio: ["ignore", "ignore", "pipe"],
+        detached: grouped,
+        windowsHide: process.platform === "win32",
+      })
+    } catch (err) {
+      resolve({ code: null, timedOut: false, stderr: err instanceof Error ? err.message : String(err) })
+      return
+    }
+    let stderr = ""
+    child.stderr?.on("data", (chunk) => {
+      stderr = (stderr + String(chunk)).slice(-4096)
+    })
+    let timedOut = false
+    let settled = false
+    let hard: ReturnType<typeof setTimeout> | undefined
+    const finish = (code: number | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (hard) clearTimeout(hard)
+      resolve({ code, timedOut, stderr })
+    }
+    const killTree = (signal: NodeJS.Signals) => {
+      if (grouped && child.pid) {
+        try {
+          process.kill(-child.pid, signal)
+          return
+        } catch {
+          // The group is already gone; fall through to the child itself.
+        }
+      }
+      if (process.platform === "win32") {
+        void Process.stop(child)
+        return
+      }
+      try {
+        child.kill(signal)
+      } catch {
+        // Already exited.
+      }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      killTree("SIGTERM")
+      hard = setTimeout(() => {
+        killTree("SIGKILL")
+        finish(null)
+      }, graceMs)
+    }, timeoutMs)
+    child.once("exit", (code) => finish(code))
+    child.once("error", (err) => {
+      stderr = stderr || err.message
+      finish(null)
+    })
+  })
+}
+
+/** `npm i -g <spec>` with a deadline (`runInstall`). A zero exit is not a
+ * usable engine — npm's global bin directory need not be on PATH — so the same
+ * discovery the turn boundary does runs before success. */
 export async function installEngine(): Promise<InstallResult> {
   const spec = installSpec()
   if (syncInternals.install) return syncInternals.install(spec)
   const npm = process.platform === "win32" ? "npm.cmd" : "npm"
-  const deadline = AbortSignal.timeout(INSTALL_TIMEOUT_MS)
-  try {
-    const result = await Process.run([npm, "i", "-g", spec], { abort: deadline, nothrow: true })
-    if (result.code === 0) {
-      const installedBin = which(ENGINE_BINARY)
-      if (!installedBin) {
-        return {
-          ok: false,
-          error: `npm installed it, but ${ENGINE_BINARY} is not on PATH — add your npm global bin directory to PATH`,
-        }
-      }
-      const installedVersion = await versionOf(installedBin)
-      if (!clearsFloor(installedVersion)) {
-        return {
-          ok: false,
-          error: `npm installed it, but ${ENGINE_BINARY} on PATH reports ${installedVersion ?? "no version"}`,
-        }
-      }
-      return { ok: true }
-    }
-    if (deadline.aborted) {
-      return { ok: false, error: `npm did not finish within ${Math.round(INSTALL_TIMEOUT_MS / 60_000)} minutes` }
-    }
-    const detail = result.stderr.toString().trim().split(/\r?\n/).slice(-3).join(" ")
-    return { ok: false, error: detail || `npm exited with code ${result.code}` }
-  } catch (err) {
-    if (deadline.aborted) {
-      return { ok: false, error: `npm did not finish within ${Math.round(INSTALL_TIMEOUT_MS / 60_000)} minutes` }
-    }
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  const run = await runInstall([npm, "i", "-g", spec])
+  if (run.timedOut) {
+    return { ok: false, error: `npm did not finish within ${Math.round(INSTALL_TIMEOUT_MS / 60_000)} minutes` }
   }
+  if (run.code === 0) {
+    const installedBin = which(ENGINE_BINARY)
+    if (!installedBin) {
+      return {
+        ok: false,
+        error: `npm installed it, but ${ENGINE_BINARY} is not on PATH — add your npm global bin directory to PATH`,
+      }
+    }
+    const installedVersion = await versionOf(installedBin)
+    if (!clearsFloor(installedVersion)) {
+      return {
+        ok: false,
+        error: `npm installed it, but ${ENGINE_BINARY} on PATH reports ${installedVersion ?? "no version"}`,
+      }
+    }
+    return { ok: true }
+  }
+  const detail = run.stderr.trim().split(/\r?\n/).slice(-3).join(" ")
+  return { ok: false, error: detail || `npm exited with code ${run.code ?? "unknown"}` }
 }
 
 /** Ask the TUI to raise the offer. False when the bus is unavailable. The

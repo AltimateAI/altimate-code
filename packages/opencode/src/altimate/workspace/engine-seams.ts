@@ -32,6 +32,10 @@ export const syncInternals: {
   /** Install-offer seams (see engine-offer.ts). */
   offer?: (offer: EngineOffer) => boolean
   publishOffer?: (sessionID: string) => Promise<boolean>
+  runInstall?: (
+    argv: string[],
+    timeoutMs: number,
+  ) => Promise<{ code: number | null; timedOut: boolean; stderr: string }>
   nodeMajor?: () => Promise<number | null>
   npmAvailable?: () => boolean
   install?: (spec: string) => Promise<InstallResult>

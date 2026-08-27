@@ -12,6 +12,7 @@ import {
   describeOffer,
   installCommand,
   installEngine,
+  runInstall,
   installSpec,
   nodeMajor,
   resetForTests,
@@ -21,7 +22,6 @@ import {
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
 import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS } from "../../../src/altimate/workspace/engine-offer"
-import { Process } from "../../../src/util/process"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
 
 const DIR = "/tmp/analytics"
@@ -313,58 +313,47 @@ describe("headless notice stream", () => {
 })
 
 describe("install deadline", () => {
-  test("passes an abort signal to the spawn, not just a timeout", async () => {
-    syncInternals.which = () => "/usr/local/bin/datamate"
-    syncInternals.versionOf = async () => "0.7.0"
-    const run = spyOn(Process, "run").mockImplementation(async (_cmd, opts) => {
-      expect(opts?.abort).toBeInstanceOf(AbortSignal)
-      return { code: 0, stdout: Buffer.from(""), stderr: Buffer.from("") } as never
-    })
-    try {
-      expect(await installEngine()).toEqual({ ok: true })
-      expect(run).toHaveBeenCalledTimes(1)
-    } finally {
-      run.mockRestore()
-    }
+  const posix = process.platform !== "win32"
+  test.skipIf(!posix)("settles on the child's exit even when a descendant keeps stderr open", async () => {
+    // npm forks a tree; a straggler holding the pipe must not hold the run.
+    const t0 = Date.now()
+    const run = await runInstall(["sh", "-c", "sleep 5 >&2 2>/dev/null & exit 0"], 4_000, 200)
+    expect(run.code).toBe(0)
+    expect(run.timedOut).toBe(false)
+    expect(Date.now() - t0).toBeLessThan(2_000)
+  })
+  test.skipIf(!posix)("the deadline terminates a tree that ignores SIGTERM and reports the timeout", async () => {
+    const t0 = Date.now()
+    const run = await runInstall(["sh", "-c", "trap '' TERM; sleep 30"], 200, 200)
+    expect(run.timedOut).toBe(true)
+    expect(Date.now() - t0).toBeLessThan(3_000)
+  })
+  test("a timed-out run is reported as such, not as an npm failure", async () => {
+    syncInternals.runInstall = async () => ({ code: null, timedOut: true, stderr: "" })
+    const result = await installEngine()
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain("did not finish within")
   })
 })
 
 describe("install success is verified, not assumed", () => {
   test("a zero exit with the engine still absent from PATH is a failure", async () => {
     syncInternals.which = () => null
-    const run = spyOn(Process, "run").mockImplementation(
-      async () => ({ code: 0, stdout: Buffer.from(""), stderr: Buffer.from("") }) as never,
-    )
-    try {
-      const result = await installEngine()
-      expect(result.ok).toBe(false)
-      if (!result.ok) expect(result.error).toContain("not on PATH")
-    } finally {
-      run.mockRestore()
-    }
+    syncInternals.runInstall = async () => ({ code: 0, timedOut: false, stderr: "" })
+    const result = await installEngine()
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain("not on PATH")
   })
   test("a zero exit with a below-floor engine on PATH is a failure", async () => {
     syncInternals.which = () => "/usr/local/bin/datamate"
     syncInternals.versionOf = async () => "0.6.3"
-    const run = spyOn(Process, "run").mockImplementation(
-      async () => ({ code: 0, stdout: Buffer.from(""), stderr: Buffer.from("") }) as never,
-    )
-    try {
-      const result = await installEngine()
-      expect(result.ok).toBe(false)
-      if (!result.ok) expect(result.error).toContain("0.6.3")
-    } finally {
-      run.mockRestore()
-    }
+    syncInternals.runInstall = async () => ({ code: 0, timedOut: false, stderr: "" })
+    const result = await installEngine()
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error).toContain("0.6.3")
   })
   test("a non-zero exit reports npm's last lines", async () => {
-    const run = spyOn(Process, "run").mockImplementation(
-      async () => ({ code: 1, stdout: Buffer.from(""), stderr: Buffer.from("boom\nEACCES denied") }) as never,
-    )
-    try {
-      expect(await installEngine()).toEqual({ ok: false, error: "boom EACCES denied" })
-    } finally {
-      run.mockRestore()
-    }
+    syncInternals.runInstall = async () => ({ code: 1, timedOut: false, stderr: "boom\nEACCES denied" })
+    expect(await installEngine()).toEqual({ ok: false, error: "boom EACCES denied" })
   })
 })
