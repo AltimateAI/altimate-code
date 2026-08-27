@@ -28,7 +28,7 @@ afterAll(() => {
   }
 })
 
-const { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip } = await import(
+const { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip, awaitKvReady } = await import(
   "../../../src/plugin/tui/altimate/workspace"
 )
 const { projectNameFromRemote, detectProjectRemote } = await import(
@@ -601,5 +601,39 @@ describe("Engine install-offer latch", () => {
     recordSkip(api, ident, scope, now)
     expect(isSkipActive(api, ident, scope, now + DAY)).toBe(true)
     expect(isEngineSkipActive(api, workspaceId, scope, now + DAY)).toBe(false)
+  })
+})
+
+describe("engine install offer — kv hydration", () => {
+  // The store starts empty until kv.json has been read; a "Not now" latch
+  // checked before that reads as absent. The offer waits for `ready`.
+  test("waits for the store to hydrate before the latch is consulted", async () => {
+    let ready = false
+    setTimeout(() => {
+      ready = true
+    }, 60)
+    const t0 = Date.now()
+    expect(
+      await awaitKvReady(
+        {
+          get ready() {
+            return ready
+          },
+        },
+        1_000,
+        5,
+      ),
+    ).toBe(true)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(50)
+  })
+  test("returns at once when the store is already hydrated", async () => {
+    const t0 = Date.now()
+    expect(await awaitKvReady({ ready: true }, 1_000, 5)).toBe(true)
+    expect(Date.now() - t0).toBeLessThan(50)
+  })
+  test("gives up after the timeout so a stuck read never blocks the offer", async () => {
+    const t0 = Date.now()
+    expect(await awaitKvReady({ ready: false }, 40, 5)).toBe(false)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(35)
   })
 })

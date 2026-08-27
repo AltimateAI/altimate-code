@@ -1177,6 +1177,27 @@ function engineSkipKey(workspaceId: string, scope: LatchScope | null): string {
   )
 }
 
+/** The KV store starts empty and fills in once the persisted file is read
+ * (`api.kv.ready`). A latch checked before that reads as absent, so an offer
+ * raised on the first message after a restart would ignore a "Not now" that
+ * is still in force. `ready` is a plain getter with nothing to await, so poll
+ * it — bounded, and on timeout proceed as if hydrated rather than never
+ * answer. Resolves to whether the store was ready. */
+const KV_READY_TIMEOUT_MS = 3_000
+const KV_READY_POLL_MS = 25
+async function awaitKvReady(
+  kv: { readonly ready: boolean },
+  timeoutMs = KV_READY_TIMEOUT_MS,
+  pollMs = KV_READY_POLL_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (!kv.ready) {
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+  return true
+}
+
 /** Same clock-rewind handling as the post-scan latch; the TTL is the one the
  * attach side's announce dedupe expires on, so both agree on "7 days". */
 function isEngineSkipActive(
@@ -1486,6 +1507,9 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
     // engine appeared, or the project is no longer bound. Say nothing.
     if (!offer) return release()
     const latchScope = await currentLatchScope()
+    if (!(await awaitKvReady(api.kv))) {
+      log.warn("kv store not hydrated in time; checking the engine install latch against what is loaded")
+    }
     if (isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
       log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
       return release()
@@ -1571,5 +1595,5 @@ export default { id: PLUGIN_ID, tui } satisfies BuiltinTuiPlugin
 // Exported for unit tests only. The shared logic (WorkspaceApi, cache, detect,
 // project-name) lives in `@/altimate/workspace/*` and should be tested there;
 // the plugin owns just the TUI-specific latch semantics.
-export { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip }
+export { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip, awaitKvReady }
 // altimate_change end
