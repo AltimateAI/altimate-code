@@ -16,6 +16,9 @@ import { AltimateApi } from "@/altimate/api/client"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { Log } from "@/altimate/util/log"
+// Type-only: the value side is imported dynamically in resolveBinding to keep
+// this module's import graph free of the API client at load time.
+import type { ProjectBindingLookup } from "./api-client"
 
 const CACHE_VERSION = 1
 
@@ -243,6 +246,83 @@ function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
     (a.repoRemote ?? null) === (b.repoRemote ?? null) &&
     (a.projectPath ?? null) === (b.projectPath ?? null)
   )
+}
+
+/** Projects the server has already said are unbound, so an unbound project
+ * pays the lookup once per process instead of once per sync. Keyed on the
+ * canonical directory. Never holds a positive result — a hit is written to the
+ * real cache, which is what later reads consult. */
+const serverLookupMissed = new Set<string>()
+
+/** The binding for ``directory``: the local cache when it has one, otherwise
+ * the server's answer, written to the cache for next time.
+ *
+ * The cache is only ever written by an explicit link. A project that is bound
+ * server-side but has no local entry — a fresh clone of a repo a teammate
+ * linked, a new machine, cleared state — therefore looks unbound to every
+ * consumer, while ``link`` refuses to help because the server reports it as
+ * already linked. That combination leaves the project permanently without
+ * workspace skills and with no way out from the CLI.
+ *
+ * Adopting a binding here is a read, not an approval. The lookup is
+ * access-controlled server-side (a workspace the caller cannot see answers 404
+ * exactly as an unbound remote does), so this can only surface a binding the
+ * caller could already see. It deliberately writes NO ``seededAt`` and does not
+ * run the memory backfill: pulling a workspace's skills is read-only, whereas
+ * pushing this machine's memory into a shared workspace is a write that stays
+ * behind a real link.
+ *
+ * Never throws — a lookup failure is "unknown", which callers treat as "leave
+ * whatever is on disk alone". */
+export async function resolveBinding(directory: string): Promise<CachedBinding | null> {
+  const local = await readLocalBinding(directory).catch(() => null)
+  if (local) return local
+
+  const key = await tenantKey()
+  if (!key) return null
+  const canon = canonicalizeKey(directory)
+  if (serverLookupMissed.has(canon)) return null
+
+  let hit: ProjectBindingLookup | null = null
+  try {
+    const { resolveProjectIdentifier } = await import("./detect")
+    const { WorkspaceApi } = await import("./api-client")
+    hit = await WorkspaceApi.getBindingForProject(resolveProjectIdentifier(directory))
+  } catch (err) {
+    // Unreachable or a 5xx: unknown, not unbound. Deliberately NOT memoized —
+    // the next session should ask again rather than inherit a network blip.
+    log.warn("could not look up the workspace binding for this project", { err: String(err) })
+    return null
+  }
+  if (!hit) {
+    serverLookupMissed.add(canon)
+    return null
+  }
+
+  const adopted: CachedBinding = {
+    datamateId: hit.binding.datamate_id,
+    datamateName: hit.binding.datamate_name,
+    repoRemote: hit.binding.repo_remote,
+    projectPath: hit.binding.project_path,
+    linkedAt: Date.now(),
+  }
+  try {
+    const existing = readCache()
+    const cache: CacheFile =
+      existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
+        ? existing
+        : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
+    cache.bindings[canon] = adopted
+    writeCache(cache)
+  } catch (err) {
+    // The binding still stands for this call; only the cache write failed, so
+    // the next process looks it up again. Same reasoning as recordApprovedBinding.
+    log.warn("could not cache the workspace binding discovered on the server", { err: String(err) })
+  }
+  log.info("adopted the workspace binding this project already has on the server", {
+    datamateId: adopted.datamateId,
+  })
+  return adopted
 }
 
 export async function recordApprovedBinding(

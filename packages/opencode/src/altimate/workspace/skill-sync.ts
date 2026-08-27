@@ -26,7 +26,7 @@ import path from "path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
-import { readLocalBinding, type CachedBinding } from "./state"
+import { resolveBinding, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
@@ -182,7 +182,10 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   }
   let changed = false
   const run = (async () => {
-    const binding = await readLocalBinding(canon)
+    // `resolveBinding`, not `readLocalBinding`: the local cache is written only
+    // by an explicit link, so a project bound server-side (fresh clone, new
+    // machine, cleared state) would otherwise never get its workspace's skills.
+    const binding = await resolveBinding(canon)
     if (!binding) return
 
     let creds: { altimateUrl: string; altimateInstanceName: string }

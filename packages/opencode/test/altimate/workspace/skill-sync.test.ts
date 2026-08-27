@@ -8,7 +8,7 @@
 // synced skills, and a rebind must never leave the previous workspace's skills
 // where discovery can load them.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
@@ -133,6 +133,37 @@ function json(body: unknown) {
     status: 200,
     headers: { "Content-Type": "application/json" },
   })
+}
+
+/** Remove the local binding, leaving the project bound only server-side. */
+function unbind() {
+  writeFileSync(
+    cachePath(),
+    JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, bindings: {} }),
+  )
+}
+
+/** Like `serve`, but the project is unbound locally and the server answers the
+ * binding lookup — the fresh-clone shape. */
+function serveWithServerBinding(skills: Record<string, Record<string, string>>) {
+  serve(skills)
+  const inner = globalThis.fetch
+  globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (url.includes("/datamate-project-bindings/by-")) {
+      return json({
+        binding: {
+          id: 7,
+          datamate_id: 1,
+          datamate_name: "ws-1",
+          repo_remote: null,
+          project_path: project,
+        },
+        datamate: { id: 1, name: "ws-1" },
+      })
+    }
+    return inner(input as never, init as never)
+  }) as unknown as typeof fetch
 }
 
 function skillFile(id: string, rel: string) {
@@ -346,6 +377,42 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-3", "SKILL.md"))).toBe(false)
     // And the previous snapshot is intact — an error never publishes.
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a project bound only on the server still gets its skills", async () => {
+    // The local cache is written only by an explicit link. Without the server
+    // fallback a fresh clone of a linked repo gets no skills at all, and `link`
+    // refuses to help because the server reports it as already linked.
+    unbind()
+    serveWithServerBinding({ "pub-1": { "SKILL.md": "from the server binding" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    // And the discovered binding is cached, so the next process skips the lookup.
+    const cached = JSON.parse(readFileSync(cachePath(), "utf8"))
+    expect(cached.bindings[realpathSync(project)].datamateId).toBe(1)
+  })
+
+  test("a failed binding lookup is not read as unbound", async () => {
+    // Same rule as the skill list: an error means "unknown", so whatever is on
+    // disk stays. Treating it as unbound would wipe a synced project offline.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    // And the failure must stay retryable: a network blip must not memoize this
+    // project as unbound for the rest of the process.
+    serveWithServerBinding({ "pub-2": { "SKILL.md": "after recovery" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
   })
 
   test("does nothing when the workspace flag is off", async () => {
