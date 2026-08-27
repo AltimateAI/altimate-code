@@ -87,7 +87,7 @@ import {
   versionOf,
   which,
 } from "./engine-probes"
-import { existingEntry, persist, persistRestore, projectEntry } from "./engine-config"
+import { existingEntry, persist, persistRestore, projectConfigPath, projectEntry } from "./engine-config"
 import { serializeAttach, trackedChainsForTests, attachChains } from "./engine-chain"
 
 // The module's public surface is deliberately unchanged by the split: consumers
@@ -283,6 +283,28 @@ async function run(): Promise<Outcome> {
     return !!now && String(now.datamateId) === workspaceId
   }
 
+  /** Is the world this decision was made in still the world we are mutating?
+   *
+   * `stillCurrent` asks only about the binding, and a mutation guarded on half
+   * the world is guarded on none of it: the plan is held across a version probe,
+   * a PATH probe, the workspace allowlist and a disk read — seconds — and a
+   * disable landing anywhere in there was then overwritten by our own pinned
+   * `enabled: true`. `addMcpToConfig` replaces the whole entry node, so a
+   * project-level disable is destroyed outright and a global one is shadowed by
+   * the override, after which the memo reads OUR entry and stands forever.
+   *
+   * Both reads live in one function so nothing can be inserted between them, and
+   * this is the LAST await before any mutation. The invariant is not "no
+   * mutation on a stale binding" but "no mutation on a stale world". */
+  const worldUnchanged = async (): Promise<boolean> => {
+    const entryNow = await existingEntry(DATAMATE_KEY).catch(() => null)
+    if (entryNow?.enabled === false) {
+      log.info("intent changed while deciding; not writing over a disable", { workspaceId })
+      return false
+    }
+    return await stillCurrent()
+  }
+
   /** Stop serving an entry we have judged untrustworthy for this workspace.
    *
    * Runtime-only (`MCP.remove`): closes the client and drops it from the tool
@@ -296,8 +318,24 @@ async function run(): Promise<Outcome> {
    * connected, and the turn's `resolveTools` would hand the model exactly the
    * tools we just decided it must not have. It also closes the client `MCP.add`
    * would otherwise overwrite without closing, which orphans a second engine. */
-  const detachRejected = async (why: Record<string, unknown>): Promise<void> => {
-    if (!(await stillCurrent())) {
+  const detachRejected = async (why: Record<string, unknown>, bindingDependent = true): Promise<void> => {
+    // The guard exists to stop us destroying something that may legitimately
+    // belong to the NEW binding. That applies to exactly one of the three
+    // reasons we tear down, and gating all of them on it left a disabled or a
+    // too-old client serving for the turn whenever a re-link raced the decision.
+    //
+    // Binding-INDEPENDENT, so never gated:
+    //   - a disabled entry serves nothing. `enabled: false` is a property of the
+    //     entry, not of a workspace, so no re-link makes it servable.
+    //   - an engine below the floor serves nobody correctly. The floor is not
+    //     workspace-specific either.
+    //   - anything THIS attach started. It exists only because we made it, so
+    //     leaving it is a leak whatever is bound now.
+    //
+    // Binding-DEPENDENT, and the only case the guard is for:
+    //   - a pre-existing entry we did not create and judged unattributable. If
+    //     the binding moved, that entry may be exactly what the new one wants.
+    if (bindingDependent && !(await stillCurrent())) {
       log.info("skipping teardown; the binding changed while this attach was deciding", { workspaceId, ...why })
       return
     }
@@ -344,10 +382,22 @@ async function run(): Promise<Outcome> {
    * that asserts an offer is raised, because neither asserts the user sees
    * exactly one thing. Replace this function's body; do not add beside it. */
   const announceRefusal = async (outcome: Outcome, toast: Toast): Promise<void> => {
-    if (installWouldHelp(outcome)) {
-      log.info("refusal is remediable by installing the engine", { workspaceId, kind: outcome.kind })
+    try {
+      if (installWouldHelp(outcome)) {
+        log.info("refusal is remediable by installing the engine", { workspaceId, kind: outcome.kind })
+      }
+      await notify(toast)
+    } catch (err) {
+      // "Never silent" has to also mean "never relabelled". A throw here reached
+      // the catch-all and turned a decided outcome — `entry-disabled`, say —
+      // into `connect-failed`, with a second toast, so a failure to DESCRIBE the
+      // verdict silently rewrote the verdict.
+      log.warn("could not announce the refusal; the outcome stands", {
+        workspaceId,
+        kind: outcome.kind,
+        err: String(err),
+      })
     }
-    await notify(toast)
   }
 
   /** The single exit for every refusal.
@@ -365,8 +415,28 @@ async function run(): Promise<Outcome> {
    *    are different questions, and unifying refusals is exactly what makes them
    *    diverge: a user who deliberately disabled their engine must never be
    *    offered an install for the engine they already have and switched off. */
-  const refuse = async (outcome: Outcome, toast: Toast, detach?: Record<string, unknown>): Promise<Outcome> => {
-    if (detach) await detachRejected(detach)
+  const refuse = async (
+    outcome: Outcome,
+    toast: Toast,
+    detach?: Record<string, unknown>,
+    bindingDependent = true,
+  ): Promise<Outcome> => {
+    // Teardown BEFORE the announcement, and this order is load-bearing rather
+    // than incidental: the announcement is a substitution point, and a body that
+    // waits on a person would hold a rejected client connected until they
+    // clicked. Stop serving first, explain second.
+    if (detach) await detachRejected(detach, bindingDependent)
+    // Revalidate before answering — round 13's rule, which covered two of seven
+    // answers because only `reused` and `attached` applied it. A refusal is an
+    // answer too: a re-link during the config read produced `engine-missing` for
+    // the workspace the project had just left, and a toast naming it.
+    if (!(await stillCurrent())) {
+      log.info("binding changed before this refusal could be reported; not answering for the old workspace", {
+        workspaceId,
+        kind: outcome.kind,
+      })
+      return { kind: "superseded" }
+    }
     await announceRefusal(outcome, toast)
     return outcome
   }
@@ -444,6 +514,7 @@ async function run(): Promise<Outcome> {
         variant: "warning",
       },
       { reason: "the entry is disabled" },
+      false,
     )
   }
 
@@ -562,6 +633,7 @@ async function run(): Promise<Outcome> {
           variant: "warning",
         },
         { workspaceId, reason: "below-floor", found: label },
+        false,
       )
     }
     replaced = describeEntry(entry)
@@ -620,60 +692,119 @@ async function run(): Promise<Outcome> {
   // enough for the replacement's first-turn wait to expire, which is the failure
   // the guard was added to prevent. Nothing may await between the guard and the
   // mutations it guards.
+  // Everything readable is read HERE, above the guard. `persist` otherwise
+  // probes up to nine candidate config paths on disk between the check and the
+  // write it protects — round 19's defect one call deeper than round 19 looked.
   const projectBefore = await projectEntry()
-  if (!(await stillCurrent())) {
-    // Re-linked while we were probing. Installing now would attach the workspace
-    // this session has already left, and would win by arriving first.
-    log.info("abandoning attach; the binding changed before the engine was installed", { workspaceId })
+  const configPath = await projectConfigPath().catch(() => undefined)
+  if (!(await worldUnchanged())) {
+    // Re-linked or disabled while we were probing. Installing now would attach a
+    // workspace this session has left, or overwrite a disable that landed while
+    // we were deciding — and would win by arriving first.
+    log.info("abandoning attach; the world changed before the engine was installed", { workspaceId })
     return { kind: "superseded" }
   }
-  await persist(DATAMATE_KEY, cfg)
-  await client.add(DATAMATE_KEY, cfg)
 
-  // Rule 4 — a failed local engine is reported, never routed around.
-  const after = (await client.status())[DATAMATE_KEY]
-  if (after?.status !== "connected") {
-    const error = after?.error ?? after?.status ?? "not connected"
-    return await refuse({ kind: "connect-failed", error }, {
-      title: "Workspace engine failed to start",
-      message: `Could not start ${ENGINE_BINARY} for workspace "${binding.datamateName}": ${error}. Integration tools are unavailable; not falling back to the hosted endpoint because it serves a different tool set.`,
-      variant: "error",
-    })
-  }
-
-  // Rule 5 — report declared-but-missing.
-  const present = engineToolKeys(await client.tools())
-  const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
-  const available = present.size
-  // ONE guard, placed after every await that follows the install — the handshake
-  // AND the tool listing. Both are windows in which a re-link can land, and the
-  // earlier version guarded only the first, so a flip during the tool read left
-  // the previous workspace installed and reported as attached.
+  // ---- the install region ------------------------------------------------
   //
-  // Late rather than early on purpose: the check is only meaningful at the last
-  // moment before we announce and answer, because everything before that is
-  // still revocable.
-  if (!(await stillCurrent())) {
-    log.info("binding changed before the attach could be reported; undoing what we installed", { workspaceId })
-    return await undoInstall(projectBefore)
+  // Past the next two lines this attach OWNS two things: a pinned entry on disk
+  // and a registered runtime client. Every exit that is not `attached` has to
+  // give both back — including an exit nobody wrote.
+  //
+  // Three separate defects lived in this region because each exit remembered
+  // the undo separately. The post-install `connect-failed` return had no undo
+  // at all, so a failing engine left our pin on disk and the user's own project
+  // entry gone; because a failing pin is retried rather than replaced, the
+  // project then wedged on `connect-failed` until someone edited config by
+  // hand. A throw from the status or tool read — a malformed config written
+  // concurrently by an IDE is enough — unwound straight past every undo with
+  // the engine registered, connected and persisted. And the supersede guard's
+  // undo was correct but was the only one.
+  //
+  // `committed` rather than a bare `finally` because the attached path must not
+  // undo itself. One rule, one place, and exits nobody anticipated are covered
+  // by construction rather than by review.
+  let committed = false
+  try {
+    await persist(DATAMATE_KEY, cfg, configPath)
+    await client.add(DATAMATE_KEY, cfg)
+
+    // Rule 4 — a failed local engine is reported, never routed around.
+    const after = (await client.status())[DATAMATE_KEY]
+    if (after?.status !== "connected") {
+      const error = after?.error ?? after?.status ?? "not connected"
+      // `which` rather than the error string: "the engine failed to start" and
+      // "there is no engine" are different situations with different remedies,
+      // and only the second is fixed by installing one. Reading ENOENT out of a
+      // message would be re-deriving from a platform detail what a PATH lookup
+      // answers directly.
+      if (!which(ENGINE_BINARY)) {
+        return await refuse({ kind: "engine-missing", declared: declaredCount }, {
+          title: "Workspace integrations unavailable",
+          message:
+            `Workspace "${binding.datamateName}" declares ${declaredCount} integration tool${declaredCount === 1 ? "" : "s"}. ` +
+            `They run on the local engine, which is not installed. Install it with: ${INSTALL_HINT}`,
+          variant: "warning",
+        })
+      }
+      return await refuse({ kind: "connect-failed", error }, {
+        title: "Workspace engine failed to start",
+        message: `Could not start ${ENGINE_BINARY} for workspace "${binding.datamateName}": ${error}. Integration tools are unavailable; not falling back to the hosted endpoint because it serves a different tool set.`,
+        variant: "error",
+      })
+    }
+
+    // Rule 5 — report declared-but-missing.
+    const present = engineToolKeys(await client.tools())
+    const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
+    const available = present.size
+    // ONE guard, placed after every await that follows the install — the
+    // handshake AND the tool listing. Both are windows in which a re-link can
+    // land, and an earlier version guarded only the first, so a flip during the
+    // tool read left the previous workspace installed and reported as attached.
+    //
+    // Late rather than early on purpose: the check is only meaningful at the
+    // last moment before we announce and answer, because everything before that
+    // is still revocable. The undo itself now belongs to the region.
+    if (!(await worldUnchanged())) {
+      log.info("the world changed before the attach could be reported; undoing what we installed", { workspaceId })
+      return { kind: "superseded" }
+    }
+
+    // Ours, and staying. Answer BEFORE announcing: `announceToolsChanged` and
+    // the toast are two more awaits, and the outcome asserts which workspace is
+    // served — round 13's rule, which the announces quietly put back at risk.
+    committed = true
+    const outcome: Outcome = {
+      kind: "attached",
+      available,
+      declared: declaredCount,
+      missing,
+      ...(replaced ? { replaced } : {}),
+    }
+    log.info("attached workspace engine", { workspaceId, available, declared: declaredCount, missing, replaced })
+
+    // Announce it so a turn that had already given up waiting still learns the
+    // tools arrived.
+    await announceToolsChanged()
+    await notify({
+      title: `Workspace "${binding.datamateName}" connected`,
+      message:
+        (declaredKeys
+          ? `${available} of ${declaredCount} declared integration tools available.`
+          : `${available} integration tools available.`) +
+        describeMissing(missing) +
+        replacedNote,
+      variant: missing.length > 0 ? "warning" : "success",
+    })
+    return outcome
+  } finally {
+    if (!committed) {
+      await undoInstall(projectBefore).catch((err) => {
+        log.warn("could not undo a non-attached install", { err: String(err), workspaceId })
+      })
+    }
   }
-
-  // Ours, and staying: announce it so a turn that had already given up waiting
-  // still learns the tools arrived.
-  await announceToolsChanged()
-
-  await notify({
-    title: `Workspace "${binding.datamateName}" connected`,
-    message:
-      (declaredKeys
-        ? `${available} of ${declaredCount} declared integration tools available.`
-        : `${available} integration tools available.`) +
-      describeMissing(missing) +
-      replacedNote,
-    variant: missing.length > 0 ? "warning" : "success",
-  })
-  log.info("attached workspace engine", { workspaceId, available, declared: declaredCount, missing, replaced })
-  return { kind: "attached", available, declared: declaredCount, missing, ...(replaced ? { replaced } : {}) }
 }
 
 // ---------------------------------------------------------------------------

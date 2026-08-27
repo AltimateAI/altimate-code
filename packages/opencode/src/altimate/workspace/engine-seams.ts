@@ -24,6 +24,7 @@ export const syncInternals: {
     tools: () => Promise<Record<string, unknown>>
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>
+  projectConfigPath?: () => Promise<string>
   persistRestore?: (name: string, previous: ExistingEntry | null) => Promise<void>
   projectEntry?: () => Promise<ExistingEntry | null>
   /** The configured (merged) MCP entry under `name`, or null if none. */

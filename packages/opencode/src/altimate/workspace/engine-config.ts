@@ -9,9 +9,20 @@ import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { log, syncInternals, projectRoot } from "./engine-seams"
 import type { ExistingEntry, LocalMcpConfig } from "./engine-types"
 
-export async function persist(name: string, cfg: LocalMcpConfig): Promise<void> {
+/** Where this project's config lives.
+ *
+ * Exposed so a caller can resolve it BEFORE a guard rather than inside the
+ * write that follows one: `resolveConfigPath` probes up to nine candidate paths
+ * on disk, and every one of those awaits sits between the last check and the
+ * mutation it is supposed to protect. */
+export async function projectConfigPath(): Promise<string> {
+  if (syncInternals.projectConfigPath) return syncInternals.projectConfigPath()
+  return resolveConfigPath(projectRoot())
+}
+
+export async function persist(name: string, cfg: LocalMcpConfig, configPath?: string): Promise<void> {
   if (syncInternals.persist) return syncInternals.persist(name, cfg)
-  const configPath = await resolveConfigPath(projectRoot())
+  configPath = configPath ?? (await resolveConfigPath(projectRoot()))
   await addMcpToConfig(name, cfg, configPath)
   // `Config.get()` is cached per instance, and `addMcpToConfig` is a raw file
   // write that does not touch that cache — so without this, every later
