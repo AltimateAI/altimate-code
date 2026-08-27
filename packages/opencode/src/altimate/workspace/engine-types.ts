@@ -35,7 +35,16 @@ export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolea
  * `command: string[]` argv, or the `{ command, args }` split an IDE writes and
  * `datamate-transport` normalises. Read defensively — this is merged config
  * written by other clients. */
-export type ExistingEntry = { type?: string; url?: string; command?: string[] | string; args?: string[]; enabled?: boolean }
+export type ExistingEntry = {
+  type?: string
+  url?: string
+  command?: string[] | string
+  args?: string[]
+  environment?: Record<string, string>
+  cwd?: string
+  timeout?: number
+  enabled?: boolean
+}
 
 export type Toast = { title: string; message: string; variant: "info" | "success" | "warning" | "error" }
 
@@ -198,21 +207,42 @@ export function describeMissing(missing: string[]): string {
  * Compared by value rather than by reference, because what comes back from disk
  * or from MCP is a different object carrying the same meaning — and across
  * everything that changes the process it describes, not argv alone. */
+/** Every field of an entry that identity depends on.
+ *
+ * Keyed by the type so the compiler asks the question: add a field to
+ * `ExistingEntry` and this fails to build until someone either lists it here or
+ * adds it to the exclusion, which makes ignoring it a decision rather than a
+ * default. A field the comparison silently forgets makes two different entries
+ * compare equal, and a teardown or an undo then acts on something that is not
+ * its own while believing it is.
+ *
+ * `enabled` is excluded on purpose: a disabled entry is still the same entry.
+ * Intent is decided above the comparison, which keeps a disable rather than
+ * rolling it back; folding it in here would make a disable read as somebody
+ * else's entry and take the wrong branch for the right-sounding reason. */
+const IDENTITY_FIELDS: Record<Exclude<keyof ExistingEntry, "enabled">, true> = {
+  type: true,
+  url: true,
+  command: true,
+  args: true,
+  environment: true,
+  cwd: true,
+  timeout: true,
+}
+
 export function sameEntry(a: ExistingEntry | null | undefined, b: ExistingEntry | null | undefined): boolean {
   const shape = (e: ExistingEntry | null | undefined) => {
     const raw = (e ?? {}) as Record<string, unknown>
-    return JSON.stringify({
-      type: raw.type ?? null,
-      url: raw.url ?? null,
+    const parts: Record<string, unknown> = {
+      // `command` and `args` are compared as the argv they produce, since the
+      // same invocation can be spelled either way.
       argv: commandArgv((e ?? null) as ExistingEntry | null),
-      // Everything else that changes the process this entry describes. Comparing
-      // argv alone treats an edit to the environment, the working directory or
-      // the timeout as "unchanged", so an undo rolls it back believing it is
-      // reverting its own write.
-      environment: raw.environment ?? null,
-      cwd: raw.cwd ?? null,
-      timeout: raw.timeout ?? null,
-    })
+    }
+    for (const field of Object.keys(IDENTITY_FIELDS)) {
+      if (field === "command" || field === "args") continue
+      parts[field] = raw[field] ?? null
+    }
+    return JSON.stringify(parts)
   }
   return shape(a) === shape(b)
 }

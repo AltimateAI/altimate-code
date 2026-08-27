@@ -25,6 +25,7 @@ import {
   planForEntry,
   clearsFloor,
   runningEngine,
+  sameEntry,
   type LocalMcpConfig,
   type Outcome,
 } from "../../../src/altimate/workspace/engine-sync"
@@ -2789,5 +2790,81 @@ describe("INVARIANT — identity covers everything that changes the process", ()
     }
     await ensure("s1")
     expect(h.restores, "rolled back an environment edit it had not made").toHaveLength(0)
+  })
+})
+
+describe("INVARIANT — identity normalises every field that changes the process", () => {
+  // `removeIfOurs` and the undo both decide from `sameEntry`. A field it does
+  // not look at makes two different entries compare equal, and the caller then
+  // destroys or restores something that is not its own while believing it is.
+  //
+  // Each case changes exactly one field and asserts the comparison notices.
+  const base = {
+    type: "local",
+    command: ["datamate", "start-stdio", "--datamate", "42"],
+    environment: { A: "1" },
+    cwd: "/work",
+    timeout: 5000,
+  } as unknown as ExistingEntry
+
+  const variants: Array<[string, ExistingEntry]> = [
+    ["command", { ...base, command: ["datamate", "start-stdio", "--datamate", "9"] } as ExistingEntry],
+    ["environment", { ...(base as object), environment: { A: "2" } } as unknown as ExistingEntry],
+    ["cwd", { ...(base as object), cwd: "/elsewhere" } as unknown as ExistingEntry],
+    ["timeout", { ...(base as object), timeout: 9000 } as unknown as ExistingEntry],
+    ["type/url", { type: "remote", url: "http://localhost:7801/sse" } as unknown as ExistingEntry],
+  ]
+
+  for (const [field, changed] of variants) {
+    test(`a change to ${field} is not the same entry`, () => {
+      expect(sameEntry(base, changed), `${field} is invisible to the comparison`).toBe(false)
+    })
+  }
+
+  test("the same entry from a different source still compares equal", () => {
+    // What comes back from disk or from MCP is a different object with the same
+    // meaning, so the comparison is by value.
+    expect(sameEntry(base, JSON.parse(JSON.stringify(base)) as ExistingEntry)).toBe(true)
+  })
+
+  test("intent is not identity: enabled is deliberately excluded", () => {
+    // A disabled entry is still the same entry. Intent is handled by the branch
+    // above the comparison, which keeps the disable rather than rolling it back;
+    // folding it in here would make a disable read as "someone else's entry" and
+    // take a different path for the same reason.
+    expect(sameEntry(base, { ...(base as object), enabled: false } as unknown as ExistingEntry)).toBe(true)
+  })
+})
+
+describe("INVARIANT — the version probe runs where the engine would run", () => {
+  test("the entry's own environment and working directory reach the probe", async () => {
+    // A bare `datamate` under a custom `environment.PATH` resolves to a
+    // different binary than this process's PATH does. Probing here rather than
+    // there lets a modern binary we happen to have approve the pre-floor engine
+    // the entry actually selects — and that engine does not lock its pin. A
+    // relative command with a configured `cwd` is resolved from the wrong
+    // directory for the same reason.
+    const seen: Array<{ environment?: Record<string, string>; cwd?: string } | undefined> = []
+    const h = install({
+      existing: {
+        type: "local",
+        command: ["datamate", "start-stdio", "--datamate", "42"],
+        environment: { PATH: "/opt/pinned/bin" },
+        cwd: "/work/project",
+        enabled: true,
+      } as never,
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.versionOf = async (_bin: string, spawn?: { environment?: Record<string, string>; cwd?: string }) => {
+      seen.push(spawn)
+      return "0.7.0"
+    }
+    await ensure("s1")
+    expect(seen[0]?.environment, "probed with this process's environment, not the entry's").toEqual({
+      PATH: "/opt/pinned/bin",
+    })
+    expect(seen[0]?.cwd, "probed from the wrong directory").toBe("/work/project")
+    void h
   })
 })

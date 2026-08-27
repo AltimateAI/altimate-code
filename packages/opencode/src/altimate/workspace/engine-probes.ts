@@ -45,8 +45,8 @@ export function which(cmd: string): string | null {
 /** `datamate --version` — the engine inlines its real package version here,
  * unlike its MCP `serverInfo`, which is a hard-coded placeholder. A version
  * string proves output, not identity; it is a compatibility floor only. */
-export function versionOf(bin: string): Promise<string | null> {
-  if (syncInternals.versionOf) return syncInternals.versionOf(bin)
+export function versionOf(bin: string, spawn?: { environment?: Record<string, string>; cwd?: string }): Promise<string | null> {
+  if (syncInternals.versionOf) return syncInternals.versionOf(bin, spawn)
   return new Promise((resolve) => {
     // cross-spawn, not execFile. An npm-installed engine on Windows is resolved
     // by `which` to a `.cmd` shim (it honours PATHEXT), and Node cannot execute
@@ -61,7 +61,18 @@ export function versionOf(bin: string): Promise<string | null> {
       resolve(value)
     }
     try {
-      const child = launch(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 })
+      // In the environment the entry would be SPAWNED in, not this process's.
+      // A bare `datamate` under a custom `environment.PATH` resolves to a
+      // different binary than the parent PATH does, so probing here would let a
+      // modern binary on our PATH approve the pre-floor engine the entry
+      // actually selects — and a relative command with a configured `cwd` would
+      // be probed from the wrong directory entirely.
+      const child = launch(bin, ["--version"], {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 5000,
+        ...(spawn?.environment ? { env: { ...process.env, ...spawn.environment } } : {}),
+        ...(spawn?.cwd ? { cwd: spawn.cwd } : {}),
+      })
       let out = ""
       child.stdout?.on("data", (chunk) => {
         out += String(chunk)
@@ -189,5 +200,5 @@ export async function notify(toast: Toast): Promise<void> {
 export async function engineVersionOf(entry: ExistingEntry | null): Promise<string | null> {
   const bin = commandArgv(entry)[0]
   const direct = bin && /(^|[\\/])datamate(\.[a-z]+)?$/i.test(bin) ? bin : null
-  return direct ? await versionOf(direct) : null
+  return direct ? await versionOf(direct, { environment: entry?.environment, cwd: entry?.cwd }) : null
 }

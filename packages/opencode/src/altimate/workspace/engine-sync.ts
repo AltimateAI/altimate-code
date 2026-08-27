@@ -96,6 +96,7 @@ import { serializeAttach, trackedChainsForTests, attachChains } from "./engine-c
 // moved to.
 export {
   attributableEngine,
+  sameEntry,
   clearsFloor,
   compareVersions,
   engineToolKeys,
@@ -514,7 +515,18 @@ async function run(sessionID: string): Promise<Outcome> {
    * text it modifies, which is as close as that can be got, but one read and one
    * write to one file is not atomic — see the note on `persist`. This guard
    * narrows the window; it does not close it. */
-  const worldUnchanged = async (): Promise<"ok" | "moved" | "disabled" | "unreadable"> => {
+  const worldUnchanged = async (
+    // The entry the PLAN was derived from, when the caller is about to act on
+    // that plan. Given only before a write: acting on a plan whose entry has
+    // been replaced overwrites a newer entry and can displace the client it
+    // started.
+    //
+    // Deliberately NOT given after the write. By then the entry on disk is our
+    // own, so there is nothing to compare a plan against — and a third-party
+    // rewrite landing after our write is a different question, answered by the
+    // undo, which already refuses to roll back an entry that is no longer ours.
+    expected?: ExistingEntry | null,
+  ): Promise<"ok" | "moved" | "disabled" | "unreadable" | "replaced"> => {
     // Intent FIRST, binding LAST — reversed again, and this is the considered
     // order rather than the obvious one.
     //
@@ -550,6 +562,17 @@ async function run(sessionID: string): Promise<Outcome> {
     if (entryNow?.enabled === false) {
       log.info("intent changed while deciding; not writing over a disable", { workspaceId })
       return "disabled"
+    }
+    // The plan was derived from a particular entry. If that entry has been
+    // REPLACED — a different enabled command, or a URL where a command was —
+    // the plan describes something that is no longer there, and acting on it
+    // overwrites a newer entry and can displace the client it started. A
+    // disable is one way the entry can change; it is not the only one.
+    if (expected !== undefined && !sameEntry(entryNow, expected)) {
+      log.info("the entry was replaced while deciding; re-deciding rather than acting on a stale plan", {
+        workspaceId,
+      })
+      return "replaced"
     }
     if (!(await stillCurrent())) return "moved"
     return "ok"
@@ -675,7 +698,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // and an IDE or the user may rewrite the file. Removing or restoring blindly
     // destroys someone else's work while believing it is tidying up after
     // itself.
-    await removeIfOurs(installed as unknown as ExistingEntry, { reason: "undoing our install" })
+    await removeIfOurs(installed, { reason: "undoing our install" })
     // "Restore what the write replaced" stops being right the moment anything
     // edits the thing we wrote. Between the install and this undo there is a
     // whole engine boot: a disable landing in that window lands on OUR entry,
@@ -707,7 +730,7 @@ async function run(sessionID: string): Promise<Outcome> {
       const keep = projectBefore ? ({ ...projectBefore, enabled: false } as ExistingEntry) : now
       return await persistRestore(DATAMATE_KEY, keep, configPath)
     }
-    if (now && !sameEntry(now, installed as unknown as ExistingEntry)) {
+    if (now && !sameEntry(now, installed)) {
       // Rewritten while we held it — a different command, or a URL where we
       // wrote a command. That edit is newer than our pin and not ours to undo.
       log.info("not restoring; the entry was rewritten since we installed", { workspaceId })
@@ -818,7 +841,7 @@ async function run(sessionID: string): Promise<Outcome> {
     // disable that landed since the inspection forbids starting it just as
     // surely as it forbids writing config. The plan was derived from a snapshot
     // taken before a status read; re-confirm both halves before acting on it.
-    const beforeRevive = await worldUnchanged()
+    const beforeRevive = await worldUnchanged(configuredEntry(inspection))
     if (beforeRevive === "disabled") return await refuseDisabled()
     if (beforeRevive === "unreadable") return await refuseUnreadable("intent could not be confirmed")
     if (beforeRevive !== "ok") return { kind: "superseded" }
@@ -842,7 +865,7 @@ async function run(sessionID: string): Promise<Outcome> {
     } catch (err) {
       if (revived) {
         log.info("undoing the revive we started, since we cannot decide about it", { workspaceId })
-        await removeIfOurs(revive as unknown as ExistingEntry, { reason: "undoing our revive" })
+        await removeIfOurs(revive, { reason: "undoing our revive" })
       }
       throw err
     }
@@ -1135,7 +1158,7 @@ async function run(sessionID: string): Promise<Outcome> {
       variant: "error",
     })
   }
-  const beforeInstall = await worldUnchanged()
+  const beforeInstall = await worldUnchanged(configuredEntry(inspection))
   if (beforeInstall === "disabled") return await refuseDisabled()
   if (beforeInstall === "unreadable") return await refuseUnreadable("intent could not be confirmed")
   if (beforeInstall !== "ok") {

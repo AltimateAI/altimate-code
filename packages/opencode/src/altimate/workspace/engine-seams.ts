@@ -15,7 +15,7 @@ export const log = Log.create({ service: "workspace-engine" })
 export const syncInternals: {
   resolveBinding?: () => Promise<CachedBinding | null>
   which?: (cmd: string) => string | null
-  versionOf?: (bin: string) => Promise<string | null>
+  versionOf?: (bin: string, spawn?: { environment?: Record<string, string>; cwd?: string }) => Promise<string | null>
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>

@@ -553,7 +553,11 @@ describe("a mutation is never made on a world that has moved", () => {
       expect(["reused", "attached"]).toContain((await ensure("s1")).kind)
     })
 
-    test("an entry an IDE adds after the config read is seen, not spawned over persists over it, unreported", async () => {
+    test("an entry an IDE adds after the config read is not spawned over", async () => {
+      // The plan was derived from "there is no entry here". If one appears
+      // before the write, acting on that plan persists over it and can displace
+      // the client it started — so the attach abandons and the next turn
+      // re-decides against the entry that is actually there.
       let onDisk: ExistingEntry | null = null
       const h = install([{}, { datamate: { status: "connected" } }], () => onDisk)
       const realStatus = syncInternals.mcp!.status
@@ -562,9 +566,8 @@ describe("a mutation is never made on a world that has moved", () => {
         return realStatus()
       }
       const outcome = await ensure("s1")
-      expect(outcome.kind).toBe("attached")
-      expect((outcome as { replaced?: string }).replaced).toBeUndefined()
-      expect(h.persisted).toHaveLength(1)
+      expect(outcome.kind).toBe("superseded")
+      expect(h.persisted, "wrote over an entry that appeared after the plan was made").toHaveLength(0)
       expect(h.removes).toEqual([])
     })
   })
