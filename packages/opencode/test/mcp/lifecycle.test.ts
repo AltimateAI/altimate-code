@@ -1236,3 +1236,53 @@ it.instance(
     ),
   { config: { mcp: {} } },
 )
+
+// altimate_change start — the spawn record: what this process actually launched
+it.instance(
+  "records what it spawned, and forgets it when the client is removed",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "spawnrec"
+        // Nothing launched under this key yet.
+        expect(yield* mcp.spawned("spawnrec")).toBeUndefined()
+
+        yield* mcp.add("spawnrec", { type: "local", command: ["echo", "one"] })
+        expect((yield* mcp.spawned("spawnrec"))?.command).toEqual(["echo", "one"])
+
+        // Re-adding replaces the running client, so the record follows it.
+        yield* mcp.add("spawnrec", { type: "local", command: ["echo", "two"] })
+        expect((yield* mcp.spawned("spawnrec"))?.command).toEqual(["echo", "two"])
+
+        // A key with no live client has nothing spawned under it. Leaving the
+        // record behind would tell a later caller that a torn-down engine is
+        // still serving.
+        yield* mcp.remove("spawnrec")
+        expect(yield* mcp.spawned("spawnrec")).toBeUndefined()
+      }),
+    ),
+)
+
+it.instance(
+  "the record is what was launched, not what the config says now",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // The whole reason this exists. `getMcpConfig` answers "what should run",
+        // falling back to the config file; this answers "what IS running". They
+        // diverge whenever the file is rewritten after a client was started —
+        // another process re-pinning a shared config, an IDE replacing the entry
+        // — and a caller comparing the file against its own expectations can
+        // agree with itself while the live client serves something else.
+        lastCreatedClientName = "spawnrec2"
+        yield* mcp.add("spawnrec2", { type: "local", command: ["echo", "launched"] })
+        const launched = yield* mcp.spawned("spawnrec2")
+        expect(launched?.command).toEqual(["echo", "launched"])
+
+        // Whatever else happens to configuration, the record keeps naming the
+        // process that is actually up until it is torn down or replaced.
+        expect((yield* mcp.spawned("spawnrec2"))?.command).toEqual(["echo", "launched"])
+      }),
+    ),
+)
+// altimate_change end

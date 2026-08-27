@@ -272,11 +272,29 @@ interface State {
   status: Record<string, Status>
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
+  // altimate_change start — what this process actually SPAWNED for each key.
+  //
+  // `config` is only written by `add`, so for a client started at bootstrap it
+  // is empty and `getMcpConfig` falls back to the config FILE — which is a
+  // different question. The file says what should run now; this says what is
+  // running. They diverge whenever the file is rewritten after a client was
+  // started: another process re-pinning a shared config, an IDE replacing the
+  // entry, a re-link. Without this record a caller comparing the file to its
+  // own expectations can agree with itself while the live client serves
+  // something else entirely, and nothing in-process can tell.
+  //
+  // Deliberately NOT folded into `config`: that would make `connect` re-spawn
+  // the bootstrap-time entry rather than the current file, which is a
+  // behaviour change nobody asked for.
+  spawned: Record<string, ConfigMCPV1.Info>
+  // altimate_change end
 }
 
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
+  // altimate_change — what this process spawned for a key; see State.spawned
+  readonly spawned: (name: string) => Effect.Effect<ConfigMCPV1.Info | undefined>
   // altimate_change start — carry the original (pre-sanitize) client name so tool-source
   // classification works from the real name, not the flattened `<client>_<tool>` key
   // (see altimate/tool-source).
@@ -747,6 +765,8 @@ export const layer = Layer.effect(
           status: {},
           clients: {},
           defs: {},
+          // altimate_change — see State.spawned
+          spawned: {},
         }
 
         // altimate_change start — auto-discover MCP servers from external AI tool configs
@@ -778,6 +798,8 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
+                // altimate_change — bootstrap spawns too, so it records too.
+                s.spawned[key] = mcp
                 watch(s, key, result.mcpClient, bridge, mcp.timeout)
               }
             }),
@@ -811,6 +833,8 @@ export const layer = Layer.effect(
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
+            // altimate_change — nothing is running any more; see State.spawned
+            s.spawned = {}
             yield* Effect.forEach(
               clients,
               (client) =>
@@ -889,6 +913,14 @@ export const layer = Layer.effect(
       return s.clients
     })
 
+    // altimate_change start — what this process spawned for a key, or undefined
+    // when nothing of ours is running under it. Read-only; see State.spawned.
+    const spawned = Effect.fn("MCP.spawned")(function* (name: string) {
+      const s = yield* InstanceState.get(state)
+      return s.spawned[name]
+    })
+    // altimate_change end
+
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
       const s = yield* InstanceState.get(state)
       const result = yield* create(name, mcp)
@@ -900,6 +932,8 @@ export const layer = Layer.effect(
         return result.status
       }
 
+      // altimate_change — remember what we actually spawned, not what the file says.
+      s.spawned[name] = mcp
       return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
     })
 
@@ -951,6 +985,10 @@ export const layer = Layer.effect(
       yield* closeClient(s, name)
       delete s.clients[name]
       delete s.status[name]
+      // altimate_change — nothing is running under this key any more, so nothing
+      // was spawned under it. Leaving the record behind makes a later caller
+      // believe a torn-down engine is still serving.
+      delete s.spawned[name]
       yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
     })
     // altimate_change end
@@ -1329,6 +1367,7 @@ export const layer = Layer.effect(
     return Service.of({
       status,
       clients,
+      spawned,
       tools,
       prompts,
       resources,
@@ -1379,6 +1418,11 @@ export async function status() {
 export async function tools() {
   return runMcp((svc) => svc.tools())
 }
+// altimate_change start — read what this process spawned for a key (see State.spawned)
+export async function spawned(name: string) {
+  return runMcp((svc) => svc.spawned(name))
+}
+// altimate_change end
 export async function add(name: string, mcp: ConfigMCPV1.Info) {
   return runMcp((svc) => svc.add(name, mcp))
 }
