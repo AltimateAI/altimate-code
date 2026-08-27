@@ -128,6 +128,7 @@ test("(e) a re-link during memo validation: the next attach is filed under the O
   const started = Date.now()
   await whenAttached("s1", 2000)
   const waited = Date.now() - started
+  const settledAtResolve = settledOutcome("s1")
   const out2 = await t2
   await ensure("s1")
   // GIVEN A REAL ASSERTION ON LIFT — it was a console.log, which is an
@@ -143,7 +144,12 @@ test("(e) a re-link during memo validation: the next attach is filed under the O
   // entry is live and attributable — so reuse is what re-deciding concludes. The
   // property is that the turn waited for the attach it actually needs rather
   // than returning instantly against a key that was already stale.
-  expect(waited, "returned instantly on a key that was already stale").toBeGreaterThan(0)
-  expect(settledOutcome("s1"), "the session never settled").toBeDefined()
+  // Not elapsed time — that assertion was flaky by construction, since a fast
+  // path measures 0ms at `Date.now()` resolution and the suite duly failed on
+  // it. The property is that the wait was actually honoured: the attach has
+  // SETTLED by the time `whenAttached` returns, which is what "the turn waits
+  // for the attach it needs" means and what dropping the wait would break.
+  void waited
+  expect(settledAtResolve, "resolved the turn before the attach it needs had settled").toBeDefined()
   expect(out2.kind).toBe("reused")
 })
