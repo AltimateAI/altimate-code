@@ -21,6 +21,7 @@ export const syncInternals: {
     add: (name: string, cfg: LocalMcpConfig) => Promise<unknown>
     connect: (name: string) => Promise<unknown>
     remove: (name: string) => Promise<unknown>
+    spawned?: (name: string) => Promise<ExistingEntry | undefined>
     tools: () => Promise<Record<string, unknown>>
   }
   persist?: (name: string, cfg: LocalMcpConfig) => Promise<void>

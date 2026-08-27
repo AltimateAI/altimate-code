@@ -48,6 +48,7 @@ type Harness = {
   restores: Array<unknown>
   statusQueue: Array<Record<string, { status: string; error?: string } | undefined>>
   tools: Record<string, unknown>
+  spawnedNow?: ExistingEntry
 }
 
 function install(opts: {
@@ -69,6 +70,11 @@ function install(opts: {
     restores: [],
     statusQueue: opts.statuses ?? [{}],
     tools: opts.tools ?? {},
+    // A configured entry that is already CONNECTED was bootstrapped from that
+    // entry, which is what MCP records. A failed one has no record: production
+    // only records a spawn when the client actually came up.
+    spawnedNow: ((opts.statuses?.[0]?.["datamate"]?.status === "connected" ? opts.existing : undefined) ??
+      undefined) as ExistingEntry | undefined,
   }
   syncInternals.resolveBinding = async () => (opts.binding === undefined ? binding : opts.binding)
   syncInternals.which = () => (opts.which === undefined ? "/usr/local/bin/datamate" : opts.which)
@@ -102,13 +108,18 @@ function install(opts: {
     status: async () => h.statusQueue.length > 1 ? h.statusQueue.shift()! : h.statusQueue[0]!,
     add: async (name, cfg) => {
       h.added.push({ name, cfg })
+      h.spawnedNow = cfg as ExistingEntry
     },
     connect: async (name) => {
       h.connects.push(name)
     },
     remove: async (name) => {
       h.removes.push(name)
+      h.spawnedNow = undefined
     },
+    // Models MCP's own record of what it launched: whatever we last added, or —
+    // when nothing was added in this process — the entry MCP bootstrapped from.
+    spawned: async () => h.spawnedNow,
     tools: async () => h.tools,
   }
   return h
@@ -1787,4 +1798,52 @@ describe("INVARIANT — the attach flow never writes config from a repair", () =
       expect(h.connects, `${name} repaired the entry with the config-writing primitive`).toHaveLength(0)
     })
   }
+})
+
+describe("INVARIANT — attribution asks the running engine, not only the config", () => {
+  // The config says what SHOULD run; MCP's spawn record says what IS running.
+  // They diverge whenever the file is rewritten after a client started: another
+  // process re-pinning a shared config, an IDE replacing the entry through
+  // MCP.add, a re-link. Judging on the config alone let every check agree with
+  // itself while the live client served another workspace's data — and its
+  // credentials — under this workspace's name. Nothing in-process could tell.
+  const ours = { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true }
+  const theirs = { type: "local", command: ["datamate", "start-stdio", "--datamate", "5"], enabled: true }
+
+  test("a config that names us over a runtime that does not is NOT reused", () => {
+    const plan = planForEntry({ entry: ours, observed: { status: "connected" }, runtime: theirs }, "42", false)
+    expect(plan, "reused an engine that was started for another workspace").toMatchObject({
+      act: "replace-unattributable",
+      pinnedTo: "5",
+    })
+  })
+
+  test("agreement between the two is what earns a reuse", () => {
+    expect(planForEntry({ entry: ours, observed: { status: "connected" }, runtime: ours }, "42", false).act).toBe(
+      "check-version",
+    )
+  })
+
+  test("no runtime record means nothing of ours is running, so the config decides alone", () => {
+    // Absent is not "mismatched": a key with no live client has no record, and
+    // the config is then the only evidence there is.
+    expect(planForEntry({ entry: ours, observed: { status: "connected" }, runtime: undefined }, "42", false).act).toBe(
+      "check-version",
+    )
+  })
+
+  test("the whole-session case: a re-pin under a live engine is caught end to end", async () => {
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    // Another process started this client for workspace 5 and then re-pinned the
+    // shared config to 42 — which is what this project is bound to, so the
+    // config agrees with the binding and always would have.
+    h.spawnedNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "5"] } as never
+    const outcome = await ensure("s1")
+    expect(outcome, "answered `reused` about a process serving another workspace").toMatchObject({ kind: "attached" })
+    expect(h.added, "did not replace the misattributed engine").toHaveLength(1)
+  })
 })

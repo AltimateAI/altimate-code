@@ -144,6 +144,15 @@ type EntryPlan =
 export type Inspection = {
   entry: ExistingEntry | null
   observed: { status: string; error?: string } | undefined
+  /** What MCP actually spawned under this key, when it knows.
+   *
+   * The config says what SHOULD run; this says what IS running, and they
+   * diverge whenever the file is rewritten after a client started — another
+   * process re-pinning a shared config, an IDE replacing the entry through
+   * `MCP.add`, a re-link. Judging attribution on the config alone let this
+   * module agree with itself while the live client served another workspace's
+   * data under this workspace's name. */
+  runtime?: ExistingEntry | undefined
 }
 
 /** Config and runtime, read together, in the one correct order.
@@ -159,8 +168,10 @@ export type Inspection = {
  * this whole rewrite is trying to stop relying on. */
 async function inspectEntry(): Promise<Inspection> {
   const entry = await existingEntry(DATAMATE_KEY)
-  const observed = (await mcp().status())[DATAMATE_KEY]
-  return { entry, observed }
+  const client = mcp()
+  const observed = (await client.status())[DATAMATE_KEY]
+  const runtime = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
+  return { entry, observed, runtime }
 }
 
 export function planForEntry(inspection: Inspection, workspaceId: string, retried: boolean): EntryPlan {
@@ -196,6 +207,18 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
   // extracting this function faithfully carried that accident along with the
   // intent, which made it look deliberate.
   const pin = pinnedWorkspace(entry)
+  // Attribution is a claim about the RUNNING engine, so the running engine gets
+  // a vote. A config entry that names this workspace while MCP is serving a
+  // process started from a different one is the silent case: every check agrees,
+  // and the tools, and the credentials, belong to somewhere else.
+  const runtimePin = inspection.runtime ? pinnedWorkspace(inspection.runtime) : null
+  if (inspection.runtime && runtimePin !== workspaceId) {
+    return {
+      act: "replace-unattributable",
+      entry: describeEntry(inspection.runtime),
+      pinnedTo: runtimePin,
+    }
+  }
   if (pin !== workspaceId) {
     // A URL entry pins nothing, so it lands here too — which is the point:
     // the hosted endpoint serves a different tool set and rule 4 forbids
@@ -852,49 +875,41 @@ function wasServing(outcome: Outcome | undefined): boolean {
   return attributableEngine(outcome)
 }
 
-/** Is the engine we attached still connected?
+/** Is the memoised success still true?
  *
- * A memoised success is only true while it stays true. When the engine's child
- * exits, MCP drops the client and marks the entry `failed`, but a settled
- * successful outcome was returned before `run()` ever read that status — so
- * every later turn resolved without the integration tools and nothing
- * reconnected until a new session or a re-link.
+ * Validated by the SAME reader and the SAME decision as a fresh attach, because
+ * this was a second copy of the intent/attribution/floor logic in a different
+ * order — it read status before config, the reverse of what the reader
+ * documents — and it is the common path, taken on every turn after the first.
+ * A second implementation of a decision is a second place for the decision to
+ * be wrong, and this one was: it never consulted intent at all, so a memo
+ * outlived a disable for the life of the session.
  *
- * Fails OPEN: a status read that throws must not invalidate a good attach. */
-async function engineStillOurs(workspaceId: string, record?: SessionAttach): Promise<boolean> {
+ * "Still valid" is defined as the plan saying reuse. Nothing else.
+ *
+ * Fails OPEN: a read that throws must not invalidate a good attach. */
+async function memoStillValid(workspaceId: string, record?: SessionAttach): Promise<boolean> {
   try {
-    if ((await mcp().status())[DATAMATE_KEY]?.status !== "connected") return false
-    // Connected is not enough. Link A -> B -> A with another session attaching B
-    // in between, and this session's key matches its original memo while the
-    // instance-wide client is serving B — so the cached success would expose B's
-    // tools under binding A. The pin is what makes it ours.
-    const entry = await existingEntry(DATAMATE_KEY)
-    // Intent outranks every other check, and it is checked FIRST because the
-    // command-unchanged shortcut below returns early: a session that already
-    // attached would otherwise ride its memo straight past the disable for the
-    // rest of its life, never re-entering `run()` where the check lives.
-    // Returning false here does not itself detach — it routes this session back
-    // through `run()`, which reports `entry-disabled` and tears the client down.
-    if (entry?.enabled === false) {
-      log.info("engine entry was disabled since the cached attach; re-deciding", { workspaceId })
+    const inspection = await inspectEntry()
+    // `retried: true` — this is not the place to revive anything. If the engine
+    // is down, the memo is not valid and a fresh attach decides what to do.
+    const plan = planForEntry(inspection, workspaceId, true)
+    if (plan.act !== "check-version") {
+      log.info("cached attach no longer describes a reusable engine; re-deciding", {
+        workspaceId,
+        act: plan.act,
+      })
       return false
     }
-    if (pinnedWorkspace(entry) !== workspaceId) return false
 
-    // The pin is not the whole contract: the FLOOR is what makes the pin
-    // trustworthy, since engines below it do not lock it. An entry reconnected
-    // or replaced behind the same pin with a pre-floor binary would otherwise
-    // ride the cached success forever, never passing through `run()` again.
-    //
-    // Re-probed only when the command CHANGES, because probing spawns a process
-    // and this runs every turn. The residual is narrow and worth naming: a
-    // binary swapped in place under an unchanged command is not caught until the
-    // next session.
-    const command = commandArgv(entry).join(" ")
+    // The FLOOR is what makes the pin trustworthy, since engines below it do not
+    // lock it. Re-probed only when the command CHANGES, because probing spawns a
+    // process and this runs every turn. The residual is narrow and worth naming:
+    // a binary swapped in place under an unchanged command is not caught until
+    // the next session.
+    const command = commandArgv(inspection.entry).join(" ")
     if (record && record.validated === command) return true
-    // Same probe and same floor as the attach path, from the same helpers. This
-    // was duplicated here, which is how a describer and a decider drift apart.
-    const found = await engineVersionOf(entry)
+    const found = await engineVersionOf(inspection.entry)
     if (!clearsFloor(found)) {
       log.info("cached attach no longer clears the version floor; re-attaching", { workspaceId, found })
       return false
@@ -995,7 +1010,7 @@ export function ensure(sessionID: string): Promise<Outcome> {
       // Re-probe before trusting a cached success — see `engineStillConnected`.
       const boundTo = await attachKeyWorkspace()
       const reusable =
-        !wasServing(previous!.outcome) || !boundTo || (await engineStillOurs(boundTo, entry))
+        !wasServing(previous!.outcome) || !boundTo || (await memoStillValid(boundTo, entry))
       // Validating the cached success is itself awaited work — status, config and
       // possibly a version probe — so the binding can move underneath it. This
       // path lives outside `run()` and therefore never had its final check;
