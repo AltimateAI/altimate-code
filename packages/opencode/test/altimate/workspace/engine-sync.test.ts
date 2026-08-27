@@ -2616,3 +2616,66 @@ describe("INVARIANT — identity and paths are resolved once", () => {
     ])
   })
 })
+
+describe("an undo only undoes its own work", () => {
+  test("a config rewritten to a new command while we held it is not rolled back", async () => {
+    // A disable is not the only edit that can land in the boot window: an IDE
+    // writing a new command or URL is newer than our pin, and rolling it back
+    // discards a change the user made deliberately.
+    let current: CachedBinding | null = binding
+    let projectNow: ExistingEntry | null = null
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    syncInternals.projectEntry = async () => projectNow
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      // An IDE rewrites the entry to its own transport, and the binding moves.
+      projectNow = { type: "remote", url: "http://localhost:7801/sse", enabled: true }
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    await ensure("s1")
+    expect(h.restores, "rolled back over an edit that was not ours").toHaveLength(0)
+  })
+
+  test("a client replaced by another caller while we held it is not closed", async () => {
+    // The MCP route and the IDE's reload both call `MCP.add` outside this
+    // flow's serialization. Removing unconditionally closes whatever is there —
+    // which, after such a replacement, is the engine someone else just asked
+    // for, left disconnected with its tools gone.
+    let current: CachedBinding | null = binding
+    const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
+    syncInternals.resolveBinding = async () => current
+    const prevAdd = syncInternals.mcp!.add
+    syncInternals.mcp!.add = async (n, cfg) => {
+      await prevAdd(n, cfg)
+      // Someone else replaces the client, then the binding moves.
+      h.spawnedNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "7"] } as never
+      current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    await ensure("s1")
+    expect(h.removes, "closed a client another caller had just installed").toHaveLength(0)
+  })
+})
+
+describe("INVARIANT — the floor is asked of the engine that is running", () => {
+  test("a newly configured modern command does not vouch for a still-running old engine", async () => {
+    // A config edit can change the command while the existing client stays
+    // connected, so the two can carry the same pin and be different binaries.
+    // Probing the CONFIGURED one then lets a fresh 0.7 command authorise reuse
+    // of a running pre-0.7 engine — which does not lock its pin, and can drift
+    // to another workspace while we report this one. The pin and the floor are
+    // one mechanism, so both are asked of the same thing.
+    const h = install({
+      existing: { type: "local", command: ["/new/datamate", "start-stdio", "--datamate", "42"], enabled: true },
+      statuses: [{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      version: (bin) => (bin.startsWith("/old") ? "0.6.5" : "0.7.0"),
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    // What is actually running is the OLD binary, same pin.
+    h.spawnedNow = { type: "local", command: ["/old/datamate", "start-stdio", "--datamate", "42"] } as never
+    const outcome = await ensure("s1")
+    expect(outcome.kind, "reused a pre-floor engine on the strength of a newer configured command").not.toBe("reused")
+    expect(h.removes, "left the pre-floor engine registered").toContain("datamate")
+  })
+})

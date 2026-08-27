@@ -69,6 +69,7 @@ import {
   installWouldHelp,
   isUrlEntry,
   pinnedWorkspace,
+  sameCommand,
   ENGINE_BINARY,
   INSTALL_HINT,
   MIN_ENGINE_VERSION,
@@ -603,19 +604,33 @@ async function run(sessionID: string): Promise<Outcome> {
    * Restoring the merged value writes a copy of a global entry into the project,
    * which is a permanent override shadowing every later global change — undoing
    * a write is only correct if it restores what that write replaced. */
-  const undoInstall = async (projectBefore: ExistingEntry | null): Promise<"restored" | "failed"> => {
-    await client.remove(DATAMATE_KEY).catch((err) => {
-      log.warn("could not remove the superseded engine", { err: String(err) })
-    })
-    // "Restore what the write replaced" stops being right the moment the user
-    // edits the thing we wrote. Between our install and this undo there is a
-    // whole engine boot, and a disable landing in that window lands on OUR
-    // entry — so restoring the pre-install state deletes the edit they just
-    // made, and the next turn, seeing no entry at all, spawns and re-enables.
-    // Round 4 arriving through the undo path.
+  const undoInstall = async (
+    projectBefore: ExistingEntry | null,
+    installed: LocalMcpConfig,
+  ): Promise<"restored" | "failed"> => {
+    // An undo may only undo its OWN work, and both halves are checked because
+    // either can be replaced between the install and the undo: the MCP route and
+    // the IDE's reload both call `MCP.add` outside this flow's serialization,
+    // and an IDE or the user may rewrite the file. Removing or restoring blindly
+    // destroys someone else's work while believing it is tidying up after
+    // itself.
+    const runningNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
+    if (runningNow && !sameCommand(runningNow, installed as unknown as ExistingEntry)) {
+      log.info("not removing the engine; something else replaced it since we installed", { workspaceId })
+    } else {
+      await client.remove(DATAMATE_KEY).catch((err) => {
+        log.warn("could not remove the superseded engine", { err: String(err) })
+      })
+    }
+    // "Restore what the write replaced" stops being right the moment anything
+    // edits the thing we wrote. Between the install and this undo there is a
+    // whole engine boot: a disable landing in that window lands on OUR entry,
+    // and so does a new command or URL from an IDE. Restoring the pre-install
+    // state discards that edit, and the next turn — finding no entry, or ours —
+    // spawns over it.
     //
     // The same rule as the guard, applied to the undo's own write: no mutation
-    // on a stale world. Read at undo time, and never undo a disable.
+    // on a stale world. Read at undo time, and restore only what is still ours.
     let now: ExistingEntry | null = null
     try {
       now = await projectEntry(configPath)
@@ -637,6 +652,12 @@ async function run(sessionID: string): Promise<Outcome> {
       })
       const keep = projectBefore ? ({ ...projectBefore, enabled: false } as ExistingEntry) : now
       return await persistRestore(DATAMATE_KEY, keep, configPath)
+    }
+    if (now && !sameCommand(now, installed as unknown as ExistingEntry)) {
+      // Rewritten while we held it — a different command, or a URL where we
+      // wrote a command. That edit is newer than our pin and not ours to undo.
+      log.info("not restoring; the entry was rewritten since we installed", { workspaceId })
+      return "restored"
     }
     return await persistRestore(DATAMATE_KEY, projectBefore, configPath)
   }
@@ -871,9 +892,15 @@ async function run(sessionID: string): Promise<Outcome> {
     // toasted every single turn while the rejected client stayed registered and
     // serving: the advice-versus-registration split this module exists to close.
     // Read as unreadable, it is detached and refused once, and the memo holds.
+    // The RUNNING engine, not the configured one. A config edit can change the
+    // command while the existing client stays connected, so the two can carry
+    // the same pin and be different binaries — and a newly configured 0.7
+    // command would then authorise reuse of a still-running pre-0.7 engine,
+    // which does not lock its pin and can drift to another workspace. The pin
+    // and the floor are one mechanism, so both are asked of the same thing.
     let found: string | null
     try {
-      found = await engineVersionOf(entry)
+      found = await engineVersionOf(inspection.runtime ?? entry)
     } catch (err) {
       log.warn("could not probe the entry's engine version; treating it as unreadable", {
         workspaceId,
@@ -1104,7 +1131,7 @@ async function run(sessionID: string): Promise<Outcome> {
   const undoNow = async (): Promise<void> => {
     if (!installed || undone) return
     undone = true
-    const restored = await undoInstall(projectBefore).catch((err) => {
+    const restored = await undoInstall(projectBefore, cfg).catch((err) => {
       log.warn("could not undo a non-attached install", { err: String(err), workspaceId })
       return "failed" as const
     })

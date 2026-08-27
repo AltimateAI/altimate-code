@@ -49,7 +49,14 @@ describe("every exit gives back what it took", () => {
       const last = h.persisted[h.persisted.length - 1]
       return last ? ({ type: "local", command: last.cfg.command, enabled: true } as ExistingEntry) : null
     }
-    syncInternals.projectEntry = async () => opts.projectEntry ?? null
+    // Mirrors production: once this attach has persisted, the project file holds
+    // OUR entry — which is what the undo reads to decide whether what is there
+    // is still its own work. A stub that always returns the pre-install value
+    // models a file that never received the write.
+    syncInternals.projectEntry = async () => {
+      const last = h.persisted[h.persisted.length - 1]
+      return last ? ({ ...last.cfg } as unknown as ExistingEntry) : (opts.projectEntry ?? null)
+    }
     syncInternals.notify = async (t) => { h.toasts.push(t) }
     syncInternals.toolsChanged = async () => {}
     syncInternals.persistRestore = async (_n, prev) => { h.restores.push(prev ?? null) }

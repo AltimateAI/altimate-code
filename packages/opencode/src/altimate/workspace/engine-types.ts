@@ -192,6 +192,15 @@ export function describeMissing(missing: string[]): string {
   return ` Declared but not available: ${shown}${more}.`
 }
 
+/** Do these two entries name the same command?
+ *
+ * The identity an undo needs: is what is here still what I put here. Compared on
+ * argv rather than by reference, because the value that comes back from disk or
+ * from MCP is a different object carrying the same meaning. */
+export function sameCommand(a: ExistingEntry | null | undefined, b: ExistingEntry | null | undefined): boolean {
+  return commandArgv(a ?? null).join(" ") === commandArgv(b ?? null).join(" ")
+}
+
 /** Is this engine version usable at all?
  *
  * The single definition of "unusable" for this module. An unreadable version is
