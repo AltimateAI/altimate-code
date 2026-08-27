@@ -25,9 +25,10 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
-// altimate_change start — workspace engine turn boundary and managed-key refusal
+// altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { DATAMATE_KEY } from "../altimate/datamate-transport"
+import * as Precedence from "../altimate/workspace/precedence"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -1759,6 +1760,20 @@ export namespace SessionPrompt {
       // altimate_change end
     })
 
+    // altimate_change start — workspace precedence.
+    // Derived once per turn from the LIVE tool map rather than cached at attach:
+    // precedence is a pure function of the materialised set, and `MCP.tools()` is
+    // cache-invalidated by the `tools/list_changed` notification, so re-deriving here
+    // is what keeps precedence correct when an engine's tool set changes under us.
+    // Resolved before the loops below because both sides' descriptions depend on it.
+    const mcpTools = await MCP.tools()
+    const precedence = await Precedence.refresh(
+      input.session.id,
+      mcpTools,
+      PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+    )
+    // altimate_change end
+
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
@@ -1768,7 +1783,8 @@ export namespace SessionPrompt {
       // altimate_change end
       tools[item.id] = tool({
         id: item.id as any,
-        description: item.description,
+        // altimate_change — name the workspace on the native side too
+        description: Precedence.describeNativeTool(item.id, item.description, precedence),
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           const ctx = context(args, options)
@@ -1820,8 +1836,10 @@ export namespace SessionPrompt {
 
     // altimate_change start — split the original client name off the model-facing tool object so
     // it's used only for source classification and never leaks into the schema sent to the model.
-    for (const [key, entry] of Object.entries(await MCP.tools())) {
+    for (const [key, entry] of Object.entries(mcpTools)) {
       const { client: clientName, ...item } = entry
+      // altimate_change — mark the engine tools that now serve a shadowed capability
+      item.description = Precedence.describeEngineTool(key, item.description ?? "", precedence)
       // altimate_change end
       const execute = item.execute
       if (!execute) continue

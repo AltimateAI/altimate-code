@@ -6,6 +6,9 @@ import type { SchemaInspectResult } from "../native/types"
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
 import { isRecord, normalizeError } from "./response-normalization"
+// altimate_change start — workspace precedence
+import * as Precedence from "../workspace/precedence"
+// altimate_change end
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
   description: "Inspect database schema — list columns, types, and constraints for a table.",
@@ -15,6 +18,14 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     warehouse: z.string().optional().describe("Warehouse connection name"),
   }),
   async execute(args, ctx) {
+    // altimate_change start — workspace precedence
+    const precedence = await Precedence.check(ctx.sessionID, "schema_inspect", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
+    // Every failure exit goes through here, so a fail-open notice cannot be dropped by
+    // one path being overlooked — three of the four exits below are errors, and the
+    // marker is most needed on exactly those.
+    const failed = (message: string) => Precedence.annotate(precedence, schemaError(message))
+    // altimate_change end
     try {
       const result = (await Dispatcher.call("schema.inspect", {
         table: args.table,
@@ -23,12 +34,12 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       })) as unknown
 
       if (!isRecord(result)) {
-        return schemaError("Invalid schema response from dispatcher.")
+        return failed("Invalid schema response from dispatcher.")
       }
 
       const responseError = normalizeError(result.error)
       if (result.success === false || responseError !== undefined) {
-        return schemaError(responseError?.trim() || "Schema inspection failed.")
+        return failed(responseError?.trim() || "Schema inspection failed.")
       }
 
       const schemaResult = (isRecord(result.data) ? result.data : result) as Partial<SchemaInspectResult>
@@ -45,14 +56,15 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
         })
       }
       // altimate_change end
-      return {
+      // altimate_change — attaches the fail-open notice when present; no-op otherwise.
+      return Precedence.annotate(precedence, {
         title: `Schema: ${schemaResult.table ?? args.table}`,
         metadata: { success: true, columnCount: (schemaResult.columns ?? []).length, rowCount: schemaResult.row_count },
         output,
-      }
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return schemaError(msg)
+      return failed(msg)
     }
   },
 })
