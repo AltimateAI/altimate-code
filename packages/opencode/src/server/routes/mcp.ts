@@ -2,6 +2,10 @@ import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { MCP } from "../../mcp"
+// altimate_change start — workspace mode owns the datamate key
+import { DATAMATE_KEY } from "../../altimate/datamate-transport"
+import { managedWorkspace } from "../../altimate/workspace/engine-overlay"
+// altimate_change end
 // altimate_change start — Config.Mcp + MCP.Status migrated to Effect Schema in v1.17.9; convert to zod for HTTP schemas
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { zod } from "@/util/effect-zod"
@@ -59,6 +63,15 @@ export const McpRoutes = lazy(() =>
       ),
       async (c) => {
         const { name, config } = c.req.valid("json")
+        // altimate_change start — workspace mode owns the `datamate` key
+        const managed = name === DATAMATE_KEY ? managedWorkspace() : null
+        if (managed) {
+          return c.json(
+            { error: `MCP server "${name}" is managed by workspace "${managed.name}" in this project` },
+            400,
+          )
+        }
+        // altimate_change end
         const result = await MCP.add(name, config)
         return c.json(result.status)
       },

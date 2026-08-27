@@ -13,6 +13,8 @@ import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
+// altimate_change - workspace mode owns the datamate key
+import { managedWorkspace } from "../workspace/engine-overlay"
 
 const log = Log.create({ service: "datamate" })
 
@@ -138,22 +140,35 @@ async function handleList() {
 
 async function handleListIntegrations() {
   try {
-    const integrations = await AltimateApi.listIntegrations()
+    const catalog = await AltimateApi.listIntegrations()
+    // altimate_change start — extension-type integrations are RPC into a live VS
+    // Code host and cannot work from the CLI. Hide them from this surface (the
+    // workspace UI still offers them) and say how many were hidden.
+    const integrations = catalog.filter((i) => i.type !== "extension")
+    const hidden = catalog.length - integrations.length
+    const omitted =
+      hidden > 0
+        ? `${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they require a live VS Code bridge and are not available from the CLI.`
+        : ""
     if (integrations.length === 0) {
       return {
-        title: "Integrations: none found",
-        metadata: { count: 0 },
-        output: "No integrations available.",
+        title: hidden > 0 ? `Integrations: none available on the CLI (${hidden} hidden)` : "Integrations: none found",
+        metadata: { count: 0, hidden },
+        output: omitted ? `No integrations available. ${omitted}` : "No integrations available.",
       }
     }
+    // altimate_change end
     const lines = ["ID | Name | Tools", "---|------|------"]
     for (const i of integrations) {
       const tools = i.tools?.map((t) => t.key).join(", ") ?? "none"
       lines.push(`${i.id} | ${i.name} | ${tools}`)
     }
+    // altimate_change start
+    if (omitted) lines.push("", `(${omitted})`)
+    // altimate_change end
     return {
       title: `Integrations: ${integrations.length} available`,
-      metadata: { count: integrations.length },
+      metadata: { count: integrations.length, hidden },
       output: lines.join("\n"),
     }
   } catch (e) {
@@ -200,6 +215,23 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     const serverName = transport !== null
       ? DATAMATE_KEY
       : (args.name ?? `datamate-${slugify(datamate.name)}`)
+
+    // altimate_change start — in workspace mode the shared `datamate` key is the
+    // bound workspace's own engine, derived at config load. Adding a datamate
+    // under that key would replace it; refuse and say why. Standalone
+    // `datamate-<name>` entries are a different key and stay the user's.
+    const managed = serverName === DATAMATE_KEY ? managedWorkspace() : null
+    if (managed) {
+      return {
+        title: `Datamate add: '${DATAMATE_KEY}' is managed by workspace "${managed.name}"`,
+        metadata: { serverName: DATAMATE_KEY, managedBy: managed.id, datamateId: args.datamate_id },
+        output:
+          `This project is linked to workspace "${managed.name}", whose integrations are served by the ` +
+          `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Adding datamate '${datamate.name}' ` +
+          `there is not applied. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage that entry by hand.`,
+      }
+    }
+    // altimate_change end
 
     const creds = transport ? undefined : await AltimateApi.getCredentials()
     const mcpConfig =

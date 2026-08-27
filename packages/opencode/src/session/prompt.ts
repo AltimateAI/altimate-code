@@ -25,6 +25,8 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
+// altimate_change - workspace engine turn boundary
+import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -1006,6 +1008,15 @@ export namespace SessionPrompt {
       // Check if user explicitly invoked an agent via @ in this turn
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
+
+      // altimate_change start — workspace engine turn boundary. Reconciles the bound
+      // workspace's engine (re-link, one retry on a failed handshake), settles this
+      // session's outcome and announces it once per verdict. Runs before
+      // `resolveTools` so the engine's tools are in this turn's tool list; the cold
+      // engine boot happens inside MCP's own bootstrap, bounded by its per-server
+      // timeout. Every user turn starts at step 1 (see the note below on `step`).
+      if (step === 1) await WorkspaceEngine.beforeTurn(sessionID)
+      // altimate_change end
 
       // altimate_change start (AI-7519) — trace resolveTools per step.
       // Included in the parent `bootstrap` span on step===1; on later steps

@@ -37,6 +37,10 @@ const DatamateSummary = z.object({
 const IntegrationSummary = z.object({
   id: z.coerce.string(),
   name: z.string().optional(),
+  // altimate_change start — catalog `type` (tool | mcp | code | api | extension);
+  // extension-type integrations have no meaning on the CLI surface.
+  type: z.string().optional(),
+  // altimate_change end
   description: z.string().nullable().optional(),
   tools: z
     .array(
@@ -227,19 +231,30 @@ export namespace AltimateApi {
 
   async function request(creds: AltimateCredentials, method: string, endpoint: string, body?: unknown) {
     const url = `${creds.altimateUrl}${endpoint}`
-    const res = await fetch(url, {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${creds.altimateApiKey}`,
-        "x-tenant": creds.altimateInstanceName,
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    })
-    if (!res.ok) {
-      throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
+    // altimate_change start — upstream_fix: bound every API request. Without a
+    // signal a stalled server holds the caller indefinitely. The abort stays
+    // armed until the BODY is read: `fetch` resolves on headers.
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 15_000)
+    try {
+      const res = await fetch(url, {
+        signal: controller.signal,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${creds.altimateApiKey}`,
+          "x-tenant": creds.altimateInstanceName,
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      })
+      if (!res.ok) {
+        throw new Error(`API ${method} ${endpoint} failed with status ${res.status}`)
+      }
+      return await res.json()
+    } finally {
+      clearTimeout(timeout)
     }
-    return res.json()
+    // altimate_change end
   }
 
   export async function listDatamates() {
