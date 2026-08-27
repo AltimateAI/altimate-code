@@ -1,4 +1,5 @@
 import path from "path"
+import { Token } from "@/util/token"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -826,14 +827,15 @@ export namespace SessionPrompt {
         if (!lastFinished) return 0
         const index = msgs.findIndex((m) => m.info.id === lastFinished.id)
         if (index < 0) return 0
-        let chars = 0
+        let tokens = 0
         for (const m of msgs.slice(index + 1)) {
           for (const part of m.parts) {
-            if (part.type === "text") chars += part.text?.length ?? 0
-            if (part.type === "tool" && part.state?.status === "completed") chars += part.state.output?.length ?? 0
+            if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+            if (part.type === "tool" && part.state?.status === "completed")
+              tokens += Token.estimate(part.state.output ?? "")
           }
         }
-        return Math.ceil(chars / 4)
+        return tokens
       })()
       if (
         lastFinished &&

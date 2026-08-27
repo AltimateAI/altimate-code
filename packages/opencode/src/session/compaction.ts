@@ -220,11 +220,14 @@ export namespace SessionCompaction {
     let dropped = 0
     while (head.length > 1 && (await estimate({ messages: head, model: input.model })) > budget) {
       const step = Math.max(1, Math.floor(head.length / 8))
-      head = head.slice(step)
-      dropped += step
-      // never drop a compaction summary boundary's assistant record silently:
-      // slicing from the front only removes the OLDEST material, which is what
-      // a summary is for in the first place.
+      // Round the cut forward to the next turn boundary: a head that starts
+      // mid-turn (assistant/tool messages with no leading user turn) is
+      // rejected by providers with a 400, defeating the fallback entirely.
+      let cut = step
+      while (cut < head.length && head[cut]!.info.role !== "user") cut++
+      if (cut >= head.length) cut = step
+      head = head.slice(cut)
+      dropped += cut
     }
     return { head, dropped }
   }
