@@ -957,9 +957,18 @@ export const layer = Layer.effect(
         // altimate_change end
         return result.status
       }
-      // altimate_change start — recorded after the bail-early check above, so a
-      // failed replacement never overwrites the status of a client another
-      // caller registered while it was coming up.
+      // altimate_change start — the newer call wins, whichever completes first.
+      // If another caller registered a client under this key while this one was
+      // coming up, this result is the OLDER intent arriving late: storing it
+      // would close their newer client and hand the runtime back to whatever
+      // this call was asked to start. Close what we made instead, leave theirs
+      // — client, status and launch record — and answer with what is serving.
+      if (s.clients[name] !== replacing) {
+        yield* Effect.tryPromise(() => result.mcpClient!.close()).pipe(Effect.ignore)
+        return s.status[name] ?? result.status
+      }
+      // Recorded after the checks above, so neither a failed nor a superseded
+      // replacement overwrites the status of a client another caller registered.
       s.status[name] = result.status
       // altimate_change end
 

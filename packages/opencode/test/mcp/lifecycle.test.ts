@@ -89,6 +89,11 @@ function getOrCreateClientState(name?: string): MockClientState {
   return state
 }
 
+// altimate_change start — a one-shot connect delay, so a test can make an older
+// add complete AFTER a newer one for the same key.
+let connectDelayOnceMs = 0
+// altimate_change end
+
 // Mock transport that succeeds or fails based on connectShouldFail / connectShouldHang
 class MockStdioTransport {
   stderr: null = null
@@ -99,6 +104,13 @@ class MockStdioTransport {
   async start() {
     if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
     if (connectShouldFail) throw new Error(connectError)
+    // altimate_change start
+    if (connectDelayOnceMs) {
+      const delay = connectDelayOnceMs
+      connectDelayOnceMs = 0
+      await new Promise<void>((resolve) => setTimeout(resolve, delay))
+    }
+    // altimate_change end
   }
   async close() {
     transportCloseCount++
@@ -1322,6 +1334,38 @@ it.instance(
           "echo",
           "three",
         ])
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "an older add that completes after a newer one does not replace the newer client",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        // The other half of the same race: both creations SUCCEED, the older
+        // one last. Storing it would close the newer client and hand the runtime
+        // back to what the older call was asked to start. The newer call wins
+        // whichever completes first; the late result is closed, not stored.
+        lastCreatedClientName = "racing2"
+        getOrCreateClientState("racing2")
+        yield* mcp.add("racing2", { type: "local", command: ["echo", "one"] })
+
+        connectDelayOnceMs = 150
+        const slow = yield* Effect.forkChild(mcp.add("racing2", { type: "local", command: ["echo", "two"] }))
+        yield* Effect.sleep("20 millis") // the slow add is inside its delayed connect
+        yield* mcp.add("racing2", { type: "local", command: ["echo", "three"] })
+        const newer = (yield* mcp.clients())["racing2"]
+
+        const late = yield* Fiber.join(slow) // completes late, and must not win
+        expect(localCommand(yield* mcp.spawned("racing2")), "an older add that completed late replaced the newer client").toEqual([
+          "echo",
+          "three",
+        ])
+        expect((yield* mcp.clients())["racing2"], "the newer client was closed by the late result").toBe(newer)
+        // The late call answers with what is serving, not with what it started.
+        expect(((late.status as any)["racing2"] ?? late.status).status).toBe("connected")
       }),
     ),
   { config: { mcp: {} } },

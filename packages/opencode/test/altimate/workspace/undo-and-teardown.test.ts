@@ -508,8 +508,9 @@ describe("the restore refuses on the text it edits", () => {
     })
     const diskEntry = async () => (await readMcpEntryFromDisk("datamate", file)) as ExistingEntry | undefined
 
-    /** After the guard's intent read, config-file readText #1 is now addMcpToConfig's
-     * ONLY read (persist has no separate check read any more). */
+    /** After the guard's intent read, config-file readText #1 is persist's merged
+     * intent re-read (the global-disable check) and #2 is addMcpToConfig's own
+     * read — the one the write modifies. The window under test is the write's. */
     function stage(where: "intent-read-end" | "before-write-read" | "after-write-read") {
       const h = install([{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }], () => null, { realPersist: true })
       syncInternals.projectConfigPath = async () => file
@@ -532,7 +533,7 @@ describe("the restore refuses on the text it edits", () => {
       Filesystem.readText = async (p: string) => {
         if (!armed || p !== file || landed) return originalReadText(p)
         n += 1
-        if (n !== 1) return originalReadText(p)
+        if (n !== 2) return originalReadText(p)
         landed = true
         if (where === "before-write-read") {
           writeFileSync(file, DISABLED_FILE)

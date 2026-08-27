@@ -38,6 +38,23 @@ export async function persist(name: string, cfg: LocalMcpConfig, configPath?: st
   // one write to one file is not atomic, and a disable landing between the read
   // and the `write` syscall is still lost. That residual is named on the PR
   // rather than papered over; closing it needs write-then-verify.
+  // The node on disk is the PROJECT file's; intent can also live in the global
+  // config the project inherits from. A global disable landing after the
+  // caller's merged read would not be on the text below — and a project pin
+  // written over it shadows that disable for good, since project wins the
+  // merge. So the merged view is asked once more, immediately before the
+  // write. Same window as the write's own read; named, not closed.
+  let merged: ExistingEntry | null
+  try {
+    merged = await existingEntry(name)
+  } catch (err) {
+    log.warn("could not confirm intent before writing the engine entry; not writing", { name, err: String(err) })
+    return "disabled"
+  }
+  if (merged?.enabled === false) {
+    log.info("refusing to write a project entry over a disable in the merged config", { name })
+    return "disabled"
+  }
   if ((await addMcpToConfig(name, cfg, configPath, { refuseIfDisabled: true })) === null) {
     log.info("refusing to write over an entry that is disabled on disk", { name })
     return "disabled"

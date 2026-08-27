@@ -181,6 +181,30 @@ describe("the write checks the text it is about to modify", () => {
       expect(after?.command).toEqual(["datamate", "start-stdio"])
       expect(h.added).toHaveLength(0)
     })
+
+    test("a GLOBAL disable landing after the guard is refused before the project write", async () => {
+      // The project file holds an enabled node, so the write's own on-disk check
+      // sees nothing wrong. Intent lives in the global config the project
+      // inherits from, and a project pin written over a global disable shadows
+      // it for good (project wins the merge). So persist asks the MERGED view
+      // once more, immediately before writing.
+      const h = install([{ datamate: { status: "connected" } }, { datamate: { status: "connected" } }], () => null, {
+        realPersist: true,
+      })
+      syncInternals.projectConfigPath = async () => file
+      syncInternals.projectEntry = async () => (await diskEntry()) ?? null
+      syncInternals.existingEntry = async () => {
+        const e = (await diskEntry()) ?? null
+        h.reads.push(e?.enabled)
+        // reads: inspection (1), the guard (2), persist's merged re-read (3) —
+        // the global disable is visible from the third read on, never on disk.
+        return h.reads.length >= 3 && e ? { ...e, enabled: false } : e
+      }
+      const first = await ensure("s1")
+      expect(first.kind, "wrote a project pin over a global disable").toBe("entry-disabled")
+      expect((await diskEntry())?.command, "the project file was written").toEqual(["datamate", "start-stdio"])
+      expect(h.added).toHaveLength(0)
+    })
   })
 
   describe("a disable landing before the revive is honoured", () => {
