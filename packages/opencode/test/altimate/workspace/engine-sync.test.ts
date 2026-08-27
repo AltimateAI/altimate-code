@@ -232,15 +232,33 @@ describe("ensure", () => {
     expect(h.toasts[0].message).toContain("not falling back to the hosted endpoint")
   })
 
-  test("a down COMMAND entry is retried once, then reported — never double-spawned", async () => {
+  test("a down COMMAND entry that is OURS is retried once, then reported — never double-spawned", async () => {
+    // Reviving is for our own engine. The entry must be pinned to this
+    // workspace to reach the retry at all — see the wedge test below.
     const h = install({
-      existing: { type: "local", command: ["datamate", "start-stdio"] },
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
       statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "failed", error: "exit 1" } }],
     })
     expect(await ensure("s1")).toEqual({ kind: "connect-failed", error: "exit 1" })
     expect(h.connects).toEqual(["datamate"])
     expect(h.added).toHaveLength(0)
     expect(h.persisted).toHaveLength(0)
+  })
+
+  test("a down entry pinned ELSEWHERE is replaced, never revived — this is the wedge", async () => {
+    // With connectivity above attribution this could not clear: the retry
+    // answered before the pin was ever consulted, so an entry pinned to a
+    // workspace the project no longer holds was retried every turn, reported
+    // `connect-failed` every turn, and never replaced — the project sat wedged
+    // until someone edited config by hand.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] },
+      statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1, datamate_dbt_compile_model: 1 },
+    })
+    expect(await ensure("s1")).toMatchObject({ kind: "attached" })
+    expect(h.connects, "revived an engine belonging to another workspace").toHaveLength(0)
+    expect(h.added, "did not replace the unattributable entry").toHaveLength(1)
   })
 
   test("a dead URL entry (IDE engine not running) is replaced by a local spawn, and the replacement is reported", async () => {
@@ -433,7 +451,10 @@ describe("ensure — attribution of a CONNECTED entry", () => {
     expect(h.removes).toHaveLength(0) // reuse must never tear down what it reuses
   })
 
-  test("a recovered entry is gated too: retried back to life but unpinned, it is replaced", async () => {
+  test("a down UNPINNED entry is replaced without being revived first", async () => {
+    // It was previously retried back to life and only then judged unattributable
+    // and replaced — a spawn spent on a process we were always going to discard.
+    // Attribution above connectivity means we never start it.
     const h = install({
       existing: { type: "local", command: ["datamate", "start-stdio"] },
       statuses: [
@@ -444,7 +465,7 @@ describe("ensure — attribution of a CONNECTED entry", () => {
       tools: twoTools,
     })
     const outcome = await ensure("s1")
-    expect(h.connects).toEqual(["datamate"]) // the one retry still happened
+    expect(h.connects, "revived an entry it was going to replace anyway").toHaveLength(0)
     expect(outcome).toMatchObject({ kind: "attached", replaced: "datamate start-stdio" })
   })
 })
@@ -853,9 +874,9 @@ describe("ensure — round 4", () => {
     expect(h.persisted).toHaveLength(0)
   })
 
-  test("a genuinely FAILED entry is still retried once", async () => {
+  test("a genuinely FAILED entry that is OURS is still retried once", async () => {
     const h = install({
-      existing: { type: "local", command: ["datamate", "start-stdio"] },
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
       statuses: [
         { datamate: { status: "failed", error: "exit 1" } },
         { datamate: { status: "failed", error: "exit 1" } },
@@ -1647,8 +1668,18 @@ describe("INVARIANT — the entry decision is ordered by authority and cannot aw
     expect(planForEntry({ entry: { ...theirs, enabled: false }, observed: live }, "42", false).act).toBe("honour-disable")
   })
 
-  test("connectivity outranks attribution — an unreachable entry is retried before being judged ours", () => {
-    expect(planForEntry({ entry: theirs, observed: { status: "failed", error: "exit 1" } }, "42", false).act).toBe("retry-connect")
+  test("attribution outranks connectivity — an unreachable entry is judged ours BEFORE being revived", () => {
+    // Whose engine is this, not how is it doing. Reviving one that is not ours
+    // spends a spawn on another client's process, and — with the old order —
+    // wedged the project on `connect-failed` forever, because the retry
+    // answered before the pin was consulted.
+    expect(planForEntry({ entry: theirs, observed: { status: "failed", error: "exit 1" } }, "42", false).act).toBe(
+      "replace-unattributable",
+    )
+    // Ours and down IS revived: that is what the retry is for.
+    expect(planForEntry({ entry: ours, observed: { status: "failed", error: "exit 1" } }, "42", false).act).toBe(
+      "retry-connect",
+    )
   })
 
   test("attribution outranks version — an entry pinned elsewhere is replaced, never probed", () => {

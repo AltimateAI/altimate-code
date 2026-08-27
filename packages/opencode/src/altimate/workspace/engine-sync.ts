@@ -165,38 +165,58 @@ async function inspectEntry(): Promise<Inspection> {
 
 export function planForEntry(inspection: Inspection, workspaceId: string, retried: boolean): EntryPlan {
   const { entry, observed } = inspection
-  // Nothing registered under this key: there is no entry to judge.
-  if (!observed) return { act: "spawn" }
 
-  // Intent first. The config's `enabled` flag is the only place a user
-  // expresses "off", and the two sources disagree in BOTH directions:
-  // `MCP.status()` synthesizes "disabled" for a configured entry with no
-  // runtime status (so a teardown looks like a user disable), and it keeps
-  // reporting "connected" from live client state after the config has been set
-  // to disabled (so a real disable looked like nothing at all). Gating on
-  // connectivity missed the second case entirely.
+  // 1. INTENT. Outranks everything, including whether anything is observed at
+  // all. `{ "datamate": { "enabled": false } }` with no `type` is the upstream
+  // idiom for switching an entry off, and the only durable way to disable an
+  // IDE-discovered one from this config — and `isMcpConfigured` requires a
+  // `type`, so MCP omits it from status entirely. Checking intent below the
+  // no-observation branch meant that marker reached the spawn path and was
+  // overwritten with our own pinned `enabled: true`. "Intent outranks
+  // connectivity" was too weak: absence of runtime is not connectivity.
   if (entry?.enabled === false) return { act: "honour-disable" }
 
+  // 2. Nothing is registered under this key, so there is nothing to attribute
+  // and nothing to revive. Note this is BELOW intent and above everything else:
+  // a disable marker must be honoured even when it is invisible to status, but
+  // once intent is settled, absence really does mean there is nothing here.
+  if (!observed) return { act: "spawn" }
+
+  // 3. ATTRIBUTION, before connectivity — whose engine is this, not how is it
+  // doing. Nursing an engine back to health before asking whose it is has no
+  // defensible reading: at best it is work spent on another client's process,
+  // at worst it revives the very engine we rejected last turn and then rejects
+  // it again. It also wedges: an entry pinned elsewhere that is also DOWN was
+  // retried every turn and never replaced, because the retry answered before
+  // the pin was ever consulted, so the project sat on `connect-failed` until
+  // someone edited config by hand.
+  //
+  // The previous order — connectivity first — was an artifact rather than a
+  // decision: the pin check lived inside an `if (connected)` block, and
+  // extracting this function faithfully carried that accident along with the
+  // intent, which made it look deliberate.
+  const pin = pinnedWorkspace(entry)
+  if (pin !== workspaceId) {
+    // A URL entry pins nothing, so it lands here too — which is the point:
+    // the hosted endpoint serves a different tool set and rule 4 forbids
+    // adopting it. An unreachable one keeps its own message because that names
+    // the port the user's IDE is not serving.
+    if (isUrlEntry(entry) && observed.status !== "connected") {
+      return { act: "replace-unreachable-url", url: entry.url }
+    }
+    return { act: "replace-unattributable", entry: describeEntry(entry), pinnedTo: pin }
+  }
+
+  // 4. CONNECTIVITY. Reached only for an entry that IS ours, which is the only
+  // kind worth reviving.
   if (observed.status !== "connected") {
-    // A dead URL is not something this client can revive — only the IDE can
-    // restore its port — so it is replaced rather than retried.
-    if (isUrlEntry(entry)) return { act: "replace-unreachable-url", url: entry.url }
-    if (retried) return { act: "refuse-unreachable", error: observed.error ?? observed.status ?? "not connected" }
+    if (retried) {
+      return { act: "refuse-unreachable", error: observed.error ?? observed.status ?? "not connected" }
+    }
     return { act: "retry-connect" }
   }
 
-  // Live — either it already was, or the single retry brought it back. A
-  // recovered entry is gated exactly like one that never dropped.
-  //
-  // "Connected" is not attribution. An entry without `--datamate <id>` follows
-  // its owner's active teammate, which changes at runtime from a UI this client
-  // does not control; reusing one would report "workspace X: N tools" about a
-  // process serving Y, and once precedence acts on that inventory it routes the
-  // model into another workspace's credentials.
-  const pin = pinnedWorkspace(entry)
-  if (pin !== workspaceId) {
-    return { act: "replace-unattributable", entry: describeEntry(entry), pinnedTo: pin }
-  }
+  // 5. VERSION.
   return { act: "check-version" }
 }
 

@@ -1238,6 +1238,10 @@ it.instance(
 )
 
 // altimate_change start — the spawn record: what this process actually launched
+function localCommand(entry: { command?: string[] } | object | undefined): string[] | undefined {
+  return entry && "command" in entry ? entry.command : undefined
+}
+
 it.instance(
   "records what it spawned, and forgets it when the client is removed",
   () =>
@@ -1248,11 +1252,11 @@ it.instance(
         expect(yield* mcp.spawned("spawnrec")).toBeUndefined()
 
         yield* mcp.add("spawnrec", { type: "local", command: ["echo", "one"] })
-        expect((yield* mcp.spawned("spawnrec"))?.command).toEqual(["echo", "one"])
+        expect(localCommand(yield* mcp.spawned("spawnrec"))).toEqual(["echo", "one"])
 
         // Re-adding replaces the running client, so the record follows it.
         yield* mcp.add("spawnrec", { type: "local", command: ["echo", "two"] })
-        expect((yield* mcp.spawned("spawnrec"))?.command).toEqual(["echo", "two"])
+        expect(localCommand(yield* mcp.spawned("spawnrec"))).toEqual(["echo", "two"])
 
         // A key with no live client has nothing spawned under it. Leaving the
         // record behind would tell a later caller that a torn-down engine is
@@ -1276,12 +1280,11 @@ it.instance(
         // agree with itself while the live client serves something else.
         lastCreatedClientName = "spawnrec2"
         yield* mcp.add("spawnrec2", { type: "local", command: ["echo", "launched"] })
-        const launched = yield* mcp.spawned("spawnrec2")
-        expect(launched?.command).toEqual(["echo", "launched"])
+        expect(localCommand(yield* mcp.spawned("spawnrec2"))).toEqual(["echo", "launched"])
 
         // Whatever else happens to configuration, the record keeps naming the
         // process that is actually up until it is torn down or replaced.
-        expect((yield* mcp.spawned("spawnrec2"))?.command).toEqual(["echo", "launched"])
+        expect(localCommand(yield* mcp.spawned("spawnrec2"))).toEqual(["echo", "launched"])
       }),
     ),
 )
