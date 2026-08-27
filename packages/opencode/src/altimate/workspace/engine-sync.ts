@@ -141,12 +141,30 @@ type EntryPlan =
   | { act: "replace-unattributable"; entry: string; pinnedTo: string | null }
   | { act: "check-version" }
 
-export function planForEntry(
-  entry: ExistingEntry | null,
-  observed: { status: string; error?: string } | undefined,
-  workspaceId: string,
-  retried: boolean,
-): EntryPlan {
+export type Inspection = {
+  entry: ExistingEntry | null
+  observed: { status: string; error?: string } | undefined
+}
+
+/** Config and runtime, read together, in the one correct order.
+ *
+ * The order is not incidental: `existingEntry` refreshes the config cache that
+ * `MCP.status()` then reads, so reading status first means judging this entry
+ * against a config that predates it — which is how an entry an IDE had just
+ * added went missing from status entirely and our own was persisted over it.
+ *
+ * They travel as one value because the decision needs BOTH and they must
+ * describe the same moment. Passing them as two arguments left it to each
+ * caller to pair them correctly, and "the caller remembers" is the property
+ * this whole rewrite is trying to stop relying on. */
+async function inspectEntry(): Promise<Inspection> {
+  const entry = await existingEntry(DATAMATE_KEY)
+  const observed = (await mcp().status())[DATAMATE_KEY]
+  return { entry, observed }
+}
+
+export function planForEntry(inspection: Inspection, workspaceId: string, retried: boolean): EntryPlan {
+  const { entry, observed } = inspection
   // Nothing registered under this key: there is no entry to judge.
   if (!observed) return { act: "spawn" }
 
@@ -328,18 +346,24 @@ async function run(): Promise<Outcome> {
   // IDE added after the cache warmed would otherwise be missing from status
   // entirely — the entry check would never run and our managed entry would be
   // persisted straight over theirs.
-  const entry = await existingEntry(DATAMATE_KEY)
-  let observed = (await client.status())[DATAMATE_KEY]
-  let plan = planForEntry(entry, observed, workspaceId, false)
+  let inspection = await inspectEntry()
+  let plan = planForEntry(inspection, workspaceId, false)
 
   if (plan.act === "retry-connect") {
     // Exactly one retry, then report — never a second spawn beside a failing
     // one. "Never twice" is the `retried` argument rather than a branch someone
     // has to remember not to re-enter.
+    //
+    // Re-inspected whole rather than re-reading status alone: `MCP.connect`
+    // writes `enabled: true` into whichever config owns the entry, so the
+    // config after a connect attempt is not necessarily the config before it.
+    // Judging fresh runtime against stale config is the same defect in
+    // miniature.
     await client.connect(DATAMATE_KEY).catch(() => undefined)
-    observed = (await client.status())[DATAMATE_KEY]
-    plan = planForEntry(entry, observed, workspaceId, true)
+    inspection = await inspectEntry()
+    plan = planForEntry(inspection, workspaceId, true)
   }
+  const entry = inspection.entry
 
   if (plan.act === "honour-disable") {
     // The user turned this entry off deliberately. Do NOT call `MCP.connect` to
@@ -386,7 +410,7 @@ async function run(): Promise<Outcome> {
     log.info("existing engine entry is a URL that is not reachable; will spawn locally", {
       workspaceId,
       url: plan.url,
-      error: observed?.error,
+      error: inspection.observed?.error,
     })
   }
 

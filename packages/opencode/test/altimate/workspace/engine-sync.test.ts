@@ -1640,49 +1640,49 @@ describe("INVARIANT — the entry decision is ordered by authority and cannot aw
   const unpinned = { type: "local", command: ["datamate", "start-stdio"], enabled: true }
 
   test("intent outranks connectivity — a disabled entry is honoured while its client is live", () => {
-    expect(planForEntry({ ...ours, enabled: false }, live, "42", false).act).toBe("honour-disable")
+    expect(planForEntry({ entry: { ...ours, enabled: false }, observed: live }, "42", false).act).toBe("honour-disable")
   })
 
   test("intent outranks attribution — a disabled entry is honoured even when it is not ours", () => {
-    expect(planForEntry({ ...theirs, enabled: false }, live, "42", false).act).toBe("honour-disable")
+    expect(planForEntry({ entry: { ...theirs, enabled: false }, observed: live }, "42", false).act).toBe("honour-disable")
   })
 
   test("connectivity outranks attribution — an unreachable entry is retried before being judged ours", () => {
-    expect(planForEntry(theirs, { status: "failed", error: "exit 1" }, "42", false).act).toBe("retry-connect")
+    expect(planForEntry({ entry: theirs, observed: { status: "failed", error: "exit 1" } }, "42", false).act).toBe("retry-connect")
   })
 
   test("attribution outranks version — an entry pinned elsewhere is replaced, never probed", () => {
-    expect(planForEntry(theirs, live, "42", false)).toEqual({
+    expect(planForEntry({ entry: theirs, observed: live }, "42", false)).toEqual({
       act: "replace-unattributable",
       entry: "datamate start-stdio --datamate 9",
       pinnedTo: "9",
     })
     // An unpinned entry is equally unattributable: it follows its owner's active
     // teammate, which this client does not control.
-    expect(planForEntry(unpinned, live, "42", false).act).toBe("replace-unattributable")
+    expect(planForEntry({ entry: unpinned, observed: live }, "42", false).act).toBe("replace-unattributable")
   })
 
   test("one retry, never two — the bound is an argument, not a branch", () => {
     const failed = { status: "failed", error: "exit 1" }
-    expect(planForEntry(ours, failed, "42", false).act).toBe("retry-connect")
-    expect(planForEntry(ours, failed, "42", true)).toEqual({ act: "refuse-unreachable", error: "exit 1" })
+    expect(planForEntry({ entry: ours, observed: failed }, "42", false).act).toBe("retry-connect")
+    expect(planForEntry({ entry: ours, observed: failed }, "42", true)).toEqual({ act: "refuse-unreachable", error: "exit 1" })
   })
 
   test("a dead URL is replaced rather than retried — only the IDE can restore its port", () => {
     const url = { type: "remote", url: "http://localhost:7801/sse", enabled: true }
-    expect(planForEntry(url, { status: "failed" }, "42", false)).toEqual({
+    expect(planForEntry({ entry: url, observed: { status: "failed" } }, "42", false)).toEqual({
       act: "replace-unreachable-url",
       url: "http://localhost:7801/sse",
     })
   })
 
   test("nothing registered is a spawn, and ours-and-live goes to the version check", () => {
-    expect(planForEntry(null, undefined, "42", false).act).toBe("spawn")
-    expect(planForEntry(ours, live, "42", false).act).toBe("check-version")
+    expect(planForEntry({ entry: null, observed: undefined }, "42", false).act).toBe("spawn")
+    expect(planForEntry({ entry: ours, observed: live }, "42", false).act).toBe("check-version")
   })
 
   test("the decision is a value, not a promise — nothing can interleave inside it", () => {
-    const plan = planForEntry(ours, live, "42", false) as unknown as { then?: unknown }
+    const plan = planForEntry({ entry: ours, observed: live }, "42", false) as unknown as { then?: unknown }
     expect(typeof plan.then).toBe("undefined")
   })
 
