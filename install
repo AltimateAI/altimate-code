@@ -499,27 +499,38 @@ install_from_binary() {
 # No network call and no identifier is written here — this only hands the CLI the
 # version it was installed at. Whether anything is ever sent remains entirely up
 # to the CLI's existing telemetry opt-out gates.
+# $1 — install_method to record. Must be a value in the CLI's allowlist
+# (packages/opencode/src/cli/welcome.ts); anything else reports as "unknown".
 write_install_marker() {
+    local marker_source="$1"
     local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/altimate-code"
     # An empty marker is deleted unread by the CLI, so fall back to "unknown"
     # rather than losing the install: $specific_version is empty whenever the
     # GitHub API could not be reached (see check_version).
     local marker_version="${specific_version:-unknown}"
     mkdir -p "$data_dir" 2>/dev/null || return 0
+    # Companion first, trigger last: the CLI returns early unless .installed-version
+    # exists, then consumes .install-source. Trigger-first would let a CLI starting in
+    # between report install_method "unknown", and a truncated .installed-version is
+    # deleted unread — losing the install rather than just its attribution.
+    printf '%s' "$marker_source" > "$data_dir/.install-source" 2>/dev/null || return 0
     printf '%s' "${marker_version#v}" > "$data_dir/.installed-version" 2>/dev/null || return 0
-    printf '%s' "curl" > "$data_dir/.install-source" 2>/dev/null || return 0
 }
 
 if [ -n "$binary_path" ]; then
     install_from_binary
+    # Attributed as "local", not "curl": --binary installs a file the caller already
+    # had (dev build, air-gapped artifact) and sets specific_version="local", so
+    # folding it into the curl metric would misreport both source and version.
+    # Still recorded — it is a real install — just not a curl one.
+    write_install_marker "local"
 else
     check_version
     download_and_install
+    # Only reached when an install actually happened: check_version exits 0 early
+    # when the requested version is already present.
+    write_install_marker "curl"
 fi
-
-# Only reached when an install actually happened: check_version exits 0 early
-# when the requested version is already present.
-write_install_marker
 
 
 add_to_path() {

@@ -478,7 +478,7 @@ export namespace Telemetry {
         // installer itself; "unknown" when the marker predates this field or the
         // source file was unreadable. Without it, curl and npm installs are
         // indistinguishable in the same metric.
-        install_method: "curl" | "powershell" | "npm" | "vscode-extension" | "unknown"
+        install_method: "curl" | "powershell" | "npm" | "vscode-extension" | "local" | "unknown"
       }
     // altimate_change end
     // altimate_change start — telemetry for skill management operations

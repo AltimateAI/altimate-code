@@ -12,8 +12,13 @@
  * "executed" describe below runs the real bash installer through its `--binary` path (no network,
  * no GitHub) against a throwaway HOME and asserts the files the CLI actually reads.
  *
- * install.ps1 has source-level coverage only — no pwsh on macOS/Linux runners. Its runtime
- * behaviour is exercised by the Windows Installer (Pester) CI job.
+ * install.ps1 gets source-level assertions here plus a syntax parse and real execution in
+ * test/windows/install.Tests.ps1, which AST-extracts Write-InstallMarker and runs it against a
+ * temp profile. NOTE: the Pester suite's *subprocess* tests deliberately stop the installer
+ * early (via -Help / an unknown -Version) so nothing is downloaded, so they never reach the
+ * marker block — the AST-extracted tests are its only runtime coverage. That suite runs under
+ * pwsh, not powershell.exe, so Windows PowerShell 5.1 — the documented entrypoint and the
+ * reason for -Encoding ascii — is still not exercised anywhere.
  */
 import { describe, expect, test, afterEach, spyOn, mock } from "bun:test"
 import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -46,9 +51,11 @@ describe("install — post-install marker", () => {
     expect(INSTALL_SH).toMatch(/specific_version:-unknown/)
   })
 
-  test("attributes itself as curl", () => {
+  test("records the install method it was given", () => {
     expect(INSTALL_SH).toMatch(/\.install-source/)
-    expect(INSTALL_SH).toMatch(/printf '%s' "curl"/)
+    expect(INSTALL_SH).toMatch(/printf '%s' "\$marker_source"/)
+    // The parameter must actually be bound, or set -u aborts the install.
+    expect(INSTALL_SH).toMatch(/local marker_source="\$1"/)
   })
 
   test("marker is written after the install actually happened, not before", () => {
@@ -56,9 +63,34 @@ describe("install — post-install marker", () => {
     // already present (no install, so no event), and a marker written ahead of a failed
     // download would report an install that never landed.
     const dispatch = INSTALL_SH.indexOf("    download_and_install")
-    const markerCall = INSTALL_SH.lastIndexOf("\nwrite_install_marker")
+    // Both branches call it after their install step; neither before.
+    const curlCall = INSTALL_SH.indexOf('write_install_marker "curl"')
+    const localCall = INSTALL_SH.indexOf('write_install_marker "local"')
+    const binaryDispatch = INSTALL_SH.indexOf("    install_from_binary")
     expect(dispatch).toBeGreaterThan(0)
-    expect(markerCall).toBeGreaterThan(dispatch)
+    expect(curlCall).toBeGreaterThan(dispatch)
+    expect(localCall).toBeGreaterThan(binaryDispatch)
+  })
+
+  test("publishes the companion before the trigger", () => {
+    const start = INSTALL_SH.indexOf("write_install_marker() {")
+    // Code only — the comment above the writes names .installed-version first while
+    // explaining why it must be written last.
+    const fn = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start))
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n")
+    const source = fn.indexOf(".install-source")
+    const version = fn.indexOf(".installed-version")
+    expect(source).toBeGreaterThan(0)
+    expect(version).toBeGreaterThan(source)
+  })
+
+  test("attributes --binary installs as local, not curl", () => {
+    // That branch sets specific_version="local"; folding it into the curl metric would
+    // misreport both source and version.
+    expect(INSTALL_SH).toMatch(/write_install_marker "local"/)
+    expect(INSTALL_SH).toMatch(/write_install_marker "curl"/)
   })
 
   test("marker failures cannot abort the install", () => {
@@ -99,7 +131,9 @@ describe("install — marker writer, executed", () => {
     const dir = join(home, ".local", "share", "altimate-code")
     // A non-empty version is required — the CLI deletes an empty marker unread.
     expect(readFileSync(join(dir, ".installed-version"), "utf-8").trim().length).toBeGreaterThan(0)
-    expect(readFileSync(join(dir, ".install-source"), "utf-8").trim()).toBe("curl")
+    // "local", not "curl": runInstaller uses --binary, which is deliberately attributed
+    // separately so a dev/air-gapped install cannot inflate the curl metric.
+    expect(readFileSync(join(dir, ".install-source"), "utf-8").trim()).toBe("local")
     rmSync(home, { recursive: true, force: true })
     expect(stderr).not.toMatch(/syntax error|command not found/)
   })
@@ -148,13 +182,39 @@ describe("install.ps1 — post-install marker", () => {
     // The CLI reads the data dir through Node's os.homedir() and never consults
     // %LOCALAPPDATA%, so a marker written there would be silently ignored at read time.
     expect(markerCode).toMatch(/XDG_DATA_HOME/)
-    expect(markerCode).toMatch(/\.local\\share/)
+    // [IO.Path]::Combine(USERPROFILE, ".local", "share") — Combine rather than a literal
+    // path so PSDrive resolution cannot throw, matching welcome.ts's <home>/.local/share.
+    expect(markerCode).toMatch(/USERPROFILE/)
+    expect(markerCode).toMatch(/"\.local", ?"share"/)
     expect(markerCode).not.toMatch(/LOCALAPPDATA/)
   })
 
   test("falls back to a non-empty version and cannot abort the install", () => {
     expect(markerCode).toMatch(/"unknown"/)
     expect(markerCode).toMatch(/} catch \{/)
+  })
+
+  test("computes its paths INSIDE the try, not above it", () => {
+    // $ErrorActionPreference is "Stop", so a null $env:USERPROFILE or an XDG_DATA_HOME
+    // naming a bad PSDrive throws. Above the try that terminates the installer after the
+    // binary is placed but before the PATH write — installed, but not on PATH. The old
+    // "} catch {" assertion passed with the assignments outside, so pin the order.
+    const tryIdx = markerCode.indexOf("try {")
+    const rootIdx = markerCode.indexOf("$dataRoot =")
+    const dirIdx = markerCode.indexOf("$dataDir =")
+    expect(tryIdx).toBeGreaterThan(0)
+    expect(rootIdx).toBeGreaterThan(tryIdx)
+    expect(dirIdx).toBeGreaterThan(tryIdx)
+  })
+
+  test("publishes the companion before the trigger", () => {
+    // .installed-version is the reader's trigger; writing it first would let a CLI
+    // starting in between report "unknown", or observe a truncated (empty) file and
+    // drop the install entirely.
+    const source = markerCode.indexOf('".install-source"')
+    const version = markerCode.indexOf('".installed-version"')
+    expect(source).toBeGreaterThan(0)
+    expect(version).toBeGreaterThan(source)
   })
 
   test("writes without a BOM", () => {
@@ -195,6 +255,10 @@ describe("is_upgrade ordering", () => {
     // up as every install reporting is_upgrade: true.
     const origCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     const origDisabled = process.env.ALTIMATE_TELEMETRY_DISABLED
+    // Both gates, not just one: doInit() returns before minting if EITHER is set, which
+    // would make the "machine-id exists after await" assertion fail on a machine or CI
+    // runner that exports OPENCODE_DISABLE_TELEMETRY.
+    const origOpencodeDisabled = process.env.OPENCODE_DISABLE_TELEMETRY
     const tmpHome = mkdtempSync(join(os.tmpdir(), "install-telemetry-home-"))
     spyOn(os, "homedir").mockImplementation(() => tmpHome)
     spyOn(global, "fetch").mockImplementation((async () => new Response("", { status: 200 })) as any)
@@ -203,6 +267,7 @@ describe("is_upgrade ordering", () => {
       // The baked-in sink is refused under a test runner, and doInit returns before minting
       // when it has no connection string — which would make this test vacuously pass.
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      delete process.env.OPENCODE_DISABLE_TELEMETRY
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
         "InstrumentationKey=k;IngestionEndpoint=https://example.invalid"
       // init() is `initPromise ??= doInit()`; shutdown() is the only seam that clears it, so
@@ -225,6 +290,8 @@ describe("is_upgrade ordering", () => {
       else delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       if (origDisabled !== undefined) process.env.ALTIMATE_TELEMETRY_DISABLED = origDisabled
       else delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      if (origOpencodeDisabled !== undefined) process.env.OPENCODE_DISABLE_TELEMETRY = origOpencodeDisabled
+      else delete process.env.OPENCODE_DISABLE_TELEMETRY
       rmSync(tmpHome, { recursive: true, force: true })
     }
   })

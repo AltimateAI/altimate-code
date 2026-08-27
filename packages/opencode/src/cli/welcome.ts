@@ -17,7 +17,10 @@ const SOURCE_FILE = ".install-source"
 // both shell scripts (it stopped spawning `curl | bash` because EDR tooling flagged
 // it — vscode-dbt-power-user#2049). It writes the marker so those installs land here
 // rather than going uncounted.
-const INSTALL_METHODS = ["curl", "powershell", "npm", "vscode-extension"] as const
+// "local" is `install --binary <path>` — a dev build or air-gapped artifact the caller
+// already had. Recorded separately so it cannot inflate the curl metric (that path also
+// reports version "local").
+const INSTALL_METHODS = ["curl", "powershell", "npm", "vscode-extension", "local"] as const
 type InstallMethod = (typeof INSTALL_METHODS)[number] | "unknown"
 
 /** Remove SOURCE_FILE, tolerating absence. Kept separate so the empty-marker path can

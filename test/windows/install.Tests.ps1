@@ -184,3 +184,94 @@ Describe "install.ps1 Test-Checksum" {
     Remove-Item $tmp -Force
   }
 }
+
+# ---------------------------------------------------------------------------
+# Write-InstallMarker (install telemetry — AI-8448)
+# ---------------------------------------------------------------------------
+# The subprocess tests above stop the installer via -Help / unknown -Version, so
+# they never reach the marker block. It is AST-extracted and executed here instead,
+# the same way Test-Checksum is, against a temp profile. This is the only runtime
+# coverage the PowerShell writer has.
+Describe "install.ps1 Write-InstallMarker" {
+  BeforeAll {
+    $src = Get-Content -Raw $script:InstallScript
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tokens, [ref]$errors)
+    $def = $ast.Find({
+      param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Write-InstallMarker"
+    }, $true)
+    if (-not $def) { throw "Write-InstallMarker not found in install.ps1" }
+    . ([ScriptBlock]::Create($def.Extent.Text))
+
+    # Mirrors welcome.ts::getDataDir(): $XDG_DATA_HOME, else <home>/.local/share.
+    function Get-MarkerDir {
+      param([string]$Root)
+      [IO.Path]::Combine($Root, "altimate-code")
+    }
+  }
+
+  BeforeEach {
+    $script:Sandbox = Join-Path ([IO.Path]::GetTempPath()) ("marker-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $script:Sandbox | Out-Null
+    $script:OldXdg = $env:XDG_DATA_HOME
+    $script:OldProfile = $env:USERPROFILE
+  }
+
+  AfterEach {
+    $env:XDG_DATA_HOME = $script:OldXdg
+    $env:USERPROFILE = $script:OldProfile
+    Remove-Item -Recurse -Force $script:Sandbox -ErrorAction SilentlyContinue
+  }
+
+  It "writes both marker files with byte-exact content and no BOM" {
+    $env:XDG_DATA_HOME = $script:Sandbox
+    Write-InstallMarker -Version "1.2.3"
+
+    $dir = Get-MarkerDir $script:Sandbox
+    # Byte-level: a BOM would make install_method fail the CLI's allowlist match.
+    $verBytes = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, ".installed-version"))
+    $srcBytes = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, ".install-source"))
+    [System.Text.Encoding]::ASCII.GetString($verBytes) | Should -BeExactly "1.2.3"
+    [System.Text.Encoding]::ASCII.GetString($srcBytes) | Should -BeExactly "powershell"
+    $verBytes[0] | Should -Not -Be 0xEF
+    $srcBytes[0] | Should -Not -Be 0xEF
+  }
+
+  It "strips a leading v and falls back to 'unknown' for an unresolved version" {
+    $env:XDG_DATA_HOME = $script:Sandbox
+    Write-InstallMarker -Version "v9.9.9"
+    $dir = Get-MarkerDir $script:Sandbox
+    Get-Content -Raw ([IO.Path]::Combine($dir, ".installed-version")) | Should -BeExactly "9.9.9"
+
+    # Empty version must NOT produce an empty marker — the CLI deletes those unread.
+    Write-InstallMarker -Version ""
+    Get-Content -Raw ([IO.Path]::Combine($dir, ".installed-version")) | Should -BeExactly "unknown"
+  }
+
+  It "falls back to <USERPROFILE>/.local/share when XDG_DATA_HOME is unset" {
+    $env:XDG_DATA_HOME = ""
+    $env:USERPROFILE = $script:Sandbox
+    Write-InstallMarker -Version "1.0.0"
+    $dir = [IO.Path]::Combine($script:Sandbox, ".local", "share", "altimate-code")
+    Test-Path ([IO.Path]::Combine($dir, ".installed-version")) | Should -BeTrue
+  }
+
+  It "does not throw when USERPROFILE is empty and XDG_DATA_HOME is unset" {
+    # The regression guard for path computation inside the try. With
+    # $ErrorActionPreference = "Stop", computing this outside the try raised a
+    # terminating error that aborted the installer AFTER the binary was placed but
+    # BEFORE the PATH write — leaving an installed binary that is not on PATH.
+    $env:XDG_DATA_HOME = ""
+    $env:USERPROFILE = ""
+    { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+  }
+
+  It "does not throw when the data dir cannot be created" {
+    # A regular file where a directory must go.
+    $blocker = Join-Path $script:Sandbox "blocker"
+    Set-Content -Path $blocker -Value "x" -NoNewline
+    $env:XDG_DATA_HOME = [IO.Path]::Combine($blocker, "nested")
+    { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+  }
+}
