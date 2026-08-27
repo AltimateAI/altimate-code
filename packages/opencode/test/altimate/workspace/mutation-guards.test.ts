@@ -524,7 +524,10 @@ describe("a mutation is never made on a world that has moved", () => {
   })
 
   describe("edits landing between the two reads of one inspection, with no revive", () => {
-    test("(a) disable after the config read, client live → reused one turn, repaired next turn, no persist", async () => {
+    test("(a) disable after the config read, client live → honoured in the same turn, no persist", async () => {
+      // The reuse answer re-asks intent before naming the engine, so a disable
+      // that lands between the inspection's two reads is refused now, with the
+      // engine detached, rather than served for a turn and repaired on the next.
       let enabled = true
       const h = install([{ datamate: { status: "connected" } }], () => ({
         type: "local",
@@ -536,9 +539,8 @@ describe("a mutation is never made on a world that has moved", () => {
         enabled = false
         return realStatus()
       }
-      expect((await ensure("s1")).kind).toBe("reused")
-      expect(h.persisted).toEqual([])
       expect((await ensure("s1")).kind).toBe("entry-disabled")
+      expect(h.persisted).toEqual([])
       expect(h.removes).toEqual(["datamate"])
     })
 

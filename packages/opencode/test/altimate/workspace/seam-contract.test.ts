@@ -538,10 +538,12 @@ describe("the retry re-inspects, and never writes the memo early or twice", () =
     expect(outcome).toMatchObject({ kind: "reused" })
     expect(h.connects, "repaired with the config-writing primitive").toHaveLength(0)
     expect(h.added, "the retry restarts the entry exactly once").toHaveLength(1)
-    // Three: the inspection, the pre-revive world check's intent read, and the
-    // re-inspection. The middle one is the guard confirming intent immediately
-    // before starting a process — a mutation, and mutations re-read.
-    expect(entryReads).toBe(3)
+    // Four: the inspection, the pre-revive world check's intent read, the
+    // re-inspection, and the reuse answer's own world check. The second is the
+    // guard confirming intent immediately before starting a process; the
+    // fourth confirms it again before the answer names the engine — mutations
+    // and named answers both re-read.
+    expect(entryReads).toBe(4)
     expect(statusReads).toBe(2)
     expect(reads.every((r) => r === undefined)).toBe(true) // nothing observable mid-run
     expect(settledOutcome("s1")).toBe(outcome)

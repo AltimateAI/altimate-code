@@ -1268,6 +1268,52 @@ describe("an answer is revalidated before it is given", () => {
     expect(await ensure("s1")).toEqual({ kind: "superseded" })
     expect(h.added).toHaveLength(0)
   })
+
+  test("a client replaced during the reuse lookup is not answered as ours", async () => {
+    // Same writers as the install region — the MCP route and the IDE's reload
+    // call `MCP.add` outside this flow's serialization — and the same two
+    // awaits (tools, allowlist) sit between judging the engine and answering
+    // for it. Answering `reused` for the replacement names the bound workspace
+    // over a client that may be pinned elsewhere; the replacement is also not
+    // ours to detach.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const prevTools = syncInternals.mcp!.tools!
+    syncInternals.mcp!.tools = async () => {
+      h.spawnedNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] } as never
+      return prevTools()
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.added, "spawned over a replacement it did not judge").toHaveLength(0)
+    expect(h.removes, "detached a client that was not the one it judged").toHaveLength(0)
+  })
+
+  test("a disable during the reuse lookup is honoured, not answered with reused", async () => {
+    // Intent outranks everything, including a reuse already decided. The tool
+    // and allowlist reads are awaits a disable can land inside; answering
+    // `reused` afterwards serves the turn from an engine the user has just
+    // switched off, and the memo would only notice on the following turn.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    let reads = 0
+    syncInternals.existingEntry = async () => {
+      reads += 1
+      // The inspection sees the entry enabled; every read after it sees the
+      // disable the user wrote while the lookup was in flight.
+      return { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"], enabled: reads === 1 }
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind, "served a turn from an engine the user disabled").toBe("entry-disabled")
+    expect(h.removes, "left the disabled engine serving").toEqual(["datamate"])
+    expect(h.persisted, "wrote config while honouring a disable").toHaveLength(0)
+    expect(h.toasts.map((t) => t.title)).toEqual(["Workspace engine is disabled"])
+  })
 })
 
 describe("a cached success is re-probed against the floor", () => {

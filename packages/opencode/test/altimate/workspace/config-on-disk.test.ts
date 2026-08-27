@@ -306,7 +306,10 @@ describe("the write checks the text it is about to modify", () => {
   })
 
   describe("edits landing between the two reads of one inspection", () => {
-    test("(a) disable after the config read, client live → reused one turn, repaired next turn, no persist", async () => {
+    test("(a) disable after the config read, client live → honoured in the same turn, no persist", async () => {
+      // The inspection read the entry enabled; the disable lands before the
+      // status read. The reuse answer re-asks intent before naming the engine,
+      // so the turn is refused and the engine detached now, not a turn later.
       let enabled = true
       const h = install([{ datamate: { status: "connected" } }], () => ({
         type: "local",
@@ -318,9 +321,8 @@ describe("the write checks the text it is about to modify", () => {
         enabled = false
         return realStatus()
       }
-      expect((await ensure("s1")).kind).toBe("reused")
-      expect(h.persisted).toEqual([])
       expect((await ensure("s1")).kind).toBe("entry-disabled")
+      expect(h.persisted).toEqual([])
       expect(h.removes).toEqual(["datamate"])
     })
   })

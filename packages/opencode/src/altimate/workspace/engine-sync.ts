@@ -665,6 +665,29 @@ async function run(sessionID: string): Promise<Outcome> {
       false,
     )
 
+  /** The two questions every answer that NAMES an engine asks before it is
+   * given — `attached` after an install, `reused` after a lookup.
+   *
+   * Is the world unchanged (binding AND intent), and is what is serving still
+   * the engine that was judged? Both answers follow awaits (the handshake, the
+   * tool listing, the allowlist lookup) that a re-link, a disable, or a
+   * replacement via `MCP.add` from the route or the IDE's reload can land
+   * inside; an answer given without asking names the bound workspace over
+   * whatever is serving now. One definition, so the two callers cannot drift.
+   *
+   * Returns a verdict rather than an outcome: teardown belongs to the caller
+   * (the install region undoes what it installed, the reuse answer detaches
+   * what it judged), and it must run BEFORE the refusal is announced. */
+  const confirmServing = async (
+    judged: ExistingEntry | null,
+  ): Promise<"ok" | "disabled" | "unreadable" | "moved" | "replaced"> => {
+    const world = await worldUnchanged()
+    if (world !== "ok") return world === "replaced" ? "moved" : world
+    const servingNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
+    if (servingNow && judged && !sameEntry(servingNow, judged)) return "replaced"
+    return "ok"
+  }
+
   /** Stop serving an entry we have judged untrustworthy for this workspace.
    *
    * Runtime-only (`MCP.remove`): closes the client and drops it from the tool
@@ -1063,21 +1086,26 @@ async function run(sessionID: string): Promise<Outcome> {
       const declaredKeys = await declaredBounded(workspaceId)
       const missing = declaredKeys ? declaredKeys.keys.filter((k) => !present.has(k)) : []
       const available = present.size
-      if (declaredKeys && missing.length > 0) {
-        await notify({
-          title: `Workspace "${binding.datamateName}" is missing declared tools`,
-          message:
-            `The running engine serves ${available} of ${declaredKeys.keys.length} declared integration tools.` +
-            describeMissing(missing),
-          variant: "warning",
-        })
-      }
       // Returning `reused` ASSERTS that the connected engine serves the current
       // binding — and the lookup above can have waited. Every mutation already
       // revalidates; so must this, because the caller acts on the answer just as
       // surely. A re-link inside that await would otherwise hand this turn the
       // previous workspace's tools, and its credentials, under the new binding.
-      if (!(await stillCurrent())) {
+      //
+      // The tool and allowlist reads above are two awaits; `confirmServing`
+      // asks the two questions every named answer asks after them.
+      const verdict = await confirmServing(runningEngine(inspection))
+      if (verdict === "replaced") {
+        // The replacement is someone else's; it is not ours to detach, and the
+        // next decision judges it on its own merits.
+        log.info("the engine we judged was replaced during the reuse lookup; not answering for it", {
+          workspaceId,
+        })
+        return { kind: "superseded" }
+      }
+      if (verdict === "disabled") return await refuseDisabled()
+      if (verdict === "unreadable") return await refuseUnreadable("intent could not be confirmed")
+      if (verdict === "moved") {
         // Detach, do not merely decline. The caller runs `resolveTools` whatever
         // this returns, so leaving the old client registered hands that turn the
         // previous workspace's tools and credentials anyway — the outcome is
@@ -1087,6 +1115,19 @@ async function run(sessionID: string): Promise<Outcome> {
         })
         await removeIfOurs(runningEngine(inspection), { reason: "superseded while reusing" })
         return { kind: "superseded" }
+      }
+      // The gap is reported only for the engine this turn is actually answered
+      // with. Announcing it before the questions above would warn about an
+      // engine that is then refused or found replaced — a second signal for a
+      // refusal, and a warning about a client that is not the one serving.
+      if (declaredKeys && missing.length > 0) {
+        await notify({
+          title: `Workspace "${binding.datamateName}" is missing declared tools`,
+          message:
+            `The running engine serves ${available} of ${declaredKeys.keys.length} declared integration tools.` +
+            describeMissing(missing),
+          variant: "warning",
+        })
       }
       clearAnnouncement(sessionID)
       log.info("reusing existing engine entry", {
@@ -1350,32 +1391,23 @@ async function run(sessionID: string): Promise<Outcome> {
     // last moment before we announce and answer, because everything before that
     // is still revocable. The undo itself now belongs to the region.
     // After the write, "has the world moved" becomes "is what is SERVING still
-    // mine". The runtime is the half that matters here: an IDE reload or the MCP
-    // route can replace the client during the status and tool awaits, and
-    // committing without asking would report the bound workspace as served by a
-    // client that is unpinned or pinned elsewhere — whose tools and credentials
-    // then reach the model.
-    //
-    // The config half is deliberately not compared here. What is on disk after
-    // our write is our own, and an edit landing on it afterwards belongs to the
-    // undo, which already refuses to roll back an entry that is no longer ours.
-    const afterInstall = await worldUnchanged()
-    const runningNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
-    if (afterInstall === "ok" && runningNow && !sameEntry(runningNow, cfg)) {
-      log.info("the client we installed was replaced before we could report it; undoing", { workspaceId })
-      await undoNow()
-      return { kind: "superseded" }
-    }
-    if (afterInstall !== "ok") {
+    // mine" — `confirmServing` asks both, the same two questions the reuse
+    // answer asks. The config half is deliberately not compared against the
+    // plan here: what is on disk after our write is our own, and an edit
+    // landing on it afterwards belongs to the undo, which already refuses to
+    // roll back an entry that is no longer ours.
+    const verdict = await confirmServing(cfg)
+    if (verdict !== "ok") {
       log.info("the world changed before the attach could be reported; undoing what we installed", {
         workspaceId,
-        why: afterInstall,
+        why: verdict,
       })
-      // Either way the install is undone by the region. A disable reports itself
-      // so the user learns their edit took effect, rather than a generic race.
+      // Either way the install is undone by the region, BEFORE anything is
+      // announced. A disable reports itself so the user learns their edit took
+      // effect, rather than a generic race.
       await undoNow()
-      if (afterInstall === "disabled") return await refuseDisabled()
-      if (afterInstall === "unreadable") return await refuseUnreadable("intent could not be confirmed")
+      if (verdict === "disabled") return await refuseDisabled()
+      if (verdict === "unreadable") return await refuseUnreadable("intent could not be confirmed")
       return { kind: "superseded" }
     }
 
