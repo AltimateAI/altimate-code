@@ -98,14 +98,31 @@ type Overlay = {
   refusal: Extract<Outcome, { kind: "engine-missing" | "engine-too-old" }> | null
 }
 
-let current: Overlay | null = null
-/** What MCP is believed to be running under the key: the overlay as it stood
- * when MCP bootstrapped (config load precedes MCP init, which reads the cached
- * config), then whatever the turn hook last applied. `undefined` until the
- * first turn boundary. Kept apart from `current` because any consumer can
- * invalidate and reload config between turns, re-running the overlay without
- * touching MCP. */
-let applied: Overlay | null | undefined = undefined
+/** Per-directory state. Config and MCP state are per project instance, and one
+ * server process can host several directories, so the overlay is keyed the same
+ * way — a module-wide value would let project B's overlay start B's engine
+ * inside A's MCP state. */
+type DirectoryState = {
+  /** The overlay as of the last config load for this directory. */
+  current: Overlay | null
+  /** What MCP is believed to be running under the key: the overlay as it stood
+   * when MCP bootstrapped (config load precedes MCP init, which reads the cached
+   * config), then whatever the turn hook last applied. `undefined` until the
+   * first turn boundary. Kept apart from `current` because any consumer can
+   * invalidate and reload config between turns, re-running the overlay without
+   * touching MCP. */
+  applied: Overlay | null | undefined
+}
+const directories = new Map<string, DirectoryState>()
+
+function stateFor(directory: string): DirectoryState {
+  let state = directories.get(directory)
+  if (!state) {
+    state = { current: null, applied: undefined }
+    directories.set(directory, state)
+  }
+  return state
+}
 
 function sameEntry(a: LocalMcpConfig | null, b: LocalMcpConfig | null): boolean {
   return !!a && !!b && a.command.join("\0") === b.command.join("\0")
@@ -117,9 +134,10 @@ function sameEntry(a: LocalMcpConfig | null, b: LocalMcpConfig | null): boolean 
  * last word over every other source of the key. Mutates `config.mcp` only when
  * the directory is bound with the pilot on. Never throws. */
 export async function overlay(directory: string, config: { mcp?: Record<string, unknown> }): Promise<void> {
+  const state = stateFor(directory)
   try {
     if (!isEnabled() || isServe()) {
-      current = null
+      state.current = null
       return
     }
     const binding = await resolveBinding(directory)
@@ -127,7 +145,7 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
       // Logged because "flag on, nothing happened" is the question every
       // first-run report asks; the directory is the usual answer.
       log.info("workspace engine overlay skipped: directory is not bound", { directory })
-      current = null
+      state.current = null
       return
     }
     const workspace = { id: String(binding.datamateId), name: binding.datamateName }
@@ -136,7 +154,7 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
       const entry = engineEntry(workspace.id)
       config.mcp ??= {}
       config.mcp[DATAMATE_KEY] = entry
-      current = { directory, workspace, entry, refusal: null }
+      state.current = { directory, workspace, entry, refusal: null }
       log.info("workspace engine overlay applied", { workspaceId: workspace.id, version: probe.version })
       return
     }
@@ -145,7 +163,7 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
     // teammate is active there. Either would answer for the workspace with
     // tools it did not declare.
     if (config.mcp && DATAMATE_KEY in config.mcp) delete config.mcp[DATAMATE_KEY]
-    current = {
+    state.current = {
       directory,
       workspace,
       entry: null,
@@ -154,31 +172,34 @@ export async function overlay(directory: string, config: { mcp?: Record<string, 
     log.info("workspace engine overlay refused", { workspaceId: workspace.id, reason: probe.kind })
   } catch (err) {
     log.warn("workspace engine overlay failed; leaving the MCP config as loaded", { err: String(err) })
-    current = null
+    state.current = null
   }
 }
 
-/** The workspace that owns the `datamate` key in this process, or null.
+/** The workspace that owns the `datamate` key for the current instance's
+ * directory, or null.
  *
  * Synchronous, for the in-process writers of that key (the reload endpoint,
  * the HTTP add route, `datamate_manager add`): in workspace mode they refuse
  * the key and say why, instead of replacing the engine underneath a turn. */
 export function managedWorkspace(): { id: string; name: string } | null {
-  return current?.workspace ?? null
+  const directory = currentDirectory()
+  if (!directory) return null
+  return directories.get(directory)?.current?.workspace ?? null
 }
 
 // ── per-session outcome ─────────────────────────────────────────────────────
 
-type SessionRecord = { outcome: Outcome; announced?: string }
+/** `retried`: this session already spent its one re-add on a failed handshake.
+ * Per session, so "start a new session to try again" is true. */
+type SessionRecord = { outcome: Outcome; announced?: string; retried?: boolean }
 const sessions = new Map<string, SessionRecord>()
-/** Workspaces whose failed handshake was already retried in this process. */
-const retried = new Set<string>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 
 function record(sessionID: string, outcome: Outcome): SessionRecord {
   const previous = sessions.get(sessionID)
   sessions.delete(sessionID)
-  const next: SessionRecord = { outcome, announced: previous?.announced }
+  const next: SessionRecord = { outcome, announced: previous?.announced, retried: previous?.retried }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
     const oldest = sessions.keys().next().value
@@ -244,21 +265,22 @@ async function reconcile(sessionID: string): Promise<void> {
     record(sessionID, { kind: "unbound" })
     return
   }
+  const state = stateFor(directory)
   // The overlay runs inside config load; make sure it has run at least once.
   await config().get()
   // First turn boundary: MCP bootstrapped from the config as loaded, i.e. from
   // the overlay as it stands now.
-  if (applied === undefined) applied = current
+  if (state.applied === undefined) state.applied = state.current
 
   const binding = await resolveBinding(directory)
   if (!binding) {
     // Unlinked (or never linked): the key is not ours to fill.
-    if (current || applied) {
+    if (state.current || state.applied) {
       await config().invalidate()
       await config().get()
     }
-    if (applied?.entry) await mcp().remove(DATAMATE_KEY)
-    applied = null
+    if (state.applied?.entry) await mcp().remove(DATAMATE_KEY)
+    state.applied = null
     record(sessionID, { kind: "unbound" })
     return
   }
@@ -266,8 +288,8 @@ async function reconcile(sessionID: string): Promise<void> {
 
   // Reload the overlay when the binding moved, or when a refused engine may
   // have appeared since (the probe memo bounds how often that is asked).
-  let reload = !current || current.workspace.id !== workspaceId
-  if (!reload && current && !current.entry) {
+  let reload = !state.current || state.current.workspace.id !== workspaceId
+  if (!reload && state.current && !state.current.entry) {
     const probe = await probeEngine()
     reload = probe.kind === "ok"
   }
@@ -276,10 +298,10 @@ async function reconcile(sessionID: string): Promise<void> {
     await config().get()
   }
 
-  const overlayNow = current
+  const overlayNow = state.current
   if (!overlayNow) {
-    if (applied?.entry) await mcp().remove(DATAMATE_KEY)
-    applied = null
+    if (state.applied?.entry) await mcp().remove(DATAMATE_KEY)
+    state.applied = null
     record(sessionID, { kind: "unbound" })
     return
   }
@@ -288,11 +310,11 @@ async function reconcile(sessionID: string): Promise<void> {
   // Bring MCP in line with the overlay: start or replace the engine when the
   // derived entry changed, drop it when there is none any more.
   if (overlayNow.entry) {
-    if (!sameEntry(applied?.entry ?? null, overlayNow.entry)) await mcp().add(DATAMATE_KEY, overlayNow.entry)
-  } else if (applied?.entry) {
+    if (!sameEntry(state.applied?.entry ?? null, overlayNow.entry)) await mcp().add(DATAMATE_KEY, overlayNow.entry)
+  } else if (state.applied?.entry) {
     await mcp().remove(DATAMATE_KEY)
   }
-  applied = overlayNow
+  state.applied = overlayNow
 
   if (!overlayNow.entry) {
     const refusal = overlayNow.refusal ?? { kind: "engine-missing" as const }
@@ -326,9 +348,14 @@ async function reconcile(sessionID: string): Promise<void> {
   // the engine's handshake; the allowlist lookup overlaps with it.
   const [statusMap, declared] = await Promise.all([mcp().status(), declaredFor(workspace.id)])
   let status = statusMap[DATAMATE_KEY]
-  if (status?.status !== "connected" && !retried.has(workspace.id)) {
-    retried.add(workspace.id)
-    log.info("workspace engine not connected; retrying once", { workspaceId: workspace.id, status: status?.status })
+  const session = sessions.get(sessionID)
+  if (status?.status !== "connected" && !session?.retried) {
+    ;(session ?? record(sessionID, { kind: "connect-failed", error: "retrying" })).retried = true
+    log.info("workspace engine not connected; retrying once for this session", {
+      workspaceId: workspace.id,
+      sessionID,
+      status: status?.status,
+    })
     await mcp().add(DATAMATE_KEY, overlayNow.entry)
     status = (await mcp().status())[DATAMATE_KEY]
   }
@@ -406,17 +433,16 @@ export function isRepairable(outcome: Outcome | undefined): boolean {
 
 /** Test-only: forget everything this process learned. */
 export function resetForTests(): void {
-  current = null
-  applied = undefined
+  directories.clear()
   probeMemo = null
   sessions.clear()
-  retried.clear()
   declaredCache.clear()
 }
 
 /** Test-only views. */
-export function overlayForTests(): Overlay | null {
-  return current
+export function overlayForTests(directory?: string): Overlay | null {
+  const dir = directory ?? currentDirectory()
+  return dir ? (directories.get(dir)?.current ?? null) : null
 }
 export function trackedSessionsForTests(): number {
   return sessions.size

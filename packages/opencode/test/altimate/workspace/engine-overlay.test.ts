@@ -360,17 +360,46 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 
-  test("a failed handshake is retried once, then settles connect-failed and is announced once", async () => {
+  test("a failed handshake is retried once per session, then settles connect-failed and is announced once", async () => {
     const h = install({ status: "failed", statusError: "Connection closed" })
     await beforeTurn("s1")
     expect(h.added).toHaveLength(1)
     expect(settledOutcome("s1")).toEqual({ kind: "connect-failed", error: "Connection closed" })
     expect(h.toasts).toHaveLength(1)
     expect(h.toasts[0].message).toContain("Connection closed")
+    expect(h.toasts[0].message).toContain("Start a new session")
     await beforeTurn("s1")
-    await beforeTurn("s2")
     expect(h.added).toHaveLength(1)
+    // The toast says a new session will try again, so a new session does.
+    await beforeTurn("s2")
+    expect(h.added).toHaveLength(2)
     expect(h.toasts).toHaveLength(2)
+    await beforeTurn("s2")
+    expect(h.added).toHaveLength(2)
+  })
+
+  test("overlay state is kept per directory, so one process can host two bound projects", async () => {
+    const DIR_B = "/tmp/growth"
+    const h = install({})
+    const bindings: Record<string, CachedBinding> = { [DIR]: bound(42), [DIR_B]: bound(7, "growth") }
+    syncInternals.resolveBinding = async (directory) => bindings[directory] ?? null
+    const configA: { mcp?: Record<string, unknown> } = { mcp: {} }
+    const configB: { mcp?: Record<string, unknown> } = { mcp: {} }
+    await overlay(DIR, configA)
+    await overlay(DIR_B, configB)
+    expect(pinnedWorkspace(configA.mcp!.datamate as LocalMcpConfig)).toBe("42")
+    expect(pinnedWorkspace(configB.mcp!.datamate as LocalMcpConfig)).toBe("7")
+    expect(overlayForTests(DIR)?.workspace.id).toBe("42")
+    expect(overlayForTests(DIR_B)?.workspace.id).toBe("7")
+    // The writers ask for the current instance's directory.
+    syncInternals.instanceDirectory = () => DIR_B
+    expect(managedWorkspace()).toEqual({ id: "7", name: "growth" })
+    syncInternals.instanceDirectory = () => DIR
+    expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+    // A's turn boundary sees A's overlay: nothing to reapply, no engine started for B.
+    await beforeTurn("s1")
+    expect(h.added).toEqual([])
+    expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 
   test("a retry that succeeds settles attached", async () => {
