@@ -639,7 +639,10 @@ describe("the restore refuses on the text it edits", () => {
     })
 
     test("memo validation read throws (transient) → not served, re-decided → reused; no toast", async () => {
-      const { h } = realReader((n) => n === 4, () => (h.added.length ? PINNED42 : null))
+      // The first attach makes four intent reads (inspection, pre-install
+      // guard, post-install guard, post-announcement guard); the memo
+      // validation on the next turn is the fifth.
+      const { h } = realReader((n) => n === 5, () => (h.added.length ? PINNED42 : null))
       const first = await ensure("s1")
       expect(first.kind).toBe("attached")
       h.statusQueue = [{ datamate: { status: "connected" } }]

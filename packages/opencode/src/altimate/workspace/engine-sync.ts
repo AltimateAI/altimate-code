@@ -680,11 +680,19 @@ async function run(sessionID: string): Promise<Outcome> {
    * what it judged), and it must run BEFORE the refusal is announced. */
   const confirmServing = async (
     judged: ExistingEntry | null,
-  ): Promise<"ok" | "disabled" | "unreadable" | "moved" | "replaced"> => {
+  ): Promise<"ok" | "disabled" | "unreadable" | "moved" | "replaced" | "gone"> => {
     const world = await worldUnchanged()
     if (world !== "ok") return world === "replaced" ? "moved" : world
-    const servingNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
-    if (servingNow && judged && !sameEntry(servingNow, judged)) return "replaced"
+    // The runtime's own record of what it launched is the only witness to
+    // "still serving". A record that names a different launch is a replacement;
+    // NO record means the client was removed or disconnected while we waited,
+    // and an answer naming an engine that is not there is as wrong as one naming
+    // the wrong engine. A harness that does not model the record is not asked.
+    if (client.spawned) {
+      const servingNow = await client.spawned(DATAMATE_KEY).catch(() => undefined)
+      if (!servingNow) return "gone"
+      if (judged && !sameEntry(servingNow, judged)) return "replaced"
+    }
     return "ok"
   }
 
@@ -1095,11 +1103,13 @@ async function run(sessionID: string): Promise<Outcome> {
       // The tool and allowlist reads above are two awaits; `confirmServing`
       // asks the two questions every named answer asks after them.
       const verdict = await confirmServing(runningEngine(inspection))
-      if (verdict === "replaced") {
-        // The replacement is someone else's; it is not ours to detach, and the
-        // next decision judges it on its own merits.
-        log.info("the engine we judged was replaced during the reuse lookup; not answering for it", {
+      if (verdict === "replaced" || verdict === "gone") {
+        // A replacement is someone else's and not ours to detach; a client that
+        // is gone has nothing to detach. Either way the next decision judges
+        // what is there on its own merits.
+        log.info("the engine we judged is no longer the one serving; not answering for it", {
           workspaceId,
+          verdict,
         })
         return { kind: "superseded" }
       }
@@ -1457,6 +1467,22 @@ async function run(sessionID: string): Promise<Outcome> {
       })
     }
     await noteHostedNeighbours(outcome)
+    // Three more awaits sit between fixing the answer and giving it, and every
+    // await after a guard belongs to the guard's problem: a re-link, a disable
+    // or a replacement landing inside the announcements would otherwise leave
+    // this turn holding `attached` for an engine that no longer serves the
+    // bound workspace. The toast was true when it was shown; the answer must be
+    // true when it is given. Superseded is repairable, so the next turn
+    // re-decides for whatever is bound then.
+    const afterAnnouncing = await confirmServing(cfg)
+    if (afterAnnouncing !== "ok") {
+      log.info("the world changed while the attach was being announced; undoing rather than answering for it", {
+        workspaceId,
+        why: afterAnnouncing,
+      })
+      await undoNow()
+      return { kind: "superseded" }
+    }
     return outcome
   } catch (err) {
     // Undo first, then decide how to report. A throw that lands after a re-link

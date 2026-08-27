@@ -293,26 +293,25 @@ describe("the world check sits adjacent to every mutation", () => {
   // ---------------------------------------------------------------------------
   // T4 — answered after awaits that follow the final guard (announce, notify).
   // ---------------------------------------------------------------------------
-  describe("the attached answer is fixed before it is announced", () => {
-    test("a re-link during announceToolsChanged is answered `attached` for the old workspace", async () => {
+  describe("the attached answer is true when it is given, not only when it was fixed", () => {
+    test("a re-link during announceToolsChanged is not answered `attached` for the old workspace", async () => {
       const h = install({ statuses: [{}, { datamate: { status: "connected" } }], tools: { datamate_dbt_build_model: 1 } })
       syncInternals.toolsChanged = async () => {
         h.trace.push("toolsChanged")
         h.current = B
       }
       const outcome = await ensure("s1")
-            // The answer is now fixed BEFORE the announcements rather than after them,
-      // so the decision no longer straddles those awaits — but a re-link landing
-      // inside the toast still leaves this turn holding `attached` for 42. It
-      // cannot be guarded without either un-saying a toast already shown or
-      // announcing a success we then retract.
-      //
-      // What must hold is that it does not OUTLIVE the turn: the memo is keyed to
-      // the workspace it was taken for, so the next turn re-decides for 99 rather
-      // than riding it.
-      expect(outcome.kind).toBe("attached")
+      // The answer is fixed before the announcements and GIVEN after them, and
+      // the announcements are awaits. The world is asked once more after the
+      // last of them: a re-link landing inside is undone and answered
+      // `superseded`, so this turn never holds `attached` for a workspace the
+      // project has left. The toast was true when it was shown; no second one.
+      expect(outcome.kind).toBe("superseded")
+      expect(h.removes, "left the old workspace's engine serving under the new binding").toEqual(["datamate"])
+      expect(h.restores).toHaveLength(1)
+      // Superseded is repairable: the next turn attaches for the new binding.
       const second = await ensure("s1")
-      expect(second.kind, "rode a memo taken for the workspace the project had left").not.toBe("reused")
+      expect(second.kind).toBe("attached")
       expect(h.added.at(-1)?.cfg.command, "did not re-attach for the new binding").toEqual([
         "datamate",
         "start-stdio",

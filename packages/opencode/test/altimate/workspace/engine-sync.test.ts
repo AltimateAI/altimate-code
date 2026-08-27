@@ -1314,6 +1314,62 @@ describe("an answer is revalidated before it is given", () => {
     expect(h.persisted, "wrote config while honouring a disable").toHaveLength(0)
     expect(h.toasts.map((t) => t.title)).toEqual(["Workspace engine is disabled"])
   })
+
+  test("a client that vanished during the reuse lookup is not answered as serving", async () => {
+    // Someone disconnects or removes the entry while the tool listing is in
+    // flight. There is nothing to detach and nothing serving; answering
+    // `reused` would name an engine that is not there.
+    const h = install({
+      existing: { type: "local", command: ["datamate", "start-stdio", "--datamate", "42"] },
+      statuses: [{ datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const prevTools = syncInternals.mcp!.tools!
+    syncInternals.mcp!.tools = async () => {
+      h.spawnedNow = undefined
+      return prevTools()
+    }
+    expect(await ensure("s1")).toEqual({ kind: "superseded" })
+    expect(h.added).toHaveLength(0)
+    expect(h.removes).toHaveLength(0)
+  })
+
+  test("a client that vanished during the post-install awaits is not reported as attached", async () => {
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const prevTools = syncInternals.mcp!.tools!
+    syncInternals.mcp!.tools = async () => {
+      h.spawnedNow = undefined
+      return prevTools()
+    }
+    expect((await ensure("s1")).kind, "reported an engine that is no longer there").toBe("superseded")
+    expect(h.restores, "left our pin on disk for a client that is gone").toHaveLength(1)
+  })
+
+  test("a re-link during the success announcements is not answered with the old workspace", async () => {
+    // The answer was fixed before the announcements, but it is GIVEN after
+    // them, and they are awaits. The toast was true when shown; the answer must
+    // be true when returned — so the world is asked once more after the last
+    // announcement, and the install is undone if it moved. No second toast.
+    let current: CachedBinding | null = binding // 42
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    syncInternals.resolveBinding = async () => current
+    const prevNotify = syncInternals.notify!
+    syncInternals.notify = async (toast) => {
+      await prevNotify(toast)
+      if (toast.title.endsWith("connected")) current = { ...binding, datamateId: 99, datamateName: "other" } as CachedBinding
+    }
+    expect((await ensure("s1")).kind).toBe("superseded")
+    expect(h.removes, "left the old workspace's engine serving under the new binding").toEqual(["datamate"])
+    expect(h.restores).toHaveLength(1)
+    expect(h.toasts.filter((t) => t.title.endsWith("connected"))).toHaveLength(1)
+    expect(h.toasts.filter((t) => t.variant === "error")).toHaveLength(0)
+  })
 })
 
 describe("a cached success is re-probed against the floor", () => {
