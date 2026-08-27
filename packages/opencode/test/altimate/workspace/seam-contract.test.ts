@@ -70,9 +70,10 @@ function install(opts: {
     h.persisted.push({ name, cfg })
   }
   syncInternals.existingEntry = async () => {
-    if (opts.existing !== undefined) return opts.existing
-    const last = h.persisted[h.persisted.length - 1]
-    return last ? ({ type: "local", command: last.cfg.command, enabled: true } as ExistingEntry) : null
+    // Mirrors production: after this attach writes, the entry on disk is ours.
+    const written = h.persisted[h.persisted.length - 1]
+    if (written) return { ...(written.cfg as unknown as ExistingEntry) }
+    return opts.existing !== undefined ? opts.existing : null
   }
   syncInternals.notify = async (toast) => {
     h.toasts.push(toast)

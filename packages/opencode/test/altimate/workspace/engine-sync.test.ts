@@ -93,6 +93,13 @@ function install(opts: {
     h.persisted.push({ name, cfg })
   }
   syncInternals.existingEntry = async () => {
+    // Mirrors production: once this attach has written, the entry on disk is
+    // OURS, and later reads see that rather than the starting value. Preferring
+    // the starting entry forever models a file that never received the write,
+    // which is invisible until something asks whether what is installed is still
+    // its own — and then it answers "no" for every successful attach.
+    const written = h.persisted[h.persisted.length - 1]
+    if (written) return { ...(written.cfg as unknown as ExistingEntry) }
     if (opts.existing !== undefined) return opts.existing
     // Production persists the pinned entry before adding it, so a later read
     // sees it. Without this the harness under-reports and a legitimate memo
@@ -2937,5 +2944,52 @@ describe("INVARIANT — a hosted datamate serving alongside us is surfaced, once
     const titles = h.toasts.map((t) => t.title)
     expect(titles.some((t) => t.includes("Another datamate")), "the ambiguity went unmentioned").toBe(true)
     expect(titles.length, "the two events did not produce two signals").toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe("INVARIANT — what is committed is what we installed", () => {
+  test("a client replaced during the post-install awaits is not reported as ours", async () => {
+    // The status and tool reads are two awaits, and the MCP route and the IDE's
+    // reload both call `MCP.add` outside this flow's serialization. A
+    // replacement landing there is what serves the turn — so committing without
+    // asking reports the bound workspace as served by a client that may be
+    // unpinned or pinned elsewhere, whose tools and credentials then reach the
+    // model.
+    const h = install({
+      statuses: [{}, { datamate: { status: "connected" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    const prevTools = syncInternals.mcp!.tools!
+    syncInternals.mcp!.tools = async () => {
+      // Someone else replaces the client while we are listing tools.
+      h.spawnedNow = { type: "local", command: ["datamate", "start-stdio", "--datamate", "9"] } as never
+      return prevTools()
+    }
+    const outcome = await ensure("s1")
+    expect(outcome.kind, "reported a replacement as the bound workspace's engine").toBe("superseded")
+  })
+
+  test("a revive restarts the entry with its own environment and working directory", async () => {
+    // `environment`, `cwd` and `timeout` are what the configured engine was
+    // meant to run under — a custom PATH may be the only place its binary
+    // exists. Reviving with a flattened argv restarts a different process than
+    // the one that failed.
+    const h = install({
+      existing: {
+        type: "local",
+        command: ["datamate", "start-stdio", "--datamate", "42"],
+        environment: { PATH: "/opt/pinned/bin" },
+        cwd: "/work/project",
+        timeout: 12_000,
+        enabled: true,
+      } as never,
+      statuses: [{ datamate: { status: "failed", error: "exit 1" } }, { datamate: { status: "connected" } }],
+      tools: { datamate_dbt_build_model: 1 },
+    })
+    await ensure("s1")
+    const revived = h.added[0]?.cfg as unknown as Record<string, unknown>
+    expect(revived?.environment, "revived with this process's environment").toEqual({ PATH: "/opt/pinned/bin" })
+    expect(revived?.cwd, "revived from the wrong directory").toBe("/work/project")
+    expect(revived?.timeout, "revived with the default timeout").toBe(12_000)
   })
 })

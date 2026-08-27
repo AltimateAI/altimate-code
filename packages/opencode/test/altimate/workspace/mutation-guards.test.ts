@@ -64,9 +64,14 @@ describe("the world check sits adjacent to every mutation", () => {
     syncInternals.projectEntry = async () => (seam("projectEntry"), null)
     syncInternals.existingEntry = async () => {
       seam("existingEntry")
-      if (opts.existing !== undefined) return opts.existing
+      // Mirrors production: once this attach has written, the entry on disk is
+      // OURS, and later reads see that rather than the pre-install value. A stub
+      // that keeps returning the starting entry models a file that never
+      // received the write — which is invisible to a test until something starts
+      // asking whether what is installed is still its own.
       const last = h.persisted[h.persisted.length - 1]
-      return last ? ({ type: "local", command: last.cfg.command, enabled: true } as ExistingEntry) : null
+      if (last) return { ...(last.cfg as unknown as ExistingEntry) }
+      return opts.existing !== undefined ? opts.existing : null
     }
     syncInternals.notify = async (toast) => {
       seam("notify")

@@ -887,12 +887,29 @@ async function run(sessionID: string): Promise<Outcome> {
     // `add` is none of those: it writes no config and starts exactly what it is
     // handed. Reviving becomes the same operation as spawning, which is the
     // real win — the retry stops being a special path with special rules.
-    const revive: LocalMcpConfig = { type: "local", command: commandArgv(configuredEntry(inspection)), enabled: true }
+    // The whole transport, not just the argv. `environment`, `cwd` and
+    // `timeout` are what the configured engine was meant to run under — a
+    // custom PATH may be the only place its binary exists, and a relative
+    // command resolves from `cwd`. Reviving with a flattened shadow of the
+    // entry restarts a different process than the one that failed.
+    const configured = configuredEntry(inspection)
+    const revive: LocalMcpConfig = {
+      type: "local",
+      command: commandArgv(configured),
+      enabled: true,
+      ...(configured?.environment ? { environment: configured.environment } : {}),
+      ...(configured?.cwd ? { cwd: configured.cwd } : {}),
+      ...(configured?.timeout !== undefined ? { timeout: configured.timeout } : {}),
+    }
     // The whole world, not just the binding: this starts a process, and a
     // disable that landed since the inspection forbids starting it just as
     // surely as it forbids writing config. The plan was derived from a snapshot
     // taken before a status read; re-confirm both halves before acting on it.
-    const beforeRevive = await worldUnchanged(configuredEntry(inspection))
+    // No expected entry here. The revive re-inspects and re-plans immediately
+    // afterwards, so a change landing between the inspection and the restart is
+    // absorbed by that — this guard only has to answer intent and the binding.
+    // The spawn path is different: it acts on its plan with no further look.
+    const beforeRevive = await worldUnchanged()
     if (beforeRevive === "disabled") return await refuseDisabled()
     if (beforeRevive === "unreadable") return await refuseUnreadable("intent could not be confirmed")
     if (beforeRevive !== "ok") return { kind: "superseded" }
@@ -1332,7 +1349,23 @@ async function run(sessionID: string): Promise<Outcome> {
     // Late rather than early on purpose: the check is only meaningful at the
     // last moment before we announce and answer, because everything before that
     // is still revocable. The undo itself now belongs to the region.
+    // After the write, "has the world moved" becomes "is what is SERVING still
+    // mine". The runtime is the half that matters here: an IDE reload or the MCP
+    // route can replace the client during the status and tool awaits, and
+    // committing without asking would report the bound workspace as served by a
+    // client that is unpinned or pinned elsewhere — whose tools and credentials
+    // then reach the model.
+    //
+    // The config half is deliberately not compared here. What is on disk after
+    // our write is our own, and an edit landing on it afterwards belongs to the
+    // undo, which already refuses to roll back an entry that is no longer ours.
     const afterInstall = await worldUnchanged()
+    const runningNow = client.spawned ? await client.spawned(DATAMATE_KEY).catch(() => undefined) : undefined
+    if (afterInstall === "ok" && runningNow && !sameEntry(runningNow, cfg)) {
+      log.info("the client we installed was replaced before we could report it; undoing", { workspaceId })
+      await undoNow()
+      return { kind: "superseded" }
+    }
     if (afterInstall !== "ok") {
       log.info("the world changed before the attach could be reported; undoing what we installed", {
         workspaceId,

@@ -59,6 +59,10 @@ describe("the write checks the text it is about to modify", () => {
       }
     }
     syncInternals.existingEntry = async () => {
+      // `entry()` IS the file here — these tests model it live, updating it from
+      // their own `persist` override and from the edits they stage. Nothing is
+      // inferred from what was persisted, because inferring would shadow the
+      // very rewrites this file exists to exercise.
       const e = entry()
       h.reads.push(e?.enabled)
       return e

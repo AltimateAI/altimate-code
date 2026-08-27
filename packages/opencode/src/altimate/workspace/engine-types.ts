@@ -29,7 +29,14 @@ export type Outcome =
   | { kind: "entry-disabled" }
   | { kind: "superseded" }
 
-export type LocalMcpConfig = { type: "local"; command: string[]; enabled: boolean }
+export type LocalMcpConfig = {
+  type: "local"
+  command: string[]
+  enabled: boolean
+  environment?: Record<string, string>
+  cwd?: string
+  timeout?: number
+}
 
 /** A configured MCP entry, in either shape it can reach us: opencode's own
  * `command: string[]` argv, or the `{ command, args }` split an IDE writes and
