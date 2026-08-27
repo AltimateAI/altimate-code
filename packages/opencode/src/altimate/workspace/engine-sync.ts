@@ -319,16 +319,34 @@ async function run(): Promise<Outcome> {
     // not act on something you cannot attribute, so it applies to itself here:
     // report it and leave it alone. Attributing this properly needs an explicit
     // ownership marker written at persist time, which is a separate change.
-    const present = (await client.status())[DATAMATE_KEY]
-    if (present) {
-      const stale = await existingEntry(DATAMATE_KEY)
-      const pin = pinnedWorkspace(stale)
-      if (pin) {
-        log.info("unbound project has an engine entry pinned to a workspace; leaving it alone", {
-          pinnedTo: pin,
-          entry: describeEntry(stale),
-        })
+    // This read is DIAGNOSTIC — it produces a log line and nothing else — so a
+    // failure to perform it must not change the outcome. Making the reader
+    // propagate was right for the paths that DECIDE on it, and this caller
+    // silently inherited that: a failed read here escaped to the catch-all and
+    // announced "Workspace engine attach failed" in a project with no workspace
+    // linked, where this module is documented inert — and because that outcome
+    // is repairable, it re-announced on every turn for as long as the config
+    // stayed unreadable.
+    //
+    // Propagating a failure is the right default, but it turns every caller that
+    // relied on the swallow into a decision that now has to be made explicitly.
+    // Here the decision is easy, because nothing is riding on the answer.
+    try {
+      const present = (await client.status())[DATAMATE_KEY]
+      if (present) {
+        const stale = await existingEntry(DATAMATE_KEY)
+        const pin = pinnedWorkspace(stale)
+        if (pin) {
+          log.info("unbound project has an engine entry pinned to a workspace; leaving it alone", {
+            pinnedTo: pin,
+            entry: describeEntry(stale),
+          })
+        }
       }
+    } catch (err) {
+      log.warn("could not inspect the stale entry in an unbound project; nothing depends on it", {
+        err: String(err),
+      })
     }
     return { kind: "unbound" }
   }

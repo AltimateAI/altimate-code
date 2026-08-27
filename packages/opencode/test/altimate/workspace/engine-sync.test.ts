@@ -2316,3 +2316,26 @@ describe("INVARIANT #13 as a property — every seam, made to throw", () => {
     })
   }
 })
+
+describe("INVARIANT — an unbound project stays silent, whatever fails inside it", () => {
+  test("an unreadable config in a project with no binding does not announce, on any turn", async () => {
+    // The module is documented inert when nothing is linked, and most projects
+    // are not linked. Making the config reader propagate was right for the paths
+    // that DECIDE on it — and this diagnostic read, which produces a log line
+    // and nothing else, silently inherited it: the failure escaped to the
+    // catch-all and announced "attach failed" in a project that never wanted an
+    // attach. `connect-failed` is repairable, so it announced again every turn.
+    const h = install({
+      binding: null,
+      statuses: [{ datamate: { status: "connected" } }],
+    })
+    syncInternals.existingEntry = async () => {
+      throw new Error("EIO: config unreadable")
+    }
+    for (const turn of [1, 2, 3]) {
+      const outcome = await ensure(`s${turn}`)
+      expect(outcome.kind, `turn ${turn}: an unbound project reported an attach failure`).toBe("unbound")
+    }
+    expect(h.toasts, "an unbound project announced something").toHaveLength(0)
+  })
+})
