@@ -83,7 +83,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   // altimate_change start — workspace precedence, derived once per turn from the live map
   const mcpTools = yield* mcp.tools()
   const precedence = yield* Effect.promise(() =>
-    Precedence.refresh(input.session.id, mcpTools, Permission.merge(input.agent.permission, input.session.permission ?? [])),
+    Precedence.refresh(
+      input.session.id,
+      mcpTools,
+      Permission.merge(input.agent.permission, input.session.permission ?? []),
+    ),
   )
   // altimate_change end
 
@@ -96,8 +100,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({
-      // altimate_change — name the workspace on the native side too
+      // altimate_change start — name the workspace on the native side too
       description: Precedence.describeNativeTool(item.id, item.description, precedence),
+      // altimate_change end
       inputSchema: jsonSchema(schema),
       execute(args, options) {
         return run.promise(
@@ -145,8 +150,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   for (const [key, entry] of Object.entries(mcpTools)) {
     const { client: clientName, ...item } = entry
     // altimate_change end
-    // altimate_change — mark the engine tools that now serve a shadowed capability
+    // altimate_change start — mark the engine tools that now serve a shadowed capability
     item.description = Precedence.describeEngineTool(key, item.description ?? "", precedence)
+    // altimate_change end
     const execute = item.execute
     if (!execute) continue
 

@@ -1783,8 +1783,9 @@ export namespace SessionPrompt {
       // altimate_change end
       tools[item.id] = tool({
         id: item.id as any,
-        // altimate_change — name the workspace on the native side too
+        // altimate_change start — name the workspace on the native side too
         description: Precedence.describeNativeTool(item.id, item.description, precedence),
+        // altimate_change end
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           const ctx = context(args, options)
@@ -1838,8 +1839,9 @@ export namespace SessionPrompt {
     // it's used only for source classification and never leaks into the schema sent to the model.
     for (const [key, entry] of Object.entries(mcpTools)) {
       const { client: clientName, ...item } = entry
-      // altimate_change — mark the engine tools that now serve a shadowed capability
+      // altimate_change start — mark the engine tools that now serve a shadowed capability
       item.description = Precedence.describeEngineTool(key, item.description ?? "", precedence)
+      // altimate_change end
       // altimate_change end
       const execute = item.execute
       if (!execute) continue
