@@ -243,7 +243,8 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
   return { act: "check-version" }
 }
 
-/** The last verdict announced to each session.
+/** The last verdict announced to a session — stored ON the session record.
+ *
  *
  * Repairable refusals are re-decided every turn — deliberately, because that is
  * how a repair gets noticed — but re-DECIDING is not a reason to re-TELL. A
@@ -253,9 +254,14 @@ export function planForEntry(inspection: Inspection, workspaceId: string, retrie
  * dialog per turn would be unusable.
  *
  * Keyed by session and by the verdict itself, so a CHANGED verdict speaks, and a
- * successful attach clears the record so the next problem is heard. */
-const lastAnnounced = new Map<string, string>()
-
+ * successful attach clears it so the next problem is heard.
+ *
+ * NOT a module-level map of its own. A second map keyed by session id is a
+ * second thing to evict, and this one would only ever grow on the sessions that
+ * never succeed — a long-running server whose new sessions keep hitting
+ * `engine-missing` would retain every one of them. Hanging it on the session
+ * record means it is bounded by whatever bounds the sessions, which is already
+ * solved and already tested. */
 function verdictSignature(outcome: Outcome): string {
   const detail =
     "error" in outcome ? outcome.error : "found" in outcome ? outcome.found : "declared" in outcome ? "" : ""
@@ -266,7 +272,8 @@ function verdictSignature(outcome: Outcome): string {
  * it repeats an older one. Called when an attach succeeds: the problem the user
  * was told about is gone, and if it comes back they should hear about it. */
 function clearAnnouncement(sessionID: string): void {
-  lastAnnounced.delete(sessionID)
+  const record = sessions.get(sessionID)
+  if (record) record.announced = undefined
 }
 
 /** Tell the user about a refusal — exactly once, from one place.
@@ -316,14 +323,17 @@ type RefusalContext = {
 
 async function announceRefusal(outcome: Outcome, toast: Toast, context?: RefusalContext): Promise<void> {
   try {
-    const sessionID = context?.sessionID
-    if (sessionID) {
+    const record = context?.sessionID ? sessions.get(context.sessionID) : undefined
+    if (record) {
       const signature = verdictSignature(outcome)
-      if (lastAnnounced.get(sessionID) === signature) {
-        log.info("verdict unchanged since the last turn; not repeating it", { sessionID, kind: outcome.kind })
+      if (record.announced === signature) {
+        log.info("verdict unchanged since the last turn; not repeating it", {
+          sessionID: context?.sessionID,
+          kind: outcome.kind,
+        })
         return
       }
-      lastAnnounced.set(sessionID, signature)
+      record.announced = signature
     }
     if (installWouldHelp(outcome)) {
       log.info("refusal is remediable by installing the engine", { ...context, kind: outcome.kind })
@@ -1245,6 +1255,8 @@ export const ATTACH_WAIT_MS = 15_000
 
 type SessionAttach = {
   key?: string
+  /** The last verdict this session was told about — see `verdictSignature`. */
+  announced?: string
   task: Promise<Outcome>
   waitTimedOut?: boolean
   outcome?: Outcome
@@ -1417,6 +1429,10 @@ export function ensure(sessionID: string): Promise<Outcome> {
     // fresh entry is built per call, so state that is not copied is state that
     // is silently rebuilt.
     validated: previous?.validated,
+    // Carried forward for the same reason `validated` is: a fresh entry is built
+    // per call, so state that is not copied is state that is silently rebuilt —
+    // and rebuilding this one turns "say it once" back into "say it every turn".
+    announced: previous?.announced,
   } as SessionAttach
   // The whole task, not just the attach. `attachKey`, the memo re-validation and
   // the serialization chain all run BEFORE the attach's own catch, so a throw in
@@ -1596,5 +1612,4 @@ export async function whenAttached(sessionID: string, timeoutMs: number = ATTACH
 export function resetForTests(): void {
   sessions.clear()
   attachChains.clear()
-  lastAnnounced.clear()
 }

@@ -982,6 +982,20 @@ describe("ensure — round 5", () => {
     for (let i = 0; i < MAX_TRACKED_SESSIONS + 25; i++) await ensure(`s${i}`)
     expect(trackedSessionsForTests()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
   })
+
+  test("per-session announcement state is bounded by the same eviction", async () => {
+    // Every REFUSING session records what it was last told, so it can avoid
+    // repeating itself. A long-running server whose new sessions keep failing —
+    // `engine-missing` is the obvious case — would retain one record per session
+    // forever if that state lived in a map of its own. It lives on the session
+    // record instead, so it is bounded by whatever bounds the sessions, which is
+    // already solved and already tested above rather than solved twice.
+    install({ which: null })
+    for (let i = 0; i < MAX_TRACKED_SESSIONS + 25; i++) {
+      expect((await ensure(`r${i}`)).kind).toBe("engine-missing")
+    }
+    expect(trackedSessionsForTests()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
+  })
 })
 
 describe("ensure — round 6: a stale binding must not be installed", () => {
