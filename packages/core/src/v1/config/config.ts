@@ -169,6 +169,46 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      // altimate_change start — harness plan W2.3 / item 5: post-compaction state ledger + summary carry
+      state_ledger: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Append a harness-computed state ledger (files written with timestamps, recent tool calls with exit codes) to the post-compaction continue message (default: true)",
+      }),
+      ledger_max_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Token cap for the state ledger and carry anchors, tail-truncated (default: 500 — harness plan W2.3 cap: the ledger must cost less than the duplicate re-reads it prevents; one mid-size file re-read is ~1-3k tokens)",
+      }),
+      ledger_recent_calls: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "How many recent tool calls the state ledger lists, newest first (default: 10 — covers several median edit-verify cycles, ~1.8 calls/cycle corpus statistic, without dominating the ledger budget)",
+      }),
+      summary_carry: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Carry the previous summary's Accomplished items into the next summarization as anchors; items without a corroborating ledger event are tagged 'claimed, unverified' (default: true)",
+      }),
+      summary_first_person: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Ask the compaction summarizer to write in the first person, as the agent's own working memory (default: true)",
+      }),
+      // altimate_change end
+      // altimate_change start — harness plan W2.2 / item 2: pin the original task verbatim through compaction
+      pin_task: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Pin the original task instruction verbatim through compaction, hoisted as an authoritative reminder alongside the summary (default: true)",
+      }),
+      pin_max_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Hard token cap for the pinned original task (default: 4096 — harness plan W2.2 cap: min(4k, pin_window_fraction of the post-overhead usable window); larger tasks keep verbatim head+tail plus a contract card of extracted literals)",
+      }),
+      pin_window_fraction: Schema.optional(Schema.Number).annotate({
+        description:
+          "Fraction of the post-overhead usable context window the pinned task may occupy (default: 0.175 — midpoint of the harness plan W2.2 15-20% band; the pin must stay a small minority of the window so working context dominates)",
+      }),
+      pin_card_max_tokens: Schema.optional(NonNegativeInt).annotate({
+        description:
+          "Token cap for the contract card of regex-extracted task literals appended when the pinned task exceeds its cap (default: 500 — harness plan W2.2 contract-card budget)",
+      }),
+      // altimate_change end
     }),
   ),
   // altimate_change start - tracing config (re-applied from main during the v1.17.9 reconciliation)
@@ -232,6 +272,53 @@ export const Info = Schema.Struct({
       auto_mcp_discovery: Schema.optional(Schema.Boolean).annotate({
         description:
           "Auto-discover MCP servers from VS Code, Claude Code, Copilot, and Gemini configs at startup (default: true). Set to false to disable.",
+      }),
+      // altimate_change end
+      // altimate_change start — W2.4: write-starvation circuit breaker + loop detection.
+      // Ships ANNOTATE-ONLY by default: mode "annotate" logs breaker-would-fire events
+      // and appends informational annotations; "armed" additionally injects outcome-neutral
+      // directives (run mode only) and enables the doom-loop escalation ladder's hard stop.
+      // Threshold defaults carry corpus-or-first-principles provenance (see
+      // session/starvation.ts DEFAULTS) and are exposed here so they are never
+      // constants fitted to any one evaluation run.
+      starvation_breaker: Schema.optional(
+        Schema.Struct({
+          mode: Schema.optional(Schema.Literals(["off", "annotate", "armed"])).annotate({
+            description:
+              "off = disabled; annotate (default) = log would-fire events and append informational annotations only; armed = also inject directives in run mode and enable the doom-loop hard stop.",
+          }),
+          max_turns_without_mutation: Schema.optional(PositiveInt).annotate({
+            description:
+              "Consecutive assistant turns with zero corroborated file mutation before the write-starvation breaker fires (default: 12; first-principles, see session/starvation.ts).",
+          }),
+          repeat_signature_threshold: Schema.optional(PositiveInt).annotate({
+            description:
+              "Consecutive identical repeat signatures (tool + normalized args + touched files + failure message) before the loop detector fires (default: 3).",
+          }),
+          doom_loop_threshold: Schema.optional(PositiveInt).annotate({
+            description:
+              "Consecutive identical (tool + normalized args) calls before the escalation ladder's first rung (nudge). Rungs: threshold = nudge, 2x = forced status-check, 3x = stop (default: 3).",
+          }),
+          polling_threshold_multiplier: Schema.optional(PositiveInt).annotate({
+            description:
+              "Multiplier applied to doom_loop_threshold for recognizable polling commands (default: 5).",
+          }),
+          polling_pattern: Schema.optional(Schema.String).annotate({
+            description:
+              "Case-insensitive regex identifying polling-style bash commands whose repeat threshold is raised (default: \\b(sleep|watch|status)\\b).",
+          }),
+          exempt_agents: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+            description:
+              "Agent names for which the breaker is skipped entirely — read-only deliverables are their normal outcome (default: plan, review).",
+          }),
+          generated_path_patterns: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+            description:
+              "Path patterns exempt from unchanged-read annotation because they regenerate across builds (directory prefixes ending in '/', '*.ext' suffixes, or substrings).",
+          }),
+        }),
+      ).annotate({
+        description:
+          "Write-starvation circuit breaker + loop detection (annotate-only by default; directives are run-mode-only).",
       }),
       // altimate_change end
     }),
