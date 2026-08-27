@@ -709,6 +709,19 @@ async function run(sessionID: string): Promise<Outcome> {
   }
   let plan = planForEntry(inspection, workspaceId, false)
 
+  /** Did THIS attach start the client that is now registered?
+   *
+   * Scoped to the whole attach rather than to the revive block, because the
+   * teardown that matters happens later. By the teardown split's own definition
+   * — undoing what this attach created is right regardless of what is bound now
+   * — a client we revived is binding-INDEPENDENT, but it was exiting through the
+   * binding-dependent gate: revive, then a re-link plus an unpinning rewrite in
+   * the same window, and the teardown is correctly skipped as "might belong to
+   * the new binding" while being a process we started seconds earlier.
+   *
+   * The definition was right and the plumbing did not carry it this far. */
+  let revived = false
+
   if (plan.act === "retry-connect") {
     // Exactly one retry, then report — never a second spawn beside a failing
     // one. "Never twice" is the `retried` argument rather than a branch someone
@@ -735,7 +748,6 @@ async function run(sessionID: string): Promise<Outcome> {
     if (beforeRevive === "disabled") return await refuseDisabled()
     if (beforeRevive === "unreadable") return await refuseUnreadable("intent could not be confirmed")
     if (beforeRevive !== "ok") return { kind: "superseded" }
-    let revived = false
     await client
       .add(DATAMATE_KEY, revive)
       .then(() => {
@@ -847,7 +859,9 @@ async function run(sessionID: string): Promise<Outcome> {
       pinnedTo: plan.pinnedTo,
       entry: plan.entry,
     })
-    await detachRejected({ workspaceId, reason: "not-attributable", pinnedTo: plan.pinnedTo })
+    // `!revived` — if we started this client, tearing it down is undoing our own
+    // work and never depends on the binding.
+    await detachRejected({ workspaceId, reason: "not-attributable", pinnedTo: plan.pinnedTo }, !revived)
   }
 
   if (plan.act === "check-version") {
