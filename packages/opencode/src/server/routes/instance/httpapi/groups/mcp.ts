@@ -127,7 +127,9 @@ export const McpApi = HttpApi.make("mcp")
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "MCP server connected successfully"),
-          error: McpServerNotFoundError,
+          // altimate_change start — the workspace-managed key refuses connect/disconnect
+          error: [McpServerNotFoundError, McpServerManagedError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.connect",
@@ -138,7 +140,9 @@ export const McpApi = HttpApi.make("mcp")
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "MCP server disconnected successfully"),
-          error: McpServerNotFoundError,
+          // altimate_change start — the workspace-managed key refuses connect/disconnect
+          error: [McpServerNotFoundError, McpServerManagedError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.disconnect",

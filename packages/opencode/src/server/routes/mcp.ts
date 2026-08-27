@@ -215,6 +215,15 @@ export const McpRoutes = lazy(() =>
       validator("param", z.object({ name: z.string() })),
       async (c) => {
         const { name } = c.req.valid("param")
+        // altimate_change start — the workspace-managed key is not restarted or persisted from here
+        const managed = name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
+        if (managed) {
+          return c.json(
+            { error: `MCP server "${name}" is managed by workspace "${managed.name}" in this project` },
+            409,
+          )
+        }
+        // altimate_change end
         await MCP.connect(name)
         return c.json(true)
       },
@@ -238,6 +247,15 @@ export const McpRoutes = lazy(() =>
       validator("param", z.object({ name: z.string() })),
       async (c) => {
         const { name } = c.req.valid("param")
+        // altimate_change start — the workspace-managed key is not closed or persisted from here
+        const managed = name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
+        if (managed) {
+          return c.json(
+            { error: `MCP server "${name}" is managed by workspace "${managed.name}" in this project` },
+            409,
+          )
+        }
+        // altimate_change end
         await MCP.disconnect(name)
         return c.json(true)
       },

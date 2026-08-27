@@ -101,7 +101,28 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
       return { success: true as const }
     })
 
+    // altimate_change start — connect/disconnect persist `enabled` for the key and
+    // restart or close its client: neither may touch the workspace-managed
+    // `datamate`, which is derived per process and never written to a file.
+    const refuseManaged = Effect.fn("McpHttpApi.refuseManaged")(function* (name: string) {
+      if (name !== DATAMATE_KEY) return
+      yield* configSvc.get()
+      const managed = managedWorkspace(yield* InstanceState.directory)
+      if (!managed) return
+      yield* Effect.logWarning("mcp connect/disconnect refused: key is managed by a workspace", {
+        name: DATAMATE_KEY,
+        workspace: managed.id,
+      })
+      return yield* new McpServerManagedError({
+        error: `MCP server "${DATAMATE_KEY}" is managed by workspace "${managed.name}" in this project`,
+      })
+    })
+    // altimate_change end
+
     const connect = Effect.fn("McpHttpApi.connect")(function* (ctx: { params: { name: string } }) {
+      // altimate_change start
+      yield* refuseManaged(ctx.params.name)
+      // altimate_change end
       yield* mcp
         .connect(ctx.params.name)
         .pipe(
@@ -115,6 +136,9 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     })
 
     const disconnect = Effect.fn("McpHttpApi.disconnect")(function* (ctx: { params: { name: string } }) {
+      // altimate_change start
+      yield* refuseManaged(ctx.params.name)
+      // altimate_change end
       yield* mcp
         .disconnect(ctx.params.name)
         .pipe(

@@ -124,6 +124,8 @@ type DirectoryState = {
   /** When the last overlay attempt threw. A failed attempt is retried at the
    * probe TTL, not on every turn — each retry invalidates the whole config. */
   failedAt?: number
+  /** The key is set by organisation-managed config: nothing here claims it. */
+  managed?: boolean
 }
 const directories = new Map<string, DirectoryState>()
 
@@ -152,6 +154,7 @@ export async function overlay(
 ): Promise<void> {
   const state = stateFor(directory)
   state.failedAt = undefined
+  state.managed = opts.managed === true
   try {
     if (!isEnabled() || isServe()) {
       state.current = null
@@ -362,6 +365,15 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // the overlay as it stands now.
   if (state.applied === undefined) state.applied = state.current
 
+  // Organisation-managed config owns the key: the feature is off for this
+  // directory, whatever the binding says. Nothing to reload per turn.
+  if (state.managed) {
+    if (state.applied?.entry) await releaseKey(await config().get(), true)
+    state.applied = null
+    record(sessionID, { kind: "disabled" })
+    return
+  }
+
   const binding = await resolveBinding(directory)
   if (!binding) {
     // Unlinked (or never linked): the key is not ours to fill.
@@ -394,7 +406,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     loaded = await config().get()
   }
 
-  const overlayNow = state.current
+  // A transient overlay failure (its retry is throttled above) keeps what was
+  // last applied: a running engine is not released over a fault in the probe.
+  const overlayNow = state.current ?? (state.failedAt !== undefined ? (state.applied ?? null) : null)
   if (!overlayNow) {
     if (state.applied) await releaseKey(loaded, !!state.applied.entry)
     state.applied = null

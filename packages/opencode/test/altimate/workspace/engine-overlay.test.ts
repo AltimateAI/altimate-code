@@ -70,6 +70,7 @@ function install(opts: {
   tools?: Record<string, unknown>
   mcp?: Record<string, unknown>
   noMcpKey?: boolean
+  managed?: boolean
 }): Harness {
   const h: Harness = {
     config: opts.noMcpKey ? {} : { mcp: opts.mcp ?? {} },
@@ -138,7 +139,7 @@ function install(opts: {
       h.gets += 1
       if (loaded) return h.config
       h.config = opts.noMcpKey ? {} : { mcp: structuredClone(initialMcp ?? {}) }
-      await overlay(DIR, h.config)
+      await overlay(DIR, h.config, { managed: opts.managed === true })
       // MCP bootstraps from the config as first loaded — after the overlay had
       // its say — and keeps whatever client that started until told otherwise.
       if (h.live === undefined) h.live = DATAMATE_KEY in (h.config.mcp ?? {})
@@ -492,11 +493,42 @@ describe("beforeTurn — what a turn boundary does", () => {
   })
 
   test("a datamate key set by managed preferences is left alone and is not managed here", async () => {
-    const h = install({ mcp: { datamate: IDE_ENTRY } })
-    await overlay(DIR, h.config, { managed: true })
+    const h = install({ mcp: { datamate: IDE_ENTRY }, managed: true })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
     expect(h.config.mcp).toEqual({ datamate: IDE_ENTRY })
     expect(managedWorkspace()).toBeNull()
     expect(h.probes).toBe(0)
+    // The feature is off here: no per-turn reload, no toast, nothing removed.
+    expect(h.invalidates).toBe(0)
+    expect(h.removes).toBe(0)
+    expect(h.toasts).toEqual([])
+    expect(settledOutcome("s1")).toEqual({ kind: "disabled" })
+  })
+
+  test("a transient overlay failure after attach keeps the running engine", async () => {
+    const h = install({})
+    // MCP bootstrapped the engine from the config as loaded; the hook adds nothing.
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(0)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    // Something else invalidates config, and the overlay's probe now throws.
+    syncInternals.which = () => {
+      throw new Error("PATH unreadable")
+    }
+    await syncInternals.config!.invalidate()
+    await beforeTurn("s1")
+    expect(h.removes).toBe(0)
+    expect(h.added).toHaveLength(0)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    // The fault clears and the TTL passes: still the same engine, not a second one.
+    h.which = "/usr/local/bin/datamate"
+    syncInternals.which = () => h.which
+    h.clock += FAILED_PROBE_TTL_MS
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(0)
+    expect(h.removes).toBe(0)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 
   test("an unlink hands the key back to the entry the reloaded config restores", async () => {
