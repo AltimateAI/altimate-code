@@ -513,14 +513,18 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toHaveLength(0)
     expect(settledOutcome("s1")?.kind).toBe("attached")
     // Something else invalidates config, and the overlay's probe now throws.
+    // The usable-engine memo would mask the throw; forget it so the fault fires.
     syncInternals.which = () => {
       throw new Error("PATH unreadable")
     }
+    invalidateProbe()
     await syncInternals.config!.invalidate()
     await beforeTurn("s1")
     expect(h.removes).toBe(0)
     expect(h.added).toHaveLength(0)
     expect(settledOutcome("s1")?.kind).toBe("attached")
+    // The fault was real: the overlay is gone until its retry, the engine is not.
+    expect(overlayForTests()).toBeNull()
     // The fault clears and the TTL passes: still the same engine, not a second one.
     h.which = "/usr/local/bin/datamate"
     syncInternals.which = () => h.which
@@ -529,6 +533,26 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toHaveLength(0)
     expect(h.removes).toBe(0)
     expect(settledOutcome("s1")?.kind).toBe("attached")
+  })
+
+  test("a relink whose overlay then fails releases the old workspace's engine and says so", async () => {
+    // Workspace A's engine may not go on serving a directory now bound to B.
+    const h = install({})
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    h.binding = bound(43, "ops")
+    syncInternals.which = () => {
+      throw new Error("PATH unreadable")
+    }
+    invalidateProbe()
+    await beforeTurn("s1")
+    expect(h.removes).toBe(1)
+    expect(h.added).toHaveLength(0)
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    // The attach toast, then the failure's — naming the workspace now bound.
+    expect(h.toasts).toHaveLength(2)
+    expect(h.toasts[1].title).toContain("ops")
+    expect(h.toasts[1].title).toContain("unavailable")
   })
 
   test("an unlink hands the key back to the entry the reloaded config restores", async () => {

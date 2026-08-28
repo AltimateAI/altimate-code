@@ -407,12 +407,27 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   }
 
   // A transient overlay failure (its retry is throttled above) keeps what was
-  // last applied: a running engine is not released over a fault in the probe.
-  const overlayNow = state.current ?? (state.failedAt !== undefined ? (state.applied ?? null) : null)
+  // last applied for this same workspace: a running engine is not released
+  // over a fault in the probe. After a relink nothing is kept — workspace A's
+  // engine must not serve a directory now bound to B.
+  const retained = state.failedAt !== undefined && state.applied?.workspace.id === workspaceId ? state.applied : null
+  const overlayNow = state.current ?? retained
   if (!overlayNow) {
     if (state.applied) await releaseKey(loaded, !!state.applied.entry)
     state.applied = null
-    record(sessionID, { kind: "unbound" })
+    if (state.failedAt === undefined) {
+      record(sessionID, { kind: "unbound" })
+      return
+    }
+    // Bound, but the overlay could not be derived: say so, once, rather than
+    // settling a bound directory as unbound in silence.
+    const outcome: Outcome = { kind: "connect-failed", error: "the workspace engine could not be checked" }
+    record(sessionID, outcome)
+    await announceRefusal(sessionID, outcome, {
+      title: `Workspace "${binding.datamateName}": engine unavailable`,
+      message: `${outcome.error}; it is checked again shortly.`,
+      variant: "warning",
+    })
     return
   }
   const workspace = overlayNow.workspace

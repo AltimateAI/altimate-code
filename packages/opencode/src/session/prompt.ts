@@ -25,8 +25,10 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
-// altimate_change - workspace engine turn boundary
+// altimate_change start — workspace engine turn boundary and managed-key refusal
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
+import { DATAMATE_KEY } from "../altimate/datamate-transport"
+// altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
@@ -2981,6 +2983,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return respond(
             userMsg.info.id,
             `MCP server **${name}** not found in config.${suffix}`,
+            model,
+          )
+        }
+
+        // The workspace-managed `datamate` key is derived per process: this
+        // command must not close or restart that engine, nor persist `enabled`
+        // for it. Same refusal as the HTTP routes, in the command's own reply.
+        const managed = name === DATAMATE_KEY ? await WorkspaceEngine.managedWorkspaceLoaded() : null
+        if (managed) {
+          return respond(
+            userMsg.info.id,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage it by hand.`,
             model,
           )
         }
