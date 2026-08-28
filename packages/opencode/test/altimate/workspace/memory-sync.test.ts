@@ -1110,6 +1110,14 @@ describe("binding resolution for the mirror", () => {
     // holding a repo that IS bound — a git worktree, a second clone, a
     // teammate's checkout — has no entry. Reading only that cache made the
     // mirror a silent no-op in every one of those.
+    //
+    // This encodes a DECISION, so it is worth stating plainly: adopting a
+    // server-side binding does enable the ongoing memory mirror, which POSTs
+    // blocks to the workspace. Only the one-shot backfill of memory this
+    // machine already held stays behind an explicit link, via `seededAt`.
+    // The reasoning is that a worktree of a linked repo is the same project by
+    // the same user, and a mirror that silently does nothing there is the bug
+    // being fixed. Flip this test if that trade is ever reversed.
     delete syncInternals.resolveBinding
     serverBinding = BINDING
     const dir = path.join(SANDBOX, "server-bound-proj")

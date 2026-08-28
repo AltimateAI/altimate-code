@@ -33,6 +33,11 @@ export interface CachedBinding {
   repoRemote: string | null
   projectPath: string | null
   linkedAt: number
+  /** True when this row was adopted from the server rather than created by an
+   * explicit link. Consumers that mean "the user approved this" must require
+   * ``!adopted``; the absent ``seededAt`` is not a substitute, because only the
+   * memory backfill consults it. */
+  adopted?: boolean
   /** Set once a bind-time seed completed without failures. Absent means the
    * seed has not run, errored, or was skipped because memory was off — all of
    * which must stay retryable, so a later warm sweeps again. */
@@ -308,6 +313,7 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
   }
 
   const adopted: CachedBinding = {
+    adopted: true,
     datamateId: hit.binding.datamate_id,
     datamateName: hit.binding.datamate_name,
     repoRemote: hit.binding.repo_remote,
