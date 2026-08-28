@@ -34,11 +34,18 @@ export namespace NudgeArbiter {
     if (!b) {
       b = []
       if (pendingBySession.size >= MAX_SESSIONS) {
+        // Evict the LEAST-RECENTLY-USED session (front of the Map after the
+        // refresh-on-access below), never the oldest-created — a long-running
+        // active session must not lose a pending directive to churn from
+        // short-lived ones.
         const oldest = pendingBySession.keys().next().value
         if (oldest !== undefined) pendingBySession.delete(oldest)
       }
-      pendingBySession.set(sessionID, b)
+    } else {
+      // Refresh recency: re-insert so Map iteration order tracks last access.
+      pendingBySession.delete(sessionID)
     }
+    pendingBySession.set(sessionID, b)
     return b
   }
 

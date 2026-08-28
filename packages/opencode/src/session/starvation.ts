@@ -508,12 +508,19 @@ export namespace SessionStarvation {
     let tracker = trackers.get(sessionID)
     if (!tracker) {
       if (trackers.size >= MAX_SESSIONS) {
+        // Evict the LEAST-RECENTLY-USED session (front of the Map after the
+        // refresh-on-access below), never the oldest-created — the longest-running
+        // active session is exactly the one accumulating escalation-ladder state
+        // and must not be silently reset by churn from short-lived sessions.
         const oldest = trackers.keys().next().value
         if (oldest !== undefined) trackers.delete(oldest)
       }
       tracker = createTracker(config)
-      trackers.set(sessionID, tracker)
+    } else {
+      // Refresh recency: re-insert so Map iteration order tracks last access.
+      trackers.delete(sessionID)
     }
+    trackers.set(sessionID, tracker)
     return tracker
   }
 

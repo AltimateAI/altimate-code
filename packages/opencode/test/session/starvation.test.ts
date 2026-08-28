@@ -436,3 +436,19 @@ describe("session-scoped tracker store", () => {
     SessionStarvation.clear("ses_store_1")
   })
 })
+
+describe("forSession LRU eviction", () => {
+  test("an active session's tracker survives churn from newer sessions", () => {
+    const prefix = "ses_lru_starve_"
+    const first = SessionStarvation.forSession(`${prefix}0`, cfg)
+    for (let i = 1; i < 128; i++) SessionStarvation.forSession(`${prefix}${i}`, cfg)
+    // Access #0 again: recency refreshed, same tracker returned.
+    expect(SessionStarvation.forSession(`${prefix}0`, cfg)).toBe(first)
+    // A new session evicts the least-recently-used (#1), never the active #0.
+    SessionStarvation.forSession(`${prefix}extra`, cfg)
+    expect(SessionStarvation.forSession(`${prefix}0`, cfg)).toBe(first)
+    // Cleanup so this suite leaves no global state behind.
+    for (let i = 0; i < 128; i++) SessionStarvation.clear(`${prefix}${i}`)
+    SessionStarvation.clear(`${prefix}extra`)
+  })
+})
