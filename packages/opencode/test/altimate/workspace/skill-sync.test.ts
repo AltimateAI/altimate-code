@@ -650,6 +650,57 @@ describe("workspace skill sync", () => {
     expect(skillFile("pub-real", "SKILL.md")).toContain(path.join(".altimate-code", "skill"))
   })
 
+  test("disconnecting the account takes the snapshot out of service", async () => {
+    // Leaving it is not neutral: discovery loads whatever is on disk without
+    // consulting the manifest, so a disconnected user keeps getting the
+    // workspace's skills — and an `alwaysApply` one keeps entering every prompt.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    rmSync(credsFile)
+    try {
+      const { changed } = await syncSkills(project)
+      expect(changed).toBe(true)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("turning the workspace flag off takes the snapshot out of service", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    process.env.ALTIMATE_WORKSPACE = "0"
+    try {
+      await syncSkills(project)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      process.env.ALTIMATE_WORKSPACE = "1"
+    }
+  })
+
+  test("an unreadable credentials file keeps the snapshot", async () => {
+    // Unknown is not disconnected. A corrupt or unreadable file must not
+    // destroy a snapshot the user is still entitled to.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    writeFileSync(credsFile, "{ not json")
+    try {
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
   test("does nothing when the workspace flag is off", async () => {
     process.env.ALTIMATE_WORKSPACE = "0"
     let calls = 0

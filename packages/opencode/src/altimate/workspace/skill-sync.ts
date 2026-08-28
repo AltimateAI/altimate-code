@@ -305,6 +305,30 @@ async function sweepStaging(directory: string): Promise<void> {
   }
 }
 
+/** Take the snapshot out of service when this client is no longer entitled to
+ * serve it — the account was disconnected, or the feature was switched off.
+ *
+ * Leaving it is not neutral. Discovery loads whatever is on disk without
+ * consulting the manifest, so a disconnected user keeps getting the workspace's
+ * skills, and any of them carrying ``alwaysApply`` keeps being injected into
+ * every prompt. Returns whether anything was actually removed, so the caller
+ * knows to refresh the registry.
+ *
+ * Only removes a tree this client owns, for the same reason the sync does. */
+async function deactivate(directory: string, why: string): Promise<boolean> {
+  const root = managedRoot(directory)
+  try {
+    await fs.stat(root)
+  } catch {
+    return false // nothing published here
+  }
+  if (!(await ownsManagedDir(directory))) return false
+  await removeManaged(directory)
+  await sweepStaging(directory)
+  log.info("removed the workspace skill snapshot", { why, path: root })
+  return true
+}
+
 async function removeManaged(directory: string): Promise<void> {
   await fs.rm(managedRoot(directory), { recursive: true, force: true })
 }
@@ -315,8 +339,14 @@ async function removeManaged(directory: string): Promise<void> {
  * failure path leaves whatever is already on disk in place, except the
  * deliberate purge described below. */
 export async function syncSkills(directory: string): Promise<{ changed: boolean }> {
-  if (!isEnabled()) return { changed: false }
   const canon = path.resolve(directory)
+  if (!isEnabled()) {
+    // Opting out has to actually take effect: a snapshot left behind keeps
+    // loading into every session.
+    const dropped = await deactivate(canon, "the workspace feature is off").catch(() => false)
+    if (dropped) snapshotChangedAt.set(canon, Date.now())
+    return { changed: dropped }
+  }
   const existing = inFlight.get(canon)
   if (existing) {
     await existing.catch(() => {})
@@ -328,6 +358,16 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   // project been "checked", and only then should the poll interval start.
   let sawRemote = false
   const run = (async () => {
+    // Checked BEFORE the binding: `resolveBinding` needs credentials too, so a
+    // disconnected client would otherwise return on a null binding and never
+    // reach this. Disconnected is different from "could not read the
+    // credentials" — the first is a decision the user made and must take
+    // effect, the second is unknown, and unknown never destroys a snapshot.
+    if (!(await AltimateApi.isConfigured())) {
+      if (await deactivate(canon, "no altimate credentials")) changed = true
+      return
+    }
+
     // `resolveBinding`, not `readLocalBinding`: the local cache is written only
     // by an explicit link, so a project bound server-side (fresh clone, new
     // machine, cleared state) would otherwise never get its workspace's skills.
@@ -350,7 +390,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     try {
       creds = await AltimateApi.getCredentials()
     } catch (err) {
-      log.warn("no altimate credentials; skipping skill sync", { err: String(err) })
+      log.warn("could not read altimate credentials; keeping the existing snapshot", {
+        err: String(err),
+      })
       return
     }
 
