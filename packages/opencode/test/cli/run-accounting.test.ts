@@ -260,6 +260,37 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     expect(acc.fatal).toBe(true)
   })
 
+  test("unprompted DONE generations after a declined challenge report explicit_done", () => {
+    // Challenge at turn N; the model declines, does two more full turns of
+    // work, then asserts DONE on its own — that is honest explicit_done, not
+    // the heuristic's doing.
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onStepStart("m1")
+    acc.onIdleDoneChallengeIssued()
+    acc.onText("m1", "Remaining: wire the config flag. Continuing.")
+    acc.onStepFinish("m1", "stop")
+    acc.onAssistantMessage({ id: "m2", agent: "build" })
+    acc.onStepStart("m2")
+    acc.onStepFinish("m2", "tool-calls")
+    acc.onAssistantMessage({ id: "m3", agent: "build" })
+    acc.onStepStart("m3")
+    acc.onText("m3", "All checks green.\nDONE")
+    acc.onStepFinish("m3", "stop")
+    const t = acc.termination()
+    expect(t.done_reason).toBe("explicit_done")
+    expect(t.why_harness_stopped).toBe("none")
+  })
+
+  test("only ONE harness abort is forgiven per challenge — a second abort is fatal", () => {
+    const acc = RunAccounting.create()
+    acc.onIdleDoneChallengeIssued()
+    acc.onSessionError("MessageAbortedError", "aborted")
+    expect(acc.fatal).toBe(false)
+    acc.onSessionError("MessageAbortedError", "aborted again")
+    expect(acc.fatal).toBe(true)
+  })
+
   test("a real error during the challenge continuation still wins over idle-done", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })

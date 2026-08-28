@@ -52,8 +52,18 @@ export namespace RunAccounting {
     let budgetExhausted = false
     let fatalError: { name: string; timeout: boolean } | undefined
     // set when the run-mode idle-done fallback issued its one-shot
-    // confirm-DONE challenge (see cli/cmd/idle-done.ts).
-    let idleDoneChallengeIssued = false
+    // confirm-DONE challenge (see cli/cmd/idle-done.ts). Scoped to the
+    // challenge GENERATION, not the run lifetime: the turn at issuance is
+    // recorded so only a DONE in the immediately-following generation is
+    // attributed to the heuristic — a later unprompted DONE (after the model
+    // declined the challenge and kept working) is honest explicit_done.
+    let idleDoneChallengeTurn: number | undefined
+    let lastExplicitDoneTurn: number | undefined
+    // the harness delivers the challenge by aborting ONE in-flight prompt;
+    // each suppression may fire at most once — later aborts/abnormal
+    // finishes are real failures.
+    let challengeAbortSuppressed = false
+    let challengeFinishSuppressed = false
 
     function isCompactionStep(messageID: string) {
       return agents.get(messageID) === "compaction"
@@ -84,10 +94,11 @@ export namespace RunAccounting {
       onText(messageID: string, text: string) {
         if (isCompactionStep(messageID)) return
         lastTextExplicitDone = SessionTermination.isExplicitDone(text)
+        lastExplicitDoneTurn = lastTextExplicitDone ? turnCount : undefined
       },
       /** the idle-done fallback issued its one-shot confirm-DONE challenge. */
       onIdleDoneChallengeIssued() {
-        idleDoneChallengeIssued = true
+        idleDoneChallengeTurn = turnCount
       },
       onSessionError(name: unknown, message?: string) {
         const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
@@ -95,7 +106,11 @@ export namespace RunAccounting {
         // the idle-done challenge is delivered by aborting the in-flight
         // prompt first; that harness-initiated abort surfaces as a
         // MessageAbortedError and must not be scored as a fatal run error.
-        if (idleDoneChallengeIssued && errorName === "MessageAbortedError") return
+        // Exactly ONE such abort exists per challenge — later aborts are real.
+        if (idleDoneChallengeTurn !== undefined && !challengeAbortSuppressed && errorName === "MessageAbortedError") {
+          challengeAbortSuppressed = true
+          return
+        }
         fatalError = {
           name: errorName,
           timeout: TIMEOUT_PATTERN.test(errorName) || TIMEOUT_PATTERN.test(message ?? ""),
@@ -121,9 +136,13 @@ export namespace RunAccounting {
           return
         }
         if (info.finish === "error" || info.finish === "other") {
-          // the terminal message of a prompt the idle-done fallback
-          // aborted (to deliver its challenge) finishes abnormally by design.
-          if (idleDoneChallengeIssued) return
+          // the terminal message of the ONE prompt the idle-done fallback
+          // aborted (to deliver its challenge) finishes abnormally by design;
+          // any further abnormal finish is a real failure.
+          if (idleDoneChallengeTurn !== undefined && !challengeFinishSuppressed) {
+            challengeFinishSuppressed = true
+            return
+          }
           fatalError ??= { name: `AbnormalFinish:${info.finish}`, timeout: false }
         }
       },
@@ -144,7 +163,13 @@ export namespace RunAccounting {
         // heuristic, not to unprompted model completion.
         const done: DoneReason = (() => {
           if (lastFinishReason !== "stop" || !lastTextExplicitDone) return "none"
-          return idleDoneChallengeIssued ? "idle_heuristic" : "explicit_done"
+          // idle_heuristic only when the DONE landed in the challenge's own
+          // generation (the turn it interrupted, or the reply turn right after).
+          const challengeScoped =
+            idleDoneChallengeTurn !== undefined &&
+            lastExplicitDoneTurn !== undefined &&
+            lastExplicitDoneTurn <= idleDoneChallengeTurn + 1
+          return challengeScoped ? "idle_heuristic" : "explicit_done"
         })()
         const harness: WhyHarnessStopped = (() => {
           if (budgetExhausted) return "budget-exhausted"
