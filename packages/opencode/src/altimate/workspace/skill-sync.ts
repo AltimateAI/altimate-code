@@ -8,15 +8,26 @@
 // skills document MCP tool names rather than this CLI's tools — neither is
 // synced here.
 //
-// Activation is deliberately NOT handled: a synced skill is discovered like any
-// other, listed in ``<available_skills>`` by name + description, and loaded when
-// the model invokes the Skill tool. Whatever frontmatter an author put in the
-// bundle flows through untouched.
+// Activation is not handled HERE, but that is not the same as "cannot happen".
+// A synced skill is discovered like any other: normally it is listed in
+// ``<available_skills>`` by name + description and loaded only when the model
+// invokes the Skill tool. Whatever frontmatter an author put in the bundle
+// flows through untouched — including ``alwaysApply`` and ``applyPaths``, which
+// discovery carries into ``Info`` (skill/index.ts) and which
+// ``collectAutoLoadedSkills`` (session/system.ts) injects into every applicable
+// system prompt with no Skill-tool call and no permission prompt.
+//
+// That is a real consequence worth stating plainly: anyone who can upload a
+// skill to a workspace can put standing instructions into the prompts of every
+// member bound to it. The backend has no activation field, so this can only
+// arrive through the uploaded SKILL.md. Whether workspace skills should be
+// allowed to auto-activate is a product decision, not one this module should
+// make silently by stripping frontmatter an author wrote.
 //
 // Server contract (app/api/datamates/custom_skills.py, mounted at ``/skills``):
 //   GET ""                       -> Page[CustomSkillSummary]  (paginated)
 //   GET "/{public_id}"           -> CustomSkillDetail  (adds files[] + content)
-//   GET "/{public_id}/files/{p}" -> raw file bytes
+//   GET "/{public_id}/files/{p}" -> {path, content} JSON (NOT raw bytes)
 // The summary carries ``file_count``, not an inventory, and nothing in the API
 // exposes a checksum — ``CustomSkillFileMeta`` is ``{path, size}``. So change
 // detection is per-skill ``updated_at`` and the only integrity check available
@@ -99,6 +110,14 @@ const inFlight = new Map<string, Promise<void>>()
  * list call per project per interval, and the list is Postgres-only server-side
  * (no S3 reads), so the check is cheap when nothing changed. */
 const POLL_INTERVAL_MS = 5 * 60 * 1000
+
+/** Ceilings on one snapshot. Nothing upstream bounds a workspace's size, and
+ * every file is read fully into memory before it reaches disk, so without these
+ * a single oversized bundle is an out-of-memory crash rather than a failed
+ * sync. Exceeding either abandons the snapshot the same way any other error
+ * does — the previous one is kept. */
+const MAX_TOTAL_BYTES = 32 * 1024 * 1024
+const MAX_TOTAL_FILES = 2000
 
 /** Last SUCCESSFUL sync per canonical project, for the interval above. A failed
  * attempt must not stamp: doing so suppresses retry for a full interval on a
@@ -206,6 +225,11 @@ function parsePage(payload: unknown): { rows: RemoteSummary[]; pages: number } |
   const p = payload as { items?: unknown; pages?: unknown }
   if (!Array.isArray(p.items)) return null
   const pages = typeof p.pages === "number" && p.pages >= 0 ? p.pages : 1
+  // An empty page while the envelope claims rows exist is a proxy or backend
+  // inconsistency, not an empty workspace — and "empty workspace" is the one
+  // answer that deletes the user's snapshot. Refuse it.
+  const total = (payload as { total?: unknown }).total
+  if (p.items.length === 0 && typeof total === "number" && total > 0) return null
   const rows: RemoteSummary[] = []
   for (const row of p.items) {
     if (!row || typeof row !== "object") return null
@@ -385,6 +409,8 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       skills: {},
     }
     try {
+      let totalFiles = 0
+      let totalBytes = 0
       for (const summary of remote) {
         if (!safePathComponent(summary.publicId)) {
           throw new WorkspaceApiError(`unusable skill id in the workspace listing: ${summary.publicId}`)
@@ -398,6 +424,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         if (!files) throw new WorkspaceApiError(`unrecognised detail for ${summary.publicId}`)
         const recorded: Record<string, number> = {}
         for (const file of files) {
+          totalFiles += 1
+          totalBytes += file.size
+          if (totalFiles > MAX_TOTAL_FILES || totalBytes > MAX_TOTAL_BYTES) {
+            throw new WorkspaceApiError(
+              `workspace skill bundle exceeds the client limit (${totalFiles} files, ${totalBytes} bytes)`,
+            )
+          }
           const encoded = file.path.split("/").map(encodeURIComponent).join("/")
           // The file endpoint answers with ``{path, content}`` JSON, not the raw
           // object — the server decodes the bundle file and hands back a string.
@@ -437,9 +470,26 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // Written into staging so it lands atomically with the snapshot.
       await fs.writeFile(path.join(staging, ".gitignore"), "*\n")
       await fs.writeFile(path.join(staging, MANIFEST_NAME), JSON.stringify(next, null, 2))
-      await fs.rm(root, { recursive: true, force: true })
+      // Move the live tree aside rather than deleting it first. `rm` then
+      // `rename` leaves a window with no snapshot at all — a crash or a reader
+      // inside it sees the skills vanish. The retired tree is removed only
+      // after the new one is in place.
       await fs.mkdir(path.dirname(root), { recursive: true })
-      await fs.rename(staging, root)
+      const retired = path.join(canon, STAGING_DIR, `retired-${process.pid}`)
+      await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
+      let hadPrevious = true
+      try {
+        await fs.rename(root, retired)
+      } catch {
+        hadPrevious = false // nothing published yet
+      }
+      try {
+        await fs.rename(staging, root)
+      } catch (err) {
+        if (hadPrevious) await fs.rename(retired, root).catch(() => {})
+        throw err
+      }
+      await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
       changed = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,

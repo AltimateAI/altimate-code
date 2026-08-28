@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
+import matter from "gray-matter"
 
 const ORIGINAL_XDG_STATE_HOME = process.env.XDG_STATE_HOME
 const ORIGINAL_TEST_HOME = process.env.OPENCODE_TEST_HOME
@@ -579,6 +580,74 @@ describe("workspace skill sync", () => {
 
     expect(existsSync(skillFile("pub-7", "SKILL.md"))).toBe(false)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("an inconsistent empty page is an error, not an empty workspace", async () => {
+    // "Empty workspace" is the one answer that deletes the snapshot, so a page
+    // claiming rows exist while returning none must not be believed.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async () =>
+      json({ items: [], total: 4, page: 1, size: 50, pages: 1 })) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a bundle beyond the client limit is refused whole", async () => {
+    // Counted on the ADVERTISED inventory, before anything is downloaded, so
+    // an oversized workspace fails fast instead of being read into memory.
+    // Uses file count rather than bytes so the ceiling is what trips — an
+    // oversized `size` would be caught by the integrity check instead, and the
+    // test would pass without the ceiling existing.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    const many = Array.from({ length: 2500 }, (_, i) => ({ path: `f${i}.md`, size: 1 }))
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) {
+        const rel = url.split("/files/")[1]
+        return json({ path: decodeURIComponent(rel), content: "x" })
+      }
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-many", name: "m", file_count: many.length, updated_at: "2026-08-08T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-many", files: many, content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-many", "f0.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a synced bundle is a real skill discovery can load", async () => {
+    // Most fixtures here assert only that bytes reached disk. That does not
+    // show the feature works: a bundle can sync "successfully" and still yield
+    // no usable skill if the frontmatter is missing or malformed.
+    serve({
+      "pub-real": {
+        "SKILL.md": "---\nname: synced-probe\ndescription: A synced workspace skill.\n---\n\nBody.\n",
+        "references/guide.md": "reference body",
+      },
+    })
+    await syncSkills(project)
+
+    const onDisk = readFileSync(skillFile("pub-real", "SKILL.md"), "utf8")
+    const parsed = matter(onDisk)
+    expect(parsed.data.name).toBe("synced-probe")
+    expect(parsed.data.description).toBe("A synced workspace skill.")
+    // The bundled reference has to survive too — the model is handed the skill's
+    // directory and reads these itself.
+    expect(readFileSync(skillFile("pub-real", "references/guide.md"), "utf8")).toBe("reference body")
+    // And it must sit where discovery globs `{skill,skills}/**/SKILL.md`.
+    expect(skillFile("pub-real", "SKILL.md")).toContain(path.join(".altimate-code", "skill"))
   })
 
   test("does nothing when the workspace flag is off", async () => {
