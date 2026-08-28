@@ -393,9 +393,10 @@ export const layer = Layer.effect(
       yield* InstanceState.invalidate(discovered)
       yield* InstanceState.invalidate(state)
     })
-    // altimate_change end
 
+    // altimate_change: `refresh` added to the upstream service surface
     return Service.of({ get, require, all, dirs, available, refresh })
+    // altimate_change end
   }),
 )
 
