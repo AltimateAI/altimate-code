@@ -1,11 +1,11 @@
-// W1.10 — honest turn accounting: compaction-machinery steps must not consume the
-// --max-turns budget. W1.12 (E4) — dual-attribution termination logging: every run
+// — honest turn accounting: compaction-machinery steps must not consume the
+// --max-turns budget. (E4) — dual-attribution termination logging: every run
 // records why_model_stopped AND why_harness_stopped as independent fields.
-// W1.1 — real error serialization (never a bare name, "[object Object]", or "{}").
+// — real error serialization (never a bare name, "[object Object]", or "{}").
 import { describe, expect, test } from "bun:test"
 import { RunAccounting } from "../../src/cli/cmd/run-accounting"
 
-describe("RunAccounting turn accounting (W1.10)", () => {
+describe("RunAccounting turn accounting", () => {
   test("counts ordinary assistant steps", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_1", agent: "build" })
@@ -43,7 +43,7 @@ describe("RunAccounting turn accounting (W1.10)", () => {
   })
 })
 
-describe("RunAccounting termination attribution (W1.12 E4)", () => {
+describe("RunAccounting termination attribution (E4)", () => {
   test("both fields are always present with valid enum values", () => {
     const acc = RunAccounting.create()
     const t = acc.termination()
@@ -140,7 +140,7 @@ describe("RunAccounting termination attribution (W1.12 E4)", () => {
   })
 })
 
-describe("RunAccounting.serializeSessionError (W1.1)", () => {
+describe("RunAccounting.serializeSessionError", () => {
   test("composes name, status, and message", () => {
     expect(
       RunAccounting.serializeSessionError({ name: "APIError", data: { message: "upstream broke", status: 502 } }),
@@ -169,7 +169,7 @@ describe("RunAccounting.serializeSessionError (W1.1)", () => {
   })
 })
 
-describe("RunAccounting retry classification (W1.1)", () => {
+describe("RunAccounting retry classification", () => {
   test("5xx statuses are retryable; 4xx and non-numbers are not", () => {
     expect(RunAccounting.isRetryableStatus(500)).toBe(true)
     expect(RunAccounting.isRetryableStatus(503)).toBe(true)
@@ -187,8 +187,8 @@ describe("RunAccounting retry classification (W1.1)", () => {
   })
 })
 
-describe("RunAccounting done_reason + idle-done bookkeeping (W2.1)", () => {
-  test("bare finishReason stop is NEVER reported as done (W2.1a)", () => {
+describe("RunAccounting done_reason + idle-done bookkeeping", () => {
+  test("bare finishReason stop is NEVER reported as done", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onText("m1", "Let me now read the schema file.")

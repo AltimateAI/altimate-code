@@ -3,7 +3,7 @@ import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "../../src/util/token"
 import type { MessageV2 } from "../../src/session/message-v2"
 
-// Harness plan W2.3 / item 5 — unit gate: ledger determinism (5a) + append-only carry (5b).
+// Harness reliability / item 5 — unit gate: ledger determinism (5a) + append-only carry (5b).
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -256,7 +256,7 @@ describe("SessionCompaction.renderLedger", () => {
     expect(capped).toContain("/repo/first.ts")
   })
 
-  test("default cap is 500 tokens (config default, plan W2.3 provenance)", () => {
+  test("default cap is 500 tokens (config default, plan provenance)", () => {
     const parts = []
     for (let i = 0; i < 200; i++)
       parts.push(toolPart({ tool: "bash", input: { command: "y".repeat(95) + i }, metadata: { exit: 0 } }))
@@ -426,7 +426,7 @@ describe("SessionCompaction.latestSummaryText", () => {
 
 // ─── Leak guard: no vertical tokens in the generic mechanism (Global rule 4) ─
 
-describe("W2.3 leak guard", () => {
+describe("leak guard", () => {
   test("ledger output for a dbt-style command is treated identically to any other command", () => {
     const mk = (cmd: string) =>
       SessionCompaction.renderLedger(

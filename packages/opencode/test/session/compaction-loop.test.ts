@@ -404,7 +404,7 @@ function createModel(opts: {
 }
 
 describe("session.compaction.isOverflow boundary conditions", () => {
-  // These tests pin the RAW-limit boundary math, so disable the W3.1 estimator
+  // These tests pin the RAW-limit boundary math, so disable the estimator
   // safety margin (fraction 1 = raw limit). Default-margin behavior is covered
   // in compaction-safety-fraction.test.ts.
   beforeAll(() => {

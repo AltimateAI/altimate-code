@@ -3,7 +3,7 @@ import { ToolResultCap } from "../../src/session/tool-result-cap"
 import { TruncateCore } from "../../src/tool/truncate-core"
 import { Token } from "../../src/util/token"
 
-// ─── W3.2 per-tool-result dispatch cap ────────────────────────────────
+// ─── per-tool-result dispatch cap ────────────────────────────────
 // A single tool result must never exceed a bounded token estimate at
 // dispatch time. Production incident: one giant duckdb/query dump jumped a
 // ~4K-token conversation past a 65K window in one step, bypassing the

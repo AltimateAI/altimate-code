@@ -1,6 +1,6 @@
 # Harness reliability review — deferred follow-ups
 
-Deferred MED findings from the pre-PR release review (codex-release-review4).
+Deferred MED findings from the pre-PR release review (pre-PR adversarial review).
 All 5 HIGH findings plus selected MED/LOW items were fixed on this branch; the
 items below were explicitly deferred and are listed verbatim from the review.
 

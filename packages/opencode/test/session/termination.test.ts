@@ -1,12 +1,12 @@
-// Harness plan W2.1 (item 1) unit gates — SessionTermination completion-token
+// Harness reliability unit gates — SessionTermination completion-token
 // contract and the explicit-DONE stop-path decision.
 //
-// W2.1(a): "finished naturally" requires finishReason "stop" PLUS an explicit
+// (a): "finished naturally" requires finishReason "stop" PLUS an explicit
 // trailing DONE assertion — never bare "stop".
 import { describe, expect, test } from "bun:test"
 import { SessionTermination } from "../../src/session/termination"
 
-describe("SessionTermination.isExplicitDone (W2.1a)", () => {
+describe("SessionTermination.isExplicitDone", () => {
   test("accepts a standalone final-line DONE assertion", () => {
     expect(SessionTermination.isExplicitDone("DONE")).toBe(true)
     expect(SessionTermination.isExplicitDone("All 14 checks green.\nDONE")).toBe(true)
@@ -59,7 +59,7 @@ describe("SessionTermination.isExplicitDone (W2.1a)", () => {
   })
 })
 
-describe("SessionTermination.explicitDoneStop (W2.1a stop-path decision)", () => {
+describe("SessionTermination.explicitDoneStop (stop-path decision)", () => {
   const textPart = (text: string, synthetic?: boolean) => ({ type: "text", text, synthetic })
 
   test("errorless stop + trailing DONE in the final real text part → stop", () => {
@@ -131,7 +131,7 @@ describe("SessionTermination.explicitDoneStop (W2.1a stop-path decision)", () =>
   })
 })
 
-describe("SessionTermination directive texts (W2.1b/c/d wording contracts)", () => {
+describe("SessionTermination directive texts (/c/d wording contracts)", () => {
   test("the completion nudge offers all three options and instructs the DONE token", () => {
     const nudge = SessionTermination.COMPLETION_NUDGE
     expect(nudge).toContain("(1)")

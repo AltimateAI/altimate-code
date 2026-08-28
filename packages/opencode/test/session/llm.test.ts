@@ -83,7 +83,7 @@ describe("session.llm.toolNamesFromMessages", () => {
   })
 })
 
-// Harness plan W1.6 / item 3: stub injection must be skipped entirely when the call
+// Harness reliability / item 3: stub injection must be skipped entirely when the call
 // exposes zero real tools (e.g. the compaction summarizer) — the provider-compat
 // fallback path for toolChoice "none".
 describe("session.llm.addHistoricalToolStubs", () => {

@@ -1,4 +1,4 @@
-// W1.8 — tool-call id sanitation. Malformed (non-string) tool-call ids must be
+// — tool-call id sanitation. Malformed (non-string) tool-call ids must be
 // coerced/regenerated DETERMINISTICALLY at ingestion (processor.ts) with the
 // mapping propagated atomically to the paired tool-result, and the replay path
 // (message-v2.ts toModelMessages) must apply the same coercion so both halves of

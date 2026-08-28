@@ -1,4 +1,4 @@
-// Harness plan W2.1(c) unit gates — idle-done detection, the run-mode-only
+// Harness reliability (c) unit gates — idle-done detection, the run-mode-only
 // FALLBACK termination path. Every hard precondition is exercised:
 //   (i)   green verify temporally AFTER the last file mutation (event-stream order)
 //   (ii)  generic verify classification (configured command or side-effecting bash;
@@ -120,7 +120,7 @@ describe("IdleDone.armedOptions (run-mode/attach arming gate)", () => {
   })
 })
 
-describe("IdleDone.isReadOnlyCommand (generic classifier, W2.1c.ii)", () => {
+describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
   test("plain read-only commands are read-only", () => {
     for (const cmd of ["ls -la", "cat file.txt", "grep -r pattern .", "pwd", "git status", "git log --oneline -5"]) {
       expect(IdleDone.isReadOnlyCommand(cmd)).toBe(true)
@@ -161,7 +161,7 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, W2.1c.ii)", () => {
   })
 })
 
-describe("IdleDone hard preconditions (W2.1c)", () => {
+describe("IdleDone hard preconditions", () => {
   test("fully-satisfied signature arms the challenge", () => {
     expect(satisfied().shouldChallenge()).toBe(true)
   })

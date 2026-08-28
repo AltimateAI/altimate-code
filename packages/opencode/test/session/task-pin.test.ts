@@ -1,4 +1,4 @@
-// harness plan W2.2 / item 2 — pin the original task verbatim through compaction.
+// harness plan / item 2 — pin the original task verbatim through compaction.
 // Pure-function unit tests: pin-source selection (mode-aware, incl. the
 // mid-session-redirect case), verbatim/head+tail+contract-card assembly,
 // dynamic budget math with the livelock invariant, and the livelock guard

@@ -73,14 +73,14 @@ describe("opencode run (non-interactive subprocess)", () => {
     30_000,
   )
 
-  // W1.1 (harness-improvement plan): a run that ends with an unrecovered session
+  // (harness-improvement plan): a run that ends with an unrecovered session
   // error is a fatal abort and must exit nonzero — an honest rc is the contract
   // automation needs. This deliberately flips the previous "exits 0 today"
   // contract lock-in (its comment asked for exactly this kind of deliberate
   // change). Recoverable errors (context overflow handled by auto-compaction)
   // still exit 0; see RunAccounting.onSessionError.
   cliIt.concurrent(
-    "mid-stream LLM error exits nonzero (W1.1 honest rc on fatal abort)",
+    "mid-stream LLM error exits nonzero (honest rc on fatal abort)",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
         yield* llm.fail("upstream provider exploded mid-stream")

@@ -7,7 +7,7 @@ import type { Provider } from "../../src/provider/provider"
 
 Log.init({ print: false })
 
-// ─── W3.1 estimator safety margin ─────────────────────────────────────
+// ─── estimator safety margin ─────────────────────────────────────
 // Token.estimate (chars-based) undercounts real tokenization of dense
 // SQL/JSON by up to ~1.55x. Compaction must trigger against an effective
 // limit (base * context_safety_fraction, default 0.65) so the worst

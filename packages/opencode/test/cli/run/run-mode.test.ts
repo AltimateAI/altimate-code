@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { applyRunModeDefault } from "@/cli/cmd/run/run-mode"
 import { Flag } from "@/flag/flag"
 
-// ─── W3.3: `altimate-code run` implies run mode ───────────────────────
+// ─── `altimate-code run` implies run mode ───────────────────────
 // External drivers (harbor, CI) invoke `run` without exporting
 // ALTIMATE_RUN_MODE; the run command applies the default itself, with an
 // explicit ALTIMATE_RUN_MODE=0 opt-out. Interactive TUI/serve entrypoints

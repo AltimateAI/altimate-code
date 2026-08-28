@@ -18,11 +18,11 @@ import { SessionTermination } from "../../src/session/termination"
 
 Log.init({ print: false })
 
-// ─── Harness plan W1.5 (item 12) + W1.6 (item 3) unit gates ───────────────────
-// W1.5: the auto-compaction continue message must carry the original user
+// ─── Harness reliability + (item 3) unit gates ───────────────────
+// the auto-compaction continue message must carry the original user
 //       message's format/tools/system/variant (like the replay branch), so the
 //       first auto-compaction cannot silently widen the permission surface.
-// W1.6: the summarizer call passes explicit toolChoice "none", and a "continue"
+// the summarizer call passes explicit toolChoice "none", and a "continue"
 //       result with no non-empty summary text is retried ONCE, then errored —
 //       never committed.
 //
@@ -203,7 +203,7 @@ function run(input: { sessionID: SessionID; messages: any[]; markerID: MessageID
   })
 }
 
-describe("session.compaction continue-message contract (W1.5 / item 12)", () => {
+describe("session.compaction continue-message contract (/ item 12)", () => {
   test("continue message carries original tools/system/format/variant through auto-compaction", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID, {
@@ -225,7 +225,7 @@ describe("session.compaction continue-message contract (W1.5 / item 12)", () => 
     expect(continueMsg.system).toBe("custom system prompt")
     expect(continueMsg.variant).toBe("high")
     expect(continueMsg.format).toEqual({ type: "json" })
-    // W2.1(b): the continue prompt is the three-option completion-aware nudge.
+    // (b): the continue prompt is the three-option completion-aware nudge.
     const continuePart = store.parts.find((p) => p.messageID === continueMsg.id && p.type === "text")
     expect(continuePart?.synthetic).toBe(true)
     expect(continuePart?.text).toContain("reply with DONE")
@@ -247,7 +247,7 @@ describe("session.compaction continue-message contract (W1.5 / item 12)", () => 
   })
 })
 
-describe("session.compaction summarizer integrity (W1.6 / item 3)", () => {
+describe("session.compaction summarizer integrity (/ item 3)", () => {
   test("summarizer call passes explicit toolChoice 'none' and no tools", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)
@@ -317,9 +317,9 @@ describe("session.compaction summarizer integrity (W1.6 / item 3)", () => {
   })
 })
 
-// ─── Harness plan W2.1(b)+(d) (item 1): completion-aware continue nudge via the
+// ─── Harness reliability (b)+(d) (item 1): completion-aware continue nudge via the
 // nudge arbiter, and the mechanism-accurate overflow notice ──────────────────────
-describe("session.compaction continue-nudge termination path (W2.1b/d)", () => {
+describe("session.compaction continue-nudge termination path (/d)", () => {
   test("continue message carries the three-option completion-aware nudge", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)
@@ -357,7 +357,7 @@ describe("session.compaction continue-nudge termination path (W2.1b/d)", () => {
     expect(NudgeArbiter.pending(sessionID)).toHaveLength(0)
   })
 
-  test("W2.1(d): overflow notice is mechanism-accurate — never blames media attachments", async () => {
+  test("(d): overflow notice is mechanism-accurate — never blames media attachments", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)
     processBehaviors = [writeSummary("a real summary")]

@@ -11,7 +11,7 @@ function userMessage(id: string, text: string): MessageV2.WithParts {
       sessionID: "session-1",
       role: "user",
       time: { created: 1000 },
-      model: { providerID: "local", modelID: "qwen3.8-27b" },
+      model: { providerID: "local", modelID: "local-test-model" },
     },
     parts: [
       {
@@ -27,7 +27,7 @@ function userMessage(id: string, text: string): MessageV2.WithParts {
 
 function model(context: number, output = 16384): Provider.Model {
   return {
-    id: "qwen3.8-27b",
+    id: "local-test-model",
     providerID: "local",
     api: { npm: "@ai-sdk/openai-compatible" },
     limit: { context, output },

@@ -1,4 +1,4 @@
-// W2.4 — write-starvation circuit breaker + loop detection (corrected mechanism).
+// — write-starvation circuit breaker + loop detection (corrected mechanism).
 // Gates covered here (unit level):
 //   - ships ANNOTATE-ONLY by default (resolveConfig default mode is "annotate")
 //   - read-only-deliverable task NON-FIRING probe (the misfire class the bench

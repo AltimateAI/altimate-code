@@ -74,7 +74,7 @@ describe("Truncate", () => {
       }),
     )
 
-    // altimate_change start — W1.7: default direction is "middle" (head+tail,
+    // altimate_change start — default direction is "middle" (head+tail,
     // tail-weighted), not pure head. Pure head truncation is still available
     // via an explicit `direction: "head"` override, covered below.
     it.live("truncates from the middle by default (head+tail, tail-weighted)", () =>
