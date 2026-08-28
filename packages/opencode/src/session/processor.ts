@@ -999,15 +999,22 @@ export namespace SessionProcessor {
             return "stop"
           }
           // altimate_change end
-          if (needsCompaction) return "compact"
+          // altimate_change start — terminal outcomes take precedence over
+          // "compact": a blocked/errored/doom-loop-stopped turn must actually
+          // stop. Returning "compact" first made those stops no-ops under
+          // overflow — the session summarized and kept running. Deferring the
+          // compaction is safe: prompt.ts's pre-dispatch overflow check compacts
+          // before any next request. (Explicit DONE above still overrides
+          // compaction the same way.)
           if (blocked) return "stop"
           if (input.assistantMessage.error) return "stop"
-          // altimate_change start — doom-loop escalation ladder final rung.
-          // Reachable only when mode is "armed" AND the process is in run mode
-          // (never TUI/serve) AND the same (toolName + normalized args) call
-          // repeated through nudge and forced status-check without changing.
+          // Doom-loop escalation ladder final rung. Reachable only when mode is
+          // "armed" AND the process is in run mode (never TUI/serve) AND the
+          // same (toolName + normalized args) call repeated through nudge and
+          // forced status-check without changing.
           if (starvationStop) return "stop"
           // altimate_change end
+          if (needsCompaction) return "compact"
           return "continue"
         }
       },

@@ -885,3 +885,53 @@ describe("processor state tracking", () => {
     expect(attempt).toBe(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Finish-outcome ordering (mirrors the decision block at the end of
+// processor.ts finish handling). Terminal outcomes (blocked / error /
+// doom-loop stop) must win over "compact"; explicit DONE with a pending
+// compaction still stops. If the ordering in processor.ts changes, update
+// this mirror to match.
+// ---------------------------------------------------------------------------
+describe("finish outcome ordering", () => {
+  function resolveOutcome(state: {
+    needsCompaction: boolean
+    explicitDone: boolean
+    blocked: boolean
+    error: boolean
+    starvationStop: boolean
+  }): "stop" | "compact" | "continue" {
+    if (state.needsCompaction && state.explicitDone) return "stop"
+    if (state.blocked) return "stop"
+    if (state.error) return "stop"
+    if (state.starvationStop) return "stop"
+    if (state.needsCompaction) return "compact"
+    return "continue"
+  }
+
+  const base = { needsCompaction: false, explicitDone: false, blocked: false, error: false, starvationStop: false }
+
+  test("explicit DONE overrides a pending compaction", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, explicitDone: true })).toBe("stop")
+  })
+
+  test("blocked wins over compact", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, blocked: true })).toBe("stop")
+  })
+
+  test("error wins over compact", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, error: true })).toBe("stop")
+  })
+
+  test("doom-loop stop wins over compact", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, starvationStop: true })).toBe("stop")
+  })
+
+  test("plain overflow still compacts", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true })).toBe("compact")
+  })
+
+  test("nothing pending continues", () => {
+    expect(resolveOutcome(base)).toBe("continue")
+  })
+})
