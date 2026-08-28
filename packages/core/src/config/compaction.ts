@@ -5,6 +5,10 @@ import { NonNegativeInt } from "../schema"
 
 export class Keep extends Schema.Class<Keep>("ConfigV2.Compaction.Keep")({
   tokens: NonNegativeInt.pipe(Schema.optional),
+  // altimate_change start — V2 parity for the fork's verbatim-tail turn count
+  // (V1 compaction.tail_turns; 0 disables the tail entirely).
+  turns: NonNegativeInt.pipe(Schema.optional),
+  // altimate_change end
 }) {}
 
 export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({

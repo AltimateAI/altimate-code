@@ -57,6 +57,10 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
       prune: info.compaction.prune,
       keep: {
         tokens: info.compaction.preserve_recent_tokens,
+        // altimate_change start — carry the verbatim-tail turn count (tail_turns:
+        // 0 disables the tail; dropping it silently restores the default).
+        turns: info.compaction.tail_turns,
+        // altimate_change end
       },
       buffer: info.compaction.reserved,
       // altimate_change start — carry the fork compaction keys (same names in V2)

@@ -97,6 +97,8 @@ describe("Config", () => {
         compaction: {
           auto: true,
           reserved: 12_000,
+          tail_turns: 0,
+          preserve_recent_tokens: 3_000,
           context_safety_fraction: 0.7,
           state_ledger: true,
           ledger_max_tokens: 400,
@@ -124,6 +126,8 @@ describe("Config", () => {
       const migrated = ConfigMigrateV1.migrate(v1)
       const decoded = Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" })
       expect(decoded.tool_output?.dispatch_max_tokens).toBe(5_000)
+      expect(decoded.compaction?.keep?.turns).toBe(0)
+      expect(decoded.compaction?.keep?.tokens).toBe(3_000)
       expect(decoded.compaction?.context_safety_fraction).toBe(0.7)
       expect(decoded.compaction?.state_ledger).toBe(true)
       expect(decoded.compaction?.ledger_max_tokens).toBe(400)
@@ -679,7 +683,7 @@ describe("Config", () => {
             expect(documents[0]?.info.compaction).toEqual({
               auto: true,
               prune: undefined,
-              keep: { tokens: 2000 },
+              keep: { tokens: 2000, turns: 3 },
               buffer: 10000,
             })
             expect(documents[0]?.info.mcp).toMatchObject({
