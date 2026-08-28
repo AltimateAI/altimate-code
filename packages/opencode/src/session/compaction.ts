@@ -215,7 +215,14 @@ export namespace SessionCompaction {
     })
   }
 
-  function preserveRecentBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
+  // Retained post-compaction content (verbatim tail + state ledger) may never
+  // by itself approach the overflow trigger: on small-window models a tail
+  // sized from the raw limit could exceed the threshold alone, so every
+  // compaction immediately re-triggered (per-turn summarization churn). Cap
+  // tail + ledger at this fraction of the trigger threshold.
+  const MAX_RETAINED_THRESHOLD_FRACTION = 0.5
+
+  export function preserveRecentBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
     const context = input.model.limit.context
     if (context === 0) return 0
 
@@ -224,10 +231,18 @@ export namespace SessionCompaction {
     const usable = input.model.limit.input
       ? Math.max(0, input.model.limit.input - reserved)
       : Math.max(0, context - maxOutput)
-    return (
+    const candidate =
       input.cfg.compaction?.preserve_recent_tokens ??
       Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable * 0.25)))
-    )
+    // Clamp (applies to explicit config too — the no-churn invariant is
+    // unconditional): tail budget + ledger budget <= fraction of the trigger.
+    const triggerHeadroom = Math.max(input.cfg.compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
+    const base = input.model.limit.input ?? context
+    if (base <= triggerHeadroom) return candidate // compaction disabled entirely; no trigger to protect
+    const threshold = overflowThreshold({ base, headroom: triggerHeadroom, fraction: 1 })
+    const ledgerMax = input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS
+    const retainCap = Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION) - ledgerMax)
+    return Math.min(candidate, retainCap)
   }
 
   function turns(messages: MessageV2.WithParts[]) {

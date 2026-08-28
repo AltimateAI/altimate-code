@@ -643,3 +643,42 @@ describe("session.compaction.process circuit breaker", () => {
     })
   })
 })
+
+describe("small-window retained-content clamp", () => {
+  // Regression: on small-window models the verbatim tail budget used to be
+  // sized from the raw limit (floor 2000, cap 8000) and could exceed the
+  // overflow trigger by itself, so every compaction immediately re-triggered
+  // (per-turn summarization churn). Tail + ledger must stay well below the
+  // trigger threshold.
+  const threshold = (model: Provider.Model, cfg: any = {}) => {
+    const maxOutput = model.limit.output ?? 4096
+    const headroom = Math.max(cfg.compaction?.reserved ?? 20_000, maxOutput)
+    const base = model.limit.input ?? model.limit.context
+    return SessionCompaction.overflowThreshold({ base, headroom, fraction: 1 })
+  }
+
+  test("32K model: tail + ledger can never alone reach the overflow trigger", () => {
+    const model = createModel({ context: 32_768, output: 8_192 })
+    const cfg = {} as any
+    const budget = SessionCompaction.preserveRecentBudget({ cfg, model })
+    const trigger = threshold(model)
+    expect(trigger).toBe(12_768)
+    expect(budget + SessionCompaction.LEDGER_MAX_TOKENS).toBeLessThanOrEqual(Math.floor(trigger / 2))
+    expect(budget).toBeGreaterThan(0)
+  })
+
+  test("explicit preserve_recent_tokens config is clamped too — the invariant is unconditional", () => {
+    const model = createModel({ context: 32_768, output: 8_192 })
+    const cfg = { compaction: { preserve_recent_tokens: 20_000 } } as any
+    const budget = SessionCompaction.preserveRecentBudget({ cfg, model })
+    const trigger = threshold(model)
+    expect(budget + SessionCompaction.LEDGER_MAX_TOKENS).toBeLessThanOrEqual(Math.floor(trigger / 2))
+  })
+
+  test("large-window models keep the normal tail budget", () => {
+    const model = createModel({ context: 200_000, output: 32_000 })
+    const budget = SessionCompaction.preserveRecentBudget({ cfg: {} as any, model })
+    // usable-derived candidate caps at 8000 and the clamp does not bind.
+    expect(budget).toBe(8_000)
+  })
+})
