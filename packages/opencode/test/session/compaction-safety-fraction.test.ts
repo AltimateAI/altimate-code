@@ -9,9 +9,11 @@ Log.init({ print: false })
 
 // ─── estimator safety margin ─────────────────────────────────────
 // Token.estimate (chars-based) undercounts real tokenization of dense
-// SQL/JSON by up to ~1.55x. Compaction must trigger against an effective
-// limit (base * context_safety_fraction, default 0.65) so the worst
-// observed underestimate still fits inside the raw window.
+// SQL/JSON by up to ~1.55x. The safety fraction corrects for that ONLY where
+// estimates are involved: estimate-derived budgets use base * fraction, and
+// the estimated component passed to isOverflow is inflated by 1/fraction.
+// Provider-reported usage is exact and compares against the raw limit minus
+// headroom.
 
 function createModel(opts: { context: number; output: number; input?: number }): Provider.Model {
   return {
@@ -106,36 +108,62 @@ describe("effectiveContextLimit", () => {
   })
 })
 
-describe("isOverflow triggers against the effective limit", () => {
-  test("default margin: trigger at effectiveBase - headroom, not base - headroom", async () => {
+describe("isOverflow two regimes: exact provider counts vs estimated components", () => {
+  test("provider-reported usage compares against the RAW limit minus headroom", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // context=100K, output=32K → headroom = max(20K, 32K) = 32K
-        // effectiveBase = floor(100K * 0.65) = 65K → threshold = 33K (raw was 68K)
+        // context=100K, output=32K → headroom = max(20K, 32K) = 32K → raw usable = 68K.
+        // Exact counts must NOT be scaled by the default 0.65 fraction — that
+        // forfeited ~35% of every window for estimate-free sessions.
         const model = createModel({ context: 100_000, output: 32_000 })
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(33_000), model })).toBe(true)
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(32_999), model })).toBe(false)
+        expect(await SessionCompaction.isOverflow({ tokens: tokens(68_000), model })).toBe(true)
+        expect(await SessionCompaction.isOverflow({ tokens: tokens(67_999), model })).toBe(false)
+        // Well above the old fraction-scaled trigger (33K) but under the raw
+        // boundary: still no overflow.
+        expect(await SessionCompaction.isOverflow({ tokens: tokens(50_000), model })).toBe(false)
       },
     })
   })
 
-  test("fraction 1 restores the raw-limit boundary", async () => {
+  test("estimated component is inflated by 1/fraction (default 0.65)", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        // Raw usable = 68K. Provider count 60K + estimated tail 6K:
+        // adjusted = 60K + ceil(6000 / 0.65) = 60K + 9,231 = 69,231 → overflow.
+        const model = createModel({ context: 100_000, output: 32_000 })
+        expect(
+          await SessionCompaction.isOverflow({ tokens: tokens(60_000), estimatedTokens: 6_000, model }),
+        ).toBe(true)
+        // 60K + ceil(5000 / 0.65) = 67,693 < 68K → no overflow.
+        expect(
+          await SessionCompaction.isOverflow({ tokens: tokens(60_000), estimatedTokens: 5_000, model }),
+        ).toBe(false)
+      },
+    })
+  })
+
+  test("fraction 1 disables estimate inflation", async () => {
     process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "1"
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // Raw boundary: usable = 100K - 32K = 68K
         const model = createModel({ context: 100_000, output: 32_000 })
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(68_000), model })).toBe(true)
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(67_999), model })).toBe(false)
+        expect(
+          await SessionCompaction.isOverflow({ tokens: tokens(60_000), estimatedTokens: 8_000, model }),
+        ).toBe(true)
+        expect(
+          await SessionCompaction.isOverflow({ tokens: tokens(60_000), estimatedTokens: 7_999, model }),
+        ).toBe(false)
       },
     })
   })
 
-  test("config key context_safety_fraction is honored", async () => {
+  test("config key context_safety_fraction scales the estimated component only", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
         await Bun.write(`${dir}/opencode.json`, JSON.stringify({ compaction: { context_safety_fraction: 0.5 } }))
@@ -144,25 +172,30 @@ describe("isOverflow triggers against the effective limit", () => {
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // effectiveBase = 50K → threshold = 50K - 32K = 18K
         const model = createModel({ context: 100_000, output: 32_000 })
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(18_000), model })).toBe(true)
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(17_999), model })).toBe(false)
+        // Exact counts still use the raw boundary despite fraction 0.5.
+        expect(await SessionCompaction.isOverflow({ tokens: tokens(67_999), model })).toBe(false)
+        // Estimated component doubles: 64K + 4000/0.5 = 72K → overflow;
+        // 63.9K + 2000/0.5 = 67.9K → no overflow.
+        expect(
+          await SessionCompaction.isOverflow({ tokens: tokens(64_000), estimatedTokens: 4_000, model }),
+        ).toBe(true)
+        expect(
+          await SessionCompaction.isOverflow({ tokens: tokens(63_900), estimatedTokens: 2_000, model }),
+        ).toBe(false)
       },
     })
   })
 
-  test("small-context floor: threshold never collapses to ~0", async () => {
+  test("small-context models keep the full raw usable window for exact counts", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
-        // context=32,768, output=5K → headroom = max(20K, 5K) = 20K
-        // effectiveBase = floor(32,768 * 0.65) = 21,299 → margin threshold 1,299
-        // floors to MIN_OVERFLOW_THRESHOLD = 4,000 (still below raw 12,768)
+        // context=32,768, output=5K → headroom = max(20K, 5K) = 20K → raw usable = 12,768.
         const model = createModel({ context: 32_768, output: 5_000 })
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(4_000), model })).toBe(true)
-        expect(await SessionCompaction.isOverflow({ tokens: tokens(3_999), model })).toBe(false)
+        expect(await SessionCompaction.isOverflow({ tokens: tokens(12_768), model })).toBe(true)
+        expect(await SessionCompaction.isOverflow({ tokens: tokens(12_767), model })).toBe(false)
       },
     })
   })

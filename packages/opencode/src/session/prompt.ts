@@ -845,11 +845,10 @@ export namespace SessionPrompt {
         lastFinished &&
         lastFinished.summary !== true &&
         (await SessionCompaction.isOverflow({
-          tokens: {
-            ...lastFinished.tokens,
-            input: (lastFinished.tokens.input ?? 0) + uncountedTail,
-            total: lastFinished.tokens.total ? lastFinished.tokens.total + uncountedTail : lastFinished.tokens.total,
-          },
+          tokens: lastFinished.tokens,
+          // Estimated component passed separately: the safety fraction applies
+          // only to it, never to the provider-reported usage above.
+          estimatedTokens: uncountedTail,
           model,
         }))
       ) {

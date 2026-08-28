@@ -87,13 +87,16 @@ export namespace SessionCompaction {
   // altimate_change start — improved isOverflow formula with safety guard and unified headroom
   // See PR #35 — fixes upstream bugs with limit.input models and small-context models
   //
-  // Estimator safety margin: token counts reaching this comparison include
-  // chars-based Token.estimate values that substantially undercount real
-  // tokenization of dense SQL/JSON (a request can exceed the provider limit
-  // while the estimate still looks safe). Compaction therefore triggers against an EFFECTIVE
-  // limit — base * context_safety_fraction, default 0.65, chosen so a worst-case
-  // underestimate still fits — never the raw limit. The raw limit
-  // stays authoritative for anything reporting actual model capability.
+  // Estimator safety margin: chars-based Token.estimate values substantially
+  // undercount real tokenization of dense SQL/JSON (a request can exceed the
+  // provider limit while the estimate still looks safe). The safety fraction
+  // (context_safety_fraction, default 0.65) corrects for that — but ONLY where
+  // estimates are involved: estimate-derived budgets (fitHead, pin sizing) are
+  // computed against base * fraction, and the estimated component a caller
+  // passes to isOverflow is inflated by 1/fraction. PROVIDER-REPORTED usage is
+  // exact and is always compared against the raw limit minus headroom —
+  // scaling exact counts by the fraction forfeited ~35% of every window for
+  // sessions whose counts contain no estimate at all.
   const DEFAULT_CONTEXT_SAFETY_FRACTION = 0.65
   // Trigger floor for small-context models where the safety fraction would push
   // the threshold to ~0 tokens — firing on a near-empty session would livelock
@@ -133,7 +136,18 @@ export namespace SessionCompaction {
     return Math.min(input.base - input.headroom, Math.max(effectiveBase - input.headroom, MIN_OVERFLOW_THRESHOLD))
   }
 
-  export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
+  export async function isOverflow(input: {
+    tokens: MessageV2.Assistant["tokens"]
+    model: Provider.Model
+    /**
+     * Chars-based-estimated tokens included in the decision (e.g. the uncounted
+     * tail appended since the last provider-reported usage reading). The safety
+     * fraction applies ONLY to this component — it is inflated by 1/fraction to
+     * cover worst-case estimator undercount. `tokens` itself is provider-reported
+     * (exact) and is compared against the raw limit minus headroom.
+     */
+    estimatedTokens?: number
+  }) {
     const config = await Config.get()
     if (config.compaction?.auto === false) return false
     const context = input.model.limit.context
@@ -148,8 +162,10 @@ export namespace SessionCompaction {
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= headroom) return false
-    const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(config) })
-    return count >= threshold
+    const estimated = input.estimatedTokens ?? 0
+    const adjusted = estimated > 0 ? count + Math.ceil(estimated / contextSafetyFraction(config)) : count
+    const threshold = overflowThreshold({ base, headroom, fraction: 1 })
+    return adjusted >= threshold
   }
   // altimate_change end
 
@@ -698,11 +714,12 @@ export namespace SessionCompaction {
     const reserved = input.cfg.compaction?.reserved ?? COMPACTION_BUFFER
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
-    // The pin capacity is computed from the EXACT overflow trigger isOverflow()
-    // uses (shared overflowThreshold helper). Computing it from the raw
-    // `base - headroom` boundary instead admitted pins that, together with the
-    // reserved buffer and working slack, exceeded the (safety-fraction-scaled)
-    // trigger — the session re-overflowed immediately after every compaction.
+    // The pin capacity derives from the shared overflowThreshold helper, at the
+    // safety-fraction-scaled (estimate-domain) boundary: pin sizes are
+    // Token.estimate values, so they are budgeted conservatively. This is always
+    // <= the raw trigger isOverflow() compares provider-reported usage against,
+    // so an admitted pin (plus reserved buffer and working slack) can never by
+    // itself re-fire compaction immediately after a compaction.
     if (base <= headroom) return 0
     const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(input.cfg) })
     if (threshold <= 0) return 0
