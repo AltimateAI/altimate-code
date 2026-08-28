@@ -813,7 +813,11 @@ export namespace SessionPrompt {
           auto: task.auto,
           overflow: task.overflow,
         })
-        if (result === "stop") break
+        // altimate_change start — treat any non-"continue" result as stop: an
+        // undefined/unknown result must never fall through to `continue`, which
+        // re-enters compaction on the same unresolved marker and busy-loops.
+        if (result !== "continue") break
+        // altimate_change end
         continue
       }
 

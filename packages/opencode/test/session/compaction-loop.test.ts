@@ -611,3 +611,35 @@ describe("session.compaction.prune with disabled config", () => {
     })
   })
 })
+
+describe("session.compaction.process circuit breaker", () => {
+  // Real-module gate for the attempt>3 breaker: it must return "stop" (never
+  // undefined — the prompt loop treats non-"continue" as stop, and undefined
+  // previously fell through to `continue`, re-entering process() in a busy
+  // loop) and must clear the per-session counter so a later prompt gets a
+  // fresh bounded set of attempts.
+  test("attempt>3 returns 'stop' and resets the attempt counter", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const sessionID = "ses_breaker_test" as any
+        const input = () => ({
+          messages: [] as any[],
+          parentID: "msg_missing" as any,
+          abort: new AbortController().signal,
+          sessionID,
+          auto: true,
+        })
+        // Attempts 1-3: breaker not yet tripped; the missing parent throws.
+        for (let i = 0; i < 3; i++) {
+          await expect(SessionCompaction.process(input())).rejects.toThrow(/Compaction parent/)
+        }
+        // Attempt 4: breaker trips BEFORE the parent lookup and returns "stop".
+        expect(await SessionCompaction.process(input())).toBe("stop")
+        // Counter was cleared: the next call is attempt 1 again (throws, not "stop").
+        await expect(SessionCompaction.process(input())).rejects.toThrow(/Compaction parent/)
+      },
+    })
+  })
+})

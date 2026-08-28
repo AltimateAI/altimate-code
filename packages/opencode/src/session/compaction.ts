@@ -797,8 +797,14 @@ export namespace SessionCompaction {
       attempt,
     })
     if (attempt > 3) {
+      // Returning undefined here made the prompt loop's `continue` re-enter
+      // process() immediately (the pending compaction marker stays unresolved),
+      // hot-spinning with a telemetry event per iteration. Return "stop" so the
+      // caller breaks, and clear the counter so a later prompt gets a fresh
+      // bounded set of attempts instead of tripping the breaker instantly.
       log.warn("compaction circuit breaker", { sessionID: input.sessionID, attempt })
-      return
+      compactionAttempts.delete(input.sessionID)
+      return "stop"
     }
     // altimate_change end
     const parent = input.messages.findLast((m) => m.info.id === input.parentID)
@@ -1036,6 +1042,7 @@ When constructing the summary, try to stick to this template:
       }).toObject()
       processor.message.finish = "error"
       await Session.updateMessage(processor.message)
+      compactionAttempts.delete(input.sessionID) // altimate_change — cleanup on too-large-to-compact stop
       return "stop"
     }
 
