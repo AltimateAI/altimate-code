@@ -176,7 +176,9 @@ export const Info = Schema.Struct({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
       // altimate_change start — estimator safety margin
-      context_safety_fraction: Schema.optional(Schema.Number).annotate({
+      context_safety_fraction: Schema.optional(
+        Schema.Number.check(Schema.isGreaterThanOrEqualTo(0.1), Schema.isLessThanOrEqualTo(1)),
+      ).annotate({
         description:
           "Fraction of the declared context limit treated as usable when estimated token counts are compared against it for compaction/overflow decisions (default: 0.65 — chars-based estimates can substantially undercount dense SQL/JSON, and compaction must trigger with enough margin that a worst-case underestimate still fits). Env override: ALTIMATE_CONTEXT_SAFETY_FRACTION. Clamped to [0.1, 1].",
       }),

@@ -740,8 +740,11 @@ export namespace SessionCompaction {
     if (threshold <= 0) return 0
     const maxTokens = input.cfg.compaction?.pin_max_tokens ?? PIN_MAX_TOKENS
     const fraction = input.cfg.compaction?.pin_window_fraction ?? PIN_WINDOW_FRACTION
-    // Hard invariant: pin + reserved + ≥2k working slack < compaction threshold.
-    const invariantCap = threshold - reserved - PIN_WORKING_SLACK
+    // Hard invariant: pin + ≥2k working slack < compaction threshold. The
+    // threshold already excludes the reserved/headroom buffer (overflowThreshold
+    // subtracts it from base), so subtracting `reserved` again here
+    // double-counted it and silently zeroed the pin on smaller windows.
+    const invariantCap = threshold - PIN_WORKING_SLACK
     const cap = Math.min(maxTokens, Math.floor(threshold * fraction), invariantCap)
     if (cap <= 0) return 0
     return Math.max(0, Math.floor(cap * pinScale(input.sessionID)))

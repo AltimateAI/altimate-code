@@ -251,22 +251,38 @@ describe("pinBudget — dynamic cap min(4k, fraction × usable) with the liveloc
 
   test("pin capacity comes from the SAME threshold isOverflow uses — 65,536/20,000 boundary case", () => {
     // context 65,536, reserved 20,000, output 8,192 → headroom 20,000.
-    // Overflow trigger: min(45,536, max(floor(65,536 × 0.65) − 20,000, 4,000)) = 22,598.
-    // A pin computed from the raw base − headroom boundary (45,536) admitted the
-    // full 4,096 pin, but pin + reserved + 2k slack = 26,096 > 22,598 — the
-    // session re-overflowed immediately after every compaction (livelock).
+    // Estimate-domain boundary: min(45,536, max(floor(65,536 × 0.65) − 20,000, 4,000)) = 22,598.
+    // The threshold ALREADY excludes the reserved headroom, so the invariant is
+    // pin + working slack < threshold (subtracting reserved again double-counted
+    // it and shrank the pin to 598 here): fraction cap floor(22,598 × 0.175) =
+    // 3,954 binds, below both PIN_MAX_TOKENS and the invariant cap 20,598.
     const threshold = SessionCompaction.overflowThreshold({ base: 65_536, headroom: 20_000, fraction: 0.65 })
     expect(threshold).toBe(22_598)
     const budget = SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 65_536, output: 8_192 }) })
-    expect(budget).toBe(598)
+    expect(budget).toBe(Math.floor(threshold * SessionCompaction.PIN_WINDOW_FRACTION))
     // The livelock invariant holds against the ACTUAL trigger.
-    expect(budget + 20_000 + SessionCompaction.PIN_WORKING_SLACK).toBeLessThanOrEqual(threshold)
+    expect(budget + SessionCompaction.PIN_WORKING_SLACK).toBeLessThanOrEqual(threshold)
   })
 
-  test("small window: invariant pin + reserved + 2k slack < threshold forces pin to 0 (skip, never violate)", () => {
-    // context 32k, output 4k → reserved default 20k, threshold 12k;
-    // invariant cap 12k − 20k − 2k < 0 → no pin fits.
+  test("small window: the invariant still admits a small pin instead of silently zeroing it", () => {
+    // context 32k, output 4k → reserved default 20k, estimate-domain threshold
+    // 4,000 (floor). Invariant cap 4,000 − 2,000 = 2,000; fraction cap
+    // floor(4,000 × 0.175) = 700 binds. The old double-subtract arithmetic
+    // (threshold − reserved − slack < 0) forced 0 on every window this size.
+    const threshold = SessionCompaction.overflowThreshold({ base: 32_000, headroom: 20_000, fraction: 0.65 })
     const budget = SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 32_000, output: 4_096 }) })
+    expect(budget).toBe(Math.floor(threshold * SessionCompaction.PIN_WINDOW_FRACTION))
+    expect(budget + SessionCompaction.PIN_WORKING_SLACK).toBeLessThanOrEqual(threshold)
+  })
+
+  test("degenerate window: pin is 0 when even slack exceeds the threshold (skip, never violate)", () => {
+    // Force a threshold at/below the working slack via a tiny explicit reserved
+    // buffer and window: base 5,000, reserved 4,000 → threshold min(1,000, …)
+    // <= PIN_WORKING_SLACK → invariant cap <= 0 → no pin fits.
+    const budget = SessionCompaction.pinBudget({
+      cfg: cfg({ reserved: 4_000 }),
+      model: model({ context: 5_000, output: 500 }),
+    })
     expect(budget).toBe(0)
   })
 

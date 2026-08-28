@@ -52,7 +52,9 @@ export namespace ToolResultCap {
     const base = input.model?.limit?.input ?? input.model?.limit?.context ?? 0
     if (base <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)
 
-    const fraction = input.safetyFraction ?? 1
+    // Default to the estimator safety fraction, not 1: an omitted fraction must
+    // fail conservative (tool outputs are estimate-domain), never fail open.
+    const fraction = input.safetyFraction ?? 0.65
     const effectiveLimit = Math.floor(base * fraction)
     const limitCapTokens = Math.floor(effectiveLimit * DEFAULT_LIMIT_FRACTION)
     if (limitCapTokens <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)

@@ -155,12 +155,22 @@ export namespace SessionProcessor {
         if (runMode) {
           const directive = NudgeArbiter.take(input.sessionID)
           if (directive) {
+            // Attribute the injection to the DIRECTIVE that won arbitration,
+            // not a hardcoded "nudge" — otherwise every injected doom-loop
+            // status-check, starvation, and repeat-signature directive is
+            // indistinguishable in telemetry.
+            const telemetryKind = (() => {
+              if (directive.kind.startsWith("doom_loop")) return "doom_loop" as const
+              if (directive.kind === "repeat_signature") return "repeat_signature" as const
+              if (directive.kind === "starvation") return "starvation" as const
+              return "nudge" as const
+            })()
             Telemetry.track({
               type: "starvation_breaker",
               timestamp: Date.now(),
               session_id: input.sessionID,
               mode: sbMode,
-              kind: "nudge",
+              kind: telemetryKind,
               action: "injected",
             })
             log.info("nudge arbiter directive injected", {

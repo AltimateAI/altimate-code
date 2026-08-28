@@ -138,3 +138,23 @@ describe("TruncateCore", () => {
     expect(tailIdx).toBeGreaterThan(hintIdx)
   })
 })
+
+describe("TruncateCore maxLines=1 edge", () => {
+  test("middle direction with a 1-line budget keeps exactly one line (the tail), never two", () => {
+    const text = ["first error line", "noise", "noise", "final verdict line"].join("\n")
+    const lines = text.split("\n")
+    const totalBytes = Buffer.byteLength(text, "utf-8")
+    const p = TruncateCore.preview(lines, totalBytes, {
+      maxLines: 1,
+      maxBytes: TruncateCore.MAX_BYTES,
+      direction: "middle",
+      headRatio: TruncateCore.DEFAULT_HEAD_RATIO,
+    })
+    const kept = [p.head, p.tail].filter((part) => part.length > 0).join("\n").split("\n")
+    expect(kept).toHaveLength(1)
+    // Tail-weighted design: the surviving line is the last one.
+    expect(p.tail).toBe("final verdict line")
+    expect(p.head).toBe("")
+    expect(p.removed).toBe(3)
+  })
+})

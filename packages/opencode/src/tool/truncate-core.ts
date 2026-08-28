@@ -101,7 +101,11 @@ function selectFromTail(lines: string[], maxLines: number, maxBytes: number, not
 export function preview(lines: string[], totalBytes: number, opts: ResolvedOptions): Preview {
   const { maxLines, maxBytes, direction, headRatio } = opts
 
-  if (direction === "tail") {
+  // A "middle" split needs at least one head line AND one tail line; with a
+  // 1-line budget the two mandatory halves would keep 2 lines and exceed
+  // maxLines. Degrade to tail-only (the verdict/summary line, per the
+  // tail-weighted design) instead of overrunning the budget.
+  if (direction === "tail" || (direction === "middle" && maxLines <= 1)) {
     const sel = selectFromTail(lines, maxLines, maxBytes, 0)
     const removed = sel.hitBytes ? totalBytes - sel.bytes : lines.length - sel.lines.length
     return { head: "", tail: sel.lines.join("\n"), removed, unit: sel.hitBytes ? "bytes" : "lines" }
