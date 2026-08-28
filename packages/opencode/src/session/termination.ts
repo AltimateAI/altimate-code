@@ -44,9 +44,12 @@ export namespace SessionTermination {
     if (last.replace(/^ {0,3}/, "") !== DONE_TOKEN) return false
     // Reject a final line inside an unclosed code fence — the block's content is
     // quoted material, not an assertion. Fence state follows CommonMark: a fence
-    // opens with a run of >= 3 backticks or tildes; only a run of the SAME
-    // character with at least the SAME length closes it. Any other fence-looking
-    // line inside an open fence (other marker, or a shorter run) is content.
+    // opens with a run of >= 3 backticks or tildes (an info string, e.g. an
+    // opening ```lang, is permitted); only a run of the SAME character with at
+    // least the SAME length, followed by nothing but optional whitespace, closes
+    // it. A fence-looking line with a trailing info string is opener/content,
+    // never a valid closer — treating it as one would let a still-open fence's
+    // interior DONE terminate the run.
     let open: { char: string; length: number } | undefined
     for (let i = 0; i < lines.length - 1; i++) {
       const match = CODE_FENCE_PATTERN.exec(lines[i]!)
@@ -54,7 +57,11 @@ export namespace SessionTermination {
       const marker = match[1]!
       if (!open) {
         open = { char: marker[0]!, length: marker.length }
-      } else if (marker[0] === open.char && marker.length >= open.length) {
+      } else if (
+        marker[0] === open.char &&
+        marker.length >= open.length &&
+        /^[ \t]*$/.test(lines[i]!.slice(match[0]!.length))
+      ) {
         open = undefined
       }
     }

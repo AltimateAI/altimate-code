@@ -1115,6 +1115,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // delivered via the nudge arbiter so this injected turn carries exactly
       // ONE system-authored directive.
       if (idleDone.challengeIssued && !accounting.fatal) {
+        // altimate_change start — upstream_fix: mark the challenge reply as
+        // sent BEFORE anything in this phase can raise a session-error/prompt-
+        // result event, so a genuine failure of the reply itself is never
+        // absorbed by the interrupted prompt's own abort suppression.
+        accounting.onIdleDoneChallengeReplySent()
+        // altimate_change end
         // Dedicated abort for the challenge subscription so a failed challenge
         // send can cancel the event-stream loop deterministically (the SSE
         // generator exits cleanly on abort; the loop's for-await then drains).

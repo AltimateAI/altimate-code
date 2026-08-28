@@ -57,6 +57,16 @@ describe("SessionTermination.isExplicitDone", () => {
     expect(SessionTermination.isExplicitDone("~~~\n```\n~~~\nDONE")).toBe(true)
   })
 
+  test("a fence-looking line with trailing info-string text never closes the fence", () => {
+    // Per CommonMark, only whitespace may follow a closing fence's marker —
+    // a line like "```not-a-closer" is content (or a nested opener), not a
+    // closer. The DONE that follows is still inside the open fence.
+    expect(SessionTermination.isExplicitDone("```\ncode\n```not-a-closer\nDONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("~~~\ncode\n~~~lang\nDONE")).toBe(false)
+    // A real closer with trailing whitespace only still closes normally.
+    expect(SessionTermination.isExplicitDone("```\ncode\n```   \nDONE")).toBe(true)
+  })
+
   test("quoted and indented-code DONE never terminates", () => {
     expect(SessionTermination.isExplicitDone("The instructions said:\n> DONE")).toBe(false)
     expect(SessionTermination.isExplicitDone("Example:\n    DONE")).toBe(false)

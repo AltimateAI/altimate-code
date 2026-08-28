@@ -74,6 +74,14 @@ export namespace RunAccounting {
     // finishes are real failures.
     let challengeAbortSuppressed = false
     let challengeFinishSuppressed = false
+    // altimate_change start — upstream_fix: the abort of the interrupted prompt
+    // can surface as onSessionError(MessageAbortedError), onPromptResult
+    // (finish="error"/"other"), or both — either channel may fire for that
+    // SAME abort, so both suppressions above are scoped to it. Once the
+    // challenge reply itself is sent, a real failure there (e.g. an errorless
+    // finish="other" on the confirm-DONE reply) must not be silently forgiven
+    // by whichever suppression the interrupted prompt's abort left unused.
+    let challengeReplySent = false
 
     function isCompactionStep(messageID: string) {
       return agents.get(messageID) === "compaction"
@@ -112,6 +120,12 @@ export namespace RunAccounting {
       onIdleDoneChallengeIssued() {
         idleDoneChallengeTurn = turnCount
       },
+      // altimate_change start — upstream_fix: see challengeReplySent above.
+      /** the idle-done confirm-DONE challenge reply has been sent; suppression of the interrupted prompt's own abort no longer applies. */
+      onIdleDoneChallengeReplySent() {
+        challengeReplySent = true
+      },
+      // altimate_change end
       onSessionError(name: unknown, message?: string) {
         const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
         if (RECOVERABLE_ERROR_NAMES.has(errorName)) return
@@ -119,7 +133,12 @@ export namespace RunAccounting {
         // prompt first; that harness-initiated abort surfaces as a
         // MessageAbortedError and must not be scored as a fatal run error.
         // Exactly ONE such abort exists per challenge — later aborts are real.
-        if (idleDoneChallengeTurn !== undefined && !challengeAbortSuppressed && errorName === "MessageAbortedError") {
+        if (
+          idleDoneChallengeTurn !== undefined &&
+          !challengeAbortSuppressed &&
+          !challengeReplySent &&
+          errorName === "MessageAbortedError"
+        ) {
           challengeAbortSuppressed = true
           return
         }
@@ -151,7 +170,7 @@ export namespace RunAccounting {
           // the terminal message of the ONE prompt the idle-done fallback
           // aborted (to deliver its challenge) finishes abnormally by design;
           // any further abnormal finish is a real failure.
-          if (idleDoneChallengeTurn !== undefined && !challengeFinishSuppressed) {
+          if (idleDoneChallengeTurn !== undefined && !challengeFinishSuppressed && !challengeReplySent) {
             challengeFinishSuppressed = true
             return
           }

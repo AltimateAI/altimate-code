@@ -335,4 +335,36 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     expect(acc.termination().why_harness_stopped).toBe("error")
     expect(acc.fatal).toBe(true)
   })
+
+  // altimate_change start — upstream_fix regression: the interrupted prompt's
+  // abort can surface as EITHER onSessionError(MessageAbortedError) or an
+  // abnormal onPromptResult (or both) — both suppressions above are scoped to
+  // that one abort. Once the challenge reply itself has been sent, a genuine
+  // failure of the reply must not be absorbed by whichever suppression the
+  // interrupted prompt's abort left unused.
+  test("a genuine challenge-reply failure is fatal even if the interrupted prompt's abort only used one suppression channel", () => {
+    const acc = RunAccounting.create()
+    acc.onIdleDoneChallengeIssued()
+    // The interrupted prompt's abort surfaces ONLY via onSessionError — its
+    // own onPromptResult never reports an abnormal finish (e.g. it resolved
+    // "stop" before the abort landed), so challengeFinishSuppressed is never
+    // consumed here.
+    acc.onSessionError("MessageAbortedError", "aborted")
+    expect(acc.fatal).toBe(false)
+    // The challenge reply is now sent; its own errorless abnormal finish is a
+    // real failure of the confirmation, not a leftover of the abort above.
+    acc.onIdleDoneChallengeReplySent()
+    acc.onPromptResult({ finish: "other" })
+    expect(acc.fatal).toBe(true)
+    expect(acc.termination().why_harness_stopped).toBe("error")
+  })
+
+  test("both suppression channels still forgive the same interrupted-prompt abort before the reply is sent", () => {
+    const acc = RunAccounting.create()
+    acc.onIdleDoneChallengeIssued()
+    acc.onSessionError("MessageAbortedError", "aborted")
+    acc.onPromptResult({ finish: "error" })
+    expect(acc.fatal).toBe(false)
+  })
+  // altimate_change end
 })
