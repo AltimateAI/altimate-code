@@ -339,7 +339,10 @@ export namespace SessionStarvation {
         const klass = classifyToolCall(input.tool)
         if (klass === "mutating") {
           mutatingCalls++
-          markMutation()
+          // No mutation credit here: the call has not succeeded yet. Credit is
+          // granted on successful completion (onToolResult) or snapshot-diff
+          // evidence (onStepFinish) — a failed edit must not reset the
+          // starvation counter.
         }
 
         const key = `${input.tool} ${normalizeArgs(input.input)}`
@@ -362,6 +365,25 @@ export namespace SessionStarvation {
         if (consecutiveIdenticalCalls >= threshold * 3) escalation = "stop"
         else if (consecutiveIdenticalCalls === threshold * 2) escalation = "status_check"
         else if (consecutiveIdenticalCalls === threshold) escalation = "nudge"
+
+        if (escalation === "stop") {
+          // Latch: the stop fires exactly once per completed ladder run — the
+          // count resets so (a) further identical calls in the same stopping
+          // step cannot re-fire it (directive/part spam), and (b) a retried
+          // session starts with a cleared ladder and full runway instead of an
+          // instant stop on its first repeated call.
+          const count = consecutiveIdenticalCalls
+          consecutiveIdenticalCalls = 0
+          return {
+            class: klass,
+            doomLoop: {
+              escalation,
+              count,
+              threshold,
+              directive: doomLoopStatusDirective({ count, tool: input.tool }),
+            },
+          }
+        }
 
         if (!escalation) return { class: klass }
         const directive =

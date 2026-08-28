@@ -156,6 +156,60 @@ describe("mutation evidence resets the starvation counter (command-agnostic)", (
   })
 })
 
+describe("mutation credit requires success, never the call alone", () => {
+  test("a FAILED mutating tool call does not reset the starvation counter", () => {
+    const t = tracker({ maxTurnsWithoutMutation: 3 })
+    t.onStepFinish({ mutatedFiles: [] })
+    t.onStepFinish({ mutatedFiles: [] })
+    // Call is issued but the result fails: no snapshot diff, no success.
+    t.onToolCall({ tool: "edit", input: { filePath: "/repo/model.sql" } })
+    t.onToolResult({ tool: "edit", input: { filePath: "/repo/model.sql" }, failureMessage: "oldString not found" })
+    const out = t.onStepFinish({ mutatedFiles: [] })
+    expect(out.turnsWithoutMutation).toBe(3)
+    expect(out.starvation).toBeDefined()
+  })
+
+  test("a successful mutating tool result still resets the counter", () => {
+    const t = tracker({ maxTurnsWithoutMutation: 3 })
+    t.onStepFinish({ mutatedFiles: [] })
+    t.onStepFinish({ mutatedFiles: [] })
+    t.onToolCall({ tool: "edit", input: { filePath: "/repo/model.sql" } })
+    t.onToolResult({ tool: "edit", input: { filePath: "/repo/model.sql" } })
+    const out = t.onStepFinish({ mutatedFiles: [] })
+    expect(out.turnsWithoutMutation).toBe(0)
+    expect(out.starvation).toBeUndefined()
+  })
+})
+
+describe("doom-loop stop latch", () => {
+  test("stop fires exactly once per completed ladder run, then the ladder resets", () => {
+    const t = tracker({ doomLoopThreshold: 3 })
+    const input = { command: "make check" }
+    const stops: number[] = []
+    for (let i = 1; i <= 20; i++) {
+      const call = t.onToolCall({ tool: "bash", input })
+      if (call.doomLoop?.escalation === "stop") stops.push(i)
+    }
+    // First full run stops at 9; the ladder then restarts from zero, so the
+    // next stop needs another full run (9 more calls, with nudge/status-check
+    // rungs in between) — never a stop on every subsequent call.
+    expect(stops).toEqual([9, 18])
+  })
+
+  test("after a latched stop, a retried session climbs the full ladder again", () => {
+    const t = tracker({ doomLoopThreshold: 3 })
+    const input = { command: "make check" }
+    for (let i = 1; i <= 9; i++) t.onToolCall({ tool: "bash", input })
+    // Retry: first repeated call after the stop is NOT an instant stop.
+    const call = t.onToolCall({ tool: "bash", input })
+    expect(call.doomLoop).toBeUndefined()
+    // The nudge rung comes back at the threshold, as in a fresh session.
+    t.onToolCall({ tool: "bash", input })
+    const third = t.onToolCall({ tool: "bash", input })
+    expect(third.doomLoop?.escalation).toBe("nudge")
+  })
+})
+
 describe("unchanged-read annotation (content hash; annotate never suppress)", () => {
   test("re-reading identical content yields an informational annotation", () => {
     const t = tracker()

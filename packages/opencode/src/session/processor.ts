@@ -306,11 +306,15 @@ export namespace SessionProcessor {
 
                     // altimate_change start — doom-loop guard re-keyed + escalation ladder.
                     // Interactive sessions keep the existing (toolName + identical args)
-                    // permission ask EXACTLY as before. Run mode bypasses the permission
-                    // channel entirely — code-truth confirmed yolo auto-approves the ask,
-                    // making the old guard a no-op there — and instead climbs the ladder
-                    // below (nudge → forced status-check → stop; never straight to stop).
-                    if (!runMode) {
+                    // permission ask EXACTLY as before. Run mode with the ladder ARMED
+                    // replaces the permission channel with the ladder below (nudge →
+                    // forced status-check → stop; never straight to stop). Run mode with
+                    // the ladder NOT armed (default annotate mode) KEEPS the legacy ask:
+                    // yolo auto-approves it (no-op there), but a non-yolo headless run
+                    // auto-rejects it — the hard brake that previously converted an
+                    // identical-args loop into a stop, which must not regress to
+                    // telemetry-only during the annotate validation period.
+                    if (!runMode || !sbArmed) {
                       const parts = await MessageV2.parts(input.assistantMessage.id)
                       const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
 
