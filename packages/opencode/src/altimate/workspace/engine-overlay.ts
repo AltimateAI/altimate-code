@@ -591,7 +591,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       return
     }
     record(sessionID, refusal)
-    const declared = (await declaredFor(workspace.id))?.keys.length ?? 0
+    const declared = (await declaredFor(workspace))?.keys.length ?? 0
     await announceRefusal(
       sessionID,
       refusal,
