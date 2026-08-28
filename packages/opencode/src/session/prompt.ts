@@ -99,6 +99,21 @@ export namespace SessionPrompt {
   // altimate_change start — how long a turn will wait for the workspace skill
   // sync before proceeding without it. See the block in `prompt`.
   const WORKSPACE_SKILL_WAIT_MS = 2000
+
+  /** Drop the caches in front of the synced skill files, if a sync moved them.
+   * Shared by both branches of the block in `prompt`: opting out removes a
+   * snapshot and needs the registry refreshed exactly as adding one does. */
+  async function refreshSkillRegistry(dir: string): Promise<void> {
+    const skillSync = await import("../altimate/workspace/skill-sync")
+    if (!skillSync.registryStale(dir)) return
+    // Marked BEFORE the work, not after: a refresh that throws must not be
+    // retried on every subsequent turn forever, and the next real snapshot
+    // change re-arms this anyway.
+    skillSync.markRegistryApplied(dir)
+    const { Config } = await import("../config/config")
+    await Config.invalidate()
+    await import("../skill").then((m) => m.Skill.refresh())
+  }
   // altimate_change end
 
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
@@ -295,22 +310,16 @@ export namespace SessionPrompt {
     // THIS session's registry — verified by harness test.
     try {
       const skillSync = await import("../altimate/workspace/skill-sync")
-      // Nothing to do at all when the feature is off — not even a stat. This
-      // sits on the latency-measured path and runs for every user, including
-      // the ones who never opted in. NOT an early `return`: that would exit
-      // `prompt` itself and skip the message this function exists to create.
-      if (skillSync.isEnabled()) {
-        const dir = Instance.directory
-        const refreshRegistry = async () => {
-          if (!skillSync.registryStale(dir)) return
-          // Marked BEFORE the work, not after: a refresh that throws must not be
-          // retried on every subsequent turn forever, and the next real snapshot
-          // change re-arms this anyway.
-          skillSync.markRegistryApplied(dir)
-          const { Config } = await import("../config/config")
-          await Config.invalidate()
-          await import("../skill").then((m) => m.Skill.refresh())
-        }
+      const dir = Instance.directory
+      // Opting out still has to take effect. `syncSkills`'s disabled branch is
+      // the only thing that removes an already-synced snapshot, and discovery
+      // does not consult the flag — so skipping this when the flag is off would
+      // leave the skills on disk and still loading, `alwaysApply` included.
+      // Cheap: that branch stats one path and returns.
+      if (!skillSync.isEnabled()) {
+        if ((await skillSync.syncSkills(dir)).changed) await refreshSkillRegistry(dir)
+      } else {
+        const refreshRegistry = () => refreshSkillRegistry(dir)
 
         // A sync that ran elsewhere — a bind, most commonly — changes the
         // snapshot with no instance context to refresh from. Pick that up before
@@ -321,7 +330,20 @@ export namespace SessionPrompt {
         if (!(await skillSync.recentlySynced(dir))) {
           const applied = skillSync.syncSkills(dir).then(refreshRegistry)
           applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
-          await Promise.race([applied, new Promise((r) => setTimeout(r, WORKSPACE_SKILL_WAIT_MS))])
+          // Timer cleared when the sync wins the race: an armed timer keeps the
+        // event loop alive, so a short-lived `run` would linger for the rest of
+        // the bound, once per turn.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            applied,
+            new Promise((r) => {
+              timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
+            }),
+          ])
+        } finally {
+          if (timer) clearTimeout(timer)
+        }
         }
       }
     } catch (err) {

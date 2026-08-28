@@ -18,7 +18,7 @@ import { Filesystem } from "@/util/filesystem"
 import { Log } from "@/altimate/util/log"
 // Type-only: the value side is imported dynamically in resolveBinding to keep
 // this module's import graph free of the API client at load time.
-import type { ProjectBindingLookup } from "./api-client"
+import type { Binding, ProjectBindingLookup } from "./api-client"
 
 const CACHE_VERSION = 1
 
@@ -287,14 +287,30 @@ const MISS_TTL_MS = 5 * 60 * 1000
  * Never throws — a lookup failure is "unknown", which callers treat as "leave
  * whatever is on disk alone". */
 export async function resolveBinding(directory: string): Promise<CachedBinding | null> {
+  const outcome = await resolveBindingOutcome(directory)
+  return outcome.status === "bound" ? outcome.binding : null
+}
+
+/** Whether a project is bound, and — crucially — whether we actually know.
+ *
+ * `null` collapses "the server confirmed this project is unbound" with "we
+ * could not find out". Callers that DELETE on unbound must not act on the
+ * second: a network blip would wipe a snapshot the user is still entitled to.
+ * Callers that only need a binding can keep using `resolveBinding`. */
+export type BindingOutcome =
+  | { status: "bound"; binding: CachedBinding }
+  | { status: "unbound" }
+  | { status: "unknown" }
+
+export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
   const local = await readLocalBinding(directory).catch(() => null)
-  if (local) return local
+  if (local) return { status: "bound", binding: local }
 
   const key = await tenantKey()
-  if (!key) return null
+  if (!key) return { status: "unknown" }
   const canon = `${key.tenant}\u0000${key.apiUrl}\u0000${canonicalizeKey(directory)}`
   const missedAt = serverLookupMissed.get(canon)
-  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return null
+  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound" }
 
   let hit: ProjectBindingLookup | null = null
   try {
@@ -305,19 +321,27 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
     // Unreachable or a 5xx: unknown, not unbound. Deliberately NOT memoized —
     // the next session should ask again rather than inherit a network blip.
     log.warn("could not look up the workspace binding for this project", { err: String(err) })
-    return null
+    return { status: "unknown" }
   }
   if (!hit) {
     serverLookupMissed.set(canon, Date.now())
-    return null
+    return { status: "unbound" }
+  }
+  // cubic P2: a malformed 2xx would otherwise throw on the dereference below,
+  // outside the try above, aborting the whole sync. An unrecognised body is
+  // unknown, not unbound — the same rule the rest of this feature follows.
+  const row = (hit as { binding?: Partial<Binding> }).binding
+  if (!row || typeof row.datamate_id !== "number" || typeof row.datamate_name !== "string") {
+    log.warn("workspace binding lookup returned an unrecognised body; treating as unknown")
+    return { status: "unknown" }
   }
 
   const adopted: CachedBinding = {
     adopted: true,
-    datamateId: hit.binding.datamate_id,
-    datamateName: hit.binding.datamate_name,
-    repoRemote: hit.binding.repo_remote,
-    projectPath: hit.binding.project_path,
+    datamateId: row.datamate_id,
+    datamateName: row.datamate_name,
+    repoRemote: row.repo_remote ?? null,
+    projectPath: row.project_path ?? null,
     linkedAt: Date.now(),
   }
   try {
@@ -336,7 +360,7 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
   log.info("adopted the workspace binding this project already has on the server", {
     datamateId: adopted.datamateId,
   })
-  return adopted
+  return { status: "bound", binding: adopted }
 }
 
 export async function recordApprovedBinding(

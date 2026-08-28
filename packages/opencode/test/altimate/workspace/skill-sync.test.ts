@@ -77,10 +77,14 @@ function bindTo(datamateId: number) {
 }
 
 beforeEach(() => {
-  // Scoped per test, not set at module load: bun may run other test files in
-  // this process, and a live workspace flag makes their prompt path attempt a
-  // real sync against this file's sandbox credentials.
+  // All three are scoped per test, not left set from module load: bun may run
+  // another test file in this worker, and these redirect Global.Path.home and
+  // .state — that file's config, state and credential reads would land in this
+  // sandbox. The workspace flag additionally makes its prompt path attempt a
+  // real sync against these credentials.
   process.env.ALTIMATE_WORKSPACE = "1"
+  process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
+  process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
   project = path.join(SANDBOX, `proj-${Math.random().toString(36).slice(2)}`)
   mkdirSync(project, { recursive: true })
   bindTo(1)
@@ -88,8 +92,13 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
-  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
-  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
+  const restore = (k: string, v: string | undefined) => {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+  restore("ALTIMATE_WORKSPACE", ORIGINAL_WORKSPACE_FLAG)
+  restore("XDG_STATE_HOME", ORIGINAL_XDG_STATE_HOME)
+  restore("OPENCODE_TEST_HOME", ORIGINAL_TEST_HOME)
 })
 
 afterAll(() => {
@@ -876,6 +885,84 @@ describe("workspace skill sync", () => {
 
     expect(readFileSync(path.join(managed, "other-tool", "SKILL.md"), "utf8")).toBe("another tool's file")
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("a confirmed unbind takes the snapshot out of service", async () => {
+    // Discovery does not consult the manifest, so a project detached in the
+    // SaaS would keep serving that workspace's skills forever.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    unbind()
+    // 404 on the binding lookup: confirmed unbound, not a failure.
+    globalThis.fetch = (async (input: string | URL) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) {
+        return new Response(JSON.stringify({ detail: "not found" }), { status: 404 })
+      }
+      return json({ items: [], total: 0, page: 1, size: 50, pages: 1 })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(path.join(project, MANAGED))).toBe(false)
+  })
+
+  test("an unreachable binding lookup keeps the snapshot", async () => {
+    // Unknown is not unbound. Deleting on a network blip would wipe a snapshot
+    // the user is still entitled to.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    unbind()
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a malformed binding response is unknown, not a crash", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    unbind()
+    globalThis.fetch = (async (input: string | URL) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) {
+        return json({ binding: { nonsense: true } })
+      }
+      return json({ items: [], total: 0, page: 1, size: 50, pages: 1 })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    // Treated as unknown: nothing published, nothing destroyed.
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("the disabled-path purge refuses to follow a symlink", async () => {
+    // The opt-out branch deletes, and it runs before the check inside the sync.
+    // The link target must hold a tree the purge WOULD delete, or the test
+    // passes for the wrong reason (nothing there to remove).
+    const outside = path.join(SANDBOX, `optout-${Math.random().toString(36).slice(2)}`)
+    const victim = path.join(outside, "skill", "_workspace")
+    mkdirSync(path.join(victim, "pub-x"), { recursive: true })
+    writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
+    writeFileSync(
+      path.join(victim, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    const proj2 = path.join(SANDBOX, `symlinked-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(proj2, { recursive: true })
+    symlinkSync(outside, path.join(proj2, ".altimate-code"))
+
+    process.env.ALTIMATE_WORKSPACE = "0"
+    try {
+      await syncSkills(proj2)
+      expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
+    } finally {
+      process.env.ALTIMATE_WORKSPACE = "1"
+    }
   })
 
   test("does nothing when the workspace flag is off", async () => {

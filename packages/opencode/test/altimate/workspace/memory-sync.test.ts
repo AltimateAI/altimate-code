@@ -174,6 +174,10 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  // Reset the server-binding fixture too: tests that delete the resolveBinding
+  // seam fall through to the real lookup, so a leaked value from a previous
+  // test would decide their outcome.
+  serverBinding = null
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured =
     originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials =

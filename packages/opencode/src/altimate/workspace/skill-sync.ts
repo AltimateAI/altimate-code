@@ -37,7 +37,7 @@ import path from "path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
-import { resolveBinding, type CachedBinding } from "./state"
+import { resolveBindingOutcome, type CachedBinding } from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 
 const log = Log.create({ service: "altimate-workspace-skill-sync" })
@@ -433,8 +433,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   const canon = path.resolve(directory)
   if (!isEnabled()) {
     // Opting out has to actually take effect: a snapshot left behind keeps
-    // loading into every session.
-    const dropped = await deactivate(canon, "the workspace feature is off").catch(() => false)
+    // loading into every session. Still gated on the symlink check — this path
+    // deletes, and it runs before the one inside `run`, so without it a
+    // symlinked `.altimate-code` would have the purge follow the link.
+    const dropped = (await pathsAreReal(canon).catch(() => false))
+      ? await deactivate(canon, "the workspace feature is off").catch(() => false)
+      : false
     if (dropped) snapshotChangedAt.set(canon, Date.now())
     return { changed: dropped }
   }
@@ -491,8 +495,19 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // `resolveBinding`, not `readLocalBinding`: the local cache is written only
     // by an explicit link, so a project bound server-side (fresh clone, new
     // machine, cleared state) would otherwise never get its workspace's skills.
-    const binding = await resolveBinding(canon)
-    if (!binding) return
+    const outcome = await resolveBindingOutcome(canon)
+    if (outcome.status !== "bound") {
+      // A CONFIRMED unbind must take the snapshot out of service — discovery
+      // does not consult the manifest, so leaving it keeps serving a workspace
+      // this project is no longer attached to. "Unknown" must not: a lookup
+      // failure is not evidence of anything, and deleting on it would wipe a
+      // snapshot on a network blip.
+      if (outcome.status === "unbound") {
+        if (await deactivate(canon, "this project is no longer bound to a workspace")) changed = true
+      }
+      return
+    }
+    const binding = outcome.binding
 
     // Refuse to touch a directory we did not create. Everything below either
     // deletes this tree or replaces it wholesale, so without this a user's own
@@ -599,7 +614,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
           const body = await altimateRequest<unknown>(
             "GET",
             `/${encodeURIComponent(summary.publicId)}/files/${encoded}`,
-            { base: SKILLS_BASE },
+            // Bounded: this is the one response whose size is set by remote
+            // bundle content rather than by our own query.
+            { base: SKILLS_BASE, boundResponse: true },
           )
           const content = parseFileContent(body, file.path)
           if (content === null) {
