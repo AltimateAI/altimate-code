@@ -273,7 +273,13 @@ export namespace IdleDone {
         if (runningToolParts.size > 0) return false // (iii)
         if (pendingPermissions.size > 0) return false // (iii)
         if (!lastVerifyGreen) return false // (i)/(ii)
+        // altimate_change start — upstream_fix: lastMutationSeq starts at -1, so a
+        // run that never mutated a file (pure read/explore, or a session that
+        // only ever verified) satisfied "verify after last write" vacuously —
+        // there was no completed work for the green verify to actually confirm.
+        if (lastMutationSeq < 0) return false // (i) at least one mutation must exist
         if (lastVerifySeq <= lastMutationSeq) return false // (i) build-after-last-write
+        // altimate_change end
         return true
       },
       markChallengeIssued() {

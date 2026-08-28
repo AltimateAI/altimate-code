@@ -1031,14 +1031,21 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // SessionRetry posture — bounded and visible). On exhaustion the error is thrown
       // so the process exits nonzero instead of hanging on an idle event that will
       // never arrive.
-      const envBound = (name: string, fallback: number) => {
+      // altimate_change start — upstream_fix: cap the upper bound too, not just
+      // reject non-finite/negative — an unbounded ALTIMATE_RUN_RETRY_MAX permits
+      // runaway retries, and an unbounded base delay compounds through
+      // `retryBaseMs * 2 ** attempt` past setTimeout's ~24.8-day int32 ceiling
+      // (Node clamps an oversized delay to fire immediately, turning "backoff"
+      // into a tight retry loop).
+      const envBound = (name: string, fallback: number, max: number) => {
         const raw = process.env[name]?.trim()
         if (!raw) return fallback
         const parsed = Number(raw)
-        return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
+        return Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, max) : fallback
       }
-      const retryMax = envBound("ALTIMATE_RUN_RETRY_MAX", 3)
-      const retryBaseMs = envBound("ALTIMATE_RUN_RETRY_BASE_MS", 1000)
+      const retryMax = envBound("ALTIMATE_RUN_RETRY_MAX", 3, 20)
+      const retryBaseMs = envBound("ALTIMATE_RUN_RETRY_BASE_MS", 1000, 60_000)
+      // altimate_change end
       const send = () => {
         if (args.command)
           return sdk.session.command({
@@ -1134,6 +1141,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 agent,
                 model: args.model ? Provider.parseModel(args.model) : undefined,
                 variant: args.variant,
+                // altimate_change start — upstream_fix: forward the same audience
+                // directive as the original turns; otherwise a continuing
+                // challenge (model says what remains and keeps working) can drop
+                // back to technical output under --audience executive.
+                ...(audienceSystem ? { system: audienceSystem } : {}),
+                // altimate_change end
                 parts: [
                   { type: "text", text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE },
                 ],
@@ -1165,9 +1178,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
             "IdleDoneChallengeFailed",
             e instanceof Error ? e.message : String(e),
           )
-          challengeAbort.abort()
           return undefined
         })
+        // altimate_change start — upstream_fix: abort was only reached on the
+        // rejection path — the success path (and a `loop()` rejection racing
+        // ahead of it) left this event subscription open indefinitely.
+        // AbortController.abort() is idempotent, so calling it unconditionally
+        // here is safe even after the failure-path abort above.
+        challengeAbort.abort()
+        // altimate_change end
         accounting.onPromptResult(challengeResult?.data?.info)
       }
       // altimate_change end

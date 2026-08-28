@@ -19,7 +19,18 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   // altimate_change start — V2 parity for the fork compaction keys (estimator
   // safety margin, state ledger/summary carry, task pin). Same names as V1 so
   // ConfigMigrateV1 can carry them through without renames.
-  context_safety_fraction: Schema.Number.pipe(Schema.optional),
+  // upstream_fix: Config.load decodes a document authored directly in V2 (not
+  // migrated from V1) through THIS schema, so the V1 bounds on these two
+  // fractions don't apply here — a direct V2 document could carry an
+  // out-of-range value straight through to
+  // SessionCompaction.contextSafetyFraction / pinBudget. Bound identically to
+  // the V1 schema (packages/core/src/v1/config/config.ts).
+  // Math.fround(0.1): Schema.toArbitrary's fast-check generator requires
+  // `.check()` bounds to be exact 32-bit floats; see the matching V1 comment.
+  context_safety_fraction: Schema.Number.check(
+    Schema.isGreaterThanOrEqualTo(Math.fround(0.1)),
+    Schema.isLessThanOrEqualTo(1),
+  ).pipe(Schema.optional),
   state_ledger: Schema.Boolean.pipe(Schema.optional),
   ledger_max_tokens: NonNegativeInt.pipe(Schema.optional),
   ledger_recent_calls: NonNegativeInt.pipe(Schema.optional),
@@ -27,7 +38,9 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   summary_first_person: Schema.Boolean.pipe(Schema.optional),
   pin_task: Schema.Boolean.pipe(Schema.optional),
   pin_max_tokens: NonNegativeInt.pipe(Schema.optional),
-  pin_window_fraction: Schema.Number.pipe(Schema.optional),
+  pin_window_fraction: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(1)).pipe(
+    Schema.optional,
+  ),
   pin_card_max_tokens: NonNegativeInt.pipe(Schema.optional),
   // altimate_change end
 }) {}

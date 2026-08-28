@@ -91,13 +91,23 @@ export namespace SessionStarvation {
     ],
   }
 
+  // altimate_change start — upstream_fix: a configured 0 (commonly meant as
+  // "off") on any of these made the breaker fire on the very first tool call —
+  // `consecutiveIdenticalCalls >= threshold * 3` is true at threshold 0, and a
+  // 0 multiplier zeroes the polling threshold too. Disabling starvation must go
+  // through `mode: "off"` only; clamp everything else to >= 1.
+  function positive(value: number | undefined, fallback: number): number {
+    return typeof value === "number" && Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback
+  }
+  // altimate_change end
+
   export function resolveConfig(cfg: ConfigShape | undefined): ResolvedConfig {
     return {
       mode: cfg?.mode ?? DEFAULTS.mode,
-      maxTurnsWithoutMutation: cfg?.max_turns_without_mutation ?? DEFAULTS.maxTurnsWithoutMutation,
-      repeatSignatureThreshold: cfg?.repeat_signature_threshold ?? DEFAULTS.repeatSignatureThreshold,
-      doomLoopThreshold: cfg?.doom_loop_threshold ?? DEFAULTS.doomLoopThreshold,
-      pollingThresholdMultiplier: cfg?.polling_threshold_multiplier ?? DEFAULTS.pollingThresholdMultiplier,
+      maxTurnsWithoutMutation: positive(cfg?.max_turns_without_mutation, DEFAULTS.maxTurnsWithoutMutation),
+      repeatSignatureThreshold: positive(cfg?.repeat_signature_threshold, DEFAULTS.repeatSignatureThreshold),
+      doomLoopThreshold: positive(cfg?.doom_loop_threshold, DEFAULTS.doomLoopThreshold),
+      pollingThresholdMultiplier: positive(cfg?.polling_threshold_multiplier, DEFAULTS.pollingThresholdMultiplier),
       pollingPattern: cfg?.polling_pattern ?? DEFAULTS.pollingPattern,
       exemptAgents: cfg?.exempt_agents ?? DEFAULTS.exemptAgents,
       generatedPathPatterns: cfg?.generated_path_patterns ?? DEFAULTS.generatedPathPatterns,
@@ -163,13 +173,22 @@ export namespace SessionStarvation {
         return value
       }
       if (seen.has(value)) return "[circular]"
+      // altimate_change start — upstream_fix: track the CURRENT recursion path,
+      // not every object ever visited — a shared (non-circular) reference in a
+      // DAG-shaped input was mislabeled "[circular]" because it stayed in
+      // `seen` after its subtree finished. Remove on the way back out.
       seen.add(value)
-      if (Array.isArray(value)) return value.map(norm)
-      const out: Record<string, unknown> = {}
-      for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-        out[key] = norm((value as Record<string, unknown>)[key])
+      try {
+        if (Array.isArray(value)) return value.map(norm)
+        const out: Record<string, unknown> = {}
+        for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+          out[key] = norm((value as Record<string, unknown>)[key])
+        }
+        return out
+      } finally {
+        seen.delete(value)
       }
-      return out
+      // altimate_change end
     }
     return JSON.stringify(norm(input))
   }

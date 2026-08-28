@@ -260,6 +260,42 @@ describe("session.compaction summarizer integrity (/ item 3)", () => {
     expect(processCalls[0].tools).toEqual({})
   })
 
+  // altimate_change start — upstream_fix regression: PIN_SUMMARY_ADDITION told
+  // the summarizer to skip the task ("it's pinned separately") based only on
+  // pinEnabled(cfg) — but pinBudget can independently return 0 on a small
+  // window, so no pin would actually be injected and the task got dropped
+  // from both places.
+  function summarizerPromptText() {
+    const lastMessage = processCalls[0].messages.at(-1)
+    return lastMessage.content[0].text as string
+  }
+
+  test("PIN_SUMMARY_ADDITION is included when the session's pin budget is positive", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+
+    await run({ sessionID, messages, markerID })
+
+    expect(summarizerPromptText()).toContain(SessionCompaction.PIN_SUMMARY_ADDITION)
+  })
+
+  test("PIN_SUMMARY_ADDITION is omitted when the session's pin budget is zero (tiny window)", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+    const tinyModel = {
+      ...fakeModel,
+      limit: { context: 15_000, output: 1_000 },
+    } as unknown as Provider.Model
+    spyOn(Provider, "getModel").mockImplementationOnce(async () => tinyModel)
+
+    await run({ sessionID, messages, markerID })
+
+    expect(summarizerPromptText()).not.toContain(SessionCompaction.PIN_SUMMARY_ADDITION)
+  })
+  // altimate_change end
+
   test("does not retry when the first attempt produces summary text", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)

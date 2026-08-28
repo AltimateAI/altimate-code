@@ -48,6 +48,16 @@ export namespace RunAccounting {
     const agents = new Map<string, string>()
     let turnCount = 0
     let lastFinishReason: string | undefined
+    // altimate_change start — upstream_fix: onText and onStepFinish are
+    // independently overwritten by whichever message last emitted a text/finish
+    // event. A DONE-bearing message (finish="tool-calls") followed by a
+    // textless message (finish="stop") left `lastTextExplicitDone` stale from
+    // the FIRST message paired with `lastFinishReason` from the SECOND — cross-
+    // message state, not one message's actual outcome. Track whose message each
+    // came from and only trust the pairing when they agree.
+    let lastFinishMessageID: string | undefined
+    let lastTextMessageID: string | undefined
+    // altimate_change end
     let lastTextExplicitDone = false
     let budgetExhausted = false
     let fatalError: { name: string; timeout: boolean } | undefined
@@ -90,10 +100,12 @@ export namespace RunAccounting {
       onStepFinish(messageID: string, reason: string | undefined) {
         if (isCompactionStep(messageID)) return
         lastFinishReason = reason
+        lastFinishMessageID = messageID
       },
       onText(messageID: string, text: string) {
         if (isCompactionStep(messageID)) return
         lastTextExplicitDone = SessionTermination.isExplicitDone(text)
+        lastTextMessageID = messageID
         lastExplicitDoneTurn = lastTextExplicitDone ? turnCount : undefined
       },
       /** the idle-done fallback issued its one-shot confirm-DONE challenge. */
@@ -152,8 +164,14 @@ export namespace RunAccounting {
       },
       /** Dual-attribution fields + done_reason for the run record/output. */
       termination(): Termination {
+        // altimate_change start — upstream_fix: only trust the DONE text when it
+        // came from the SAME message as the finish reason being paired with it —
+        // see the field comment above.
+        const explicitDoneOnFinishMessage =
+          lastTextExplicitDone && lastTextMessageID !== undefined && lastTextMessageID === lastFinishMessageID
+        // altimate_change end
         const model: WhyModelStopped = (() => {
-          if (lastFinishReason === "stop" && lastTextExplicitDone) return "explicit-done"
+          if (lastFinishReason === "stop" && explicitDoneOnFinishMessage) return "explicit-done"
           if (lastFinishReason === "tool-calls" || lastFinishReason === "tool-call") return "tool-call"
           return "stop"
         })()
@@ -162,7 +180,7 @@ export namespace RunAccounting {
         // the idle-done confirm challenge, it is honestly attributed to the
         // heuristic, not to unprompted model completion.
         const done: DoneReason = (() => {
-          if (lastFinishReason !== "stop" || !lastTextExplicitDone) return "none"
+          if (lastFinishReason !== "stop" || !explicitDoneOnFinishMessage) return "none"
           // idle_heuristic only when the DONE landed in the challenge's own
           // generation (the turn it interrupted, or the reply turn right after).
           const challengeScoped =
@@ -194,7 +212,7 @@ export namespace RunAccounting {
   export function serializeSessionError(error: unknown): string {
     if (error === undefined || error === null) return "UnknownError"
     if (typeof error !== "object") return String(error)
-    const obj = error as { name?: unknown; data?: unknown }
+    const obj = error as { name?: unknown; message?: unknown; data?: unknown }
     const name = typeof obj.name === "string" && obj.name.length > 0 ? obj.name : "UnknownError"
     const data = (obj.data && typeof obj.data === "object" ? obj.data : {}) as Record<string, unknown>
     const status =
@@ -203,12 +221,19 @@ export namespace RunAccounting {
         : typeof data.statusCode === "number"
           ? data.statusCode
           : undefined
+    // altimate_change start — upstream_fix: fall back to the top-level `message`
+    // (native `Error.message`, e.g. thrown network/transport failures) when the
+    // nested `data.message` the server-error shape uses is absent — otherwise a
+    // thrown Error serialized to the bare string "Error" loses its message.
     const message =
       typeof data.message === "string" && data.message.length > 0
         ? data.message
-        : data.message !== undefined
-          ? JSON.stringify(data.message)
-          : undefined
+        : typeof obj.message === "string" && obj.message.length > 0
+          ? obj.message
+          : data.message !== undefined
+            ? JSON.stringify(data.message)
+            : undefined
+    // altimate_change end
     const head = status !== undefined ? `${name} (status ${status})` : name
     return message ? `${head}: ${message}` : head
   }

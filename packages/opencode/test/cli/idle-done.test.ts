@@ -166,6 +166,23 @@ describe("IdleDone hard preconditions", () => {
     expect(satisfied().shouldChallenge()).toBe(true)
   })
 
+  // altimate_change start — upstream_fix regression: lastMutationSeq starts at
+  // -1, so a session that never mutated a file (read-only/explore, or one that
+  // only ever ran verify commands) satisfied "verify after last write"
+  // vacuously — there was no completed work for the green verify to confirm.
+  test("(i) NEVER fires when no mutation was ever observed, even with a green verify", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(bashPart("m_verify", "./scripts/verify.sh --all", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    d.observePart(stepFinish("m_idle1"))
+    d.observePart(stepFinish("m_idle2"))
+    d.observePart(stepFinish("m_idle3"))
+    expect(d.shouldChallenge()).toBe(false)
+  })
+  // altimate_change end
+
   test("(iv) NEVER fires in a never-compacted session", () => {
     const d = IdleDone.create(OPTS, deps([]))
     d.observePart(editPart("m1"))
@@ -316,6 +333,11 @@ describe("IdleDone hard preconditions", () => {
 
   test("compaction step-finishes reset the idle streak (idle turns are per-cycle)", () => {
     const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    // A mutation must exist before a green verify can satisfy the
+    // build-after-last-write precondition (i) — this test isolates the
+    // idle-streak-reset behavior, not the mutation precondition itself.
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
     d.observePart(bashPart("m_verify", "make check", 0))
     d.observePart(stepFinish("m_verify"))
     d.observePart(stepFinish("cmp_1"))

@@ -84,14 +84,23 @@ describe("session.llm.toolNamesFromMessages", () => {
 })
 
 // Harness reliability / item 3: stub injection must be skipped entirely when the call
-// exposes zero real tools (e.g. the compaction summarizer) — the provider-compat
-// fallback path for toolChoice "none".
+// exposes zero real tools AND uses the explicit toolChoice "none" no-tool-call
+// contract (e.g. the compaction summarizer) — the provider-compat fallback path.
+// A normal turn that happens to have zero real tools (allowlist/permissions
+// stripped everything) must still get historical stubs so referenced tool_use
+// blocks in history don't trip provider validation.
 describe("session.llm.addHistoricalToolStubs", () => {
-  test("skips stub injection entirely when there are zero real tools", () => {
+  test("skips stub injection when there are zero real tools AND toolChoice is none", () => {
     const tools: Record<string, Tool> = {}
-    const result = LLM.addHistoricalToolStubs(tools, new Set(["bash", "read"]))
+    const result = LLM.addHistoricalToolStubs(tools, new Set(["bash", "read"]), "none")
     expect(result).toBe(tools)
     expect(Object.keys(tools)).toEqual([])
+  })
+
+  test("still injects stubs for zero real tools when toolChoice is not none", () => {
+    const tools: Record<string, Tool> = {}
+    LLM.addHistoricalToolStubs(tools, new Set(["bash", "read"]))
+    expect(Object.keys(tools).sort()).toEqual(["bash", "read"])
   })
 
   test("injects stubs for referenced tools missing from a non-empty tool set", () => {

@@ -27,6 +27,46 @@ function tracker(overrides: Partial<SessionStarvation.ResolvedConfig> = {}) {
   return SessionStarvation.createTracker({ ...cfg, ...overrides })
 }
 
+// altimate_change start — upstream_fix regression tests
+describe("resolveConfig clamps non-positive thresholds to their default", () => {
+  test("doom_loop_threshold: 0 does not immediately trip the breaker on the first call", () => {
+    const resolved = SessionStarvation.resolveConfig({ doom_loop_threshold: 0 })
+    expect(resolved.doomLoopThreshold).toBe(SessionStarvation.resolveConfig(undefined).doomLoopThreshold)
+  })
+
+  test("negative and non-finite values also fall back to the default", () => {
+    expect(SessionStarvation.resolveConfig({ polling_threshold_multiplier: -3 }).pollingThresholdMultiplier).toBe(
+      SessionStarvation.resolveConfig(undefined).pollingThresholdMultiplier,
+    )
+    expect(SessionStarvation.resolveConfig({ max_turns_without_mutation: Number.NaN }).maxTurnsWithoutMutation).toBe(
+      SessionStarvation.resolveConfig(undefined).maxTurnsWithoutMutation,
+    )
+  })
+
+  test("a valid positive override is still honored", () => {
+    expect(SessionStarvation.resolveConfig({ doom_loop_threshold: 7 }).doomLoopThreshold).toBe(7)
+  })
+
+  test("mode: 'off' remains the only way to disable starvation", () => {
+    expect(SessionStarvation.resolveConfig({ mode: "off" }).mode).toBe("off")
+  })
+})
+
+describe("normalizeArgs — shared (non-circular) references are not mislabeled circular", () => {
+  test("a DAG-shaped object (same reference reused, not nested in itself) normalizes both occurrences", () => {
+    const shared = { a: 1 }
+    const result = SessionStarvation.normalizeArgs({ x: shared, y: shared })
+    expect(result).toBe(JSON.stringify({ x: { a: 1 }, y: { a: 1 } }))
+  })
+
+  test("a genuinely circular reference is still caught", () => {
+    const circular: Record<string, unknown> = { a: 1 }
+    circular.self = circular
+    expect(SessionStarvation.normalizeArgs(circular)).toBe(JSON.stringify({ a: 1, self: "[circular]" }))
+  })
+})
+// altimate_change end
+
 describe("config defaults (annotate-only ships by default)", () => {
   test("default mode is annotate — directives and hard consequences are OFF until bench-validated", () => {
     expect(cfg.mode).toBe("annotate")

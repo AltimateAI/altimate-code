@@ -512,7 +512,7 @@ export namespace SessionCompaction {
         const state = part.state
         if (state.status !== "completed" && state.status !== "error") continue
         const errored = state.status === "error"
-        const metadata: Record<string, any> = (state.status === "completed" ? state.metadata : state.metadata) ?? {}
+        const metadata: Record<string, any> = state.metadata ?? {}
         const exit = typeof metadata.exit === "number" || metadata.exit === null ? metadata.exit : undefined
         calls.push({ tool: part.tool, detail: callDetail(state.input), exit, errored })
         if (part.tool === "bash") sawBash = true
@@ -881,6 +881,15 @@ export namespace SessionCompaction {
         await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
       : // altimate_change end
         await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+    // altimate_change start — upstream_fix: the compaction agent may override its
+    // own model (`agent.model` above), but pinBudget must be computed against the
+    // SESSION's model — the pin is re-injected into the session's next turn, not
+    // the compaction agent's. Reuse `model` when they're the same (the common,
+    // no-override case) instead of resolving twice.
+    const sessionModel = agent.model
+      ? await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+      : model
+    // altimate_change end
     // altimate_change start — upstream_fix: restore tail-preserving compaction selection
     const cfg = await Config.get()
     // altimate_change start — state ledger + summary carry wiring
@@ -993,11 +1002,15 @@ When constructing the summary, try to stick to this template:
     if (firstPersonEnabled) promptText += "\n\n" + FIRST_PERSON_REFRAME
     // altimate_change end
     // altimate_change start — when task pinning is
-    // active, tell the summarizer not to burn summary tokens restating the task
-    // (the original task is pinned separately and re-injected after compaction).
-    // Layered as an ADDITION to whichever summary prompt is active — never a
-    // replacement.
-    if (pinEnabled(cfg)) promptText += "\n\n" + PIN_SUMMARY_ADDITION
+    // active AND will actually fit a nonzero budget for the session's model,
+    // tell the summarizer not to burn summary tokens restating the task (the
+    // original task is pinned separately and re-injected after compaction).
+    // pinEnabled(cfg) alone doesn't guarantee a pin: pinBudget can return 0 on a
+    // small-window session, which would otherwise tell the summarizer to omit
+    // the task while no pin exists to compensate. Layered as an ADDITION to
+    // whichever summary prompt is active — never a replacement.
+    if (pinEnabled(cfg) && pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID }) > 0)
+      promptText += "\n\n" + PIN_SUMMARY_ADDITION
     // altimate_change end
     // altimate_change start — summarizer integrity:
     // hoist the summarizer input so a failed attempt can be retried with identical

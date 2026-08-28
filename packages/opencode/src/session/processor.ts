@@ -151,9 +151,14 @@ export namespace SessionProcessor {
         // altimate_change end
         // Nudge arbiter delivery: at most ONE system-authored
         // directive block per injected turn, highest precedence wins. Run-mode-only.
+        // altimate_change start — upstream_fix: never let the compaction summarizer
+        // consume a pending nudge/starvation/doom-loop directive — it can only
+        // produce a summary and cannot act on it, so the real working turn right
+        // after compaction would silently never see the breaker/loop nudge.
         let effectiveStreamInput = streamInput
-        if (runMode) {
+        if (runMode && !input.assistantMessage.summary) {
           const directive = NudgeArbiter.take(input.sessionID)
+          // altimate_change end
           if (directive) {
             // Attribute the injection to the DIRECTIVE that won arbitration,
             // not a hardcoded "nudge" — otherwise every injected doom-loop
@@ -262,9 +267,11 @@ export namespace SessionProcessor {
                   }
                   break
 
-                case "tool-input-start":
+                case "tool-input-start": {
                   // altimate_change start — sanitize the incoming id before it
-                  // becomes the persisted callID and the pairing key.
+                  // becomes the persisted callID and the pairing key. Braced —
+                  // Biome noSwitchDeclarations: these consts must not leak into
+                  // sibling switch clauses.
                   const inputStartCallID = coerceToolCallID(value.id)
                   const part = await Session.updatePart({
                     id: toolcalls.get(inputStartCallID)?.id ?? PartID.ascending(),
@@ -282,6 +289,7 @@ export namespace SessionProcessor {
                   toolcalls.set(inputStartCallID, part as MessageV2.ToolPart)
                   // altimate_change end
                   break
+                }
 
                 case "tool-input-delta":
                   break

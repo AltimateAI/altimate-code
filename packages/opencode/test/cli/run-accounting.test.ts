@@ -167,6 +167,20 @@ describe("RunAccounting.serializeSessionError", () => {
       "MessageOutputLengthError",
     )
   })
+
+  // altimate_change start — upstream_fix regression: a native thrown Error
+  // (e.g. a network/transport failure) has `.message` at the top level, not
+  // nested under `.data`, and previously serialized to the bare error name.
+  test("falls back to the top-level message on a native Error with no data.message", () => {
+    expect(RunAccounting.serializeSessionError(new TypeError("fetch failed"))).toBe("TypeError: fetch failed")
+  })
+
+  test("data.message still wins over the top-level message when both are present", () => {
+    expect(
+      RunAccounting.serializeSessionError({ name: "APIError", message: "generic", data: { message: "specific" } }),
+    ).toBe("APIError: specific")
+  })
+  // altimate_change end
 })
 
 describe("RunAccounting retry classification", () => {
@@ -281,6 +295,26 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     expect(t.done_reason).toBe("explicit_done")
     expect(t.why_harness_stopped).toBe("none")
   })
+
+  // altimate_change start — upstream_fix regression: onText/onStepFinish are
+  // independently overwritten by whichever message last fired each event. A
+  // DONE-bearing message that finishes "tool-calls" followed by a textless
+  // message that finishes "stop" must NOT pair the stale DONE flag from the
+  // FIRST message with the finish reason of the SECOND.
+  test("stale DONE from a tool-calls message is not paired with a later textless stop", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onStepStart("m1")
+    acc.onText("m1", "Wrapping up.\nDONE")
+    acc.onStepFinish("m1", "tool-calls")
+    acc.onAssistantMessage({ id: "m2", agent: "build" })
+    acc.onStepStart("m2")
+    acc.onStepFinish("m2", "stop") // no onText for m2 — no text part at all
+    const t = acc.termination()
+    expect(t.done_reason).toBe("none")
+    expect(t.why_model_stopped).toBe("stop")
+  })
+  // altimate_change end
 
   test("only ONE harness abort is forgiven per challenge — a second abort is fatal", () => {
     const acc = RunAccounting.create()

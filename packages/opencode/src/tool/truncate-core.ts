@@ -7,8 +7,6 @@
 // future change to truncation behavior cannot silently apply on one call path
 // and not the other, the way the pre-existing hand-duplicated implementations
 // could.
-export * as TruncateCore from "./truncate-core"
-
 export const MAX_LINES = 2000
 export const MAX_BYTES = 50 * 1024
 
@@ -149,3 +147,5 @@ export function assemble(p: Preview, hint: string, direction: Direction): string
   if (direction === "middle") return `${p.head}\n\n${marker}\n\n${hint}\n\n${p.tail}`
   return `${p.head}\n\n${marker}\n\n${hint}`
 }
+
+export * as TruncateCore from "./truncate-core"

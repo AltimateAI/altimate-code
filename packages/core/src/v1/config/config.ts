@@ -176,8 +176,14 @@ export const Info = Schema.Struct({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
       // altimate_change start — estimator safety margin
+      // upstream_fix: Schema.toArbitrary's fast-check generator requires
+      // `.check()` bounds to be exact 32-bit floats (fc.float's `min`/`max`
+      // constraints); 0.1 is not exactly float32-representable and made the
+      // property-based V1→V2 migration fuzz test below throw on every run.
+      // Math.fround(0.1) is float32-safe and differs from 0.1 by ~1.5e-10 —
+      // immaterial to the intended "roughly 0.1 minimum" bound.
       context_safety_fraction: Schema.optional(
-        Schema.Number.check(Schema.isGreaterThanOrEqualTo(0.1), Schema.isLessThanOrEqualTo(1)),
+        Schema.Number.check(Schema.isGreaterThanOrEqualTo(Math.fround(0.1)), Schema.isLessThanOrEqualTo(1)),
       ).annotate({
         description:
           "Fraction of the declared context limit treated as usable when estimated token counts are compared against it for compaction/overflow decisions (default: 0.65 — chars-based estimates can substantially undercount dense SQL/JSON, and compaction must trigger with enough margin that a worst-case underestimate still fits). Env override: ALTIMATE_CONTEXT_SAFETY_FRACTION. Clamped to [0.1, 1].",
@@ -214,10 +220,16 @@ export const Info = Schema.Struct({
         description:
           "Hard token cap for the pinned original task (default: 4096 — effective cap is min(4k, pin_window_fraction of the post-overhead usable window); larger tasks keep verbatim head+tail plus a contract card of extracted literals)",
       }),
-      pin_window_fraction: Schema.optional(Schema.Number).annotate({
+      // altimate_change start — bound like the sibling context_safety_fraction: an
+      // out-of-range fraction (typo, negative, > 1) must be rejected at the config
+      // boundary rather than silently mis-sizing the pin.
+      pin_window_fraction: Schema.optional(
+        Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(1)),
+      ).annotate({
         description:
-          "Fraction of the post-overhead usable context window the pinned task may occupy (default: 0.175 — the pin must stay a small minority of the window so working context dominates)",
+          "Fraction of the post-overhead usable context window the pinned task may occupy (default: 0.175 — the pin must stay a small minority of the window so working context dominates). Clamped to [0, 1].",
       }),
+      // altimate_change end
       pin_card_max_tokens: Schema.optional(NonNegativeInt).annotate({
         description:
           "Token cap for the contract card of regex-extracted task literals appended when the pinned task exceeds its cap (default: 500)",

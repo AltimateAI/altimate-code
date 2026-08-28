@@ -222,9 +222,9 @@ declare a task complete, ALWAYS:
    column names, exact file paths. Diff them against what you actually wrote.
    Your naming preferences never override the stated contract, even when your
    names are "better".
-2. **Run the final build and tests** (e.g. `dbt build`) so the compiled
-   manifest reflects every model you created or changed. Work that exists only
-   as an un-built SQL file does not count as done.
+2. **Run the final build and tests** with `altimate-dbt build` (no `--model`
+   flag) so the compiled manifest reflects every model you created or changed.
+   Work that exists only as an un-built SQL file does not count as done.
 3. **If you are running low on turns or context**, stop exploring and commit:
    write the change, build, verify. A completed adequate solution beats an
    unfinished perfect one.
