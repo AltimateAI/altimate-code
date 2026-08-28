@@ -285,7 +285,10 @@ export namespace SessionCompaction {
       // rejected by providers with a 400, defeating the fallback entirely.
       let cut = step
       while (cut < head.length && head[cut]!.info.role !== "user") cut++
-      if (cut >= head.length) cut = step
+      // No user boundary to cut at: fail closed with the current (still
+      // user-leading) head rather than slice mid-turn — an assistant/tool-leading
+      // head is rejected by providers with a 400, defeating the fallback.
+      if (cut >= head.length) break
       head = head.slice(cut)
       dropped += cut
     }

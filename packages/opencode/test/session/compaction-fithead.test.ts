@@ -25,6 +25,27 @@ function userMessage(id: string, text: string): MessageV2.WithParts {
   } as unknown as MessageV2.WithParts
 }
 
+function assistantMessage(id: string, text: string): MessageV2.WithParts {
+  return {
+    info: {
+      id,
+      sessionID: "session-1",
+      role: "assistant",
+      time: { created: 1000 },
+      model: { providerID: "local", modelID: "local-test-model" },
+    },
+    parts: [
+      {
+        id: `${id}-part`,
+        sessionID: "session-1",
+        messageID: id,
+        type: "text",
+        text,
+      },
+    ],
+  } as unknown as MessageV2.WithParts
+}
+
 function model(context: number, output = 16384): Provider.Model {
   return {
     id: "local-test-model",
@@ -65,6 +86,32 @@ describe("SessionCompaction.fitHead", () => {
     // At fraction 1 the same head fits the raw window untrimmed.
     const raw = await SessionCompaction.fitHead({ head, model: model(32768, 8192), fraction: 1 })
     expect(raw.dropped).toBe(0)
+  })
+
+  test("cuts only at user boundaries — a single-leading-user head fails closed", async () => {
+    // One user turn followed by only assistant messages, far over budget.
+    // There is no later user boundary to cut at; the fallback must NOT slice
+    // mid-turn (an assistant-leading head draws a provider 400) — it returns
+    // the head unchanged, still led by the user message.
+    const head = [
+      userMessage("m0", "x".repeat(20_000)),
+      ...Array.from({ length: 15 }, (_, i) => assistantMessage(`a${i}`, "x".repeat(20_000))),
+    ]
+    const result = await SessionCompaction.fitHead({ head, model: model(32768, 8192) })
+    expect(result.dropped).toBe(0)
+    expect(result.head[0]!.info.role).toBe("user")
+    expect(result.head.length).toBe(16)
+  })
+
+  test("cut rounds forward to the next user boundary, never mid-turn", async () => {
+    // Alternating user/assistant turns over budget: every survivor head must
+    // start with a user message.
+    const head = Array.from({ length: 20 }, (_, i) =>
+      i % 2 === 0 ? userMessage(`m${i}`, "x".repeat(20_000)) : assistantMessage(`a${i}`, "x".repeat(20_000)),
+    )
+    const result = await SessionCompaction.fitHead({ head, model: model(32768, 8192) })
+    expect(result.dropped).toBeGreaterThan(0)
+    expect(result.head[0]!.info.role).toBe("user")
   })
 
   test("zero-context models pass through unchanged", async () => {
