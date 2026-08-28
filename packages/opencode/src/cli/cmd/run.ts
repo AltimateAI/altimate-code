@@ -998,17 +998,20 @@ You are speaking to a non-technical business executive. Follow these rules stric
         tracer?.flushSync("Process interrupted")
         process.exit(143)
       }
+      // altimate_change start — honest rc on fatal abort. beforeExit firing
+      // before the run finishes means the event loop drained before the run
+      // completed — the prompt/event stream was abandoned (observed: a
+      // mid-stream provider failure tears everything down and the process used
+      // to die here with rc 0). The flag (not just listener removal) makes the
+      // outcome sticky in the right direction: a spurious firing during an
+      // event-loop gap on a run that later completes must not poison the rc —
+      // the success path sets runFinished and restores exitCode explicitly.
+      let runFinished = false
       const onBeforeExit = () => {
         tracer?.flushSync("Process exited")
-        // altimate_change start — honest rc on fatal abort. beforeExit firing
-        // while this handler is still registered means the event loop drained before
-        // the run completed — the prompt/event stream was abandoned (observed: a
-        // mid-stream provider failure tears everything down and the process used to
-        // die here with rc 0). The handler is removed once the run loop drains
-        // normally, so completed runs are unaffected.
-        process.exitCode = 1
-        // altimate_change end
+        if (!runFinished) process.exitCode = 1
       }
+      // altimate_change end
       process.on("SIGINT", onSigint)
       process.on("SIGTERM", onSigterm)
       process.on("beforeExit", onBeforeExit)
@@ -1170,6 +1173,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
 
       // Remove crash handlers — trace will be finalized cleanly
+      // altimate_change start — the run loop drained normally: mark the run
+      // finished and clear any exit code a premature beforeExit firing set.
+      // accounting.fatal below remains the single authority for a nonzero rc.
+      runFinished = true
+      process.exitCode = 0
+      // altimate_change end
       process.removeListener("SIGINT", onSigint)
       process.removeListener("SIGTERM", onSigterm)
       process.removeListener("beforeExit", onBeforeExit)
