@@ -11,8 +11,12 @@ import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./eng
 export const log = Log.create({ service: "workspace-engine" })
 
 /** Test seams. Production leaves every field unset. */
+/** A binding plus the credential scope it was read under (`tenant|apiUrl`).
+ * Absent when the scope could not be resolved. */
+export type ScopedBinding = CachedBinding & { scope?: string }
+
 export const syncInternals: {
-  resolveBinding?: (directory: string) => Promise<CachedBinding | null>
+  resolveBinding?: (directory: string) => Promise<ScopedBinding | null>
   which?: (cmd: string) => string | null
   versionOf?: (bin: string) => Promise<string | null>
   declared?: (workspaceId: string) => Promise<Declared | null>

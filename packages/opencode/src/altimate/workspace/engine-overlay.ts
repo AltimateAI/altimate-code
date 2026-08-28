@@ -26,7 +26,15 @@
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { MCP } from "@/mcp"
 import { Config } from "@/config/config"
-import { currentDirectory, isEnabled, isHeadless, isServe, log, syncInternals } from "./engine-seams"
+import {
+  currentDirectory,
+  isEnabled,
+  isHeadless,
+  isServe,
+  log,
+  syncInternals,
+  type ScopedBinding,
+} from "./engine-seams"
 import { declaredBounded, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
 import {
   ENGINE_BINARY,
@@ -95,7 +103,10 @@ export function invalidateProbe(): void {
 
 type Overlay = {
   directory: string
-  workspace: { id: string; name: string }
+  /** `key` is the workspace's identity across accounts — ids are tenant-local,
+   * so the same number in another tenant is another workspace, and a session
+   * that switched accounts must not keep the old one's engine or inventory. */
+  workspace: { id: string; name: string; key: string }
   /** The derived entry, or null when the engine is unusable. */
   entry: LocalMcpConfig | null
   refusal: Extract<Outcome, { kind: "engine-missing" | "engine-too-old" }> | null
@@ -138,6 +149,12 @@ function stateFor(directory: string): DirectoryState {
   return state
 }
 
+/** Identity of the workspace a binding names: the credential scope it was
+ * read under plus the tenant-local id. */
+function workspaceKey(binding: ScopedBinding): string {
+  return `${binding.scope ?? ""}|${binding.datamateId}`
+}
+
 function sameEntry(a: LocalMcpConfig | null, b: LocalMcpConfig | null): boolean {
   return !!a && !!b && a.command.join("\0") === b.command.join("\0")
 }
@@ -176,7 +193,11 @@ export async function overlay(
       state.current = null
       return
     }
-    const workspace = { id: String(binding.datamateId), name: binding.datamateName }
+    const workspace = {
+      id: String(binding.datamateId),
+      name: binding.datamateName,
+      key: workspaceKey(binding),
+    }
     const probe = await probeEngine()
     if (probe.kind === "ok") {
       const entry = engineEntry(workspace.id)
@@ -213,7 +234,8 @@ export async function overlay(
  * the key and say why, instead of replacing the engine underneath a turn. */
 export function managedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
   if (!directory) return null
-  return directories.get(directory)?.current?.workspace ?? null
+  const workspace = directories.get(directory)?.current?.workspace
+  return workspace ? { id: workspace.id, name: workspace.name } : null
 }
 
 /** `managedWorkspace` once the overlay has run for this instance. The overlay
@@ -287,11 +309,13 @@ async function releaseKey(loaded: { mcp?: Record<string, unknown> } | undefined,
   }
 }
 
-async function declaredFor(workspaceId: string): Promise<Declared | null> {
-  const cached = declaredCache.get(workspaceId)
+async function declaredFor(workspace: { id: string; key: string }): Promise<Declared | null> {
+  // Cached per workspace identity, not per id: the same id in another tenant
+  // is another allowlist.
+  const cached = declaredCache.get(workspace.key)
   if (cached && (cached.value || now() - cached.at < DECLARED_RETRY_MS)) return cached.value
-  const value = await declaredBounded(workspaceId)
-  declaredCache.set(workspaceId, { value, at: now() })
+  const value = await declaredBounded(workspace.id)
+  declaredCache.set(workspace.key, { value, at: now() })
   return value
 }
 
@@ -389,12 +413,13 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     record(sessionID, { kind: "unbound" })
     return
   }
-  const workspaceId = String(binding.datamateId)
+  const boundKey = workspaceKey(binding)
 
-  // Reload the overlay when the binding moved, or when a refused engine may
-  // have appeared since (the probe memo bounds how often that is asked).
+  // Reload the overlay when the binding moved — to another workspace, or the
+  // same id under another account — or when a refused engine may have
+  // appeared since (the probe memo bounds how often that is asked).
   let reload = state.current
-    ? state.current.workspace.id !== workspaceId
+    ? state.current.workspace.key !== boundKey
     : state.failedAt === undefined || now() - state.failedAt >= FAILED_PROBE_TTL_MS
   if (!reload && state.current && !state.current.entry) {
     const probe = await probeEngine()
@@ -410,17 +435,21 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // last applied for this same workspace: a running engine is not released
   // over a fault in the probe. After a relink nothing is kept — workspace A's
   // engine must not serve a directory now bound to B.
-  const retained = state.failedAt !== undefined && state.applied?.workspace.id === workspaceId ? state.applied : null
+  const retained = state.failedAt !== undefined && state.applied?.workspace.key === boundKey ? state.applied : null
   const overlayNow = state.current ?? retained
   if (!overlayNow) {
-    if (state.applied) await releaseKey(loaded, !!state.applied.entry)
-    state.applied = null
     if (state.failedAt === undefined) {
+      if (state.applied) await releaseKey(loaded, !!state.applied.entry)
+      state.applied = null
       record(sessionID, { kind: "unbound" })
       return
     }
-    // Bound, but the overlay could not be derived: say so, once, rather than
-    // settling a bound directory as unbound in silence.
+    // Bound, but the overlay could not be derived. Whatever runs under the key
+    // is dropped and nothing is handed back: the reloaded config may carry a
+    // raw IDE or hosted entry, and that must not answer for this workspace.
+    if (state.applied?.entry || DATAMATE_KEY in (await mcp().status())) await mcp().remove(DATAMATE_KEY)
+    state.applied = null
+    // Say so, once, rather than settling a bound directory as unbound in silence.
     const outcome: Outcome = { kind: "connect-failed", error: "the workspace engine could not be checked" }
     record(sessionID, outcome)
     await announceRefusal(sessionID, outcome, {
@@ -435,7 +464,12 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // Bring MCP in line with the overlay: start or replace the engine when the
   // derived entry changed, drop it when there is none any more.
   if (overlayNow.entry) {
-    if (!sameEntry(state.applied?.entry ?? null, overlayNow.entry)) await mcp().add(DATAMATE_KEY, overlayNow.entry)
+    // The argv is the same for the same id in another tenant; the engine
+    // reads its credentials when it starts, so it is replaced on identity, not
+    // only on argv.
+    const replaced =
+      !sameEntry(state.applied?.entry ?? null, overlayNow.entry) || state.applied?.workspace.key !== workspace.key
+    if (replaced) await mcp().add(DATAMATE_KEY, overlayNow.entry)
   } else if (state.applied?.entry || DATAMATE_KEY in (await mcp().status())) {
     // Ours to drop — or a client that predates the link, which MCP bootstrapped
     // from an IDE or hosted entry while the directory was unbound. With the
@@ -447,7 +481,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   if (!overlayNow.entry) {
     const refusal = overlayNow.refusal ?? { kind: "engine-missing" as const }
     if (refusal.kind === "engine-missing") {
-      const declared = await declaredFor(workspace.id)
+      const declared = await declaredFor(workspace)
       const count = declared?.keys.length
       const outcome: Outcome =
         count === undefined ? { kind: "engine-missing" } : { kind: "engine-missing", declared: count }
@@ -474,7 +508,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 
   // The engine is configured. The first status call boots MCP, which awaits
   // the engine's handshake; the allowlist lookup overlaps with it.
-  const [statusMap, declared] = await Promise.all([mcp().status(), declaredFor(workspace.id)])
+  const [statusMap, declared] = await Promise.all([mcp().status(), declaredFor(workspace)])
   let status = statusMap[DATAMATE_KEY]
   const session = sessions.get(sessionID)
   if (status?.status !== "connected" && !session?.retried) {

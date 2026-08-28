@@ -25,18 +25,18 @@ import {
   type McpEntry,
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
-import type { CachedBinding } from "../../../src/altimate/workspace/state"
+import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
 const DIR = "/tmp/analytics"
 const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
 
-const bound = (id: number, name = "analytics"): CachedBinding =>
-  ({ datamateId: id, datamateName: name, repoRemote: null, projectPath: DIR, linkedAt: 0 }) as CachedBinding
+const bound = (id: number, name = "analytics", scope = "acme|https://api.acme.example"): ScopedBinding =>
+  ({ datamateId: id, datamateName: name, repoRemote: null, projectPath: DIR, linkedAt: 0, scope }) as ScopedBinding
 
 type Harness = {
   config: { mcp?: Record<string, unknown> }
-  binding: CachedBinding | null
+  binding: ScopedBinding | null
   which: string | null
   version: string | null
   status: string
@@ -60,7 +60,7 @@ function install(opts: {
   flag?: boolean
   serve?: boolean
   headless?: boolean
-  binding?: CachedBinding | null
+  binding?: ScopedBinding | null
   which?: string | null
   version?: string | null
   declared?: Declared | null
@@ -396,7 +396,7 @@ describe("beforeTurn — what a turn boundary does", () => {
   test("overlay state is kept per directory, so one process can host two bound projects", async () => {
     const DIR_B = "/tmp/growth"
     const h = install({})
-    const bindings: Record<string, CachedBinding> = { [DIR]: bound(42), [DIR_B]: bound(7, "growth") }
+    const bindings: Record<string, ScopedBinding> = { [DIR]: bound(42), [DIR_B]: bound(7, "growth") }
     syncInternals.resolveBinding = async (directory) => bindings[directory] ?? null
     const configA: { mcp?: Record<string, unknown> } = { mcp: {} }
     const configB: { mcp?: Record<string, unknown> } = { mcp: {} }
@@ -535,9 +535,36 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 
-  test("a relink whose overlay then fails releases the old workspace's engine and says so", async () => {
-    // Workspace A's engine may not go on serving a directory now bound to B.
+  test("the same workspace id under another account is another workspace: engine and inventory replaced", async () => {
+    // Ids are tenant-local. After an account switch the directory may be bound
+    // to "workspace 42" of the new tenant; the engine started under the old
+    // credentials and the old allowlist must not be kept.
     const h = install({})
+    let lookups = 0
+    const inner = syncInternals.declared!
+    syncInternals.declared = async (id) => {
+      lookups += 1
+      return inner(id)
+    }
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    expect(h.added).toHaveLength(0)
+    expect(lookups).toBe(1)
+    h.binding = bound(42, "analytics", "globex|https://api.globex.example")
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    expect(h.added).toHaveLength(1)
+    expect(lookups).toBe(2)
+    // Same account, same workspace: nothing is replaced.
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+    expect(lookups).toBe(2)
+  })
+
+  test("a relink whose overlay then fails releases the old workspace's engine and says so", async () => {
+    // Workspace A's engine may not go on serving a directory now bound to B —
+    // and neither may the IDE entry the reloaded config still carries.
+    const h = install({ mcp: { datamate: IDE_ENTRY } })
     await beforeTurn("s1")
     expect(settledOutcome("s1")?.kind).toBe("attached")
     h.binding = bound(43, "ops")

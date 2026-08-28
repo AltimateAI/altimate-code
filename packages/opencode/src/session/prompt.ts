@@ -2974,6 +2974,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
 
         const model = await lastModel(input.sessionID)
+        // The workspace-managed `datamate` key is derived per process: this
+        // command must not close or restart that engine, nor persist `enabled`
+        // for it. Asked before the config check — a refused engine has no
+        // config entry at all, and "not found" would be the wrong answer.
+        const managed = name === DATAMATE_KEY ? await WorkspaceEngine.managedWorkspaceLoaded() : null
+        if (managed) {
+          return respond(
+            userMsg.info.id,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage it by hand.`,
+            model,
+          )
+        }
         // MCP.connect/disconnect on an unknown name logs and returns silently, so
         // validate against config first and give the user a clear signal on a typo.
         const cfg = await Config.get()
@@ -2983,18 +2995,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           return respond(
             userMsg.info.id,
             `MCP server **${name}** not found in config.${suffix}`,
-            model,
-          )
-        }
-
-        // The workspace-managed `datamate` key is derived per process: this
-        // command must not close or restart that engine, nor persist `enabled`
-        // for it. Same refusal as the HTTP routes, in the command's own reply.
-        const managed = name === DATAMATE_KEY ? await WorkspaceEngine.managedWorkspaceLoaded() : null
-        if (managed) {
-          return respond(
-            userMsg.info.id,
-            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage it by hand.`,
             model,
           )
         }

@@ -163,6 +163,13 @@ function canonicalizeKey(directory: string): string {
   }
 }
 
+/** The (tenant, apiUrl) the current credentials name — the scope every
+ * binding lives in. Workspace ids are tenant-local, so anything that keys on
+ * a workspace across an account switch needs this alongside the id. */
+export async function credentialScope(): Promise<{ tenant: string; apiUrl: string } | null> {
+  return tenantKey()
+}
+
 async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
   // Best-effort: ``AltimateApi.getCredentials`` can throw ``SyntaxError`` on
   // a corrupt credentials JSON, ``ZodError`` on schema drift, or a raw
