@@ -41,6 +41,22 @@ describe("SessionTermination.isExplicitDone", () => {
     expect(SessionTermination.isExplicitDone("```\nbuild ok\n```\nDONE")).toBe(true)
   })
 
+  test("fence state tracks marker character and length (CommonMark), not parity", () => {
+    // A ``` line inside an unclosed ````-fence is content, not a closer —
+    // the trailing DONE is still quoted material.
+    expect(SessionTermination.isExplicitDone("Here is the doc:\n````\n```\nDONE")).toBe(false)
+    // A ~~~ line that is content of a closed ``` block is not a fence —
+    // the final plaintext DONE is a real assertion.
+    expect(SessionTermination.isExplicitDone("```\n~~~\n```\nDONE")).toBe(true)
+    // A shorter same-character run inside an open fence does not close it.
+    expect(SessionTermination.isExplicitDone("`````\n```\n`````\nDONE")).toBe(true)
+    // A longer same-character run closes a shorter opener.
+    expect(SessionTermination.isExplicitDone("```\ncode\n`````\nDONE")).toBe(true)
+    // Tilde fences follow the same rules.
+    expect(SessionTermination.isExplicitDone("~~~~\n~~~\nDONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("~~~\n```\n~~~\nDONE")).toBe(true)
+  })
+
   test("quoted and indented-code DONE never terminates", () => {
     expect(SessionTermination.isExplicitDone("The instructions said:\n> DONE")).toBe(false)
     expect(SessionTermination.isExplicitDone("Example:\n    DONE")).toBe(false)

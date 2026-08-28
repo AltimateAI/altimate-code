@@ -31,7 +31,7 @@ export namespace SessionTermination {
   // fence, not markdown-indented code (>= 4 leading spaces or a tab), not a
   // `>` quote, not wrapped in backticks or other markup, no punctuation.
   // Case-sensitive so prose "done" never counts.
-  const CODE_FENCE_PATTERN = /^\s{0,3}(```|~~~)/
+  const CODE_FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/
 
   /** True when the text ends with an explicit completion assertion (see module header). */
   export function isExplicitDone(text: string): boolean {
@@ -42,11 +42,23 @@ export namespace SessionTermination {
     if (/^(?: {4,}|\t)/.test(last)) return false
     // Up to 3 leading spaces is plain text in Markdown; anything else must match exactly.
     if (last.replace(/^ {0,3}/, "") !== DONE_TOKEN) return false
-    // Reject a final line inside an unclosed code fence (odd number of fence
-    // delimiters before it) — the block's content is quoted material, not an assertion.
-    let fences = 0
-    for (let i = 0; i < lines.length - 1; i++) if (CODE_FENCE_PATTERN.test(lines[i]!)) fences++
-    return fences % 2 === 0
+    // Reject a final line inside an unclosed code fence — the block's content is
+    // quoted material, not an assertion. Fence state follows CommonMark: a fence
+    // opens with a run of >= 3 backticks or tildes; only a run of the SAME
+    // character with at least the SAME length closes it. Any other fence-looking
+    // line inside an open fence (other marker, or a shorter run) is content.
+    let open: { char: string; length: number } | undefined
+    for (let i = 0; i < lines.length - 1; i++) {
+      const match = CODE_FENCE_PATTERN.exec(lines[i]!)
+      if (!match) continue
+      const marker = match[1]!
+      if (!open) {
+        open = { char: marker[0]!, length: marker.length }
+      } else if (marker[0] === open.char && marker.length >= open.length) {
+        open = undefined
+      }
+    }
+    return open === undefined
   }
 
   /**
