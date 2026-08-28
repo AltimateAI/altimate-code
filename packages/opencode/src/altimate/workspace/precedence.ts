@@ -302,9 +302,14 @@ async function attributedTo(expected: string): Promise<string | null> {
     // when the cached answer is about to enable, and leave the refusing path cheap
     // rather than re-reading all config on every turn.
     if (cached !== expected) return cached
-    await Config.invalidate().catch((err) => {
+    try {
+      await Config.invalidate()
+    } catch (err) {
+      // A pin we could not re-confirm against disk must refuse, not enable: this is
+      // the one direction the comment above calls dangerous.
       log.warn("could not invalidate the config cache before attributing the engine", { err: String(err) })
-    })
+      return null
+    }
     return await read()
   } catch (err) {
     log.warn("could not read MCP config for engine attribution", { err: String(err) })
@@ -443,6 +448,7 @@ export function resetForTests(): void {
   delete precedenceInternals.announce
   delete precedenceInternals.binding
   delete precedenceInternals.attributedTo
+  delete precedenceInternals.attachOutcome
 }
 
 export interface RedirectResult {
@@ -544,6 +550,27 @@ function redirectFor(
  * the handler itself would resolve it (see `resolveDefaultTarget`).
  */
 export async function check(sessionID: string, capability: Capability, warehouse?: string): Promise<Verdict> {
+  // All three SQL tool bodies call this before their own try blocks, and the body
+  // below lazily imports the tool layer — a throw here must fail open with a stated
+  // reason, not take out sql_execute, sql_explain and schema_inspect together.
+  try {
+    return await checkUnsafe(sessionID, capability, warehouse)
+  } catch (err) {
+    log.warn("precedence check failed; running locally with an undetermined marker", {
+      sessionID,
+      capability,
+      err: String(err),
+    })
+    return {
+      notice:
+        "Not routed through the bound workspace: the routing decision failed to " +
+        "compute for this call, so it ran locally.",
+      precedence: "undetermined",
+    }
+  }
+}
+
+async function checkUnsafe(sessionID: string, capability: Capability, warehouse?: string): Promise<Verdict> {
   const precedence = bySession.get(sessionID)
   if (!precedence) {
     // No snapshot for this session. The resolver derives one every turn, so this is
@@ -556,7 +583,21 @@ export async function check(sessionID: string, capability: Capability, warehouse
       precedence: "undetermined",
     }
   }
-  if (!precedence.enabled) return RUN
+  if (!precedence.enabled) {
+    // Deliberate disablement (pilot-off, escape-hatch, unbound, nothing-materialised)
+    // runs silently by design. Uncertainty must say so: an engine that could not be
+    // attributed means the routing decision is unknown, and unknown runs locally
+    // WITH a stated reason (Claim 1) — a toast is UI, not the correctness channel.
+    if (precedence.disabledReason === "unattributed") {
+      return {
+        notice:
+          "Not routed through the bound workspace: the local engine could not be " +
+          "attributed to it for this turn, so no routing decision was available.",
+        precedence: "undetermined",
+      }
+    }
+    return RUN
+  }
 
   // Re-linking mid-session is supported, so this snapshot can name a workspace the
   // project has since left — and a redirect naming it would send the call to that
@@ -573,7 +614,18 @@ export async function check(sessionID: string, capability: Capability, warehouse
 
   if (warehouse) {
     const type = canonicalType(Registry.getConfig(warehouse)?.type)
-    if (!type) return RUN
+    if (!type) {
+      // The named connection's configured type does not canonicalise, so whether the
+      // engine serves it is unknowable — same treatment as the default-target path,
+      // which reports exactly this condition instead of running silently.
+      return {
+        notice:
+          `Not routed through workspace "${precedence.workspaceName}": connection ` +
+          `"${warehouse}"'s configured type is not recognised, so no routing decision ` +
+          `was available for it.`,
+        precedence: "undetermined",
+      }
+    }
     const entry = precedence.shadowed.get(type)?.get(capability)
     if (!entry) return RUN
     if (!reachable(precedence, entry.modelKey)) return unreachable(precedence.workspaceName, entry.modelKey)

@@ -471,8 +471,9 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
     // `tryExecuteViaDbt` awaits, and the registry is mutable: re-reading it afterwards
     // could pick a different connection than the one the caller's routing decision was
     // computed against (a concurrent `warehouse.add` can change which name sorts first).
-    // Reading once here makes the decided connection and the executed connection the
-    // same by construction. The dbt-first ordering below is unchanged.
+    // Reading once here pins the fallback across the dbt await. It narrows, not
+    // closes, the decision/execution window: `Precedence.check()` reads the registry
+    // independently before this handler runs. The dbt-first ordering is unchanged.
     const fallbackName = params.warehouse || Registry.list().warehouses[0]?.name
     // Pinning the name is not enough on its own: the same name can be re-added against a
     // different warehouse while this call is suspended, and the routing decision made for

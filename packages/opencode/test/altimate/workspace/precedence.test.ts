@@ -158,6 +158,23 @@ describe("attribution is grounded in the attach, not only the saved config", () 
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     const verdict = await check(SESSION, "sql_execute", "local_snow")
     expect(verdict.redirect).toBeUndefined()
+    // Uncertainty is never silent: the result itself carries the reason and the
+    // undetermined marker — a toast is UI, not the correctness channel.
+    expect(verdict.notice).toContain("could not be attributed")
+    expect(verdict.precedence).toBe("undetermined")
+  })
+
+  test("a throw inside the decision fails open with a stated reason", async () => {
+    // beforeEach's bindTo() gives an enabled snapshot; refresh first, then poison the
+    // binding read that check()'s re-link guard performs mid-decision.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    precedenceInternals.binding = async () => {
+      throw new Error("boom")
+    }
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.notice).toContain("failed to compute")
+    expect(verdict.precedence).toBe("undetermined")
   })
 
   test("only an established attach qualifies — every other outcome is refused", async () => {
