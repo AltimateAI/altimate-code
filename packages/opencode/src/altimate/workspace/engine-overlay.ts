@@ -234,7 +234,11 @@ export async function overlay(
  * the key and say why, instead of replacing the engine underneath a turn. */
 export function managedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
   if (!directory) return null
-  const workspace = directories.get(directory)?.current?.workspace
+  const state = directories.get(directory)
+  // While a transient overlay failure is being retried, the turn boundary
+  // keeps the applied engine running; the key stays owned for that long too,
+  // or a writer could replace the very engine the sessions are still using.
+  const workspace = state?.current?.workspace ?? (state?.failedAt !== undefined ? state.applied?.workspace : undefined)
   return workspace ? { id: workspace.id, name: workspace.name } : null
 }
 
@@ -549,7 +553,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   const rec = record(sessionID, outcome)
   // Keyed on the workspace too: a re-link with an identical inventory is still
   // a new verdict the user should hear.
-  const signature = `attached:${workspace.id}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}`
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}`
   if (rec.announced === signature) return
   rec.announced = signature
   log.info("workspace engine attached", {

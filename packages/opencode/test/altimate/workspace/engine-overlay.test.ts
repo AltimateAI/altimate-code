@@ -523,8 +523,10 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.removes).toBe(0)
     expect(h.added).toHaveLength(0)
     expect(settledOutcome("s1")?.kind).toBe("attached")
-    // The fault was real: the overlay is gone until its retry, the engine is not.
+    // The fault was real: the overlay is gone until its retry, the engine is not
+    // — and the key stays owned while that engine is still the one in use.
     expect(overlayForTests()).toBeNull()
+    expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
     // The fault clears and the TTL passes: still the same engine, not a second one.
     h.which = "/usr/local/bin/datamate"
     syncInternals.which = () => h.which
@@ -550,11 +552,14 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(settledOutcome("s1")?.kind).toBe("attached")
     expect(h.added).toHaveLength(0)
     expect(lookups).toBe(1)
+    const toastsBefore = h.toasts.length
     h.binding = bound(42, "analytics", "globex|https://api.globex.example")
     await beforeTurn("s1")
     expect(settledOutcome("s1")?.kind).toBe("attached")
     expect(h.added).toHaveLength(1)
     expect(lookups).toBe(2)
+    // A new workspace's attachment is announced even with identical counts.
+    expect(h.toasts.length).toBe(toastsBefore + 1)
     // Same account, same workspace: nothing is replaced.
     await beforeTurn("s1")
     expect(h.added).toHaveLength(1)

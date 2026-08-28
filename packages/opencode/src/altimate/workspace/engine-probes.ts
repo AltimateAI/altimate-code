@@ -8,7 +8,7 @@ import { AltimateApi } from "@/altimate/api/client"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
-import { credentialScope, readLocalBinding } from "./state"
+import { readLocalBindingScoped } from "./state"
 import { log, syncInternals, type ScopedBinding } from "./engine-seams"
 import type { Declared, Toast } from "./engine-types"
 
@@ -18,12 +18,12 @@ export const DECLARED_TIMEOUT_MS = 4_000
 export async function resolveBinding(directory: string): Promise<ScopedBinding | null> {
   if (syncInternals.resolveBinding) return syncInternals.resolveBinding(directory)
   try {
-    const binding = await readLocalBinding(directory)
+    // One credential snapshot validates the hit and names its scope, so the
+    // binding cannot be paired with another tenant's scope by a credentials
+    // change between two reads. The id alone is tenant-local.
+    const { binding, scope } = await readLocalBindingScoped(directory)
     if (!binding) return null
-    // The cache only answers for the credentials' own tenant, so a hit is in
-    // scope; carry that scope, since the workspace id alone is tenant-local.
-    const scope = await credentialScope()
-    return { ...binding, scope: scope ? `${scope.tenant}|${scope.apiUrl}` : undefined }
+    return { ...binding, scope: scope ?? undefined }
   } catch (err) {
     log.warn("could not resolve the workspace binding", { err: String(err) })
     return null

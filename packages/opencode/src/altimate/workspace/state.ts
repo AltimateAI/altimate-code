@@ -163,13 +163,6 @@ function canonicalizeKey(directory: string): string {
   }
 }
 
-/** The (tenant, apiUrl) the current credentials name — the scope every
- * binding lives in. Workspace ids are tenant-local, so anything that keys on
- * a workspace across an account switch needs this alongside the id. */
-export async function credentialScope(): Promise<{ tenant: string; apiUrl: string } | null> {
-  return tenantKey()
-}
-
 async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
   // Best-effort: ``AltimateApi.getCredentials`` can throw ``SyntaxError`` on
   // a corrupt credentials JSON, ``ZodError`` on schema drift, or a raw
@@ -196,8 +189,26 @@ async function tenantKey(): Promise<{ tenant: string; apiUrl: string } | null> {
  * unresolved key (macOS ``/tmp`` → ``/private/tmp``), then relies on direct
  * lookup for the process's remaining lifetime. */
 export async function readLocalBinding(directory: string): Promise<CachedBinding | null> {
+  return (await readLocalBindingScoped(directory)).binding
+}
+
+/** `readLocalBinding` plus the credential scope (`tenant|apiUrl`) the hit was
+ * validated against — one credential snapshot for both, so a binding can never
+ * be paired with another tenant's scope. Workspace ids are tenant-local; the
+ * scope is what tells the same id in two tenants apart. */
+export async function readLocalBindingScoped(
+  directory: string,
+): Promise<{ binding: CachedBinding | null; scope: string | null }> {
   const key = await tenantKey()
-  if (!key) return null
+  if (!key) return { binding: null, scope: null }
+  const scope = `${key.tenant}|${key.apiUrl}`
+  return { binding: await readCachedBinding(directory, key), scope }
+}
+
+async function readCachedBinding(
+  directory: string,
+  key: { tenant: string; apiUrl: string },
+): Promise<CachedBinding | null> {
   let cache = readCache()
   if (!cache) return null
   if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
