@@ -39,9 +39,13 @@ export namespace MessageV2 {
   // so the SAME raw value always maps to the SAME id — the property that keeps
   // the call half and the result half of a pair consistent whether coerced at
   // ingestion (processor.ts) or defensively at replay (toModelMessagesEffect).
-  export function sanitizeToolCallID(id: unknown): string {
+  // `salt` (optional; e.g. the processor's assistant message id) is folded into
+  // the hash so regenerated ids for empty/identical malformed raw values do not
+  // collide across processors/steps. Persisted sanitized ids are valid strings
+  // and pass through unchanged on replay, so salting never breaks a stored pair.
+  export function sanitizeToolCallID(id: unknown, salt?: string): string {
     if (typeof id === "string" && id.length > 0) return id
-    const raw = typeof id === "string" ? id : (JSON.stringify(id) ?? String(id))
+    const raw = (salt ?? "") + "\u0000" + (typeof id === "string" ? id : (JSON.stringify(id) ?? String(id)))
     let hash = 0x811c9dc5
     for (let i = 0; i < raw.length; i++) {
       hash ^= raw.charCodeAt(i)

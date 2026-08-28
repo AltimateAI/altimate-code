@@ -206,4 +206,43 @@ describe("malformed-id round-trip: ingest → persist → replay", () => {
       expect(coerce(raw)).toBe(MessageV2.sanitizeToolCallID(raw))
     }
   })
+
+  test("prototype-key ids are safe: __proto__/constructor/toString never resolve to inherited members", () => {
+    const coerce = SessionProcessor.createToolCallIDCoercer()
+    for (const raw of ["__proto__", "constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      const first = coerce(raw)
+      // Valid non-empty strings pass through as themselves — but critically as
+      // STRINGS, never as inherited Object.prototype members.
+      expect(typeof first).toBe("string")
+      expect(first).toBe(raw)
+      // The alias lookup on repeat must return the same string, not an object.
+      const second = coerce(raw)
+      expect(second).toBe(raw)
+      expect(typeof second).toBe("string")
+    }
+    // No prototype pollution occurred.
+    expect(({} as any).polluted).toBeUndefined()
+  })
+
+  test("per-processor salt separates regenerated ids for identical malformed raw values", () => {
+    const a = SessionProcessor.createToolCallIDCoercer("msg_a")
+    const b = SessionProcessor.createToolCallIDCoercer("msg_b")
+    for (const raw of ["", 0, null, { a: 1 }]) {
+      const idA = a(raw)
+      const idB = b(raw)
+      expect(idA).not.toBe(idB)
+      expect(idA).toMatch(/^call_[0-9a-f]{8}$/)
+      expect(idB).toMatch(/^call_[0-9a-f]{8}$/)
+    }
+    // Within one processor the mapping stays deterministic (pairing contract).
+    expect(a("")).toBe(a(""))
+    expect(MessageV2.sanitizeToolCallID("", "msg_a")).toBe(a(""))
+  })
+
+  test("salted regeneration still passes persisted valid ids through unchanged on replay", () => {
+    // Persisted sanitized ids are valid strings; replay must not re-hash them.
+    const persisted = MessageV2.sanitizeToolCallID(999, "msg_a")
+    expect(MessageV2.sanitizeToolCallID(persisted)).toBe(persisted)
+    expect(MessageV2.sanitizeToolCallID(persisted, "different-salt")).toBe(persisted)
+  })
 })

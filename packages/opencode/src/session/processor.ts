@@ -59,14 +59,19 @@ export namespace SessionProcessor {
   // un-regenerated result id would 400 every subsequent provider request.
   // Exported as a factory so the ingestion half is unit-testable against the replay
   // half in message-v2.ts (they must produce identical output for a pair).
-  export function createToolCallIDCoercer() {
-    const aliases: Record<string, string> = {}
+  // The alias table is a Map, never a plain object: adversarial ids like
+  // "__proto__"/"constructor"/"toString" hit inherited Object.prototype members
+  // on a plain-object index and return non-strings as the "sanitized id",
+  // erroring the stream loop. `salt` (per processor/step) keeps regenerated
+  // ids for empty/duplicate malformed raw values from colliding across steps.
+  export function createToolCallIDCoercer(salt?: string) {
+    const aliases = new Map<string, string>()
     return (raw: unknown): string => {
       const key = typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw))
-      const existing = aliases[key]
+      const existing = aliases.get(key)
       if (existing !== undefined) return existing
-      const sanitized = MessageV2.sanitizeToolCallID(raw)
-      aliases[key] = sanitized
+      const sanitized = MessageV2.sanitizeToolCallID(raw, salt)
+      aliases.set(key, sanitized)
       return sanitized
     }
   }
@@ -78,13 +83,15 @@ export namespace SessionProcessor {
     model: Provider.Model
     abort: AbortSignal
   }) {
-    const toolcalls: Record<string, MessageV2.ToolPart> = {}
-    // altimate_change start — coerce malformed tool-call ids at ingestion;
-    // sanitized ids are used as BOTH the persisted callID and the pairing key.
-    const coerceToolCallID = createToolCallIDCoercer()
-    // altimate_change end
-    // altimate_change start — per-tool call counter for varied-input loop detection
-    const toolCallCounts: Record<string, number> = {}
+    // altimate_change start — Map (not plain object) so adversarial ids can
+    // never resolve to inherited Object.prototype members.
+    const toolcalls = new Map<string, MessageV2.ToolPart>()
+    // coerce malformed tool-call ids at ingestion; sanitized ids are used as
+    // BOTH the persisted callID and the pairing key. Salted per processor so
+    // regenerated ids for empty/duplicate raw values cannot collide across steps.
+    const coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
+    // per-tool call counter for varied-input loop detection
+    const toolCallCounts = new Map<string, number>()
     // altimate_change end
     let snapshot: string | undefined
     let blocked = false
@@ -108,7 +115,7 @@ export namespace SessionProcessor {
       },
       partFromToolCall(toolCallID: string) {
         // altimate_change start — tool-execution lookups use the same coercion
-        return toolcalls[coerceToolCallID(toolCallID)]
+        return toolcalls.get(coerceToolCallID(toolCallID))
         // altimate_change end
       },
       async process(streamInput: LLM.StreamInput) {
@@ -250,7 +257,7 @@ export namespace SessionProcessor {
                   // becomes the persisted callID and the pairing key.
                   const inputStartCallID = coerceToolCallID(value.id)
                   const part = await Session.updatePart({
-                    id: toolcalls[inputStartCallID]?.id ?? PartID.ascending(),
+                    id: toolcalls.get(inputStartCallID)?.id ?? PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "tool",
@@ -262,7 +269,7 @@ export namespace SessionProcessor {
                       raw: "",
                     },
                   })
-                  toolcalls[inputStartCallID] = part as MessageV2.ToolPart
+                  toolcalls.set(inputStartCallID, part as MessageV2.ToolPart)
                   // altimate_change end
                   break
 
@@ -275,7 +282,7 @@ export namespace SessionProcessor {
                 case "tool-call": {
                   // altimate_change start — resolve the pair via the coerced id
                   const toolCallCallID = coerceToolCallID(value.toolCallId)
-                  const match = toolcalls[toolCallCallID]
+                  const match = toolcalls.get(toolCallCallID)
                   // altimate_change end
                   if (match) {
                     const part = await Session.updatePart({
@@ -298,7 +305,7 @@ export namespace SessionProcessor {
                       // altimate_change end
                     })
                     // altimate_change start — key by the coerced id
-                    toolcalls[toolCallCallID] = part as MessageV2.ToolPart
+                    toolcalls.set(toolCallCallID, part as MessageV2.ToolPart)
                     // altimate_change end
                     // altimate_change start — session has now tool-called; suppresses plan refusal warning
                     sessionToolCallsMade++
@@ -349,16 +356,16 @@ export namespace SessionProcessor {
                     // legitimate multi-step work — attaching any hard consequence to it would
                     // kill ~half of legitimate work. It remains as telemetry; consequences
                     // hang off the (toolName + normalized args) ladder below instead.
-                    toolCallCounts[value.toolName] = (toolCallCounts[value.toolName] ?? 0) + 1
-                    if (toolCallCounts[value.toolName] >= TOOL_REPEAT_THRESHOLD) {
+                    toolCallCounts.set(value.toolName, (toolCallCounts.get(value.toolName) ?? 0) + 1)
+                    if ((toolCallCounts.get(value.toolName) ?? 0) >= TOOL_REPEAT_THRESHOLD) {
                       Telemetry.track({
                         type: "doom_loop_detected",
                         timestamp: Date.now(),
                         session_id: input.sessionID,
                         tool_name: value.toolName,
-                        repeat_count: toolCallCounts[value.toolName],
+                        repeat_count: toolCallCounts.get(value.toolName) ?? 0,
                       })
-                      toolCallCounts[value.toolName] = 0
+                      toolCallCounts.set(value.toolName, 0)
                     }
                     // altimate_change end
 
@@ -421,7 +428,7 @@ export namespace SessionProcessor {
                 case "tool-result": {
                   // altimate_change start — resolve the pair via the coerced id
                   const toolResultCallID = coerceToolCallID(value.toolCallId)
-                  const match = toolcalls[toolResultCallID]
+                  const match = toolcalls.get(toolResultCallID)
                   // altimate_change end
                   if (match && match.state.status === "running") {
                     // altimate_change start — unchanged-read annotation (content hash
@@ -514,7 +521,7 @@ export namespace SessionProcessor {
                     })
 
                     // altimate_change start — delete by the coerced id
-                    delete toolcalls[toolResultCallID]
+                    toolcalls.delete(toolResultCallID)
                     // altimate_change end
                   }
                   break
@@ -523,7 +530,7 @@ export namespace SessionProcessor {
                 case "tool-error": {
                   // altimate_change start — resolve the pair via the coerced id
                   const toolErrorCallID = coerceToolCallID(value.toolCallId)
-                  const match = toolcalls[toolErrorCallID]
+                  const match = toolcalls.get(toolErrorCallID)
                   // altimate_change end
                   if (match && match.state.status === "running") {
                     // altimate_change start — repeat-signature loop detection on
@@ -580,7 +587,7 @@ export namespace SessionProcessor {
                       blocked = shouldBreak
                     }
                     // altimate_change start — delete by the coerced id
-                    delete toolcalls[toolErrorCallID]
+                    toolcalls.delete(toolErrorCallID)
                     // altimate_change end
                   }
                   break

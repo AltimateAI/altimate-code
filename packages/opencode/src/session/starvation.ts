@@ -386,8 +386,9 @@ export namespace SessionStarvation {
         }
 
         if (!escalation) return { class: klass }
+        // "stop" returned above; only nudge/status_check reach here.
         const directive =
-          escalation === "status_check" || escalation === "stop"
+          escalation === "status_check"
             ? doomLoopStatusDirective({ count: consecutiveIdenticalCalls, tool: input.tool })
             : doomLoopNudgeDirective({ count: consecutiveIdenticalCalls, tool: input.tool })
         return {
