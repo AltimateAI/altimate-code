@@ -1034,8 +1034,9 @@ export namespace SessionProcessor {
           // same (toolName + normalized args) call repeated through nudge and
           // forced status-check without changing.
           if (starvationStop) return "stop"
-          // altimate_change end
+          // Upstream's compact check, relocated below the terminal outcomes.
           if (needsCompaction) return "compact"
+          // altimate_change end
           return "continue"
         }
       },
