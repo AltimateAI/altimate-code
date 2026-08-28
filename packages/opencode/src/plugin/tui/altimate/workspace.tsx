@@ -1401,12 +1401,14 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
     <props.api.ui.DialogSelect
       title={title()}
       options={options()}
-      // No filter. The row set changes with the phase, and a query typed to
-      // reach "Install now" still applies afterwards — the installing sentinel
-      // and the failure rows do not match it, so `filtered()` empties and the
-      // recovery actions become unreachable. A fixed three-option dialog gains
-      // nothing from filtering anyway.
+      // No filter, and no filter box. The row set changes with the phase, and
+      // a query typed to reach "Install now" would still apply afterwards — the
+      // installing sentinel and the failure rows do not match it, so
+      // `filtered()` would empty and the recovery actions become unreachable.
+      // A fixed three-option dialog gains nothing from filtering anyway, and
+      // the box itself only collects stray keystrokes while the install runs.
       skipFilter
+      renderFilter={false}
       current={canInstall() ? "install" : "copy"}
       onSelect={(option) => {
         if (option.value === "busy") return
