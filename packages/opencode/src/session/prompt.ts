@@ -299,15 +299,27 @@ export namespace SessionPrompt {
     // which `attach()` propagates into the facade's runtime, so it invalidates
     // THIS session's registry — verified by harness test.
     try {
-      const { syncSkills, recentlySynced } = await import("../altimate/workspace/skill-sync")
+      const skillSync = await import("../altimate/workspace/skill-sync")
       const dir = Instance.directory
-      if (!recentlySynced(dir)) {
-        const applied = syncSkills(dir).then(async ({ changed }) => {
-          if (!changed) return
-          const { Config } = await import("../config/config")
-          await Config.invalidate()
-          await import("../skill").then((m) => m.Skill.refresh())
-        })
+      const refreshRegistry = async () => {
+        if (!skillSync.registryStale(dir)) return
+        // Marked BEFORE the work, not after: a refresh that throws must not be
+        // retried on every subsequent turn forever, and the next real snapshot
+        // change re-arms this anyway.
+        skillSync.markRegistryApplied(dir)
+        const { Config } = await import("../config/config")
+        await Config.invalidate()
+        await import("../skill").then((m) => m.Skill.refresh())
+      }
+
+      // A sync that ran elsewhere — a bind, most commonly — changes the
+      // snapshot with no instance context to refresh from. Pick that up before
+      // deciding whether this turn needs to poll at all, or a linked workspace's
+      // skills would sit on disk unseen until the process restarts.
+      await refreshRegistry()
+
+      if (!(await skillSync.recentlySynced(dir))) {
+        const applied = skillSync.syncSkills(dir).then(refreshRegistry)
         applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
         await Promise.race([applied, new Promise((r) => setTimeout(r, WORKSPACE_SKILL_WAIT_MS))])
       }

@@ -8,7 +8,7 @@
 // synced skills, and a rebind must never leave the previous workspace's skills
 // where discovery can load them.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
@@ -35,7 +35,8 @@ writeFileSync(
   }),
 )
 
-const { syncSkills, recentlySynced } = await import("@/altimate/workspace/skill-sync")
+const { syncSkills, recentlySynced, registryStale, markRegistryApplied } =
+  await import("@/altimate/workspace/skill-sync")
 const { cachePath } = await import("@/altimate/workspace/state")
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
@@ -425,13 +426,13 @@ describe("workspace skill sync", () => {
     // If it never went true, every turn would pay an HTTP round trip; if it
     // never went false, a skill added in the SaaS would never reach an open
     // session.
-    expect(recentlySynced(project)).toBe(false)
+    expect(await recentlySynced(project)).toBe(false)
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
-    expect(recentlySynced(project)).toBe(true)
+    expect(await recentlySynced(project)).toBe(true)
 
     // Scoped per project — a different directory is still due a check.
-    expect(recentlySynced(path.join(SANDBOX, "some-other-proj"))).toBe(false)
+    expect(await recentlySynced(path.join(SANDBOX, "some-other-proj"))).toBe(false)
   })
 
   test("a skill added later is picked up by a subsequent sync", async () => {
@@ -448,6 +449,135 @@ describe("workspace skill sync", () => {
     const { changed } = await syncSkills(project)
     expect(changed).toBe(true)
     expect(existsSync(skillFile("pub-9", "SKILL.md"))).toBe(true)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a public_id that is not a single path component is refused", async () => {
+    // `public_id` is server-generated but still remote input spliced into a
+    // filesystem path, one component ABOVE the per-file guard — so the file
+    // guard cannot catch an escape here.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "x" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "../../escape", name: "e", file_count: 1, updated_at: "2026-06-06T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "../../escape", files: [{ path: "SKILL.md", size: 1 }], content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(path.join(project, ".altimate-code", "escape"))).toBe(false)
+    expect(existsSync(path.join(project, "escape"))).toBe(false)
+    // The previous snapshot is untouched: an unusable id is an error, not empty.
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("refuses to replace a managed directory it did not create", async () => {
+    // The directory name is ours by convention, and convention is not
+    // ownership. Anything already there without our manifest is a user's file.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "hand-rolled"), { recursive: true })
+    writeFileSync(path.join(managed, "hand-rolled", "SKILL.md"), "mine, not synced")
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(readFileSync(path.join(managed, "hand-rolled", "SKILL.md"), "utf8")).toBe("mine, not synced")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("staging never lands where skill discovery scans", async () => {
+    // Discovery globs `{skill,skills}/**/SKILL.md` under the config dir, so a
+    // staging tree beside `_workspace` would be scanned and a half-written
+    // snapshot loaded as real skills. Observed DURING the sync: staging is
+    // removed on success, so checking afterwards proves nothing.
+    const seen: string[][] = []
+    serve({ "pub-1": { "SKILL.md": "one", "references/g.md": "ref" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/files/")) {
+        try {
+          seen.push(readdirSync(path.join(project, ".altimate-code", "skill")))
+        } catch {
+          seen.push([])
+        }
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+
+    await syncSkills(project)
+
+    expect(seen.length).toBeGreaterThan(0)
+    for (const entries of seen) {
+      expect(entries.filter((e) => e !== "_workspace")).toEqual([])
+    }
+  })
+
+  test("a damaged snapshot is repaired rather than declared up to date", async () => {
+    serve({ "pub-1": { "SKILL.md": "one", "references/g.md": "ref" } })
+    await syncSkills(project)
+    rmSync(skillFile("pub-1", "references/g.md"))
+
+    // Same updated_at: only checking the manifest would call this current.
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "references/g.md"))).toBe(true)
+  })
+
+  test("a failed sync does not consume the poll window", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("offline")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    // Stamping here would suppress the retry for a full interval on a blip.
+    expect(await recentlySynced(project)).toBe(false)
+  })
+
+  test("registryStale reports a snapshot the caller has not applied yet", async () => {
+    // A bind syncs with no instance context to refresh from; the next turn has
+    // to notice on its own, without re-fetching.
+    expect(registryStale(project)).toBe(false)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(registryStale(project)).toBe(true)
+    markRegistryApplied(project)
+    expect(registryStale(project)).toBe(false)
+  })
+
+  test("the published snapshot ignores itself in git", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(readFileSync(path.join(project, MANAGED, ".gitignore"), "utf8")).toBe("*\n")
+  })
+
+  test("a file response for the wrong path is refused", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      // Same length, different file — undetectable without checking the path.
+      if (url.includes("/files/")) return json({ path: "OTHER.md", content: "abc" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-7", name: "p7", file_count: 1, updated_at: "2026-07-07T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-7", files: [{ path: "SKILL.md", size: 3 }], content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-7", "SKILL.md"))).toBe(false)
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 

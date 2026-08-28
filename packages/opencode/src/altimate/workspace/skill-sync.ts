@@ -47,6 +47,9 @@ const MAX_PAGES = 50
  * generates rule files) we mirror author-written content verbatim, and editing
  * it would alter what the model reads. */
 const MANAGED_DIR = path.join(".altimate-code", "skill", "_workspace")
+/** Staging lives here, deliberately NOT under `.altimate-code/skill/`, which
+ * discovery scans. See the swap in `syncSkills`. */
+const STAGING_DIR = path.join(".altimate-code", "skill-staging")
 const MANIFEST_NAME = ".manifest.json"
 
 export interface ManifestSkill {
@@ -97,14 +100,61 @@ const inFlight = new Map<string, Promise<void>>()
  * (no S3 reads), so the check is cheap when nothing changed. */
 const POLL_INTERVAL_MS = 5 * 60 * 1000
 
-/** Last completed sync per canonical project, for the interval above. */
+/** Last SUCCESSFUL sync per canonical project, for the interval above. A failed
+ * attempt must not stamp: doing so suppresses retry for a full interval on a
+ * transient error, which is the opposite of what a failure should cause. */
 const lastSyncedAt = new Map<string, number>()
+
+/** When this project's on-disk snapshot last changed, and when a caller last
+ * refreshed the skill registry for it.
+ *
+ * These are separate because the two events happen in different places: a bind
+ * changes disk without any registry to refresh, while the per-turn hook holds
+ * the instance context that CAN refresh. Comparing them is what lets a turn
+ * notice that a bind (or another caller) already moved the snapshot, even
+ * though this turn's own sync did nothing. */
+const snapshotChangedAt = new Map<string, number>()
+const registryAppliedAt = new Map<string, number>()
+
+/** Does the skill registry still reflect an older snapshot than the one on
+ * disk? True after a sync that changed files until `markRegistryApplied`. */
+export function registryStale(directory: string): boolean {
+  const canon = path.resolve(directory)
+  const changed = snapshotChangedAt.get(canon)
+  if (changed === undefined) return false
+  return (registryAppliedAt.get(canon) ?? 0) < changed
+}
+
+/** Record that the caller has refreshed the registry for the current snapshot. */
+export function markRegistryApplied(directory: string): void {
+  registryAppliedAt.set(path.resolve(directory), Date.now())
+}
 
 /** Has this project's snapshot been checked within the poll interval? Callers
  * on a per-message path use this to skip the network entirely. */
-export function recentlySynced(directory: string): boolean {
-  const at = lastSyncedAt.get(path.resolve(directory))
-  return at !== undefined && Date.now() - at < POLL_INTERVAL_MS
+export async function recentlySynced(directory: string): Promise<boolean> {
+  const canon = path.resolve(directory)
+  const at = lastSyncedAt.get(canon)
+  if (at === undefined || Date.now() - at >= POLL_INTERVAL_MS) return false
+  // Scoped to the account in play RIGHT NOW, not the one the snapshot was
+  // fetched for. Without this an account switch inside the interval keeps
+  // serving the previous tenant's skills, because the poll that would notice
+  // the change is the thing being skipped.
+  let now: string | null = null
+  try {
+    const creds = await AltimateApi.getCredentials()
+    now = accountKeyOf(creds.altimateInstanceName, creds.altimateUrl)
+  } catch {
+    now = null // signed out: fall through and let the sync decide
+  }
+  return now !== null && syncedFor.get(canon) === now
+}
+
+/** Which account each project's snapshot was last fetched for. */
+const syncedFor = new Map<string, string>()
+
+function accountKeyOf(tenant: string, apiUrl: string): string {
+  return `${tenant}\u0000${apiUrl}`
 }
 
 async function readManifest(directory: string): Promise<Manifest | null> {
@@ -132,6 +182,19 @@ function safeRelativePath(p: unknown): p is string {
   return !p.split(/[\\/]/).includes("..")
 }
 
+/** Reject a ``public_id`` that is not usable as a single directory name.
+ *
+ * The id is server-generated, but it is still remote input concatenated into a
+ * filesystem path. Without this a malformed or compromised response could place
+ * bundle files anywhere the process can write — the per-file guard above does
+ * not help, because the escape happens one component earlier. */
+function safePathComponent(p: unknown): p is string {
+  if (typeof p !== "string" || !p) return false
+  if (p === "." || p === "..") return false
+  if (path.isAbsolute(p)) return false
+  return !/[\\/\0]/.test(p)
+}
+
 /** Read one page of the list endpoint, refusing anything unrecognised.
  *
  * Returning null means "error", never "empty" — the distinction is what stops a
@@ -156,10 +219,14 @@ function parsePage(payload: unknown): { rows: RemoteSummary[]; pages: number } |
 
 /** ``GET /skills/{id}/files/{path}`` answers ``{path, content}``. Anything else
  * is an error, not an empty file — see ``parsePage`` for why that matters. */
-function parseFileContent(body: unknown): string | null {
+function parseFileContent(body: unknown, expectedPath: string): string | null {
   if (!body || typeof body !== "object") return null
-  const c = (body as { content?: unknown }).content
-  return typeof c === "string" ? c : null
+  const b = body as { content?: unknown; path?: unknown }
+  // The echoed path must be the one requested. Without checking it, a
+  // mis-routed or cached response of the same length is written under the
+  // filename we asked for — and no checksum exists to catch it later.
+  if (typeof b.path === "string" && b.path !== expectedPath) return null
+  return typeof b.content === "string" ? b.content : null
 }
 
 function parseDetailFiles(payload: unknown): RemoteFile[] | null {
@@ -183,6 +250,37 @@ function parseDetailFiles(payload: unknown): RemoteFile[] | null {
   return out
 }
 
+/** Is the managed directory ours to replace?
+ *
+ * Ours means: absent, or present with the manifest this module writes. Anything
+ * else is a directory that happens to sit at our path — a hand-written skill, a
+ * checkout from an older tool — and we must not delete it. The name is ours by
+ * convention only, and convention is not an ownership check. */
+async function ownsManagedDir(directory: string): Promise<boolean> {
+  const root = managedRoot(directory)
+  let entries: string[]
+  try {
+    entries = await fs.readdir(root)
+  } catch {
+    return true // absent: the first sync creates it
+  }
+  if (entries.length === 0) return true
+  return entries.includes(MANIFEST_NAME)
+}
+
+/** Remove staging trees this project abandoned — a SIGKILL mid-sync leaves one
+ * behind, and nothing else would ever collect it. */
+async function sweepStaging(directory: string): Promise<void> {
+  const dir = path.join(directory, STAGING_DIR)
+  try {
+    for (const entry of await fs.readdir(dir)) {
+      await fs.rm(path.join(dir, entry), { recursive: true, force: true }).catch(() => {})
+    }
+  } catch {
+    /* nothing staged */
+  }
+}
+
 async function removeManaged(directory: string): Promise<void> {
   await fs.rm(managedRoot(directory), { recursive: true, force: true })
 }
@@ -201,12 +299,28 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     return { changed: false }
   }
   let changed = false
+  let failed = false
+  // Set once the workspace's list has actually been read. Only then has this
+  // project been "checked", and only then should the poll interval start.
+  let sawRemote = false
   const run = (async () => {
     // `resolveBinding`, not `readLocalBinding`: the local cache is written only
     // by an explicit link, so a project bound server-side (fresh clone, new
     // machine, cleared state) would otherwise never get its workspace's skills.
     const binding = await resolveBinding(canon)
     if (!binding) return
+
+    // Refuse to touch a directory we did not create. Everything below either
+    // deletes this tree or replaces it wholesale, so without this a user's own
+    // files at our path are destroyed by a routine sync.
+    if (!(await ownsManagedDir(canon))) {
+      log.warn(
+        "refusing to manage the workspace skill directory: it has contents this client did not write",
+        { path: managedRoot(canon) },
+      )
+      return
+    }
+    await sweepStaging(canon)
 
     let creds: { altimateUrl: string; altimateInstanceName: string }
     try {
@@ -239,8 +353,10 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
 
     const remote = await listAll(binding)
     if (!remote) return // error, not empty — keep what is on disk
+    sawRemote = true
+    syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl))
 
-    if (!foreign && upToDate(manifest, remote)) return
+    if (!foreign && (await upToDate(canon, manifest, remote))) return
 
     if (remote.length === 0) {
       await removeManaged(canon)
@@ -253,7 +369,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // published: any failure abandons the staging directory and leaves the
     // previous snapshot untouched.
     const root = managedRoot(canon)
-    const staging = `${root}.staging-${process.pid}`
+    // Staged OUTSIDE `.altimate-code/skill/`, because discovery globs
+    // `{skill,skills}/**/SKILL.md` from the config dir — a staging tree that
+    // lived beside `_workspace` would be scanned, so a half-downloaded snapshot
+    // (or one abandoned by a SIGKILL) would be loaded as real skills.
+    const staging = path.join(canon, STAGING_DIR, `pending-${process.pid}`)
+    await fs.mkdir(path.join(canon, STAGING_DIR), { recursive: true })
+    await fs.writeFile(path.join(canon, STAGING_DIR, ".gitignore"), "*\n").catch(() => {})
     await fs.rm(staging, { recursive: true, force: true })
     const next: Manifest = {
       version: 1,
@@ -264,6 +386,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     }
     try {
       for (const summary of remote) {
+        if (!safePathComponent(summary.publicId)) {
+          throw new WorkspaceApiError(`unusable skill id in the workspace listing: ${summary.publicId}`)
+        }
         const detail = await altimateRequest<unknown>(
           "GET",
           `/${encodeURIComponent(summary.publicId)}`,
@@ -281,7 +406,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
             `/${encodeURIComponent(summary.publicId)}/files/${encoded}`,
             { base: SKILLS_BASE },
           )
-          const content = parseFileContent(body)
+          const content = parseFileContent(body, file.path)
           if (content === null) {
             throw new WorkspaceApiError(`unrecognised file body for ${summary.publicId}/${file.path}`)
           }
@@ -305,6 +430,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       }
       // Manifest goes inside the staged tree so files and manifest commit
       // together — a snapshot is never live without the record of what it is.
+      // Ignore everything this directory holds, itself included. The tree is
+      // a mirror of the workspace and is rebuilt from the server on demand, so
+      // it has no business in the user's history — and committing it would put
+      // one workspace's private instructions into a repo other workspaces read.
+      // Written into staging so it lands atomically with the snapshot.
+      await fs.writeFile(path.join(staging, ".gitignore"), "*\n")
       await fs.writeFile(path.join(staging, MANIFEST_NAME), JSON.stringify(next, null, 2))
       await fs.rm(root, { recursive: true, force: true })
       await fs.mkdir(path.dirname(root), { recursive: true })
@@ -315,19 +446,25 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         skills: remote.length,
       })
     } catch (err) {
+      failed = true
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
     }
   })()
   inFlight.set(canon, run)
+  let ok = true
   try {
     await run
   } catch (err) {
+    ok = false
     log.warn("workspace skill sync errored", { err: String(err) })
   } finally {
     inFlight.delete(canon)
   }
-  lastSyncedAt.set(canon, Date.now())
+  // Only a clean run earns the poll interval. `failed` is set by the inner
+  // catch, which swallows so that skills can never block a turn.
+  if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
+  if (changed) snapshotChangedAt.set(canon, Date.now())
   return { changed }
 }
 
@@ -364,13 +501,32 @@ async function listAll(binding: CachedBinding): Promise<RemoteSummary[] | null> 
  *
  * Compared on the server's ``updated_at`` per skill, because the API exposes no
  * checksum and the list carries only ``file_count``. */
-function upToDate(manifest: Manifest | null, remote: RemoteSummary[]): boolean {
+async function upToDate(
+  directory: string,
+  manifest: Manifest | null,
+  remote: RemoteSummary[],
+): Promise<boolean> {
   if (!manifest) return false
   const ids = Object.keys(manifest.skills)
   if (ids.length !== remote.length) return false
   for (const summary of remote) {
     const local = manifest.skills[summary.publicId]
     if (!local || local.updatedAt !== summary.updatedAt) return false
+  }
+  // The manifest agreeing with the server says nothing about the files still
+  // being there. A deleted, truncated or partially checked-out snapshot would
+  // otherwise be declared current forever, and the missing skill would never
+  // come back. The recorded sizes are already on hand, so verify against them.
+  const root = managedRoot(directory)
+  for (const [publicId, entry] of Object.entries(manifest.skills)) {
+    for (const [rel, size] of Object.entries(entry.files)) {
+      try {
+        const stat = await fs.stat(path.join(root, publicId, rel))
+        if (stat.size !== size) return false
+      } catch {
+        return false
+      }
+    }
   }
   return true
 }

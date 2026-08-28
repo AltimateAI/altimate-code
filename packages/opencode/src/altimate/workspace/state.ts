@@ -252,7 +252,14 @@ function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
  * pays the lookup once per process instead of once per sync. Keyed on the
  * canonical directory. Never holds a positive result — a hit is written to the
  * real cache, which is what later reads consult. */
-const serverLookupMissed = new Set<string>()
+const serverLookupMissed = new Map<string, number>()
+
+/** How long a "this project is unbound" answer is trusted. Bounded because the
+ * answer changes the moment someone links the project in the SaaS: a permanent
+ * memo means skills and memory never appear until the process restarts. Keyed
+ * with the tenant and API host so switching accounts does not inherit the other
+ * account's verdict. */
+const MISS_TTL_MS = 5 * 60 * 1000
 
 /** The binding for ``directory``: the local cache when it has one, otherwise
  * the server's answer, written to the cache for next time.
@@ -280,8 +287,9 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
 
   const key = await tenantKey()
   if (!key) return null
-  const canon = canonicalizeKey(directory)
-  if (serverLookupMissed.has(canon)) return null
+  const canon = `${key.tenant}\u0000${key.apiUrl}\u0000${canonicalizeKey(directory)}`
+  const missedAt = serverLookupMissed.get(canon)
+  if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return null
 
   let hit: ProjectBindingLookup | null = null
   try {
@@ -295,7 +303,7 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
     return null
   }
   if (!hit) {
-    serverLookupMissed.add(canon)
+    serverLookupMissed.set(canon, Date.now())
     return null
   }
 
@@ -312,7 +320,7 @@ export async function resolveBinding(directory: string): Promise<CachedBinding |
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-    cache.bindings[canon] = adopted
+    cache.bindings[canonicalizeKey(directory)] = adopted
     writeCache(cache)
   } catch (err) {
     // The binding still stands for this call; only the cache write failed, so
