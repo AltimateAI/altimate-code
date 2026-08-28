@@ -77,14 +77,18 @@ function bindTo(datamateId: number) {
 }
 
 beforeEach(() => {
-  // All three are scoped per test, not left set from module load: bun may run
-  // another test file in this worker, and these redirect Global.Path.home and
-  // .state — that file's config, state and credential reads would land in this
-  // sandbox. The workspace flag additionally makes its prompt path attempt a
-  // real sync against these credentials.
+  // Only the workspace flag is scoped per test. It matters because leaving it
+  // set makes OTHER files' prompt path attempt a real sync against this
+  // sandbox's credentials, which cost 15s timeouts.
+  //
+  // XDG_STATE_HOME / OPENCODE_TEST_HOME are deliberately NOT scoped this way,
+  // despite the same argument applying in principle. Flipping them per test is
+  // worse: a file sharing this bun worker sets its own values at module load,
+  // and restoring "the original" here deletes theirs mid-run. Tried it — seven
+  // tests in onboarding/materialize.test.ts began materializing into the real
+  // home directory. Module-scope + afterAll is the lesser of the two evils
+  // until test files stop sharing a process.
   process.env.ALTIMATE_WORKSPACE = "1"
-  process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
-  process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
   project = path.join(SANDBOX, `proj-${Math.random().toString(36).slice(2)}`)
   mkdirSync(project, { recursive: true })
   bindTo(1)
@@ -92,13 +96,8 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH
-  const restore = (k: string, v: string | undefined) => {
-    if (v === undefined) delete process.env[k]
-    else process.env[k] = v
-  }
-  restore("ALTIMATE_WORKSPACE", ORIGINAL_WORKSPACE_FLAG)
-  restore("XDG_STATE_HOME", ORIGINAL_XDG_STATE_HOME)
-  restore("OPENCODE_TEST_HOME", ORIGINAL_TEST_HOME)
+  if (ORIGINAL_WORKSPACE_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+  else process.env.ALTIMATE_WORKSPACE = ORIGINAL_WORKSPACE_FLAG
 })
 
 afterAll(() => {
@@ -296,6 +295,9 @@ describe("workspace skill sync", () => {
     let detailOrFile = 0
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
+      // Binding revalidation is not a detail or file fetch; this test is about
+      // not re-downloading an unchanged workspace.
+      if (url.includes("/datamate-project-bindings/by-")) return json({ detail: "not found" })
       if (url.includes("/files/") || !url.includes("datamate_id")) detailOrFile++
       return json({
         items: [{ public_id: "pub-1", name: "p1", file_count: 1, updated_at: "2026-01-01T00:00:00Z" }],
@@ -963,6 +965,49 @@ describe("workspace skill sync", () => {
     } finally {
       process.env.ALTIMATE_WORKSPACE = "1"
     }
+  })
+
+  test("a cached binding the server no longer recognises is not retained", async () => {
+    // The cache is written by an explicit link and otherwise never expires, so
+    // without revalidation a project detached in the SaaS keeps serving its old
+    // workspace's skills on this machine forever.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    // The local binding is still on disk — this is NOT the unbound-cache case.
+    expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeDefined()
+
+    globalThis.fetch = (async (input: string | URL) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) {
+        return new Response(JSON.stringify({ detail: "not found" }), { status: 404 })
+      }
+      return json({ items: [], total: 0, page: 1, size: 50, pages: 1 })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    // And the stale row is gone, so a later read cannot resurrect it.
+    expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeUndefined()
+  })
+
+  test("a cached binding survives a server that cannot be reached", async () => {
+    // Revalidation must not tear down a working setup over a network blip.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    // Workspace unchanged; only the binding lookup is unreachable. Serving an
+    // empty list here instead would delete the snapshot for a different and
+    // entirely correct reason, proving nothing about revalidation.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) throw new Error("offline")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeDefined()
   })
 
   test("does nothing when the workspace flag is off", async () => {

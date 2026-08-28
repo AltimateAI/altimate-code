@@ -266,6 +266,17 @@ const serverLookupMissed = new Map<string, number>()
  * account's verdict. */
 const MISS_TTL_MS = 5 * 60 * 1000
 
+/** How long a cached POSITIVE binding is trusted before the server is asked
+ * again. The cache is written by an explicit link and otherwise never expires,
+ * so without this a project rebound or detached in the SaaS keeps serving its
+ * OLD workspace's skills on this machine forever — including any carrying
+ * `alwaysApply`. The server is authoritative; the cache covers the window
+ * between checks and the case where the server cannot be reached. */
+const REVALIDATE_MS = 5 * 60 * 1000
+
+/** When each project's cached binding was last confirmed against the server. */
+const lastValidatedAt = new Map<string, number>()
+
 /** The binding for ``directory``: the local cache when it has one, otherwise
  * the server's answer, written to the cache for next time.
  *
@@ -304,10 +315,54 @@ export type BindingOutcome =
 
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
   const local = await readLocalBinding(directory).catch(() => null)
-  if (local) return { status: "bound", binding: local }
 
   const key = await tenantKey()
-  if (!key) return { status: "unknown" }
+  if (!key) return local ? { status: "bound", binding: local } : { status: "unknown" }
+
+  // A cached binding is trusted only inside the revalidation window. Past it
+  // the server decides, because it is the only thing that knows about a rebind
+  // or a detach performed elsewhere.
+  if (local) {
+    const validated = lastValidatedAt.get(canonicalizeKey(directory))
+    if (validated !== undefined && Date.now() - validated < REVALIDATE_MS) {
+      return { status: "bound", binding: local }
+    }
+    const fresh = await lookupBinding(directory, key)
+    if (fresh.status === "unknown") {
+      // Cannot reach the server: keep serving what we have rather than tearing
+      // a working setup down over a network blip.
+      return { status: "bound", binding: local }
+    }
+    lastValidatedAt.set(canonicalizeKey(directory), Date.now())
+    if (fresh.status === "unbound") {
+      forgetBinding(directory, key)
+      return { status: "unbound" }
+    }
+    // Rebound elsewhere: adopt the server's answer, replacing the cached row.
+    if (fresh.binding.datamateId !== local.datamateId) return fresh
+    return { status: "bound", binding: local }
+  }
+  return await lookupBinding(directory, key)
+}
+
+/** Drop a cached row the server no longer recognises, so later reads do not
+ * resurrect it from disk. */
+function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }): void {
+  try {
+    const cache = readCache()
+    if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return
+    delete cache.bindings[canonicalizeKey(directory)]
+    writeCache(cache)
+  } catch (err) {
+    log.warn("could not drop a binding the server no longer recognises", { err: String(err) })
+  }
+}
+
+/** The server's answer for this project, with no cache consulted. */
+async function lookupBinding(
+  directory: string,
+  key: { tenant: string; apiUrl: string },
+): Promise<BindingOutcome> {
   const canon = `${key.tenant}\u0000${key.apiUrl}\u0000${canonicalizeKey(directory)}`
   const missedAt = serverLookupMissed.get(canon)
   if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound" }
@@ -357,6 +412,7 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
     // the next process looks it up again. Same reasoning as recordApprovedBinding.
     log.warn("could not cache the workspace binding discovered on the server", { err: String(err) })
   }
+  lastValidatedAt.set(canonicalizeKey(directory), Date.now())
   log.info("adopted the workspace binding this project already has on the server", {
     datamateId: adopted.datamateId,
   })

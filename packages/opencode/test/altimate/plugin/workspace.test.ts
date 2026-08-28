@@ -234,9 +234,10 @@ describe("workspace binding cache", () => {
     let memPostSerial = 0
     globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
       const url = String(_input)
-      // Count memory traffic only. Skills re-sync on every bind by design, so
-      // including them here would make this assertion about the wrong thing.
-      if (!url.includes("/skills")) calls++
+      // Count memory traffic only. Skills re-sync on every bind by design, and
+      // a cached binding is revalidated against the server — neither is the
+      // memory seed this test is about.
+      if (!url.includes("/skills") && !url.includes("/datamate-project-bindings/by-")) calls++
       if (url.includes("/datamates/memory/") && !url.includes("/list")) {
         memPostSerial += 1
         return new Response(
