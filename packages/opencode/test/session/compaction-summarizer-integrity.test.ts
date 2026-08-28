@@ -334,7 +334,7 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
     expect(continuePart?.text).toContain("ask for clarification")
   })
 
-  test("Global rule 5: exactly ONE directive block — pending lower-precedence directives are consumed", async () => {
+  test("one-directive-per-turn contract: exactly ONE directive block — pending lower-precedence directives are consumed", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)
     processBehaviors = [writeSummary("a real summary")]

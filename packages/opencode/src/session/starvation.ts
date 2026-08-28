@@ -105,7 +105,7 @@ export namespace SessionStarvation {
   }
 
   // ---------------------------------------------------------------------------
-  // Generic classifiers — NO vertical tokens (FINAL-PLAN Global rule 4).
+  // Generic classifiers — NO vertical tokens (hard requirement: keep these domain-neutral).
   // ---------------------------------------------------------------------------
 
   // Tools whose successful completion IS file mutation (harness-corroborated by

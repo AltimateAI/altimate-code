@@ -72,7 +72,7 @@ describe("applyReadAnnotation — output mutation is run-mode-only", () => {
 describe("no vertical tokens in generic classifiers (leak-lens hard requirement)", () => {
   test("starvation.ts contains no dbt/warehouse vertical tokens", () => {
     const source = readFileSync(path.join(import.meta.dir, "../../src/session/starvation.ts"), "utf8")
-    // Global rule 4: no dbt/altimate-dbt string matching inside any generic
+    // Hard requirement: no dbt/altimate-dbt string matching inside any generic
     // classifier, and no bench task command strings in product code.
     expect(/\bdbt\b/i.test(source)).toBe(false)
     expect(/snowflake|bigquery|redshift|databricks/i.test(source)).toBe(false)
@@ -383,7 +383,7 @@ describe("armed gating logic (run-mode-only, exempt agents)", () => {
   })
 })
 
-describe("nudge arbiter (Global rule 5)", () => {
+describe("nudge arbiter (one-directive-per-turn contract)", () => {
   test("at most one directive per turn — highest precedence wins, rest dropped", () => {
     const sid = "ses_arbiter_1"
     NudgeArbiter.clear(sid)

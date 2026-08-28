@@ -2,7 +2,7 @@
 // FALLBACK termination path. Every hard precondition is exercised:
 //   (i)   green verify temporally AFTER the last file mutation (event-stream order)
 //   (ii)  generic verify classification (configured command or side-effecting bash;
-//         classifier contains no vertical tokens — Global rule 4)
+//         classifier contains no vertical tokens — leak-lens hard requirement)
 //   (iii) suppression while tools/subagents/permissions are outstanding
 //   (iv)  compaction-gated + N consecutive post-compaction text-only turns
 //   (v)   one-shot recursion guard
@@ -152,7 +152,7 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isReadOnlyCommand("FOO=1 make check")).toBe(false)
   })
 
-  test("classifier and module contain no vertical/product tokens (Global rule 4)", async () => {
+  test("classifier and module contain no vertical/product tokens (leak-lens hard requirement)", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/idle-done.ts", import.meta.url).pathname).text()
     // No dbt/vertical string matching inside the generic mechanism, and no bench
     // task command strings in product code.

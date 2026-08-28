@@ -424,7 +424,7 @@ describe("SessionCompaction.latestSummaryText", () => {
   })
 })
 
-// ─── Leak guard: no vertical tokens in the generic mechanism (Global rule 4) ─
+// ─── Leak guard: no vertical tokens in the generic mechanism (hard requirement) ─
 
 describe("leak guard", () => {
   test("ledger output for a dbt-style command is treated identically to any other command", () => {

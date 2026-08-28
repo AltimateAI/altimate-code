@@ -168,7 +168,7 @@ describe("SessionTermination directive texts (/c/d wording contracts)", () => {
     expect(SessionTermination.OVERFLOW_NOTICE).toContain("context limit")
   })
 
-  test("no vertical/product tokens in any directive text (Global rule 4)", () => {
+  test("no vertical/product tokens in any directive text (leak-lens hard requirement)", () => {
     for (const text of [
       SessionTermination.COMPLETION_NUDGE,
       SessionTermination.CONFIRM_DONE_CHALLENGE,

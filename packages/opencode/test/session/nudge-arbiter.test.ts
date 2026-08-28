@@ -1,4 +1,4 @@
-// FINAL harness plan — Global rule 5 unit gates: the nudge arbiter guarantees at
+// One-directive-per-turn contract unit gates: the nudge arbiter guarantees at
 // most ONE system-authored directive block per injected turn, with precedence
 // termination_challenge (item 1) > starvation_breaker (item 4) > budget_reminder
 // (item 9). Items register candidates; the injection site takes the single winner.
@@ -11,7 +11,7 @@ beforeEach(() => {
   NudgeArbiter.clear(SID)
 })
 
-describe("NudgeArbiter precedence (Global rule 5)", () => {
+describe("NudgeArbiter precedence (one-directive-per-turn contract)", () => {
   test("termination challenge beats starvation breaker and budget reminder", () => {
     NudgeArbiter.register(SID, { source: "budget_reminder", kind: "budget", text: "budget text" })
     NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "starvation text" })
@@ -34,7 +34,7 @@ describe("NudgeArbiter precedence (Global rule 5)", () => {
   })
 })
 
-describe("NudgeArbiter one-directive-per-turn (Global rule 5)", () => {
+describe("NudgeArbiter one-directive-per-turn contract", () => {
   test("take() returns exactly one directive and clears ALL pending — losers are dropped", () => {
     NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "s" })
     NudgeArbiter.register(SID, { source: "budget_reminder", kind: "budget", text: "b" })
