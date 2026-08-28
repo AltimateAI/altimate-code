@@ -611,4 +611,35 @@ description: A skill in the .opencode/skills directory.
     ),
   )
   // altimate_change end
+
+  // altimate_change start — the sync side asserts bytes on disk; this asserts
+  // the thing that actually matters, that discovery loads such a bundle as a
+  // usable skill. Written here because this file has the instance harness.
+  it.live("a workspace-synced bundle layout is discovered as a real skill", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          // Exactly what skill-sync writes: `.altimate-code/skill/_workspace/<public_id>/`.
+          const base = path.join(dir, ".altimate-code", "skill", "_workspace", "pub-abc123")
+          yield* Effect.promise(() =>
+            Bun.write(
+              path.join(base, "SKILL.md"),
+              `---\nname: workspace-synced\ndescription: Synced from a bound workspace.\n---\n\nBody.\n`,
+            ),
+          )
+          yield* Effect.promise(() => Bun.write(path.join(base, "references", "guide.md"), "ref"))
+          // The ignore file the sync stages alongside must not upset discovery.
+          yield* Effect.promise(() => Bun.write(path.join(base, "..", ".gitignore"), "*\n"))
+
+          const skill = yield* Skill.Service
+          const found = (yield* skill.all()).find((s) => s.name === "workspace-synced")
+          expect(found).toBeDefined()
+          expect(found!.description).toBe("Synced from a bound workspace.")
+          expect(found!.content).toContain("Body.")
+          expect(found!.location).toContain("_workspace")
+        }),
+      { git: true },
+    ),
+  )
+  // altimate_change end
 })

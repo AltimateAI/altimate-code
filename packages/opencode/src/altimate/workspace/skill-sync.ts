@@ -99,7 +99,7 @@ function managedRoot(directory: string): string {
 
 /** In-flight sync per canonical project directory, so a bind and a session
  * start racing on the same project do not both stage and swap. */
-const inFlight = new Map<string, Promise<void>>()
+const inFlight = new Map<string, Promise<{ changed: boolean }>>()
 
 /** How long a snapshot is trusted before the next turn re-checks the workspace.
  *
@@ -152,6 +152,13 @@ export function markRegistryApplied(directory: string): void {
 /** Has this project's snapshot been checked within the poll interval? Callers
  * on a per-message path use this to skip the network entirely. */
 export async function recentlySynced(directory: string): Promise<boolean> {
+  // Checked first, for two reasons. It avoids a credentials read on every
+  // message when the feature is off — this sits on the latency-measured path.
+  // And it closes a correctness hole in the other direction: turning the flag
+  // off AFTER a successful sync left `lastSyncedAt` inside the interval with a
+  // matching account, so `syncSkills` was never called, `deactivate` never ran,
+  // and the snapshot stayed live for up to a full interval.
+  if (!isEnabled()) return false
   const canon = path.resolve(directory)
   const at = lastSyncedAt.get(canon)
   if (at === undefined || Date.now() - at >= POLL_INTERVAL_MS) return false
@@ -164,7 +171,9 @@ export async function recentlySynced(directory: string): Promise<boolean> {
     const creds = await AltimateApi.getCredentials()
     now = accountKeyOf(creds.altimateInstanceName, creds.altimateUrl)
   } catch {
-    now = null // signed out: fall through and let the sync decide
+    // Unreadable OR absent — both fall through and let the sync decide, which
+    // is the only place that distinguishes disconnected from corrupt.
+    now = null
   }
   return now !== null && syncedFor.get(canon) === now
 }
@@ -198,6 +207,7 @@ async function readManifest(directory: string): Promise<Manifest | null> {
 function safeRelativePath(p: unknown): p is string {
   if (typeof p !== "string" || !p) return false
   if (path.isAbsolute(p)) return false
+  if (p.includes("\0")) return false // symmetrical with safePathComponent
   return !p.split(/[\\/]/).includes("..")
 }
 
@@ -211,6 +221,10 @@ function safePathComponent(p: unknown): p is string {
   if (typeof p !== "string" || !p) return false
   if (p === "." || p === "..") return false
   if (path.isAbsolute(p)) return false
+  // These two are written as FILES at the staged root. An id of either name
+  // becomes a directory there, the write fails EISDIR, and that workspace can
+  // never sync again.
+  if (p === MANIFEST_NAME || p === ".gitignore") return false
   return !/[\\/\0]/.test(p)
 }
 
@@ -220,16 +234,25 @@ function safePathComponent(p: unknown): p is string {
  * malformed 200 from reading as an empty workspace and deleting the user's
  * tree. ``api-client``'s helpers coerce unknown envelopes to ``[]``, so an
  * empty result is only trustworthy when the envelope itself parsed. */
-function parsePage(payload: unknown): { rows: RemoteSummary[]; pages: number } | null {
+function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummary[]; pages: number } | null {
   if (!payload || typeof payload !== "object") return null
   const p = payload as { items?: unknown; pages?: unknown }
   if (!Array.isArray(p.items)) return null
-  const pages = typeof p.pages === "number" && p.pages >= 0 ? p.pages : 1
+  // `pages` decides when to stop paginating, so a missing or nonsense value
+  // must be an error, not a default of 1 — defaulting turns a partial first
+  // page into "the whole workspace" and prunes everything on later pages.
+  const rawPages = (payload as { pages?: unknown }).pages
+  if (typeof rawPages !== "number" || !Number.isInteger(rawPages) || rawPages < 1) return null
+  const pages = rawPages
   // An empty page while the envelope claims rows exist is a proxy or backend
   // inconsistency, not an empty workspace — and "empty workspace" is the one
   // answer that deletes the user's snapshot. Refuse it.
   const total = (payload as { total?: unknown }).total
   if (p.items.length === 0 && typeof total === "number" && total > 0) return null
+  // A page that is not the one requested means the accumulation below would be
+  // wrong; treat it as unrecognised rather than merging it.
+  const echoed = (payload as { page?: unknown }).page
+  if (typeof echoed === "number" && echoed !== expectedPage) return null
   const rows: RemoteSummary[] = []
   for (const row of p.items) {
     if (!row || typeof row !== "object") return null
@@ -249,7 +272,10 @@ function parseFileContent(body: unknown, expectedPath: string): string | null {
   // The echoed path must be the one requested. Without checking it, a
   // mis-routed or cached response of the same length is written under the
   // filename we asked for — and no checksum exists to catch it later.
-  if (typeof b.path === "string" && b.path !== expectedPath) return null
+  // Required, not "checked when present": a mis-routed or cached response is
+  // exactly the case where the field may be absent, which is what this guard
+  // was written for.
+  if (b.path !== expectedPath) return null
   return typeof b.content === "string" ? b.content : null
 }
 
@@ -285,23 +311,88 @@ async function ownsManagedDir(directory: string): Promise<boolean> {
   let entries: string[]
   try {
     entries = await fs.readdir(root)
-  } catch {
-    return true // absent: the first sync creates it
+  } catch (err) {
+    // ONLY "absent" means the first sync may create it. `readdir` also throws
+    // ENOTDIR for a plain file at this path and EACCES for a directory we
+    // cannot read — answering "ours" to those hands a user's own file to
+    // `fs.rm`, which is the exact outcome this guard exists to prevent.
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT"
   }
   if (entries.length === 0) return true
-  return entries.includes(MANIFEST_NAME)
+  if (!entries.includes(MANIFEST_NAME)) return false
+  // The filename alone is not proof. A directory holding an unrelated or
+  // corrupt `.manifest.json` is someone else's; require one we can actually
+  // read as ours.
+  return (await readManifest(directory)) !== null
+}
+
+/** Is every component this module writes through a real directory?
+ *
+ * `readdir` follows symlinks, so a repository shipping
+ * ``.altimate-code/skill-staging -> ../..`` (git tracks symlinks, so it
+ * survives a clone) would have the sweep below enumerate and recursively delete
+ * the link's target. The same applies to symlinked ANCESTORS, which every
+ * mkdir, rename and write resolves through. Nothing here should ever traverse a
+ * link, so refuse rather than try to make traversal safe. */
+async function pathsAreReal(directory: string): Promise<boolean> {
+  const candidates = [
+    path.join(directory, ".altimate-code"),
+    path.join(directory, ".altimate-code", "skill"),
+    path.join(directory, STAGING_DIR),
+    managedRoot(directory),
+  ]
+  for (const candidate of candidates) {
+    try {
+      const st = await fs.lstat(candidate)
+      if (!st.isDirectory()) return false // a symlink lstats as a link, not a dir
+    } catch (err) {
+      // Absent is fine — it will be created as a real directory.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return false
+    }
+  }
+  return true
 }
 
 /** Remove staging trees this project abandoned — a SIGKILL mid-sync leaves one
  * behind, and nothing else would ever collect it. */
 async function sweepStaging(directory: string): Promise<void> {
   const dir = path.join(directory, STAGING_DIR)
+  let entries: string[]
   try {
-    for (const entry of await fs.readdir(dir)) {
-      await fs.rm(path.join(dir, entry), { recursive: true, force: true }).catch(() => {})
-    }
+    entries = await fs.readdir(dir)
   } catch {
-    /* nothing staged */
+    return // nothing staged
+  }
+  for (const entry of entries) {
+    // Leave another process's work alone. These are named `<kind>-<pid>`, and
+    // deleting a live owner's staging makes it publish a snapshot missing every
+    // file written before the sweep, with a manifest that claims them.
+    const owner = /-(\d+)$/.exec(entry)?.[1]
+    if (owner && owner !== String(process.pid) && processAlive(Number(owner))) continue
+    const target = path.join(dir, entry)
+    try {
+      const st = await fs.lstat(target)
+      if (!st.isDirectory()) {
+        // A symlink here would have `rm -r` follow into its target.
+        await fs.unlink(target).catch(() => {})
+        continue
+      }
+    } catch {
+      continue
+    }
+    await fs.rm(target, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/** Is a PID still running? Used only to avoid sweeping a live sibling's staging;
+ * a wrong answer costs a stale directory, never a deletion of live work. */
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM"
   }
 }
 
@@ -349,8 +440,9 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
   }
   const existing = inFlight.get(canon)
   if (existing) {
-    await existing.catch(() => {})
-    return { changed: false }
+    // Report the joined run's real outcome. Returning a hard-coded `false` is a
+    // false answer waiting for the next caller to trust it.
+    return await existing.catch(() => ({ changed: false }))
   }
   let changed = false
   let failed = false
@@ -366,6 +458,34 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     if (!(await AltimateApi.isConfigured())) {
       if (await deactivate(canon, "no altimate credentials")) changed = true
       return
+    }
+
+    // Nothing below should ever traverse a symlink. Checked before any write,
+    // rename or sweep, all of which resolve through these components.
+    if (!(await pathsAreReal(canon))) {
+      log.warn("refusing to sync: a workspace skill path is not a real directory", {
+        path: managedRoot(canon),
+      })
+      failed = true
+      return
+    }
+
+    // Read credentials and the manifest BEFORE resolving the binding, so an
+    // account switch can be acted on. `resolveBinding` returns null for both
+    // "confirmed unbound" and "lookup failed", and the old code returned on
+    // that null before ever reaching the foreign-manifest purge — so switching
+    // to an account with no binding here left the previous tenant's skills on
+    // disk and loading into prompts, with every retry hitting the same return.
+    const credsForPurge = await AltimateApi.getCredentials().catch(() => null)
+    if (credsForPurge) {
+      const priorManifest = await readManifest(canon)
+      if (
+        priorManifest &&
+        (priorManifest.tenant !== credsForPurge.altimateInstanceName ||
+          priorManifest.apiUrl !== credsForPurge.altimateUrl)
+      ) {
+        if (await deactivate(canon, "the snapshot belongs to another account")) changed = true
+      }
     }
 
     // `resolveBinding`, not `readLocalBinding`: the local cache is written only
@@ -543,21 +663,28 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
     }
   })()
-  inFlight.set(canon, run)
-  let ok = true
+  // Published to `inFlight` so a joining caller awaits the SAME settled result
+  // this one returns, rather than a hard-coded guess.
+  const settled = (async () => {
+    let ok = true
+    try {
+      await run
+    } catch (err) {
+      ok = false
+      log.warn("workspace skill sync errored", { err: String(err) })
+    }
+    // Only a clean run earns the poll interval. `failed` is set by the inner
+    // catch, which swallows so that skills can never block a turn.
+    if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
+    if (changed) snapshotChangedAt.set(canon, Date.now())
+    return { changed }
+  })()
+  inFlight.set(canon, settled)
   try {
-    await run
-  } catch (err) {
-    ok = false
-    log.warn("workspace skill sync errored", { err: String(err) })
+    return await settled
   } finally {
     inFlight.delete(canon)
   }
-  // Only a clean run earns the poll interval. `failed` is set by the inner
-  // catch, which swallows so that skills can never block a turn.
-  if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
-  if (changed) snapshotChangedAt.set(canon, Date.now())
-  return { changed }
 }
 
 /** Walk every page of the list endpoint. Returns null on any error or
@@ -577,12 +704,17 @@ async function listAll(binding: CachedBinding): Promise<RemoteSummary[] | null> 
       })
       return null
     }
-    const parsed = parsePage(payload)
+    const parsed = parsePage(payload, page)
     if (!parsed) {
       log.warn("workspace skill list was not in a recognised shape; keeping the existing snapshot")
       return null
     }
-    all.push(...parsed.rows)
+    // Dedupe across pages. The manifest is keyed by id, so a row repeated
+    // across a page boundary makes the length comparison in `upToDate`
+    // permanently unequal and re-downloads the whole workspace every poll.
+    for (const row of parsed.rows) {
+      if (!all.some((seen) => seen.publicId === row.publicId)) all.push(row)
+    }
     if (page >= parsed.pages || parsed.rows.length === 0) return all
   }
   log.warn("workspace skill list exceeded the page bound; keeping the existing snapshot")

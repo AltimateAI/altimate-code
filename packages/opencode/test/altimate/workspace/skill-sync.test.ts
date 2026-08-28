@@ -8,7 +8,16 @@
 // synced skills, and a rebind must never leave the previous workspace's skills
 // where discovery can load them.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import matter from "gray-matter"
@@ -627,10 +636,12 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
-  test("a synced bundle is a real skill discovery can load", async () => {
-    // Most fixtures here assert only that bytes reached disk. That does not
-    // show the feature works: a bundle can sync "successfully" and still yield
-    // no usable skill if the frontmatter is missing or malformed.
+  test("a synced bundle has the shape a skill needs", async () => {
+    // Shape only. Most fixtures here assert bytes reached disk, which does not
+    // show a bundle yields a USABLE skill — but neither does this: discovery is
+    // not run here, because this file has no instance harness. The end-to-end
+    // claim is made where it can be: "a workspace-synced bundle layout is
+    // discovered as a real skill" in test/skill/skill.test.ts.
     serve({
       "pub-real": {
         "SKILL.md": "---\nname: synced-probe\ndescription: A synced workspace skill.\n---\n\nBody.\n",
@@ -699,6 +710,172 @@ describe("workspace skill sync", () => {
     } finally {
       writeFileSync(credsFile, saved)
     }
+  })
+
+  test("pages are walked, and a partial listing never prunes the rest", async () => {
+    // The reviewers all named this: nothing constructed a 2-page listing, so
+    // MAX_PAGES, the terminator, the echoed page and cross-page accumulation
+    // were unexercised.
+    const bodies: Record<string, string> = {
+      "p1-a": "---\nname: p1a\ndescription: d.\n---\nA\n",
+      "p2-b": "---\nname: p2b\ndescription: d.\n---\nB\n",
+    }
+    const row = (id: string) => ({
+      public_id: id,
+      name: id,
+      file_count: 1,
+      updated_at: "2026-09-09T00:00:00Z",
+    })
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) {
+        const id = /skills\/([^/]+)\/files/.exec(url)![1]
+        return json({ path: "SKILL.md", content: bodies[id] })
+      }
+      if (url.includes("datamate_id")) {
+        const page = Number(/page=(\d+)/.exec(url)?.[1] ?? 1)
+        return json({
+          items: [row(page === 1 ? "p1-a" : "p2-b")],
+          total: 2,
+          page,
+          size: 1,
+          pages: 2,
+        })
+      }
+      const id = /skills\/([^/?]+)/.exec(url)![1]
+      return json({
+        skill: {
+          public_id: id,
+          files: [{ path: "SKILL.md", size: Buffer.from(bodies[id]).byteLength }],
+          content: "",
+        },
+      })
+    }) as unknown as typeof fetch
+
+    await syncSkills(project)
+    expect(existsSync(skillFile("p1-a", "SKILL.md"))).toBe(true)
+    expect(existsSync(skillFile("p2-b", "SKILL.md"))).toBe(true)
+  })
+
+  test("a listing with an unusable `pages` is an error, not a one-page workspace", async () => {
+    // Defaulting `pages` to 1 turns a partial first page into "the whole
+    // workspace" and deletes everything the later pages held.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    for (const bad of [undefined, 0, 1.5, "2"]) {
+      globalThis.fetch = (async () =>
+        json({ items: [], total: 0, page: 1, size: 50, pages: bad })) as unknown as typeof fetch
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    }
+  })
+
+  test("a file response omitting `path` is refused", async () => {
+    // The mis-routed response this guard exists for is exactly the case where
+    // the echoed field may be missing, so "checked when present" is no check.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ content: "abc" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-np", name: "n", file_count: 1, updated_at: "2026-09-10T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-np", files: [{ path: "SKILL.md", size: 3 }], content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-np", "SKILL.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a plain file at the managed path is never deleted", async () => {
+    // `readdir` throws ENOTDIR here, which the old guard read as "absent,
+    // therefore ours" and handed straight to fs.rm.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.dirname(managed), { recursive: true })
+    writeFileSync(managed, "a user's file, not a directory")
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(readFileSync(managed, "utf8")).toBe("a user's file, not a directory")
+  })
+
+  test("a symlinked staging directory is refused rather than traversed", async () => {
+    // `readdir` follows symlinks, so sweeping through one would recursively
+    // delete whatever it points at — outside the project.
+    const outside = path.join(SANDBOX, `outside-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(path.join(outside, "precious.txt"), "must survive")
+
+    mkdirSync(path.join(project, ".altimate-code", "skill"), { recursive: true })
+    symlinkSync(outside, path.join(project, ".altimate-code", "skill-staging"))
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(readFileSync(path.join(outside, "precious.txt"), "utf8")).toBe("must survive")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("switching to an account with no binding drops the old tenant's skills", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    // New account: the cached binding no longer matches, and the server has no
+    // binding for this project either.
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    writeFileSync(
+      credsFile,
+      JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: "other-tenant", altimateApiKey: "k" }),
+    )
+    globalThis.fetch = (async () => json({ detail: "not found" })) as unknown as typeof fetch
+    try {
+      await syncSkills(project)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
+  test("a directory holding a manifest we cannot read is not ours", async () => {
+    // Ownership was decided on the FILENAME `.manifest.json`. A directory with
+    // an unrelated or corrupt file of that name is someone else's, and was
+    // being deleted wholesale.
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "someone-elses"), { recursive: true })
+    writeFileSync(path.join(managed, "someone-elses", "SKILL.md"), "not ours")
+    writeFileSync(path.join(managed, ".manifest.json"), "{ not valid json")
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(readFileSync(path.join(managed, "someone-elses", "SKILL.md"), "utf8")).toBe("not ours")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("a manifest from a foreign shape does not confer ownership", async () => {
+    const managed = path.join(project, MANAGED)
+    mkdirSync(path.join(managed, "other-tool"), { recursive: true })
+    writeFileSync(path.join(managed, "other-tool", "SKILL.md"), "another tool's file")
+    // Valid JSON, wrong shape — `readManifest` must reject it.
+    writeFileSync(path.join(managed, ".manifest.json"), JSON.stringify({ some: "other tool" }))
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(readFileSync(path.join(managed, "other-tool", "SKILL.md"), "utf8")).toBe("another tool's file")
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
   })
 
   test("does nothing when the workspace flag is off", async () => {

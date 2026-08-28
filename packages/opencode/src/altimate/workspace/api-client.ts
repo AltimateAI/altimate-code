@@ -176,7 +176,17 @@ async function req<T>(
     // swallows the AbortError from the timeout firing during the body read
     // and turns a stalled response into a false "empty body". Rejection
     // rethrows into the outer catch and is classified there. (cubic round 3.)
-    text = await res.text()
+    // Bound the body before buffering it. `res.text()` reads to completion, so
+    // a response far larger than advertised is an out-of-memory crash before
+    // any size check downstream can reject it. Content-Length is a hint, not a
+    // guarantee, so the stream is also cut off at the cap.
+    const declared = Number(res.headers.get("content-length") ?? Number.NaN)
+    if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+      throw new WorkspaceApiError(
+        `Response from ${target} declares ${declared} bytes, over the ${MAX_RESPONSE_BYTES} limit`,
+      )
+    }
+    text = await readBounded(res, target)
   } catch (err) {
     // Distinguish "we hit our 15s abort" from "network stack failed" so the
     // caller can decide differently (retry, longer timeout, offline banner).
@@ -246,6 +256,36 @@ async function req<T>(
  * not duplicate any of it — see ./memory-api.ts, which drives
  * ``/datamates/memory/*`` through this exact path. Always pass an explicit
  * ``base``; the default is this module's own namespace. */
+/** Ceiling on a single response body. Nothing upstream bounds what a workspace
+ * can hold, and the body is buffered whole, so without this one oversized
+ * response is a process crash rather than a failed request. */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+/** Read a response body, refusing to buffer past the cap. */
+async function readBounded(res: Response, target: string): Promise<string> {
+  if (!res.body) return await res.text()
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > MAX_RESPONSE_BYTES) {
+        throw new WorkspaceApiError(
+          `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
+        )
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.cancel().catch(() => {})
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks))
+}
+
 export { req as altimateRequest }
 
 export namespace WorkspaceApi {
