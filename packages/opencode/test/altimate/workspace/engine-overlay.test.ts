@@ -76,7 +76,7 @@ function install(opts: {
     config: opts.noMcpKey ? {} : { mcp: opts.mcp ?? {} },
     binding: opts.binding === undefined ? bound(42) : opts.binding,
     which: opts.which === undefined ? "/usr/local/bin/datamate" : opts.which,
-    version: opts.version === undefined ? "0.7.0" : opts.version,
+    version: opts.version === undefined ? "0.7.1" : opts.version,
     status: opts.status ?? "connected",
     statusError: opts.statusError,
     onAdd: opts.onAdd,
@@ -646,7 +646,7 @@ describe("beforeTurn — what a turn boundary does", () => {
   test("a failed probe is repeated on its own after the TTL", async () => {
     const h = install({ version: "0.6.3" })
     await beforeTurn("s1")
-    h.version = "0.7.0"
+    h.version = "0.7.1"
     h.clock += FAILED_PROBE_TTL_MS
     await beforeTurn("s1")
     expect(h.added).toHaveLength(1)

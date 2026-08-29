@@ -55,6 +55,7 @@ describe("clearsFloor", () => {
     expect(clearsFloor("0.7.1")).toBe(true)
     expect(clearsFloor("1.0.0")).toBe(true)
     expect(clearsFloor("0.6.9")).toBe(false)
+    expect(clearsFloor("0.7.0")).toBe(false) // the previous floor no longer clears
     expect(clearsFloor(`${MIN_ENGINE_VERSION}-beta.1`)).toBe(false)
     expect(clearsFloor("0.7rc.0")).toBe(false)
   })
