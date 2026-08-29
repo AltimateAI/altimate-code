@@ -178,3 +178,23 @@ resolution step rather than a line edit. Much narrower after the sweep: installe
 packages are now excluded from the touched-model set, so this needs a genuine
 name collision between the root project and a dependency, both selected in the
 same session.
+
+### 10. The dialect guard checks for a guard, not for the *right* guard
+
+`dbt-dialect-guard` suppresses a warehouse-specific call when it sits anywhere
+inside a `{% if … target.type … %}` chain. It does not check that the branch the
+call sits in is actually limited to a warehouse that provides the function, so
+both of these pass while still breaking on at least one target:
+
+```jinja
+{% if target.type != 'snowflake' %} {{ iff(a, b, c) }} {% endif %}
+{% if target.type == 'snowflake' %} … {% else %} safe_cast(x as int) {% endif %}
+```
+
+Why deferred: closing it needs a mapping from each `DIALECT_FUNCTIONS` entry to
+the `target.type` values that provide it, plus evaluation of each branch
+condition against that set — `==`, `!=`, `in`, `not in`, and the implicit
+complement an `{% else %}` arm carries. That is a feature with its own test
+surface, and a half-implementation converts a false negative into a blocking
+false positive on correct models. The validator's docstring states the weaker
+property it actually checks, so the claim is not overstated in the meantime.
