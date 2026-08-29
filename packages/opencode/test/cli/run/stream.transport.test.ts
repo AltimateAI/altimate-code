@@ -710,7 +710,7 @@ describe("run stream transport", () => {
                       messageID: "msg-1",
                       id: "bash-1",
                       callID: "call-1",
-                      tool: "bash",
+                      tool: "terminal",
                       body: {
                         command: "pwd",
                       },

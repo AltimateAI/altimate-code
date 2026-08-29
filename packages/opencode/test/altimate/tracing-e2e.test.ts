@@ -179,7 +179,7 @@ describe("Incremental snapshots", () => {
     // Now add tool call and wait for its snapshot
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -218,7 +218,7 @@ describe("Incremental snapshots", () => {
 
     // First tool
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: Date.now() - 100, end: Date.now() } },
     })
@@ -353,7 +353,7 @@ describe("Performance", () => {
     const start = performance.now()
     for (let i = 0; i < 1000; i++) {
       tracer.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-${i}`,
         state: {
           status: "completed",
@@ -400,7 +400,7 @@ describe("Performance", () => {
     tracer.startTrace("s-perf-attrs", { prompt: "perf test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
 
@@ -428,7 +428,7 @@ describe("Performance", () => {
     tracer.logStepStart({ id: "1" })
     for (let i = 0; i < 1000; i++) {
       tracer.logToolCall({
-        tool: "bash", callID: `c-${i}`,
+        tool: "terminal", callID: `c-${i}`,
         state: { status: "completed", input: { i }, output: `out-${i}`, time: { start: 1, end: 2 } },
       })
     }
@@ -455,7 +455,7 @@ describe("Performance", () => {
     // logToolCall triggers snapshot — measure that it returns immediately
     const start = performance.now()
     tracer.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: {
         status: "completed",
         input: { data: "x".repeat(100000) }, // Large input
@@ -567,7 +567,7 @@ describe("Worker event simulation", () => {
     const events = [
       { type: "message.updated", properties: { info: { role: "assistant", modelID: "claude-sonnet-4-20250514", providerID: "anthropic", agent: "builder", variant: "high", parentID: "session-tui-1" } } },
       { type: "message.part.updated", properties: { part: { sessionID: "session-tui-1", type: "step-start", id: "step-1" } } },
-      { type: "message.part.updated", properties: { part: { sessionID: "session-tui-1", type: "tool", tool: "bash", callID: "c1", state: { status: "completed", input: { command: "ls" }, output: "file1.ts\nfile2.ts", time: { start: Date.now() - 1000, end: Date.now() } } } } },
+      { type: "message.part.updated", properties: { part: { sessionID: "session-tui-1", type: "tool", tool: "terminal", callID: "c1", state: { status: "completed", input: { command: "ls" }, output: "file1.ts\nfile2.ts", time: { start: Date.now() - 1000, end: Date.now() } } } } },
       { type: "message.part.updated", properties: { part: { sessionID: "session-tui-1", type: "text", text: "Found files.", time: { end: Date.now() } } } },
       { type: "message.part.updated", properties: { part: { sessionID: "session-tui-1", type: "step-finish", id: "step-1", reason: "stop", cost: 0.005, tokens: { input: 500, output: 100, reasoning: 0, cache: { read: 0, write: 0 } } } } },
       { type: "session.status", properties: { sessionID: "session-tui-1", status: { type: "idle" } } },
@@ -671,7 +671,7 @@ describe("Trace viewer server", () => {
     tracer.startTrace("viewer-test", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
     tracer.logStepFinish({

@@ -1812,7 +1812,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   return (
     <Show when={!shouldHide()}>
       <Switch>
-        <Match when={display() === "bash"}>
+        <Match when={display() === "terminal"}>
           <Shell {...toolprops} />
         </Match>
         <Match when={display() === "glob"}>
@@ -2654,8 +2654,7 @@ function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
-const toolDisplays = new Set([
-  "bash",
+const toolDisplays = new Set(["terminal",
   "glob",
   "read",
   "grep",

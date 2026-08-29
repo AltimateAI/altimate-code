@@ -42,7 +42,7 @@ export type RegistryToolOrigin = "native" | "altimate" | "external"
 const NATIVE_TOOL_IDS = new Set<string>([
   "invalid",
   "question",
-  "bash",
+  "terminal",
   "batch",
   "read",
   "glob",

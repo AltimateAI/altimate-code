@@ -44,7 +44,7 @@ describe("telemetry.categorizeToolName", () => {
   })
 
   test("returns 'file' for file operation tools", () => {
-    for (const tool of ["read", "write", "edit", "glob", "grep", "bash"]) {
+    for (const tool of ["read", "write", "edit", "glob", "grep", "terminal"]) {
       expect(Telemetry.categorizeToolName(tool, "standard")).toBe("file")
     }
   })
@@ -2266,7 +2266,7 @@ describe("telemetry.tool_chain_outcome", () => {
         type: "tool_chain_outcome",
         timestamp: Date.now(),
         session_id: "s1",
-        chain: JSON.stringify(["read", "edit", "bash"]),
+        chain: JSON.stringify(["read", "edit", "terminal"]),
         chain_length: 3,
         had_errors: false,
         error_recovery_count: 0,

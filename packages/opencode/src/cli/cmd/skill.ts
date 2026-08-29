@@ -48,7 +48,7 @@ ${cliSection}
 `
 }
 
-function bashToolTemplate(name: string): string {
+function terminalToolTemplate(name: string): string {
   return `#!/usr/bin/env bash
 set -euo pipefail
 # ${name} — TODO describe what this tool does
@@ -310,7 +310,7 @@ const SkillCreateCommand = cmd({
               template = nodeToolTemplate(name)
               break
             default:
-              template = bashToolTemplate(name)
+              template = terminalToolTemplate(name)
           }
 
           await fs.writeFile(toolFile, template, { mode: 0o755 })

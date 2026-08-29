@@ -346,7 +346,7 @@ describe("run subagent data", () => {
           sessionID: "child-1",
           type: "tool",
           callID: "call-1",
-          tool: "bash",
+          tool: "terminal",
           state: {
             status: "running",
             input: {
@@ -362,7 +362,7 @@ describe("run subagent data", () => {
       properties: {
         id: "perm-1",
         sessionID: "child-1",
-        permission: "bash",
+        permission: "terminal",
         patterns: ["git status --short"],
         metadata: {},
         always: [],

@@ -18,7 +18,7 @@ import stripAnsi from "strip-ansi"
 import type { ToolPart } from "@opencode-ai/sdk/v2"
 import type * as Tool from "@/tool/tool"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
-import type { ShellTool as BashTool } from "@/tool/shell"
+import type { ShellTool as TerminalTool } from "@/tool/shell"
 import type { EditTool } from "@/tool/edit"
 import type { GlobTool } from "@/tool/glob"
 import type { GrepTool } from "@/tool/grep"
@@ -103,7 +103,7 @@ type ToolPermissionCtx = {
 
 type ToolDefs = {
   invalid: typeof InvalidTool
-  bash: typeof BashTool
+  terminal: typeof TerminalTool
   write: typeof WriteTool
   edit: typeof EditTool
   apply_patch: typeof ApplyPatchTool
@@ -631,7 +631,7 @@ function snapQuestion(p: ToolProps<typeof QuestionTool>): ToolSnapshot {
   }
 }
 
-function scrollBashStart(p: ToolProps<typeof BashTool>): string {
+function scrollTerminalStart(p: ToolProps<typeof TerminalTool>): string {
   const cmd = p.input.command ?? ""
   const desc = p.input.description || "Shell"
   const wd = p.input.workdir ?? ""
@@ -649,7 +649,7 @@ function scrollBashStart(p: ToolProps<typeof BashTool>): string {
   return `# ${title}\n$ ${cmd}`
 }
 
-function scrollBashProgress(p: ToolProps<typeof BashTool>): string {
+function scrollTerminalProgress(p: ToolProps<typeof TerminalTool>): string {
   const out = stripAnsi(p.frame.raw)
   const cmd = (p.input.command ?? "").trim()
   const fmt = (text: string) => {
@@ -682,18 +682,18 @@ function scrollBashProgress(p: ToolProps<typeof BashTool>): string {
   return fmt(out)
 }
 
-function scrollBashFinal(p: ToolProps<typeof BashTool>): string {
+function scrollTerminalFinal(p: ToolProps<typeof TerminalTool>): string {
   const code = p.metadata.exit ?? num(p.frame.meta.exitCode) ?? num(p.frame.meta.exit_code)
   const time = span(p.frame.state)
   if (code === undefined) {
     if (!time) {
-      return "bash completed"
+      return "terminal completed"
     }
 
-    return `bash completed · ${time}`
+    return `terminal completed · ${time}`
   }
 
-  return `bash completed (exit ${code})${time ? ` · ${time}` : ""}`
+  return `terminal completed (exit ${code})${time ? ` · ${time}` : ""}`
 }
 
 function scrollReadStart(p: ToolProps<typeof ReadTool>): string {
@@ -977,7 +977,7 @@ function permList(p: ToolPermissionProps): ToolPermissionInfo {
   }
 }
 
-function permBash(p: ToolPermissionProps<typeof BashTool>): ToolPermissionInfo {
+function permTerminal(p: ToolPermissionProps<typeof TerminalTool>): ToolPermissionInfo {
   const title = p.input.description || "Shell command"
   const cmd = p.input.command || ""
   return {
@@ -1043,18 +1043,18 @@ const TOOL_RULES = {
       start: () => "",
     },
   },
-  bash: {
+  terminal: {
     view: {
       output: true,
       final: false,
     },
-    run: runBash,
+    run: runTerminal,
     scroll: {
-      start: scrollBashStart,
-      progress: scrollBashProgress,
-      final: scrollBashFinal,
+      start: scrollTerminalStart,
+      progress: scrollTerminalProgress,
+      final: scrollTerminalFinal,
     },
-    permission: permBash,
+    permission: permTerminal,
   },
   write: {
     view: {
@@ -1287,7 +1287,7 @@ export function toolFrame(commit: StreamCommit, raw: string): ToolFrame {
   }
 }
 
-function runBash(p: ToolProps<typeof BashTool>): ToolInline {
+function runTerminal(p: ToolProps<typeof TerminalTool>): ToolInline {
   return {
     icon: "$",
     title: p.input.command || "",

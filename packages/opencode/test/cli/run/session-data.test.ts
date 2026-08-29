@@ -234,13 +234,42 @@ describe("run session data", () => {
     })
   })
 
+  test("claims legacy bash shell tools without duplicating entries", () => {
+    let data = createSessionData()
+    data = reduce(data, tool({
+      id: "tool-bash-1",
+      messageID: "msg-1",
+      tool: "bash",
+      callID: "call-1",
+      state: { status: "running", input: { command: "ls" } }
+    })).data
+
+    expect(data.tools.has("tool-bash-1")).toBe(true)
+
+    const shellStarted = reduce(data, {
+      type: "session.next.shell.started",
+      properties: {
+        sessionID: "session-1",
+        callID: "call-1",
+        command: "ls",
+      }
+    })
+    data = shellStarted.data
+
+    expect(data.shell.has("call-1")).toBe(true)
+    expect(data.shell.size).toBe(1)
+
+    // Proves that no duplicate shell-start commit was emitted
+    expect(shellStarted.commits).toEqual([])
+  })
+
   test("refreshes the active permission view when tool input arrives later", () => {
     const data = reduce(createSessionData(), {
       type: "permission.asked",
       properties: {
         id: "perm-1",
         sessionID: "session-1",
-        permission: "bash",
+        permission: "terminal",
         patterns: ["src/**/*.ts"],
         metadata: {},
         always: [],
@@ -257,7 +286,7 @@ describe("run session data", () => {
         id: "tool-1",
         messageID: "msg-1",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "running",
           input: {
@@ -290,7 +319,7 @@ describe("run session data", () => {
       tool({
         id: "tool-1",
         messageID: "msg-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "completed",
           input: {
@@ -343,7 +372,7 @@ describe("run session data", () => {
         kind: "tool",
         phase: "start",
         partID: "shell:call-1",
-        tool: "bash",
+        tool: "terminal",
         shell: {
           callID: "call-1",
           command: "pwd",
@@ -367,7 +396,7 @@ describe("run session data", () => {
         kind: "tool",
         phase: "progress",
         partID: "shell:call-1",
-        tool: "bash",
+        tool: "terminal",
         text: "/tmp/demo\n",
         toolState: "completed",
         shell: {
@@ -396,7 +425,7 @@ describe("run session data", () => {
           id: "tool-1",
           messageID: "msg-1",
           callID: "call-1",
-          tool: "bash",
+          tool: "terminal",
           state: {
             status: "running",
             input: {
@@ -425,7 +454,7 @@ describe("run session data", () => {
           id: "tool-1",
           messageID: "msg-1",
           callID: "call-1",
-          tool: "bash",
+          tool: "terminal",
           state: {
             status: "completed",
             input: {
@@ -451,7 +480,7 @@ describe("run session data", () => {
         id: "tool-1",
         messageID: "msg-1",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "running",
           input: {
@@ -480,7 +509,7 @@ describe("run session data", () => {
         id: "tool-1",
         messageID: "msg-1",
         callID: "call-1",
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "completed",
           input: {

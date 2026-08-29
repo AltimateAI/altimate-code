@@ -286,7 +286,7 @@ const TIPS: Tip[] = [
   "Use {highlight}instructions{/highlight} in config to load additional rules files",
   "Set agent {highlight}temperature{/highlight} from 0.0 (focused) to 1.0 (creative)",
   "Configure {highlight}steps{/highlight} to limit agentic iterations per request",
-  'Set {highlight}"tools": {"bash": false}{/highlight} to disable specific tools',
+  'Set {highlight}"tools": {"terminal": false}{/highlight} to disable specific tools',
   'Set {highlight}"mcp_*": false{/highlight} to disable all tools from an MCP server',
   "Override global tool settings per agent configuration",
   'Set {highlight}"share": "auto"{/highlight} to automatically share all sessions',

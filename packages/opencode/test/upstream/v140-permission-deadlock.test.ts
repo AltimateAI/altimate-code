@@ -43,15 +43,15 @@ test("PDF deadlock: bash ask + 'Allow once' reply via route handler logic resolv
   await Instance.provide({
     directory: tmp.path,
     fn: async () => {
-      // Step 1: tool/bash.ts calls ctx.ask, which hits PermissionNext.ask
+      // Step 1: tool/terminal.ts calls ctx.ask, which hits PermissionNext.ask
       // (this is exactly what session/processor.ts does at line 193/221).
       const askPromise = PermissionNext.ask({
         sessionID: SessionID.make("session_pdf_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["which duckdb"],
         metadata: { command: "which duckdb" },
         always: ["which *"],
-        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "ask" }],
       })
 
       // Step 2: request lands in PermissionNext's pending Map and emits
@@ -89,11 +89,11 @@ test("PDF deadlock: 'Allow always' reply also resolves the ask Promise", async (
     fn: async () => {
       const askPromise = PermissionNext.ask({
         sessionID: SessionID.make("session_pdf_test_always"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["pwd && ls -la"],
         metadata: { command: "pwd && ls -la" },
         always: ["pwd *", "ls *"],
-        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "ask" }],
       })
 
       const list = await waitForPending(1)
@@ -112,11 +112,11 @@ test("PDF deadlock: 'Allow always' reply also resolves the ask Promise", async (
       // Subsequent ask for matching pattern auto-resolves (allow rule was added).
       const followup = PermissionNext.ask({
         sessionID: SessionID.make("session_pdf_test_always"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["pwd"],
         metadata: { command: "pwd" },
         always: ["pwd *"],
-        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "ask" }],
       })
 
       // Allow rule lets this resolve immediately without showing a new prompt.
@@ -137,11 +137,11 @@ test("PDF deadlock: 'Reject' reply rejects the ask Promise (not deadlock)", asyn
     fn: async () => {
       const askPromise = PermissionNext.ask({
         sessionID: SessionID.make("session_pdf_test_reject"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["rm -rf /"],
         metadata: { command: "rm -rf /" },
         always: [],
-        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "ask" }],
       })
 
       const list = await waitForPending(1)

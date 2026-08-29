@@ -462,7 +462,7 @@ function syncText(data: SessionData, partID: string, next: string) {
 // verbatim at the start of their next text part. We save both the raw and
 // trimmed forms so stripEcho() can match either.
 function stashEcho(data: SessionData, part: ToolPart) {
-  if (part.tool !== "bash") {
+  if (part.tool !== "terminal" && part.tool !== "bash") {
     return
   }
 
@@ -658,8 +658,8 @@ function claimShell(data: SessionData, callID: string, source: ShellCall["source
   return next
 }
 
-function bashCommand(part: ToolPart): string | undefined {
-  if (part.tool !== "bash") {
+function terminalCommand(part: ToolPart): string | undefined {
+  if (part.tool !== "terminal" && part.tool !== "bash") {
     return undefined
   }
 
@@ -683,7 +683,7 @@ function shellCommit(
     kind: "tool",
     source: "tool",
     partID: shellPartID(input.callID),
-    tool: "bash",
+    tool: "terminal",
     shell: input,
     ...next,
   }
@@ -925,8 +925,8 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
 
     if (part.type === "tool") {
       const view = syncPermission(data, part) ?? syncQuestion(data, part)
-      if (part.tool === "bash" && part.callID) {
-        if (claimShell(data, part.callID, "tool", bashCommand(part)).source === "shell") {
+      if ((part.tool === "terminal" || part.tool === "bash") && part.callID) {
+        if (claimShell(data, part.callID, "tool", terminalCommand(part)).source === "shell") {
           return out(data, commits, view)
         }
       }

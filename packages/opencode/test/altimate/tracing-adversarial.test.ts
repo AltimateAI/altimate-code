@@ -101,7 +101,7 @@ describe("Adversarial — malformed input", () => {
     circular.self = circular
 
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -178,7 +178,7 @@ describe("Adversarial — malformed input", () => {
     tracer.startTrace("s-err-type", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "error",
@@ -202,7 +202,7 @@ describe("Adversarial — malformed input", () => {
     tracer.startTrace("s-undef-err", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "error",
@@ -250,7 +250,7 @@ describe("Adversarial — malformed input", () => {
     tracer.startTrace("s-no-time", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -280,7 +280,7 @@ describe("Adversarial — unicode and special characters", () => {
     tracer.startTrace("s-emoji", { prompt: "Fix the 🐛 in the 🔧 pipeline 🚀" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -486,7 +486,7 @@ describe("Adversarial — concurrency", () => {
     // Fire 100 tool calls synchronously as fast as possible
     for (let i = 0; i < 100; i++) {
       tracer.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `rapid-${i}`,
         state: {
           status: "completed",
@@ -700,7 +700,7 @@ describe("Adversarial — state machine", () => {
     tracer.startTrace("s-interleave", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -742,7 +742,7 @@ describe("Adversarial — state machine", () => {
     // These should all be no-ops, not crashes
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -774,7 +774,7 @@ describe("Adversarial — JSON serialization", () => {
     tracer.startTrace("s-date", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -800,7 +800,7 @@ describe("Adversarial — JSON serialization", () => {
     tracer.startTrace("s-bigint", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -854,7 +854,7 @@ describe("Adversarial — JSON serialization", () => {
     tracer.startTrace("s-deep", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",

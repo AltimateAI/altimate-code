@@ -11,7 +11,7 @@ const TOOLS = [
 describe("Retrieval.select", () => {
   test("always keeps core tools", () => {
     const sel = Retrieval.select("run the dbt models", TOOLS, { topk: 12 })
-    expect(sel.has("bash")).toBe(true)
+    expect(sel.has("terminal")).toBe(true)
     expect(sel.has("read")).toBe(true)
   })
 

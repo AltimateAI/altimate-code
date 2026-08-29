@@ -21,7 +21,8 @@ const InputObject = Schema.StructWithRest(
     glob: Schema.optional(Rule),
     grep: Schema.optional(Rule),
     list: Schema.optional(Rule),
-    bash: Schema.optional(Rule),
+    bash: Schema.optional(Rule), // kept for backward compatibility but mapped to "terminal"
+    terminal: Schema.optional(Rule),
     task: Schema.optional(Rule),
     external_directory: Schema.optional(Rule),
     todowrite: Schema.optional(Action),
@@ -37,8 +38,20 @@ const InputObject = Schema.StructWithRest(
 
 const InputSchema = Schema.Union([Action, InputObject])
 
-const normalizeInput = (input: Schema.Schema.Type<typeof InputSchema>): Schema.Schema.Type<typeof InputObject> =>
-  typeof input === "string" ? { "*": input } : input
+const normalizeInput = (input: Schema.Schema.Type<typeof InputSchema>): Schema.Schema.Type<typeof InputObject> => {
+  if (typeof input === "string") return { "*": input }
+  const result: any = {}
+  for (const [key, value] of globalThis.Object.entries(input)) {
+    if (key === "bash") {
+      if (!("terminal" in input)) {
+        result.terminal = value
+      }
+    } else {
+      result[key] = value
+    }
+  }
+  return result
+}
 
 export const Info = InputSchema.pipe(
   Schema.decodeTo(InputObject, {

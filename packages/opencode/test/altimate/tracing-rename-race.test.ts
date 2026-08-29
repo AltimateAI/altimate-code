@@ -69,7 +69,7 @@ describe("trace corruption — flushSync vs in-flight rename race", () => {
     await new Promise((r) => setTimeout(r, 300))
 
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c-pre-crash",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })

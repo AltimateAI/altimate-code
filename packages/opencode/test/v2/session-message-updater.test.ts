@@ -150,7 +150,7 @@ test.skip("tool completion stores completed timestamp", () => {
         assistantMessageID,
         timestamp: DateTime.makeUnsafe(2),
         callID,
-        name: "bash",
+        name: "terminal",
       },
     } satisfies SessionEvent.Event),
   )
@@ -164,7 +164,7 @@ test.skip("tool completion stores completed timestamp", () => {
         assistantMessageID,
         timestamp: DateTime.makeUnsafe(3),
         callID,
-        tool: "bash",
+        tool: "terminal",
         input: { command: "pwd" },
         provider: { executed: true, metadata: { fake: { source: "provider" } } },
       },

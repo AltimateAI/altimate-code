@@ -872,7 +872,7 @@ Ordered permissions`,
     )
 
     const config = yield* Config.use.get()
-    expect(Object.keys(config.agent?.ordered?.permission ?? {})).toEqual(["bash", "*", "edit"])
+    expect(Object.keys(config.agent?.ordered?.permission ?? {})).toEqual(["terminal", "*", "edit"])
   }),
 )
 
@@ -1421,7 +1421,7 @@ test("config parser preserves permission order while rejecting unknown top-level
     "test",
   )
 
-  expect(Object.keys(config.permission!)).toEqual(["bash", "*", "edit"])
+  expect(Object.keys(config.permission!)).toEqual(["terminal", "*", "edit"])
   try {
     ConfigParse.schema(ConfigV1.Info, { invalid_field: true }, "test")
     throw new Error("expected config parse to fail")

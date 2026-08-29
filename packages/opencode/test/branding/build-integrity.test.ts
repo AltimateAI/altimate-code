@@ -325,7 +325,7 @@ describe("Bundle Completeness", () => {
   })
 
   test("bash.ts prepends ALTIMATE_BIN_DIR to PATH", () => {
-    const bashTs = readFileSync(join(repoRoot, "packages/opencode/src/tool/bash.ts"), "utf-8")
+    const bashTs = readFileSync(join(repoRoot, "packages/opencode/src/tool/terminal.ts"), "utf-8")
     expect(bashTs).toContain("ALTIMATE_BIN_DIR")
     expect(bashTs).toContain("PATH")
   })

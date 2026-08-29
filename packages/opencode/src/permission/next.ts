@@ -48,7 +48,11 @@ export namespace PermissionNext {
 
   export function fromConfig(permission: ConfigPermissionV1.Info) {
     const ruleset: Ruleset = []
-    for (const [key, value] of Object.entries(permission)) {
+    for (let [key, value] of Object.entries(permission)) {
+      if (key === "bash") {
+        if (permission.terminal !== undefined) continue // terminal takes precedence
+        key = "terminal"
+      }
       if (typeof value === "string") {
         ruleset.push({
           permission: key,
@@ -264,7 +268,7 @@ export namespace PermissionNext {
   export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
     const result = new Set<string>()
     for (const tool of tools) {
-      const permission = EDIT_TOOLS.includes(tool) ? "edit" : tool
+      const permission = EDIT_TOOLS.includes(tool) ? "edit" : (tool === "bash" ? "terminal" : tool)
 
       const rule = ruleset.findLast((r) => Wildcard.match(permission, r.permission))
       if (!rule) continue

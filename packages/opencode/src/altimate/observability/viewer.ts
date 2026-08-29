@@ -595,7 +595,7 @@ function showDetail(span) {
       if (fp) changedFiles[fp] = lname.indexOf('write') >= 0 ? 'write' : 'edit';
     } else if (lname.indexOf('read') >= 0 || lname === 'glob' || lname === 'grep') {
       if (fp && !changedFiles[fp]) readFiles[fp] = 1;
-    } else if (lname === 'bash' || lname.indexOf('shell') >= 0) {
+    } else if (lname === 'terminal' || lname.indexOf('shell') >= 0) {
       var cmd = inpObj ? (inpObj.command || '') : (typeof inp === 'string' ? inp : '');
       if (cmd) {
         // Extract the meaningful command — strip cd prefixes, take last command in chain
@@ -652,7 +652,7 @@ function showDetail(span) {
     }
 
     // For bash/shell commands — extract meaningful command and its outcome
-    if ((lname === 'bash' || lname.indexOf('shell') >= 0) && outStr) {
+    if ((lname === 'terminal' || lname.indexOf('shell') >= 0) && outStr) {
       var rawCmd = String(inp.command || '');
       var cmdParts = rawCmd.split(/\\s*&&\\s*/);
       var displayCmd = cmdParts[cmdParts.length - 1].trim();
@@ -1475,7 +1475,7 @@ function showDetail(span) {
       var fp = inp.file_path || inp.filePath || inp.path || null;
       if (nm.indexOf('write') >= 0 || nm.indexOf('edit') >= 0) { if (fp) mdChanged[fp] = nm.indexOf('write') >= 0 ? 'new' : 'edited'; }
       else if (nm.indexOf('read') >= 0) { mdReadCount++; }
-      else if (nm === 'bash') {
+      else if (nm === 'terminal' || nm.indexOf('shell') >= 0) {
         var cmd = inp.command || '';
         var parts = cmd.split(/\\s*&&\\s*/);
         var last = parts[parts.length - 1].trim().toLowerCase();

@@ -8,7 +8,7 @@ const opencode = OpenCode.make({})
 opencode.tool.add(ReadTool)
 
 opencode.tool.add({
-  name: "bash",
+  name: "terminal",
   schema: {
     type: "object",
     properties: {

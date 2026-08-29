@@ -169,7 +169,7 @@ function runningToolMessage(id: string): SessionMessages[number] {
         messageID: id,
         type: "tool",
         callID: `${id}-call`,
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "running",
           input: {
@@ -228,7 +228,7 @@ function shellAssistantMessage(id: string, parentID: string): SessionMessages[nu
         messageID: id,
         type: "tool",
         callID: `${id}-call`,
-        tool: "bash",
+        tool: "terminal",
         state: {
           status: "completed",
           input: {
@@ -387,7 +387,7 @@ describe("run session replay", () => {
       expect.objectContaining({
         kind: "tool",
         text: "account.ts\n",
-        tool: "bash",
+        tool: "terminal",
         toolState: "completed",
       }),
     )

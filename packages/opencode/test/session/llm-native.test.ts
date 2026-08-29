@@ -170,7 +170,7 @@ describe("session.llm-native.request", () => {
           {
             type: "tool-call",
             toolCallId: "call-1",
-            toolName: "bash",
+            toolName: "terminal",
             input: { command: "ls" },
             providerOptions: { openai: { itemId: "item-1" } },
           },
@@ -182,7 +182,7 @@ describe("session.llm-native.request", () => {
           {
             type: "tool-result",
             toolCallId: "call-1",
-            toolName: "bash",
+            toolName: "terminal",
             output: { type: "text", value: "ok" },
             providerOptions: { openai: { outputId: "output-1" } },
           },
@@ -243,7 +243,7 @@ describe("session.llm-native.request", () => {
     expect(request.toolChoice).toMatchObject({ type: "required" })
     expect(request.tools).toMatchObject([
       {
-        name: "bash",
+        name: "terminal",
         description: "Run a shell command",
         inputSchema: {
           type: "object",
@@ -270,7 +270,7 @@ describe("session.llm-native.request", () => {
           {
             type: "tool-call",
             id: "call-1",
-            name: "bash",
+            name: "terminal",
             input: { command: "ls" },
             providerMetadata: { openai: { itemId: "item-1" } },
           },
@@ -282,7 +282,7 @@ describe("session.llm-native.request", () => {
           {
             type: "tool-result",
             id: "call-1",
-            name: "bash",
+            name: "terminal",
             result: { type: "text", value: "ok" },
             providerMetadata: { openai: { outputId: "output-1" } },
           },

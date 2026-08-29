@@ -113,7 +113,7 @@ describe("logToolCall — state.time null/undefined", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -136,7 +136,7 @@ describe("logToolCall — state.time null/undefined", () => {
     tracer.startTrace("s1", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -156,7 +156,7 @@ describe("logToolCall — state.time null/undefined", () => {
     tracer.logStepStart({ id: "1" })
     // The try/catch should handle this
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: null as any,
     })

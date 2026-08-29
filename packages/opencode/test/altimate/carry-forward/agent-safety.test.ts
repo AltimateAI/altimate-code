@@ -86,12 +86,12 @@ it.instance("builder denies destructive DDL and defaults destructive shell to as
     const builder = yield* load((svc) => svc.get("builder"))
     expect(builder).toBeDefined()
     // DDL is denied outright (both upper + lower case patterns installed)
-    expect(Permission.evaluate("bash", "DROP DATABASE prod", builder!.permission).action).toBe("deny")
-    expect(Permission.evaluate("bash", "drop schema staging", builder!.permission).action).toBe("deny")
-    expect(Permission.evaluate("bash", "TRUNCATE events", builder!.permission).action).toBe("deny")
+    expect(Permission.evaluate("terminal", "DROP DATABASE prod", builder!.permission).action).toBe("deny")
+    expect(Permission.evaluate("terminal", "drop schema staging", builder!.permission).action).toBe("deny")
+    expect(Permission.evaluate("terminal", "TRUNCATE events", builder!.permission).action).toBe("deny")
     // Destructive file/git ops default to "ask"
-    expect(Permission.evaluate("bash", "rm -rf ./build", builder!.permission).action).toBe("ask")
-    expect(Permission.evaluate("bash", "git push --force origin main", builder!.permission).action).toBe("ask")
+    expect(Permission.evaluate("terminal", "rm -rf ./build", builder!.permission).action).toBe("ask")
+    expect(Permission.evaluate("terminal", "git push --force origin main", builder!.permission).action).toBe("ask")
     // Bare bash defaults to "ask", not "allow"
     expect(evalPerm(builder, "bash")).toBe("ask")
   }),
@@ -105,8 +105,8 @@ it.instance(
       expect(builder).toBeDefined()
       // Even though the user set bash: allow, DDL stays denied (last-match-wins safetyDenials)
       expect(evalPerm(builder, "bash")).toBe("allow")
-      expect(Permission.evaluate("bash", "DROP DATABASE prod", builder!.permission).action).toBe("deny")
-      expect(Permission.evaluate("bash", "drop database prod", builder!.permission).action).toBe("deny")
+      expect(Permission.evaluate("terminal", "DROP DATABASE prod", builder!.permission).action).toBe("deny")
+      expect(Permission.evaluate("terminal", "drop database prod", builder!.permission).action).toBe("deny")
     }),
   {
     config: {
@@ -133,7 +133,7 @@ it.instance("reviewer agent never mutates (edit/write deny, bash asks) but allow
     expect(reviewer?.mode).toBe("primary")
     // #978: bash asks (user approves each command, e.g. `gh pr view`) — never runs silently
     expect(evalPerm(reviewer, "bash")).toBe("ask")
-    expect(Permission.evaluate("bash", "DROP DATABASE prod", reviewer!.permission).action).toBe("deny")
+    expect(Permission.evaluate("terminal", "DROP DATABASE prod", reviewer!.permission).action).toBe("deny")
     expect(evalPerm(reviewer, "edit")).toBe("deny")
     expect(evalPerm(reviewer, "write")).toBe("deny")
     // The dbt PR review verdict engine + read-only analysis tools are allowed

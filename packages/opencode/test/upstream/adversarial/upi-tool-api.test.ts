@@ -150,7 +150,7 @@ describe("UPI-12 and UPI-13 tool context, decode, and central truncation", () =>
         async execute(args: { name: string }, ctx) {
           await new Promise((resolve) => setTimeout(resolve, 0))
           ctx.metadata({ title: args.name, metadata: { stage: "metadata" } })
-          await ctx.ask({ permission: "bash", patterns: ["echo *"], always: ["echo *"], metadata: {} })
+          await ctx.ask({ permission: "terminal", patterns: ["echo *"], always: ["echo *"], metadata: {} })
           return { title: "done", metadata: { ok: true }, output: "ok" }
         },
       }),

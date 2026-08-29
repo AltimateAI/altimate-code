@@ -1,4 +1,4 @@
-export * as BashTool from "./bash"
+export * as TerminalTool from "./terminal"
 
 import path from "path"
 import { ToolFailure } from "@opencode-ai/llm"
@@ -13,7 +13,7 @@ import { PositiveInt } from "../schema"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 
-export const name = "bash"
+export const name = "terminal"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
 export const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 export const MAX_CAPTURE_BYTES = 1024 * 1024

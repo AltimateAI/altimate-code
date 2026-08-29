@@ -573,9 +573,9 @@ test("coalesces same-line tool progress into one snapshot", async () => {
   const out = await setup()
 
   try {
-    await out.scrollback.append(toolCommit({ tool: "bash", phase: "progress", text: "abc" }))
-    await out.scrollback.append(toolCommit({ tool: "bash", phase: "progress", text: "def" }))
-    await out.scrollback.append(toolCommit({ tool: "bash", phase: "final", text: "", toolState: "completed" }))
+    await out.scrollback.append(toolCommit({ tool: "terminal", phase: "progress", text: "abc" }))
+    await out.scrollback.append(toolCommit({ tool: "terminal", phase: "progress", text: "def" }))
+    await out.scrollback.append(toolCommit({ tool: "terminal", phase: "final", text: "", toolState: "completed" }))
 
     const commits = claim(out.renderer)
     try {
@@ -607,7 +607,7 @@ test("renders completed bash output with one blank line after the command and be
     take()
     await out.scrollback.append(
       toolCommit({
-        tool: "bash",
+        tool: "terminal",
         phase: "start",
         toolState: "running",
         state: {
@@ -624,7 +624,7 @@ test("renders completed bash output with one blank line after the command and be
     take()
     await out.scrollback.append(
       toolCommit({
-        tool: "bash",
+        tool: "terminal",
         phase: "progress",
         toolState: "completed",
         text: ["/tmp/demo", "git status", "On branch demo", "nothing to commit, working tree clean", ""].join("\n"),
@@ -669,7 +669,7 @@ test("inserts a spacer before the next tool after completed multiline bash outpu
 
     await out.scrollback.append(
       toolCommit({
-        tool: "bash",
+        tool: "terminal",
         phase: "start",
         toolState: "running",
         state: {
@@ -686,7 +686,7 @@ test("inserts a spacer before the next tool after completed multiline bash outpu
     take()
     await out.scrollback.append(
       toolCommit({
-        tool: "bash",
+        tool: "terminal",
         phase: "progress",
         toolState: "completed",
         text: ["/tmp/demo", "pwd; ls -la", "/tmp/demo", "total 4", "", ""].join("\n"),
@@ -747,7 +747,7 @@ test("does not double-space before completed bash output when inline tool header
 
     await out.scrollback.append(
       toolCommit({
-        tool: "bash",
+        tool: "terminal",
         phase: "start",
         toolState: "running",
         state: {
@@ -796,7 +796,7 @@ test("does not double-space before completed bash output when inline tool header
     take()
     await out.scrollback.append(
       toolCommit({
-        tool: "bash",
+        tool: "terminal",
         phase: "progress",
         toolState: "completed",
         text: ["src/cli/cmd/run", "ls", "demo.ts", "entry.body.ts", "", ""].join("\n"),

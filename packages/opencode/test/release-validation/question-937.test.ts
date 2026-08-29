@@ -2,16 +2,16 @@
 //
 // Touched source:
 //   packages/opencode/src/tool/question.ts   (isNonInteractive / autoAnswer + mode-aware output)
-//   packages/opencode/src/tool/bash.ts        (strip ALTIMATE_NON_INTERACTIVE from child env)
+//   packages/opencode/src/tool/terminal.ts        (strip ALTIMATE_NON_INTERACTIVE from child env)
 //   packages/opencode/src/cli/cmd/run.ts       (set ALTIMATE_NON_INTERACTIVE; null-safe stdin read)
 //
 // Style/imports follow packages/opencode/test/tool/question.test.ts and
-// packages/opencode/test/tool/bash.test.ts.
+// packages/opencode/test/tool/terminal.test.ts.
 
 import { describe, expect, test, spyOn, beforeAll, beforeEach, afterEach } from "bun:test"
 import { QuestionTool } from "../../src/tool/question"
 import * as QuestionModule from "../../src/question"
-import { BashTool } from "../../src/tool/bash"
+import { TerminalTool } from "../../src/tool/terminal"
 import { Instance } from "../../src/project/instance"
 import { SessionID, MessageID } from "../../src/session/schema"
 // altimate_change start — upstream v1.17.9 made tools Effect definitions (no static .init());
@@ -219,7 +219,7 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
 
 // ---------------------------------------------------------------------------
 // Gap #7 — bash tool strips ALTIMATE_NON_INTERACTIVE from child env.
-// Mirrors packages/opencode/test/tool/bash.test.ts (Instance.provide + execute).
+// Mirrors packages/opencode/test/tool/terminal.test.ts (Instance.provide + execute).
 // ---------------------------------------------------------------------------
 describe("tool.bash strips ALTIMATE_NON_INTERACTIVE from child env", () => {
   let prev: string | undefined
@@ -239,7 +239,7 @@ describe("tool.bash strips ALTIMATE_NON_INTERACTIVE from child env", () => {
     await Instance.provide({
       directory: projectRoot,
       fn: async () => {
-        const bash = await initTool(BashTool)
+        const bash = await initTool(TerminalTool)
         // printenv exits non-zero when the var is unset, so `|| echo MISSING`
         // proves the delete reached spawn's env.
         const result = await bash.execute(

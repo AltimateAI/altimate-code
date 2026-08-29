@@ -313,7 +313,7 @@ describe("Recap — graceful degradation", () => {
     tracer.startTrace("s-empty-input", { prompt: "x" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -989,7 +989,7 @@ describe("Loop detection", () => {
     // Call same tool 5 times with identical input
     for (let i = 0; i < 5; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-${i}`,
         state: {
           status: "completed",
@@ -1018,7 +1018,7 @@ describe("Loop detection", () => {
     recap.startTrace("s-no-loop-diff-tools", { prompt: "test" })
     recap.logStepStart({ id: "1" })
 
-    const tools = ["bash", "read", "edit", "glob", "grep"]
+    const tools = ["terminal", "read", "edit", "glob", "grep"]
     for (let i = 0; i < 5; i++) {
       recap.logToolCall({
         tool: tools[i]!,
@@ -1048,7 +1048,7 @@ describe("Loop detection", () => {
 
     for (let i = 0; i < 5; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-${i}`,
         state: {
           status: "completed",
@@ -1076,7 +1076,7 @@ describe("Loop detection", () => {
     // Call same tool 5 times with empty input
     for (let i = 0; i < 5; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-${i}`,
         state: {
           status: "completed",
@@ -1120,7 +1120,7 @@ describe("Loop detection", () => {
     // Only 2 repeats of the same tool (below threshold of 3)
     for (let i = 0; i < 2; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-bash-${i}`,
         state: {
           status: "completed",
@@ -1165,7 +1165,7 @@ describe("Loop detection", () => {
     // of the surviving slice, well within the last-10 detection window
     for (let i = 0; i < 3; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-loop-${i}`,
         state: {
           status: "completed",
@@ -1196,7 +1196,7 @@ describe("Loop detection", () => {
     // Interleave two different loops: bash(ls) and read(file.ts)
     for (let i = 0; i < 4; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-bash-${i}`,
         state: {
           status: "completed",
@@ -1268,7 +1268,7 @@ describe("Post-session narrative", () => {
     // Call bash 3 times, read 2 times, edit 1 time
     for (let i = 0; i < 3; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-bash-${i}`,
         state: {
           status: "completed",
@@ -1346,7 +1346,7 @@ describe("Post-session narrative", () => {
     // Trigger a loop: same tool+input 5 times
     for (let i = 0; i < 5; i++) {
       recap.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-${i}`,
         state: {
           status: "completed",
@@ -1373,7 +1373,7 @@ describe("Post-session narrative", () => {
     recap.logStepStart({ id: "1" })
 
     recap.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: {
         status: "completed",
@@ -1383,7 +1383,7 @@ describe("Post-session narrative", () => {
       },
     })
     recap.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c2",
       state: {
         status: "completed",
@@ -1397,9 +1397,9 @@ describe("Post-session narrative", () => {
     const filePath = await recap.endTrace()
 
     const traceFile: TraceFile = JSON.parse(await fs.readFile(filePath!, "utf-8"))
-    const bashTool = traceFile.summary.topTools!.find((t) => t.name === "bash")!
-    expect(bashTool.count).toBe(2)
-    expect(bashTool.totalDuration).toBe(4000) // 2500 + 1500
+    const terminalTool = traceFile.summary.topTools!.find((t) => t.name === "terminal")!
+    expect(terminalTool.count).toBe(2)
+    expect(terminalTool.totalDuration).toBe(4000) // 2500 + 1500
   })
 })
 
@@ -1527,7 +1527,7 @@ describe("viewer adversarial tests", () => {
     const traceFile = makeTrace({
       spans: [
         { spanId: "s0", parentSpanId: null, name: "session", kind: "session", startTime: 0, status: "ok" },
-        { spanId: "s1", parentSpanId: "s0", name: "bash", kind: "tool", startTime: 1, endTime: 2, status: "ok",
+        { spanId: "s1", parentSpanId: "s0", name: "terminal", kind: "tool", startTime: 1, endTime: 2, status: "ok",
           tool: { callId: "c1", durationMs: 1 },
           input: { command: '<img src=x onerror=alert(1)>' },
           output: '<script>alert("xss")</script>Completed successfully' },
@@ -1628,11 +1628,11 @@ describe("viewer adversarial tests", () => {
     const traceFile = makeTrace({
       spans: [
         { spanId: "s0", parentSpanId: null, name: "session", kind: "session", startTime: 0, status: "ok" },
-        { spanId: "s1", parentSpanId: "s0", name: "bash", kind: "tool", startTime: 1, endTime: 2, status: "ok",
+        { spanId: "s1", parentSpanId: "s0", name: "terminal", kind: "tool", startTime: 1, endTime: 2, status: "ok",
           tool: { callId: "c1", durationMs: 1 },
           input: { command: "pytest tests/" },
           output: "5 tests passed, 0 failed" },
-        { spanId: "s2", parentSpanId: "s0", name: "bash", kind: "tool", startTime: 3, endTime: 4, status: "ok",
+        { spanId: "s2", parentSpanId: "s0", name: "terminal", kind: "tool", startTime: 3, endTime: 4, status: "ok",
           tool: { callId: "c2", durationMs: 1 },
           input: { command: "pip install pandas" },
           output: "Successfully installed pandas-2.0.0" },

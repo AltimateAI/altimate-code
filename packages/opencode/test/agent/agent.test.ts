@@ -73,8 +73,8 @@ it.instance("build agent has correct default properties", () =>
     expect(build?.mode).toBe("primary")
     expect(build?.native).toBe(true)
     expect(evalPerm(build, "edit")).toBe("allow")
-    // altimate fork: bash defaults to "ask" (safety default) rather than "allow"
-    expect(evalPerm(build, "bash")).toBe("ask")
+    // altimate fork: terminal defaults to "ask" (safety default) rather than "allow"
+    expect(evalPerm(build, "terminal")).toBe("ask")
   }),
 )
 
@@ -91,12 +91,12 @@ it.instance("reviewer agent is read-only but usable outside the project (#978)",
     expect(Permission.evaluate("external_directory", "/some/sibling/repo", reviewer!.permission).action).toBe("ask")
     // #978: PR/issue URLs are reviewable
     expect(evalPerm(reviewer, "webfetch")).toBe("allow")
-    // #978: bash prompts (e.g. `gh pr view`) instead of hard-denying
-    expect(Permission.evaluate("bash", "gh pr view 66 --repo AltimateAI/.claude", reviewer!.permission).action).toBe(
+    // #978: terminal prompts (e.g. `gh pr view`) instead of hard-denying
+    expect(Permission.evaluate("terminal", "gh pr view 66 --repo AltimateAI/.claude", reviewer!.permission).action).toBe(
       "ask",
     )
-    // Safety denials still hold even though bash asks
-    expect(Permission.evaluate("bash", "DROP DATABASE prod", reviewer!.permission).action).toBe("deny")
+    // Safety denials still hold even though terminal asks
+    expect(Permission.evaluate("terminal", "DROP DATABASE prod", reviewer!.permission).action).toBe("deny")
     // Review never mutates
     expect(evalPerm(reviewer, "edit")).toBe("deny")
     expect(evalPerm(reviewer, "sql_execute_write")).toBe("deny")
@@ -311,7 +311,7 @@ it.instance(
       const build = yield* load((svc) => svc.get("build"))
       expect(build).toBeDefined()
       // Specific pattern is denied
-      expect(Permission.evaluate("bash", "rm -rf *", build!.permission).action).toBe("deny")
+      expect(Permission.evaluate("terminal", "rm -rf *", build!.permission).action).toBe("deny")
       // Edit still allowed
       expect(evalPerm(build, "edit")).toBe("allow")
     }),

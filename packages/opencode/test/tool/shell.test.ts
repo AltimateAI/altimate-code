@@ -42,7 +42,7 @@ const initShell = Effect.fn("ShellToolTest.init")(function* () {
   return yield* info.init()
 })
 
-const initBash = initShell
+const initTerminal = initShell
 
 const run = Effect.fn("ShellToolTest.run")(function* (
   args: Tool.InferParameters<typeof ShellTool>,
@@ -196,7 +196,7 @@ describe("tool.shell", () => {
       yield* runIn(
         tmp,
         Effect.gen(function* () {
-          const bash = yield* initBash()
+          const bash = yield* initTerminal()
           const fallback = Shell.name(Shell.acceptable("fish"))
           expect(fallback).not.toBe("fish")
           expect(bash.description).toContain(fallback)

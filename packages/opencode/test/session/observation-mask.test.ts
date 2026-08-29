@@ -15,7 +15,7 @@ function makeToolPart(overrides: {
     messageID: "msg_1" as any,
     type: "tool" as const,
     callID: "call_1",
-    tool: overrides.tool ?? "bash",
+    tool: overrides.tool ?? "terminal",
   }
 
   if (status === "completed") {
@@ -82,7 +82,7 @@ describe("SessionCompaction.createObservationMask", () => {
 
   test("handles empty output gracefully", () => {
     const part = makeToolPart({
-      tool: "bash",
+      tool: "terminal",
       input: { command: "echo hello" },
       output: "",
     })
@@ -139,10 +139,10 @@ describe("SessionCompaction.createObservationMask", () => {
   })
 
   test("uses empty input for pending tool parts", () => {
-    const part = makeToolPart({ tool: "bash", status: "pending" })
+    const part = makeToolPart({ tool: "terminal", status: "pending" })
     const mask = SessionCompaction.createObservationMask(part)
 
-    expect(mask).toContain("bash()")
+    expect(mask).toContain("terminal()")
     expect(mask).toContain("returned 1 lines")
     expect(mask).toContain("0 B")
   })
@@ -162,13 +162,13 @@ describe("SessionCompaction.createObservationMask", () => {
 
   test("uses input from error tool parts", () => {
     const part = makeToolPart({
-      tool: "bash",
+      tool: "terminal",
       input: { command: "rm -rf /" },
       status: "error",
     })
     const mask = SessionCompaction.createObservationMask(part)
 
-    expect(mask).toContain("bash(command:")
+    expect(mask).toContain("terminal(command:")
     expect(mask).toContain("0 B")
   })
 })

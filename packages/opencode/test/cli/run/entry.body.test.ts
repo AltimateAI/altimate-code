@@ -289,7 +289,7 @@ describe("run entry body", () => {
         text: "partial output",
         phase: "progress",
         source: "tool",
-        tool: "bash",
+        tool: "terminal",
         partID: "tool-2",
       }),
     )
@@ -305,7 +305,7 @@ describe("run entry body", () => {
           text: "partial output",
           phase: "progress",
           source: "tool",
-          tool: "bash",
+          tool: "terminal",
         }),
         body,
       ),
@@ -317,7 +317,7 @@ describe("run entry body", () => {
           text: "output",
           phase: "progress",
           source: "tool",
-          tool: "bash",
+          tool: "terminal",
           toolState: "completed",
         }),
       ),
@@ -328,7 +328,7 @@ describe("run entry body", () => {
     expect(
       entryBody(
         toolCommit({
-          tool: "bash",
+          tool: "terminal",
           phase: "progress",
           toolState: "completed",
           text: ["/tmp/demo", "git status", "On branch demo", "nothing to commit, working tree clean", ""].join("\n"),
@@ -359,7 +359,7 @@ describe("run entry body", () => {
     expect(
       entryBody(
         toolCommit({
-          tool: "bash",
+          tool: "terminal",
           phase: "start",
           toolState: "running",
           text: "running shell",
@@ -386,7 +386,7 @@ describe("run entry body", () => {
           text: "running shell",
           phase: "start",
           source: "tool",
-          tool: "bash",
+          tool: "terminal",
           partID: "shell:call-1",
           toolState: "running",
           shell: {
@@ -407,7 +407,7 @@ describe("run entry body", () => {
           text: "/tmp/demo\n",
           phase: "progress",
           source: "tool",
-          tool: "bash",
+          tool: "terminal",
           partID: "shell:call-1",
           toolState: "completed",
           shell: {

@@ -79,28 +79,64 @@ const list = () =>
 
 // fromConfig tests
 
-test("fromConfig - string value becomes wildcard rule", () => {
+test("fromConfig - legacy bash only maps to terminal", () => {
   const result = Permission.fromConfig({ bash: "allow" })
-  expect(result).toEqual([{ permission: "bash", pattern: "*", action: "allow" }])
+  expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
+})
+
+test("fromConfig - terminal only works", () => {
+  const result = Permission.fromConfig({ terminal: "allow" })
+  expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
+})
+
+test("fromConfig - terminal wins over bash", () => {
+  const result = Permission.fromConfig({ bash: "deny", terminal: "allow" })
+  expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
+})
+
+test("fromConfig - migration preserves bash order before wildcard", () => {
+  const result = Permission.fromConfig({ bash: "allow", "*": "deny" })
+  expect(result).toEqual([
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "*", pattern: "*", action: "deny" }
+  ])
+})
+
+test("fromConfig - migration preserves bash order after wildcard", () => {
+  const result = Permission.fromConfig({ "*": "deny", bash: "allow" })
+  expect(result).toEqual([
+    { permission: "*", pattern: "*", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" }
+  ])
 })
 
 test("fromConfig - object value converts to rules array", () => {
-  const result = Permission.fromConfig({ bash: { "*": "allow", rm: "deny" } })
+  const result = Permission.fromConfig({ terminal: { "*": "allow", rm: "deny" } })
   expect(result).toEqual([
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "bash", pattern: "rm", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "rm", action: "deny" },
   ])
+})
+
+test("fromConfig - legacy bash deny rules still deny terminal", () => {
+  const ruleset = Permission.fromConfig({ bash: "deny" })
+  expect(Permission.evaluate("terminal", "ls", ruleset).action).toBe("deny")
+})
+
+test("fromConfig - legacy bash allow rules still allow terminal", () => {
+  const ruleset = Permission.fromConfig({ bash: "allow" })
+  expect(Permission.evaluate("terminal", "ls", ruleset).action).toBe("allow")
 })
 
 test("fromConfig - mixed string and object values", () => {
   const result = Permission.fromConfig({
-    bash: { "*": "allow", rm: "deny" },
+    terminal: { "*": "allow", rm: "deny" },
     edit: "allow",
     webfetch: "ask",
   })
   expect(result).toEqual([
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "bash", pattern: "rm", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "rm", action: "deny" },
     { permission: "edit", pattern: "*", action: "allow" },
     { permission: "webfetch", pattern: "*", action: "ask" },
   ])
@@ -136,20 +172,20 @@ test("fromConfig - does not expand tilde in middle of path", () => {
 // entries even when a wildcard appears after a specific permission.
 
 test("fromConfig - preserves top-level config key order", () => {
-  const wildcardFirst = Permission.fromConfig({ "*": "deny", bash: "allow" })
-  const specificFirst = Permission.fromConfig({ bash: "allow", "*": "deny" })
+  const wildcardFirst = Permission.fromConfig({ "*": "deny", terminal: "allow" })
+  const specificFirst = Permission.fromConfig({ terminal: "allow", "*": "deny" })
 
-  expect(wildcardFirst.map((r) => r.permission)).toEqual(["*", "bash"])
-  expect(specificFirst.map((r) => r.permission)).toEqual(["bash", "*"])
+  expect(wildcardFirst.map((r) => r.permission)).toEqual(["*", "terminal"])
+  expect(specificFirst.map((r) => r.permission)).toEqual(["terminal", "*"])
 
-  expect(Permission.evaluate("bash", "ls", wildcardFirst).action).toBe("allow")
-  expect(Permission.evaluate("bash", "ls", specificFirst).action).toBe("deny")
+  expect(Permission.evaluate("terminal", "ls", wildcardFirst).action).toBe("allow")
+  expect(Permission.evaluate("terminal", "ls", specificFirst).action).toBe("deny")
 })
 
 test("fromConfig - wildcard acts as fallback when it appears before specifics", () => {
   const ruleset = Permission.fromConfig({ "*": "ask", bash: "allow" })
   expect(Permission.evaluate("edit", "foo.ts", ruleset).action).toBe("ask")
-  expect(Permission.evaluate("bash", "ls", ruleset).action).toBe("allow")
+  expect(Permission.evaluate("terminal", "ls", ruleset).action).toBe("allow")
 })
 
 test("fromConfig - top-level ordering is not sorted by wildcard specificity", () => {
@@ -159,19 +195,19 @@ test("fromConfig - top-level ordering is not sorted by wildcard specificity", ()
     edit: "deny",
     "mcp_*": "allow",
   })
-  expect(ruleset.map((r) => r.permission)).toEqual(["bash", "*", "edit", "mcp_*"])
+  expect(ruleset.map((r) => r.permission)).toEqual(["terminal", "*", "edit", "mcp_*"])
 })
 
 test("fromConfig - sub-pattern insertion order inside a tool key is preserved", () => {
   const ruleset = Permission.fromConfig({ bash: { "*": "deny", "git *": "allow" } })
   expect(ruleset.map((r) => r.pattern)).toEqual(["*", "git *"])
-  expect(Permission.evaluate("bash", "rm foo", ruleset).action).toBe("deny")
-  expect(Permission.evaluate("bash", "git status", ruleset).action).toBe("allow")
+  expect(Permission.evaluate("terminal", "rm foo", ruleset).action).toBe("deny")
+  expect(Permission.evaluate("terminal", "git status", ruleset).action).toBe("allow")
 })
 
 test("fromConfig - documented fallback-first example", () => {
   const ruleset = Permission.fromConfig({ "*": "ask", bash: "allow", edit: "deny" })
-  expect(Permission.evaluate("bash", "ls", ruleset).action).toBe("allow")
+  expect(Permission.evaluate("terminal", "ls", ruleset).action).toBe("allow")
   expect(Permission.evaluate("edit", "foo.ts", ruleset).action).toBe("deny")
   expect(Permission.evaluate("read", "foo.ts", ruleset).action).toBe("ask")
 })
@@ -197,53 +233,53 @@ test("evaluate - matches expanded $HOME pattern", () => {
 
 test("merge - simple concatenation", () => {
   const result = Permission.merge(
-    [{ permission: "bash", pattern: "*", action: "allow" }],
-    [{ permission: "bash", pattern: "*", action: "deny" }],
+    [{ permission: "terminal", pattern: "*", action: "allow" }],
+    [{ permission: "terminal", pattern: "*", action: "deny" }],
   )
   expect(result).toEqual([
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "bash", pattern: "*", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "*", action: "deny" },
   ])
 })
 
 test("merge - adds new permission", () => {
   const result = Permission.merge(
-    [{ permission: "bash", pattern: "*", action: "allow" }],
+    [{ permission: "terminal", pattern: "*", action: "allow" }],
     [{ permission: "edit", pattern: "*", action: "deny" }],
   )
   expect(result).toEqual([
-    { permission: "bash", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "*", action: "allow" },
     { permission: "edit", pattern: "*", action: "deny" },
   ])
 })
 
 test("merge - concatenates rules for same permission", () => {
   const result = Permission.merge(
-    [{ permission: "bash", pattern: "foo", action: "ask" }],
-    [{ permission: "bash", pattern: "*", action: "deny" }],
+    [{ permission: "terminal", pattern: "foo", action: "ask" }],
+    [{ permission: "terminal", pattern: "*", action: "deny" }],
   )
   expect(result).toEqual([
-    { permission: "bash", pattern: "foo", action: "ask" },
-    { permission: "bash", pattern: "*", action: "deny" },
+    { permission: "terminal", pattern: "foo", action: "ask" },
+    { permission: "terminal", pattern: "*", action: "deny" },
   ])
 })
 
 test("merge - multiple rulesets", () => {
   const result = Permission.merge(
-    [{ permission: "bash", pattern: "*", action: "allow" }],
-    [{ permission: "bash", pattern: "rm", action: "ask" }],
+    [{ permission: "terminal", pattern: "*", action: "allow" }],
+    [{ permission: "terminal", pattern: "rm", action: "ask" }],
     [{ permission: "edit", pattern: "*", action: "allow" }],
   )
   expect(result).toEqual([
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "bash", pattern: "rm", action: "ask" },
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "rm", action: "ask" },
     { permission: "edit", pattern: "*", action: "allow" },
   ])
 })
 
 test("merge - empty ruleset does nothing", () => {
-  const result = Permission.merge([{ permission: "bash", pattern: "*", action: "allow" }], [])
-  expect(result).toEqual([{ permission: "bash", pattern: "*", action: "allow" }])
+  const result = Permission.merge([{ permission: "terminal", pattern: "*", action: "allow" }], [])
+  expect(result).toEqual([{ permission: "terminal", pattern: "*", action: "allow" }])
 })
 
 test("merge - preserves rule order", () => {
@@ -263,45 +299,45 @@ test("merge - preserves rule order", () => {
 
 test("merge - config permission overrides default ask", () => {
   const defaults: PermissionV1.Ruleset = [{ permission: "*", pattern: "*", action: "ask" }]
-  const config: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]
+  const config: PermissionV1.Ruleset = [{ permission: "terminal", pattern: "*", action: "allow" }]
   const merged = Permission.merge(defaults, config)
 
-  expect(Permission.evaluate("bash", "ls", merged).action).toBe("allow")
+  expect(Permission.evaluate("terminal", "ls", merged).action).toBe("allow")
   expect(Permission.evaluate("edit", "foo.ts", merged).action).toBe("ask")
 })
 
 test("merge - config ask overrides default allow", () => {
-  const defaults: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]
-  const config: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "ask" }]
+  const defaults: PermissionV1.Ruleset = [{ permission: "terminal", pattern: "*", action: "allow" }]
+  const config: PermissionV1.Ruleset = [{ permission: "terminal", pattern: "*", action: "ask" }]
   const merged = Permission.merge(defaults, config)
 
-  expect(Permission.evaluate("bash", "ls", merged).action).toBe("ask")
+  expect(Permission.evaluate("terminal", "ls", merged).action).toBe("ask")
 })
 
 // evaluate tests
 
 test("evaluate - exact pattern match", () => {
-  const result = Permission.evaluate("bash", "rm", [{ permission: "bash", pattern: "rm", action: "deny" }])
+  const result = Permission.evaluate("terminal", "rm", [{ permission: "terminal", pattern: "rm", action: "deny" }])
   expect(result.action).toBe("deny")
 })
 
 test("evaluate - wildcard pattern match", () => {
-  const result = Permission.evaluate("bash", "rm", [{ permission: "bash", pattern: "*", action: "allow" }])
+  const result = Permission.evaluate("terminal", "rm", [{ permission: "terminal", pattern: "*", action: "allow" }])
   expect(result.action).toBe("allow")
 })
 
 test("evaluate - last matching rule wins", () => {
-  const result = Permission.evaluate("bash", "rm", [
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "bash", pattern: "rm", action: "deny" },
+  const result = Permission.evaluate("terminal", "rm", [
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "rm", action: "deny" },
   ])
   expect(result.action).toBe("deny")
 })
 
 test("evaluate - last matching rule wins (wildcard after specific)", () => {
-  const result = Permission.evaluate("bash", "rm", [
-    { permission: "bash", pattern: "rm", action: "deny" },
-    { permission: "bash", pattern: "*", action: "allow" },
+  const result = Permission.evaluate("terminal", "rm", [
+    { permission: "terminal", pattern: "rm", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" },
   ])
   expect(result.action).toBe("allow")
 })
@@ -329,13 +365,13 @@ test("evaluate - order matters for specificity", () => {
 
 test("evaluate - unknown permission returns ask", () => {
   const result = Permission.evaluate("unknown_tool", "anything", [
-    { permission: "bash", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "*", action: "allow" },
   ])
   expect(result.action).toBe("ask")
 })
 
 test("evaluate - empty ruleset returns ask", () => {
-  const result = Permission.evaluate("bash", "rm", [])
+  const result = Permission.evaluate("terminal", "rm", [])
   expect(result.action).toBe("ask")
 })
 
@@ -345,7 +381,7 @@ test("evaluate - no matching pattern returns ask", () => {
 })
 
 test("evaluate - empty rules array returns ask", () => {
-  const result = Permission.evaluate("bash", "rm", [])
+  const result = Permission.evaluate("terminal", "rm", [])
   expect(result.action).toBe("ask")
 })
 
@@ -368,17 +404,17 @@ test("evaluate - non-matching patterns are skipped", () => {
 })
 
 test("evaluate - exact match at end wins over earlier wildcard", () => {
-  const result = Permission.evaluate("bash", "/bin/rm", [
-    { permission: "bash", pattern: "*", action: "allow" },
-    { permission: "bash", pattern: "/bin/rm", action: "deny" },
+  const result = Permission.evaluate("terminal", "/bin/rm", [
+    { permission: "terminal", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "/bin/rm", action: "deny" },
   ])
   expect(result.action).toBe("deny")
 })
 
 test("evaluate - wildcard at end overrides earlier exact match", () => {
-  const result = Permission.evaluate("bash", "/bin/rm", [
-    { permission: "bash", pattern: "/bin/rm", action: "deny" },
-    { permission: "bash", pattern: "*", action: "allow" },
+  const result = Permission.evaluate("terminal", "/bin/rm", [
+    { permission: "terminal", pattern: "/bin/rm", action: "deny" },
+    { permission: "terminal", pattern: "*", action: "allow" },
   ])
   expect(result.action).toBe("allow")
 })
@@ -386,12 +422,12 @@ test("evaluate - wildcard at end overrides earlier exact match", () => {
 // wildcard permission tests
 
 test("evaluate - wildcard permission matches any permission", () => {
-  const result = Permission.evaluate("bash", "rm", [{ permission: "*", pattern: "*", action: "deny" }])
+  const result = Permission.evaluate("terminal", "rm", [{ permission: "*", pattern: "*", action: "deny" }])
   expect(result.action).toBe("deny")
 })
 
 test("evaluate - wildcard permission with specific pattern", () => {
-  const result = Permission.evaluate("bash", "rm", [{ permission: "*", pattern: "rm", action: "deny" }])
+  const result = Permission.evaluate("terminal", "rm", [{ permission: "*", pattern: "rm", action: "deny" }])
   expect(result.action).toBe("deny")
 })
 
@@ -403,9 +439,9 @@ test("evaluate - glob permission pattern", () => {
 })
 
 test("evaluate - specific permission and wildcard permission combined", () => {
-  const result = Permission.evaluate("bash", "rm", [
+  const result = Permission.evaluate("terminal", "rm", [
     { permission: "*", pattern: "*", action: "deny" },
-    { permission: "bash", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "*", action: "allow" },
   ])
   expect(result.action).toBe("allow")
 })
@@ -430,49 +466,49 @@ test("evaluate - multiple matching permission patterns combine rules", () => {
 test("evaluate - wildcard permission fallback for unknown tool", () => {
   const result = Permission.evaluate("unknown_tool", "anything", [
     { permission: "*", pattern: "*", action: "ask" },
-    { permission: "bash", pattern: "*", action: "allow" },
+    { permission: "terminal", pattern: "*", action: "allow" },
   ])
   expect(result.action).toBe("ask")
 })
 
 test("evaluate - later wildcard permission can override earlier specific permission", () => {
-  const result = Permission.evaluate("bash", "rm", [
-    { permission: "bash", pattern: "*", action: "allow" },
+  const result = Permission.evaluate("terminal", "rm", [
+    { permission: "terminal", pattern: "*", action: "allow" },
     { permission: "*", pattern: "*", action: "deny" },
   ])
   expect(result.action).toBe("deny")
 })
 
 test("evaluate - merges multiple rulesets", () => {
-  const config: PermissionV1.Ruleset = [{ permission: "bash", pattern: "*", action: "allow" }]
-  const approved: PermissionV1.Ruleset = [{ permission: "bash", pattern: "rm", action: "deny" }]
-  const result = Permission.evaluate("bash", "rm", config, approved)
+  const config: PermissionV1.Ruleset = [{ permission: "terminal", pattern: "*", action: "allow" }]
+  const approved: PermissionV1.Ruleset = [{ permission: "terminal", pattern: "rm", action: "deny" }]
+  const result = Permission.evaluate("terminal", "rm", config, approved)
   expect(result.action).toBe("deny")
 })
 
 // disabled tests
 
 test("disabled - returns empty set when all tools allowed", () => {
-  const result = Permission.disabled(["bash", "edit", "read"], [{ permission: "*", pattern: "*", action: "allow" }])
+  const result = Permission.disabled(["terminal", "edit", "read"], [{ permission: "*", pattern: "*", action: "allow" }])
   expect(result.size).toBe(0)
 })
 
 test("disabled - disables tool when denied", () => {
   const result = Permission.disabled(
-    ["bash", "edit", "read"],
+    ["terminal", "edit", "read"],
     [
       { permission: "*", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "deny" },
     ],
   )
-  expect(result.has("bash")).toBe(true)
+  expect(result.has("terminal")).toBe(true)
   expect(result.has("edit")).toBe(false)
   expect(result.has("read")).toBe(false)
 })
 
 test("disabled - disables edit/write/apply_patch when edit denied", () => {
   const result = Permission.disabled(
-    ["edit", "write", "apply_patch", "bash"],
+    ["edit", "write", "apply_patch", "terminal"],
     [
       { permission: "*", pattern: "*", action: "allow" },
       { permission: "edit", pattern: "*", action: "deny" },
@@ -481,77 +517,77 @@ test("disabled - disables edit/write/apply_patch when edit denied", () => {
   expect(result.has("edit")).toBe(true)
   expect(result.has("write")).toBe(true)
   expect(result.has("apply_patch")).toBe(true)
-  expect(result.has("bash")).toBe(false)
+  expect(result.has("terminal")).toBe(false)
 })
 
 test("disabled - does not disable when partially denied", () => {
   const result = Permission.disabled(
-    ["bash"],
+    ["terminal"],
     [
-      { permission: "bash", pattern: "*", action: "allow" },
-      { permission: "bash", pattern: "rm *", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "allow" },
+      { permission: "terminal", pattern: "rm *", action: "deny" },
     ],
   )
-  expect(result.has("bash")).toBe(false)
+  expect(result.has("terminal")).toBe(false)
 })
 
 test("disabled - does not disable when action is ask", () => {
-  const result = Permission.disabled(["bash", "edit"], [{ permission: "*", pattern: "*", action: "ask" }])
+  const result = Permission.disabled(["terminal", "edit"], [{ permission: "*", pattern: "*", action: "ask" }])
   expect(result.size).toBe(0)
 })
 
 test("disabled - does not disable when specific allow after wildcard deny", () => {
   const result = Permission.disabled(
-    ["bash"],
+    ["terminal"],
     [
-      { permission: "bash", pattern: "*", action: "deny" },
-      { permission: "bash", pattern: "echo *", action: "allow" },
+      { permission: "terminal", pattern: "*", action: "deny" },
+      { permission: "terminal", pattern: "echo *", action: "allow" },
     ],
   )
-  expect(result.has("bash")).toBe(false)
+  expect(result.has("terminal")).toBe(false)
 })
 
 test("disabled - does not disable when wildcard allow after deny", () => {
   const result = Permission.disabled(
-    ["bash"],
+    ["terminal"],
     [
-      { permission: "bash", pattern: "rm *", action: "deny" },
-      { permission: "bash", pattern: "*", action: "allow" },
+      { permission: "terminal", pattern: "rm *", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "allow" },
     ],
   )
-  expect(result.has("bash")).toBe(false)
+  expect(result.has("terminal")).toBe(false)
 })
 
 test("disabled - disables multiple tools", () => {
   const result = Permission.disabled(
-    ["bash", "edit", "webfetch"],
+    ["terminal", "edit", "webfetch"],
     [
-      { permission: "bash", pattern: "*", action: "deny" },
+      { permission: "terminal", pattern: "*", action: "deny" },
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "webfetch", pattern: "*", action: "deny" },
     ],
   )
-  expect(result.has("bash")).toBe(true)
+  expect(result.has("terminal")).toBe(true)
   expect(result.has("edit")).toBe(true)
   expect(result.has("webfetch")).toBe(true)
 })
 
 test("disabled - wildcard permission denies all tools", () => {
-  const result = Permission.disabled(["bash", "edit", "read"], [{ permission: "*", pattern: "*", action: "deny" }])
-  expect(result.has("bash")).toBe(true)
+  const result = Permission.disabled(["terminal", "edit", "read"], [{ permission: "*", pattern: "*", action: "deny" }])
+  expect(result.has("terminal")).toBe(true)
   expect(result.has("edit")).toBe(true)
   expect(result.has("read")).toBe(true)
 })
 
 test("disabled - specific allow overrides wildcard deny", () => {
   const result = Permission.disabled(
-    ["bash", "edit", "read"],
+    ["terminal", "edit", "read"],
     [
       { permission: "*", pattern: "*", action: "deny" },
-      { permission: "bash", pattern: "*", action: "allow" },
+      { permission: "terminal", pattern: "*", action: "allow" },
     ],
   )
-  expect(result.has("bash")).toBe(false)
+  expect(result.has("terminal")).toBe(false)
   expect(result.has("edit")).toBe(true)
   expect(result.has("read")).toBe(true)
 })
@@ -564,11 +600,11 @@ it.instance(
     Effect.gen(function* () {
       const result = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
-        ruleset: [{ permission: "bash", pattern: "*", action: "allow" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "allow" }],
       })
       expect(result).toBeUndefined()
     }),
@@ -581,7 +617,7 @@ it.instance(
     Effect.gen(function* () {
       const ctx = yield* requireInstance
       const now = Date.now()
-      const stored: PermissionV1.Rule[] = [{ permission: "bash", pattern: "echo *", action: "allow" }]
+      const stored: PermissionV1.Rule[] = [{ permission: "terminal", pattern: "echo *", action: "allow" }]
       LegacyDatabase.use((db) =>
         db.run(sql`
           INSERT INTO permission (id, project_id, action, resource, time_created, time_updated, data)
@@ -591,7 +627,7 @@ it.instance(
 
       const result = yield* ask({
         sessionID: SessionID.make("session_persisted"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["echo hello"],
         metadata: {},
         always: [],
@@ -610,11 +646,11 @@ it.instance(
       const err = yield* fail(
         ask({
           sessionID: SessionID.make("session_test"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["rm -rf /"],
           metadata: {},
           always: [],
-          ruleset: [{ permission: "bash", pattern: "*", action: "deny" }],
+          ruleset: [{ permission: "terminal", pattern: "*", action: "deny" }],
         }),
       )
       expect(err).toBeInstanceOf(PermissionV1.DeniedError)
@@ -628,11 +664,11 @@ it.instance(
     Effect.gen(function* () {
       const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
-        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "ask" }],
       }).pipe(Effect.forkScoped)
 
       expect(yield* waitForPending(1)).toHaveLength(1)
@@ -648,7 +684,7 @@ it.instance(
     Effect.gen(function* () {
       const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: { cmd: "ls" },
         always: ["ls"],
@@ -663,7 +699,7 @@ it.instance(
       expect(items).toHaveLength(1)
       expect(items[0]).toMatchObject({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: { cmd: "ls" },
         always: ["ls"],
@@ -694,7 +730,7 @@ it.instance(
 
       const fiber = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: { cmd: "ls" },
         always: ["ls"],
@@ -715,7 +751,7 @@ it.instance(
         ),
       ).toMatchObject({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
       })
 
@@ -734,7 +770,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_test1"),
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -755,7 +791,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_test2"),
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -779,7 +815,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_test2b"),
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -811,7 +847,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_test3"),
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: ["ls"],
@@ -824,7 +860,7 @@ it.instance(
 
       const result = yield* ask({
         sessionID: SessionID.make("session_test2"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -842,7 +878,7 @@ it.instance(
       const a = yield* ask({
         id: PermissionV1.ID.make("per_test4a"),
         sessionID: SessionID.make("session_same"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -878,7 +914,7 @@ it.instance(
       const a = yield* ask({
         id: PermissionV1.ID.make("per_test5a"),
         sessionID: SessionID.make("session_same"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: ["ls"],
@@ -888,7 +924,7 @@ it.instance(
       const b = yield* ask({
         id: PermissionV1.ID.make("per_test5b"),
         sessionID: SessionID.make("session_same"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -912,7 +948,7 @@ it.instance(
       const a = yield* ask({
         id: PermissionV1.ID.make("per_test6a"),
         sessionID: SessionID.make("session_a"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: ["ls"],
@@ -922,7 +958,7 @@ it.instance(
       const b = yield* ask({
         id: PermissionV1.ID.make("per_test6b"),
         sessionID: SessionID.make("session_b"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -955,7 +991,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_test7"),
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -1006,7 +1042,7 @@ it.live("permission requests stay isolated by directory", () =>
         ask({
           id: PermissionV1.ID.make("per_dir_a"),
           sessionID: SessionID.make("session_dir_a"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["ls"],
           metadata: {},
           always: [],
@@ -1021,7 +1057,7 @@ it.live("permission requests stay isolated by directory", () =>
         ask({
           id: PermissionV1.ID.make("per_dir_b"),
           sessionID: SessionID.make("session_dir_b"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["pwd"],
           metadata: {},
           always: [],
@@ -1055,7 +1091,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_dispose"),
         sessionID: SessionID.make("session_dispose"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -1082,7 +1118,7 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_reload"),
         sessionID: SessionID.make("session_reload"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
@@ -1120,13 +1156,13 @@ it.instance(
       const err = yield* fail(
         ask({
           sessionID: SessionID.make("session_test"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["echo hello", "rm -rf /"],
           metadata: {},
           always: [],
           ruleset: [
-            { permission: "bash", pattern: "*", action: "allow" },
-            { permission: "bash", pattern: "rm *", action: "deny" },
+            { permission: "terminal", pattern: "*", action: "allow" },
+            { permission: "terminal", pattern: "rm *", action: "deny" },
           ],
         }),
       )
@@ -1141,11 +1177,11 @@ it.instance(
     Effect.gen(function* () {
       const result = yield* ask({
         sessionID: SessionID.make("session_test"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["echo hello", "ls -la", "pwd"],
         metadata: {},
         always: [],
-        ruleset: [{ permission: "bash", pattern: "*", action: "allow" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "allow" }],
       })
       expect(result).toBeUndefined()
     }),
@@ -1159,13 +1195,13 @@ it.instance(
       const err = yield* fail(
         ask({
           sessionID: SessionID.make("session_test"),
-          permission: "bash",
+          permission: "terminal",
           patterns: ["echo hello", "rm -rf /"],
           metadata: {},
           always: [],
           ruleset: [
-            { permission: "bash", pattern: "echo *", action: "ask" },
-            { permission: "bash", pattern: "rm *", action: "deny" },
+            { permission: "terminal", pattern: "echo *", action: "ask" },
+            { permission: "terminal", pattern: "rm *", action: "deny" },
           ],
         }),
       )
@@ -1186,11 +1222,11 @@ it.instance(
       const fiber = yield* ask({
         id: PermissionV1.ID.make("per_reload"),
         sessionID: SessionID.make("session_reload"),
-        permission: "bash",
+        permission: "terminal",
         patterns: ["ls"],
         metadata: {},
         always: [],
-        ruleset: [{ permission: "bash", pattern: "*", action: "ask" }],
+        ruleset: [{ permission: "terminal", pattern: "*", action: "ask" }],
       }).pipe(Effect.forkScoped)
 
       const pending = yield* waitForPending(1)

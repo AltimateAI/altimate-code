@@ -206,7 +206,11 @@ function expand(pattern: string): string {
 
 export function fromConfig(permission: ConfigPermissionV1.Info) {
   const ruleset: PermissionV1.Rule[] = []
-  for (const [key, value] of Object.entries(permission)) {
+  for (let [key, value] of Object.entries(permission)) {
+    if (key === "bash") {
+      if (permission.terminal !== undefined) continue // terminal takes precedence
+      key = "terminal"
+    }
     if (typeof value === "string") {
       ruleset.push({ permission: key, action: value, pattern: "*" })
       continue

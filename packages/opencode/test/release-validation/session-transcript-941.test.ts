@@ -125,7 +125,7 @@ async function addAssistantMessageWithTool(sessionID: SessionID, parentID: Messa
     messageID: id,
     type: "tool",
     callID: "call_completed",
-    tool: "bash",
+    tool: "terminal",
     state: {
       status: "completed",
       input: { a: 1 },

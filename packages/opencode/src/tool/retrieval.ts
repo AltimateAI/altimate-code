@@ -21,8 +21,7 @@ export namespace Retrieval {
    * directory-listing tool registered (file discovery is `glob` / `bash ls`),
    * so no "list"/"ls" entry here.
    */
-  export const CORE = [
-    "bash", "read", "write", "edit", "glob", "grep",
+  export const CORE = ["terminal", "read", "write", "edit", "glob", "grep",
     "task", "todowrite", "skill",
   ]
 

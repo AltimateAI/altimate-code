@@ -70,7 +70,7 @@ describe("buildTraceFile — snapshot isolation", () => {
     })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -98,7 +98,7 @@ describe("buildTraceFile — snapshot isolation", () => {
     tracer.startTrace("s-span-isolate", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -133,7 +133,7 @@ describe("buildTraceFile — snapshot isolation", () => {
 
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -164,7 +164,7 @@ describe("snapshot — debouncing and atomicity", () => {
     // Fire 20 tool calls rapidly — each triggers snapshot()
     for (let i = 0; i < 20; i++) {
       tracer.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: `c-${i}`,
         state: { status: "completed", input: {}, output: `out-${i}`, time: { start: 1, end: 2 } },
       })
@@ -192,7 +192,7 @@ describe("snapshot — debouncing and atomicity", () => {
     tracer.startTrace("s-unwritable", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -213,7 +213,7 @@ describe("snapshot — debouncing and atomicity", () => {
 
     // Trigger a tool call (which triggers snapshot)
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -242,7 +242,7 @@ describe("snapshot — debouncing and atomicity", () => {
     // Now log more events (should be no-ops, but they'd trigger snapshot too)
     tracer.logStepStart({ id: "2" })
     tracer.logToolCall({
-      tool: "bash",
+      tool: "terminal",
       callID: "c-post",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
@@ -284,7 +284,7 @@ describe("Worker tracing — session lifecycle simulation", () => {
     const t1 = getOrCreateRecap("session-lifecycle")!
     t1.logStepStart({ id: "1" })
     t1.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: { status: "completed", input: {}, output: "cycle 1", time: { start: 1, end: 2 } },
     })
     t1.logStepFinish(ZERO_STEP)
@@ -398,7 +398,7 @@ describe("Concurrent snapshot + endTrace race", () => {
 
       // Trigger snapshot via tool call
       tracer.logToolCall({
-        tool: "bash",
+        tool: "terminal",
         callID: "c1",
         state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
       })
@@ -510,7 +510,7 @@ describe("Live trace viewer — /api/trace", () => {
       // Add a tool call and wait for snapshot
       tracer.logStepStart({ id: "1" })
       tracer.logToolCall({
-        tool: "bash", callID: "c1",
+        tool: "terminal", callID: "c1",
         state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
       })
       await new Promise((r) => setTimeout(r, 50))
@@ -576,7 +576,7 @@ describe("Snapshot with non-serializable data in spans", () => {
     tracer.startTrace("s-func-attr", { prompt: "test" })
     tracer.logStepStart({ id: "1" })
     tracer.logToolCall({
-      tool: "bash", callID: "c1",
+      tool: "terminal", callID: "c1",
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
     // Wait for the tool snapshot to settle first
@@ -636,7 +636,7 @@ describe("Stress test — snapshot interleaving", () => {
       tracer.startTrace(`stress-${i}`, { prompt: `prompt-${i}` })
       tracer.logStepStart({ id: "1" })
       tracer.logToolCall({
-        tool: "bash", callID: `c-${i}`,
+        tool: "terminal", callID: `c-${i}`,
         state: { status: "completed", input: { i }, output: `ok-${i}`, time: { start: 1, end: 2 } },
       })
       tracer.logStepFinish({

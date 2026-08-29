@@ -201,7 +201,7 @@ describe("v1.4.0 failure injection — synthetic provider errors flow through di
   test("aborted with non-string reason normalized to 'non_string_reason' (not [object Object])", () => {
     const out = Telemetry.deriveAgentOutcomeReason({
       outcome: "aborted",
-      lastToolName: "bash",
+      lastToolName: "terminal",
       lastMessageError: null,
       abortReason: "non_string_reason",
       lastErrorClass: "",
