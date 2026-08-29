@@ -2,6 +2,7 @@
 import { ValidatorRegistry } from "../../session/validators/registry"
 import { DbtBuildGreenValidator } from "./dbt-build-green"
 import { DbtDeliverableNamesValidator } from "./dbt-deliverable-names"
+import { DbtDialectGuardValidator } from "./dbt-dialect-guard"
 import { DbtIncrementalConfigValidator } from "./dbt-incremental-config"
 import { DbtNothingBuiltValidator } from "./dbt-nothing-built"
 import { DbtSchemaVerifyValidator } from "./dbt-schema-verify"
@@ -27,6 +28,7 @@ export function registerAltimateValidators(): void {
   ValidatorRegistry.register(DbtBuildGreenValidator)
   ValidatorRegistry.register(DbtDeliverableNamesValidator)
   ValidatorRegistry.register(DbtIncrementalConfigValidator)
+  ValidatorRegistry.register(DbtDialectGuardValidator)
   ValidatorRegistry.register(DbtSchemaVerifyValidator)
   ValidatorRegistry.register(DbtTestsPassValidator)
 }
