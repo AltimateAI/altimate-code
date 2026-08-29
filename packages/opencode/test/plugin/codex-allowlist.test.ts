@@ -11,14 +11,17 @@
 // ChatGPT account."}
 //
 // Ids asserted OUTSIDE those two lists were NOT probed and are not claimed to
-// have been. They fall in two groups, both deliberate:
-//   * ids absent from the models.dev catalog (gpt-5.1-codex, gpt-5.1-codex-max,
-//     codex-hypothetical-future-name, …). These cannot reach the loader at all,
-//     so probing them would be meaningless; they are here purely as shape
-//     assertions against a substring rule creeping back in.
-//   * obviously-unrelated ids (claude-*, gemini-*, gpt-4o), same reason.
-// The probe scope, and the four catalog ids left unprobed, are recorded on
-// OAUTH_ALLOWED_MODELS in src/plugin/codex.ts.
+// have been:
+//   * older codex ids (gpt-5.1-codex, gpt-5.1-codex-max, …). These ARE present
+//     in the bundled provider/models-snapshot.ts, so on a cold cache they do
+//     reach the loader and this filter does drop them. That drop is deliberate
+//     and fail-closed, not verified — see the "OLDER CODEX IDS" note on
+//     OAUTH_ALLOWED_MODELS. Asserting them here pins the current behaviour;
+//     it does not claim the backend rejects them.
+//   * obviously-unrelated ids (claude-*, gemini-*, gpt-4o) and invented names,
+//     which are pure shape assertions against a substring rule creeping back.
+// The probe scope, the unprobed catalog ids, and the cold-cache caveat are all
+// recorded on OAUTH_ALLOWED_MODELS in src/plugin/codex.ts.
 //
 // Two directions of breakage this file guards:
 //   * false positives — an id offered in the picker that 400s at request time
@@ -191,5 +194,31 @@ describe("disallowedOAuthModelKeys — what the loader actually deletes", () => 
 
   test("an empty model map yields nothing to delete", () => {
     expect(disallowedOAuthModelKeys({})).toEqual([])
+  })
+
+  test("older codex ids from the bundled snapshot are dropped, deliberately", () => {
+    // These five are absent from live models.dev but ARE in the bundled
+    // provider/models-snapshot.ts, which is the catalog on a cold cache
+    // (ModelsDev.Data resolves disk cache -> snapshot -> fetch). So they do
+    // reach this filter and the removed includes("codex") rule used to offer
+    // them. None was probed; they are excluded fail-closed.
+    //
+    // This test pins that as a DECISION, not a discovery. If any of them is
+    // ever probed, move it into VERIFIED_ACCEPTED or VERIFIED_REJECTED and
+    // delete it from here.
+    const unprobedSnapshotCodexIds = [
+      "gpt-5-codex",
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-mini",
+      "gpt-5.2-codex",
+    ]
+    for (const id of unprobedSnapshotCodexIds) {
+      expect(OAUTH_ALLOWED_MODELS.has(id)).toBe(false)
+      expect(VERIFIED_ACCEPTED).not.toContain(id)
+      expect(VERIFIED_REJECTED).not.toContain(id)
+    }
+    const models = Object.fromEntries(unprobedSnapshotCodexIds.map((id) => [id, model(id)]))
+    expect(disallowedOAuthModelKeys(models).sort()).toEqual([...unprobedSnapshotCodexIds].sort())
   })
 })

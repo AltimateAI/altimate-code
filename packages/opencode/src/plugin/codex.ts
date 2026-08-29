@@ -41,14 +41,36 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
  * model missing from the picker that the official client offers them, that is
  * the likely cause and the fix is a per-account list, not another id here.
  *
- * NOT A SILENT DROP. Reviewers have twice asked why codex-tagged ids such as
- * gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex and
- * gpt-5.3-codex-xhigh appear in neither list. They are not in the models.dev
- * catalog at all (checked against https://models.dev/api.json — the only codex
- * ids it carries are gpt-5.3-codex and gpt-5.3-codex-spark), so no filter here
- * can hide them: they never reach this loader. The removed
- * ``includes("codex")`` rule would have admitted them had they existed, which
- * is why the old tests named them, but nothing in the picker changed for them.
+ * OLDER CODEX IDS ARE DROPPED, AND THAT DROP IS UNVERIFIED. Reviewers keep
+ * asking why codex-tagged ids appear in neither list above. The honest answer
+ * depends on WHICH catalog is live, because the two disagree:
+ *
+ *   * live https://models.dev/api.json carries exactly two codex ids —
+ *     gpt-5.3-codex and gpt-5.3-codex-spark — both accounted for above.
+ *   * the BUNDLED snapshot (provider/models-snapshot.ts) is staler and still
+ *     carries gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max,
+ *     gpt-5.1-codex-mini and gpt-5.2-codex under ``openai``.
+ *
+ * ModelsDev.Data resolves disk cache -> bundled snapshot -> fetch, so on a
+ * fresh install or cold cache the snapshot IS the catalog, and those five ids
+ * do reach this loader. The removed ``includes("codex")`` rule offered them;
+ * exact matching now deletes them. None was individually probed. They are
+ * absent from the discovery endpoint's nine slugs (a Pro account), which is
+ * evidence but not a probe, and consistent with older codex models having been
+ * retired.
+ *
+ * They stay out on the same fail-closed reasoning as the ids above: an
+ * unverified inclusion fails opaquely mid-request, an unverified exclusion
+ * fails visibly at selection with a "did you mean" list. Probe one and move it
+ * into the right list to settle it.
+ *
+ * COLD-CACHE CAVEAT. That same snapshot staleness cuts the other way for the
+ * models this list adds: it contains NO gpt-5.6 variant, so on a cold cache
+ * sol/luna/terra are absent from the catalog entirely and this allowlist cannot
+ * conjure them — the filter only ever deletes. They become selectable once the
+ * catalog refreshes from models.dev (or the bundled snapshot is regenerated at
+ * the next release build). This allowlist is necessary for them to appear, but
+ * on a cold cache it is not sufficient.
  *
  * There is no derivable rule here — the tier accepts ``gpt-5.3-codex-spark``
  * but rejects ``gpt-5.3-codex``, and accepts the gpt-5.6 sol/luna/terra
