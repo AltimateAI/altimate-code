@@ -608,6 +608,48 @@ function servedFor(precedence: Precedence, type: string): Capability[] {
   })
 }
 
+// altimate_change start — reachability-filtered projection of what is actually routed,
+// for the system-prompt awareness section. A PROJECTION, not a second derivation: it
+// reads the same snapshot the redirects read and filters through the same `servedFor`,
+// so the section can never advertise a routing that `check()` would not perform, nor
+// one the caller's agent is forbidden to follow.
+export interface ServedCapability {
+  /** Canonical local driver type the workspace serves, e.g. `snowflake`. */
+  type: string
+  capability: Capability
+  /** Model-facing key the caller must invoke, i.e. `<server>_<engineTool>`. */
+  modelKey: string
+}
+
+/**
+ * Every (type, capability) pair this caller will really have routed, in a stable
+ * order: types in shadow-table insertion order, capabilities in `CAPABILITIES` order.
+ * Empty when precedence is disabled, or when the caller may reach none of the
+ * destinations — both of which must render no section at all.
+ */
+export function servedInventory(precedence: Precedence): ServedCapability[] {
+  if (!precedence.enabled) return []
+  const out: ServedCapability[] = []
+  for (const type of precedence.shadowed.keys()) {
+    const byCapability = precedence.shadowed.get(type)
+    if (!byCapability) continue
+    for (const capability of servedFor(precedence, type)) {
+      const entry = byCapability.get(capability)
+      if (!entry) continue
+      out.push({ type, capability, modelKey: entry.modelKey })
+    }
+  }
+  return out
+}
+
+/** The capabilities NOT served for a type — what the section must say stays local, so
+ * an execute-only integration never steers `sql_explain` away from the local tool. */
+export function localCapabilitiesFor(precedence: Precedence, type: string): Capability[] {
+  const served = servedFor(precedence, type)
+  return CAPABILITIES.filter((c) => !served.includes(c))
+}
+// altimate_change end
+
 function unreachable(workspaceName: string, modelKey: string): Verdict {
   return {
     notice:

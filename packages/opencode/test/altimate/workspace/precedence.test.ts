@@ -23,6 +23,8 @@ import {
   snapshotState,
   warehouseListNote,
   warehouseListNotes,
+  servedInventory,
+  localCapabilitiesFor,
 } from "../../../src/altimate/workspace/precedence"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { canonicalType } from "../../../src/altimate/native/connections/registry"
@@ -1321,3 +1323,63 @@ describe("drift is reported for every warehouse capability shape", () => {
     expect(warned.sort()).toEqual(["redshift_get_query_explain_plan", "redshift_get_table_stats"])
   })
 })
+// altimate_change start — the projection the awareness section renders from. It must
+// agree with `check()` on every call, so these assert against the same snapshot the
+// guard uses rather than against a hand-built object.
+describe("servedInventory — what the model will be told is routed", () => {
+  test("lists every materialised capability with its model-facing key", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(servedInventory(p)).toEqual([
+      { type: "snowflake", capability: "sql_execute", modelKey: "datamate_snowflake_execute_database_query" },
+      { type: "snowflake", capability: "sql_explain", modelKey: "datamate_snowflake_get_query_explain_plan" },
+      { type: "snowflake", capability: "schema_inspect", modelKey: "datamate_snowflake_get_table_stats" },
+    ])
+  })
+
+  test("an execute-only integration reports execute only", async () => {
+    // Keying on the warehouse type instead of the capability would advertise an
+    // explain tool that does not exist on the engine side.
+    const p = await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(servedInventory(p)).toEqual([
+      { type: "bigquery", capability: "sql_execute", modelKey: "datamate_bigquery_execute_database_query" },
+    ])
+    expect(localCapabilitiesFor(p, "bigquery")).toEqual(["sql_explain", "schema_inspect"])
+  })
+
+  test("is empty for every disabled snapshot", async () => {
+    delete process.env.ALTIMATE_WORKSPACE
+    expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
+    process.env.ALTIMATE_WORKSPACE = "1"
+
+    precedenceInternals.binding = async () => null
+    expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
+    bindTo()
+
+    precedenceInternals.attributedTo = async () => "999"
+    expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
+    bindTo()
+
+    expect(servedInventory(await refresh(SESSION, {}))).toEqual([])
+  })
+
+  test("excludes destinations the caller is forbidden to call", async () => {
+    // Same filter `check()` applies. A listing that ignored the ruleset would promise
+    // the analyst a routing it will never get, and steer it off the tools it can use.
+    const analystLike = [
+      { permission: "*", pattern: "*", action: "deny" as const },
+      { permission: "sql_execute", pattern: "*", action: "allow" as const },
+    ]
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    expect(servedInventory(p)).toEqual([])
+  })
+
+  test("agrees with check() on the same snapshot", async () => {
+    // The property that matters: anything the section advertises, the guard redirects.
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    for (const entry of servedInventory(p)) {
+      const verdict = await check(SESSION, entry.capability, "local_snow")
+      expect(verdict.redirect?.metadata.redirect_to).toBe(entry.modelKey)
+    }
+  })
+})
+// altimate_change end
