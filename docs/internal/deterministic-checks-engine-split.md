@@ -191,3 +191,55 @@ the false-positive risk concentrates and where the test corpus has to be built.
 3. **Sequencing.** Both checks depend on compiled SQL, so both sit behind the build-green
    gate in the completion lane. Neither is worth building before that gate demonstrably
    fires on real sessions.
+
+---
+
+## Placement of the shipped completion-gate validators
+
+**Status:** assessment, addendum to the above
+**Date:** 2026-08-28
+**Scope:** the five completion-gate validators actually shipped in
+`packages/opencode/src/altimate/validators/`: `dbt-nothing-built`, `dbt-build-green`,
+`dbt-deliverable-names`, `dbt-incremental-config`, `dbt-dialect-guard`. Question: does any
+of this — or its logic — belong in `altimate-core-internal` instead of `altimate-code`, so
+other engine consumers (the dbt PR reviewer, CI tooling, other products) can reuse it?
+
+### Per-validator table
+
+| Validator | What it analyzes | Reuse value for other engine consumers | Engine-feasible (does the engine see the inputs)? | Recommendation |
+|---|---|---|---|---|
+| `dbt-nothing-built` | Filesystem: any authored file under `models/seeds/snapshots/data/analyses/macros/tests` since session start, `run_results.json` freshness. Plus a markdown/regex scan of a task-instruction file for literal required deliverables. | None. The check *is* "did this session's filesystem change since a wall-clock timestamp" — meaningless outside a live agent session. | No. The engine's API is SQL-in/findings-out; it has no concept of session start time, a live project directory to `stat`, or a task-instruction document. | **Stays in altimate-code.** Not a SQL question at any point. |
+| `dbt-build-green` | Filesystem: `<target>/run_results.json` parsed, cross-referenced against edited-model mtimes for coverage/staleness/failure status. | None. Same category as above — needs a live build artifact plus session-scoped mtime comparisons. | No. Same as above; also no dbt subprocess invocation happens in-engine. | **Stays in altimate-code.** |
+| `dbt-deliverable-names` | Filesystem inventory (`models/seeds/snapshots/data/analyses`) + `manifest.json` node names/aliases, diffed against literal deliverable names extracted from a task document via markdown/regex parsing. | None directly — this is a naming-contract check against a task doc, not a SQL property. | No. Requires a live project directory and a task-instruction file; the engine never sees either. | **Stays in altimate-code.** |
+| `dbt-incremental-config` | Two of its three findings are dbt **config** semantics — `incremental_strategy`/`unique_key` presence, `is_incremental()` guard presence — read via regex over `{{ config(...) }}` args and grep over the model body. The third is a regex scan for non-deterministic functions (`current_timestamp`, `random()`, …) inside the `is_incremental()` predicate block. | **High, and already realized elsewhere.** `crates/altimate-core/src/review/dbt_config.rs::dbt_config_lint` implements the *same two* checks — `DBT001` (`incremental_no_guard`) and `DBT002` (`incremental_no_unique_key`) — as a real minijinja-based structural config parser, not regex. It is already wired dispatcher-side as `altimate_core.dbt_config_lint` and is **already consumed** by the dbt-PR-reviewer (`packages/opencode/src/altimate/review/runner.ts:338`). | Yes for findings 1 & 2 — the engine already does this, on raw (uncompiled) model SQL, no compiled-artifact dependency. Finding 3 (non-determinism *specifically inside* the `is_incremental()` predicate) has no engine equivalent yet; the closest existing rule, `L049 clock_in_filter`, catches clock functions in any WHERE/JOIN/HAVING predicate but doesn't scope to the incremental guard block specifically. | **Rewire, don't reimplement.** Findings 1 & 2 should call `altimate_core.dbt_config_lint` and filter to `DBT001`/`DBT002` instead of carrying a parallel regex implementation — the validator's own comment tier ("grep-level … config declared in `dbt_project.yml` is intentionally not resolved") describes exactly the ceiling the engine's minijinja parser already clears. The idempotency-gating policy (only escalate the missing-guard finding to a blocker when the task doc says "idempotent") is genuinely consumer-side — it depends on a task-instruction file the engine doesn't see — and stays in the validator as a thin policy layer over the engine's finding. **Worth an engine follow-up ticket:** add a `DBT007`-style rule to the same `dbt_config.rs` file for "non-deterministic function inside an `is_incremental()` predicate" — the parsing/masking infrastructure (`mask_comments_and_strings`, predicate-block extraction) already exists in that file, so it's a small addition, not new architecture. |
+| `dbt-dialect-guard` | Raw (uncompiled) model text: (a) does the project already establish a `target.type`-guard convention (fs scan for the string across `models/`+`macros/`); (b) a curated 19-entry list of warehouse-specific function names, regex-matched; (c) whether each match sits inside a `{% if …target.type… %}…{% endif %}` block, detected by blanking out guarded regions before matching. | Partial, and one-directional. The engine's `L033 non_portable_function` rule is a genuine sqlparser AST walk with a much larger curated function set (the excerpt alone showed 50+ names vs. the validator's 19) — the validator is duplicating a *subset* of engine data with a worse matcher. But L033 cannot do what this validator does: it requires parseable SQL, and compiling a dbt model resolves away whichever `{% if target.type %}` branch wasn't taken — the information "was this guarded" is gone by the time SQL reaches the engine's parser. | No, for the guard-detection half — that is a category error: the engine's SQL-in/findings-out contract has nothing to say about un-rendered Jinja branches, because by the time it sees valid SQL the branch has already been chosen. Yes, in principle, for the *function-name curation* half, which is pure data the engine already owns more completely. | **Hybrid, but the "hybrid" is data-sharing, not logic-splitting.** The guard-detection orchestration must stay in altimate-code (it needs live, un-rendered Jinja source — a live-project concern by definition). The curated dialect-function list should stop being hand-maintained twice: either export `non_portable_function_set()` (or a subset annotated with source dialect) via a small napi accessor so the validator sources its match list from the engine, or accept the current duplication and add a periodic reconciliation check. This is a maintenance/consistency follow-up, not an engine ticket for new analysis logic. |
+
+### Overall recommendation — does this need to go into the engine?
+
+**No, not as a wholesale move.** Three of the five validators (`dbt-nothing-built`,
+`dbt-build-green`, `dbt-deliverable-names`) never touch SQL semantics at all — they reason
+about filesystem state, build artifacts (`run_results.json`, `manifest.json`), and a task
+document's prose. None of that is representable in the engine's SQL-in/findings-out
+dispatcher contract, and none of it has any value to another engine consumer (the dbt PR
+reviewer doesn't care whether *this* session's clock wrote a file). Pushing them
+engine-side would be the same category error the prior assessment already named for
+division-guard and filter-consistency, just in the other direction: these validators need a
+live project directory and session-scoped timestamps, and the engine's API surface is
+SQL text in, findings out. There's nothing to move.
+
+The one real finding here is `dbt-incremental-config`, and it isn't "should this move to
+the engine" — **it already lives there.** `dbt_config_lint` (`DBT001`/`DBT002`) is shipped,
+wired through the dispatcher, and already consumed by the dbt-PR-reviewer's `runner.ts`.
+The validator built a second, weaker (regex-only) implementation of the same two checks
+instead of calling the existing one. The fix is a rewire of the validator's detection
+layer onto `altimate_core.dbt_config_lint`, keeping only the task-doc-driven idempotency
+policy consumer-side (exactly the hybrid pattern the division-guard case established:
+engine finds it, consumer decides when it's blocking). One small engine follow-up is worth
+filing — a `DBT007` rule for non-determinism scoped to the `is_incremental()` predicate,
+reusing infrastructure already in `dbt_config.rs` — but it's rule-sized, not a new
+capability.
+
+`dbt-dialect-guard` is the only genuinely mixed case, and even there the "engine work" is
+data reconciliation (share `L033`'s function-name set) rather than new analysis: the guard
+-detection logic itself has no engine home because it depends on un-rendered Jinja
+branches, which the engine's compiled-SQL contract structurally cannot see.
