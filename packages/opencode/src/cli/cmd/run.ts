@@ -419,7 +419,10 @@ export const RunCommand = cmd({
     // directives, doom-loop escalation ladder) arm in the in-process session.
     // Explicit ALTIMATE_RUN_MODE=0 opts out; --attach skips entirely (the agent
     // runs on the remote, possibly interactive, server). See run/run-mode.ts.
-    applyRunModeDefault(process.env, { attach: Boolean(args.attach) })
+    applyRunModeDefault(process.env, {
+      attach: Boolean(args.attach),
+      resumed: Boolean(args.continue || args.session),
+    })
     // altimate_change end
 
     let message = [...args.message, ...(args["--"] || [])]
@@ -1045,6 +1048,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       const retryMax = envBound("ALTIMATE_RUN_RETRY_MAX", 3, 20)
       const retryBaseMs = envBound("ALTIMATE_RUN_RETRY_BASE_MS", 1000, 60_000)
+      // The per-value bounds alone do NOT keep the compounded delay inside the
+      // timer range — see RunAccounting.retryDelayMs, which clamps it.
       // altimate_change end
       const send = () => {
         if (args.command)
@@ -1087,7 +1092,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           reason = e instanceof Error ? e.message : String(e)
         }
         if (sendAttempt >= retryMax) throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)
-        const delay = retryBaseMs * 2 ** sendAttempt
+        const delay = RunAccounting.retryDelayMs(retryBaseMs, sendAttempt)
         if (!emit("retry", { attempt: sendAttempt + 1, max: retryMax, reason, delayMs: delay })) {
           UI.println(
             UI.Style.TEXT_WARNING_BOLD + "!",

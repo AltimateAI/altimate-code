@@ -190,3 +190,35 @@ describe("SessionTermination directive texts (/c/d wording contracts)", () => {
     }
   })
 })
+
+// Regression coverage for the fence-state tracker's CommonMark conformance.
+describe("SessionTermination.isExplicitDone — fence-state conformance", () => {
+  test("CRLF input still closes fences, so a real DONE is accepted", () => {
+    // Interior lines keep a trailing \r before normalization, which made the
+    // closing fence fail its whitespace-only check and left the fence open.
+    expect(SessionTermination.isExplicitDone("```sh\r\necho hi\r\n```\r\n\r\nDONE\r\n")).toBe(true)
+  })
+
+  test("CRLF input inside an UNCLOSED fence is still rejected", () => {
+    expect(SessionTermination.isExplicitDone("```sh\r\necho hi\r\nDONE\r\n")).toBe(false)
+  })
+
+  test("bare-CR input splits into lines rather than collapsing to one", () => {
+    expect(SessionTermination.isExplicitDone("```sh\recho hi\r```\r\rDONE\r")).toBe(true)
+  })
+
+  test("a backtick run whose info string contains a backtick is not an opener", () => {
+    // CommonMark: a backtick fence's info string may not contain a backtick, so
+    // this line is paragraph text. Treating it as an opener made the next
+    // backtick run read as its closer, exposing the block interior.
+    expect(SessionTermination.isExplicitDone(["```foo`bar", "```", "DONE"].join("\n"))).toBe(false)
+  })
+
+  test("a tilde fence's info string may contain backticks", () => {
+    expect(SessionTermination.isExplicitDone(["~~~foo`bar", "x", "~~~", "DONE"].join("\n"))).toBe(true)
+  })
+
+  test("a closing fence may not carry an info string", () => {
+    expect(SessionTermination.isExplicitDone(["```sh", "x", "```sh", "DONE"].join("\n"))).toBe(false)
+  })
+})

@@ -199,6 +199,19 @@ describe("RunAccounting retry classification", () => {
     expect(RunAccounting.isRetryableThrown(new Error("model not found"))).toBe(false)
     expect(RunAccounting.isRetryableThrown(undefined)).toBe(false)
   })
+
+  test("backoff grows exponentially but never exceeds the timer ceiling", () => {
+    expect(RunAccounting.retryDelayMs(1000, 0)).toBe(1000)
+    expect(RunAccounting.retryDelayMs(1000, 3)).toBe(8000)
+    // The accepted env maximums (base 60s, 20 retries) compound past the signed
+    // 32-bit limit; an unclamped delay there is scheduled for ~1ms, which turns
+    // the backoff into a tight retry loop.
+    expect(60_000 * 2 ** 19).toBeGreaterThan(RunAccounting.MAX_TIMER_MS)
+    expect(RunAccounting.retryDelayMs(60_000, 19)).toBe(RunAccounting.MAX_TIMER_MS)
+    for (let attempt = 0; attempt <= 20; attempt++) {
+      expect(RunAccounting.retryDelayMs(60_000, attempt)).toBeLessThanOrEqual(RunAccounting.MAX_TIMER_MS)
+    }
+  })
 })
 
 describe("RunAccounting done_reason + idle-done bookkeeping", () => {

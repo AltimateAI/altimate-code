@@ -263,6 +263,20 @@ export namespace RunAccounting {
     return typeof status === "number" && status >= 500 && status <= 599
   }
 
+  /** setTimeout's signed 32-bit ceiling; a larger delay is clamped by the runtime to ~1ms. */
+  export const MAX_TIMER_MS = 2_147_483_647
+
+  /**
+   * Exponential backoff clamped to the timer range. Bounding the retry count and
+   * the base delay separately is NOT enough: at the accepted maximums the
+   * compounded delay (base * 2**attempt) runs far past MAX_TIMER_MS, and an
+   * overflowing timeout fires almost immediately — turning the backoff into the
+   * tight retry loop the bounds exist to prevent.
+   */
+  export function retryDelayMs(baseMs: number, attempt: number): number {
+    return Math.min(baseMs * 2 ** attempt, MAX_TIMER_MS)
+  }
+
   /** Thrown transport failures that warrant an enqueue retry: timeouts and dropped connections. */
   export function isRetryableThrown(error: unknown): boolean {
     if (error === undefined || error === null) return false

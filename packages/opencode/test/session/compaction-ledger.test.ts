@@ -176,6 +176,29 @@ describe("SessionCompaction.buildLedger", () => {
     expect(ledger.writes.every((w) => w.mtime === 7000 && w.tool === "apply_patch")).toBe(true)
   })
 
+  test("apply_patch moves record the DESTINATION, and deletes record nothing", () => {
+    // `filePath` is the move SOURCE; the content lands at `movePath`. Naming the
+    // source sends the continuing agent back to the path that was removed.
+    const messages = [
+      assistantMsg([
+        toolPart({
+          tool: "apply_patch",
+          input: { patchText: "..." },
+          metadata: {
+            files: [
+              { filePath: "/repo/old.py", movePath: "/repo/new.py", type: "update" },
+              { filePath: "/repo/gone.py", type: "delete" },
+              { filePath: "/repo/kept.py", type: "update" },
+            ],
+          },
+          end: 7000,
+        }),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages)
+    expect(ledger.writes.map((w) => w.path).sort()).toEqual(["/repo/kept.py", "/repo/new.py"])
+  })
+
   test("pending and running parts are ignored (facts only)", () => {
     const messages = [
       assistantMsg([
@@ -217,6 +240,14 @@ describe("SessionCompaction.renderLedger", () => {
 
   test("empty ledger renders empty string", () => {
     expect(SessionCompaction.renderLedger({ writes: [], calls: [], sawBash: false })).toBe("")
+  })
+
+  test("a budget too small for even the header renders nothing, not a bare header", () => {
+    // `ledger_max_tokens: 0` is accepted by the schema; truncation used to stop
+    // at the header and return it, injecting text the tail calculation had
+    // budgeted at zero.
+    expect(SessionCompaction.renderLedger(sample(), { maxTokens: 0 })).toBe("")
+    expect(SessionCompaction.renderLedger(sample(), { maxTokens: 3 })).toBe("")
   })
 
   test("contains verified writes with ISO event time, advisory wording, and unverified-shell note", () => {
@@ -331,6 +362,19 @@ describe("SessionCompaction.corroborateCarry", () => {
   test("item with no corroborating event carries as claimed, unverified", () => {
     const out = SessionCompaction.corroborateCarry([{ text: "generated final_report.pdf and emailed it" }], ledger)
     expect(out[0]!.status).toBe("claimed, unverified")
+  })
+
+  test("a directory-qualified artifact is not corroborated by a same-basename write elsewhere", () => {
+    // Basename fallback exists for bare filenames. Applying it to a qualified
+    // token lets an unrelated `test/orders.sql` verify `src/orders.sql`, and
+    // because carry status is append-only that wrong fact never gets corrected.
+    const out = SessionCompaction.corroborateCarry([{ text: "created test/orders.sql fixtures" }], ledger)
+    expect(out[0]!.status).toBe("claimed, unverified")
+  })
+
+  test("a bare filename still matches the write's basename", () => {
+    const out = SessionCompaction.corroborateCarry([{ text: "created orders.sql" }], ledger)
+    expect(out[0]!.status).toBe("verified")
   })
 
   test("zero-exit command naming the artifact corroborates; failed command does not", () => {

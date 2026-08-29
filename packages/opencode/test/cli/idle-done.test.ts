@@ -152,6 +152,37 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isReadOnlyCommand("FOO=1 make check")).toBe(false)
   })
 
+  // Classifying by command head alone misses in-place and redirection forms.
+  // Snapshot patch parts normally catch bash writes, but `snapshot: false`
+  // emits none, and an unrecorded write leaves the mutation watermark stale.
+  test("in-place editor flags are mutating even though the head is read-only", () => {
+    for (const cmd of ["sed -i '' 's/a/b/' src/app.ts", "sed -i.bak s/a/b/ f.txt"]) {
+      // `sed` is on the read-only allowlist, so the head alone says "no write".
+      expect(IdleDone.isReadOnlyCommand(cmd)).toBe(true)
+      expect(IdleDone.isMutatingCommand(cmd)).toBe(true)
+    }
+    expect(IdleDone.isMutatingCommand("perl -i -pe 's/a/b/' f.txt")).toBe(true)
+  })
+
+  test("output redirection is mutating; fd duplication is not", () => {
+    expect(IdleDone.isMutatingCommand("cat a.txt > b.txt")).toBe(true)
+    expect(IdleDone.isMutatingCommand("echo hi >> log.txt")).toBe(true)
+    expect(IdleDone.isMutatingCommand("ls | tee out.txt")).toBe(true)
+    expect(IdleDone.isMutatingCommand("make check 2>&1")).toBe(false)
+  })
+
+  test("always-writing heads are mutating anywhere in the pipeline", () => {
+    expect(IdleDone.isMutatingCommand("ls && rm -rf build")).toBe(true)
+    expect(IdleDone.isMutatingCommand("mkdir -p out")).toBe(true)
+    expect(IdleDone.isMutatingCommand("FOO=1 mv a b")).toBe(true)
+  })
+
+  test("plain read-only commands are not mutating", () => {
+    for (const cmd of ["ls -la", "cat file.txt", "grep -r pattern .", "git status", "sed s/a/b/ f.txt"]) {
+      expect(IdleDone.isMutatingCommand(cmd)).toBe(false)
+    }
+  })
+
   test("classifier and module contain no vertical/product tokens (leak-lens hard requirement)", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/idle-done.ts", import.meta.url).pathname).text()
     // No dbt/vertical string matching inside the generic mechanism, and no bench
@@ -182,6 +213,42 @@ describe("IdleDone hard preconditions", () => {
     expect(d.shouldChallenge()).toBe(false)
   })
   // altimate_change end
+
+  // Snapshots off (`snapshot: false`) means no patch part reports a
+  // bash-mediated write, so the in-place edit below is the only evidence that
+  // the session changed a file after its last green verification.
+  test("(i) an in-place bash edit after the verify blocks the challenge with no patch part", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(patchPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "./scripts/verify.sh --all", 0))
+    d.observePart(stepFinish("m_verify"))
+    // A write that produces no patch part and whose head is on the read-only list.
+    d.observePart(bashPart("m_sed", "sed -i '' 's/a/b/' src/app.ts", 0))
+    d.observePart(stepFinish("m_sed"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    // The write was recorded, and it postdates the verification.
+    const snap = d.snapshot()
+    expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
+  })
+
+  test("(ii) a configured verify command that redirects its output is still the verification", () => {
+    const opts: IdleDone.Options = { ...OPTS, verifyCommand: "make check" }
+    const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(patchPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "make check > build.log", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(true)
+  })
 
   test("(iv) NEVER fires in a never-compacted session", () => {
     const d = IdleDone.create(OPTS, deps([]))

@@ -372,4 +372,32 @@ describe("resolvePinRunMode — explicit run-mode value wins over the legacy fal
     expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "  ", ALTIMATE_NON_INTERACTIVE: "1" })).toBe(true)
     expect(SessionPrompt.resolvePinRunMode({})).toBe(false)
   })
+
+  // `run --continue` / `--session` / `--fork` resume a session whose first user
+  // message belongs to an EARLIER invocation. Run-mode selection would pin that
+  // stale request as authoritative over the summary and the current prompt.
+  test("a resumed run falls back to interactive selection", () => {
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "1", ALTIMATE_RUN_RESUMED: "1" })).toBe(false)
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_NON_INTERACTIVE: "1", ALTIMATE_RUN_RESUMED: "1" })).toBe(false)
+  })
+
+  test("a fresh run is unaffected", () => {
+    expect(SessionPrompt.resolvePinRunMode({ ALTIMATE_RUN_MODE: "1" })).toBe(true)
+  })
+})
+
+describe("selectPinSource — resumed run sessions", () => {
+  test("interactive selection picks this run's task, not the previous run's", () => {
+    // A session resumed with `run --continue "<new task>"`: the earlier
+    // invocation's task is still message #1.
+    const previous = userMsg("Previous run: migrate the staging schema.")
+    const current = userMsg("This run: add regression tests for the migration.")
+    const history = [previous, current]
+    // Run-mode selection would hand back the completed previous task.
+    expect(SessionPrompt.selectPinSource(history, true)?.id).toBe(previous.info.id)
+    // The resumed path resolves runMode=false and gets the current request.
+    const source = SessionPrompt.selectPinSource(history, false)
+    expect(source?.id).toBe(current.info.id)
+    expect(source?.text).toContain("regression tests")
+  })
 })

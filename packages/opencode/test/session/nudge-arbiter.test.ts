@@ -83,17 +83,22 @@ describe("NudgeArbiter LRU eviction", () => {
   test("eviction removes the least-recently-USED session, not the oldest-created", () => {
     const prefix = "ses_lru_nudge_"
     const directive = { source: "budget_reminder" as const, kind: "budget", text: "d" }
-    // Fill the table (the 128-session bound) with fresh sessions.
-    for (let i = 0; i < 128; i++) NudgeArbiter.register(`${prefix}${i}`, directive)
-    // Refresh the OLDEST-created session by using it again.
-    NudgeArbiter.register(`${prefix}0`, { ...directive, text: "refreshed" })
-    // A new session must evict the least-recently-used (#1), not #0.
-    NudgeArbiter.register(`${prefix}new`, directive)
-    expect(NudgeArbiter.pending(`${prefix}0`).length).toBeGreaterThan(0)
-    expect(NudgeArbiter.pending(`${prefix}1`)).toHaveLength(0)
-    expect(NudgeArbiter.pending(`${prefix}new`).length).toBeGreaterThan(0)
-    // Cleanup so this suite leaves no global state behind.
-    for (let i = 0; i < 128; i++) NudgeArbiter.clear(`${prefix}${i}`)
-    NudgeArbiter.clear(`${prefix}new`)
+    // Cleanup runs even when an assertion throws — otherwise a failure here
+    // leaves 129 sessions in the module-global table and the 128-session bound
+    // starts evicting other suites' pending directives.
+    try {
+      // Fill the table (the 128-session bound) with fresh sessions.
+      for (let i = 0; i < 128; i++) NudgeArbiter.register(`${prefix}${i}`, directive)
+      // Refresh the OLDEST-created session by using it again.
+      NudgeArbiter.register(`${prefix}0`, { ...directive, text: "refreshed" })
+      // A new session must evict the least-recently-used (#1), not #0.
+      NudgeArbiter.register(`${prefix}new`, directive)
+      expect(NudgeArbiter.pending(`${prefix}0`).length).toBeGreaterThan(0)
+      expect(NudgeArbiter.pending(`${prefix}1`)).toHaveLength(0)
+      expect(NudgeArbiter.pending(`${prefix}new`).length).toBeGreaterThan(0)
+    } finally {
+      for (let i = 0; i < 128; i++) NudgeArbiter.clear(`${prefix}${i}`)
+      NudgeArbiter.clear(`${prefix}new`)
+    }
   })
 })

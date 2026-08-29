@@ -169,6 +169,25 @@ describe("Config", () => {
       expect(decodeCompaction({ pin_window_fraction: 0.175 })._tag).toBe("Success")
     }),
   )
+
+  // The float32-exact bound the fast-check generator needs must round DOWN.
+  // Rounding up (Math.fround(0.1) ≈ 0.10000000149) made the schema reject the
+  // documented minimum and both endpoints of the advertised [0.1, 1] range.
+  it.effect("both endpoints of the documented context_safety_fraction range decode", () =>
+    Effect.sync(() => {
+      const decodeCompaction = (compaction: Record<string, unknown>) =>
+        Schema.decodeUnknownResult(Config.Info)({ compaction })
+      expect(decodeCompaction({ context_safety_fraction: 0.1 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 1 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 0.099 })._tag).toBe("Failure")
+
+      const decodeV1 = (compaction: Record<string, unknown>) =>
+        Schema.decodeUnknownResult(ConfigV1.Info)({ compaction })
+      expect(decodeV1({ context_safety_fraction: 0.1 })._tag).toBe("Success")
+      expect(decodeV1({ context_safety_fraction: 1 })._tag).toBe("Success")
+      expect(decodeV1({ context_safety_fraction: 0.099 })._tag).toBe("Failure")
+    }),
+  )
   // altimate_change end
 
   it.effect("migrates v1 provider setup options into AISDK settings", () =>

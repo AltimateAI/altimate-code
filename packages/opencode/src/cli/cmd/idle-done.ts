@@ -168,6 +168,48 @@ export namespace IdleDone {
     return true
   }
 
+  // Heads that always write, and in-place/redirection forms whose head alone
+  // looks read-only (`sed -i file`, `cat a > b`, `... | tee out`).
+  //
+  // Snapshot patch parts normally report bash-mediated writes, but snapshots
+  // are configurable (`snapshot: false`) and produce no patch part when off. A
+  // write that goes unrecorded leaves the mutation watermark stale, so an
+  // EARLIER green verification still satisfies the build-after-last-write
+  // precondition and idle-done can claim nothing happened after it. Classifying
+  // by command head alone is what misses these.
+  const MUTATING_HEADS = new Set([
+    "rm",
+    "mv",
+    "cp",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "ln",
+    "install",
+    "chmod",
+    "chown",
+    "truncate",
+    "dd",
+    "tee",
+  ])
+
+  /** True when the command writes to the filesystem through a head, flag, or redirection. */
+  export function isMutatingCommand(command: string): boolean {
+    // Output redirection to a file. Excludes fd duplication (`2>&1`, `>&2`).
+    if (/(?<![0-9&])>>?\s*(?![&|])/.test(command)) return true
+    // In-place editors: the head is on the read-only list, the `-i` flag writes.
+    if (/\b(?:sed|perl|ruby)\b[^|;&]*\s-[A-Za-z]*i\b/.test(command)) return true
+    for (const statement of command.split(/&&|\|\||[;|\n]/)) {
+      const tokens = statement
+        .trim()
+        .split(/\s+/)
+        .filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
+      const head = tokens[0]?.replace(/^\(+/, "")
+      if (head && MUTATING_HEADS.has(head)) return true
+    }
+    return false
+  }
+
   // Mutation-classified tool names: the harness's own file-writing tools. Patch
   // parts (snapshot diffs) additionally catch bash-mediated mutations.
   const MUTATING_TOOLS = new Set(["write", "edit", "multiedit", "patch"])
@@ -211,10 +253,18 @@ export namespace IdleDone {
       const isCandidate = options.verifyCommand
         ? command.trimStart().startsWith(options.verifyCommand)
         : !isReadOnlyCommand(command)
-      if (!isCandidate) return
-      const exit = part.state?.metadata?.["exit"]
-      lastVerifySeq = seq
-      lastVerifyGreen = exit === 0
+      if (isCandidate) {
+        const exit = part.state?.metadata?.["exit"]
+        lastVerifySeq = seq
+        lastVerifyGreen = exit === 0
+        return
+      }
+      // Not a verification. If it still wrote, advance the mutation watermark —
+      // otherwise a stale earlier verify keeps satisfying precondition (i) even
+      // though the session changed files after it. Checked after the candidate
+      // test so a configured verify command that redirects its own output
+      // (`make test > log`) is still counted as the verification it is.
+      if (isMutatingCommand(command)) lastMutationSeq = seq
     }
 
     return {

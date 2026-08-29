@@ -524,9 +524,17 @@ export namespace SessionCompaction {
         }
         if (part.tool === "apply_patch") {
           const files = Array.isArray(metadata.files) ? metadata.files : []
-          for (const f of files)
-            if (typeof f?.filePath === "string")
-              writes.set(f.filePath, { path: f.filePath, mtime: state.time.end, tool: "apply_patch" })
+          for (const f of files) {
+            // A delete wrote nothing — recording it would advertise a file that
+            // no longer exists as freshly written.
+            if (f?.type === "delete") continue
+            // On a move, `filePath` is the SOURCE and `movePath` is where the
+            // content actually landed; the ledger must name the destination or
+            // it sends the continuing agent back to the path that was removed.
+            const target = typeof f?.movePath === "string" ? f.movePath : f?.filePath
+            if (typeof target === "string")
+              writes.set(target, { path: target, mtime: state.time.end, tool: "apply_patch" })
+          }
         }
       }
     }
@@ -570,6 +578,11 @@ export namespace SessionCompaction {
       }
     }
     while (lines.length > 1 && Token.estimate(lines.join("\n")) > maxTokens) lines.pop()
+    // A header with every fact truncated away carries no information but is
+    // still charged against a budget the caller assumed was spent on facts —
+    // and `ledger_max_tokens: 0` (which the schema accepts) would otherwise
+    // inject unbudgeted text. Emit nothing when not even the header fits.
+    if (Token.estimate(lines.join("\n")) > maxTokens) return ""
     return lines.join("\n")
   }
 
@@ -618,7 +631,11 @@ export namespace SessionCompaction {
 
   function itemCorroborated(text: string, ledger: Ledger): boolean {
     for (const token of artifactTokens(text)) {
-      const base = token.split("/").pop() ?? ""
+      // Basename fallback only for a bare filename. A directory-qualified token
+      // (`src/index.ts`) must match its own path — otherwise any unrelated
+      // `test/index.ts` write corroborates it, and because carry status is
+      // append-only that wrong [verified] fact survives every later compaction.
+      const base = token.includes("/") ? "" : token
       for (const w of ledger.writes) {
         if (w.path === token || w.path.endsWith("/" + token)) return true
         if (base && w.path.split("/").pop() === base) return true

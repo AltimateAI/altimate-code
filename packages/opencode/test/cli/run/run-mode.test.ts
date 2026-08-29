@@ -46,6 +46,33 @@ describe("applyRunModeDefault", () => {
     applyRunModeDefault(env, { attach: true })
     expect(env["ALTIMATE_RUN_MODE"]).toBeUndefined()
   })
+
+  // A resumed run's history starts with an earlier invocation's task, so the
+  // pin selector must not treat "first user message" as this run's request.
+  test("a fresh run sets no resumed marker", () => {
+    const env: Record<string, string | undefined> = {}
+    applyRunModeDefault(env)
+    expect(env["ALTIMATE_RUN_RESUMED"]).toBeUndefined()
+  })
+
+  test("a resumed run marks the session", () => {
+    const env: Record<string, string | undefined> = {}
+    applyRunModeDefault(env, { resumed: true })
+    expect(env["ALTIMATE_RUN_MODE"]).toBe("1")
+    expect(env["ALTIMATE_RUN_RESUMED"]).toBe("1")
+  })
+
+  test("the resumed marker is set even when run mode was exported explicitly", () => {
+    const env: Record<string, string | undefined> = { ALTIMATE_RUN_MODE: "1" }
+    applyRunModeDefault(env, { resumed: true })
+    expect(env["ALTIMATE_RUN_RESUMED"]).toBe("1")
+  })
+
+  test("--attach sets no resumed marker either — the agent runs remotely", () => {
+    const env: Record<string, string | undefined> = {}
+    applyRunModeDefault(env, { attach: true, resumed: true })
+    expect(env["ALTIMATE_RUN_RESUMED"]).toBeUndefined()
+  })
 })
 
 describe("Flag.ALTIMATE_RUN_MODE integration", () => {

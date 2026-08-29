@@ -1,7 +1,7 @@
 export * as ConfigV1 from "./config"
 
 import { Schema } from "effect"
-import { NonNegativeInt, PositiveInt, type DeepMutable } from "../../schema"
+import { NonNegativeInt, PositiveInt, SAFETY_FRACTION_MIN, type DeepMutable } from "../../schema"
 import { ConfigExperimental } from "../../config/experimental"
 import { ConfigReference } from "../../config/reference"
 import { ConfigAgentV1 } from "./agent"
@@ -180,10 +180,13 @@ export const Info = Schema.Struct({
       // `.check()` bounds to be exact 32-bit floats (fc.float's `min`/`max`
       // constraints); 0.1 is not exactly float32-representable and made the
       // property-based V1→V2 migration fuzz test below throw on every run.
-      // Math.fround(0.1) is float32-safe and differs from 0.1 by ~1.5e-10 —
-      // immaterial to the intended "roughly 0.1 minimum" bound.
+      // The bound must therefore be a float32 that is BELOW 0.1, not above it:
+      // Math.fround(0.1) is ~0.10000000149, so a config carrying the documented
+      // minimum `0.1` failed to decode. SAFETY_FRACTION_MIN is the nearest
+      // float32 under 0.1 (~1.3e-8 below), which keeps the generator happy and
+      // still accepts the advertised lower endpoint.
       context_safety_fraction: Schema.optional(
-        Schema.Number.check(Schema.isGreaterThanOrEqualTo(Math.fround(0.1)), Schema.isLessThanOrEqualTo(1)),
+        Schema.Number.check(Schema.isGreaterThanOrEqualTo(SAFETY_FRACTION_MIN), Schema.isLessThanOrEqualTo(1)),
       ).annotate({
         description:
           "Fraction of the declared context limit treated as usable when estimated token counts are compared against it for compaction/overflow decisions (default: 0.65 — chars-based estimates can substantially undercount dense SQL/JSON, and compaction must trigger with enough margin that a worst-case underestimate still fits). Env override: ALTIMATE_CONTEXT_SAFETY_FRACTION. Clamped to [0.1, 1].",

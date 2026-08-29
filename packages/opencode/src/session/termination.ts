@@ -35,7 +35,14 @@ export namespace SessionTermination {
 
   /** True when the text ends with an explicit completion assertion (see module header). */
   export function isExplicitDone(text: string): boolean {
-    const lines = text.replace(/\s+$/, "").split("\n")
+    // Normalize line endings FIRST. On CRLF input the interior lines keep a
+    // trailing `\r`, which fails the closing fence's whitespace-only check and
+    // leaves every fence permanently open (a genuine DONE is then rejected);
+    // on bare-CR input the text never splits at all.
+    const lines = text
+      .replace(/\r\n?/g, "\n")
+      .replace(/\s+$/, "")
+      .split("\n")
     const last = lines[lines.length - 1]
     if (last === undefined) return false
     // Markdown-indented code (4+ spaces or a tab) is demonstration text.
@@ -55,12 +62,19 @@ export namespace SessionTermination {
       const match = CODE_FENCE_PATTERN.exec(lines[i]!)
       if (!match) continue
       const marker = match[1]!
+      const rest = lines[i]!.slice(match[0]!.length)
       if (!open) {
+        // CommonMark: a backtick fence's info string may not contain a
+        // backtick. Such a line is ordinary paragraph text, so treating it as
+        // an opener would make a later backtick run look like its closer and
+        // expose the interior — including a demonstration DONE — as an
+        // assertion.
+        if (marker[0] === "`" && rest.includes("`")) continue
         open = { char: marker[0]!, length: marker.length }
       } else if (
         marker[0] === open.char &&
         marker.length >= open.length &&
-        /^[ \t]*$/.test(lines[i]!.slice(match[0]!.length))
+        /^[ \t]*$/.test(rest)
       ) {
         open = undefined
       }

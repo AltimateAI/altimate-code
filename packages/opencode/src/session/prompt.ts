@@ -2437,7 +2437,10 @@ export namespace SessionPrompt {
   // FIRST non-synthetic user message (the CLI task). Interactive sessions pin
   // the MOST RECENT substantive user instruction — users pivot mid-session, and
   // hoisting message #1 as "authoritative" would fight later redirections in
-  // exactly the long sessions that compact.
+  // exactly the long sessions that compact. A RESUMED run (`--continue`,
+  // `--session`, `--fork`) uses the interactive rule too: its history begins
+  // with an earlier invocation's task, so "first" would pin a stale request
+  // over the one this run supplied (see resolvePinRunMode).
   //
   // Budget: SessionCompaction.pinBudget — min(4k, ~17.5% of the post-overhead
   // usable window), hard invariant pin + reserved + ≥2k slack < compaction
@@ -2609,6 +2612,12 @@ export namespace SessionPrompt {
    * Exported for unit tests.
    */
   export function resolvePinRunMode(env: Record<string, string | undefined> = process.env): boolean {
+    // A resumed run (`--continue` / `--session` / `--fork`, marked by run.ts)
+    // carries earlier invocations' messages, so "first user message" is a
+    // previous task, not this run's. Those sessions use interactive selection —
+    // the latest substantive instruction — which is the request this invocation
+    // actually supplied.
+    if (env["ALTIMATE_RUN_RESUMED"] === "1") return false
     if (env["ALTIMATE_RUN_MODE"]?.trim()) return Flag.parseRunModeValue(env["ALTIMATE_RUN_MODE"])
     return env["ALTIMATE_NON_INTERACTIVE"] === "1"
   }
