@@ -50,7 +50,8 @@ import {
   collectExecutedModelNames,
   collectRunResultExemptModels,
   sourceExemptsFromRunResults,
-  sourceContradictsExemption,
+  sourceDeclaresNonEphemeral,
+  sourceDeclaresEnabled,
   type RunResultsArtifact,
 } from "./validator-utils"
 
@@ -189,19 +190,26 @@ export const DbtBuildGreenValidator: Validator = {
       // re-enabled a disabled one, still appears exempt there — and the gate
       // would skip the very relation the session was asked to create.
       let exempt = false
-      let contradicts = false
+      let saysNonEphemeral = false
+      let saysEnabled = false
       try {
         const source = await fs.readFile(path, "utf8")
         exempt = sourceExemptsFromRunResults(source)
-        contradicts = sourceContradictsExemption(source)
+        saysNonEphemeral = sourceDeclaresNonEphemeral(source)
+        saysEnabled = sourceDeclaresEnabled(source)
       } catch {
         // Unreadable model — leave it to the coverage assertion, which is
         // the conservative direction for a file we cannot inspect.
       }
       // The manifest still speaks for config set in `dbt_project.yml` rather
       // than in the model, which the source cannot show — but only when the
-      // source does not say otherwise.
-      if (!exempt && !contradicts) exempt = exemptFromManifest.has(name)
+      // source contradicts it on the SAME axis. The axes are independent: a
+      // model disabled in the project file may still set `materialized`, and
+      // an ephemeral model may set `enabled=true`. Letting either declaration
+      // discard both exemptions would demand a `run_results` row dbt is never
+      // going to write.
+      if (!exempt && exemptFromManifest.ephemeral.has(name) && !saysNonEphemeral) exempt = true
+      if (!exempt && exemptFromManifest.disabled.has(name) && !saysEnabled) exempt = true
       if (exempt) {
         exemptModels.push(name)
         continue

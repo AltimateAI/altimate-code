@@ -826,6 +826,21 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
 }
 
 /**
+ * Model names dbt writes no `run_results` row for, split by *why*.
+ *
+ * The two axes are independent and must stay that way: a model disabled in
+ * `dbt_project.yml` may still set `materialized` in its own config, and an
+ * ephemeral model may set `enabled=true`. Collapsing them into one set makes a
+ * source-level declaration on either axis discard the exemption on the other.
+ */
+export interface RunResultExemptions {
+  /** `materialized='ephemeral'` — compiled into consumers, never its own node. */
+  ephemeral: Set<string>
+  /** `enabled=false` — removed from the graph entirely. */
+  disabled: Set<string>
+}
+
+/**
  * Model names for which dbt legitimately writes **no** `run_results` row, so
  * their absence from a build artifact is not evidence that they were not
  * built:
@@ -840,8 +855,10 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
  * because a session that has just written `enabled=false` will not have a
  * manifest that reflects it until the next parse.
  */
-export async function collectRunResultExemptModels(dbtRoot: string): Promise<Set<string>> {
-  const out = new Set<string>()
+export async function collectRunResultExemptModels(
+  dbtRoot: string,
+): Promise<RunResultExemptions> {
+  const out: RunResultExemptions = { ephemeral: new Set<string>(), disabled: new Set<string>() }
   try {
     const targetPath = await resolveDbtTargetPath(dbtRoot)
     const raw = await fs.readFile(join(targetPath, "manifest.json"), "utf8")
@@ -855,15 +872,15 @@ export async function collectRunResultExemptModels(dbtRoot: string): Promise<Set
       const name = typeof n["name"] === "string" ? n["name"].toLowerCase() : ""
       if (!name) continue
       const config = (n["config"] ?? {}) as Record<string, unknown>
-      if (String(config["materialized"] ?? "").toLowerCase() === "ephemeral") out.add(name)
-      if (config["enabled"] === false) out.add(name)
+      if (String(config["materialized"] ?? "").toLowerCase() === "ephemeral") out.ephemeral.add(name)
+      if (config["enabled"] === false) out.disabled.add(name)
     }
     for (const entry of Object.values(manifest.disabled ?? {})) {
       const rows = Array.isArray(entry) ? entry : [entry]
       for (const node of rows) {
         if (typeof node !== "object" || node === null) continue
         const name = (node as Record<string, unknown>)["name"]
-        if (typeof name === "string" && name.length > 0) out.add(name.toLowerCase())
+        if (typeof name === "string" && name.length > 0) out.disabled.add(name.toLowerCase())
       }
     }
   } catch {
@@ -916,19 +933,31 @@ export function sourceExemptsFromRunResults(sql: string): boolean {
 }
 
 /**
- * True when a model's own source declares a configuration that **contradicts**
- * an exemption read from `manifest.json` — a real materialisation, or an
- * explicit `enabled=true`.
+ * True when a model's own source declares a real materialisation, contradicting
+ * an `ephemeral` exemption read from `manifest.json`.
  *
  * `manifest.json` is only as current as the last `dbt parse`. A session that
- * turns an ephemeral model into a table, or re-enables a disabled one, leaves
- * a manifest that still calls it exempt, and the build gate would then skip
- * the very relation the session was asked to create. The model source is the
- * newer of the two, so it wins.
+ * turns an ephemeral model into a table leaves a manifest that still calls it
+ * ephemeral, and the build gate would then skip the very relation the session
+ * was asked to create. The model source is the newer of the two, so it wins.
  */
-export function sourceContradictsExemption(sql: string): boolean {
-  const args = dbtConfigArgs(stripSqlComments(sql))
-  return NON_EPHEMERAL_CONFIG_RE.test(args) || ENABLED_CONFIG_RE.test(args)
+export function sourceDeclaresNonEphemeral(sql: string): boolean {
+  return NON_EPHEMERAL_CONFIG_RE.test(dbtConfigArgs(stripSqlComments(sql)))
+}
+
+/**
+ * True when a model's own source declares `enabled=true`, contradicting a
+ * `disabled` exemption read from `manifest.json`.
+ *
+ * Kept separate from the materialisation axis on purpose. The two are
+ * independent in dbt: a model disabled in `dbt_project.yml` can perfectly well
+ * set `materialized` in its own config, and an ephemeral model can set
+ * `enabled=true`. Treating either as a single "not exempt" signal pulls a model
+ * dbt will never write a `run_results` row for back into the coverage
+ * assertion, which is a gate the session cannot clear by doing anything right.
+ */
+export function sourceDeclaresEnabled(sql: string): boolean {
+  return ENABLED_CONFIG_RE.test(dbtConfigArgs(stripSqlComments(sql)))
 }
 
 /**

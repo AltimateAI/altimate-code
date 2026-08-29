@@ -27,7 +27,8 @@ import {
   collectProducedNodeNames,
   collectExecutedModelNames,
   sourceExemptsFromRunResults,
-  sourceContradictsExemption,
+  sourceDeclaresNonEphemeral,
+  sourceDeclaresEnabled,
   resolveDbtTargetPath,
   maskJinjaExpressions,
   extractJinjaIfBlocks,
@@ -269,13 +270,82 @@ describe("run-results exemptions are scoped to config() arguments", () => {
     expect(r.details!["exempt_models"]).toEqual([])
   })
 
-  test("sourceContradictsExemption only reads config() arguments", () => {
-    expect(sourceContradictsExemption("{{ config(materialized='table') }}\nselect 1")).toBe(true)
-    expect(sourceContradictsExemption("{{ config(enabled=true) }}\nselect 1")).toBe(true)
-    expect(sourceContradictsExemption("{{ config(materialized='ephemeral') }}\nselect 1")).toBe(
+  test("the contradiction probes only read config() arguments", () => {
+    expect(sourceDeclaresNonEphemeral("{{ config(materialized='table') }}\nselect 1")).toBe(true)
+    expect(sourceDeclaresNonEphemeral("{{ config(materialized='ephemeral') }}\nselect 1")).toBe(
       false,
     )
-    expect(sourceContradictsExemption("select * from t where materialized = 'table'")).toBe(false)
+    expect(sourceDeclaresNonEphemeral("select * from t where materialized = 'table'")).toBe(false)
+    expect(sourceDeclaresEnabled("{{ config(enabled=true) }}\nselect 1")).toBe(true)
+    expect(sourceDeclaresEnabled("select 1 from t where enabled = true")).toBe(false)
+  })
+
+  test("a manifest exemption is only discarded on the axis the source contradicts", async () => {
+    // Disabled in `dbt_project.yml`, so the manifest is the only place that
+    // knows. The model sets `materialized` in its own config, which says
+    // nothing about whether it is enabled — demanding a `run_results` row for
+    // it would be a gate the session can never clear.
+    await makeProject()
+    await writeModel("retired", "{{ config(materialized='table') }}\nselect 1 as id")
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "target", "manifest.json"),
+      JSON.stringify({
+        nodes: {},
+        disabled: {
+          "model.t.retired": [
+            { name: "retired", original_file_path: "models/retired.sql", config: {} },
+          ],
+        },
+      }),
+    )
+    await writeRunResults([{ id: "model.t.other", status: "success" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["exempt_models"]).toEqual(["retired"])
+  })
+
+  test("an ephemeral manifest entry survives an unrelated enabled=true in the source", async () => {
+    await makeProject()
+    await writeModel("interim", "{{ config(enabled=true) }}\nselect 1 as id")
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "target", "manifest.json"),
+      JSON.stringify({
+        nodes: {
+          "model.t.interim": {
+            name: "interim",
+            original_file_path: "models/interim.sql",
+            config: { materialized: "ephemeral" },
+          },
+        },
+      }),
+    )
+    await writeRunResults([{ id: "model.t.other", status: "success" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["exempt_models"]).toEqual(["interim"])
+  })
+
+  test("re-enabling a disabled model does discard the disabled exemption", async () => {
+    await makeProject()
+    await writeModel("revived", "{{ config(enabled=true) }}\nselect 1 as id")
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "target", "manifest.json"),
+      JSON.stringify({
+        nodes: {},
+        disabled: {
+          "model.t.revived": [
+            { name: "revived", original_file_path: "models/revived.sql", config: {} },
+          ],
+        },
+      }),
+    )
+    await writeRunResults([{ id: "model.t.other", status: "success" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["not_built"]).toEqual(["revived"])
   })
 })
 
