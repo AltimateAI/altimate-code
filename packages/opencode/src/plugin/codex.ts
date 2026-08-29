@@ -36,6 +36,27 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
  * endpoint above on a subscription credential; guessing puts a model in the
  * picker that then fails at request time.
  *
+ * WHY THIS IS STATIC AND NOT DISCOVERED. There is an authoritative per-account
+ * endpoint — ``GET https://chatgpt.com/backend-api/codex/models?client_version=<v>``
+ * — and it accepts our own identity (``originator: altimate`` plus our
+ * User-Agent; no impersonation needed) and returns exactly the set above, each
+ * entry carrying ``slug``, ``visibility`` and ``minimal_client_version``. Its
+ * ``visibility: "list"`` slugs corroborate this list precisely, which is why
+ * that list is reproduced here rather than derived at runtime:
+ *
+ * ``client_version`` is mandatory (omitted or unparseable ⇒ HTTP 400) and is
+ * gated against each model's ``minimal_client_version``, which today ranges
+ * from 0.98.0 to 0.144.0. Those are Codex CLI release numbers, a numbering line
+ * we are not on. Our own versions sit below all of them, and the gate fails
+ * SILENTLY — ``client_version=0.9.7`` (our published version) returns
+ * ``HTTP 200 {"models":[]}``, and a dev build's ``local`` returns
+ * ``400 {"detail":"Invalid client_version format"}``. So discovery yields
+ * nothing usable unless we assert a Codex CLI version we are not, which would
+ * be impersonating the first-party client. We do not do that, so the list stays
+ * static. If we ever have a legitimate client_version to send, the mechanism is
+ * a small drop-in: fetch, keep ``visibility === "list"``, and fall back to this
+ * set whenever the response is empty or the call fails.
+ *
  * Exported for unit-test coverage — see test/plugin/codex-allowlist.test.ts. */
 export const OAUTH_ALLOWED_MODELS = new Set([
   "gpt-5.3-codex-spark",
