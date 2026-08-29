@@ -2,13 +2,23 @@
 // in packages/opencode/src/plugin/codex.ts — the ACTIVE plugin wired
 // via plugin/index.ts.
 //
-// The allowlist is a verified truth table, not a guess. Every id asserted
-// below was probed against the live backend
-// (POST https://chatgpt.com/backend-api/codex/responses) on a ChatGPT Pro
-// credential, using our own `originator: altimate` client identity over plain
-// HTTP. Accepted ids returned HTTP 200; rejected ids returned
+// The allowlist is a verified truth table, not a guess. Every id in
+// VERIFIED_ACCEPTED and VERIFIED_REJECTED below was probed against the live
+// backend (POST https://chatgpt.com/backend-api/codex/responses) on a ChatGPT
+// Pro credential, using our own `originator: altimate` client identity over
+// plain HTTP. Accepted ids returned HTTP 200; rejected ids returned
 // 400 {"detail":"The '<id>' model is not supported when using Codex with a
 // ChatGPT account."}
+//
+// Ids asserted OUTSIDE those two lists were NOT probed and are not claimed to
+// have been. They fall in two groups, both deliberate:
+//   * ids absent from the models.dev catalog (gpt-5.1-codex, gpt-5.1-codex-max,
+//     codex-hypothetical-future-name, …). These cannot reach the loader at all,
+//     so probing them would be meaningless; they are here purely as shape
+//     assertions against a substring rule creeping back in.
+//   * obviously-unrelated ids (claude-*, gemini-*, gpt-4o), same reason.
+// The probe scope, and the four catalog ids left unprobed, are recorded on
+// OAUTH_ALLOWED_MODELS in src/plugin/codex.ts.
 //
 // Two directions of breakage this file guards:
 //   * false positives — an id offered in the picker that 400s at request time
@@ -30,7 +40,7 @@
 // adopting ``shouldAllowOAuthModel`` here (and expanding this file's
 // coverage to the newly-active filter) is followup work.
 import { describe, expect, test } from "bun:test"
-import { OAUTH_ALLOWED_MODELS, shouldAllowOAuthModel } from "../../src/plugin/codex"
+import { OAUTH_ALLOWED_MODELS, disallowedOAuthModelKeys, shouldAllowOAuthModel } from "../../src/plugin/codex"
 
 /** Verified HTTP 200 on a ChatGPT Pro subscription credential. */
 const VERIFIED_ACCEPTED = [
@@ -118,5 +128,68 @@ describe("shouldAllowOAuthModel — behavior of the filter itself", () => {
     for (const id of ["claude-3.5-sonnet", "gemini-2.5-pro", "gpt-4o", "gpt-4-turbo", ""]) {
       expect(shouldAllowOAuthModel(id)).toBe(false)
     }
+  })
+})
+
+describe("disallowedOAuthModelKeys — what the loader actually deletes", () => {
+  const model = (apiId?: string) => (apiId === undefined ? {} : { api: { id: apiId } })
+
+  test("a config alias of a supported model is kept, keyed by its alias", () => {
+    // The bug this guards: the loader used to match the MAP KEY. Config models
+    // are folded into the provider database before auth loaders run, so
+    // `provider.openai.models.fast-spark.id = "gpt-5.3-codex-spark"` arrives
+    // keyed `fast-spark` with the real id on `api.id`. Matching the key deleted
+    // a model the backend serves.
+    const models = {
+      "fast-spark": model("gpt-5.3-codex-spark"),
+      "my-flagship": model("gpt-5.6-sol"),
+    }
+    expect(disallowedOAuthModelKeys(models)).toEqual([])
+  })
+
+  test("an alias of an unsupported model is still deleted", () => {
+    // The alias must not become a way to smuggle a rejected id past the filter
+    // — it is the api.id that reaches the backend, so that is what is judged.
+    const models = {
+      "totally-fine-name": model("gpt-5.6"),
+      "gpt-5.6-sol": model("gpt-5.6-sol"),
+    }
+    expect(disallowedOAuthModelKeys(models)).toEqual(["totally-fine-name"])
+  })
+
+  test("api.id wins over the key in both directions", () => {
+    const models = {
+      // key allowed, api.id rejected -> delete
+      "gpt-5.6-sol": model("gpt-5.6"),
+      // key rejected, api.id allowed -> keep
+      "gpt-5.6": model("gpt-5.6-sol"),
+    }
+    expect(disallowedOAuthModelKeys(models)).toEqual(["gpt-5.6-sol"])
+  })
+
+  test("falls back to the key when api.id is absent", () => {
+    // The database backfills api.id only AFTER this hook runs, so the field can
+    // be missing despite the type. Behaviour must degrade to the old key match,
+    // not throw and not allow everything through.
+    const models = {
+      "gpt-5.6-sol": model(undefined),
+      "gpt-5.6": model(undefined),
+      "gpt-5.4": { api: {} },
+      "gpt-5.2": { api: {} },
+    }
+    expect(disallowedOAuthModelKeys(models).sort()).toEqual(["gpt-5.2", "gpt-5.6"])
+  })
+
+  test("the catalog set resolves identically whether matched by key or api.id", () => {
+    // Every models.dev catalog entry has key === api.id (checked against
+    // https://models.dev/api.json), so this change is behaviour-preserving for
+    // catalog models — only aliases move. Guards against a future refactor
+    // quietly changing which flagship models the picker offers.
+    const catalog = Object.fromEntries([...VERIFIED_ACCEPTED, ...VERIFIED_REJECTED].map((id) => [id, model(id)]))
+    expect(disallowedOAuthModelKeys(catalog).sort()).toEqual([...VERIFIED_REJECTED].sort())
+  })
+
+  test("an empty model map yields nothing to delete", () => {
+    expect(disallowedOAuthModelKeys({})).toEqual([])
   })
 })

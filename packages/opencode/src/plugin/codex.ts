@@ -20,14 +20,35 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
  *
  * Every entry was verified against the live backend
  * (POST https://chatgpt.com/backend-api/codex/responses) on a ChatGPT Pro
- * credential: entries here returned HTTP 200, and every other gpt-5.x id in
- * the models.dev catalog returned
- * ``400 {"detail":"The '<id>' model is not supported when using Codex with a
- * ChatGPT account."}``.
+ * credential: entries here returned HTTP 200.
  *
- * Confirmed rejected, so deliberately absent: gpt-5, gpt-5.1, gpt-5.2,
- * gpt-5.2-pro, gpt-5.3-chat-latest, gpt-5.3-codex, gpt-5.4-nano, gpt-5.4-pro,
- * gpt-5.5-pro, gpt-5.6.
+ * CONFIRMED REJECTED, so deliberately absent — each returned
+ * ``400 {"detail":"The '<id>' model is not supported when using Codex with a
+ * ChatGPT account."}``: gpt-5, gpt-5.1, gpt-5.2, gpt-5.2-pro,
+ * gpt-5.3-chat-latest, gpt-5.3-codex, gpt-5.4-nano, gpt-5.4-pro, gpt-5.5-pro,
+ * gpt-5.6.
+ *
+ * NOT PROBED, and excluded by default because this list is fail-closed:
+ * gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.2-chat-latest. They are in the
+ * models.dev catalog but are not plausible Codex-tier models, and the
+ * discovery endpoint below does not list them either. An earlier revision of
+ * this comment claimed every other catalog id had been probed; that overstated
+ * the evidence, and these four are the exception.
+ *
+ * TIER SCOPE. All of the above is what ONE ChatGPT Pro account was served.
+ * It has not been verified against a Plus credential, so it is possible Plus
+ * is entitled to a narrower (or wider) set. If a Plus subscriber reports a
+ * model missing from the picker that the official client offers them, that is
+ * the likely cause and the fix is a per-account list, not another id here.
+ *
+ * NOT A SILENT DROP. Reviewers have twice asked why codex-tagged ids such as
+ * gpt-5.1-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.2-codex and
+ * gpt-5.3-codex-xhigh appear in neither list. They are not in the models.dev
+ * catalog at all (checked against https://models.dev/api.json — the only codex
+ * ids it carries are gpt-5.3-codex and gpt-5.3-codex-spark), so no filter here
+ * can hide them: they never reach this loader. The removed
+ * ``includes("codex")`` rule would have admitted them had they existed, which
+ * is why the old tests named them, but nothing in the picker changed for them.
  *
  * There is no derivable rule here — the tier accepts ``gpt-5.3-codex-spark``
  * but rejects ``gpt-5.3-codex``, and accepts the gpt-5.6 sol/luna/terra
@@ -45,17 +66,28 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
  * that list is reproduced here rather than derived at runtime:
  *
  * ``client_version`` is mandatory (omitted or unparseable ⇒ HTTP 400) and is
- * gated against each model's ``minimal_client_version``, which today ranges
- * from 0.98.0 to 0.144.0. Those are Codex CLI release numbers, a numbering line
- * we are not on. Our own versions sit below all of them, and the gate fails
- * SILENTLY — ``client_version=0.9.7`` (our published version) returns
- * ``HTTP 200 {"models":[]}``, and a dev build's ``local`` returns
- * ``400 {"detail":"Invalid client_version format"}``. So discovery yields
- * nothing usable unless we assert a Codex CLI version we are not, which would
- * be impersonating the first-party client. We do not do that, so the list stays
- * static. If we ever have a legitimate client_version to send, the mechanism is
- * a small drop-in: fetch, keep ``visibility === "list"``, and fall back to this
- * set whenever the response is empty or the call fails.
+ * gated against each model's ``minimal_client_version``, which at the time of
+ * probing ranged from 0.98.0 to 0.144.0. Those are Codex CLI release numbers —
+ * a numbering line we are not on, so comparing our number against theirs is
+ * meaningless regardless of which way it happens to sort.
+ *
+ * Two different version numbers exist in this repo and it matters which one
+ * reaches the wire. What we would send is ``Installation.VERSION``, i.e. the
+ * build-injected ``OPENCODE_VERSION`` — the NPM-published version, 0.9.7 at
+ * the time of probing, or the literal ``local`` for a dev build. It is NOT the
+ * 1.17.9 in packages/opencode/package.json, which is inherited from the
+ * upstream numbering line and never sent. Both observed values fail, and the
+ * failure is SILENT for one of them: ``client_version=0.9.7`` returns
+ * ``HTTP 200 {"models":[]}`` — no error to debug, just an empty picker — while
+ * a dev build's ``local`` returns
+ * ``400 {"detail":"Invalid client_version format"}``.
+ *
+ * The blocker is not arithmetic, so bumping our version would not lift it: the
+ * field means "which Codex CLI release am I", and answering it is impersonating
+ * the first-party client whatever number we put there. We do not do that, so
+ * the list stays static. If we ever have a legitimate client_version to send,
+ * the mechanism is a small drop-in: fetch, keep ``visibility === "list"``, and
+ * fall back to this set whenever the response is empty or the call fails.
  *
  * Exported for unit-test coverage — see test/plugin/codex-allowlist.test.ts. */
 export const OAUTH_ALLOWED_MODELS = new Set([
@@ -84,6 +116,28 @@ export const OAUTH_ALLOWED_MODELS = new Set([
  * assume the two files share this policy today. */
 export function shouldAllowOAuthModel(modelId: string): boolean {
   return OAUTH_ALLOWED_MODELS.has(modelId)
+}
+
+/** Map keys to delete from an OAuth (subscription) provider's model record.
+ *
+ * Matches on the UPSTREAM api id, not the map key. The two are equal for every
+ * models.dev catalog entry, but a user can alias a model in config —
+ * ``provider.openai.models.fast-spark.id = "gpt-5.3-codex-spark"`` — which
+ * produces an entry keyed ``fast-spark`` whose ``api.id`` carries the real id.
+ * Config models are folded into the provider database (Provider.state, "extend
+ * database from config") BEFORE auth loaders run, so they do reach this filter;
+ * matching the key would delete a model the backend actually serves.
+ *
+ * Falls back to the key when ``api.id`` is absent: the database only backfills
+ * ``model.api.id ?? model.id ?? modelID`` after this hook has run, so the field
+ * is not guaranteed populated at this point even though the type says so.
+ *
+ * Returns keys rather than mutating, so the caller keeps the in-place delete on
+ * the shared database object and this stays unit-testable. */
+export function disallowedOAuthModelKeys(models: Record<string, { api?: { id?: string } }>): string[] {
+  return Object.entries(models)
+    .filter(([key, model]) => !shouldAllowOAuthModel(model?.api?.id ?? key))
+    .map(([key]) => key)
 }
 
 interface PkceCodes {
@@ -469,9 +523,10 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         if (auth.type !== "oauth") return {}
 
         // Filter models to only those the ChatGPT-subscription (Codex) tier
-        // accepts. Delegates to ``shouldAllowOAuthModel`` (module-level,
-        // above). See OAUTH_ALLOWED_MODELS + shouldAllowOAuthModel for the
-        // criteria + how to add new gpt-5.N releases.
+        // accepts. Delegates to ``disallowedOAuthModelKeys`` (module-level,
+        // above), which matches on each model's upstream ``api.id`` so a
+        // config alias of a supported model survives. See OAUTH_ALLOWED_MODELS
+        // for the criteria + how to add new gpt-5.N releases.
         //
         // NOTE: this file is the ACTIVE plugin (wired via plugin/index.ts).
         // The sibling plugin/openai/codex.ts is an unwired in-progress
@@ -479,8 +534,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         // fallback — this filter does NOT share a source of truth with it.
         // Adopting shouldAllowOAuthModel there is followup on that refactor.
         // (Closes #1132 — GPT 5.6 missing from picker.)
-        for (const modelId of Object.keys(provider.models)) {
-          if (!shouldAllowOAuthModel(modelId)) delete provider.models[modelId]
+        for (const modelId of disallowedOAuthModelKeys(provider.models)) {
+          delete provider.models[modelId]
         }
 
         // Zero out costs for Codex (included with ChatGPT subscription)
