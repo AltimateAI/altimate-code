@@ -82,6 +82,30 @@ describe("extractOAuthIdentity", () => {
   })
 })
 
+describe("claim sanitization — claims are untrusted, unverified input", () => {
+  test("control characters and escape sequences are stripped before display", () => {
+    const hostile = fakeJwt({
+      chatgpt_plan_type: "free\u001b[2Jwiped",
+      chatgpt_account_id: "acct\n\r\u0007-1234",
+    })
+    const identity = extractOAuthIdentity(hostile)
+    expect(identity.plan).toBe("free[2Jwiped")
+    expect(identity.accountId).toBe("acct-1234")
+    for (const value of [identity.plan!, identity.accountId!]) {
+      expect(/[\x00-\x1f\x7f]/.test(value)).toBe(false)
+    }
+  })
+
+  test("absurdly long claims are capped", () => {
+    const identity = extractOAuthIdentity(fakeJwt({ chatgpt_plan_type: "x".repeat(5000) }))
+    expect(identity.plan!.length).toBe(64)
+  })
+
+  test("a claim of only control characters is dropped entirely", () => {
+    expect(extractOAuthIdentity(fakeJwt({ chatgpt_plan_type: "\u0000\u0007" }))).toEqual({})
+  })
+})
+
 describe("maskAccountId", () => {
   test("truncates long ids", () => {
     expect(maskAccountId(FREE_ACCOUNT_ID)).toBe("4f3a1b2c…")
@@ -169,6 +193,18 @@ describe("enrichCodexPlanMismatchBody", () => {
     )!
     expect(message).toContain("`free` plan")
     expect(message).not.toContain("Provider said:")
+  })
+
+  test("an entitled plan is told the model is the problem, not the plan", () => {
+    // A Plus/Pro account can hit the same 400 for a model that simply is not
+    // offered to subscription accounts. Telling that user their plan is too low
+    // would contradict what they are paying for.
+    const proToken = fakeJwt({ chatgpt_plan_type: "pro", chatgpt_account_id: FREE_ACCOUNT_ID })
+    const message = enrichCodexPlanMismatchBody(MISMATCH_BODY, proToken)!
+    expect(message).toContain("`pro` plan, which does include Codex")
+    expect(message).toContain("this is the model, not the plan")
+    expect(message).not.toContain("cannot run them")
+    expect(message).not.toContain("auth logout openai")
   })
 
   test("leaves every other error alone", () => {

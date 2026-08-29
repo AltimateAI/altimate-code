@@ -238,8 +238,10 @@ export type LoginTarget =
  * Decide which login path an invocation takes. A URL positional keeps the
  * well-known behavior it always had; anything else is a provider id, so
  * `auth login openai` works like `auth login --provider openai` rather than
- * being handed to fetch(). An explicit `--provider` flag takes precedence over
- * the positional, following the usual flag-beats-positional convention.
+ * being handed to fetch(). A URL positional always wins — it is the only way to
+ * reach the well-known path, and it is what pre-existing invocations pass. When
+ * the positional is not a URL, an explicit `--provider` flag takes precedence
+ * over it, following the usual flag-beats-positional convention.
  */
 export function resolveLoginTarget(args: { target?: string; provider?: string }): LoginTarget {
   if (isAuthProviderUrl(args.target)) return { kind: "url", url: args.target.replace(/\/+$/, "") }
