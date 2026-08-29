@@ -1,6 +1,7 @@
 // altimate_change start — explicit registration entry point for altimate validators
 import { ValidatorRegistry } from "../../session/validators/registry"
 import { DbtBuildGreenValidator } from "./dbt-build-green"
+import { DbtDeliverableNamesValidator } from "./dbt-deliverable-names"
 import { DbtNothingBuiltValidator } from "./dbt-nothing-built"
 import { DbtSchemaVerifyValidator } from "./dbt-schema-verify"
 import { DbtTestsPassValidator } from "./dbt-tests-pass"
@@ -23,6 +24,7 @@ import { DbtTestsPassValidator } from "./dbt-tests-pass"
 export function registerAltimateValidators(): void {
   ValidatorRegistry.register(DbtNothingBuiltValidator)
   ValidatorRegistry.register(DbtBuildGreenValidator)
+  ValidatorRegistry.register(DbtDeliverableNamesValidator)
   ValidatorRegistry.register(DbtSchemaVerifyValidator)
   ValidatorRegistry.register(DbtTestsPassValidator)
 }
