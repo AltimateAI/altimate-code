@@ -446,11 +446,13 @@ describe("a Jinja target-path does not become a literal directory name", () => {
       join(dir, "dbt_project.yml"),
       "name: t\ntarget-path: \"{{ env_var('ALTIMATE_TEST_ARTIFACT_DIR') }}\"\n",
     )
+    const prior = process.env.ALTIMATE_TEST_ARTIFACT_DIR
     process.env.ALTIMATE_TEST_ARTIFACT_DIR = "build-out"
     try {
       expect(await resolveDbtTargetPath(dir)).toBe(join(dir, "build-out"))
     } finally {
-      delete process.env.ALTIMATE_TEST_ARTIFACT_DIR
+      if (prior === undefined) delete process.env.ALTIMATE_TEST_ARTIFACT_DIR
+      else process.env.ALTIMATE_TEST_ARTIFACT_DIR = prior
     }
   })
 
@@ -509,14 +511,38 @@ describe("a contract-free task document does not mask a real contract", () => {
     dir = await fs.mkdtemp(join(tmpdir(), "review-sweep-task-"))
     await fs.writeFile(join(dir, "TASK.md"), "Create the model `from_task`.\n")
     await fs.writeFile(join(dir, "PINNED.md"), "Create the model `from_pinned`.\n")
+    const prior = process.env.ALTIMATE_VALIDATORS_TASK_FILE
     process.env.ALTIMATE_VALIDATORS_TASK_FILE = "PINNED.md"
     try {
       const found = await findTaskInstructionFiles(dir, null)
       expect(found.length).toBe(1)
       expect(found[0]!.path.endsWith("PINNED.md")).toBe(true)
     } finally {
-      delete process.env.ALTIMATE_VALIDATORS_TASK_FILE
+      if (prior === undefined) delete process.env.ALTIMATE_VALIDATORS_TASK_FILE
+      else process.env.ALTIMATE_VALIDATORS_TASK_FILE = prior
     }
+  })
+})
+
+describe("a leading qualifier does not erase the deliverable", () => {
+  test("`Using dbt, create the model X` still yields a contract", () => {
+    const r = extractRequiredDeliverables("Using dbt, create the model `orders`.\n")
+    expect(r!.models).toEqual(["orders"])
+  })
+
+  test("`With the supplied source, build the model X` still yields a contract", () => {
+    const r = extractRequiredDeliverables(
+      "With the supplied source, build the model `fct_orders`.\n",
+    )
+    expect(r!.models).toEqual(["fct_orders"])
+  })
+
+  test("a qualifier after the name still stops attribute collection", () => {
+    // `order_id` is a column, not a second required model.
+    const r = extractRequiredDeliverables(
+      "Create the model `fct_orders` with unique key `order_id`.\n",
+    )
+    expect(r!.models).toEqual(["fct_orders"])
   })
 })
 
@@ -727,6 +753,152 @@ describe("an operation row is not a built deliverable", () => {
     await writeRunResults([{ id: "model.t.fct_orders", status: "success" }])
     const r = await DbtNothingBuiltValidator.check(ctx())
     expect(r.ok).toBe(true)
+  })
+})
+// ---------------------------------------------------------------------------
+// Second review wave — findings raised against the sweep commit itself
+// ---------------------------------------------------------------------------
+
+describe("a lowercase task filename stays reachable on a case-sensitive volume", () => {
+  test("a workspace whose only task document is task.md still yields a contract", async () => {
+    await makeProject("review-sweep-case-")
+    await fs.writeFile(join(dir, "task.md"), "Create the model `fct_orders`.\n")
+    const found = await findTaskInstructionFiles(dir, null)
+    expect(found.length).toBeGreaterThan(0)
+    expect(await DbtNothingBuiltValidator.appliesTo(ctx())).toBe(true)
+  })
+
+  test("one file reachable under two spellings is reported once", async () => {
+    // On APFS/NTFS `TASK.md` and `task.md` are the same file; dedup is by
+    // resolved identity, so it appears once rather than twice.
+    await makeProject("review-sweep-case-")
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.\n")
+    const found = await findTaskInstructionFiles(dir, null)
+    const bases = found.map((f) => f.path.toLowerCase())
+    expect(new Set(bases).size).toBe(bases.length)
+  })
+})
+
+describe("a null unique_key does not pass, spaced or unspaced", () => {
+  const spellings = [
+    "unique_key=None",
+    "unique_key = None",
+    "unique_key= null",
+    "unique_key = null",
+    "unique_key = ''",
+    "unique_key = []",
+  ]
+  for (const spelling of spellings) {
+    test(`\`${spelling}\` is treated as no key`, async () => {
+      await makeProject("review-sweep-key-")
+      await writeModel(
+        "fct_events",
+        `{{ config(materialized='incremental', incremental_strategy='merge', ${spelling}) }}\nselect 1 as id`,
+      )
+      const r = await DbtIncrementalConfigValidator.check(ctx())
+      expect(r.ok).toBe(false)
+      const kinds = (r.details!["findings"] as Array<{ kind: string }>).map((f) => f.kind)
+      expect(kinds).toContain("upsert-without-unique-key")
+    })
+  }
+
+  test("a real key still passes", async () => {
+    await makeProject("review-sweep-key-")
+    await writeModel(
+      "fct_events",
+      "{{ config(materialized='incremental', incremental_strategy='merge', unique_key = 'id') }}\nselect 1 as id",
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+})
+
+describe("a projected boolean is not the row-selection predicate", () => {
+  test("random() in a projection before a deterministic where does not block", async () => {
+    await makeProject("review-sweep-pred-")
+    await writeModel(
+      "fct_events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select *, (is_active and random() > 0.5) as sampled from src",
+        "{% if is_incremental() %}",
+        "  where loaded_at > (select max(loaded_at) from {{ this }})",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+
+  test("a bare `and` fragment guard is still inspected", async () => {
+    await makeProject("review-sweep-pred-")
+    await writeModel(
+      "fct_events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select * from src",
+        "{% if is_incremental() %}",
+        "  and loaded_at > current_timestamp",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(false)
+  })
+})
+
+describe("the idempotency demand is read from every task document", () => {
+  test("an informational TASK.md no longer hides a REQUIREMENTS.md demand", async () => {
+    await makeProject("review-sweep-idem2-")
+    await fs.writeFile(join(dir, "TASK.md"), "Background about this repository.\n")
+    await fs.writeFile(join(dir, "REQUIREMENTS.md"), "Reruns must be idempotent.\n")
+    await writeModel("fct_events", "{{ config(materialized='incremental') }}\nselect 1 as id")
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.details!["idempotency_demanded"]).toBe(true)
+    const kinds = (r.details!["findings"] as Array<{ kind: string }>).map((f) => f.kind)
+    expect(kinds).toContain("missing-is-incremental-guard")
+  })
+})
+
+describe("Jinja modulo in a guard condition does not defeat the guard", () => {
+  test("stripJinjaIfBlocks matches an opener containing `%`", () => {
+    const sql = "{% if target.type == 'snowflake' and n % 2 == 0 %}\niff(a, b, c)\n{% endif %}"
+    expect(stripJinjaIfBlocks(sql, /target\.type/i)).not.toContain("iff(")
+  })
+
+  test("a guarded call in such a block is not reported", async () => {
+    await makeProject("review-sweep-mod-")
+    await fs.mkdir(join(dir, "macros"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "macros", "portable.sql"),
+      "{% macro ts() %}{% if target.type == 'duckdb' %}now(){% endif %}{% endmacro %}",
+    )
+    await writeModel(
+      "stg_orders",
+      "{% if target.type == 'snowflake' and 4 % 2 == 0 %}\nselect iff(a, b, c) as x\n{% endif %}",
+    )
+    const r = await DbtDialectGuardValidator.check(ctx())
+    expect(r.details!["findings"]).toEqual([])
+  })
+})
+
+describe("the guard-convention probe ignores text inside string literals", () => {
+  test("a target.type mention inside a literal does not activate the lint", async () => {
+    await makeProject("review-sweep-probe-")
+    await writeModel(
+      "stg_orders",
+      "select '{% if target.type == ''snowflake'' %}' as note, iff(a, b, c) as flag from t",
+    )
+    expect(await DbtDialectGuardValidator.appliesTo(ctx())).toBe(false)
+  })
+
+  test("a real guard still activates it", async () => {
+    await makeProject("review-sweep-probe-")
+    await writeModel(
+      "stg_orders",
+      "{% if target.type == 'snowflake' %}select 1{% else %}select 2{% endif %}",
+    )
+    expect(await DbtDialectGuardValidator.appliesTo(ctx())).toBe(true)
   })
 })
 // altimate_change end

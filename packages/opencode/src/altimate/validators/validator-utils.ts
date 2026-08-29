@@ -439,16 +439,20 @@ export async function findTaskInstructionFiles(
     for (const name of TASK_FILE_CANDIDATES) paths.push(join(root, name))
   }
   const out: TaskInstructionFile[] = []
-  // Keyed case-insensitively: the candidate list carries both `TASK.md` and
-  // `task.md`, and on a case-insensitive volume (APFS, NTFS) those resolve to
-  // one file that would otherwise be reported twice.
+  // Deduplicated by file identity, never by path spelling. On a
+  // case-insensitive volume (APFS, NTFS) `TASK.md` and `task.md` resolve to
+  // one file and must be reported once; on a case-sensitive volume they are
+  // two distinct candidates and both have to stay reachable, so a lowercased
+  // key would make every lowercase candidate unreadable and skip the gate on
+  // a workspace whose only task document is `task.md`.
   const seen = new Set<string>()
   for (const p of paths) {
-    const key = p.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
     const found = await readTaskFile(p)
-    if (found) out.push(found)
+    if (!found) continue
+    const identity = await fs.realpath(p).catch(() => p)
+    if (seen.has(identity)) continue
+    seen.add(identity)
+    out.push(found)
   }
   return out
 }
@@ -626,7 +630,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // required makes the deliverable gate reject the correct implementation
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
-    proseTokens.push(...inlineCodeSpans(requirementHead(line)))
+    proseTokens.push(...inlineCodeSpans(requirementHead(line, verb.index)))
   }
   const prose = collectDeliverableTokens(proseTokens)
   if (prose.models.length > 0 || prose.files.length > 0) {
@@ -650,9 +654,14 @@ const REQUIREMENT_QUALIFIER_RE =
  * ("Build `stg_a` and `stg_b`") keep all of them; lines that name one and then
  * describe it keep only the name.
  */
-function requirementHead(line: string): string {
-  const m = REQUIREMENT_QUALIFIER_RE.exec(line)
-  return m ? line.slice(0, m.index) : line
+function requirementHead(line: string, verbIndex: number): string {
+  // Only a qualifier that follows the requirement verb starts the attribute
+  // clause. "Using dbt, create the model `orders`" opens with one, and cutting
+  // there leaves nothing to extract — the contract reads as absent and both
+  // deliverable gates skip a session that was told exactly what to build.
+  REQUIREMENT_QUALIFIER_RE.lastIndex = 0
+  const m = REQUIREMENT_QUALIFIER_RE.exec(line.slice(verbIndex))
+  return m ? line.slice(0, verbIndex + m.index) : line
 }
 
 /**
@@ -1240,6 +1249,18 @@ export function maskJinjaExpressions(sql: string): string {
 }
 
 /**
+ * Opening `{% if ... %}` tag.
+ *
+ * The body is `(?:[^%]|%(?!\}))*` rather than `[^%]*` so a condition containing
+ * Jinja's modulo operator — `{% if target.type == 'snowflake' and n % 2 == 0 %}`
+ * — is still matched. With `[^%]*` the opener never matched such a tag, the
+ * guarded block was never blanked, and a correctly guarded call was reported as
+ * unguarded. The two alternatives are disjoint, so there is no backtracking
+ * blow-up.
+ */
+const JINJA_IF_OPENER_SOURCE = "\\{%-?\\s*if\\b(?:[^%]|%(?!\\}))*%\\}"
+
+/**
  * Find the Jinja `{% if %}` block that starts at `openStart` and return the
  * index just past its matching `{% endif %}`, counting nested `if` blocks.
  *
@@ -1280,7 +1301,7 @@ function jinjaBlockEnd(sql: string, openStart: number): number {
  * of unguarded SQL to be blanked.
  */
 export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
-  const opener = /\{%-?\s*if\b[^%]*%\}/gi
+  const opener = new RegExp(JINJA_IF_OPENER_SOURCE, "gi")
   let out = sql
   let searchFrom = 0
   for (;;) {
@@ -1370,7 +1391,7 @@ export interface JinjaIfBlock {
  * with it the predicate the caller was looking for.
  */
 export function extractJinjaIfBlocks(sql: string, conditionRe: RegExp): JinjaIfBlock[] {
-  const opener = /\{%-?\s*if\b[^%]*%\}/gi
+  const opener = new RegExp(JINJA_IF_OPENER_SOURCE, "gi")
   const out: JinjaIfBlock[] = []
   let searchFrom = 0
   for (;;) {

@@ -34,7 +34,7 @@ import { join } from "path"
 import type { Validator, ValidatorContext, ValidatorResult } from "../../session/validators/types"
 import {
   findDbtProjectRoot,
-  findTaskInstructionFile,
+  findTaskInstructionFiles,
   modelsModifiedSince,
   modelNameFromPath,
   stripSqlComments,
@@ -52,8 +52,15 @@ const STRATEGY_RE = /incremental_strategy\s*=\s*['"]([a-z0-9_+]+)['"]/i
  * A `unique_key=` in the config args with a value dbt can actually match rows
  * on. `unique_key=None`, `unique_key=null` and `unique_key=''` are spelled
  * assignments that leave dbt with no key, so they read as absent.
+ *
+ * The whitespace before the value lives *inside* the lookahead deliberately. A
+ * greedy `\s*` outside it can backtrack to zero width once the lookahead
+ * matches, so the lookahead is then re-tested against " None" instead of
+ * "None", fails to match, and the negative lookahead wrongly succeeds — which
+ * made `unique_key = None` (spaced) read as a real key while the unspaced form
+ * was correctly rejected.
  */
-const UNIQUE_KEY_RE = /unique_key\s*=\s*(?!(?:None|null|''|""|\[\s*\])\s*(?:[,)]|$))/i
+const UNIQUE_KEY_RE = /unique_key\s*=(?!\s*(?:None|null|''|""|\[\s*\])\s*(?:[,)]|$))/i
 /** `unique_key` mentioned anywhere in `dbt_project.yml`. */
 const PROJECT_UNIQUE_KEY_RE = /^\s*\+?unique_key\s*:/m
 /** The `is_incremental()` guard call. */
@@ -67,8 +74,18 @@ const IS_INCREMENTAL_RE = /is_incremental\s*\(\s*\)/i
  * non-determinism check entirely.
  */
 const IS_INCREMENTAL_CONDITION_RE = /is_incremental\s*\(\s*\)/i
-/** Where a row-selection predicate starts inside a guard body. */
-const PREDICATE_START_RE = /\b(?:where|and|or|on|having|qualify)\b/i
+/**
+ * Where a row-selection predicate starts inside a guard body.
+ *
+ * Two tiers. A real clause keyword is authoritative. A bare `and` / `or` is the
+ * fallback for the dominant dbt idiom, where the guard body is a fragment
+ * appended to a `where` that lives outside the block — but only when no clause
+ * keyword appears anywhere in the arm, because otherwise the `and` inside a
+ * projected boolean (`(is_active and random() > 0.5)`) would be taken as the
+ * predicate start and turn a deterministic `where` into a blocking finding.
+ */
+const CLAUSE_START_RE = /\b(?:where|on|having|qualify)\b/i
+const CONJUNCTION_START_RE = /\b(?:and|or)\b/i
 /**
  * Clock and randomness constructs whose value changes between otherwise
  * identical runs.
@@ -133,7 +150,8 @@ function incrementalPredicates(sql: string): string {
   const parts: string[] = []
   for (const block of extractJinjaIfBlocks(sql, IS_INCREMENTAL_CONDITION_RE)) {
     const incrementalArm = jinjaIfBranchHead(block.body)
-    const predicateAt = PREDICATE_START_RE.exec(incrementalArm)
+    const predicateAt =
+      CLAUSE_START_RE.exec(incrementalArm) ?? CONJUNCTION_START_RE.exec(incrementalArm)
     if (predicateAt) parts.push(incrementalArm.slice(predicateAt.index))
   }
   return parts.join("\n")
@@ -195,8 +213,12 @@ export const DbtIncrementalConfigValidator: Validator = {
       return { ok: true, details: { models_touched: 0, session_id: ctx.sessionID } }
     }
 
-    const task = await findTaskInstructionFile(ctx.workingDirectory, dbtRoot)
-    const idempotencyDemanded = task !== null && demandsIdempotency(task.content)
+    // Every task document, not just the first readable one — an informational
+    // `TASK.md` sitting ahead of the `REQUIREMENTS.md` that states the
+    // idempotency demand would otherwise silence the guard check, while the
+    // contract-driven gates correctly read past it.
+    const tasks = await findTaskInstructionFiles(ctx.workingDirectory, dbtRoot)
+    const idempotencyDemanded = tasks.some((t) => demandsIdempotency(t.content))
     // A `unique_key` set in `dbt_project.yml` is inherited by the model, and
     // this lint does not resolve dbt's config inheritance. Rather than report
     // an inconsistency that is not one, the keyed-strategy finding is

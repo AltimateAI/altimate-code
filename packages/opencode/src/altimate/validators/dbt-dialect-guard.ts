@@ -143,7 +143,11 @@ async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
         if (await scan(full, depth + 1)) return true
       } else if (stat.isFile() && entry.name.toLowerCase().endsWith(".sql")) {
         try {
-          const text = stripSqlComments(await fs.readFile(full, "utf8"))
+          // Literal bodies are masked as well as comments: a model containing
+          // `select '{% if target.type == ''snowflake'' %}' as note` would
+          // otherwise switch this lint on for a project that has no guard
+          // convention, and start rejecting its correct warehouse-specific SQL.
+          const text = maskSqlStringLiterals(stripSqlComments(await fs.readFile(full, "utf8")))
           if (TARGET_TYPE_GUARD_PROBE_RE.test(text)) return true
         } catch {
           // unreadable — keep scanning
