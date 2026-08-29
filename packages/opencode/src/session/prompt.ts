@@ -827,20 +827,7 @@ export namespace SessionPrompt {
       // counted, and one oversized output can jump the session past the window
       // between checks (a common failure mode for long headless runs). Estimate the
       // uncounted tail and include it.
-      const uncountedTail = (() => {
-        if (!lastFinished) return 0
-        const index = msgs.findIndex((m) => m.info.id === lastFinished.id)
-        if (index < 0) return 0
-        let tokens = 0
-        for (const m of msgs.slice(index + 1)) {
-          for (const part of m.parts) {
-            if (part.type === "text") tokens += Token.estimate(part.text ?? "")
-            if (part.type === "tool" && part.state?.status === "completed")
-              tokens += Token.estimate(part.state.output ?? "")
-          }
-        }
-        return tokens
-      })()
+      const uncountedTail = estimateUncountedTail(msgs, lastFinished?.id)
       if (
         lastFinished &&
         lastFinished.summary !== true &&
@@ -2448,6 +2435,39 @@ export namespace SessionPrompt {
   // keep verbatim head+tail plus a deterministic ≤500-token contract card of
   // regex-extracted literals. Never paraphrase.
 
+  // altimate_change start — extracted from the proactive-overflow check so this
+  // load-bearing context-safety estimate is unit-testable (it had no coverage).
+  /**
+   * Tokens present in the conversation that the provider's reported usage for
+   * `lastFinishedID` does NOT include. The recorded usage is from the last
+   * assistant turn, but tool results are appended to that message AFTER the
+   * generation ends, and further messages accumulate before the next check —
+   * one oversized output can jump the session past the window in between.
+   *
+   * `lastFinished`'s own TOOL parts are counted (uncounted by the provider
+   * figure); its own text is not (already inside `tokens.output`).
+   * Everything after it is counted in full.
+   */
+  export function estimateUncountedTail(msgs: MessageV2.WithParts[], lastFinishedID: MessageID | undefined): number {
+    if (!lastFinishedID) return 0
+    const index = msgs.findIndex((m) => m.info.id === lastFinishedID)
+    if (index < 0) return 0
+    let tokens = 0
+    for (const part of msgs[index]?.parts ?? []) {
+      if (part.type === "tool" && part.state?.status === "completed")
+        tokens += Token.estimate(part.state.output ?? "")
+    }
+    for (const m of msgs.slice(index + 1)) {
+      for (const part of m.parts) {
+        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+        if (part.type === "tool" && part.state?.status === "completed")
+          tokens += Token.estimate(part.state.output ?? "")
+      }
+    }
+    return tokens
+  }
+  // altimate_change end
+
   /** Exported for unit tests. Selects the message whose text gets pinned. */
   export function selectPinSource(
     history: MessageV2.WithParts[],
@@ -2591,7 +2611,25 @@ export namespace SessionPrompt {
     // Skip while the source message is still in visible context verbatim — the
     // pin exists to survive compaction, not to duplicate live messages.
     if (input.visible.some((m) => m.info.id === source.id)) return undefined
-    const body = buildPinnedTask({ text: source.text, capTokens: input.capTokens, cardCapTokens: input.cardCapTokens })
+    // altimate_change start — the wrapper counts against the cap. The framing
+    // below was previously added AFTER buildPinnedTask had spent the whole
+    // budget, so the rendered reminder exceeded the advertised hard cap and ate
+    // into the reserved working headroom the pin invariant (pin + reserved +
+    // >=2k slack < compaction threshold) depends on. Budget the body against
+    // cap minus the framing, and keep at least a token of body budget so a
+    // tight configured cap degrades to a small pin rather than none.
+    const frame = [
+      "<system-reminder>",
+      "Original task — authoritative over any summary. The conversation above was compacted into a summary; the task below is the user's own instruction, reproduced verbatim. If the summary and this task conflict, this task wins.",
+      "",
+      "",
+      "</system-reminder>",
+    ]
+    const wrapperOverhead = Token.estimate(frame.join("\n"))
+    const bodyCap = input.capTokens - wrapperOverhead
+    if (bodyCap <= 0) return undefined
+    const body = buildPinnedTask({ text: source.text, capTokens: bodyCap, cardCapTokens: input.cardCapTokens })
+    // altimate_change end
     if (!body) return undefined
     return [
       "<system-reminder>",

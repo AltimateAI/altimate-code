@@ -407,12 +407,18 @@ describe("session.compaction.isOverflow boundary conditions", () => {
   // These tests pin the RAW-limit boundary math, so disable the estimator
   // safety margin (fraction 1 = raw limit). Default-margin behavior is covered
   // in compaction-safety-fraction.test.ts.
+  // altimate_change start — save and RESTORE the prior value; unconditionally
+  // deleting it wiped a value the surrounding environment had set.
+  let priorSafetyFraction: string | undefined
   beforeAll(() => {
+    priorSafetyFraction = process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
     process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "1"
   })
   afterAll(() => {
-    delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+    if (priorSafetyFraction === undefined) delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+    else process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = priorSafetyFraction
   })
+  // altimate_change end
 
   test("tokens exactly at usable limit triggers overflow", async () => {
     await using tmp = await tmpdir()
@@ -681,4 +687,27 @@ describe("small-window retained-content clamp", () => {
     // usable-derived candidate caps at 8000 and the clamp does not bind.
     expect(budget).toBe(8_000)
   })
+
+  // altimate_change start — PR #1171 review: the ledger reservation was taken out
+  // of the tail budget even with both ledger and carry disabled, so a large
+  // ledger_max_tokens could starve the retained tail for text never rendered.
+  test("no ledger budget is reserved when both state_ledger and summary_carry are off", () => {
+    const model = createModel({ context: 32_768, output: 8_192 })
+    const off = { compaction: { state_ledger: false, summary_carry: false, ledger_max_tokens: 5_000 } } as any
+    const on = { compaction: { ledger_max_tokens: 5_000 } } as any
+    expect(SessionCompaction.preserveRecentBudget({ cfg: off, model })).toBeGreaterThan(
+      SessionCompaction.preserveRecentBudget({ cfg: on, model }),
+    )
+  })
+
+  test("the reservation still applies when only one of the two features is on", () => {
+    const model = createModel({ context: 32_768, output: 8_192 })
+    const ledgerOnly = { compaction: { state_ledger: true, summary_carry: false, ledger_max_tokens: 5_000 } } as any
+    const carryOnly = { compaction: { state_ledger: false, summary_carry: true, ledger_max_tokens: 5_000 } } as any
+    const bothOff = { compaction: { state_ledger: false, summary_carry: false, ledger_max_tokens: 5_000 } } as any
+    const off = SessionCompaction.preserveRecentBudget({ cfg: bothOff, model })
+    expect(SessionCompaction.preserveRecentBudget({ cfg: ledgerOnly, model })).toBeLessThan(off)
+    expect(SessionCompaction.preserveRecentBudget({ cfg: carryOnly, model })).toBeLessThan(off)
+  })
+  // altimate_change end
 })

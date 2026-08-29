@@ -64,6 +64,40 @@ export namespace SessionProcessor {
   // on a plain-object index and return non-strings as the "sanitized id",
   // erroring the stream loop. `salt` (per processor/step) keeps regenerated
   // ids for empty/duplicate malformed raw values from colliding across steps.
+  // altimate_change start — the step-finish outcome ordering, extracted so the
+  // production path and its unit gate share ONE implementation. The previous
+  // test re-implemented this ladder locally, so it stayed green no matter how
+  // processor.ts changed — false confidence on the termination ordering three
+  // benchmark runs depend on.
+  //
+  // Ordering rationale (unchanged):
+  //  1. An errorless turn that asserts completion terminates EVEN under
+  //     overflow. Returning "compact" there is the termination-impossibility
+  //     triangle: the finished session gets summarized and the post-compaction
+  //     continue message breeds further turns.
+  //  2. Terminal outcomes (blocked / errored / doom-loop stop) must actually
+  //     stop; returning "compact" first made them no-ops under overflow.
+  //  3. Deferring compaction is safe in every mode — prompt.ts's pre-dispatch
+  //     overflow check compacts before the next request is sent.
+  export type FinishOutcome = "stop" | "compact" | "continue"
+
+  export function resolveFinishOutcome(state: {
+    needsCompaction: boolean
+    /** errorless turn that finished with "stop" AND asserted completion; never the summarizer. */
+    explicitDone: boolean
+    blocked: boolean
+    error: boolean
+    starvationStop: boolean
+  }): FinishOutcome {
+    if (state.needsCompaction && state.explicitDone) return "stop"
+    if (state.blocked) return "stop"
+    if (state.error) return "stop"
+    if (state.starvationStop) return "stop"
+    if (state.needsCompaction) return "compact"
+    return "continue"
+  }
+  // altimate_change end
+
   export function createToolCallIDCoercer(salt?: string) {
     const aliases = new Map<string, string>()
     return (raw: unknown): string => {
@@ -591,12 +625,29 @@ export namespace SessionProcessor {
                       }
                     }
                     // altimate_change end
+                    // altimate_change start — the dispatch cap applies to FAILED
+                    // results too. It was enforced only on the success branch,
+                    // so a failed MCP or shell call with very large stderr still
+                    // entered the conversation unbounded — the same single-result
+                    // overflow the cap exists to prevent.
+                    const toolErrorText = (() => {
+                      const raw = (value.error as any).toString()
+                      if (typeof raw !== "string") return raw
+                      const capped = ToolResultCap.apply(raw, toolResultCapTokens)
+                      if (capped.truncated)
+                        log.info("tool error capped at dispatch", {
+                          tool: match.tool,
+                          capTokens: toolResultCapTokens,
+                        })
+                      return capped.content
+                    })()
+                    // altimate_change end
                     await Session.updatePart({
                       ...match,
                       state: {
                         status: "error",
                         input: value.input ?? match.state.input,
-                        error: (value.error as any).toString(),
+                        error: toolErrorText,
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
@@ -1018,40 +1069,31 @@ export namespace SessionProcessor {
           // mode — prompt.ts's pre-dispatch overflow check compacts before the
           // next request. Never bare finishReason "stop" (that ends nearly every
           // ordinary text turn), and never for the compaction summarizer itself.
-          if (
-            needsCompaction &&
+          const explicitDone =
             !input.assistantMessage.summary &&
             SessionTermination.explicitDoneStop({
               finish: input.assistantMessage.finish,
               hasError: input.assistantMessage.error !== undefined,
               parts: p,
             })
-          ) {
+          if (needsCompaction && explicitDone) {
             log.info("explicit DONE with pending compaction — terminating instead of compacting", {
               sessionID: input.sessionID,
               messageID: input.assistantMessage.id,
             })
-            return "stop"
           }
           // altimate_change end
-          // altimate_change start — terminal outcomes take precedence over
-          // "compact": a blocked/errored/doom-loop-stopped turn must actually
-          // stop. Returning "compact" first made those stops no-ops under
-          // overflow — the session summarized and kept running. Deferring the
-          // compaction is safe: prompt.ts's pre-dispatch overflow check compacts
-          // before any next request. (Explicit DONE above still overrides
-          // compaction the same way.)
-          if (blocked) return "stop"
-          if (input.assistantMessage.error) return "stop"
-          // Doom-loop escalation ladder final rung. Reachable only when mode is
-          // "armed" AND the process is in run mode (never TUI/serve) AND the
-          // same (toolName + normalized args) call repeated through nudge and
-          // forced status-check without changing.
-          if (starvationStop) return "stop"
-          // Upstream's compact check, relocated below the terminal outcomes.
-          if (needsCompaction) return "compact"
+          // altimate_change start — the ordering itself lives in the exported
+          // `resolveFinishOutcome` so the unit gate can exercise the REAL
+          // decision instead of a hand-written copy of it (PR #1171 review).
+          return resolveFinishOutcome({
+            needsCompaction,
+            explicitDone,
+            blocked,
+            error: input.assistantMessage.error !== undefined,
+            starvationStop,
+          })
           // altimate_change end
-          return "continue"
         }
       },
     }

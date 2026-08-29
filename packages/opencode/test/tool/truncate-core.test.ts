@@ -158,3 +158,95 @@ describe("TruncateCore maxLines=1 edge", () => {
     expect(p.removed).toBe(3)
   })
 })
+
+// altimate_change start — PR #1171 review: oversized boundary lines and
+// degenerate byte budgets. Before these fixes a single line longer than a
+// half's byte share selected nothing, so a middle preview of a one-line dump
+// reached the model as a bare truncation marker with zero content; and the two
+// middle byte budgets were each floored at 1, so they could sum above maxBytes.
+describe("TruncateCore oversized boundary lines", () => {
+  const opts = (over: Partial<TruncateCore.ResolvedOptions> = {}): TruncateCore.ResolvedOptions => ({
+    maxLines: TruncateCore.MAX_LINES,
+    maxBytes: TruncateCore.MAX_BYTES,
+    direction: TruncateCore.DEFAULT_DIRECTION,
+    headRatio: TruncateCore.DEFAULT_HEAD_RATIO,
+    ...over,
+  })
+
+  function run(text: string, over: Partial<TruncateCore.ResolvedOptions> = {}) {
+    const resolved = opts(over)
+    const lines = text.split("\n")
+    return TruncateCore.preview(lines, Buffer.byteLength(text, "utf-8"), resolved)
+  }
+
+  test("a single line longer than the whole budget still yields content in middle mode", () => {
+    const text = "x".repeat(10_000)
+    const p = run(text, { maxBytes: 300, direction: "middle" })
+    expect(p.head.length + p.tail.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(p.head + p.tail, "utf-8")).toBeLessThanOrEqual(300)
+  })
+
+  test("head and tail of a single oversized line do not overlap in bytes", () => {
+    const text = "H".repeat(5_000) + "T".repeat(5_000)
+    const p = run(text, { maxBytes: 300, direction: "middle" })
+    expect(Buffer.byteLength(p.head + p.tail, "utf-8")).toBeLessThanOrEqual(300)
+    // head comes from the front of the line, tail from the back
+    expect(p.head.startsWith("H")).toBe(true)
+    expect(p.tail.endsWith("T")).toBe(true)
+  })
+
+  test("an oversized first line no longer erases the head half entirely", () => {
+    const text = ["A".repeat(5_000), "middle noise", "final verdict"].join("\n")
+    const p = run(text, { maxBytes: 400, direction: "middle" })
+    expect(p.head.length).toBeGreaterThan(0)
+    expect(p.head.startsWith("A")).toBe(true)
+    expect(p.tail).toContain("final verdict")
+  })
+
+  test("tail-only direction keeps a suffix when the last line exceeds the budget", () => {
+    const text = ["short", "Z".repeat(9_000)].join("\n")
+    const p = run(text, { maxBytes: 200, direction: "tail" })
+    expect(p.tail.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(p.tail, "utf-8")).toBeLessThanOrEqual(200)
+  })
+
+  test("head-only direction keeps a prefix when the first line exceeds the budget", () => {
+    const text = ["Q".repeat(9_000), "trailing"].join("\n")
+    const p = run(text, { maxBytes: 200, direction: "head" })
+    expect(p.head.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(p.head, "utf-8")).toBeLessThanOrEqual(200)
+  })
+
+  test("maxLines=1 with an oversized final line still returns content", () => {
+    const text = ["a", "b", "W".repeat(4_000)].join("\n")
+    const p = run(text, { maxLines: 1, maxBytes: 150, direction: "middle" })
+    expect(p.tail.length).toBeGreaterThan(0)
+    expect(Buffer.byteLength(p.tail, "utf-8")).toBeLessThanOrEqual(150)
+  })
+
+  test("multi-byte characters are never split mid-codepoint", () => {
+    // 3-byte characters; a naive byte cut at 200 would land mid-codepoint.
+    const text = "日".repeat(2_000)
+    const p = run(text, { maxBytes: 200, direction: "middle" })
+    const combined = p.head + p.tail
+    expect(combined.length).toBeGreaterThan(0)
+    expect(combined).not.toContain("�")
+    expect(Buffer.byteLength(combined, "utf-8")).toBeLessThanOrEqual(200)
+  })
+
+  test("middle byte budgets never sum above maxBytes for degenerate limits", () => {
+    for (const maxBytes of [1, 2, 3, 4, 5]) {
+      const text = ["aaaa", "bbbb", "cccc"].join("\n")
+      const p = run(text, { maxBytes, maxLines: 10, direction: "middle" })
+      expect(Buffer.byteLength(p.head + p.tail, "utf-8")).toBeLessThanOrEqual(maxBytes)
+    }
+  })
+
+  test("a degraded middle preview assembles without a leading blank line", () => {
+    const p: TruncateCore.Preview = { head: "", tail: "final", removed: 3, unit: "lines" }
+    const out = TruncateCore.assemble(p, "[hint]", "middle")
+    expect(out.startsWith("\n")).toBe(false)
+    expect(out.startsWith("...3 lines truncated...")).toBe(true)
+  })
+})
+// altimate_change end

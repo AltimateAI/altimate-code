@@ -65,6 +65,47 @@ describe("ToolResultCap.resolve", () => {
     })
     expect(cap).toBe(6_389)
   })
+
+  // altimate_change start — PR #1171 review: `config.compaction.context_safety_fraction`
+  // was declared on the input type and never read.
+  test("a configured context_safety_fraction is honoured when no explicit fraction is passed", () => {
+    const withConfig = ToolResultCap.resolve({
+      config: { compaction: { context_safety_fraction: 0.5 } },
+      model: { limit: { input: 65_536 } },
+    })
+    const explicit = ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: 0.5 })
+    expect(withConfig).toBe(explicit)
+    // and it genuinely differs from the default fraction
+    expect(withConfig).not.toBe(
+      ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: ToolResultCap.DEFAULT_SAFETY_FRACTION }),
+    )
+  })
+
+  test("an explicit safetyFraction still wins over the configured one", () => {
+    const cap = ToolResultCap.resolve({
+      config: { compaction: { context_safety_fraction: 0.2 } },
+      model: { limit: { input: 65_536 } },
+      safetyFraction: 0.65,
+    })
+    expect(cap).toBe(ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: 0.65 }))
+  })
+
+  test("a nonsensical configured fraction falls back to the default", () => {
+    const cap = ToolResultCap.resolve({
+      config: { compaction: { context_safety_fraction: 0 } },
+      model: { limit: { input: 65_536 } },
+    })
+    expect(cap).toBe(
+      ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: ToolResultCap.DEFAULT_SAFETY_FRACTION }),
+    )
+  })
+
+  test("the unknown-model bound is derived from the shared default fraction", () => {
+    expect(ToolResultCap.UNKNOWN_MODEL_CAP_TOKENS).toBe(
+      Math.floor(Math.floor(65_536 * ToolResultCap.DEFAULT_SAFETY_FRACTION) * ToolResultCap.DEFAULT_LIMIT_FRACTION),
+    )
+  })
+  // altimate_change end
 })
 
 describe("ToolResultCap.apply", () => {

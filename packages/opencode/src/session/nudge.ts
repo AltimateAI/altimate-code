@@ -50,13 +50,19 @@ export namespace NudgeArbiter {
   }
 
   /** Register a candidate directive for the session's next injected turn.
-   *  Multiple registrations from the same source+kind replace, not stack. */
+   *  altimate_change start — replace by SOURCE, not source+kind. Only one
+   *  directive per source is ever delivered, and `take()` picked the EARLIEST
+   *  match, so a single generation that crossed two rungs of the doom-loop
+   *  ladder (nudge, then the stronger status_check) delivered the stale nudge
+   *  and dropped the escalation with the rest of the bucket. The latest
+   *  registration from a source is the current one, so it wins. */
   export function register(sessionID: string, directive: Directive): void {
     const b = bucket(sessionID)
-    const existing = b.findIndex((d) => d.source === directive.source && d.kind === directive.kind)
+    const existing = b.findIndex((d) => d.source === directive.source)
     if (existing >= 0) b[existing] = directive
     else b.push(directive)
   }
+  // altimate_change end
 
   /** Pending directives (test/telemetry visibility only). */
   export function pending(sessionID: string): readonly Directive[] {

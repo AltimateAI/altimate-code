@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
 
 import { SessionCompaction } from "../../src/session/compaction"
+import { SessionPrompt } from "../../src/session/prompt"
+import { Token } from "@/util/token"
 import type { MessageV2 } from "../../src/session/message-v2"
 import type { Provider } from "../../src/provider/provider"
 
@@ -41,3 +43,56 @@ describe("fitHead turn boundaries", () => {
     expect(result.dropped).toBe(0)
   })
 })
+
+// altimate_change start — PR #1171 review (cubic P1): the estimate skipped tool
+// results attached to the LAST FINISHED assistant message itself. Those land on
+// that message after its usage was reported, so they were invisible to both the
+// provider figure and the tail estimate — precisely the single oversized result
+// this proactive check exists to catch. The computation was an inline IIFE with
+// no coverage; it is now exported and pinned here.
+function assistantWithTool(id: string, text: string, output: string): MessageV2.WithParts {
+  return {
+    info: { id, sessionID: "s", role: "assistant", time: { created: 1 }, model: { providerID: "p", modelID: "m" } },
+    parts: [
+      { id: `${id}-t`, sessionID: "s", messageID: id, type: "text", text },
+      {
+        id: `${id}-tool`,
+        sessionID: "s",
+        messageID: id,
+        type: "tool",
+        tool: "bash",
+        callID: `${id}-call`,
+        state: { status: "completed", input: {}, output, title: "t", metadata: {}, time: { start: 1, end: 2 } },
+      },
+    ],
+  } as unknown as MessageV2.WithParts
+}
+
+describe("SessionPrompt.estimateUncountedTail", () => {
+  test("counts a tool result attached to the last finished message itself", () => {
+    const giant = "x".repeat(40_000)
+    const msgs = [msg("u", "user", "task"), assistantWithTool("a", "working", giant)]
+    const estimate = SessionPrompt.estimateUncountedTail(msgs, "a" as any)
+    expect(estimate).toBeGreaterThan(0)
+    expect(estimate).toBe(Token.estimate(giant))
+  })
+
+  test("does not double-count the last finished message's own text", () => {
+    // its text is already inside the provider-reported tokens.output
+    const msgs = [msg("u", "user", "task"), assistantWithTool("a", "some assistant prose here", "")]
+    expect(SessionPrompt.estimateUncountedTail(msgs, "a" as any)).toBe(0)
+  })
+
+  test("still counts everything after the last finished message", () => {
+    const later = "y".repeat(9_000)
+    const msgs = [msg("u", "user", "task"), assistantWithTool("a", "working", ""), msg("u2", "user", later)]
+    expect(SessionPrompt.estimateUncountedTail(msgs, "a" as any)).toBe(Token.estimate(later))
+  })
+
+  test("returns 0 for an unknown or absent id", () => {
+    const msgs = [msg("u", "user", "task")]
+    expect(SessionPrompt.estimateUncountedTail(msgs, undefined)).toBe(0)
+    expect(SessionPrompt.estimateUncountedTail(msgs, "nope" as any)).toBe(0)
+  })
+})
+// altimate_change end

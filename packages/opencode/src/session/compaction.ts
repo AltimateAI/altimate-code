@@ -240,7 +240,14 @@ export namespace SessionCompaction {
     const base = input.model.limit.input ?? context
     if (base <= triggerHeadroom) return candidate // compaction disabled entirely; no trigger to protect
     const threshold = overflowThreshold({ base, headroom: triggerHeadroom, fraction: 1 })
-    const ledgerMax = input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS
+    // altimate_change start — reserve the ledger budget only when a ledger or
+    // carry can actually be emitted. With both features off the reservation was
+    // still taken out of the tail budget, and a large `ledger_max_tokens` could
+    // drive the retained tail to zero for text that is never rendered.
+    const ledgerEmitted =
+      input.cfg.compaction?.state_ledger !== false || input.cfg.compaction?.summary_carry !== false
+    const ledgerMax = ledgerEmitted ? (input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS) : 0
+    // altimate_change end
     const retainCap = Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION) - ledgerMax)
     return Math.min(candidate, retainCap)
   }
@@ -502,6 +509,28 @@ export namespace SessionCompaction {
   }
 
   /** Deterministic: output depends only on the message list passed in. */
+  // altimate_change start — the ledger must be built from the UNFILTERED session
+  // history. The compaction caller passes the compaction-FILTERED view, so from
+  // the second compaction onward every tool event hidden by an earlier
+  // compaction was already gone: the "session state ledger" forgot the files it
+  // had recorded, precisely when cross-compaction fidelity matters most.
+  // Fail-safe — a read failure falls back to the filtered view rather than
+  // losing the ledger entirely.
+  /** Full chronological history for the ledger; `fallback` on read failure. */
+  export function ledgerHistory(sessionID: SessionID, fallback: MessageV2.WithParts[]): MessageV2.WithParts[] {
+    try {
+      // MessageV2.stream yields newest-first; buildLedger wants chronological.
+      return [...MessageV2.stream(sessionID)].reverse()
+    } catch (e) {
+      log.warn("ledger history read failed, using filtered view", {
+        sessionID,
+        error: e instanceof Error ? e.message : String(e),
+      })
+      return fallback
+    }
+  }
+  // altimate_change end
+
   export function buildLedger(messages: MessageV2.WithParts[]): Ledger {
     const writes = new Map<string, LedgerWrite>()
     const calls: LedgerCall[] = []
@@ -569,8 +598,12 @@ export namespace SessionCompaction {
     lines.push(
       "Advisory: these files were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it.",
     )
-    if (ledger.calls.length) {
+    // altimate_change start — `slice(-0)` is `slice(0)`, i.e. EVERY call, so a
+    // configured `ledger_recent_calls: 0` (which the NonNegativeInt schema
+    // accepts) rendered the entire call history instead of none.
+    if (ledger.calls.length && recentCalls > 0) {
       const recent = ledger.calls.slice(-recentCalls).reverse()
+      // altimate_change end
       lines.push(`Recent tool calls, newest first (last ${recent.length} of ${ledger.calls.length}):`)
       for (const c of recent) {
         const status = c.errored ? "errored" : c.exit === undefined ? "ok" : c.exit === null ? "exit ?" : `exit ${c.exit}`
@@ -630,7 +663,12 @@ export namespace SessionCompaction {
   }
 
   function itemCorroborated(text: string, ledger: Ledger): boolean {
-    for (const token of artifactTokens(text)) {
+    for (const raw of artifactTokens(text)) {
+      // altimate_change start — a summary commonly writes a path as `./src/foo.ts`.
+      // The leading `./` made the token look directory-qualified while matching
+      // no ledger path, so a genuinely written artifact stayed unverified.
+      const token = raw.startsWith("./") ? raw.slice(2) : raw
+      // altimate_change end
       // Basename fallback only for a bare filename. A directory-qualified token
       // (`src/index.ts`) must match its own path — otherwise any unrelated
       // `test/index.ts` write corroborates it, and because carry status is
@@ -774,6 +812,32 @@ export namespace SessionCompaction {
   // finished non-summary assistant turn exists after the previous completed
   // summary — i.e. the session re-overflowed immediately.
   const pinState = new Map<string, { failures: number; scale: number }>()
+  // altimate_change start — bound the map the way the starvation and nudge
+  // stores added in this same change are bounded. Production never deleted an
+  // entry (`resetPinState` is a test hook), so a long-lived server accumulated
+  // one entry for every session that ever compacted. Least-recently-used is
+  // evicted: an active long session must not lose its livelock state to churn
+  // from short-lived ones. Losing an evicted entry is safe — the guard simply
+  // restarts at scale 1 for that session.
+  const MAX_PIN_STATE_SESSIONS = 128
+
+  function pinStateBucket(sessionID: string): { failures: number; scale: number } {
+    const existing = pinState.get(sessionID)
+    if (existing) {
+      // Refresh recency so Map iteration order tracks last access.
+      pinState.delete(sessionID)
+      pinState.set(sessionID, existing)
+      return existing
+    }
+    if (pinState.size >= MAX_PIN_STATE_SESSIONS) {
+      const oldest = pinState.keys().next().value
+      if (oldest !== undefined) pinState.delete(oldest)
+    }
+    const fresh = { failures: 0, scale: 1 }
+    pinState.set(sessionID, fresh)
+    return fresh
+  }
+  // altimate_change end
 
   export function pinScale(sessionID?: string): number {
     if (!sessionID) return 1
@@ -788,7 +852,7 @@ export namespace SessionCompaction {
 
   /** Called by the auto-overflow paths in prompt.ts BEFORE creating a new compaction. */
   export function notePinCompaction(sessionID: string, msgs: MessageV2.WithParts[]) {
-    const state = pinState.get(sessionID) ?? { failures: 0, scale: 1 }
+    const state = pinStateBucket(sessionID)
     let lastSummary = -1
     for (let i = msgs.length - 1; i >= 0; i--) {
       const info = msgs[i].info
@@ -915,8 +979,17 @@ export namespace SessionCompaction {
     const firstPersonEnabled = cfg.compaction?.summary_first_person !== false
     const ledgerMaxTokens = cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS
     const ledgerRecentCalls = cfg.compaction?.ledger_recent_calls ?? LEDGER_RECENT_CALLS
+    // altimate_change start — the ledger must be built from the UNFILTERED
+    // session history. `input.messages` is the compaction-filtered view, so on
+    // the second and later compactions every tool event hidden by an earlier
+    // compaction was already gone: the "session state ledger" forgot the files
+    // it had recorded, precisely when cross-compaction fidelity matters most.
+    // Reading the stream directly restores the full record. Fail-safe: a read
+    // failure falls back to the filtered view rather than losing the ledger.
     const ledger: Ledger =
-      ledgerEnabled || carryEnabled ? buildLedger(input.messages) : { writes: [], calls: [], sawBash: false }
+      ledgerEnabled || carryEnabled
+        ? buildLedger(ledgerHistory(input.sessionID, input.messages))
+        : { writes: [], calls: [], sawBash: false }
     // altimate_change end
     const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
     const prior = completedCompactions(history)

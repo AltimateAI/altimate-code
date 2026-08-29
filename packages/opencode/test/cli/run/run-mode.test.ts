@@ -143,3 +143,28 @@ describe("Flag.parseRunModeValue (strict trimmed boolean parser)", () => {
     }
   })
 })
+
+// altimate_change start — PR #1171 review, raised independently on three
+// threads: `run` sets ALTIMATE_RUN_MODE on its own process, and the bash tool
+// spread process.env into every child while stripping only the sibling
+// ALTIMATE_NON_INTERACTIVE. A nested `serve`/TUI therefore inherited run mode
+// and armed run-mode-only mechanisms in an interactive session.
+describe("run-mode markers do not leak into bash child processes", () => {
+  test("bash tool strips ALTIMATE_RUN_MODE and ALTIMATE_RUN_RESUMED from child env", async () => {
+    const source = await Bun.file(new URL("../../../src/tool/bash.ts", import.meta.url)).text()
+    expect(source).toContain('delete mergedEnv["ALTIMATE_RUN_MODE"]')
+    expect(source).toContain('delete mergedEnv["ALTIMATE_RUN_RESUMED"]')
+    // the pre-existing sibling strip must remain
+    expect(source).toContain('delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]')
+    expect(source).toContain("env: mergedEnv")
+  })
+
+  test("a nested run re-arms run mode for itself, so stripping loses nothing", () => {
+    // applyRunModeDefault is what `run` calls at handler startup; a child that
+    // should be in run mode sets it again from an empty environment.
+    const childEnv: Record<string, string | undefined> = {}
+    applyRunModeDefault(childEnv)
+    expect(childEnv["ALTIMATE_RUN_MODE"]).toBe("1")
+  })
+})
+// altimate_change end

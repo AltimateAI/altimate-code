@@ -160,6 +160,38 @@ describe("taskPinText — compaction-gated assembly", () => {
     })
     expect(pin).toBeUndefined()
   })
+
+  // altimate_change start — PR #1171 review (codex + cubic, two threads): the
+  // `<system-reminder>` framing was added AFTER buildPinnedTask had spent the
+  // whole cap, so the rendered pin exceeded the advertised hard cap and ate the
+  // reserved working headroom the pin invariant depends on.
+  test("the rendered pin — framing included — stays inside capTokens", () => {
+    const { history, summary, cont } = historyWithRedirect()
+    for (const capTokens of [200, 500, 1_000, 4_096]) {
+      const pin = SessionPrompt.taskPinText({
+        history,
+        visible: [summary, cont],
+        runMode: true,
+        capTokens,
+        cardCapTokens: 500,
+      })
+      if (!pin) continue
+      expect(Token.estimate(pin)).toBeLessThanOrEqual(capTokens)
+    }
+  })
+
+  test("a cap smaller than the framing itself yields no pin rather than an over-budget one", () => {
+    const { history, summary, cont } = historyWithRedirect()
+    const pin = SessionPrompt.taskPinText({
+      history,
+      visible: [summary, cont],
+      runMode: true,
+      capTokens: 5,
+      cardCapTokens: 500,
+    })
+    expect(pin).toBeUndefined()
+  })
+  // altimate_change end
 })
 
 describe("buildPinnedTask — verbatim under cap, head+tail + contract card over cap", () => {
@@ -347,6 +379,28 @@ describe("livelock guard — two consecutive failed compactions halve the pin", 
     expect(SessionCompaction.pinScale(SID)).toBe(0.25)
     expect(SessionCompaction.pinScale("ses_other")).toBe(1)
   })
+
+  // altimate_change start — PR #1171 review (codex P2 / cubic P2, two threads):
+  // production never removed a pinState entry, so a long-lived server kept one
+  // per session that ever compacted. Bounded LRU now, matching the starvation
+  // and nudge stores added in the same change.
+  test("the livelock map is bounded and evicts the LEAST-RECENTLY-USED session", () => {
+    const prefix = "ses_pin_lru_"
+    // Fill the table with distinct sessions.
+    for (let i = 0; i < 128; i++) {
+      SessionCompaction.notePinCompaction(`${prefix}${i}`, immediateRefire() as any)
+      SessionCompaction.notePinCompaction(`${prefix}${i}`, immediateRefire() as any)
+    }
+    // Every one of them halved.
+    expect(SessionCompaction.pinScale(`${prefix}0`)).toBe(0.5)
+    // Touch the oldest-created session so it is no longer least-recently-used.
+    SessionCompaction.notePinCompaction(`${prefix}0`, normalProgress() as any)
+    // A new session evicts #1 (now the LRU), not #0.
+    SessionCompaction.notePinCompaction(`${prefix}new`, immediateRefire() as any)
+    expect(SessionCompaction.pinScale(`${prefix}0`)).toBe(0.5)
+    expect(SessionCompaction.pinScale(`${prefix}1`)).toBe(1)
+  })
+  // altimate_change end
 })
 
 describe("summary-template addition", () => {

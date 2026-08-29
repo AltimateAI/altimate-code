@@ -466,12 +466,19 @@ describe("session.compaction.isOverflow", () => {
   // These tests pin the RAW-limit boundary math, so disable the estimator
   // safety margin (fraction 1 = raw limit). Default-margin behavior is covered
   // in compaction-safety-fraction.test.ts.
+  // altimate_change start — save and RESTORE the prior value. Unconditionally
+  // deleting it wiped a value the surrounding environment (CI, a dev shell) had
+  // set, silently changing compaction behaviour for everything that ran after.
+  let priorSafetyFraction: string | undefined
   beforeAll(() => {
+    priorSafetyFraction = process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
     process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "1"
   })
   afterAll(() => {
-    delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+    if (priorSafetyFraction === undefined) delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+    else process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = priorSafetyFraction
   })
+  // altimate_change end
 
   it.live(
     "returns true when token count exceeds usable context",

@@ -171,6 +171,25 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("make check 2>&1")).toBe(false)
   })
 
+  // altimate_change start — PR #1171 review (cubic P1 + cursor Medium, two
+  // threads): the old lookbehind rejected any `>` preceded by a digit or `&`,
+  // so real file writes through a numbered descriptor were classified
+  // non-mutating and a stale green verification kept satisfying the idle-done
+  // gate.
+  test("numbered-descriptor redirection to a file is mutating", () => {
+    expect(IdleDone.isMutatingCommand("cat input 2>error.log")).toBe(true)
+    expect(IdleDone.isMutatingCommand("make test 2> errors.log")).toBe(true)
+    expect(IdleDone.isMutatingCommand("build 1> out.txt")).toBe(true)
+    expect(IdleDone.isMutatingCommand("build &> out.txt")).toBe(true)
+  })
+
+  test("fd duplication is still excluded", () => {
+    expect(IdleDone.isMutatingCommand("make check 2>&1")).toBe(false)
+    expect(IdleDone.isMutatingCommand("echo hi >&2")).toBe(false)
+    expect(IdleDone.isMutatingCommand("run 2>&1 | grep x")).toBe(false)
+  })
+  // altimate_change end
+
   test("always-writing heads are mutating anywhere in the pipeline", () => {
     expect(IdleDone.isMutatingCommand("ls && rm -rf build")).toBe(true)
     expect(IdleDone.isMutatingCommand("mkdir -p out")).toBe(true)
@@ -210,6 +229,52 @@ describe("IdleDone hard preconditions", () => {
     d.observePart(stepFinish("m_idle1"))
     d.observePart(stepFinish("m_idle2"))
     d.observePart(stepFinish("m_idle3"))
+    expect(d.shouldChallenge()).toBe(false)
+  })
+  // altimate_change end
+
+  // altimate_change start — PR #1171 review: with snapshots off, an
+  // `apply_patch` write left the mutation watermark untouched because only the
+  // snapshot `patch` PART was classified as a mutation, never the tool itself.
+  test("(i) an apply_patch after the verify blocks the challenge with no patch part", () => {
+    const applyPatchPart = (messageID: string): IdleDone.PartSlice => ({
+      id: pid(),
+      messageID,
+      type: "tool",
+      tool: "apply_patch",
+      state: { status: "completed", input: {} },
+    })
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(patchPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "./scripts/verify.sh --all", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(applyPatchPart("m_apply"))
+    d.observePart(stepFinish("m_apply"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+  })
+
+  // altimate_change — PR #1171 review: with no verify command configured, EVERY
+  // non-read-only command was a verification candidate, so a zero-exit `rm`
+  // stood in as green verification evidence (and the MUTATING_HEADS branch was
+  // unreachable). A mutator is now a mutation, never a verification.
+  test("(ii) a zero-exit destructive command is a mutation, not a verification", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(patchPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "./scripts/verify.sh --all", 0))
+    d.observePart(stepFinish("m_verify"))
+    // Succeeds, but proves nothing about the deliverable — and it wrote.
+    d.observePart(bashPart("m_rm", "rm -rf build", 0))
+    d.observePart(stepFinish("m_rm"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
     expect(d.shouldChallenge()).toBe(false)
   })
   // altimate_change end

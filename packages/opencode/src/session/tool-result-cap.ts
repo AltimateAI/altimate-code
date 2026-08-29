@@ -22,11 +22,20 @@ export namespace ToolResultCap {
   // tail instead of dropping the entire line.
   const LINE_CHUNK_CHARS = 2_000
 
+  // altimate_change start — one source of truth for the estimator safety
+  // fraction default. It was written as a bare 0.65 in two places here, so a
+  // change to the shared default silently skipped this module.
+  /** Mirrors SessionCompaction's DEFAULT_CONTEXT_SAFETY_FRACTION. */
+  export const DEFAULT_SAFETY_FRACTION = 0.65
+  // altimate_change end
+
   // Conservative bound when the model's limits are unknown: size the cap as if
   // the model had the smallest window this cap protects (64K, scaled by the
-  // default 0.65 safety fraction) rather than trusting the byte-derived cap
+  // default safety fraction) rather than trusting the byte-derived cap
   // (~17K tokens), which can overwhelm a small window on its own.
-  export const UNKNOWN_MODEL_CAP_TOKENS = Math.floor(Math.floor(65_536 * 0.65) * DEFAULT_LIMIT_FRACTION)
+  export const UNKNOWN_MODEL_CAP_TOKENS = Math.floor(
+    Math.floor(65_536 * DEFAULT_SAFETY_FRACTION) * DEFAULT_LIMIT_FRACTION,
+  )
 
   /**
    * Resolve the per-result token cap: an explicit `tool_output.dispatch_max_tokens`
@@ -54,7 +63,17 @@ export namespace ToolResultCap {
 
     // Default to the estimator safety fraction, not 1: an omitted fraction must
     // fail conservative (tool outputs are estimate-domain), never fail open.
-    const fraction = input.safetyFraction ?? 0.65
+    // altimate_change start — `config.compaction.context_safety_fraction` was
+    // declared on this input and never read, so a caller that passed only the
+    // config (every caller except processor.ts) silently got the default
+    // instead of the configured fraction. Honour it as the second choice.
+    const configuredFraction = input.config?.compaction?.context_safety_fraction
+    const fraction =
+      input.safetyFraction ??
+      (typeof configuredFraction === "number" && Number.isFinite(configuredFraction) && configuredFraction > 0
+        ? configuredFraction
+        : DEFAULT_SAFETY_FRACTION)
+    // altimate_change end
     const effectiveLimit = Math.floor(base * fraction)
     const limitCapTokens = Math.floor(effectiveLimit * DEFAULT_LIMIT_FRACTION)
     if (limitCapTokens <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)

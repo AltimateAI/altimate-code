@@ -195,8 +195,15 @@ export namespace IdleDone {
 
   /** True when the command writes to the filesystem through a head, flag, or redirection. */
   export function isMutatingCommand(command: string): boolean {
-    // Output redirection to a file. Excludes fd duplication (`2>&1`, `>&2`).
-    if (/(?<![0-9&])>>?\s*(?![&|])/.test(command)) return true
+    // altimate_change start — Output redirection to a file. Only fd DUPLICATION
+    // (`2>&1`, `>&2`) is excluded, and duplication is identified by the `&`
+    // that FOLLOWS the operator. The previous lookbehind also rejected a `>`
+    // preceded by a digit or `&`, which silently missed real file writes —
+    // `2> errors.log`, `1> out.txt`, `&> out.txt` — so a post-verification
+    // write never advanced the mutation watermark and a stale green verify
+    // could still satisfy the idle-done gate. Misreading an arithmetic `>` as a
+    // redirect is the safe direction here: it only makes idle-done fire less.
+    if (/>>?\s*(?!&)/.test(command)) return true
     // In-place editors: the head is on the read-only list, the `-i` flag writes.
     if (/\b(?:sed|perl|ruby)\b[^|;&]*\s-[A-Za-z]*i\b/.test(command)) return true
     for (const statement of command.split(/&&|\|\||[;|\n]/)) {
@@ -212,7 +219,12 @@ export namespace IdleDone {
 
   // Mutation-classified tool names: the harness's own file-writing tools. Patch
   // parts (snapshot diffs) additionally catch bash-mediated mutations.
-  const MUTATING_TOOLS = new Set(["write", "edit", "multiedit", "patch"])
+  // altimate_change start — `apply_patch` is the real tool id (tool/apply_patch.ts);
+  // only the snapshot `patch` PART was listed, so with snapshots disabled or
+  // outside a git worktree an apply_patch write left the mutation watermark
+  // untouched and a stale green verification still passed the idle-done gate.
+  const MUTATING_TOOLS = new Set(["write", "edit", "multiedit", "patch", "apply_patch"])
+  // altimate_change end
 
   export interface Deps {
     /** From RunAccounting — resolves whether a message belongs to compaction machinery. */
@@ -250,9 +262,16 @@ export namespace IdleDone {
 
     function observeBash(part: PartSlice) {
       const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
+      // altimate_change start — a mutating command is never a verification. With
+      // no verify command configured the fallback treated EVERY non-read-only
+      // command as a verification candidate, so a zero-exit `rm`/`mv`/`cp`
+      // counted as a green verification and the MUTATING_HEADS branch below was
+      // unreachable. Excluding mutators here restores it and stops a destructive
+      // command from standing in as evidence that the work is finished.
       const isCandidate = options.verifyCommand
         ? command.trimStart().startsWith(options.verifyCommand)
-        : !isReadOnlyCommand(command)
+        : !isReadOnlyCommand(command) && !isMutatingCommand(command)
+      // altimate_change end
       if (isCandidate) {
         const exit = part.state?.metadata?.["exit"]
         lastVerifySeq = seq

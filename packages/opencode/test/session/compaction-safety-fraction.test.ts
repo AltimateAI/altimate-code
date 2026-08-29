@@ -43,12 +43,19 @@ function tokens(input: number) {
   return { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
 }
 
+// altimate_change start — save and RESTORE the value the surrounding
+// environment had. Unconditionally deleting it wiped a fraction set by CI or a
+// dev shell for the remainder of the run.
+let priorSafetyFraction: string | undefined
 beforeEach(() => {
+  priorSafetyFraction = process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
   delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
 })
 afterEach(() => {
-  delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+  if (priorSafetyFraction === undefined) delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+  else process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = priorSafetyFraction
 })
+// altimate_change end
 
 describe("contextSafetyFraction resolution", () => {
   test("defaults to 0.65", () => {

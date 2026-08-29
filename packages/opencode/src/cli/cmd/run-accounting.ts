@@ -277,6 +277,17 @@ export namespace RunAccounting {
     return Math.min(baseMs * 2 ** attempt, MAX_TIMER_MS)
   }
 
+  /**
+   * A `--max-turns` value the budget can actually enforce. yargs coerces a
+   * non-numeric argument to NaN, which is falsy and silently DISABLES the
+   * budget; a negative value is truthy and trips the check on the very first
+   * step. Both are configuration errors, so the CLI rejects them up front
+   * rather than running with a budget that does not mean what was asked.
+   */
+  export function isValidMaxTurns(value: unknown): boolean {
+    return typeof value === "number" && Number.isInteger(value) && value >= 1
+  }
+
   /** Thrown transport failures that warrant an enqueue retry: timeouts and dropped connections. */
   export function isRetryableThrown(error: unknown): boolean {
     if (error === undefined || error === null) return false

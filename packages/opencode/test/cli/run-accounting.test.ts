@@ -183,6 +183,31 @@ describe("RunAccounting.serializeSessionError", () => {
   // altimate_change end
 })
 
+// altimate_change start — PR #1171 review: the turn budget was accepted unvalidated.
+describe("RunAccounting.isValidMaxTurns", () => {
+  test("accepts positive integers", () => {
+    expect(RunAccounting.isValidMaxTurns(1)).toBe(true)
+    expect(RunAccounting.isValidMaxTurns(40)).toBe(true)
+  })
+
+  test("rejects NaN — a non-numeric value is falsy and silently disabled the budget", () => {
+    expect(RunAccounting.isValidMaxTurns(Number.NaN)).toBe(false)
+  })
+
+  test("rejects zero and negatives — a negative budget tripped on the very first step", () => {
+    expect(RunAccounting.isValidMaxTurns(0)).toBe(false)
+    expect(RunAccounting.isValidMaxTurns(-5)).toBe(false)
+  })
+
+  test("rejects fractional, infinite and non-numeric values", () => {
+    expect(RunAccounting.isValidMaxTurns(2.5)).toBe(false)
+    expect(RunAccounting.isValidMaxTurns(Infinity)).toBe(false)
+    expect(RunAccounting.isValidMaxTurns("3")).toBe(false)
+    expect(RunAccounting.isValidMaxTurns(undefined)).toBe(false)
+  })
+})
+// altimate_change end
+
 describe("RunAccounting retry classification", () => {
   test("5xx statuses are retryable; 4xx and non-numbers are not", () => {
     expect(RunAccounting.isRetryableStatus(500)).toBe(true)

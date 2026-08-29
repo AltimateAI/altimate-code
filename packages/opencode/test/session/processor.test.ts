@@ -1,6 +1,9 @@
 // @ts-nocheck
 import { describe, test, expect, beforeEach, mock } from "bun:test"
 import { Telemetry } from "../../src/telemetry"
+// altimate_change — the finish-ordering suite below exercises the real exported
+// decision function rather than a local copy (PR #1171 review).
+import { SessionProcessor } from "../../src/session/processor"
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -894,20 +897,11 @@ describe("processor state tracking", () => {
 // this mirror to match.
 // ---------------------------------------------------------------------------
 describe("finish outcome ordering", () => {
-  function resolveOutcome(state: {
-    needsCompaction: boolean
-    explicitDone: boolean
-    blocked: boolean
-    error: boolean
-    starvationStop: boolean
-  }): "stop" | "compact" | "continue" {
-    if (state.needsCompaction && state.explicitDone) return "stop"
-    if (state.blocked) return "stop"
-    if (state.error) return "stop"
-    if (state.starvationStop) return "stop"
-    if (state.needsCompaction) return "compact"
-    return "continue"
-  }
+  // altimate_change start — PR #1171 review: this suite used to re-implement the
+  // ordering locally, so it passed regardless of what processor.ts did. It now
+  // calls the SAME exported function the production step-finish path calls.
+  const resolveOutcome = SessionProcessor.resolveFinishOutcome
+  // altimate_change end
 
   const base = { needsCompaction: false, explicitDone: false, blocked: false, error: false, starvationStop: false }
 

@@ -34,6 +34,30 @@ describe("NudgeArbiter precedence (one-directive-per-turn contract)", () => {
   })
 })
 
+// altimate_change start — PR #1171 review: within ONE source, take() picked the
+// earliest registration, so a generation that crossed two rungs of the doom-loop
+// ladder delivered the stale nudge and dropped the stronger status_check.
+describe("NudgeArbiter escalation within a source", () => {
+  test("the latest directive from a source replaces the earlier one", () => {
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "nudge", text: "gentle nudge" })
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "status_check", text: "forced status check" })
+    expect(NudgeArbiter.pending(SID)).toHaveLength(1)
+    const winner = NudgeArbiter.take(SID)
+    expect(winner?.kind).toBe("status_check")
+    expect(winner?.text).toBe("forced status check")
+  })
+
+  test("replacing within a source does not disturb other sources' precedence", () => {
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "nudge", text: "n" })
+    NudgeArbiter.register(SID, { source: "budget_reminder", kind: "budget", text: "b" })
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "status_check", text: "sc" })
+    const winner = NudgeArbiter.take(SID)
+    expect(winner?.source).toBe("starvation_breaker")
+    expect(winner?.kind).toBe("status_check")
+  })
+})
+// altimate_change end
+
 describe("NudgeArbiter one-directive-per-turn contract", () => {
   test("take() returns exactly one directive and clears ALL pending — losers are dropped", () => {
     NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "s" })

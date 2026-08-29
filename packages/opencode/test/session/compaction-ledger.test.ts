@@ -276,6 +276,32 @@ describe("SessionCompaction.renderLedger", () => {
     expect(text).toContain("last 10 of 15")
   })
 
+  // altimate_change start — PR #1171 review: `slice(-0)` is `slice(0)`, so a
+  // configured recentCalls of 0 rendered EVERY call instead of none.
+  test("a recentCalls limit of 0 lists no calls at all", () => {
+    const parts = []
+    for (let i = 1; i <= 15; i++)
+      parts.push(toolPart({ tool: "bash", input: { command: `cmd-${i}` }, metadata: { exit: 0 } }))
+    const ledger = SessionCompaction.buildLedger([assistantMsg(parts)])
+    const text = SessionCompaction.renderLedger(ledger, { recentCalls: 0 })
+    expect(text).not.toContain("cmd-15")
+    expect(text).not.toContain("cmd-1")
+    expect(text).not.toContain("Recent tool calls")
+  })
+
+  test("a recentCalls limit of 0 still renders the writes section", () => {
+    const ledger = SessionCompaction.buildLedger([
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/repo/kept.sql" }, end: 1_000 }),
+        toolPart({ tool: "bash", input: { command: "noisy" }, metadata: { exit: 0 } }),
+      ]),
+    ])
+    const text = SessionCompaction.renderLedger(ledger, { recentCalls: 0 })
+    expect(text).toContain("/repo/kept.sql")
+    expect(text).not.toContain("noisy")
+  })
+  // altimate_change end
+
   test("tail-truncates to the token cap, preserving the header and writes section", () => {
     const parts = [toolPart({ tool: "write", input: { filePath: "/repo/first.ts" }, end: 1000 })]
     for (let i = 0; i < 50; i++)
@@ -358,6 +384,23 @@ describe("SessionCompaction.corroborateCarry", () => {
     const out = SessionCompaction.corroborateCarry([{ text: "created models/orders.sql with dedup logic" }], ledger)
     expect(out).toEqual([{ text: "created models/orders.sql with dedup logic", status: "verified" }])
   })
+
+  // altimate_change start — PR #1171 review: a summary that writes a path as
+  // `./models/orders.sql` looked directory-qualified (so the basename fallback
+  // was correctly suppressed) but matched no ledger path either, leaving a
+  // genuinely written artifact unverified.
+  test("a leading ./ on a qualified path still corroborates", () => {
+    const out = SessionCompaction.corroborateCarry([{ text: "created ./models/orders.sql" }], ledger)
+    expect(out[0]!.status).toBe("verified")
+  })
+
+  test("the ./ normalization does not resurrect the basename fallback", () => {
+    // `./other/orders.sql` names a DIFFERENT directory; it must stay unverified
+    // even though a file named orders.sql was written elsewhere.
+    const out = SessionCompaction.corroborateCarry([{ text: "created ./other/orders.sql" }], ledger)
+    expect(out[0]!.status).toBe("claimed, unverified")
+  })
+  // altimate_change end
 
   test("item with no corroborating event carries as claimed, unverified", () => {
     const out = SessionCompaction.corroborateCarry([{ text: "generated final_report.pdf and emailed it" }], ledger)

@@ -30,6 +30,9 @@ import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 // altimate_change start — run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
+// altimate_change start — stable message id for idempotent prompt retries
+import { MessageID } from "../../session/schema"
+// altimate_change end
 // altimate_change end
 // altimate_change start — run implies run mode (fork-only module)
 import { applyRunModeDefault } from "./run/run-mode"
@@ -389,6 +392,16 @@ export const RunCommand = cmd({
     // altimate_change end
   },
   handler: async (args) => {
+    // altimate_change start — validate --max-turns before anything runs. yargs
+    // coerces a non-numeric value to NaN, which is falsy and SILENTLY disabled
+    // the budget; a negative value is truthy and aborted the session on its
+    // very first step with a nonsense message. Both are configuration errors a
+    // benchmark harness must hear about immediately, not discover afterwards.
+    if (args.maxTurns !== undefined && !RunAccounting.isValidMaxTurns(args.maxTurns)) {
+      UI.error(`--max-turns must be a positive integer (got ${String(args.maxTurns)})`)
+      process.exit(1)
+    }
+    // altimate_change end
     // altimate_change start — `run` is the only entrypoint without an answer
     // channel for the question tool: no TUI is mounted and the in-process
     // Server.Default() shim below does not bind a port, so a connected IDE
@@ -1051,10 +1064,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // The per-value bounds alone do NOT keep the compounded delay inside the
       // timer range — see RunAccounting.retryDelayMs, which clamps it.
       // altimate_change end
+      // altimate_change start — retry idempotency. `session.prompt`/`command`
+      // run the whole task synchronously, so an ambiguous transport failure
+      // (timeout, ECONNRESET, gateway 5xx) can arrive AFTER the server accepted
+      // the POST and started the run. Re-sending then duplicates the task —
+      // a second user message and a second execution. Pinning a stable
+      // messageID makes the attempt identifiable: before each retry we ask the
+      // server whether that message landed, and only re-send when it did not.
+      const sendMessageID = MessageID.ascending()
       const send = () => {
         if (args.command)
           return sdk.session.command({
             sessionID,
+            messageID: sendMessageID,
             agent,
             model: args.model,
             command: args.command,
@@ -1064,6 +1086,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const model = args.model ? Provider.parseModel(args.model) : undefined
         return sdk.session.prompt({
           sessionID,
+          messageID: sendMessageID,
           agent,
           model,
           variant: args.variant,
@@ -1071,6 +1094,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ...(audienceSystem ? { system: audienceSystem } : {}),
         })
       }
+      /** True when the server already persisted this attempt's user message. */
+      const alreadyAccepted = async () => {
+        const res = await sdk.session
+          .message({ sessionID, messageID: sendMessageID })
+          .catch(() => undefined)
+        return Boolean((res as { data?: { info?: unknown } } | undefined)?.data?.info)
+      }
+      // altimate_change end
       type SendResult = {
         error?: unknown
         response?: Response
@@ -1091,6 +1122,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (!RunAccounting.isRetryableThrown(e)) throw e
           reason = e instanceof Error ? e.message : String(e)
         }
+        // altimate_change start — never re-send a prompt the server already
+        // accepted: that duplicates the task. The failure was on the response
+        // path, so fall through and let the event loop drain to idle instead.
+        if (await alreadyAccepted()) {
+          if (!emit("retry_skipped", { reason, messageID: sendMessageID })) {
+            UI.println(
+              UI.Style.TEXT_WARNING_BOLD + "!",
+              UI.Style.TEXT_NORMAL + ` prompt already accepted by the server; not retrying — ${reason}`,
+            )
+          }
+          break
+        }
+        // altimate_change end
         if (sendAttempt >= retryMax) throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)
         const delay = RunAccounting.retryDelayMs(retryBaseMs, sendAttempt)
         if (!emit("retry", { attempt: sendAttempt + 1, max: retryMax, reason, delayMs: delay })) {

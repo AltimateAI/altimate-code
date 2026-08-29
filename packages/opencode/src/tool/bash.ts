@@ -177,6 +177,17 @@ export const BashTool = Tool.define("bash", async () => {
       // nested server invocation. See PR #937 review (Issue #3).
       delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]
       // altimate_change end
+      // altimate_change start — strip the run-mode markers for the same reason.
+      // `run` sets ALTIMATE_RUN_MODE on its own process to arm run-mode-only
+      // mechanisms (DONE-termination gate, starvation directives, doom-loop
+      // escalation). A nested `serve`/TUI launched through this tool inherited
+      // it and armed those mechanisms in an interactive session, contradicting
+      // the invariant that they never apply outside run mode. A nested `run`
+      // re-applies the default itself (cli/cmd/run/run-mode.ts), so nothing
+      // that should be in run mode loses it.
+      delete mergedEnv["ALTIMATE_RUN_MODE"]
+      delete mergedEnv["ALTIMATE_RUN_RESUMED"]
+      // altimate_change end
       const sep = process.platform === "win32" ? ";" : ":"
       const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""
       const pathEntries = new Set(basePath.split(sep).filter(Boolean))
