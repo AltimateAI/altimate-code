@@ -2,6 +2,9 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Log } from "../util/log"
 import { Installation } from "../installation"
 import { Auth, OAUTH_DUMMY_KEY } from "../auth"
+// altimate_change start — plan/account diagnostics for wrong-account logins
+import { decodeJwtClaims, enrichCodexPlanMismatchBody, extractOAuthIdentity, maskAccountId } from "../auth/oauth-claims"
+// altimate_change end
 import os from "os"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -243,13 +246,10 @@ export interface IdTokenClaims {
 }
 
 export function parseJwtClaims(token: string): IdTokenClaims | undefined {
-  const parts = token.split(".")
-  if (parts.length !== 3) return undefined
-  try {
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString())
-  } catch {
-    return undefined
-  }
+  // altimate_change start — one JWT decoder, shared with auth/oauth-claims which
+  // reads the same tokens for the plan/account diagnostics
+  return decodeJwtClaims(token) as IdTokenClaims | undefined
+  // altimate_change end
 }
 
 export function extractAccountIdFromClaims(claims: IdTokenClaims): string | undefined {
@@ -688,10 +688,39 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                 ? new URL(CODEX_API_ENDPOINT)
                 : parsed
 
-            return fetch(url, {
+            const response = await fetch(url, {
               ...init,
               headers,
             })
+
+            // altimate_change start — a wrong-account login is otherwise undiagnosable.
+            // A free-plan ChatGPT credential fails every Codex request with a 400 that
+            // blames the MODEL ("...is not supported when using Codex with a ChatGPT
+            // account"), never the account. Replace that body with one naming the plan
+            // and account the request actually used, plus the commands to switch.
+            // Only this one 400 shape is touched; every other response passes through.
+            if (response.status === 400) {
+              const body = await response
+                .clone()
+                .text()
+                .catch(() => "")
+              const enriched = enrichCodexPlanMismatchBody(body, currentAuth.access)
+              if (enriched) {
+                const identity = extractOAuthIdentity(currentAuth.access)
+                log.warn("codex request rejected for this account's plan", {
+                  plan: identity.plan,
+                  account: maskAccountId(identity.accountId),
+                })
+                return new Response(JSON.stringify({ detail: enriched }), {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: { "content-type": "application/json" },
+                })
+              }
+            }
+            // altimate_change end
+
+            return response
           },
         }
       },
