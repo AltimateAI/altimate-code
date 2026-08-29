@@ -882,6 +882,75 @@ describe("Jinja modulo in a guard condition does not defeat the guard", () => {
   })
 })
 
+describe("an is_incremental() guard on an elif branch is still inspected", () => {
+  test("extractJinjaIfBlocks returns the matching elif arm", () => {
+    const blocks = extractJinjaIfBlocks(
+      "{% if a %}\nx\n{% elif is_incremental() %}\nwhere loaded_at > current_timestamp\n{% endif %}",
+      /(?<![\w.])is_incremental\s*\(\s*\)/i,
+    )
+    expect(blocks.length).toBe(1)
+    expect(blocks[0]!.body).toContain("current_timestamp")
+    expect(blocks[0]!.body).not.toContain("\nx\n")
+  })
+
+  test("a nondeterministic predicate on the elif arm blocks", async () => {
+    await makeProject("review-sweep-elif-")
+    await writeModel(
+      "fct_events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select * from src",
+        "{% if var('full', false) %}",
+        "  where 1 = 1",
+        "{% elif is_incremental() %}",
+        "  where loaded_at > current_timestamp",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    const kinds = (r.details!["findings"] as Array<{ kind: string }>).map((f) => f.kind)
+    expect(kinds).toContain("nondeterministic-predicate")
+  })
+})
+
+describe("a project macro is not dbt's is_incremental() builtin", () => {
+  test("my_is_incremental() does not count as a guard", async () => {
+    await makeProject("review-sweep-macro-")
+    await fs.writeFile(join(dir, "TASK.md"), "Reruns must be idempotent.\n")
+    await writeModel(
+      "fct_events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select * from src",
+        "{% if my_is_incremental() %}",
+        "  where loaded_at > (select max(loaded_at) from {{ this }})",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    const kinds = (r.details!["findings"] as Array<{ kind: string }>).map((f) => f.kind)
+    expect(kinds).toContain("missing-is-incremental-guard")
+  })
+
+  test("the real builtin still counts as a guard", async () => {
+    await makeProject("review-sweep-macro-")
+    await fs.writeFile(join(dir, "TASK.md"), "Reruns must be idempotent.\n")
+    await writeModel(
+      "fct_events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select * from src",
+        "{% if is_incremental() %}",
+        "  where loaded_at > (select max(loaded_at) from {{ this }})",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+})
+
 describe("the guard-convention probe ignores text inside string literals", () => {
   test("a target.type mention inside a literal does not activate the lint", async () => {
     await makeProject("review-sweep-probe-")

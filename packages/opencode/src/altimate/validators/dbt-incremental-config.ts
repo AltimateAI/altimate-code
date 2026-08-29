@@ -63,8 +63,14 @@ const STRATEGY_RE = /incremental_strategy\s*=\s*['"]([a-z0-9_+]+)['"]/i
 const UNIQUE_KEY_RE = /unique_key\s*=(?!\s*(?:None|null|''|""|\[\s*\])\s*(?:[,)]|$))/i
 /** `unique_key` mentioned anywhere in `dbt_project.yml`. */
 const PROJECT_UNIQUE_KEY_RE = /^\s*\+?unique_key\s*:/m
-/** The `is_incremental()` guard call. */
-const IS_INCREMENTAL_RE = /is_incremental\s*\(\s*\)/i
+/**
+ * The `is_incremental()` guard call.
+ *
+ * Bounded on the left so a project macro named `my_is_incremental()` — or a
+ * namespaced `utils.is_incremental()` — is not mistaken for dbt's builtin and
+ * used to block a valid model.
+ */
+const IS_INCREMENTAL_RE = /(?<![\w.])is_incremental\s*\(\s*\)/i
 /**
  * Condition of a Jinja `if` that branches on `is_incremental()`.
  *
@@ -73,7 +79,7 @@ const IS_INCREMENTAL_RE = /is_incremental\s*\(\s*\)/i
  * dbt guard, and demanding the bare call hid such a block's predicate from the
  * non-determinism check entirely.
  */
-const IS_INCREMENTAL_CONDITION_RE = /is_incremental\s*\(\s*\)/i
+const IS_INCREMENTAL_CONDITION_RE = /(?<![\w.])is_incremental\s*\(\s*\)/i
 /**
  * Where a row-selection predicate starts inside a guard body.
  *

@@ -1381,14 +1381,22 @@ export interface JinjaIfBlock {
 }
 
 /**
- * Every Jinja `{% if %}` block whose condition matches `conditionRe`, matched
- * to its own `{% endif %}` by nesting depth.
+ * Every **arm** of every Jinja if-chain whose own branch condition matches
+ * `conditionRe`, matched to its chain's `{% endif %}` by nesting depth.
  *
- * The non-greedy regex this replaces made two mistakes at once: it required
- * the condition to be the *complete* condition, so `{% if is_incremental() and
- * loaded %}` was invisible; and it ended the block at the first `{% endif %}`,
- * so a guard containing a nested `{% if %}` lost the rest of its body — and
- * with it the predicate the caller was looking for.
+ * Arms, not whole blocks, and `{% elif %}` as well as `{% if %}`. Three
+ * distinct bugs live in the naive version of this:
+ *
+ *   - requiring the condition to be the *complete* condition, which made
+ *     `{% if is_incremental() and loaded %}` invisible;
+ *   - ending the block at the first `{% endif %}`, which lost the remainder of
+ *     a guard containing a nested `{% if %}` — and with it the predicate the
+ *     caller was looking for;
+ *   - looking only at the opening tag, which skipped a chain that carries the
+ *     condition on an `{% elif %}`.
+ *
+ * Each returned `body` is one branch's own text, already bounded by the
+ * chain's next top-level branch tag, so a caller does not have to split it.
  */
 export function extractJinjaIfBlocks(sql: string, conditionRe: RegExp): JinjaIfBlock[] {
   const opener = new RegExp(JINJA_IF_OPENER_SOURCE, "gi")
@@ -1398,20 +1406,60 @@ export function extractJinjaIfBlocks(sql: string, conditionRe: RegExp): JinjaIfB
     opener.lastIndex = searchFrom
     const m = opener.exec(sql)
     if (!m) return out
-    if (!conditionRe.test(m[0])) {
-      searchFrom = m.index + m[0].length
+    const end = jinjaBlockEnd(sql, m.index)
+    for (const arm of chainArms(sql, m.index, m[0].length, end)) {
+      if (conditionRe.test(arm.opener)) out.push(arm)
+    }
+    // Continue past this chain's own opening tag rather than past the whole
+    // chain: a nested `{% if %}` inside it is its own chain and may carry the
+    // condition too.
+    searchFrom = m.index + m[0].length
+  }
+}
+
+/**
+ * Split one if-chain into its top-level arms. `openStart` is the index of the
+ * chain's `{% if %}` tag, `openLength` its length, and `end` the index just
+ * past the matching `{% endif %}`.
+ */
+function chainArms(
+  sql: string,
+  openStart: number,
+  openLength: number,
+  end: number,
+): JinjaIfBlock[] {
+  const region = sql.slice(openStart, end)
+  // Same `%`-tolerant body as the opener, so a condition containing Jinja's
+  // modulo operator does not hide a branch tag.
+  const tag = /\{%-?\s*(if|elif|else|endif)\b(?:[^%]|%(?!\}))*%\}/gi
+  const arms: JinjaIfBlock[] = []
+  let depth = 0
+  let currentOpener = sql.slice(openStart, openStart + openLength)
+  let armStart = openLength
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(region)) !== null) {
+    const kind = (m[1] ?? "").toLowerCase()
+    // The chain's own opening tag is not a nested `if`.
+    if (m.index < openLength) continue
+    if (kind === "if") {
+      depth++
       continue
     }
-    const end = jinjaBlockEnd(sql, m.index)
-    const bodyStart = m.index + m[0].length
-    // `end` is just past the matching `{% endif %}`; walk back to its opening
-    // brace so the body excludes the closing tag itself.
-    const closeAt = sql.lastIndexOf("{%", end)
-    out.push({
-      opener: m[0],
-      body: sql.slice(bodyStart, closeAt > bodyStart ? closeAt : Math.max(bodyStart, end)),
-    })
-    searchFrom = end
+    if (kind === "endif") {
+      if (depth > 0) {
+        depth--
+        continue
+      }
+      arms.push({ opener: currentOpener, body: region.slice(armStart, m.index) })
+      break
+    }
+    // `elif` / `else` at depth 0 closes the current arm and opens the next.
+    if (depth > 0) continue
+    arms.push({ opener: currentOpener, body: region.slice(armStart, m.index) })
+    currentOpener = m[0]
+    armStart = m.index + m[0].length
   }
+  if (arms.length === 0) arms.push({ opener: currentOpener, body: region.slice(armStart) })
+  return arms
 }
 // altimate_change end
