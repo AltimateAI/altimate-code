@@ -12,6 +12,7 @@ import {
   isFailedRunStatus,
   collectProducedNodeNames,
   stripSqlComments,
+  maskSqlStringLiterals,
 } from "../../../src/altimate/validators/validator-utils"
 import type { ValidatorContext } from "../../../src/session/validators/types"
 
@@ -60,10 +61,24 @@ const ctxFuture = (): ValidatorContext => ({
   retryCount: 0,
 })
 
+/**
+ * Env vars these tests set. Captured once and restored after each test, so a
+ * run that starts with one of them already set is neither misled by it nor
+ * left with it deleted.
+ */
+const MANAGED_ENV = [
+  "ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS",
+  "ALTIMATE_VALIDATORS_TASK_FILE",
+  "DBT_TARGET_PATH",
+] as const
+const ENV_SNAPSHOT = new Map(MANAGED_ENV.map((k) => [k, process.env[k]]))
+
 afterEach(async () => {
-  delete process.env.ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS
-  delete process.env.ALTIMATE_VALIDATORS_TASK_FILE
-  delete process.env.DBT_TARGET_PATH
+  for (const key of MANAGED_ENV) {
+    const prior = ENV_SNAPSHOT.get(key)
+    if (prior === undefined) delete process.env[key]
+    else process.env[key] = prior
+  }
   if (dir) await fs.rm(dir, { recursive: true, force: true })
   dir = ""
 })
@@ -142,6 +157,48 @@ describe("extractRequiredDeliverables", () => {
       "## Required\n- `select * from x`\n- `ok_name`\n- `a`\n",
     )
     expect(r!.models).toEqual(["ok_name"])
+  })
+
+  test("a `Required columns` heading does not open a deliverables section", () => {
+    // Column names under such a heading are not relations, and requiring them
+    // as models would fail a session that never promised those tables.
+    const doc = ["# Task", "## Required columns", "- `order_id`", "- `customer_id`"].join("\n")
+    expect(extractRequiredDeliverables(doc)).toBeNull()
+  })
+
+  test("a requirement line names the artifact, not the attributes that describe it", () => {
+    const r = extractRequiredDeliverables(
+      "Create the model `fct_orders` with unique key `order_id`.",
+    )
+    expect(r!.models).toEqual(["fct_orders"])
+  })
+
+  test("a requirement line may still name several artifacts", () => {
+    const r = extractRequiredDeliverables("Build the models `stg_a` and `stg_b`.")
+    expect(r!.models).toEqual(["stg_a", "stg_b"])
+  })
+
+  test("`Add the missing …` states a deliverable just as `Implement …` does", () => {
+    const r = extractRequiredDeliverables("Add the missing model `models/staging/stg_teams.sql`.")
+    expect(r!.source).toBe("requirement-lines")
+    expect(r!.models).toEqual(["stg_teams"])
+  })
+
+  test("a modification verb does not match a longer word that merely contains it", () => {
+    // `add` inside `address`, `fix` inside `fixture`.
+    expect(extractRequiredDeliverables("The address model `dim_addr` exists.")).toBeNull()
+  })
+
+  test("a bare YAML filename is not a required model", () => {
+    // `properties` is a file, not a relation; recording it as a required model
+    // would block a session that created exactly the file that was asked for.
+    expect(extractRequiredDeliverables("Create the file `properties.yml`.")).toBeNull()
+  })
+
+  test("a YAML path is a required file and implies no relation", () => {
+    const r = extractRequiredDeliverables("Create the file `models/staging/schema.yml`.")
+    expect(r!.files).toEqual(["models/staging/schema.yml"])
+    expect(r!.models).toEqual([])
   })
 })
 
@@ -272,6 +329,39 @@ describe("run_results and inventory helpers", () => {
     expect(out).not.toContain("z / w")
     expect(out).toContain("select 2")
   })
+
+  test("stripSqlComments leaves a `--` inside a string literal alone", () => {
+    // A regex chain blanks from the `--` to end of line here, losing the rest
+    // of the statement and with it any construct a lint needed to see.
+    const out = stripSqlComments("select 'a--b' as code, listagg(x) as agg")
+    expect(out).toContain("listagg(x)")
+    expect(out).toContain("'a--b'")
+  })
+
+  test("stripSqlComments leaves a `/*` inside a string literal alone", () => {
+    const out = stripSqlComments("select '/*' as code, count(*) as n from t")
+    expect(out).toContain("count(*)")
+  })
+
+  test("stripSqlComments preserves length and line structure", () => {
+    const input = "select 1 -- note\nselect 2"
+    const out = stripSqlComments(input)
+    expect(out.length).toBe(input.length)
+    expect(out.split("\n").length).toBe(2)
+  })
+
+  test("maskSqlStringLiterals blanks literal bodies but not the code around them", () => {
+    const out = maskSqlStringLiterals("select 'safe_cast(' as example, safe_cast(x) as v")
+    expect(out).not.toContain("'safe_cast('")
+    expect(out).toContain("safe_cast(x)")
+    expect(out.length).toBe("select 'safe_cast(' as example, safe_cast(x) as v".length)
+  })
+
+  test("maskSqlStringLiterals understands a doubled-quote escape", () => {
+    const out = maskSqlStringLiterals("select 'it''s listagg(' as t, listagg(y) as agg")
+    expect(out).toContain("listagg(y)")
+    expect(out).not.toContain("it''s")
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -357,12 +447,57 @@ describe("DbtNothingBuiltValidator — check", () => {
     expect(r.details!["fresh_run_results"]).toBe(false)
   })
 
-  test("an all-failed fresh run artifact does not count as a build", async () => {
+  /**
+   * A session that wrote no project files but did leave a run artifact:
+   * everything except `run_results.json` is back-dated before the session
+   * start, so `authored_files` is false and the verdict turns purely on what
+   * the artifact says.
+   */
+  async function buildOnlySession(
+    nodes: Array<{ id: string; status: string }>,
+  ): Promise<ValidatorContext> {
     await makeProject()
     await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
-    await writeRunResults([{ id: "model.t.fct_orders", status: "error" }])
-    const r = await DbtNothingBuiltValidator.check(ctxFuture())
+    const old = Date.now() / 1000 - 3600
+    for (const rel of ["dbt_project.yml", "TASK.md", "models"]) {
+      await fs.utimes(join(dir, rel), old, old)
+    }
+    await writeRunResults(nodes)
+    return { ...ctxPast(), sessionStartMs: Date.now() - 60_000 }
+  }
+
+  test("an all-failed fresh run artifact does not count as a build", async () => {
+    const c = await buildOnlySession([{ id: "model.t.fct_orders", status: "error" }])
+    const r = await DbtNothingBuiltValidator.check(c)
+    // Fresh, but every node failed — so it is the status, not staleness, that
+    // denies it credit as a build.
+    expect(r.details!["authored_files"]).toBe(false)
+    expect(r.details!["fresh_run_results"]).toBe(false)
     expect(r.ok).toBe(false)
+  })
+
+  test("a fresh run of tests only is not a build", async () => {
+    const c = await buildOnlySession([{ id: "test.t.not_null_fct_orders_id", status: "pass" }])
+    const r = await DbtNothingBuiltValidator.check(c)
+    expect(r.details!["authored_files"]).toBe(false)
+    expect(r.details!["fresh_run_results"]).toBe(false)
+    expect(r.ok).toBe(false)
+  })
+
+  test("a fresh seed build does count as a build", async () => {
+    const c = await buildOnlySession([{ id: "seed.t.countries", status: "success" }])
+    const r = await DbtNothingBuiltValidator.check(c)
+    expect(r.details!["fresh_run_results"]).toBe(true)
+    expect(r.ok).toBe(true)
+  })
+
+  test("editing a root project file counts as having authored something", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
+    // dbt_project.yml was written by makeProject() during this "session".
+    const r = await DbtNothingBuiltValidator.check(ctxPast())
+    expect(r.ok).toBe(true)
+    expect(r.details!["authored_files"]).toBe(true)
   })
 
   test("opt-in path reports the opt-in expectation and still fails an empty session", async () => {

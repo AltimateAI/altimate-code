@@ -30,6 +30,7 @@
  */
 
 import { promises as fs } from "fs"
+import { join } from "path"
 import type { Validator, ValidatorContext, ValidatorResult } from "../../session/validators/types"
 import {
   findDbtProjectRoot,
@@ -37,6 +38,7 @@ import {
   modelsModifiedSince,
   modelNameFromPath,
   stripSqlComments,
+  maskSqlStringLiterals,
 } from "./validator-utils"
 
 /** `{{ config(...) }}` call, capturing its argument text. */
@@ -45,18 +47,43 @@ const CONFIG_CALL_RE = /\{\{-?\s*config\s*\(([\s\S]*?)\)\s*-?\}\}/gi
 const INCREMENTAL_RE = /materiali[sz]ed\s*=\s*['"]incremental['"]/i
 /** Declared incremental strategy. */
 const STRATEGY_RE = /incremental_strategy\s*=\s*['"]([a-z0-9_+]+)['"]/i
-/** Any `unique_key=` in the config args. */
-const UNIQUE_KEY_RE = /unique_key\s*=/i
+/**
+ * A `unique_key=` in the config args with a value dbt can actually match rows
+ * on. `unique_key=None`, `unique_key=null` and `unique_key=''` are spelled
+ * assignments that leave dbt with no key, so they read as absent.
+ */
+const UNIQUE_KEY_RE = /unique_key\s*=\s*(?!(?:None|null|''|""|\[\s*\])\s*(?:[,)]|$))/i
+/** `unique_key` mentioned anywhere in `dbt_project.yml`. */
+const PROJECT_UNIQUE_KEY_RE = /^\s*\+?unique_key\s*:/m
 /** The `is_incremental()` guard call. */
 const IS_INCREMENTAL_RE = /is_incremental\s*\(\s*\)/i
 /** Body of the first `{% if is_incremental() %} … {% endif %}` block. */
 const IS_INCREMENTAL_BLOCK_RE =
   /\{%-?\s*if\s+is_incremental\s*\(\s*\)\s*-?%\}([\s\S]*?)\{%-?\s*endif\s*-?%\}/gi
-/** Functions whose value changes between otherwise identical runs. */
-const NONDETERMINISTIC_RE =
-  /\b(current_timestamp|current_date|localtimestamp|getdate|sysdate|now|random|rand|uuid_string|gen_random_uuid|newid)\b/gi
+/** Start of the `{% else %}` / `{% elif %}` arm — the full-refresh branch. */
+const ELSE_ARM_RE = /\{%-?\s*el(?:se|if)\b/i
+/** Where a row-selection predicate starts inside a guard body. */
+const PREDICATE_START_RE = /\b(?:where|and|or|on|having|qualify)\b/i
+/**
+ * Clock and randomness constructs whose value changes between otherwise
+ * identical runs.
+ *
+ * Split by shape on purpose. The keyword forms are SQL reserved words and
+ * cannot plausibly be a column; the function forms need a call shape, because
+ * `random`, `now` and `rand` are all perfectly ordinary column names and
+ * `where random < 0.5` is not a defect.
+ */
+const NONDETERMINISTIC_KEYWORD_RE =
+  /\b(current_timestamp|current_date|localtimestamp|sysdate)\b/gi
+const NONDETERMINISTIC_CALL_RE =
+  /\b(getdate|now|random|rand|uuid_string|gen_random_uuid|newid)\s*\(/gi
 /** The task literally asks for repeatable re-runs. */
-const IDEMPOTENCY_RE = /\bidempoten(?:t|cy|tly)\b/i
+const IDEMPOTENCY_RE = /\bidempoten(?:t|ce|cy|tly)\b/i
+/**
+ * Negation in the same clause as the idempotency word. "Idempotency is not
+ * required" must not switch the guard check on.
+ */
+const IDEMPOTENCY_NEGATION_RE = /\b(?:not|no|never|without|isn't|aren't|un)\b/i
 
 /** Strategies whose semantics require a key to match rows on. */
 const KEYED_STRATEGIES = new Set(["merge", "delete+insert"])
@@ -79,26 +106,66 @@ function configArgs(sql: string): string {
   return parts.join("\n")
 }
 
-/** Concatenate the bodies of every `is_incremental()` guard block. */
+/**
+ * Concatenate the **row-selection predicates** of every `is_incremental()`
+ * guard block.
+ *
+ * Two narrowings, both there to keep the blocking finding on the thing it
+ * claims to be about:
+ *
+ *   - The `{% else %}` / `{% elif %}` arm is the full-refresh branch. A clock
+ *     call there belongs to the initial load and says nothing about whether
+ *     incremental runs are reproducible.
+ *   - Only the part of the incremental arm from the first `where`/`and`/`on`
+ *     onwards is a predicate. A guard body that conditionally *projects*
+ *     `current_timestamp as loaded_at` does not make row selection vary, and
+ *     is left to the advisory list.
+ */
 function incrementalPredicates(sql: string): string {
   const parts: string[] = []
   IS_INCREMENTAL_BLOCK_RE.lastIndex = 0
   let m: RegExpExecArray | null
   while ((m = IS_INCREMENTAL_BLOCK_RE.exec(sql)) !== null) {
-    if (m[1]) parts.push(m[1])
+    const body = m[1]
+    if (!body) continue
+    const elseAt = ELSE_ARM_RE.exec(body)
+    const incrementalArm = elseAt ? body.slice(0, elseAt.index) : body
+    const predicateAt = PREDICATE_START_RE.exec(incrementalArm)
+    if (predicateAt) parts.push(incrementalArm.slice(predicateAt.index))
   }
   return parts.join("\n")
 }
 
-/** Distinct non-deterministic function names appearing in a fragment. */
+/** Distinct non-deterministic constructs appearing in a fragment. */
 function nondeterministicCalls(fragment: string): string[] {
   const out = new Set<string>()
-  NONDETERMINISTIC_RE.lastIndex = 0
-  let m: RegExpExecArray | null
-  while ((m = NONDETERMINISTIC_RE.exec(fragment)) !== null) {
-    if (m[1]) out.add(m[1].toLowerCase())
+  for (const re of [NONDETERMINISTIC_KEYWORD_RE, NONDETERMINISTIC_CALL_RE]) {
+    re.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(fragment)) !== null) {
+      if (m[1]) out.add(m[1].toLowerCase())
+    }
   }
   return Array.from(out)
+}
+
+/** True when the task asks for idempotent re-runs and does not disclaim it. */
+function demandsIdempotency(text: string): boolean {
+  for (const line of text.split(/\r?\n/)) {
+    if (!IDEMPOTENCY_RE.test(line)) continue
+    if (IDEMPOTENCY_NEGATION_RE.test(line)) continue
+    return true
+  }
+  return false
+}
+
+/** True when `dbt_project.yml` configures a `unique_key` this lint cannot resolve. */
+async function projectDeclaresUniqueKey(dbtRoot: string): Promise<boolean> {
+  try {
+    return PROJECT_UNIQUE_KEY_RE.test(await fs.readFile(join(dbtRoot, "dbt_project.yml"), "utf8"))
+  } catch {
+    return false
+  }
 }
 
 export const DbtIncrementalConfigValidator: Validator = {
@@ -122,7 +189,12 @@ export const DbtIncrementalConfigValidator: Validator = {
     }
 
     const task = await findTaskInstructionFile(ctx.workingDirectory, dbtRoot)
-    const idempotencyDemanded = task !== null && IDEMPOTENCY_RE.test(task.content)
+    const idempotencyDemanded = task !== null && demandsIdempotency(task.content)
+    // A `unique_key` set in `dbt_project.yml` is inherited by the model, and
+    // this lint does not resolve dbt's config inheritance. Rather than report
+    // an inconsistency that is not one, the keyed-strategy finding is
+    // suppressed for the whole project when the key could come from there.
+    const projectKey = await projectDeclaresUniqueKey(dbtRoot)
 
     const findings: Finding[] = []
     const advisories: Array<{ model: string; functions: string[] }> = []
@@ -135,7 +207,12 @@ export const DbtIncrementalConfigValidator: Validator = {
       } catch {
         continue
       }
+      // Config parsing reads the literals (`materialized='incremental'`), so
+      // it runs on comment-stripped source. The non-determinism scan runs on
+      // a further copy with literal bodies masked, so a value such as
+      // `'now'` in a projected string cannot produce a blocking finding.
       const sql = stripSqlComments(raw)
+      const scanSql = maskSqlStringLiterals(sql)
       const args = configArgs(sql)
       if (!INCREMENTAL_RE.test(args)) continue
       incrementalModels++
@@ -143,7 +220,9 @@ export const DbtIncrementalConfigValidator: Validator = {
 
       const strategyMatch = STRATEGY_RE.exec(args)
       const strategy = strategyMatch?.[1]?.toLowerCase() ?? null
-      if (strategy && KEYED_STRATEGIES.has(strategy) && !UNIQUE_KEY_RE.test(args)) {
+      const keyed = strategy !== null && KEYED_STRATEGIES.has(strategy)
+      const hasUniqueKey = UNIQUE_KEY_RE.test(args) || projectKey
+      if (keyed && !hasUniqueKey) {
         findings.push({
           model,
           kind: "upsert-without-unique-key",
@@ -151,8 +230,12 @@ export const DbtIncrementalConfigValidator: Validator = {
         })
       }
 
+      // A keyed upsert re-runs idempotently even without a guard: the merge
+      // matches on the key rather than appending, so a full re-scan converges
+      // on the same table. Only a guardless model with no such key can
+      // duplicate rows on re-run.
       const hasGuard = IS_INCREMENTAL_RE.test(sql)
-      if (idempotencyDemanded && !hasGuard) {
+      if (idempotencyDemanded && !hasGuard && !(keyed && hasUniqueKey)) {
         findings.push({
           model,
           kind: "missing-is-incremental-guard",
@@ -161,7 +244,7 @@ export const DbtIncrementalConfigValidator: Validator = {
         })
       }
 
-      const predicate = incrementalPredicates(sql)
+      const predicate = incrementalPredicates(scanSql)
       const predicateCalls = nondeterministicCalls(predicate)
       if (predicateCalls.length > 0) {
         findings.push({
@@ -171,7 +254,7 @@ export const DbtIncrementalConfigValidator: Validator = {
         })
       }
 
-      const elsewhere = nondeterministicCalls(sql).filter((f) => !predicateCalls.includes(f))
+      const elsewhere = nondeterministicCalls(scanSql).filter((f) => !predicateCalls.includes(f))
       if (elsewhere.length > 0) advisories.push({ model, functions: elsewhere })
     }
 
@@ -181,6 +264,7 @@ export const DbtIncrementalConfigValidator: Validator = {
       idempotency_demanded: idempotencyDemanded,
       findings: findings.map((f) => ({ model: f.model, kind: f.kind })),
       advisories,
+      project_unique_key: projectKey,
       dbt_root: dbtRoot,
       session_id: ctx.sessionID,
       elapsed_ms: Date.now() - startedAt,

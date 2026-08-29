@@ -160,11 +160,11 @@ describe("DbtBuildGreenValidator — fresh artifact", () => {
     expect(r.details!["coverage_assertable"]).toBe(false)
   })
 
-  test("fails when a model was edited after the last build", async () => {
+  test("fails when a model was edited well after the last build", async () => {
     await makeProject()
-    await writeRunResults([{ id: "model.t.stg_orders", status: "success" }], -30_000)
+    await writeRunResults([{ id: "model.t.stg_orders", status: "success" }], -300_000)
     await writeModel("stg_orders")
-    const r = await DbtBuildGreenValidator.check(ctx({ sessionStartMs: Date.now() - 120_000 }))
+    const r = await DbtBuildGreenValidator.check(ctx({ sessionStartMs: Date.now() - 600_000 }))
     expect(r.ok).toBe(false)
     expect(r.details!["stale_build"]).toEqual(["stg_orders"])
   })
@@ -215,6 +215,149 @@ describe("DbtBuildGreenValidator — fresh artifact", () => {
     )
     const r = await DbtBuildGreenValidator.check(ctx())
     expect(r.ok).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Regression tests for false positives observed against real dbt projects.
+// Each asserts NO firing on a state a competent engineer would call finished;
+// a gate that blocks one of these costs the session a retry turn for nothing.
+// ---------------------------------------------------------------------------
+
+/** Write model DDL under `<target>/run/`, which is what `dbt run`/`dbt build` emits. */
+async function writeRunArtifact(name: string): Promise<void> {
+  const runDir = join(dir, "target", "run", "t", "models")
+  await fs.mkdir(runDir, { recursive: true })
+  await fs.writeFile(join(runDir, `${name}.sql`), "create table x as select 1")
+}
+
+describe("DbtBuildGreenValidator — known-good states must not fire", () => {
+  test("a tidy-up write seconds after a green build is not a stale build", async () => {
+    await makeProject()
+    await writeRunResults([{ id: "model.t.stg_orders", status: "success" }], -3_000)
+    await writeModel("stg_orders", "select 1 as id\n")
+    const r = await DbtBuildGreenValidator.check(ctx({ sessionStartMs: Date.now() - 600_000 }))
+    expect(r.ok).toBe(true)
+    expect(r.details!["stale_build"]).toEqual([])
+  })
+
+  test("an ephemeral model the session edited is exempt from build coverage", async () => {
+    await makeProject()
+    await writeRunResults([{ id: "model.t.fct_orders", status: "success" }])
+    await writeModel("eph_helper", "{{ config(materialized='ephemeral') }}\nselect 1 as id")
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["not_built"]).toEqual([])
+    expect(r.details!["exempt_models"]).toEqual(["eph_helper"])
+  })
+
+  test("a model the session disabled on purpose is exempt from build coverage", async () => {
+    await makeProject()
+    await writeRunResults([{ id: "model.t.fct_orders", status: "success" }])
+    await writeModel("retired_model", "{{ config(enabled=false) }}\nselect 1 as id")
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["exempt_models"]).toEqual(["retired_model"])
+  })
+
+  test("a model marked ephemeral only in the manifest is exempt too", async () => {
+    await makeProject()
+    await writeRunResults([{ id: "model.t.fct_orders", status: "success" }])
+    await fs.writeFile(
+      join(dir, "target", "manifest.json"),
+      JSON.stringify({
+        nodes: { "model.t.eph": { name: "eph", config: { materialized: "ephemeral" } } },
+      }),
+    )
+    await writeModel("eph")
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["exempt_models"]).toEqual(["eph"])
+  })
+})
+
+describe("DbtBuildGreenValidator — a test run must not blind the coverage check", () => {
+  test("model DDL written this session proves the build a later `dbt test` overwrote", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await writeRunArtifact("stg_orders")
+    await writeRunResults([{ id: "test.t.not_null_stg_orders_id", status: "pass" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["coverage_assertable"]).toBe(true)
+    expect(r.details!["model_nodes_in_artifact"]).toBe(0)
+    expect(r.details!["executed_models"]).toBe(1)
+    expect(r.details!["not_built"]).toEqual([])
+  })
+
+  test("a test-only artifact still catches a model that was never executed", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await writeModel("fct_orders")
+    // Only one of the two was actually run.
+    await writeRunArtifact("stg_orders")
+    await writeRunResults([{ id: "test.t.not_null_stg_orders_id", status: "pass" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["not_built"]).toEqual(["fct_orders"])
+  })
+
+  test("with neither evidence source the verdict is inconclusive, not a silent pass", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await writeRunResults([{ id: "test.t.not_null_stg_orders_id", status: "pass" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.details!["coverage_assertable"]).toBe(false)
+    expect(r.details!["verdict"]).toBe("coverage-inconclusive")
+  })
+})
+
+describe("DbtBuildGreenValidator — artifact parsing", () => {
+  test("a test node sharing a model's bare name does not supply build coverage", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await writeRunResults([
+      { id: "test.t.stg_orders", status: "pass" },
+      { id: "model.t.other", status: "success" },
+    ])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["not_built"]).toEqual(["stg_orders"])
+  })
+
+  test("a failing test that shares a model's name is not the model's failure", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await writeRunArtifact("stg_orders")
+    await writeRunResults([
+      { id: "test.t.stg_orders", status: "fail" },
+      { id: "model.t.stg_orders", status: "success" },
+    ])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.details!["failed_in_scope"]).toEqual([])
+    expect(r.details!["failed_out_of_scope"]).toBe(1)
+  })
+
+  test("a versioned model is matched under its file spelling", async () => {
+    await makeProject()
+    await writeModel("dim_accounts_v2")
+    await writeRunResults([{ id: "model.t.dim_accounts.v2", status: "success" }])
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["not_built"]).toEqual([])
+  })
+
+  test("a run_results.json with no results array is not build evidence", async () => {
+    await makeProject()
+    await writeModel("stg_orders")
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "target", "run_results.json"),
+      JSON.stringify({ metadata: { dbt_schema_version: "v5" } }),
+    )
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["verdict"]).toBe("no-fresh-build")
   })
 })
 // altimate_change end

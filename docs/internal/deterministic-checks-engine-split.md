@@ -35,7 +35,7 @@ Relevant because it sets the cost of "add something engine-side".
   transpile.
 - Published as the npm package `@altimateai/altimate-core` (per-platform native addon).
   altimate-code pins it exactly: `packages/opencode/package.json` → `"@altimateai/altimate-core": "0.7.0"`.
-- Consumer binding: `packages/opencode/src/altimate/native/altimate-core.ts` registers ~34
+- Consumer binding: `packages/opencode/src/altimate/native/altimate-core.ts` registers 42
   `altimate_core.*` handlers on the dispatcher. Registration is lazy — the napi binary loads
   on the first `Dispatcher.call()` (`packages/opencode/src/altimate/native/index.ts`), so a
   validator importing `Dispatcher` costs nothing until it actually calls.
@@ -160,10 +160,17 @@ the existing rules:
    normalising predicates structurally rather than textually so that reordered or
    differently-spelled equivalents do not produce noise.
 
-Then: a napi export in `crates/altimate-core-node/src/review.rs` (or a new lint code in
-`safety.rs::lint` if it is expressed as a rule — a rule is the cheaper path, since `lint`
-is already plumbed all the way through to the agent and to `altimate_core.check`), a
-dispatcher entry in `altimate-core.ts`, and a validator consuming it.
+Then, one of two wiring paths — they are not the same amount of work:
+
+- **As a lint rule (cheaper, preferred).** Add the code in `safety.rs::lint` and consume
+  the existing `altimate_core.lint` handler. No napi export and no dispatcher key are
+  needed: `altimate-core.ts` already exposes lint results end to end, to the agent and to
+  `altimate_core.check`.
+- **As a bespoke analysis API.** Only this path needs a new napi export in
+  `crates/altimate-core-node/src/review.rs` plus a dispatcher entry in `altimate-core.ts`.
+  Choose it only if the finding needs a richer result shape than a lint code carries.
+
+Either way, a validator consumes the result.
 
 **Why this cannot live in the validator lane.** Step 1 needs the projection's expression
 tree; step 2 needs parsed boolean predicates; step 3 needs column attribution through CTEs

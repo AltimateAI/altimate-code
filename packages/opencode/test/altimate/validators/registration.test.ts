@@ -59,7 +59,12 @@ describe("registerAltimateValidators", () => {
       step: 1,
       retryCount: 0,
     })
-    expect(results.filter((r) => !r.result.ok)).toEqual([])
+    // `runAll` records an entry only for validators whose `appliesTo` returned
+    // true, and it converts a thrown check into a soft pass. Asserting "no
+    // failures" would therefore also hold for a validator that wrongly ran and
+    // happened to pass — which is the regression this test exists to catch.
+    // The contract is that nothing runs at all outside a dbt project.
+    expect(results).toEqual([])
   })
 })
 // altimate_change end

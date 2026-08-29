@@ -21,9 +21,13 @@
  * Grep-level by design. The function list is curated for precision rather
  * than coverage: only functions whose availability genuinely differs across
  * the warehouses this product targets, matched with a call-shaped pattern so
- * a same-named column cannot trigger them. A project macro that happens to
- * share a name with a listed function is the known residual false positive,
- * which is why the message is advisory and names the guard to add.
+ * a same-named column cannot trigger them.
+ *
+ * Before matching, the model text is reduced to what the warehouse actually
+ * executes: comments removed, string-literal bodies masked, `target.type`
+ * blocks blanked by nesting depth rather than to the first `{% endif %}`, and
+ * `{{ … }}` expressions masked so a project macro sharing a name with a
+ * warehouse builtin is not mistaken for one.
  */
 
 import { promises as fs } from "fs"
@@ -34,6 +38,9 @@ import {
   modelsModifiedSince,
   modelNameFromPath,
   stripSqlComments,
+  maskSqlStringLiterals,
+  maskJinjaExpressions,
+  stripJinjaIfBlocks,
 } from "./validator-utils"
 
 /** Env flag that forces the lint on for a project with no guards yet. */
@@ -59,7 +66,9 @@ const DIALECT_FUNCTIONS: DialectFunction[] = [
   { name: "zeroifnull()", dialects: "Snowflake", pattern: /\bzeroifnull\s*\(/gi },
   { name: "div0()", dialects: "Snowflake", pattern: /\bdiv0\s*\(/gi },
   { name: "nvl2()", dialects: "Snowflake / Redshift", pattern: /\bnvl2\s*\(/gi },
-  { name: "try_to_number()", dialects: "Snowflake", pattern: /\btry_to_(?:number|date|timestamp)\s*\(/gi },
+  { name: "try_to_number()", dialects: "Snowflake", pattern: /\btry_to_number\s*\(/gi },
+  { name: "try_to_date()", dialects: "Snowflake", pattern: /\btry_to_date\s*\(/gi },
+  { name: "try_to_timestamp()", dialects: "Snowflake", pattern: /\btry_to_timestamp\s*\(/gi },
   { name: "object_construct()", dialects: "Snowflake", pattern: /\bobject_construct\s*\(/gi },
   { name: "parse_json()", dialects: "Snowflake", pattern: /\bparse_json\s*\(/gi },
   { name: "to_varchar()", dialects: "Snowflake", pattern: /\bto_varchar\s*\(/gi },
@@ -71,15 +80,24 @@ const DIALECT_FUNCTIONS: DialectFunction[] = [
   { name: "_TABLE_SUFFIX", dialects: "BigQuery", pattern: /\b_table_suffix\b/gi },
   { name: "read_csv_auto()", dialects: "DuckDB", pattern: /\bread_csv_auto\s*\(/gi },
   { name: "read_parquet()", dialects: "DuckDB", pattern: /\bread_parquet\s*\(/gi },
-  { name: "list_transform()", dialects: "DuckDB", pattern: /\blist_(?:transform|aggregate|value)\s*\(/gi },
+  { name: "list_transform()", dialects: "DuckDB", pattern: /\blist_transform\s*\(/gi },
+  { name: "list_aggregate()", dialects: "DuckDB", pattern: /\blist_aggregate\s*\(/gi },
+  { name: "list_value()", dialects: "DuckDB", pattern: /\blist_value\s*\(/gi },
   { name: "epoch_ms()", dialects: "DuckDB", pattern: /\bepoch_ms\s*\(/gi },
   { name: "getdate()", dialects: "Redshift / SQL Server", pattern: /\bgetdate\s*\(/gi },
 ]
 
-/** A Jinja `if` whose condition mentions `target.type`, through its `endif`. */
-const TARGET_TYPE_GUARD_RE = /\{%-?\s*if\b[^%]*target\.type[\s\S]*?\{%-?\s*endif\s*-?%\}/gi
-/** Bare mention of the guard variable, used as the project-convention probe. */
-const TARGET_TYPE_RE = /target\.type/i
+/** Condition of a Jinja `if` that branches on the warehouse. */
+const TARGET_TYPE_CONDITION_RE = /target\.type/i
+/**
+ * A real `{% if … target.type … %}` guard — the project-convention probe.
+ *
+ * A bare mention of `target.type` is not enough: it also matches the words
+ * inside a comment or a string, which would switch this lint on for a
+ * single-warehouse project that never established the convention and start
+ * rejecting its perfectly correct `iff()` calls.
+ */
+const TARGET_TYPE_GUARD_PROBE_RE = /\{%-?\s*if\b[^%]*target\.type/i
 
 /** Depth limit mirroring the other project scans in this lane. */
 const SCAN_MAX_DEPTH = 8
@@ -120,7 +138,8 @@ async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
         if (await scan(full, depth + 1)) return true
       } else if (stat.isFile() && entry.name.toLowerCase().endsWith(".sql")) {
         try {
-          if (TARGET_TYPE_RE.test(await fs.readFile(full, "utf8"))) return true
+          const text = stripSqlComments(await fs.readFile(full, "utf8"))
+          if (TARGET_TYPE_GUARD_PROBE_RE.test(text)) return true
         } catch {
           // unreadable — keep scanning
         }
@@ -134,9 +153,28 @@ async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
   return false
 }
 
-/** Blank out every `target.type`-guarded Jinja block. */
+/**
+ * Blank out every `target.type`-guarded Jinja block, matching `{% if %}` to
+ * its own `{% endif %}` by nesting depth.
+ *
+ * A non-greedy regex ends the block at the *first* `{% endif %}`, so a guard
+ * containing an inner `{% if %}` — ordinary dbt — leaves its still-guarded
+ * remainder exposed and reports correctly-guarded SQL as unguarded.
+ */
 function stripGuardedBlocks(sql: string): string {
-  return sql.replace(TARGET_TYPE_GUARD_RE, (m) => " ".repeat(m.length))
+  return stripJinjaIfBlocks(sql, TARGET_TYPE_CONDITION_RE)
+}
+
+/**
+ * The text of a model that the warehouse will actually execute as raw SQL:
+ * comments removed, string-literal bodies masked (`select 'listagg(' as x` is
+ * a value, not a call), `target.type`-guarded blocks blanked, and Jinja
+ * expressions masked — `{{ safe_cast(a, b) }}` is a project or dbt-dispatched
+ * macro call, which is the portable spelling this lint asks for rather than
+ * the defect it looks for.
+ */
+function executableSql(raw: string): string {
+  return maskJinjaExpressions(stripGuardedBlocks(maskSqlStringLiterals(stripSqlComments(raw))))
 }
 
 export const DbtDialectGuardValidator: Validator = {
@@ -170,7 +208,7 @@ export const DbtDialectGuardValidator: Validator = {
       } catch {
         continue
       }
-      const sql = stripGuardedBlocks(stripSqlComments(raw))
+      const sql = executableSql(raw)
       const model = modelNameFromPath(path)
       for (const fn of DIALECT_FUNCTIONS) {
         fn.pattern.lastIndex = 0

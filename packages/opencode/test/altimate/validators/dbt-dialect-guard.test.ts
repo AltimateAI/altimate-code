@@ -169,4 +169,89 @@ describe("DbtDialectGuardValidator — check", () => {
     expect((r.details!["findings"] as unknown[]).length).toBe(2)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Regression tests for false positives observed against real dbt projects.
+// Each is ordinary dbt practice, and each blocked a session before these fixes.
+// ---------------------------------------------------------------------------
+
+describe("DbtDialectGuardValidator — known-good states must not fire", () => {
+  test("a nested {% if %} inside a target.type guard does not end the guard early", async () => {
+    await makeProject()
+    await addProjectGuardConvention()
+    await writeModel(
+      "nested_guard",
+      [
+        "{% if target.type == 'snowflake' %}",
+        "  {% if var('wide', false) %}",
+        "  select 1 as narrow",
+        "  {% endif %}",
+        "  select listagg(name, ',') as names from {{ ref('x') }}",
+        "{% else %}",
+        "  select string_agg(name, ',') as names from {{ ref('x') }}",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtDialectGuardValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["findings"]).toEqual([])
+  })
+
+  test("a dialect function name inside a string literal is a value, not a call", async () => {
+    await makeProject()
+    await addProjectGuardConvention()
+    await writeModel("literal_only", "select 'listagg(' as never_executed, 1 as id")
+    const r = await DbtDialectGuardValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["findings"]).toEqual([])
+  })
+
+  test("a project macro invoked through Jinja is not a warehouse builtin", async () => {
+    await makeProject()
+    await addProjectGuardConvention()
+    await writeModel("macro_call", "select {{ safe_cast('a', 'int') }} as v from {{ ref('x') }}")
+    const r = await DbtDialectGuardValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["findings"]).toEqual([])
+  })
+
+  test("a dialect function name in a comment is not a call", async () => {
+    await makeProject()
+    await addProjectGuardConvention()
+    await writeModel("commented", "-- we used to call listagg(name, ',') here\nselect 1 as id")
+    const r = await DbtDialectGuardValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+})
+
+describe("DbtDialectGuardValidator — activation needs a real guard", () => {
+  test("a bare `target.type` mention in a comment does not establish the convention", async () => {
+    await makeProject()
+    await fs.mkdir(join(dir, "macros"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "macros", "notes.sql"),
+      "-- one day we should branch on target.type here\n{% macro noop() %}{% endmacro %}",
+    )
+    expect(await DbtDialectGuardValidator.appliesTo(ctx())).toBe(false)
+  })
+
+  test("an actual `{% if target.type %}` guard does establish it", async () => {
+    await makeProject()
+    await addProjectGuardConvention()
+    expect(await DbtDialectGuardValidator.appliesTo(ctx())).toBe(true)
+  })
+})
+
+describe("DbtDialectGuardValidator — reported construct names", () => {
+  test("names the construct that actually matched, not its alternation head", async () => {
+    await makeProject()
+    await addProjectGuardConvention()
+    await writeModel("t", "select try_to_date(x) as d from {{ ref('y') }}")
+    const r = await DbtDialectGuardValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["findings"]).toEqual([
+      { model: "t", function: "try_to_date()", dialects: "Snowflake" },
+    ])
+  })
+})
 // altimate_change end

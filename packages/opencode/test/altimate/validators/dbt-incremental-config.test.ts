@@ -219,12 +219,143 @@ describe("DbtIncrementalConfigValidator — robustness", () => {
     expect(r.reason).toContain("b")
   })
 
-  test("tolerates an unreadable model file without throwing", async () => {
+  test("tolerates a directory named like a model without throwing", async () => {
     await makeProject()
     await writeModel("ok_model", "{{ config(materialized='table') }} select 1 as id")
     await fs.mkdir(join(dir, "models", "weird.sql"))
     const r = await DbtIncrementalConfigValidator.check(ctx())
     expect(r.ok).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Known-good states: ordinary incremental models this lint must stay quiet on.
+// ---------------------------------------------------------------------------
+
+describe("DbtIncrementalConfigValidator — known-good states must not fire", () => {
+  test("a column named `random` in the predicate is not a random() call", async () => {
+    await makeProject()
+    await writeModel(
+      "events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select * from {{ ref('src') }}",
+        "{% if is_incremental() %}",
+        "  where random < 0.5 and now_flag = 1",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+
+  test("a clock in the full-refresh `{% else %}` arm is not the incremental predicate", async () => {
+    await makeProject()
+    await writeModel(
+      "events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select * from {{ ref('src') }}",
+        "{% if is_incremental() %}",
+        "  where loaded_at > (select max(loaded_at) from {{ this }})",
+        "{% else %}",
+        "  where loaded_at > current_date - 30",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+
+  test("a clock projected inside the guard is advisory, not a predicate finding", async () => {
+    await makeProject()
+    await writeModel(
+      "events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select id",
+        "{% if is_incremental() %}",
+        "  , current_timestamp as loaded_at",
+        "{% endif %}",
+        "from {{ ref('src') }}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+
+  test("a literal `'now'` in a projected string is not a clock call", async () => {
+    await makeProject()
+    await writeModel(
+      "events",
+      [
+        "{{ config(materialized='incremental') }}",
+        "select id, 'now' as label from {{ ref('src') }}",
+        "{% if is_incremental() %}",
+        "  where id > (select max(id) from {{ this }})",
+        "{% endif %}",
+      ].join("\n"),
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["advisories"]).toEqual([])
+  })
+
+  test("a `unique_key` inherited from dbt_project.yml suppresses the keyless finding", async () => {
+    await makeProject()
+    await fs.writeFile(
+      join(dir, "dbt_project.yml"),
+      "name: t\nversion: '1.0'\nconfig-version: 2\nprofile: t\nmodels:\n  t:\n    +unique_key: id\n",
+    )
+    await writeModel(
+      "events",
+      "{{ config(materialized='incremental', incremental_strategy='merge') }} select 1 as id",
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["project_unique_key"]).toBe(true)
+  })
+
+  test("a keyed upsert re-runs idempotently, so no guard is demanded of it", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Re-runs must be idempotent.")
+    await writeModel(
+      "events",
+      "{{ config(materialized='incremental', incremental_strategy='merge', unique_key='id') }} select 1 as id",
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+  })
+
+  test("a task that disclaims idempotency does not switch the guard check on", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Idempotency is not required for this backfill.")
+    await writeModel("events", "{{ config(materialized='incremental') }} select 1 as id")
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(true)
+    expect(r.details!["idempotency_demanded"]).toBe(false)
+  })
+})
+
+describe("DbtIncrementalConfigValidator — contract wording", () => {
+  test("`idempotence` reads as a demand for repeatable re-runs", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Reruns must provide idempotence.")
+    await writeModel("events", "{{ config(materialized='incremental') }} select 1 as id")
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.details!["idempotency_demanded"]).toBe(true)
+  })
+
+  test("`unique_key=None` is a spelled assignment with no usable key", async () => {
+    await makeProject()
+    await writeModel(
+      "events",
+      "{{ config(materialized='incremental', incremental_strategy='merge', unique_key=None) }} select 1 as id",
+    )
+    const r = await DbtIncrementalConfigValidator.check(ctx())
+    expect(r.ok).toBe(false)
+    expect(r.reason).toContain("events")
   })
 })
 // altimate_change end

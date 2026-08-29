@@ -48,8 +48,27 @@ const OPT_IN_ENV = "ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS"
  * nothing whatsoever.
  */
 const AUTHORED_DIRS = ["models", "seeds", "snapshots", "data", "analyses", "macros", "tests"]
+/**
+ * Root-level project files whose edit is also real work. A session that only
+ * had to change `dbt_project.yml` or add a package produced something, and
+ * reporting it as having written nothing would be a false accusation.
+ */
+const AUTHORED_ROOT_FILES = [
+  "dbt_project.yml",
+  "packages.yml",
+  "dependencies.yml",
+  "selectors.yml",
+  "profiles.yml",
+]
 /** Depth limit mirroring the other project scans in this lane. */
 const SCAN_MAX_DEPTH = 8
+/**
+ * `unique_id` prefixes for nodes that materialise something. A `dbt test` run
+ * overwrites `run_results.json` with test rows only, and counting those as a
+ * build would let a session that produced no deliverable clear this gate —
+ * the exact end-state the validator exists to catch.
+ */
+const BUILDABLE_NODE_PREFIXES = ["model.", "seed.", "snapshot.", "operation."]
 
 /** Evidence that this session was expected to produce artifacts. */
 interface ArtifactExpectation {
@@ -113,6 +132,14 @@ async function anyAuthoredFileSince(dbtRoot: string, sinceMs: number): Promise<b
   for (const dir of AUTHORED_DIRS) {
     if (await scan(join(dbtRoot, dir), 0)) return true
   }
+  for (const name of AUTHORED_ROOT_FILES) {
+    try {
+      const stat = await fs.stat(join(dbtRoot, name))
+      if (stat.isFile() && stat.mtimeMs >= sinceMs) return true
+    } catch {
+      // absent — keep looking
+    }
+  }
   return false
 }
 
@@ -146,7 +173,11 @@ export const DbtNothingBuiltValidator: Validator = {
     const freshRun =
       runResults !== null &&
       runResults.mtimeMs >= ctx.sessionStartMs &&
-      runResults.results.some((r) => !isFailedRunStatus(r.status))
+      runResults.results.some(
+        (r) =>
+          BUILDABLE_NODE_PREFIXES.some((prefix) => r.uniqueId.startsWith(prefix)) &&
+          !isFailedRunStatus(r.status),
+      )
 
     const details = {
       expectation: expectation.kind,

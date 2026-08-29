@@ -461,14 +461,32 @@ const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]{2,}$/
 const FILE_PATH_RE = /^[A-Za-z0-9_./-]+\.(?:sql|ya?ml|csv)$/i
 /** Inline code spans — the only place a name is accepted from. */
 const CODE_SPAN_RE = /`([^`\n]+)`/g
-/** Verb that makes a line a requirement rather than background prose. */
+/**
+ * Verb that makes a line a requirement rather than background prose.
+ *
+ * Creation verbs plus the modification verbs that carry the same obligation —
+ * "Add the missing `stg_teams.sql`" states a deliverable exactly as
+ * "Implement the missing …" does. The modification verbs are spelled with
+ * explicit inflections rather than a `\w*` tail so that `add` cannot match
+ * `address` and `fix` cannot match `fixture`.
+ */
 const REQUIREMENT_VERB_RE =
-  /\b(?:creat|build|produc|implement|deliver|materiali[sz]|generat|writ|deploy)\w*\b/i
+  /\b(?:(?:creat|build|produc|implement|deliver|materiali[sz]|generat|writ|deploy)\w*|add(?:s|ed|ing)?|renam(?:e|es|ed|ing)|convert(?:s|ed|ing)?|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?)\b/i
 /** Noun that makes the requirement about a data artifact. */
 const DELIVERABLE_NOUN_RE =
   /\b(?:model|models|table|tables|view|views|seed|seeds|snapshot|snapshots|mart|marts|file|files)\b/i
-/** Heading that opens an explicit deliverables list. */
-const DELIVERABLES_HEADING_RE = /^\s{0,3}#{1,6}\s*(?:required|deliverab|expected output)/i
+/**
+ * Heading that opens an explicit deliverables list.
+ *
+ * Bounded on purpose. An unbounded `required` prefix also matches
+ * `## Required columns`, whose code spans are column names — turning every one
+ * of them into a required model and failing a session that never promised
+ * those relations. A heading qualifies only when it is about deliverables:
+ * bare "Required", "Required models/files/…", "Deliverables", or
+ * "Expected output".
+ */
+const DELIVERABLES_HEADING_RE =
+  /^\s{0,3}#{1,6}\s*(?:deliverab\w*|expected\s+outputs?|required(?:\s+(?:deliverab\w*|models?|files?|outputs?|artifacts?|tables?|views?|seeds?|snapshots?))?)\s*:?\s*$/i
 /** Any other heading closes it. */
 const ANY_HEADING_RE = /^\s{0,3}#{1,6}\s/
 /** Machine-readable declaration block. */
@@ -531,13 +549,33 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   for (const line of lines) {
     if (!REQUIREMENT_VERB_RE.test(line)) continue
     if (!DELIVERABLE_NOUN_RE.test(line)) continue
-    proseTokens.push(...inlineCodeSpans(line))
+    proseTokens.push(...inlineCodeSpans(requirementHead(line)))
   }
   const prose = collectDeliverableTokens(proseTokens)
   if (prose.models.length > 0 || prose.files.length > 0) {
     return { ...prose, source: "requirement-lines" }
   }
   return null
+}
+
+/**
+ * Word that stops naming the deliverable and starts describing it. Everything
+ * after it is an attribute, not another artifact: in "Create the model
+ * `fct_orders` with unique key `order_id`", `order_id` is a column, and
+ * requiring a *model* by that name blocks a correct implementation forever.
+ */
+const REQUIREMENT_QUALIFIER_RE =
+  /\b(?:with|using|keyed|partitioned|clustered|containing|including|whose|grain(?:ed)?\s+(?:on|by)|based\s+on)\b/i
+
+/**
+ * The part of a requirement line that still names artifacts — everything up to
+ * the first qualifier word. Lines that list several deliverables
+ * ("Build `stg_a` and `stg_b`") keep all of them; lines that name one and then
+ * describe it keep only the name.
+ */
+function requirementHead(line: string): string {
+  const m = REQUIREMENT_QUALIFIER_RE.exec(line)
+  return m ? line.slice(0, m.index) : line
 }
 
 /** Pull the contents of every inline code span on a line. */
@@ -561,14 +599,23 @@ function collectDeliverableTokens(tokens: string[]): { models: string[]; files: 
     if (token.includes("/") && FILE_PATH_RE.test(token)) {
       if (!files.includes(token)) files.push(token)
       // A required `models/marts/orders.sql` also requires the model `orders`.
-      const bare = modelNameFromPath(token).toLowerCase()
-      if (IDENTIFIER_RE.test(bare) && !DELIVERABLE_STOPWORDS.has(bare) && !models.includes(bare)) {
-        models.push(bare)
+      // A required `models/schema.yml` requires a file and no relation, so no
+      // model name is derived from it.
+      if (/\.(?:sql|csv)$/i.test(token)) {
+        const bare = modelNameFromPath(token).toLowerCase()
+        if (IDENTIFIER_RE.test(bare) && !DELIVERABLE_STOPWORDS.has(bare) && !models.includes(bare)) {
+          models.push(bare)
+        }
       }
       continue
     }
+    // A bare `properties.yml` names a YAML file, and no relation. Recording
+    // `properties` as a required *model* would block a session that created
+    // exactly the file the task asked for; and with no directory there is
+    // nothing to check its existence against, so it is dropped entirely.
+    if (/\.ya?ml$/i.test(token)) continue
     // A bare `orders.sql` names a model without pinning its directory.
-    const withoutExt = token.toLowerCase().replace(/\.(?:sql|ya?ml|csv)$/i, "")
+    const withoutExt = token.toLowerCase().replace(/\.(?:sql|csv)$/i, "")
     if (!IDENTIFIER_RE.test(withoutExt)) continue
     if (DELIVERABLE_STOPWORDS.has(withoutExt)) continue
     if (!models.includes(withoutExt)) models.push(withoutExt)
@@ -608,6 +655,13 @@ export interface RunResultNode {
   uniqueId: string
   /** Bare node name, lowercased (`orders`). */
   name: string
+  /**
+   * Version suffix for a dbt versioned model (`model.pkg.dim_accounts.v2` →
+   * `v2`), else null. The name of such a node is `dim_accounts`, while the
+   * file that defines it is typically `dim_accounts_v2.sql`, so a caller
+   * matching files against results has to try both spellings.
+   */
+  version: string | null
   /** dbt status string, lowercased (`success`, `error`, `skipped`, …). */
   status: string
   /** dbt's message for the node, when present. */
@@ -642,7 +696,11 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
     const parsed = JSON.parse(raw) as { results?: unknown }
-    const rows = Array.isArray(parsed.results) ? parsed.results : []
+    // A file that parses but carries no `results` array is not a run artifact.
+    // Returning an empty one would read as "a build happened and recorded
+    // nothing", which lets an unbuilt model through; null means "no evidence".
+    if (!Array.isArray(parsed.results)) return null
+    const rows = parsed.results
     const results: RunResultNode[] = []
     for (const row of rows) {
       if (typeof row !== "object" || row === null) continue
@@ -650,9 +708,12 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
       const uniqueId = typeof r["unique_id"] === "string" ? r["unique_id"] : ""
       if (!uniqueId) continue
       const parts = uniqueId.split(".")
+      const last = (parts[parts.length - 1] ?? "").toLowerCase()
+      const versioned = parts.length > 3 && /^v\d+$/.test(last)
       results.push({
         uniqueId,
-        name: (parts[parts.length - 1] ?? "").toLowerCase(),
+        name: versioned ? (parts[parts.length - 2] ?? "").toLowerCase() : last,
+        version: versioned ? last : null,
         status: typeof r["status"] === "string" ? r["status"].toLowerCase() : "",
         message: typeof r["message"] === "string" ? r["message"] : null,
       })
@@ -661,6 +722,119 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
   } catch {
     return null
   }
+}
+
+/**
+ * Model names for which dbt legitimately writes **no** `run_results` row, so
+ * their absence from a build artifact is not evidence that they were not
+ * built:
+ *
+ *   - `materialized='ephemeral'` — compiled into its consumers, never a node
+ *     of its own in the run;
+ *   - `enabled=false` — removed from the graph entirely, which is what
+ *     retiring a model looks like.
+ *
+ * Read from `manifest.json` (`nodes` for materialization, `disabled` for the
+ * second) when one exists. Callers should also inspect the model source,
+ * because a session that has just written `enabled=false` will not have a
+ * manifest that reflects it until the next parse.
+ */
+export async function collectRunResultExemptModels(dbtRoot: string): Promise<Set<string>> {
+  const out = new Set<string>()
+  try {
+    const targetPath = await resolveDbtTargetPath(dbtRoot)
+    const raw = await fs.readFile(join(targetPath, "manifest.json"), "utf8")
+    const manifest = JSON.parse(raw) as {
+      nodes?: Record<string, unknown>
+      disabled?: Record<string, unknown>
+    }
+    for (const node of Object.values(manifest.nodes ?? {})) {
+      if (typeof node !== "object" || node === null) continue
+      const n = node as Record<string, unknown>
+      const name = typeof n["name"] === "string" ? n["name"].toLowerCase() : ""
+      if (!name) continue
+      const config = (n["config"] ?? {}) as Record<string, unknown>
+      if (String(config["materialized"] ?? "").toLowerCase() === "ephemeral") out.add(name)
+      if (config["enabled"] === false) out.add(name)
+    }
+    for (const entry of Object.values(manifest.disabled ?? {})) {
+      const rows = Array.isArray(entry) ? entry : [entry]
+      for (const node of rows) {
+        if (typeof node !== "object" || node === null) continue
+        const name = (node as Record<string, unknown>)["name"]
+        if (typeof name === "string" && name.length > 0) out.add(name.toLowerCase())
+      }
+    }
+  } catch {
+    // No manifest, or an unreadable one — the source-level check stands alone.
+  }
+  return out
+}
+
+/** `materialized='ephemeral'` in an in-model `config()` call. */
+const EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"]ephemeral['"]/i
+/** `enabled=false` in an in-model `config()` call. */
+const DISABLED_CONFIG_RE = /\benabled\s*=\s*(?:false|False|0)\b/
+
+/**
+ * True when a model's own source declares it ephemeral or disabled — the two
+ * states for which dbt writes no `run_results` row. Source-level so it is
+ * correct for a model the session has just edited, before any re-parse.
+ */
+export function sourceExemptsFromRunResults(sql: string): boolean {
+  const stripped = stripSqlComments(sql)
+  return EPHEMERAL_CONFIG_RE.test(stripped) || DISABLED_CONFIG_RE.test(stripped)
+}
+
+/**
+ * Model names dbt actually executed during this session, read from the DDL it
+ * writes under `<target>/run/`.
+ *
+ * This exists because `run_results.json` is a single file that every dbt
+ * command overwrites: an agent that runs `dbt build` and then `dbt test`
+ * leaves an artifact containing test nodes only, and a coverage assertion
+ * keyed solely on it silently checks nothing. `dbt test` does not write model
+ * DDL, so a fresh file here is build evidence a later test run cannot erase.
+ *
+ * Ephemeral models never appear (they are compiled into their consumers, not
+ * executed), which is why they are exempted separately.
+ */
+export async function collectExecutedModelNames(
+  dbtRoot: string,
+  sinceMs: number,
+): Promise<Set<string>> {
+  /** Depth limit mirroring the other project scans in this lane. */
+  const maxDepth = 8
+  const names = new Set<string>()
+  const targetPath = await resolveDbtTargetPath(dbtRoot)
+  async function scan(dir: string, depth: number): Promise<void> {
+    if (depth > maxDepth) return
+    let entries: import("fs").Dirent[]
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        await scan(full, depth + 1)
+        continue
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".sql")) continue
+      try {
+        const stat = await fs.stat(full)
+        if (stat.mtimeMs >= sinceMs) {
+          names.add(entry.name.slice(0, entry.name.length - 4).toLowerCase())
+        }
+      } catch {
+        // unstattable — ignore
+      }
+    }
+  }
+  await scan(join(targetPath, "run"), 0)
+  return names
 }
 
 // ---------------------------------------------------------------------------
@@ -744,14 +918,165 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
 // ---------------------------------------------------------------------------
 
 /**
+ * Single left-to-right scan that classifies every character of a SQL/Jinja
+ * document as code, comment, or string-literal body, blanking whichever
+ * regions the caller asked for.
+ *
+ * A regex chain cannot do this correctly: `where note = 'a--b'` makes a
+ * line-comment pattern swallow the rest of the line, and
+ * `select 'safe_cast('` makes a call-shaped function pattern match text the
+ * warehouse never executes. The first produces silent misses, the second produces blocking
+ * false positives, so both consumers of this module need a lexer rather than
+ * a pattern.
+ *
+ * Blanked regions are replaced with spaces of equal length (newlines kept) so
+ * downstream line and character offsets stay meaningful.
+ */
+function scrubSql(sql: string, opts: { comments: boolean; literals: boolean }): string {
+  const out = sql.split("")
+  const blank = (from: number, to: number) => {
+    for (let i = from; i < to && i < out.length; i++) {
+      if (out[i] !== "\n" && out[i] !== "\r") out[i] = " "
+    }
+  }
+  let i = 0
+  const n = sql.length
+  while (i < n) {
+    const c = sql[i]
+    const next = sql[i + 1]
+    // Line comment.
+    if (c === "-" && next === "-") {
+      let j = i
+      while (j < n && sql[j] !== "\n") j++
+      if (opts.comments) blank(i, j)
+      i = j
+      continue
+    }
+    // Block comment. SQL block comments do not nest in the dialects we target.
+    if (c === "/" && next === "*") {
+      const end = sql.indexOf("*/", i + 2)
+      const j = end === -1 ? n : end + 2
+      if (opts.comments) blank(i, j)
+      i = j
+      continue
+    }
+    // Jinja comment.
+    if (c === "{" && next === "#") {
+      const end = sql.indexOf("#}", i + 2)
+      const j = end === -1 ? n : end + 2
+      if (opts.comments) blank(i, j)
+      i = j
+      continue
+    }
+    // String literal. `''` and `\'` both escape a quote; dollar quoting is not
+    // handled because dbt models do not use it.
+    if (c === "'" || c === '"') {
+      let j = i + 1
+      while (j < n) {
+        if (sql[j] === "\\") {
+          j += 2
+          continue
+        }
+        if (sql[j] === c) {
+          if (sql[j + 1] === c) {
+            j += 2
+            continue
+          }
+          j++
+          break
+        }
+        j++
+      }
+      // Blank the body only, so the quotes still delimit a literal for any
+      // caller that cares where one was.
+      if (opts.literals) blank(i + 1, Math.min(j, n) - 1)
+      i = j
+      continue
+    }
+    i++
+  }
+  return out.join("")
+}
+
+/**
  * Blank out SQL and Jinja comments so a lint regex cannot match text the
- * warehouse never sees. Comment bodies are replaced with spaces of equal
- * length so downstream character offsets stay meaningful.
+ * warehouse never sees. Quote-aware: a `--` or `/*` inside a string literal is
+ * data, not a comment, and is left alone.
  */
 export function stripSqlComments(sql: string): string {
-  return sql
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => " ".repeat(m.length))
-    .replace(/--[^\n]*/g, (m) => " ".repeat(m.length))
-    .replace(/\{#[\s\S]*?#\}/g, (m) => " ".repeat(m.length))
+  return scrubSql(sql, { comments: true, literals: false })
+}
+
+/**
+ * Blank out the body of every string literal so a call-shaped pattern cannot
+ * match text that is a value rather than an executed call
+ * (`select 'safe_cast(' as example`). Applied by the lint validators before
+ * pattern matching; the quotes themselves are preserved.
+ */
+export function maskSqlStringLiterals(sql: string): string {
+  return scrubSql(sql, { comments: false, literals: true })
+}
+
+/**
+ * Blank out the body of every Jinja expression (`{{ … }}`). A project macro is
+ * invoked as `{{ safe_cast(a, b) }}` while a warehouse builtin is raw SQL, so
+ * masking expressions is what separates "the author called our macro" from
+ * "the author wrote warehouse-specific SQL".
+ */
+export function maskJinjaExpressions(sql: string): string {
+  return sql.replace(/\{\{[\s\S]*?\}\}/g, (m) =>
+    m.replace(/[^\n\r]/g, " "),
+  )
+}
+
+/**
+ * Find the Jinja `{% if %}` block that starts at `openStart` and return the
+ * index just past its matching `{% endif %}`, counting nested `if` blocks.
+ *
+ * A non-greedy regex stops at the first `{% endif %}`, which for a guard that
+ * contains a nested `{% if %}` ends the block early and leaves genuinely
+ * guarded SQL exposed to the lint. Returns the end of the input when the block
+ * is unterminated.
+ */
+function jinjaBlockEnd(sql: string, openStart: number): number {
+  const tag = /\{%-?\s*(if|endif)\b/gi
+  tag.lastIndex = openStart
+  let depth = 0
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(sql)) !== null) {
+    if (m[1]?.toLowerCase() === "if") {
+      depth++
+      continue
+    }
+    depth--
+    if (depth <= 0) {
+      const close = sql.indexOf("%}", m.index)
+      return close === -1 ? sql.length : close + 2
+    }
+  }
+  return sql.length
+}
+
+/**
+ * Blank every Jinja `{% if %}` block whose condition matches `conditionRe`,
+ * through its *matching* `{% endif %}` rather than the first one.
+ */
+export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
+  const opener = /\{%-?\s*if\b[^%]*%\}/gi
+  let out = sql
+  let searchFrom = 0
+  for (;;) {
+    opener.lastIndex = searchFrom
+    const m = opener.exec(out)
+    if (!m) return out
+    if (!conditionRe.test(m[0])) {
+      searchFrom = m.index + m[0].length
+      continue
+    }
+    const end = jinjaBlockEnd(out, m.index)
+    const region = out.slice(m.index, end)
+    out = out.slice(0, m.index) + region.replace(/[^\n\r]/g, " ") + out.slice(end)
+    searchFrom = end
+  }
 }
 // altimate_change end
