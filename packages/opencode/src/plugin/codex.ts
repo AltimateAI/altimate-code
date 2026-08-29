@@ -16,33 +16,52 @@ const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
 
-/** Non-codex ChatGPT-subscription (OAuth) allowlist. Any modelId
- * containing "codex" is auto-allowed by ``shouldAllowOAuthModel`` below,
- * so this set only enumerates the plain non-codex main/mini variants
- * OpenAI exposes on Codex-tier accounts. Bump whenever a new gpt-5.N
- * is generally available on the subscription. Exported for unit-test
- * coverage — see test/plugin/codex-allowlist.test.ts. */
+/** Exact set of model ids the ChatGPT-subscription (Codex) tier accepts.
+ *
+ * Every entry was verified against the live backend
+ * (POST https://chatgpt.com/backend-api/codex/responses) on a ChatGPT Pro
+ * credential: entries here returned HTTP 200, and every other gpt-5.x id in
+ * the models.dev catalog returned
+ * ``400 {"detail":"The '<id>' model is not supported when using Codex with a
+ * ChatGPT account."}``.
+ *
+ * Confirmed rejected, so deliberately absent: gpt-5, gpt-5.1, gpt-5.2,
+ * gpt-5.2-pro, gpt-5.3-chat-latest, gpt-5.3-codex, gpt-5.4-nano, gpt-5.4-pro,
+ * gpt-5.5-pro, gpt-5.6.
+ *
+ * There is no derivable rule here — the tier accepts ``gpt-5.3-codex-spark``
+ * but rejects ``gpt-5.3-codex``, and accepts the gpt-5.6 sol/luna/terra
+ * variants but rejects plain ``gpt-5.6``. So this is an exact-match list by
+ * necessity, not by preference. Only add an id after confirming a 200 from the
+ * endpoint above on a subscription credential; guessing puts a model in the
+ * picker that then fails at request time.
+ *
+ * Exported for unit-test coverage — see test/plugin/codex-allowlist.test.ts. */
 export const OAUTH_ALLOWED_MODELS = new Set([
-  "gpt-5.2",
+  "gpt-5.3-codex-spark",
   "gpt-5.4",
   "gpt-5.4-mini",
   "gpt-5.5",
-  "gpt-5.6",
+  "gpt-5.6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
 ])
 
 /** OAuth (ChatGPT-subscription) model-filter policy for the ACTIVE plugin
- * (this file — wired via plugin/index.ts). A model is kept if either
- * (a) its id contains ``"codex"`` (all codex variants ship on the
- * subscription), or (b) its id is an exact member of
- * ``OAUTH_ALLOWED_MODELS`` (the curated non-codex releases).
+ * (this file — wired via plugin/index.ts). Exact membership in
+ * ``OAUTH_ALLOWED_MODELS`` — no substring heuristics.
  *
- * The sibling file plugin/openai/codex.ts (an in-progress refactor,
- * currently NOT wired) has its own separate filter with a
- * ``parseFloat(match[1]) > 5.4`` fallback. Adopting this helper is
- * followup work on that refactor — do NOT assume the two files share
- * this policy today. */
+ * This previously auto-allowed any id containing ``"codex"``, which admitted
+ * ``gpt-5.3-codex``. The backend rejects that id, so it reached the picker and
+ * then failed at request time with an HTTP 400. Substring matching cannot
+ * express the real policy (``gpt-5.3-codex-spark`` is accepted while
+ * ``gpt-5.3-codex`` is not), so the heuristic is gone.
+ *
+ * The sibling file plugin/openai/codex.ts (an in-progress refactor, currently
+ * NOT wired) has its own separate filter with a ``parseFloat(match[1]) > 5.4``
+ * fallback. Adopting this helper is followup work on that refactor — do NOT
+ * assume the two files share this policy today. */
 export function shouldAllowOAuthModel(modelId: string): boolean {
-  if (modelId.includes("codex")) return true
   return OAUTH_ALLOWED_MODELS.has(modelId)
 }
 
