@@ -31,7 +31,7 @@ import { join } from "path"
 import type { Validator, ValidatorContext, ValidatorResult } from "../../session/validators/types"
 import {
   findDbtProjectRoot,
-  findTaskInstructionFile,
+  findTaskInstructionFiles,
   extractRequiredDeliverables,
   readRunResults,
   isFailedRunStatus,
@@ -67,8 +67,14 @@ const SCAN_MAX_DEPTH = 8
  * overwrites `run_results.json` with test rows only, and counting those as a
  * build would let a session that produced no deliverable clear this gate —
  * the exact end-state the validator exists to catch.
+ *
+ * `operation.` is excluded for the same reason: an `on-run-end` hook or a
+ * `dbt run-operation` records a successful operation row while materialising
+ * nothing, so accepting it hands an otherwise-empty session a free pass. A
+ * `dbt run` that did build something records model rows too, so nothing
+ * legitimate depends on the operation row.
  */
-const BUILDABLE_NODE_PREFIXES = ["model.", "seed.", "snapshot.", "operation."]
+const BUILDABLE_NODE_PREFIXES = ["model.", "seed.", "snapshot."]
 
 /** Evidence that this session was expected to produce artifacts. */
 interface ArtifactExpectation {
@@ -88,8 +94,10 @@ async function artifactExpectation(
   cwd: string,
   dbtRoot: string,
 ): Promise<ArtifactExpectation | null> {
-  const task = await findTaskInstructionFile(cwd, dbtRoot)
-  if (task) {
+  // Keep looking past a task document that states no contract: an
+  // informational `TASK.md` sitting beside the `REQUIREMENTS.md` that carries
+  // the real obligations would otherwise mask it and skip this gate entirely.
+  for (const task of await findTaskInstructionFiles(cwd, dbtRoot)) {
     const required = extractRequiredDeliverables(task.content)
     if (required) return { kind: "task-file", taskFile: task.path, required }
   }

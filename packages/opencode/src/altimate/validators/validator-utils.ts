@@ -91,8 +91,10 @@ async function isProjectFile(path: string): Promise<boolean> {
  * Find dbt model `.sql` files under `cwd` that were modified since `sinceMs`.
  * Scans up to 8 directory levels deep (deep enough for typical dbt layouts
  * like `models/staging/sources/dl/raw/...`); skips hidden dirs, node_modules,
- * target. Only returns files under a `models/` ancestor (case-insensitive,
- * to tolerate case-insensitive volumes on macOS APFS / Windows NTFS).
+ * target, and the dbt package install directories (`dbt_packages`,
+ * `dbt_modules`) whose contents `dbt deps` rewrites wholesale. Only returns
+ * files under a `models/` ancestor (case-insensitive, to tolerate
+ * case-insensitive volumes on macOS APFS / Windows NTFS).
  */
 const MODELS_MAX_DEPTH = 8
 export async function modelsModifiedSince(cwd: string, sinceMs: number): Promise<string[]> {
@@ -109,7 +111,13 @@ export async function modelsModifiedSince(cwd: string, sinceMs: number): Promise
       if (
         entry.name.startsWith(".") ||
         entry.name === "node_modules" ||
-        entry.name === "target"
+        entry.name === "target" ||
+        // Installed dbt packages. `dbt deps` rewrites every file under here,
+        // so without this skip a plain `dbt deps` makes every dependency
+        // model look locally edited and the build gate demands a build for
+        // models the session never touched.
+        entry.name === "dbt_packages" ||
+        entry.name === "dbt_modules"
       )
         continue
       const full = join(dir, entry.name)
@@ -396,28 +404,91 @@ export async function findTaskInstructionFile(
   cwd: string,
   dbtRoot?: string | null,
 ): Promise<TaskInstructionFile | null> {
+  const all = await findTaskInstructionFiles(cwd, dbtRoot)
+  return all[0] ?? null
+}
+
+/**
+ * Every task/instruction document in the workspace, in the same precedence
+ * order `findTaskInstructionFile` uses.
+ *
+ * Callers that want a *contract* must use this and keep looking past a
+ * document that names no deliverables. A workspace commonly carries an
+ * informational `TASK.md` beside a `REQUIREMENTS.md` that states the actual
+ * obligations; stopping at the first readable file lets the informational one
+ * mask the real contract, and both contract-driven gates then skip a session
+ * that produced nothing.
+ *
+ * `ALTIMATE_VALIDATORS_TASK_FILE` keeps its override semantics: when it names
+ * a readable file, that file is the contract and nothing else is considered.
+ */
+export async function findTaskInstructionFiles(
+  cwd: string,
+  dbtRoot?: string | null,
+): Promise<TaskInstructionFile[]> {
   const explicit = process.env.ALTIMATE_VALIDATORS_TASK_FILE
+  if (explicit && explicit.trim().length > 0) {
+    const p = isAbsolutePath(explicit) ? explicit : join(cwd, explicit)
+    const found = await readTaskFile(p)
+    return found ? [found] : []
+  }
   const roots = [cwd, join(cwd, ".altimate")]
   if (dbtRoot && dbtRoot !== cwd) roots.push(dbtRoot)
   const paths: string[] = []
-  if (explicit && explicit.trim().length > 0) {
-    paths.push(isAbsolutePath(explicit) ? explicit : join(cwd, explicit))
-  }
   for (const root of roots) {
     for (const name of TASK_FILE_CANDIDATES) paths.push(join(root, name))
   }
+  const out: TaskInstructionFile[] = []
+  // Keyed case-insensitively: the candidate list carries both `TASK.md` and
+  // `task.md`, and on a case-insensitive volume (APFS, NTFS) those resolve to
+  // one file that would otherwise be reported twice.
+  const seen = new Set<string>()
   for (const p of paths) {
-    try {
-      const stat = await fs.stat(p)
-      if (!stat.isFile() || stat.size > TASK_FILE_MAX_BYTES) continue
-      const content = await fs.readFile(p, "utf8")
-      if (content.trim().length === 0) continue
-      return { path: p, content }
-    } catch {
-      // not present / unreadable — keep looking
-    }
+    const key = p.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const found = await readTaskFile(p)
+    if (found) out.push(found)
   }
-  return null
+  return out
+}
+
+/** Read one candidate task document, or null when it is absent/unusable. */
+async function readTaskFile(path: string): Promise<TaskInstructionFile | null> {
+  try {
+    const stat = await fs.stat(path)
+    if (!stat.isFile() || stat.size > TASK_FILE_MAX_BYTES) return null
+    const content = await fs.readFile(path, "utf8")
+    if (content.trim().length === 0) return null
+    return { path, content }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * `{{ env_var('NAME') }}` / `{{ env_var('NAME', 'default') }}` — the only
+ * Jinja form a project path is worth resolving, and the only one dbt users
+ * reach for in `target-path`.
+ */
+const ENV_VAR_EXPR_RE =
+  /^\{\{-?\s*env_var\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*(?:,\s*['"]([^'"]*)['"]\s*)?\)\s*-?\}\}$/
+
+/**
+ * Resolve a configured path that may be a Jinja expression.
+ *
+ * Returns the literal value when there is no Jinja, the resolved value for a
+ * whole-value `env_var()` expression, and null when the value contains Jinja
+ * this helper cannot render. Null means "unknown" — callers must fall back to
+ * dbt's default rather than treat the unrendered text as a directory name.
+ */
+function resolveJinjaPathValue(value: string): string | null {
+  if (!value.includes("{{") && !value.includes("{%")) return value
+  const m = ENV_VAR_EXPR_RE.exec(value)
+  if (!m || !m[1]) return null
+  const fromEnv = process.env[m[1]]
+  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv
+  return m[2] !== undefined && m[2].length > 0 ? m[2] : null
 }
 
 /** Absolute-path test that also accepts Windows drive-letter roots. */
@@ -547,8 +618,14 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   // Tier 3 — requirement lines in prose.
   const proseTokens: string[] = []
   for (const line of lines) {
-    if (!REQUIREMENT_VERB_RE.test(line)) continue
+    const verb = REQUIREMENT_VERB_RE.exec(line)
+    if (!verb) continue
     if (!DELIVERABLE_NOUN_RE.test(line)) continue
+    // "Do not create the model `legacy_orders`" carries a creation verb and an
+    // artifact noun, but names something that must NOT exist. Recording it as
+    // required makes the deliverable gate reject the correct implementation
+    // forever, so a negated verb disqualifies the whole line.
+    if (verbIsNegated(line, verb.index)) continue
     proseTokens.push(...inlineCodeSpans(requirementHead(line)))
   }
   const prose = collectDeliverableTokens(proseTokens)
@@ -576,6 +653,19 @@ const REQUIREMENT_QUALIFIER_RE =
 function requirementHead(line: string): string {
   const m = REQUIREMENT_QUALIFIER_RE.exec(line)
   return m ? line.slice(0, m.index) : line
+}
+
+/**
+ * Negation that turns a requirement verb into a prohibition, allowed to sit at
+ * most a couple of words before the verb ("do not create", "never rename",
+ * "must not add", "without creating").
+ */
+const VERB_NEGATION_RE =
+  /\b(?:not|never|don'?t|do\s+not|doesn'?t|cannot|can'?t|avoid|without|no\s+need\s+to)\b(?:\s+\w+){0,2}\s*$/i
+
+/** True when the requirement verb at `verbIndex` is negated. */
+function verbIsNegated(line: string, verbIndex: number): boolean {
+  return VERB_NEGATION_RE.test(line.slice(0, verbIndex))
 }
 
 /** Pull the contents of every inline code span on a line. */
@@ -638,10 +728,21 @@ export async function resolveDbtTargetPath(dbtRoot: string): Promise<string> {
   }
   try {
     const yml = await fs.readFile(join(dbtRoot, "dbt_project.yml"), "utf8")
-    const m = /^\s*target-path\s*:\s*["']?([^"'#\n]+?)["']?\s*(?:#.*)?$/m.exec(yml)
-    if (m && m[1] && m[1].trim().length > 0) {
-      const value = m[1].trim()
-      return isAbsolutePath(value) ? value : join(dbtRoot, value)
+    // Quoted forms are matched before the bare form: a Jinja value carries
+    // its own quotes (`"{{ env_var('DIR') }}"`), so a bare-value pattern that
+    // stops at the first quote truncates it.
+    const m = /^\s*target-path\s*:\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^#\n]*?))\s*(?:#.*)?$/m.exec(yml)
+    const raw = m ? (m[1] ?? m[2] ?? m[3] ?? "") : ""
+    if (raw.trim().length > 0) {
+      const value = resolveJinjaPathValue(raw.trim())
+      // An unresolvable Jinja expression is not a directory name. Joining it
+      // verbatim produces a path that cannot exist, `readRunResults` reports
+      // no artifact, and the build gate blocks a session whose build was
+      // perfectly green. Falling back to dbt's default is the direction that
+      // can only under-fire.
+      if (value !== null && value.length > 0) {
+        return isAbsolutePath(value) ? value : join(dbtRoot, value)
+      }
     }
   } catch {
     // no project file / unreadable — fall through to the default
@@ -771,24 +872,74 @@ export async function collectRunResultExemptModels(dbtRoot: string): Promise<Set
   return out
 }
 
+/** `{{ config(...) }}` call, capturing its argument text. */
+const CONFIG_CALL_RE = /\{\{-?\s*config\s*\(([\s\S]*?)\)\s*-?\}\}/gi
 /** `materialized='ephemeral'` in an in-model `config()` call. */
 const EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"]ephemeral['"]/i
 /** `enabled=false` in an in-model `config()` call. */
 const DISABLED_CONFIG_RE = /\benabled\s*=\s*(?:false|False|0)\b/
+/** `materialized='<anything but ephemeral>'` in an in-model `config()` call. */
+const NON_EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"](?!ephemeral['"])[a-z0-9_+]+['"]/i
+/** `enabled=true` in an in-model `config()` call. */
+const ENABLED_CONFIG_RE = /\benabled\s*=\s*(?:true|True|1)\b/
+
+/**
+ * Concatenate the argument text of every `{{ config() }}` call in a model.
+ *
+ * Everything that reasons about a model's declared configuration must go
+ * through this rather than scanning the whole file: `where enabled = false` is
+ * an ordinary SQL predicate, and treating it as `config(enabled=false)` hands
+ * any session a one-line way to exempt an unbuilt model from the build gate.
+ */
+export function dbtConfigArgs(sql: string): string {
+  const parts: string[] = []
+  CONFIG_CALL_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = CONFIG_CALL_RE.exec(sql)) !== null) {
+    if (m[1]) parts.push(m[1])
+  }
+  return parts.join("\n")
+}
 
 /**
  * True when a model's own source declares it ephemeral or disabled — the two
  * states for which dbt writes no `run_results` row. Source-level so it is
  * correct for a model the session has just edited, before any re-parse.
+ *
+ * Scoped to `{{ config() }}` arguments. Matching the whole model body would
+ * let `where enabled = false` in a normal filter silently remove the model
+ * from the build gate's coverage assertion.
  */
 export function sourceExemptsFromRunResults(sql: string): boolean {
-  const stripped = stripSqlComments(sql)
-  return EPHEMERAL_CONFIG_RE.test(stripped) || DISABLED_CONFIG_RE.test(stripped)
+  const args = dbtConfigArgs(stripSqlComments(sql))
+  return EPHEMERAL_CONFIG_RE.test(args) || DISABLED_CONFIG_RE.test(args)
+}
+
+/**
+ * True when a model's own source declares a configuration that **contradicts**
+ * an exemption read from `manifest.json` — a real materialisation, or an
+ * explicit `enabled=true`.
+ *
+ * `manifest.json` is only as current as the last `dbt parse`. A session that
+ * turns an ephemeral model into a table, or re-enables a disabled one, leaves
+ * a manifest that still calls it exempt, and the build gate would then skip
+ * the very relation the session was asked to create. The model source is the
+ * newer of the two, so it wins.
+ */
+export function sourceContradictsExemption(sql: string): boolean {
+  const args = dbtConfigArgs(stripSqlComments(sql))
+  return NON_EPHEMERAL_CONFIG_RE.test(args) || ENABLED_CONFIG_RE.test(args)
 }
 
 /**
  * Model names dbt actually executed during this session, read from the DDL it
- * writes under `<target>/run/`.
+ * writes under `<target>/run/`, mapped to the mtime of that DDL.
+ *
+ * The mtime is part of the answer, not bookkeeping: when a model's coverage
+ * comes from its DDL rather than from `run_results.json`, staleness has to be
+ * measured against the build that produced the DDL. `run_results.json` is
+ * rewritten by a later `dbt test`, so comparing against it would date the
+ * model's build to a command that did not build it.
  *
  * This exists because `run_results.json` is a single file that every dbt
  * command overwrites: an agent that runs `dbt build` and then `dbt test`
@@ -802,10 +953,10 @@ export function sourceExemptsFromRunResults(sql: string): boolean {
 export async function collectExecutedModelNames(
   dbtRoot: string,
   sinceMs: number,
-): Promise<Set<string>> {
+): Promise<Map<string, number>> {
   /** Depth limit mirroring the other project scans in this lane. */
   const maxDepth = 8
-  const names = new Set<string>()
+  const names = new Map<string, number>()
   const targetPath = await resolveDbtTargetPath(dbtRoot)
   async function scan(dir: string, depth: number): Promise<void> {
     if (depth > maxDepth) return
@@ -826,7 +977,12 @@ export async function collectExecutedModelNames(
       try {
         const stat = await fs.stat(full)
         if (stat.mtimeMs >= sinceMs) {
-          names.add(entry.name.slice(0, entry.name.length - 4).toLowerCase())
+          const name = entry.name.slice(0, entry.name.length - 4).toLowerCase()
+          // Keep the newest DDL for a name: the same model can be written by
+          // several invocations in one session, and the last one is the build
+          // a later source edit has to be compared against.
+          const prev = names.get(name)
+          if (prev === undefined || stat.mtimeMs > prev) names.set(name, stat.mtimeMs)
         }
       } catch {
         // unstattable — ignore
@@ -895,6 +1051,12 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
   }
   // manifest.json contributes names and aliases for nodes whose relation name
   // differs from the filename.
+  //
+  // Only for nodes whose defining file is still on disk. A manifest survives a
+  // branch switch or a model deletion, and a name taken from a node whose
+  // `original_file_path` no longer exists is not evidence that the project
+  // defines that relation — it is evidence that it used to. Accepting it lets
+  // a required deliverable read as satisfied by an obsolete artifact.
   try {
     const targetPath = await resolveDbtTargetPath(dbtRoot)
     const raw = await fs.readFile(join(targetPath, "manifest.json"), "utf8")
@@ -902,6 +1064,10 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
     for (const node of Object.values(manifest.nodes ?? {})) {
       if (typeof node !== "object" || node === null) continue
       const n = node as Record<string, unknown>
+      const originalPath = typeof n["original_file_path"] === "string" ? n["original_file_path"] : ""
+      // A node with no recorded path cannot be checked; keep it, because
+      // dropping it would move the gate towards blocking a correct project.
+      if (originalPath.length > 0 && !(await pathExists(join(dbtRoot, originalPath)))) continue
       for (const key of ["name", "alias", "identifier"]) {
         const value = n[key]
         if (typeof value === "string" && value.length > 0) names.add(value.toLowerCase())
@@ -911,6 +1077,16 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
     // no manifest — the fs inventory stands alone
   }
   return names
+}
+
+/** True when `path` exists at all (file or directory). */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await fs.stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,13 +1194,18 @@ export function maskSqlStringLiterals(sql: string): string {
 }
 
 /**
- * Blank out the body of every Jinja expression (`{{ … }}`). A project macro is
- * invoked as `{{ safe_cast(a, b) }}` while a warehouse builtin is raw SQL, so
- * masking expressions is what separates "the author called our macro" from
- * "the author wrote warehouse-specific SQL".
+ * Blank out the body of every Jinja expression (`{{ … }}`) and statement tag
+ * (`{% … %}`). A project macro is invoked as `{{ safe_cast(a, b) }}` — or from
+ * a statement tag as `{% set x = safe_cast(a, b) %}` — while a warehouse
+ * builtin is raw SQL, so masking both is what separates "the author called our
+ * macro" from "the author wrote warehouse-specific SQL".
+ *
+ * Nothing inside either delimiter is text the warehouse executes, so masking
+ * cannot hide a real defect; leaving statement tags exposed does produce a
+ * blocking false positive on a macro call.
  */
 export function maskJinjaExpressions(sql: string): string {
-  return sql.replace(/\{\{[\s\S]*?\}\}/g, (m) =>
+  return sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g, (m) =>
     m.replace(/[^\n\r]/g, " "),
   )
 }
@@ -1058,8 +1239,16 @@ function jinjaBlockEnd(sql: string, openStart: number): number {
 }
 
 /**
- * Blank every Jinja `{% if %}` block whose condition matches `conditionRe`,
- * through its *matching* `{% endif %}` rather than the first one.
+ * Blank every Jinja `{% if %}` block whose `if` **or** any of its own top-level
+ * `{% elif %}` branches matches `conditionRe`, through its *matching*
+ * `{% endif %}` rather than the first one.
+ *
+ * `{% if a %}…{% elif target.type == 'x' %}…{% endif %}` is one guard chain: a
+ * project can express its only warehouse branch in the `elif`, and blanking
+ * only the arm whose opener matched would report the chain's guarded SQL as
+ * unguarded. `elif` tags belonging to a *nested* `if` are not the chain's own
+ * branches and are ignored, so a nested guard cannot cause an outer block full
+ * of unguarded SQL to be blanked.
  */
 export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
   const opener = /\{%-?\s*if\b[^%]*%\}/gi
@@ -1069,13 +1258,109 @@ export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
     opener.lastIndex = searchFrom
     const m = opener.exec(out)
     if (!m) return out
+    const end = jinjaBlockEnd(out, m.index)
+    const region = out.slice(m.index, end)
+    if (!conditionRe.test(m[0]) && !ownBranchMatches(region, conditionRe)) {
+      searchFrom = m.index + m[0].length
+      continue
+    }
+    out = out.slice(0, m.index) + region.replace(/[^\n\r]/g, " ") + out.slice(end)
+    searchFrom = end
+  }
+}
+
+/**
+ * True when a `{% elif %}` belonging to *this* if-chain (depth 1, i.e. not
+ * inside a nested `{% if %}`) matches `conditionRe`. `region` must start at the
+ * chain's own `{% if %}` tag.
+ */
+function ownBranchMatches(region: string, conditionRe: RegExp): boolean {
+  const tag = /\{%-?\s*(if|elif|endif)\b[^%]*%\}/gi
+  let depth = 0
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(region)) !== null) {
+    const kind = m[1]?.toLowerCase()
+    if (kind === "if") {
+      depth++
+      continue
+    }
+    if (kind === "endif") {
+      depth--
+      continue
+    }
+    if (depth === 1 && conditionRe.test(m[0])) return true
+  }
+  return false
+}
+
+/**
+ * The first arm of a Jinja if-chain body: everything up to the chain's *own*
+ * `{% else %}` / `{% elif %}`, ignoring the else/elif tags of nested `{% if %}`
+ * blocks.
+ *
+ * A guard body that contains a nested conditional has a nested `{% else %}`
+ * long before the outer one. Splitting on the first `{% else %}` therefore
+ * truncates the arm and drops whatever followed — for the incremental lint,
+ * exactly the predicate it exists to inspect.
+ */
+export function jinjaIfBranchHead(body: string): string {
+  const tag = /\{%-?\s*(if|elif|else|endif)\b[^%]*%\}/gi
+  let depth = 0
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(body)) !== null) {
+    const kind = m[1]?.toLowerCase()
+    if (kind === "if") {
+      depth++
+      continue
+    }
+    if (kind === "endif") {
+      depth--
+      continue
+    }
+    if (depth === 0) return body.slice(0, m.index)
+  }
+  return body
+}
+
+/** One Jinja `{% if %}` block: its opening tag and its body. */
+export interface JinjaIfBlock {
+  /** The opening `{% if … %}` tag, verbatim. */
+  opener: string
+  /** Everything between the opening tag and the matching `{% endif %}`. */
+  body: string
+}
+
+/**
+ * Every Jinja `{% if %}` block whose condition matches `conditionRe`, matched
+ * to its own `{% endif %}` by nesting depth.
+ *
+ * The non-greedy regex this replaces made two mistakes at once: it required
+ * the condition to be the *complete* condition, so `{% if is_incremental() and
+ * loaded %}` was invisible; and it ended the block at the first `{% endif %}`,
+ * so a guard containing a nested `{% if %}` lost the rest of its body — and
+ * with it the predicate the caller was looking for.
+ */
+export function extractJinjaIfBlocks(sql: string, conditionRe: RegExp): JinjaIfBlock[] {
+  const opener = /\{%-?\s*if\b[^%]*%\}/gi
+  const out: JinjaIfBlock[] = []
+  let searchFrom = 0
+  for (;;) {
+    opener.lastIndex = searchFrom
+    const m = opener.exec(sql)
+    if (!m) return out
     if (!conditionRe.test(m[0])) {
       searchFrom = m.index + m[0].length
       continue
     }
-    const end = jinjaBlockEnd(out, m.index)
-    const region = out.slice(m.index, end)
-    out = out.slice(0, m.index) + region.replace(/[^\n\r]/g, " ") + out.slice(end)
+    const end = jinjaBlockEnd(sql, m.index)
+    const bodyStart = m.index + m[0].length
+    // `end` is just past the matching `{% endif %}`; walk back to its opening
+    // brace so the body excludes the closing tag itself.
+    const closeAt = sql.lastIndexOf("{%", end)
+    out.push({
+      opener: m[0],
+      body: sql.slice(bodyStart, closeAt > bodyStart ? closeAt : Math.max(bodyStart, end)),
+    })
     searchFrom = end
   }
 }

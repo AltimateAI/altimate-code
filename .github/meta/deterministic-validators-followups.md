@@ -64,16 +64,13 @@ The right fix is a content comparison — hash each model at build time and comp
 after — which needs a pre-build snapshot the gate does not currently take. Worth
 doing when the lane gains a session-scoped artifact store.
 
-### 5. Compound `{% if is_incremental() and … %}` conditions are not matched
+### 5. ~~Compound `{% if is_incremental() and … %}` conditions are not matched~~ — RESOLVED
 
-The guard-body extractor matches `{% if is_incremental() %}` as the complete
-condition, so a compound condition hides its body from the non-determinism check.
-
-Why deferred rather than widened: loosening the pattern widens what the gate
-*blocks*, and doing that without nesting-aware block matching would reintroduce
-the early-`endif` bug just fixed in `dbt-dialect-guard`. The shared
-`stripJinjaIfBlocks` helper added here is the right foundation; extraction should
-be rebuilt on it rather than on a looser regex.
+Closed in the review sweep. Guard-body extraction was rebuilt on the shared
+nesting-aware helper (`extractJinjaIfBlocks` + `jinjaIfBranchHead`) rather than on
+a looser regex, which is what this entry said the fix had to wait for. Compound
+conditions and nested `{% if %}` / `{% else %}` inside a guard are now handled.
+Covered by `review-sweep.test.ts`.
 
 ### 6. `analyses/` counts toward the produced-node inventory
 
@@ -87,7 +84,7 @@ comparison (required *model* vs required *seed*), which changes the
 from the inventory would make the gate block more often on a correct project,
 which is the wrong direction to move without the type information.
 
-### 7. Four copies of the recursive project walker
+### 7. Five copies of the recursive project walker
 
 `modelsModifiedSince`, `collectProducedNodeNames`, `collectExecutedModelNames`,
 `anyAuthoredFileSince` and `projectPrescribesGuards` each carry their own
@@ -127,9 +124,57 @@ a test invocation does not overwrite, and by recording
 `verdict: "coverage-inconclusive"` when neither source can speak — so the case is
 visible in telemetry rather than silently green.
 
+### Backslash string escapes in the SQL lexer
+
+A reviewer asked that `scrubSql` stop treating `\'` as an escaped quote, on the
+grounds that none of the target warehouses use backslash as a string-escape
+character. Declined: the premise is wrong. Snowflake, BigQuery and Redshift all
+support backslash escape sequences in string literals; only DuckDB is
+strictly `''`-only. Dropping the branch would mis-lex `'it\'s'` on three of the
+four warehouses this lane targets, which is the more common shape than the
+literal-trailing-backslash case the reviewer raised.
+
 ### `unique_key` inherited from `dbt_project.yml`
 
 Full dbt config inheritance is not resolved. Rather than guess, the keyless-upsert
 finding is suppressed for the whole project when `dbt_project.yml` mentions
 `unique_key` at all. Deliberately blunt: it gives up a true positive in exchange
 for never inventing an inconsistency that the merged config does not have.
+
+---
+
+## Deferred — raised in the review sweep, still open
+
+### 8. `<target>/run/` DDL proves execution, not success
+
+Build coverage falls back to the model DDL under `<target>/run/` when
+`run_results.json` has been overwritten by a later `dbt test`. dbt writes that
+DDL *before* the warehouse executes the statement, so it is present for a model
+that then failed. A session that runs `dbt build` (a model errors), then
+`dbt test`, leaves a failed model with fresh DDL and no failing row in the
+surviving artifact, and the gate reports green.
+
+Why deferred: the obvious narrowing — trust the DDL only when the fresh artifact
+carries no model rows at all — breaks the very common `dbt run --select a` then
+`dbt run --select b` session, where `a` is covered by DDL alone and the artifact
+does carry model rows. That would block healthy sessions, which is the wrong
+direction. The real fix is retaining per-invocation run-result history for the
+session rather than reading whichever single artifact survived, which is the same
+session-scoped artifact store that item 4 needs.
+
+Partially mitigated in the sweep: staleness is now measured against the DDL's own
+mtime rather than the surviving artifact's, so an edit made between the build and
+a later test is caught.
+
+### 9. Build coverage is keyed on the bare node name, not the package
+
+In a multi-package project where a dependency and the root project both define
+`orders`, a successful `model.dependency.orders` row satisfies coverage for the
+local `model.local.orders`.
+
+Why deferred: matching on the full unique ID means mapping each touched file to
+its manifest node via `original_file_path`, which is a new manifest-backed
+resolution step rather than a line edit. Much narrower after the sweep: installed
+packages are now excluded from the touched-model set, so this needs a genuine
+name collision between the root project and a dependency, both selected in the
+same session.

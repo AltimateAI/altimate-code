@@ -50,6 +50,7 @@ import {
   collectExecutedModelNames,
   collectRunResultExemptModels,
   sourceExemptsFromRunResults,
+  sourceContradictsExemption,
   type RunResultsArtifact,
 } from "./validator-utils"
 
@@ -182,15 +183,25 @@ export const DbtBuildGreenValidator: Validator = {
         // so it can never be reported as "edited after the build".
         mtimeMs = 0
       }
-      let exempt = exemptFromManifest.has(name)
-      if (!exempt) {
-        try {
-          exempt = sourceExemptsFromRunResults(await fs.readFile(path, "utf8"))
-        } catch {
-          // Unreadable model — leave it to the coverage assertion, which is
-          // the conservative direction for a file we cannot inspect.
-        }
+      // The model's own source is the newer of the two sources of truth and
+      // is read first. `manifest.json` reflects the last `dbt parse`, so a
+      // session that has just turned an ephemeral model into a table, or
+      // re-enabled a disabled one, still appears exempt there — and the gate
+      // would skip the very relation the session was asked to create.
+      let exempt = false
+      let contradicts = false
+      try {
+        const source = await fs.readFile(path, "utf8")
+        exempt = sourceExemptsFromRunResults(source)
+        contradicts = sourceContradictsExemption(source)
+      } catch {
+        // Unreadable model — leave it to the coverage assertion, which is
+        // the conservative direction for a file we cannot inspect.
       }
+      // The manifest still speaks for config set in `dbt_project.yml` rather
+      // than in the model, which the source cannot show — but only when the
+      // source does not say otherwise.
+      if (!exempt && !contradicts) exempt = exemptFromManifest.has(name)
       if (exempt) {
         exemptModels.push(name)
         continue
@@ -226,11 +237,22 @@ export const DbtBuildGreenValidator: Validator = {
     const notBuilt = coverageAssertable
       ? states.filter((s) => s.status === null && !executed.has(s.name))
       : []
-    const staleBuild = states.filter(
-      (s) =>
-        (s.status !== null || executed.has(s.name)) &&
-        s.mtimeMs > fresh.mtimeMs + BUILD_FRESHNESS_TOLERANCE_MS,
-    )
+    // Staleness is measured against the artifact that actually covered the
+    // model. For a model whose only evidence is its `<target>/run/` DDL, that
+    // is the DDL's own mtime — `run_results.json` is rewritten by a later
+    // `dbt test`, and dating the build from it would forgive every edit made
+    // between the build and the test.
+    const staleBuild = states.filter((s) => {
+      const ddlMtime = executed.get(s.name)
+      const builtAt =
+        s.status !== null
+          ? ddlMtime !== undefined
+            ? Math.min(fresh.mtimeMs, ddlMtime)
+            : fresh.mtimeMs
+          : ddlMtime
+      if (builtAt === undefined) return false
+      return s.mtimeMs > builtAt + BUILD_FRESHNESS_TOLERANCE_MS
+    })
 
     const details = {
       ...baseDetails,

@@ -35,7 +35,7 @@ rather than on unit-test fixtures.
 |---|---|
 | Do the five fire on healthy, complete dbt projects? | **Not in ordinary end-states** — 0 firings across 27 naturalistic known-good states. |
 | Are there false positives at all? | **Yes, five reproducible ones**, all in `dbt-build-green` (3) and `dbt-dialect-guard` (2), each triggered by an ordinary dbt practice rather than by a defect. |
-| Do they fire on genuinely-unfinished work? | **Yes** — every constructed defect state was caught, with two recall gaps in the task-document parser. |
+| Do they fire on genuinely-unfinished work? | **Partially** — 8 of 11 constructed known-bad states fired; 3 were silent (see [True-positive discrimination](#true-positive-discrimination-known-bad-states-n--11)). |
 | Do they execute in a non-dbt repo? | **No.** Zero validators executed; confirmed in a live session with the lane and the artifact opt-in both forced on. |
 | Runtime cost? | ~2–10 ms per dispatch on a small project; ~1–3.5 s on a 2 000-model project, because each validator re-walks the tree independently. |
 | Does enforcement convert failures into passes? | **Unknown — not measured.** N = 1 paired task; the run needed no retry, so there was nothing to convert. |
@@ -72,7 +72,7 @@ Anthropic path was used.
 The three completed sessions therefore ran against a **self-hosted internal
 staging endpoint**, registered as a custom OpenAI-compatible provider:
 
-```
+```text
 provider  custom (npm: @ai-sdk/openai-compatible), internal staging endpoint
 context   65536, output limit 8192
 sampling  temperature 0.2, seed 1001 (pinned per rollout)
@@ -175,7 +175,7 @@ deterministic and reproduce on every run.
 State B7. The session writes a model, runs `dbt build` green, then appends a
 trailing newline (a formatter, a comment, a tidy-up) three seconds later.
 
-```
+```text
 The build is not green: 1 model(s) were edited after the last build: extra_green2.
   "stale_build": ["extra_green2"], "failed_in_scope": [], "not_built": []
 ```
@@ -191,7 +191,7 @@ State B8. dbt does not emit a `run_results` node for an ephemeral model, so the
 coverage assertion ("is every model I edited present in the artifact?") can
 never be satisfied for one.
 
-```
+```text
 The build is not green: 1 model(s) you edited were never built: eph_helper.
   "not_built": ["eph_helper"], "model_nodes_in_artifact": 6
 ```
@@ -206,7 +206,7 @@ State B9. `{{ config(enabled=false) }}` removes the node from the manifest, so
 the same coverage assertion fires. Retiring a model is a legitimate, common
 change.
 
-```
+```text
 The build is not green: 1 model(s) you edited were never built: retired_model.
 ```
 
@@ -219,7 +219,7 @@ ephemeral and disabled nodes.
 State B2. `listagg()` sits inside a `{% if target.type == 'snowflake' %}` block
 that also contains an inner `{% if var(...) %}…{% endif %}`:
 
-```
+```text
 1 unguarded warehouse-specific construct(s) in 1 model(s) you edited: nested_guard.
   findings: [{"model":"nested_guard","function":"listagg()","dialects":"Snowflake / Redshift / Oracle"}]
 ```
@@ -253,10 +253,35 @@ safety question — a gate that never fires is also useless.
 | jaffle + `incremental_strategy='delete+insert'` with no `unique_key` | `dbt-incremental-config` ✓ |
 
 The three silent known-bad states were `real-03` read-only, `real-06` build-only
-and `real-06` read-only. All three are explained by the recall gaps below rather
-than by a logic error.
+and `real-06` read-only. These are not all the same kind of gap, and the two
+buckets should not be conflated:
 
-**Two recall gaps worth noting** (misses, not false positives):
+* **`real-03` read-only is an intentional no-op, not a recall miss.**
+  `DbtBuildGreenValidator.check()` returns `verdict: "nothing-to-gate"`
+  (`packages/opencode/src/altimate/validators/dbt-build-green.ts:132-134`)
+  whenever a session touches no model files *and* produces no fresh build
+  artifact of its own — there is no claim of success to check. A read-only
+  session on `real-03` (nothing written, nothing built) hits exactly that
+  path by design. Real-03's defect is a genuine build error
+  (`team_game_counts`), not a missing deliverable, so none of the
+  contract-driven validators below are candidates for it either — this state
+  has no validator that could plausibly have caught it while doing nothing.
+* **`real-06` build-only and `real-06` read-only are more likely the same
+  `nothing-to-gate` no-op for `dbt-build-green`** — the table above already
+  records that real-06's project does not parse and produces no artifact, so
+  the same "no edits, no fresh artifact" path plausibly applies regardless of
+  whether the session ran `dbt build` or nothing at all. This document does
+  not independently record `dbt-build-green`'s per-state telemetry for these
+  two variants, so that half of the explanation is inferred from the general
+  no-artifact/no-edit design path rather than separately measured. What *is*
+  a genuine recall gap on these two states is that `dbt-nothing-built` and
+  `dbt-deliverable-names` — the validators built to catch a missing
+  deliverable like real-06's absent `stg_nba_teams.sql` — never activated at
+  all, for the task-document parsing reason below.
+
+**Two more gaps worth noting, neither a false positive** — the first is the
+genuine recall gap in the task-document parser referenced above; the second is
+a narrow, by-design activation precondition rather than a parsing miss:
 
 * `real-06`'s prompt reads *"Add the missing `models/staging/stg_nba_teams.sql`"*.
   `REQUIREMENT_VERB_RE` covers `creat|build|produc|implement|deliver|materiali[sz]|generat|writ|deploy`
@@ -276,7 +301,7 @@ registered validators, not five.
 
 Probing the full lane against a green, complete `real-01` workspace produced:
 
-```
+```text
 dbt-schema-verify  ok:false  errored=3/5 models  elapsed_ms=10864
 dbt-tests-pass     ok:false  errored=4/5 models  elapsed_ms=13919
 ```
@@ -410,7 +435,7 @@ A live session in a small TypeScript repo (`/tmp/valexp/negctl/repo`: two source
 files, a `bun test` suite, a README, no dbt anywhere), with the **full lane**
 enabled and the artifact gate additionally forced on:
 
-```
+```text
 ALTIMATE_VALIDATORS_ENABLED=1
 ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS=1
 (ALTIMATE_VALIDATORS_ONLY unset — all seven validators registered)
@@ -422,7 +447,7 @@ and stopped cleanly.
 
 Validator events, verbatim from the session's stderr:
 
-```
+```text
 validator_hook_reached step=1..5  finish=tool-calls  validatorCount=7
 validator_hook_reached step=6     finish=stop        validatorCount=7
 dispatch_enter        step=6
@@ -504,8 +529,9 @@ honest statement than "disproven".
 conservative where it was designed to be: 0 firings across 27 naturalistic
 known-good end-states, 0 false positives from three of the five validators, a
 clean negative control in a non-dbt repo with the most aggressive opt-in forced
-on, and negligible CPU cost on normal projects. The true-positive side works
-too: every constructed defect was caught. The problem is not that the lane is
+on, and negligible CPU cost on normal projects. The true-positive side works in
+part: 8 of 11 constructed known-bad states fired, and 3 were silent. The problem
+is not that the lane is
 reckless; it is that its blast radius includes a handful of legitimate dbt
 practices, and its benefit is unmeasured.
 

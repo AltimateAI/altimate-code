@@ -7,6 +7,12 @@ import { DbtDialectGuardValidator } from "../../../src/altimate/validators/dbt-d
 import type { ValidatorContext } from "../../../src/session/validators/types"
 
 let dir = ""
+/**
+ * Value the dialect-guard opt-in held before this file ran. Deleting the
+ * variable unconditionally would clobber a value owned by the surrounding
+ * environment for every later test in the shared process.
+ */
+const originalDialectGuardEnv = process.env.ALTIMATE_VALIDATORS_DIALECT_GUARD
 
 async function makeProject(): Promise<string> {
   dir = await fs.mkdtemp(join(tmpdir(), "dialect-guard-"))
@@ -41,7 +47,11 @@ const ctx = (overrides: Partial<ValidatorContext> = {}): ValidatorContext => ({
 })
 
 afterEach(async () => {
-  delete process.env.ALTIMATE_VALIDATORS_DIALECT_GUARD
+  if (originalDialectGuardEnv === undefined) {
+    delete process.env.ALTIMATE_VALIDATORS_DIALECT_GUARD
+  } else {
+    process.env.ALTIMATE_VALIDATORS_DIALECT_GUARD = originalDialectGuardEnv
+  }
   if (dir) await fs.rm(dir, { recursive: true, force: true })
   dir = ""
 })

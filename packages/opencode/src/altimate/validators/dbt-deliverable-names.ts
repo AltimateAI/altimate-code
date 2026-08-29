@@ -38,7 +38,7 @@ import { join } from "path"
 import type { Validator, ValidatorContext, ValidatorResult } from "../../session/validators/types"
 import {
   findDbtProjectRoot,
-  findTaskInstructionFile,
+  findTaskInstructionFiles,
   extractRequiredDeliverables,
   collectProducedNodeNames,
   modelsModifiedSince,
@@ -54,11 +54,14 @@ interface Contract {
 
 /** Read the workspace's literal deliverable contract, or null if there is none. */
 async function readContract(cwd: string, dbtRoot: string): Promise<Contract | null> {
-  const task = await findTaskInstructionFile(cwd, dbtRoot)
-  if (!task) return null
-  const required = extractRequiredDeliverables(task.content)
-  if (!required) return null
-  return { taskFile: task.path, required }
+  // Every candidate, not just the first readable one: an informational
+  // `TASK.md` that states no deliverables must not mask a `REQUIREMENTS.md`
+  // that does, or this gate silently skips a session it was meant to check.
+  for (const task of await findTaskInstructionFiles(cwd, dbtRoot)) {
+    const required = extractRequiredDeliverables(task.content)
+    if (required) return { taskFile: task.path, required }
+  }
+  return null
 }
 
 /** True when `relative` exists under either the dbt project or the workspace. */

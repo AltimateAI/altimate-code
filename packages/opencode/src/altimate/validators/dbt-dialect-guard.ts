@@ -96,8 +96,13 @@ const TARGET_TYPE_CONDITION_RE = /target\.type/i
  * inside a comment or a string, which would switch this lint on for a
  * single-warehouse project that never established the convention and start
  * rejecting its perfectly correct `iff()` calls.
+ *
+ * `elif` counts as well as `if`: a project can express its only warehouse
+ * branch as `{% elif target.type == 'bigquery' %}`, and refusing to recognise
+ * it left such a project's edited models unchecked. `stripJinjaIfBlocks`
+ * blanks a chain whose own `elif` carries the guard, so the two stay in step.
  */
-const TARGET_TYPE_GUARD_PROBE_RE = /\{%-?\s*if\b[^%]*target\.type/i
+const TARGET_TYPE_GUARD_PROBE_RE = /\{%-?\s*(?:el)?if\b[^%]*target\.type/i
 
 /** Depth limit mirroring the other project scans in this lane. */
 const SCAN_MAX_DEPTH = 8

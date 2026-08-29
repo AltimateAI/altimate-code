@@ -39,10 +39,11 @@ import {
   modelNameFromPath,
   stripSqlComments,
   maskSqlStringLiterals,
+  extractJinjaIfBlocks,
+  jinjaIfBranchHead,
+  dbtConfigArgs,
 } from "./validator-utils"
 
-/** `{{ config(...) }}` call, capturing its argument text. */
-const CONFIG_CALL_RE = /\{\{-?\s*config\s*\(([\s\S]*?)\)\s*-?\}\}/gi
 /** In-model incremental materialisation. */
 const INCREMENTAL_RE = /materiali[sz]ed\s*=\s*['"]incremental['"]/i
 /** Declared incremental strategy. */
@@ -57,11 +58,15 @@ const UNIQUE_KEY_RE = /unique_key\s*=\s*(?!(?:None|null|''|""|\[\s*\])\s*(?:[,)]
 const PROJECT_UNIQUE_KEY_RE = /^\s*\+?unique_key\s*:/m
 /** The `is_incremental()` guard call. */
 const IS_INCREMENTAL_RE = /is_incremental\s*\(\s*\)/i
-/** Body of the first `{% if is_incremental() %} … {% endif %}` block. */
-const IS_INCREMENTAL_BLOCK_RE =
-  /\{%-?\s*if\s+is_incremental\s*\(\s*\)\s*-?%\}([\s\S]*?)\{%-?\s*endif\s*-?%\}/gi
-/** Start of the `{% else %}` / `{% elif %}` arm — the full-refresh branch. */
-const ELSE_ARM_RE = /\{%-?\s*el(?:se|if)\b/i
+/**
+ * Condition of a Jinja `if` that branches on `is_incremental()`.
+ *
+ * Matched against the opening tag rather than requiring it to be the whole
+ * condition: `{% if is_incremental() and not full_refresh %}` is an ordinary
+ * dbt guard, and demanding the bare call hid such a block's predicate from the
+ * non-determinism check entirely.
+ */
+const IS_INCREMENTAL_CONDITION_RE = /is_incremental\s*\(\s*\)/i
 /** Where a row-selection predicate starts inside a guard body. */
 const PREDICATE_START_RE = /\b(?:where|and|or|on|having|qualify)\b/i
 /**
@@ -69,21 +74,35 @@ const PREDICATE_START_RE = /\b(?:where|and|or|on|having|qualify)\b/i
  * identical runs.
  *
  * Split by shape on purpose. The keyword forms are SQL reserved words and
- * cannot plausibly be a column; the function forms need a call shape, because
- * `random`, `now` and `rand` are all perfectly ordinary column names and
- * `where random < 0.5` is not a defect.
+ * cannot plausibly be a bare column; the function forms need a call shape,
+ * because `random`, `now` and `rand` are all perfectly ordinary column names
+ * and `where random < 0.5` is not a defect.
+ *
+ * The keyword form additionally refuses a *qualified* reference:
+ * `src.current_timestamp` and `"current_timestamp"` name a column on a
+ * relation, not the clock, and blocking on one would reject a correct model.
  */
 const NONDETERMINISTIC_KEYWORD_RE =
-  /\b(current_timestamp|current_date|localtimestamp|sysdate)\b/gi
+  /(?<![.\w"`\]])(current_timestamp|current_date|localtimestamp|sysdate)\b/gi
 const NONDETERMINISTIC_CALL_RE =
   /\b(getdate|now|random|rand|uuid_string|gen_random_uuid|newid)\s*\(/gi
 /** The task literally asks for repeatable re-runs. */
 const IDEMPOTENCY_RE = /\bidempoten(?:t|ce|cy|tly)\b/i
 /**
- * Negation in the same clause as the idempotency word. "Idempotency is not
- * required" must not switch the guard check on.
+ * A statement that idempotency is **not** wanted, scoped to the idempotency
+ * word itself.
+ *
+ * Testing the whole line for any negation word was the bug this replaces:
+ * "The model must be idempotent and must not depend on the current time" both
+ * demands idempotency and contains "not", so the demand was discarded and the
+ * missing-guard check never ran. Only a negation that qualifies the
+ * idempotency word — before it ("not idempotent", "need not be idempotent") or
+ * immediately after it ("idempotency is not required") — disclaims it.
  */
-const IDEMPOTENCY_NEGATION_RE = /\b(?:not|no|never|without|isn't|aren't|un)\b/i
+const IDEMPOTENCY_NEGATION_BEFORE_RE =
+  /(?:\bnon-?|\b(?:not|never|no|without|isn'?t|aren'?t|doesn'?t|don'?t|need\s+not)\b)(?:\s+\w+){0,2}\s*$/i
+const IDEMPOTENCY_NEGATION_AFTER_RE =
+  /^\w*\s*(?:(?:is|are|was|were)\s+(?:not|never)|isn'?t|aren'?t|wasn'?t|weren'?t)\b/i
 
 /** Strategies whose semantics require a key to match rows on. */
 const KEYED_STRATEGIES = new Set(["merge", "delete+insert"])
@@ -93,17 +112,6 @@ interface Finding {
   model: string
   kind: "upsert-without-unique-key" | "missing-is-incremental-guard" | "nondeterministic-predicate"
   detail: string
-}
-
-/** Concatenate the argument text of every `{{ config() }}` call in a model. */
-function configArgs(sql: string): string {
-  const parts: string[] = []
-  CONFIG_CALL_RE.lastIndex = 0
-  let m: RegExpExecArray | null
-  while ((m = CONFIG_CALL_RE.exec(sql)) !== null) {
-    if (m[1]) parts.push(m[1])
-  }
-  return parts.join("\n")
 }
 
 /**
@@ -123,13 +131,8 @@ function configArgs(sql: string): string {
  */
 function incrementalPredicates(sql: string): string {
   const parts: string[] = []
-  IS_INCREMENTAL_BLOCK_RE.lastIndex = 0
-  let m: RegExpExecArray | null
-  while ((m = IS_INCREMENTAL_BLOCK_RE.exec(sql)) !== null) {
-    const body = m[1]
-    if (!body) continue
-    const elseAt = ELSE_ARM_RE.exec(body)
-    const incrementalArm = elseAt ? body.slice(0, elseAt.index) : body
+  for (const block of extractJinjaIfBlocks(sql, IS_INCREMENTAL_CONDITION_RE)) {
+    const incrementalArm = jinjaIfBranchHead(block.body)
     const predicateAt = PREDICATE_START_RE.exec(incrementalArm)
     if (predicateAt) parts.push(incrementalArm.slice(predicateAt.index))
   }
@@ -152,8 +155,12 @@ function nondeterministicCalls(fragment: string): string[] {
 /** True when the task asks for idempotent re-runs and does not disclaim it. */
 function demandsIdempotency(text: string): boolean {
   for (const line of text.split(/\r?\n/)) {
-    if (!IDEMPOTENCY_RE.test(line)) continue
-    if (IDEMPOTENCY_NEGATION_RE.test(line)) continue
+    const m = IDEMPOTENCY_RE.exec(line)
+    if (!m) continue
+    const before = line.slice(0, m.index)
+    const after = line.slice(m.index + m[0].length)
+    if (IDEMPOTENCY_NEGATION_BEFORE_RE.test(before)) continue
+    if (IDEMPOTENCY_NEGATION_AFTER_RE.test(after)) continue
     return true
   }
   return false
@@ -213,7 +220,7 @@ export const DbtIncrementalConfigValidator: Validator = {
       // `'now'` in a projected string cannot produce a blocking finding.
       const sql = stripSqlComments(raw)
       const scanSql = maskSqlStringLiterals(sql)
-      const args = configArgs(sql)
+      const args = dbtConfigArgs(sql)
       if (!INCREMENTAL_RE.test(args)) continue
       incrementalModels++
       const model = modelNameFromPath(path)
