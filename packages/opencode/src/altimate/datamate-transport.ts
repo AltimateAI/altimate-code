@@ -49,11 +49,16 @@ async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
       cwd: projectRootDir,
       absolute: true,
       dot: true,
+      // Prune dependency/build trees during traversal. Filtering the results
+      // afterwards still reads every directory: on a monorepo with
+      // node_modules installed that walk costs ~6 CPU-seconds per invocation
+      // because it runs across the whole runtime I/O thread pool.
+      ignore: [...Glob.DEFAULT_IGNORE],
     })
-    // Exclude build/dependency/output trees. command + args from a discovered
-    // mcp.json are passed to StdioClientTransport, so keep the scan to source the
-    // user actually authors and out of vendored/generated directories. The new core
-    // Glob.Options dropped the `ignore` field, so filter the results instead.
+    // Belt and braces: keep the result filter so a pattern that slips past the
+    // traversal prune (e.g. via a symlinked path) still never reaches
+    // StdioClientTransport, which is handed `command` + `args` from whatever
+    // mcp.json we discover.
     const ignoredDirs = [
       "node_modules",
       ".git",

@@ -462,8 +462,11 @@ export const CheckCommand = cmd({
     let files: string[] = args.files ?? []
     if (files.length === 0) {
       console.error("No files specified, searching for **/*.{sql,ddl} in current directory...")
-      const sqls = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true })
-      const ddls = await Glob.scan("**/*.ddl", { cwd: process.cwd(), absolute: true })
+      // Prune dependency/build trees: vendored SQL is not the user's SQL, and
+      // walking node_modules to find it burns seconds of CPU on a real repo.
+      const ignore = [...Glob.DEFAULT_IGNORE]
+      const sqls = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true, ignore })
+      const ddls = await Glob.scan("**/*.ddl", { cwd: process.cwd(), absolute: true, ignore })
       files = [...new Set([...sqls, ...ddls])]
     } else {
       // Expand globs in positional args

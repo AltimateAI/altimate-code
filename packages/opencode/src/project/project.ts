@@ -393,6 +393,11 @@ export namespace Project {
       cwd: input.worktree,
       absolute: true,
       include: "file",
+      // altimate_change start — prune dependency/build trees; an unrestricted walk of
+      // the worktree costs seconds of CPU on a repo with node_modules installed, and a
+      // dependency's favicon is never the project icon anyway.
+      ignore: [...Glob.DEFAULT_IGNORE],
+      // altimate_change end
     })
     const shortest = matches.sort((a, b) => a.length - b.length)[0]
     if (!shortest) return
@@ -669,6 +674,9 @@ export namespace Project {
             cwd: input.worktree,
             absolute: true,
             include: "file",
+            // altimate_change start — prune dependency/build trees; see Project.discover above.
+            ignore: [...Glob.DEFAULT_IGNORE],
+            // altimate_change end
           }),
         )
         const shortest = matches.sort((a, b) => a.length - b.length)[0]
