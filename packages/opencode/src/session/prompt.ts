@@ -36,6 +36,9 @@ import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
 import { FileTime } from "../file/time"
 import { Flag } from "../flag/flag"
+// altimate_change — sync flag read, so the workspace-skill hook below can cost
+// literally nothing (not even an await) for users who never opted in.
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
 import { Command } from "../command"
@@ -292,62 +295,56 @@ export namespace SessionPrompt {
     // `Skill.dirs()` is what first materialises the skill registry, so acting
     // here lands the skills on this turn rather than the next one.
     //
-    // `prompt` runs per message, so the pull is rate-limited by
-    // `recentlySynced`. Between polls a skill added in the SaaS is at most one
-    // interval away; syncing once per process would mean it never arrives in an
-    // open session at all.
+    // The flag is read SYNCHRONOUSLY and the opt-out path is deliberately not
+    // awaited. An `await` here — even a zero-cost one — inserts an event-loop
+    // tick before `createUserMessage`, which reorders this turn against a
+    // forked `prompt.loop` fiber. That is not theoretical: it made
+    // "running subtask preserves metadata after tool-call transition" fail
+    // roughly two runs in three, while passing on main. A feature nobody
+    // enabled must not perturb the turn at all.
     //
-    // The wait is bounded and the sync is NOT cancelled on timeout. This is the
-    // one path whose first-answer latency is measured, and the workspace request
-    // budget is 15s — long enough that a slow backend would otherwise be felt as
-    // the agent hanging before it even starts. Past the bound the sync keeps
-    // running and simply lands on a later turn, which is what it would have done
-    // anyway had the interval not elapsed yet.
-    //
-    // Refresh only on a real change: dropping the caches costs a config reread
-    // for every instance plus a full re-scan. This runs under the instance ALS,
-    // which `attach()` propagates into the facade's runtime, so it invalidates
-    // THIS session's registry — verified by harness test.
-    try {
-      const skillSync = await import("../altimate/workspace/skill-sync")
+    // Opting out still has to take effect, since discovery loads whatever is on
+    // disk without consulting the flag — so the cleanup runs, detached. It has
+    // nothing to race: there is no snapshot for this turn to use.
+    if (!CoreFlag.ALTIMATE_WORKSPACE) {
       const dir = Instance.directory
-      // Opting out still has to take effect. `syncSkills`'s disabled branch is
-      // the only thing that removes an already-synced snapshot, and discovery
-      // does not consult the flag — so skipping this when the flag is off would
-      // leave the skills on disk and still loading, `alwaysApply` included.
-      // Cheap: that branch stats one path and returns.
-      if (!skillSync.isEnabled()) {
-        if ((await skillSync.syncSkills(dir)).changed) await refreshSkillRegistry(dir)
-      } else {
+      void import("../altimate/workspace/skill-sync")
+        .then(async (m) => {
+          if ((await m.syncSkills(dir)).changed) await refreshSkillRegistry(dir)
+        })
+        .catch((err) => log.warn("workspace skill opt-out cleanup failed", { err: String(err) }))
+    } else {
+      try {
+        const skillSync = await import("../altimate/workspace/skill-sync")
+        const dir = Instance.directory
         const refreshRegistry = () => refreshSkillRegistry(dir)
 
         // A sync that ran elsewhere — a bind, most commonly — changes the
         // snapshot with no instance context to refresh from. Pick that up before
-        // deciding whether this turn needs to poll at all, or a linked workspace's
-        // skills would sit on disk unseen until the process restarts.
+        // deciding whether this turn needs to poll at all.
         await refreshRegistry()
 
         if (!(await skillSync.recentlySynced(dir))) {
           const applied = skillSync.syncSkills(dir).then(refreshRegistry)
           applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
           // Timer cleared when the sync wins the race: an armed timer keeps the
-        // event loop alive, so a short-lived `run` would linger for the rest of
-        // the bound, once per turn.
-        let timer: ReturnType<typeof setTimeout> | undefined
-        try {
-          await Promise.race([
-            applied,
-            new Promise((r) => {
-              timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
-            }),
-          ])
-        } finally {
-          if (timer) clearTimeout(timer)
+          // event loop alive, so a short-lived `run` would linger for the rest
+          // of the bound, once per turn.
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            await Promise.race([
+              applied,
+              new Promise((r) => {
+                timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
+              }),
+            ])
+          } finally {
+            if (timer) clearTimeout(timer)
+          }
         }
-        }
+      } catch (err) {
+        log.warn("workspace skill sync failed", { err: String(err) })
       }
-    } catch (err) {
-      log.warn("workspace skill sync failed", { err: String(err) })
     }
     // altimate_change end
 
