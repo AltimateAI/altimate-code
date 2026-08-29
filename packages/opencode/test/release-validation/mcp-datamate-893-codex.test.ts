@@ -114,6 +114,7 @@ describe("PR #893 datamate IDE transport selection", () => {
     await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
       type: "remote",
       url: "https://datamate.example.com/sse",
+      source: path.join(project.path, ".vscode", "mcp.json"),
     })
   })
 
@@ -131,32 +132,37 @@ describe("PR #893 datamate IDE transport selection", () => {
     await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
       type: "local",
       command: ["bunx", "@altimate/datamate", "start-stdio", "--workspace", project.path],
+      source: path.join(project.path, ".cursor", "mcp.json"),
     })
   })
 
-  test("falls back to safe local datamate marker when IDE entry has no usable transport fields", async () => {
+  test("rejects an IDE entry with no usable transport fields (no marker fallback)", async () => {
+    // Contract change (review on the stdio-env fix): an incomplete entry — no
+    // usable `url` or `command` — is not a transport. It used to fall back to a
+    // bare `datamate start-stdio` marker; now it is skipped so it can neither
+    // shadow a valid entry in a later file nor be persisted as a malformed
+    // `remote` entry without a url.
     await using project = await tmpdir()
     await writeJson(path.join(project.path, ".vscode/mcp.json"), {
       servers: { datamate: { type: "stdio", args: ["ignored-without-command"] } },
     })
 
-    await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
-      type: "local",
-      command: ["datamate", "start-stdio"],
-    })
+    await expect(readDatamateTransportFromIde(project.path)).resolves.toBeNull()
   })
 
   test("skips malformed mcp.json and uses the next valid datamate entry", async () => {
     await using project = await tmpdir()
-    await mkdir(path.join(project.path, "a-bad"), { recursive: true })
-    await writeFile(path.join(project.path, "a-bad/mcp.json"), "{ not json")
-    await writeJson(path.join(project.path, "z-good/mcp.json"), {
+    // Only the extension-written locations (.vscode/ and .cursor/) are scanned.
+    await mkdir(path.join(project.path, "a-bad", ".vscode"), { recursive: true })
+    await writeFile(path.join(project.path, "a-bad/.vscode/mcp.json"), "{ not json")
+    await writeJson(path.join(project.path, "z-good/.vscode/mcp.json"), {
       servers: { datamate: { url: "https://good.example.com/mcp" } },
     })
 
     await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
       type: "remote",
       url: "https://good.example.com/mcp",
+      source: path.join(project.path, "z-good", ".vscode", "mcp.json"),
     })
   })
 
@@ -172,6 +178,7 @@ describe("PR #893 datamate IDE transport selection", () => {
     await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
       type: "local",
       command: ["datamate", "start-stdio"],
+      source: path.join(project.path, ".vscode", "mcp.json"),
     })
   })
 })
@@ -206,21 +213,30 @@ describe("PR #893 datamate sync to altimate-code config", () => {
       },
     })
 
-    const updated = await syncDatamateUrlFromVscodeMcp(project.path)
+    // Isolated global dir: the sync also heals the global config, and tests must
+    // never touch the developer's real one.
+    const updated = await syncDatamateUrlFromVscodeMcp(project.path, path.join(project.path, "isolated-global"))
     const entry = await readMcpEntryFromDisk("datamate", configPath)
     const raw = await readFile(configPath, "utf-8")
 
     expect(updated).toEqual(["datamate"])
+    // Contract change (security review on the stdio-env fix): the carried env is
+    // an ALLOWLIST (ELECTRON_RUN_AS_NODE only), not a denylist — arbitrary keys
+    // like KEEP_ME are dropped, since the carried env is spread over the host
+    // process env at spawn. The synced entry is also stamped with provenance
+    // bound to the IDE file it came from.
     expect(entry).toEqual({
       type: "local",
       command: ["datamate", "start-stdio", "--port", "0"],
-      environment: { KEEP_ME: "yes" },
       enabled: false,
       timeout: 12345,
       updatedAt: "2026-06-17T10:00:00.000Z",
+      managedBy: "altimate-ide",
+      sourceMcpJson: path.join(project.path, ".vscode", "mcp.json"),
     } as any)
     expect(raw).not.toContain("extension-rpc-secret")
     expect(raw).not.toContain("ALTIMATE_EXTENSION_RPC")
+    expect(raw).not.toContain("KEEP_ME")
   })
 
   test("does not rewrite datamate when updatedAt already matches IDE config", async () => {

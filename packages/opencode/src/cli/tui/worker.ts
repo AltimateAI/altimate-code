@@ -27,12 +27,30 @@ import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+// altimate_change start — heal the datamate MCP entry at boot. `altimate serve` runs
+// this sync before listening (cli/cmd/serve.ts), but the TUI worker never did, so an
+// entry persisted without its env block (e.g. missing ELECTRON_RUN_AS_NODE for an
+// Electron command) was re-spawned broken on every TUI session start with no path to
+// self-repair.
+import { syncDatamateUrlFromVscodeMcp } from "@/altimate/datamate-transport"
+// altimate_change end
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
 // is enforced by the compiler rather than by a comment.
 const SHUTDOWN_BUDGET_MS = Telemetry.TUI_SHUTDOWN_BUDGET_MS
 
 Heap.start()
+
+// altimate_change start — datamate entry heal (the sync resolves the project root
+// itself, so a session launched from a subdirectory still finds the root IDE config
+// + persisted entry). Everything that reads the config is sequenced AFTER this
+// promise — trace init below, the first in-process request, and Server.listen —
+// because the heal writes altimate-code.json with a non-atomic write, and
+// InstanceRuntime.load/Config.get() would otherwise race it (transiently truncated
+// read) or cache the pre-heal entry, making the first session spawn the broken
+// config anyway. Errors are swallowed: a failed sync must never block the TUI.
+const datamateSyncReady: Promise<unknown> = syncDatamateUrlFromVscodeMcp(process.cwd()).catch(() => {})
+// altimate_change end
 
 const traceConsumer = new TraceConsumer()
 // loadConfig() must complete before the first event: getOrCreateTrace caches, per session, a Trace
@@ -41,6 +59,11 @@ const traceConsumer = new TraceConsumer()
 // Config.get() (a facade needing an Instance on the canonical ALS the bare worker lacks at init), so
 // load the project instance for the worker's cwd first; best-effort fallback otherwise.
 const traceReady: Promise<void> = (async () => {
+  // altimate_change start — the datamate heal writes altimate-code.json; let it finish
+  // before InstanceRuntime.load/Config.get() read (and cache) the config, so the first
+  // session connects with the healed entry instead of a stale or half-written one.
+  await datamateSyncReady
+  // altimate_change end
   try {
     const ctx = await InstanceRuntime.load({ directory: process.cwd() })
     await Instance.restore(ctx, () => traceConsumer.loadConfig())
@@ -65,6 +88,10 @@ let server: Awaited<ReturnType<typeof Server.listen>> | undefined
 
 export const rpc = {
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
+    // altimate_change start — no request is served until the datamate entry heal
+    // completes (already-resolved after the first request; effectively free thereafter).
+    await datamateSyncReady
+    // altimate_change end
     const headers = { ...input.headers }
     const auth = ServerAuth.header()
     if (auth && !headers["authorization"] && !headers["Authorization"]) {
@@ -90,6 +117,10 @@ export const rpc = {
     return result
   },
   async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
+    // altimate_change start — external-server mode bypasses rpc.fetch, so gate listen
+    // on the datamate entry heal the same way (mirrors cli/cmd/serve.ts ordering).
+    await datamateSyncReady
+    // altimate_change end
     if (server) await server.stop(true)
     server = await Server.listen(input)
     return { url: server.url.toString() }
