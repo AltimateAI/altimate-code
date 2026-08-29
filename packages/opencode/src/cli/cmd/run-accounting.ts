@@ -82,6 +82,7 @@ export namespace RunAccounting {
     // finish="other" on the confirm-DONE reply) must not be silently forgiven
     // by whichever suppression the interrupted prompt's abort left unused.
     let challengeReplySent = false
+    // altimate_change end
 
     function isCompactionStep(messageID: string) {
       return agents.get(messageID) === "compaction"
