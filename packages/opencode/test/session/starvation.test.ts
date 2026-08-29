@@ -402,10 +402,20 @@ describe("doom-loop escalation ladder — re-keyed on (toolName + normalized arg
 
 describe("armed gating logic (run-mode-only, exempt agents)", () => {
   // Mirrors the gate expression in processor.ts:
-  //   sbArmed = mode === "armed" && runMode && !exemptAgents.includes(agent)
-  function armed(mode: SessionStarvation.Mode, runMode: boolean, agent: string) {
+  //   sbExempt = exemptAgents.includes(agent) || assistantMessage.summary
+  //   sbArmed  = mode === "armed" && runMode && !sbExempt
+  //   starvation tracker is created only when mode !== "off" && !sbExempt
+  function exempt(resolved: SessionStarvation.ResolvedConfig, agent: string, summary: boolean) {
+    return resolved.exemptAgents.includes(agent) || summary
+  }
+  function armed(mode: SessionStarvation.Mode, runMode: boolean, agent: string, summary = false) {
     const resolved = SessionStarvation.resolveConfig({ mode })
-    return mode === "armed" && runMode && !resolved.exemptAgents.includes(agent)
+    return mode === "armed" && runMode && !exempt(resolved, agent, summary)
+  }
+  /** Whether the per-session tracker is wired at all (and so can accumulate steps). */
+  function tracks(mode: SessionStarvation.Mode, agent: string, summary = false) {
+    const resolved = SessionStarvation.resolveConfig({ mode })
+    return mode !== "off" && !exempt(resolved, agent, summary)
   }
 
   test("annotate mode (the default) never arms — even in run mode", () => {
@@ -420,6 +430,25 @@ describe("armed gating logic (run-mode-only, exempt agents)", () => {
   test("armed + run mode stays off for plan/review-class agents", () => {
     expect(armed("armed", true, "plan")).toBe(false)
     expect(armed("armed", true, "review")).toBe(false)
+  })
+
+  // The compaction summarizer runs through the same processor under the session's
+  // OWN id, so without an exemption its single mutation-free step would advance
+  // the working agent's shared tracker.
+  test("the compaction summarizer is exempt: no tracker is wired for a summary message", () => {
+    expect(tracks("annotate", "build", true)).toBe(false)
+    expect(tracks("armed", "build", true)).toBe(false)
+    // a normal working step on the same session still tracks
+    expect(tracks("annotate", "build", false)).toBe(true)
+  })
+
+  test("the compaction summarizer never arms, even in armed run mode", () => {
+    expect(armed("armed", true, "build", true)).toBe(false)
+    expect(armed("armed", true, "build", false)).toBe(true)
+  })
+
+  test("mode 'off' wires no tracker at all", () => {
+    expect(tracks("off", "build")).toBe(false)
   })
 })
 

@@ -252,6 +252,36 @@ describe("IdleDone hard preconditions", () => {
     expect(d.shouldChallenge()).toBe(false)
   })
 
+  // Production emits the step-finish part FIRST and the snapshot `patch` part
+  // immediately after it (session/processor.ts writes step-finish, then diffs the
+  // snapshot), so the two tests below drive the detector in that real order — the
+  // helpers above emit the patch before step-finish, which would mask an ordering
+  // regression in the mutation/verify comparison.
+  test("(i) production ordering: patch AFTER its own step-finish still precedes a later verify", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(patchPart("m_work")) // step-end snapshot diff, as production emits it
+    d.observePart(bashPart("m_verify", "./scripts/verify.sh --all", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(true)
+  })
+
+  test("(i) production ordering: a same-step patch emitted after step-finish still suppresses", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m1"))
+    d.observePart(bashPart("m1", "make check", 0)) // verify inside the mutating step
+    d.observePart(stepFinish("m1"))
+    d.observePart(patchPart("m1")) // snapshot diff lands after step-finish
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m2", "m3", "m4"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+  })
+
   test("(i)/(ii) a FAILING most-recent verify blocks the challenge", () => {
     const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
     d.observePart(editPart("m1"))

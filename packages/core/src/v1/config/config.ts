@@ -315,7 +315,7 @@ export const Info = Schema.Struct({
           }),
           max_turns_without_mutation: Schema.optional(PositiveInt).annotate({
             description:
-              "Consecutive assistant turns with zero corroborated file mutation before the write-starvation breaker fires (default: 12; see session/starvation.ts).",
+              "Consecutive assistant generation steps with zero corroborated file mutation before the write-starvation breaker fires (default: 12). Counted per model step, not per user message — one user turn routinely spans several read-only steps, so tune this against step counts (see session/starvation.ts).",
           }),
           repeat_signature_threshold: Schema.optional(PositiveInt).annotate({
             description:

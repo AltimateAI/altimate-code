@@ -133,7 +133,16 @@ export namespace SessionProcessor {
           processConfig.experimental?.starvation_breaker as SessionStarvation.ConfigShape | undefined,
         )
         const runMode = Flag.ALTIMATE_RUN_MODE
-        const sbExempt = sbConfig.exemptAgents.includes(input.assistantMessage.agent)
+        // The compaction summarizer runs through this same processor under the
+        // session's OWN id, so it would otherwise share the working agent's
+        // per-session tracker: its single mutation-free step increments
+        // `turnsWithoutMutation`, inflating the real agent's counter (spurious
+        // would-fire telemetry in annotate mode, a premature directive in armed
+        // mode). It can only produce a summary, so it is exempt from starvation
+        // accounting entirely — the same reason it is excluded from directive
+        // delivery below.
+        const sbSummarizer = input.assistantMessage.summary === true
+        const sbExempt = sbConfig.exemptAgents.includes(input.assistantMessage.agent) || sbSummarizer
         const starvation =
           sbConfig.mode === "off" || sbExempt ? undefined : SessionStarvation.forSession(input.sessionID, sbConfig)
         const sbArmed = sbConfig.mode === "armed" && runMode && !sbExempt

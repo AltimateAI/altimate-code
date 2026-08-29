@@ -58,9 +58,11 @@ export namespace SessionStarvation {
   //   - repeatSignatureThreshold = 3: three identical (tool+args+touched-files+
   //     failure) signatures means three attempts produced the same failure —
   //     repeating the call cannot change the outcome.
-  //   - maxTurnsWithoutMutation = 12: legitimate exploration bursts (read/search
-  //     before a first edit or a final answer) span a handful of assistant
-  //     turns; 12 consecutive assistant turns with zero corroborated file
+  //   - maxTurnsWithoutMutation = 12: counted per GENERATION STEP (onStepFinish
+  //     is called once per model step, and one user message routinely spans
+  //     several read-only steps) — not per user message. Legitimate exploration
+  //     bursts (read/search before a first edit or a final answer) span a
+  //     handful of steps; 12 consecutive steps with zero corroborated file
   //     mutation is well beyond that regime while still permitting long
   //     read-only research tasks to proceed (the directive is outcome-neutral).
   //   - pollingThresholdMultiplier = 5: identical polling commands (sleep/watch/
@@ -212,7 +214,7 @@ export namespace SessionStarvation {
         normalizeArgs(input.args),
         [...(input.touchedFiles ?? [])].sort().join(","),
         (input.failureMessage ?? "").replace(/\s+/g, " ").trim(),
-      ].join(" "),
+      ].join("\u0000"),
     )
   }
 
@@ -364,7 +366,7 @@ export namespace SessionStarvation {
           // starvation counter.
         }
 
-        const key = `${input.tool} ${normalizeArgs(input.input)}`
+        const key = `${input.tool}\u0000${normalizeArgs(input.input)}`
         if (key === lastCallKey) consecutiveIdenticalCalls++
         else {
           lastCallKey = key
