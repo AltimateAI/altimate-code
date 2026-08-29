@@ -267,11 +267,8 @@ export namespace SessionProcessor {
                   }
                   break
 
+                // altimate_change start — sanitize the incoming id before it becomes the persisted callID and pairing key; braced so the consts do not leak into sibling clauses
                 case "tool-input-start": {
-                  // altimate_change start — sanitize the incoming id before it
-                  // becomes the persisted callID and the pairing key. Braced —
-                  // Biome noSwitchDeclarations: these consts must not leak into
-                  // sibling switch clauses.
                   const inputStartCallID = coerceToolCallID(value.id)
                   const part = await Session.updatePart({
                     id: toolcalls.get(inputStartCallID)?.id ?? PartID.ascending(),
@@ -287,9 +284,9 @@ export namespace SessionProcessor {
                     },
                   })
                   toolcalls.set(inputStartCallID, part as MessageV2.ToolPart)
-                  // altimate_change end
                   break
                 }
+                // altimate_change end
 
                 case "tool-input-delta":
                   break
