@@ -145,17 +145,14 @@ export const DbtBuildGreenValidator: Validator = {
       })
     }
 
-    const inScope = new Set(states.map((s) => s.name))
-    const failedInScope = states.filter((s) => s.status !== null && isFailedRunStatus(s.status))
     // With no edits of our own, the fresh artifact IS this session's build, so
-    // every failing node in it is in scope.
-    const failedWholeRun =
-      touchedPaths.length === 0
-        ? fresh.results.filter((r) => isFailedRunStatus(r.status))
-        : fresh.results.filter((r) => isFailedRunStatus(r.status) && inScope.has(r.name))
-    const failedOutOfScope = fresh.results.filter(
-      (r) => isFailedRunStatus(r.status) && !inScope.has(r.name),
-    ).length
+    // every failing node in it is in scope. Otherwise scope is what we edited,
+    // and failures elsewhere are recorded but never block.
+    const inScope = new Set(states.map((s) => s.name))
+    const allFailed = fresh.results.filter((r) => isFailedRunStatus(r.status))
+    const failedInScope =
+      touchedPaths.length === 0 ? allFailed : allFailed.filter((r) => inScope.has(r.name))
+    const failedOutOfScope = allFailed.length - failedInScope.length
 
     // Coverage is only assertable when the artifact actually recorded models.
     const coverageAssertable = modelNodes.size > 0
@@ -169,20 +166,20 @@ export const DbtBuildGreenValidator: Validator = {
       verdict: "fresh-build",
       coverage_assertable: coverageAssertable,
       model_nodes_in_artifact: modelNodes.size,
-      failed_in_scope: failedWholeRun.map((r) => r.name),
+      failed_in_scope: failedInScope.map((r) => r.name),
       failed_out_of_scope: failedOutOfScope,
       not_built: notBuilt.map((s) => s.name),
       stale_build: staleBuild.map((s) => s.name),
     }
 
-    if (failedWholeRun.length === 0 && notBuilt.length === 0 && staleBuild.length === 0) {
+    if (failedInScope.length === 0 && notBuilt.length === 0 && staleBuild.length === 0) {
       return { ok: true, details }
     }
 
     const reasonParts: string[] = []
-    if (failedWholeRun.length > 0) {
+    if (failedInScope.length > 0) {
       reasonParts.push(
-        `${failedWholeRun.length} node(s) failed in the last build: ${failedWholeRun.map((r) => `${r.name} (${r.status})`).join(", ")}`,
+        `${failedInScope.length} node(s) failed in the last build: ${failedInScope.map((r) => `${r.name} (${r.status})`).join(", ")}`,
       )
     }
     if (notBuilt.length > 0) {
@@ -197,12 +194,12 @@ export const DbtBuildGreenValidator: Validator = {
     }
 
     const hintLines: string[] = []
-    for (const failure of failedWholeRun.slice(0, 10)) {
+    for (const failure of failedInScope.slice(0, 10)) {
       const msg = (failure.message ?? "").split("\n")[0]?.slice(0, 200)
       hintLines.push(`  • ${failure.name} — ${failure.status}${msg ? `: ${msg}` : ""}`)
     }
-    if (failedWholeRun.length > 10) {
-      hintLines.push(`  • …and ${failedWholeRun.length - 10} more`)
+    if (failedInScope.length > 10) {
+      hintLines.push(`  • …and ${failedInScope.length - 10} more`)
     }
     hintLines.push(
       "Rebuild the models you changed with `dbt build` and make the run finish clean before declaring done. Fix the model SQL rather than removing the model, disabling the test, or narrowing the selector.",
