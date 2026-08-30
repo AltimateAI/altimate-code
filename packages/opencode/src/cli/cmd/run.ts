@@ -1248,28 +1248,37 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // persistent failure surfaces instead of hanging the run.
           for (let challengeAttempt = 0; ; challengeAttempt++) {
             const res = (await sdk.session
-              .prompt({
-                sessionID,
-                messageID: challengeMessageID,
-                agent,
-                model: args.model ? Provider.parseModel(args.model) : undefined,
-                variant: args.variant,
-                // altimate_change start — upstream_fix: forward the same audience
-                // directive as the original turns; otherwise a continuing
-                // challenge (model says what remains and keeps working) can drop
-                // back to technical output under --audience executive.
-                ...(audienceSystem ? { system: audienceSystem } : {}),
-                // altimate_change end
-                // Internal challenge text must never become the authoritative
-                // resumed-session task pin.
-                parts: [
-                  {
-                    type: "text",
-                    text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE,
-                    synthetic: true,
-                  },
-                ],
-              })
+              .prompt(
+                {
+                  sessionID,
+                  messageID: challengeMessageID,
+                  agent,
+                  model: args.model ? Provider.parseModel(args.model) : undefined,
+                  variant: args.variant,
+                  // altimate_change start — upstream_fix: forward the same audience
+                  // directive as the original turns; otherwise a continuing
+                  // challenge (model says what remains and keeps working) can drop
+                  // back to technical output under --audience executive.
+                  ...(audienceSystem ? { system: audienceSystem } : {}),
+                  // altimate_change end
+                  // Internal challenge text must never become the authoritative
+                  // resumed-session task pin.
+                  parts: [
+                    {
+                      type: "text",
+                      text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE,
+                      synthetic: true,
+                    },
+                  ],
+                },
+                {
+                  // Share the subscription lifetime with the synchronous POST.
+                  // If the challenge event stream fails, aborting challengeAbort
+                  // must also release this otherwise-unbounded request before we
+                  // await challengePromise below.
+                  signal: challengeAbort.signal,
+                },
+              )
               .catch((e) => ({ error: e }) as SendResult)) as SendResult
             if (!res?.error) return res
             const status = res.response?.status

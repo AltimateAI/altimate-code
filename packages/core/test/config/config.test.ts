@@ -161,6 +161,9 @@ describe("Config", () => {
       expect(decodeCompaction({ context_safety_fraction: 0.05 })._tag).toBe("Success")
       expect(decodeCompaction({ context_safety_fraction: 1.5 })._tag).toBe("Success")
       expect(decodeCompaction({ context_safety_fraction: 0.65 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: Number.NaN })._tag).toBe("Failure")
+      expect(decodeCompaction({ context_safety_fraction: Number.POSITIVE_INFINITY })._tag).toBe("Failure")
+      expect(decodeCompaction({ context_safety_fraction: Number.NEGATIVE_INFINITY })._tag).toBe("Failure")
 
       expect(decodeCompaction({ pin_window_fraction: -0.1 })._tag).toBe("Failure")
       expect(decodeCompaction({ pin_window_fraction: 1.1 })._tag).toBe("Failure")

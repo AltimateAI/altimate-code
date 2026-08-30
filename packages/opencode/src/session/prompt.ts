@@ -396,8 +396,17 @@ export namespace SessionPrompt {
       })
     }
 
-    // altimate_change start — cancel() became async (SessionStatus.set is async); use `await using` for async dispose
-    await using _ = defer(() => cancel(sessionID))
+    // altimate_change start — cancel() became async (SessionStatus.set is async); use `await using` for async dispose.
+    // Always finish at idle after cancellation cleanup. Processor errors already
+    // publish error-before-idle themselves, but failures outside the processor
+    // (notably the compaction circuit breaker) previously skipped the normal
+    // idle transition and left every client waiting forever.
+    await using _ = defer(async () => {
+      await cancel(sessionID)
+      await SessionStatus.set(sessionID, { type: "idle" }).catch((error) => {
+        log.warn("failed to restore idle status during prompt-loop cleanup", { sessionID, error })
+      })
+    })
     // altimate_change end
     // A directive is valid only for this active generation. If the loop stops,
     // aborts, or throws after a detector registers but before the next turn

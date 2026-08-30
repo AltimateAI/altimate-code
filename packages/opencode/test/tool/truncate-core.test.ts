@@ -251,6 +251,12 @@ describe("TruncateCore oversized boundary lines", () => {
     expect(Buffer.byteLength(p.head + p.tail, "utf-8")).toBe(4)
   })
 
+  test("a tiny split prefers the tail boundary when only one UTF-8 character fits", () => {
+    const p = run("😀\n🚀", { maxBytes: 4, maxLines: 2, direction: "middle", headRatio: 0.5 })
+    expect(p.head).toBe("")
+    expect(p.tail).toBe("🚀")
+  })
+
   test("a degraded middle preview assembles without a leading blank line", () => {
     const p: TruncateCore.Preview = { head: "", tail: "final", removed: 3, unit: "lines" }
     const out = TruncateCore.assemble(p, "[hint]", "middle")

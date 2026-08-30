@@ -22,7 +22,7 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   // Accept finite numeric configuration here and clamp at the one runtime
   // boundary (SessionCompaction.contextSafetyFraction). Rejecting the value at
   // document decode drops the entire config instead of safely clamping it.
-  context_safety_fraction: Schema.Number.pipe(Schema.optional),
+  context_safety_fraction: Schema.Number.check(Schema.isFinite()).pipe(Schema.optional),
   state_ledger: Schema.Boolean.pipe(Schema.optional),
   ledger_max_tokens: NonNegativeInt.pipe(Schema.optional),
   ledger_recent_calls: NonNegativeInt.pipe(Schema.optional),

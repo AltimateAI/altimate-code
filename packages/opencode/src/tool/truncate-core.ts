@@ -198,16 +198,17 @@ export function preview(lines: string[], totalBytes: number, opts: ResolvedOptio
     // the unsplit maxBytes budget fits it (for example, one 4-byte emoji with a
     // 2/2 middle split). Retry one boundary with the full budget so truncation
     // never erases content that was representable within the configured cap.
+    // Middle mode is tail-weighted, so preserve the trailing verdict first.
     if (headLines.length === 0 && tailLines.length === 0 && lines.length > 0) {
-      const first = bytePrefix(lines[0]!, maxBytes)
-      if (first) {
-        headLines = [first]
-        headBytes = Buffer.byteLength(first, "utf-8")
+      const last = byteSuffix(lines[lines.length - 1]!, maxBytes)
+      if (last) {
+        tailLines = [last]
+        tailBytes = Buffer.byteLength(last, "utf-8")
       } else {
-        const last = byteSuffix(lines[lines.length - 1]!, maxBytes)
-        if (last) {
-          tailLines = [last]
-          tailBytes = Buffer.byteLength(last, "utf-8")
+        const first = bytePrefix(lines[0]!, maxBytes)
+        if (first) {
+          headLines = [first]
+          headBytes = Buffer.byteLength(first, "utf-8")
         }
       }
     }

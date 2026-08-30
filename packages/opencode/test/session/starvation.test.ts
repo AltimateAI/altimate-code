@@ -371,7 +371,7 @@ describe("repeat_signature loop detection", () => {
     )
   })
 
-  test("large outcome normalization stays deterministic without a full-size replace", () => {
+  test("large outcome whitespace normalization is deterministic", () => {
     const call = { tool: "read", args: { filePath: "/a.sql" } }
     const spaced = ("row   value\n".repeat(100_000) + "done").trim()
     const collapsed = ("row value ".repeat(100_000) + "done").trim()

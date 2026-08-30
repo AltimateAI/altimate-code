@@ -1035,8 +1035,9 @@ export namespace SessionCompaction {
     if (attempt > 3) {
       // Returning undefined here made the prompt loop's `continue` re-enter
       // process() immediately (the pending compaction marker stays unresolved),
-      // hot-spinning with a telemetry event per iteration. Return "stop" so the
-      // caller breaks, and clear the counter so a later prompt gets a fresh
+      // hot-spinning with a telemetry event per iteration. Throw a fatal error
+      // so callers cannot report a clean stop; prompt-loop cleanup restores the
+      // session to idle. Clear the counter so a later prompt gets a fresh
       // bounded set of attempts instead of tripping the breaker instantly.
       log.warn("compaction circuit breaker", { sessionID: input.sessionID, attempt })
       compactionAttempts.delete(input.sessionID)
@@ -1116,7 +1117,10 @@ export namespace SessionCompaction {
     const selected = await select({
       messages: history.filter((_, index) => !hidden.has(index)),
       cfg,
-      model,
+      // The retained tail and state ledger are re-injected into the SESSION
+      // model's next request. Reserve and estimate both against that same model;
+      // a compaction-agent model override may have a different context window.
+      model: sessionModel,
     })
     // altimate_change end
     // altimate_change end
