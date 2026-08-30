@@ -826,16 +826,18 @@ describe("manual-install hints are copy-pasteable", () => {
     expect(prefix!.startsWith("'") || prefix!.startsWith('"')).toBe(true)
   })
 
-  test("DriverNotInstalledError names a location when nothing was searched", () => {
-    process.env["ALTIMATE_DRIVER_DIR"] = path.join(path.sep, "tmp", "altimate-drivers-absent")
+  test("DriverNotInstalledError names a location for an empty searched list", () => {
+    const installDir = path.join(tmpRoot, "absent")
+    process.env["ALTIMATE_DRIVER_DIR"] = installDir
 
-    // The first-run state: no driver directory exists, so driverSearchRoots()
-    // returns nothing. The message must still name somewhere.
+    // Model the possible empty-root result directly. A unit-test checkout has
+    // legitimate executable/package roots, so forcing driverSearchRoots() to
+    // return [] here would be host-dependent.
     const err = new DriverNotInstalledError("duckdb", DRIVER_PACKAGES.duckdb, [])
 
     expect(err.message).not.toContain("Searched 0 locations:")
-    expect(err.message).toContain("Searched nothing")
-    expect(err.message).toContain(path.join("altimate-drivers-absent", "node_modules"))
+    expect(err.message).toContain("No searchable driver locations were found.")
+    expect(err.message).toContain(`Expected managed location: ${path.join(installDir, "node_modules")}.`)
     // Still distinguishable from a broken install, and still actionable.
     expect(err.message).toContain("DuckDB driver not installed.")
     expect(err.message).toContain("npm install --prefix")

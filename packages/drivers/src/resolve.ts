@@ -92,15 +92,13 @@ export class DriverNotInstalledError extends Error {
   constructor(driver: DriverName, packages: readonly string[], searched: readonly string[]) {
     const label = DRIVER_LABELS[driver]
     const installDir = driverInstallDir()
-    // `driverSearchRoots()` only returns directories that exist, so on a machine
-    // that has never installed a driver it returns nothing at all — the normal
-    // first-run state, given drivers are deliberately not shipped. That left the
-    // message ending in a bare "Searched 0 locations:" with nothing after the
-    // colon, which names nowhere and reads like a bug. Say plainly that there was
-    // nothing to search, and name the directory the install command creates.
+    // `driverSearchRoots()` only returns directories that exist, so a compiled
+    // first run can have no searchable roots at all. The old message then ended
+    // in a bare "Searched 0 locations:" with nothing after the colon. Describe
+    // only what the empty list proves and name the managed location users need.
     const searchedLine = searched.length
       ? `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`
-      : `Searched nothing: no driver directory exists yet, not even ${path.join(installDir, "node_modules")}.`
+      : `No searchable driver locations were found. Expected managed location: ${path.join(installDir, "node_modules")}.`
     super(
       `${label} driver not installed.\n` +
         `Install it with the warehouse_install_driver tool, or run:\n` +
