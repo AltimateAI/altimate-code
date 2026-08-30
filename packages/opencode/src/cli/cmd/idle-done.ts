@@ -133,19 +133,20 @@ export namespace IdleDone {
     "[",
     "sleep",
   ])
+  // Only subcommands whose argument forms are unconditionally observational
+  // belong here. Families such as branch, remote, and config mix reads with
+  // ref/config writes; fail closed for the whole family so a mutating form can
+  // never leave the mutation watermark behind a stale green verification.
   const GIT_READ_ONLY_SUBCOMMANDS = new Set([
     "status",
     "log",
     "diff",
     "show",
-    "branch",
-    "remote",
     "rev-parse",
     "ls-files",
     "blame",
     "describe",
     "shortlog",
-    "config",
   ])
 
   const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([

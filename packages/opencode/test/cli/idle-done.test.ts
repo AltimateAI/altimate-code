@@ -174,6 +174,20 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("git diff --check")).toBe(false)
   })
 
+  test("mixed read/write git families fail closed for mutating argument forms", () => {
+    for (const command of [
+      "git branch feature",
+      "git branch -D stale",
+      "git remote add origin git@example.com:org/repo.git",
+      "git remote set-url origin git@example.com:org/new.git",
+      "git config user.name Altimate",
+      "git config --unset user.email",
+    ]) {
+      expect(IdleDone.isReadOnlyCommand(command)).toBe(false)
+      expect(IdleDone.isMutatingCommand(command)).toBe(true)
+    }
+  })
+
   test("git global options are skipped before classifying the subcommand", () => {
     expect(IdleDone.isReadOnlyCommand("git -C /repo status")).toBe(true)
     expect(IdleDone.isReadOnlyCommand("git --git-dir /repo/.git log -1")).toBe(true)
@@ -327,6 +341,23 @@ describe("IdleDone hard preconditions", () => {
     d.observePart(stepFinish("cmp_2"))
     for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
     expect(d.shouldChallenge()).toBe(false)
+  })
+
+  test("(i) a mutating git argument form invalidates an earlier green verification", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "make check", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(bashPart("m_config", "git config user.name Altimate", 0))
+    d.observePart(stepFinish("m_config"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+
+    expect(d.shouldChallenge()).toBe(false)
+    const snap = d.snapshot()
+    expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
   })
 
   test("(ii) an unknown zero-exit command is not verification evidence", () => {
