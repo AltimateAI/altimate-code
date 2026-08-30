@@ -17,6 +17,7 @@ import { join } from "path"
 import { DbtBuildGreenValidator } from "../../../src/altimate/validators/dbt-build-green"
 import { DbtDeliverableNamesValidator } from "../../../src/altimate/validators/dbt-deliverable-names"
 import { DbtIncrementalConfigValidator } from "../../../src/altimate/validators/dbt-incremental-config"
+import { DbtNothingBuiltValidator } from "../../../src/altimate/validators/dbt-nothing-built"
 import {
   dbtConfigArgs,
   modelsModifiedSince,
@@ -338,6 +339,45 @@ describe("finding 5 — node type is checked", () => {
     )
     const produced = await collectProducedNodeNames(dir)
     expect(produced.has("foo")).toBe(false)
+  })
+})
+
+describe("a stale task document must not trap the session", () => {
+  test("a required model already on disk satisfies the gate without being touched", async () => {
+    // A TASK.md naming a deliverable that some earlier session already
+    // delivered, left in the workspace. Requiring THIS session to have
+    // authored it would block every later session doing unrelated work, and no
+    // action inside the session could clear it — it would burn the whole
+    // shared retry budget every time.
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
+    await fs.writeFile(join(dir, "models", "fct_orders.sql"), "select 1 as id")
+    // Backdate everything so nothing counts as authored this session.
+    const old = Date.now() / 1000 - 3600
+    for (const rel of ["dbt_project.yml", "TASK.md", join("models", "fct_orders.sql")]) {
+      await fs.utimes(join(dir, rel), old, old)
+    }
+
+    const r = await DbtNothingBuiltValidator.check(
+      ctx({ sessionStartMs: Date.now() - 60_000 }),
+    )
+    expect(r.details!["authored_files"]).toBe(false)
+    expect(r.details!["matched_deliverables"]).toEqual(["fct_orders"])
+    expect(r.ok).toBe(true)
+  })
+
+  test("but a deliverable that exists nowhere still blocks", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
+    const old = Date.now() / 1000 - 3600
+    for (const rel of ["dbt_project.yml", "TASK.md"]) {
+      await fs.utimes(join(dir, rel), old, old)
+    }
+
+    const r = await DbtNothingBuiltValidator.check(
+      ctx({ sessionStartMs: Date.now() - 60_000 }),
+    )
+    expect(r.ok).toBe(false)
   })
 })
 

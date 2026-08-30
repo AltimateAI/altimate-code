@@ -37,6 +37,7 @@ import {
   isFailedRunStatus,
   resolveDbtSourcePaths,
   runResultsExecutedModels,
+  collectProducedNodeNames,
   type RequiredDeliverables,
 } from "./validator-utils"
 
@@ -237,12 +238,45 @@ export const DbtNothingBuiltValidator: Validator = {
     const namedModels = expectation.required?.models ?? []
     const namedFiles = expectation.required?.files ?? []
     const hasNamedDeliverables = namedModels.length > 0 || namedFiles.length > 0
+    // A deliverable that already exists on disk satisfies the contract even
+    // when this session did not touch it.
+    //
+    // Without this, a task document is a permanent trap: a workspace whose
+    // TASK.md names `fct_orders` — delivered in some earlier session, and the
+    // document never cleaned up — would block every later session that did
+    // unrelated work, and no action the agent can take inside the session
+    // clears it short of editing the task document itself. It would then burn
+    // the whole shared retry budget every time.
+    //
+    // Existence rather than authorship is also what `dbt-deliverable-names`
+    // already asserts, so the two contract gates now agree on what "delivered"
+    // means instead of disagreeing by one session.
+    const existingNodes = hasNamedDeliverables
+      ? await collectProducedNodeNames(dbtRoot)
+      : new Set<string>()
+    const matchedFiles: string[] = []
+    for (const file of namedFiles) {
+      if (authoredWork.relPaths.has(normalizeRelPath(file))) {
+        matchedFiles.push(file)
+        continue
+      }
+      // Same existence escape hatch as for named models.
+      try {
+        const stat = await fs.stat(join(dbtRoot, file))
+        if (stat.isFile()) matchedFiles.push(file)
+      } catch {
+        // absent — not delivered
+      }
+    }
     const matchedDeliverables = hasNamedDeliverables
       ? [
           ...namedModels.filter(
-            (name) => authoredWork.names.has(name.toLowerCase()) || builtNodeNames.has(name.toLowerCase()),
+            (name) =>
+              authoredWork.names.has(name.toLowerCase()) ||
+              builtNodeNames.has(name.toLowerCase()) ||
+              existingNodes.has(name.toLowerCase()),
           ),
-          ...namedFiles.filter((file) => authoredWork.relPaths.has(normalizeRelPath(file))),
+          ...matchedFiles,
         ]
       : []
     const satisfied = hasNamedDeliverables
