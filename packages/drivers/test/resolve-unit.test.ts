@@ -313,7 +313,9 @@ describe("loadOptionalDriver", () => {
   })
 
   test("throws DriverNotInstalledError naming the searched roots", async () => {
-    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "empty")
+    const managedRoot = path.join(tmpRoot, "empty", "node_modules")
+    fs.mkdirSync(managedRoot, { recursive: true })
+    process.env["ALTIMATE_DRIVER_DIR"] = path.dirname(managedRoot)
     delete process.env["ALTIMATE_BIN_DIR"]
     delete process.env["NODE_PATH"]
 
@@ -332,6 +334,7 @@ describe("loadOptionalDriver", () => {
     // target directory and no account of where we had looked.
     expect(err.message).toContain("--prefix")
     expect(err.message).toContain("Searched")
+    expect(err.message).toContain(managedRoot)
   })
 
   test("reports a disk-resolved package that throws on import as a load failure", async () => {
@@ -824,6 +827,33 @@ describe("manual-install hints are copy-pasteable", () => {
     // hardcoded `'` assertion fails on a Windows runner. The sibling npm-missing
     // test above already accepts both; mirror it.
     expect(prefix!.startsWith("'") || prefix!.startsWith('"')).toBe(true)
+  })
+
+  test("DriverNotInstalledError names a location for an empty searched list", () => {
+    const installDir = path.join(tmpRoot, "absent")
+    process.env["ALTIMATE_DRIVER_DIR"] = installDir
+
+    // Model the possible empty-root result directly. A unit-test checkout has
+    // legitimate executable/package roots, so forcing driverSearchRoots() to
+    // return [] here would be host-dependent.
+    const err = new DriverNotInstalledError("duckdb", DRIVER_PACKAGES.duckdb, [])
+
+    expect(err.message).not.toContain("Searched 0 locations:")
+    expect(err.message).toContain("No searchable driver locations were found.")
+    expect(err.message).toContain(`Expected managed location: ${path.join(installDir, "node_modules")}.`)
+    // Still distinguishable from a broken install, and still actionable.
+    expect(err.message).toContain("DuckDB driver not installed.")
+    expect(err.message).toContain("npm install --prefix")
+  })
+
+  test("DriverNotInstalledError lists the roots it did search", () => {
+    const roots = [path.join(path.sep, "a", "node_modules"), path.join(path.sep, "b", "node_modules")]
+
+    const err = new DriverNotInstalledError("duckdb", DRIVER_PACKAGES.duckdb, roots)
+
+    expect(err.message).toContain("Searched 2 locations:")
+    for (const root of roots) expect(err.message).toContain(root)
+    expect(err.message).not.toContain("Searched nothing")
   })
 
   test("no source builds a --prefix hint without shellQuote", () => {
