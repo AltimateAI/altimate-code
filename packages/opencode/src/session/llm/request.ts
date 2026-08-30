@@ -177,6 +177,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
+  // altimate_change start — canonicalize the exact outgoing header precedence before budgeting
   const requestHeaders = mergeRequestHeaders(
     input.model.providerID.startsWith("opencode")
       ? {
@@ -195,6 +196,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     input.model.headers,
     headers,
   )
+  // altimate_change end
 
   // altimate_change start — clamp after tools, headers, and plugin options are finalized.
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
@@ -230,7 +232,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     params: clampedParams,
     messageTransformOptions: requestOptions,
     // altimate_change end
+    // altimate_change start — return the canonical headers used by the budget estimator
     headers: requestHeaders,
+    // altimate_change end
   }
 })
 

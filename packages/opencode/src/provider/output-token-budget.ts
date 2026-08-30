@@ -14,10 +14,7 @@ const ESTIMATE_CHUNK_SIZE = 400
 const MEDIA_TOKEN_ALLOWANCE = 2_048
 const FILE_TOKEN_ALLOWANCE = 16_384
 const PDF_TOKEN_ALLOWANCE = 32_768
-const PDF_TOKENS_PER_PAGE = 5_000
-const PDF_SCAN_BYTE_LIMIT = 64 * 1_024
 const DATA_URL_HEADER_LIMIT = 1_024
-const PDF_PAGE_LIMIT = 600
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
@@ -210,59 +207,13 @@ function inlinePayloadSize(payload: unknown): number | undefined {
   return Math.max(0, Math.floor((bodyLength * 3) / 4) - padding)
 }
 
-/** Decode at most one bounded prefix for optional PDF page-tree evidence. */
-function inlinePdfPrefix(payload: unknown): string | undefined {
-  if (ArrayBuffer.isView(payload)) {
-    const length = Math.min(payload.byteLength, PDF_SCAN_BYTE_LIMIT)
-    return Buffer.from(payload.buffer, payload.byteOffset, length).toString("latin1")
-  }
-  if (payload instanceof ArrayBuffer) {
-    return Buffer.from(payload, 0, Math.min(payload.byteLength, PDF_SCAN_BYTE_LIMIT)).toString("latin1")
-  }
-
-  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
-  if (!value || /^https?:/i.test(value)) return undefined
-  const dataURL = /^data:/i.test(value)
-  const prefix = dataURL ? value.slice(0, DATA_URL_HEADER_LIMIT) : ""
-  const comma = dataURL ? prefix.indexOf(",") : -1
-  if (dataURL && comma === -1) return undefined
-  const bodyOffset = comma === -1 ? 0 : comma + 1
-  if (comma !== -1 && !/;base64(?:;|$)/i.test(prefix.slice(0, comma))) {
-    return value.slice(bodyOffset, bodyOffset + PDF_SCAN_BYTE_LIMIT)
-  }
-
-  try {
-    const encodedLimit = Math.ceil(PDF_SCAN_BYTE_LIMIT / 3) * 4
-    return Buffer.from(value.slice(bodyOffset, bodyOffset + encodedLimit), "base64")
-      .subarray(0, PDF_SCAN_BYTE_LIMIT)
-      .toString("latin1")
-  } catch {
-    return undefined
-  }
-}
-
-/** Estimate page count only from the bounded PDF prefix. */
-function pdfPageCount(source: string | undefined): number {
-  if (!source) return 0
-  let pages = 0
-  const leaf = /\/Type\s*\/Page\b/g
-  while (leaf.exec(source) && pages < PDF_PAGE_LIMIT) pages++
-
-  const trees = [/\/Type\s*\/Pages\b[^>]{0,512}?\/Count\s+(\d+)/g, /\/Count\s+(\d+)[^>]{0,512}?\/Type\s*\/Pages\b/g]
-  for (const tree of trees) {
-    for (let match = tree.exec(source); match; match = tree.exec(source)) {
-      pages = Math.max(pages, Number(match[1]))
-    }
-  }
-  return Math.min(pages, PDF_PAGE_LIMIT)
-}
-
-/** Combine fixed, monotonic byte-size, and bounded page evidence for inline PDFs. */
+/** Combine fixed and monotonic byte-size evidence without trusting unparsed PDF metadata. */
 function pdfTokenAllowance(payload: unknown): number {
   const bytes = inlinePayloadSize(payload) ?? 0
-  const pages = pdfPageCount(inlinePdfPrefix(payload))
-  // One decoded byte per token is deliberately conservative for compressed and multilingual files.
-  return Math.max(PDF_TOKEN_ALLOWANCE, bytes, pages * PDF_TOKENS_PER_PAGE)
+  // Raw PDF bytes cannot authenticate page-tree metadata: comments, strings, streams, stale
+  // objects, and incremental revisions may all contain convincing but unreachable markers.
+  // One decoded byte per token plus the fixed floor stays conservative without amplification.
+  return Math.max(PDF_TOKEN_ALLOWANCE, bytes)
 }
 
 /** Assign an allowance that matches the semantic media kind rather than its encoded bytes. */

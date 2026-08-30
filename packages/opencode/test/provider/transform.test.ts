@@ -4937,23 +4937,41 @@ describe("output token budget", () => {
     expect(pdfToolResult).toBeGreaterThan(100_000)
   })
 
-  test("charges PDFs by page count when the document page tree is available", () => {
-    const pdf = [
-      "%PDF-1.7",
-      "1 0 obj << /Type /Pages /Count 12 /Kids [] >> endobj",
-      "2 0 obj << /Type /Page /Parent 1 0 R >> endobj",
-      "%%EOF",
-    ].join("\n")
-    const estimated = estimateInputTokens({
-      system: [],
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "file", mediaType: "application/pdf", data: Buffer.from(pdf).toString("base64") }],
-        },
-      ],
-    })
-    expect(estimated).toBeGreaterThanOrEqual(60_000)
+  test("does not trust unparsed PDF metadata as page-count evidence", () => {
+    const marker = "/Type /Pages /Count 600"
+    const variants = [
+      ["%PDF-1.4", `% ${marker}`, "1 0 obj << /Type /Pages /Count 1 >> endobj", "%%EOF"].join("\n"),
+      ["%PDF-1.4", `1 0 obj << /Note (${marker}) >> endobj`, "%%EOF"].join("\n"),
+      ["%PDF-1.4", "1 0 obj << /Length 24 >> stream", marker, "endstream endobj", "%%EOF"].join("\n"),
+      ["%PDF-1.4", `99 0 obj << ${marker} >> endobj`, "%%EOF"].join("\n"),
+    ]
+    const estimate = (data: string | Uint8Array | ArrayBuffer) =>
+      estimateInputTokens({
+        system: [],
+        messages: [{ role: "user", content: [{ type: "file", mediaType: "application/pdf", data }] }],
+      })
+
+    for (const pdf of variants) {
+      const bytes = new Uint8Array(Buffer.from(pdf, "latin1"))
+      const payloads = [
+        Buffer.from(bytes).toString("base64"),
+        `data:application/pdf;base64,${Buffer.from(bytes).toString("base64")}`,
+        bytes,
+        bytes.buffer,
+      ]
+      for (const payload of payloads) {
+        const estimated = estimate(payload)
+        expect(estimated).toBeGreaterThan(32_000)
+        expect(estimated).toBeLessThan(40_000)
+        expect(
+          clampOutputTokens({
+            model: createWindowModel({ context: 200_000, input: 180_000, output: 16_384 }),
+            requested: 16_384,
+            inputTokens: estimated,
+          }),
+        ).toBe(16_384)
+      }
+    }
   })
 
   test("never lets a page marker suppress the PDF byte-size floor", () => {
@@ -4968,23 +4986,6 @@ describe("output token budget", () => {
       ],
     })
     expect(estimated).toBeGreaterThan(200_000)
-  })
-
-  test("bounds PDF page-tree scanning to a fixed prefix", () => {
-    const pdf = ["%PDF-1.7", "x".repeat(70 * 1_024), "<< /Type /Pages /Count 600 >>", "%%EOF"].join("\n")
-    const estimated = estimateInputTokens({
-      system: [],
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "file", mediaType: "application/pdf", data: Buffer.from(pdf).toString("base64") }],
-        },
-      ],
-    })
-    // The late page tree is outside the 64 KiB inspection prefix. Size still participates, but
-    // the estimator does not scan the full payload and inflate this to 600 * 5,000 tokens.
-    expect(estimated).toBeGreaterThan(70_000)
-    expect(estimated).toBeLessThan(100_000)
   })
 
   test("bounds malformed data-URL header inspection and keeps its size floor", () => {
@@ -5002,8 +5003,8 @@ describe("output token budget", () => {
         },
       ],
     })
-    // The comma and page tree are outside the bounded data-URL header prefix. The full string
-    // still establishes a conservative size floor, but the late page marker is never scanned.
+    // The comma is outside the bounded data-URL header prefix. The full string still establishes
+    // a conservative size floor without inspecting attacker-controlled PDF metadata.
     expect(lateEstimated).toBeGreaterThan(70_000)
     expect(lateEstimated).toBeLessThan(100_000)
 

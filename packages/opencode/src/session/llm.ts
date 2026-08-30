@@ -175,6 +175,7 @@ export namespace LLM {
       },
     )
 
+    // altimate_change start — canonicalize the exact outgoing header precedence before budgeting
     const requestHeaders = mergeRequestHeaders(
       input.model.providerID.startsWith("opencode")
         ? {
@@ -185,14 +186,13 @@ export namespace LLM {
           }
         : input.model.providerID !== "anthropic"
           ? {
-              // altimate_change start — upstream_fix: UA brand
               "User-Agent": `altimate-code/${Installation.VERSION}`,
-              // altimate_change end
             }
           : undefined,
       input.model.headers,
       headers,
     )
+    // altimate_change end
 
     const tools = await resolveTools(input)
 
@@ -309,7 +309,9 @@ export namespace LLM {
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
+      // altimate_change start — send the canonical headers used by the budget estimator
       headers: requestHeaders,
+      // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
         ...system.map(
