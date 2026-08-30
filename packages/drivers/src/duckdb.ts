@@ -17,10 +17,19 @@ import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, Sche
  */
 const DEFAULT_OPEN_TIMEOUT_MS = 30_000
 
+/**
+ * Largest delay `setTimeout` represents. A larger value overflows the timer's
+ * 32-bit signed delay and is clamped to 1ms, which would turn a deliberately
+ * huge budget into an immediate deadline — the exact failure this file exists
+ * to remove. Clamp instead, so an over-large budget still behaves like a very
+ * long one.
+ */
+const MAX_TIMER_MS = 2_147_483_647
+
 /** Read a positive, finite millisecond budget, or `undefined` if unusable. */
 function positiveMs(value: unknown): number | undefined {
   const n = typeof value === "number" ? value : Number(value)
-  return Number.isFinite(n) && n > 0 ? n : undefined
+  return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_TIMER_MS) : undefined
 }
 
 function resolveOpenTimeoutMs(config: ConnectionConfig): number {
@@ -59,8 +68,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       msg.includes("locked") ||
       msg.includes("conflicting lock") ||
       msg.includes("could not set lock") ||
-      msg.includes("sqlite_busy") ||
-      msg.includes("duckdb_locked")
+      msg.includes("sqlite_busy")
     )
   }
 
@@ -157,12 +165,19 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           timeout = setTimeout(() => {
             if (!resolved) {
               resolved = true
+              // Nothing can reach this handle once the promise rejects. If the
+              // callback arrives later it closes the handle itself (see the
+              // `resolved` branch in onOpen); if it never arrives, that branch
+              // never runs, so close here too. Both paths are idempotent
+              // because closeQuietly swallows a double close.
+              closeQuietly()
               reject(
                 new Error(
                   `DuckDB store "${dbPath}" did not finish opening within ${openTimeoutMs}ms. ` +
                   `This is a client-side deadline in the DuckDB driver, not a fault in the store ` +
                   `— the open may simply be queued behind other work in this process. ` +
-                  `Raise it with ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`,
+                  `Raise the budget with this connection's open_timeout_ms (which takes ` +
+                  `priority) or ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`,
                 ),
               )
             }
@@ -192,6 +207,17 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
               retryErr instanceof Error ? retryErr : new Error(String(retryErr)),
             )
           }
+        } else if (isLockError(err) && dbPath !== ":memory:") {
+          // An explicit read-only open is NOT rescued by the retry above — and
+          // must not be: DuckDB's file lock is exclusive against read-only
+          // opens too, so re-opening READ_ONLY when we already asked for
+          // READ_ONLY would only repeat the same failure. It still has to be
+          // wrapped, because categorizeConnectionError matches the wrapper's
+          // "locked by another process" wording; the raw DuckDB text would be
+          // reported as an unclassified failure. An in-memory store is excluded
+          // for the same reason the retry excludes it: no other process can
+          // hold it, so the wrapper's text would be false.
+          throw wrapDuckDBError(err instanceof Error ? err : new Error(String(err)))
         } else {
           throw err
         }

@@ -339,6 +339,12 @@ export interface WarehouseTestResult {
    * are not fixable by editing the connection.
    */
   infrastructure?: boolean
+  /**
+   * True when the failure clears on its own once another process lets go — a
+   * store locked by another writer. Still `infrastructure`, but the response is
+   * to close the conflicting connection and retry, not to stop and report.
+   */
+  recoverable?: boolean
   // altimate_change end
 }
 

@@ -6,6 +6,7 @@ import path from "node:path"
 import { Dispatcher } from "../../src/altimate/native"
 import * as Registry from "../../src/altimate/native/connections/registry"
 import { WarehouseTestTool } from "../../src/altimate/tools/warehouse-test"
+import { holdWriteLock } from "./duckdb-lock-helper"
 import { initTool } from "./tool-fixture"
 
 // End-to-end coverage for the `warehouse_test` tool against a real DuckDB file
@@ -20,6 +21,9 @@ const ddbTest = RUN ? test : test.skip
 
 let dir = ""
 let storePath = ""
+// Captured so afterAll can put the environment back exactly as it found it.
+// Unconditionally deleting would clear a value the surrounding process had set.
+let prevTelemetryDisabled: string | undefined
 
 async function warehouseTest(name: string) {
   return Dispatcher.call("warehouse.test", { name })
@@ -27,6 +31,7 @@ async function warehouseTest(name: string) {
 
 describe("warehouse.test against a real DuckDB store", () => {
   beforeAll(async () => {
+    prevTelemetryDisabled = process.env["ALTIMATE_TELEMETRY_DISABLED"]
     process.env["ALTIMATE_TELEMETRY_DISABLED"] = "true"
     if (!RUN) return
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "warehouse-test-"))
@@ -36,6 +41,7 @@ describe("warehouse.test against a real DuckDB store", () => {
     const c = await Registry.get("seed")
     await c.execute("CREATE TABLE t AS SELECT 1 AS a")
     const probe = await c.execute("SELECT count(*) AS n FROM t")
+    await Registry.closeAll()
     Registry.reset()
     // Refuse to run against anything but the real driver — see above.
     if (Number(probe.rows?.[0]?.[0]) !== 1) {
@@ -47,12 +53,20 @@ describe("warehouse.test against a real DuckDB store", () => {
     }
   })
 
-  afterEach(() => {
+  // Registry.reset() only clears the connector map — it is synchronous and
+  // close() is not — so on its own it leaks the native DuckDB handle behind
+  // every connector these tests create. closeAll() is what actually releases
+  // them; without it the handles accumulate and the rmSync below cannot delete
+  // the store on Windows.
+  afterEach(async () => {
+    await Registry.closeAll()
     Registry.reset()
   })
 
-  afterAll(() => {
-    delete process.env["ALTIMATE_TELEMETRY_DISABLED"]
+  afterAll(async () => {
+    if (prevTelemetryDisabled === undefined) delete process.env["ALTIMATE_TELEMETRY_DISABLED"]
+    else process.env["ALTIMATE_TELEMETRY_DISABLED"] = prevTelemetryDisabled
+    await Registry.closeAll()
     Registry.reset()
     if (dir) fs.rmSync(dir, { recursive: true, force: true })
   })
@@ -62,6 +76,7 @@ describe("warehouse.test against a real DuckDB store", () => {
     // merely usually right would recreate exactly that contamination. Each
     // iteration resets the registry so nothing is served from cache.
     for (let i = 0; i < 10; i++) {
+      await Registry.closeAll()
       Registry.reset()
       Registry.setConfigs({ local: { type: "duckdb", path: storePath } })
       const result = await warehouseTest("local")
@@ -96,6 +111,47 @@ describe("warehouse.test against a real DuckDB store", () => {
     Registry.setConfigs({ local: { type: "duckdb", path: storePath } })
     const result = await warehouseTest("local")
     expect(result.connected).toBe(true)
+  })
+
+  ddbTest("a store locked by another process is reported as a recoverable lock", async () => {
+    const lock = await holdWriteLock(storePath, dir)
+    try {
+      await Registry.closeAll()
+      Registry.reset()
+      Registry.setConfigs({ local: { type: "duckdb", path: storePath } })
+      const result = await warehouseTest("local")
+      expect(result.connected).toBe(false)
+      // Not "other": before this, an unwrapped lock error fell through every
+      // rule in categorizeConnectionError and was reported as an unclassified
+      // failure, which reads exactly like a bad password.
+      expect(result.error_category).toBe("store_locked")
+      // Still infrastructure — nothing about this connection's config is wrong
+      // — but recoverable, which is what separates it from a broken install.
+      expect(result.infrastructure).toBe(true)
+      expect(result.recoverable).toBe(true)
+    } finally {
+      await lock.release()
+    }
+  })
+
+  ddbTest("the tool tells a caller to clear a lock, not to stop and report it", async () => {
+    const tool = await initTool(WarehouseTestTool)
+    const ctx = { sessionID: "s", messageID: "m", agent: "build", abort: new AbortController().signal, messages: [] }
+    const lock = await holdWriteLock(storePath, dir)
+    try {
+      await Registry.closeAll()
+      Registry.reset()
+      Registry.setConfigs({ local: { type: "duckdb", path: storePath } })
+      const locked = await tool.execute({ name: "local" }, ctx)
+      expect(locked.title).toContain("STORE LOCKED")
+      expect(locked.metadata.recoverable).toBe(true)
+      // A lock clears itself once the other process lets go, so the
+      // stop-and-report copy meant for a broken install is wrong advice here.
+      expect(locked.output).not.toContain("Stop and report this")
+      expect(locked.output).toContain("Close that connection and try again")
+    } finally {
+      await lock.release()
+    }
   })
 
   ddbTest("the warehouse_test tool renders infrastructure faults unmistakably", async () => {

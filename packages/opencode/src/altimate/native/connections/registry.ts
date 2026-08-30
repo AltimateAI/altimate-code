@@ -286,7 +286,16 @@ export function categorizeConnectionError(e: unknown): string {
   // Checked before the generic "timeout"/"not found" rules below, which are
   // about the remote warehouse and would otherwise swallow these.
   if (msg.includes("did not finish opening")) return "driver_open_timeout"
-  if (msg.includes("locked by another process")) return "store_locked"
+  // "locked by another process" is the DuckDB driver's own wrapper. The other
+  // two are DuckDB's raw text ("Could not set lock on file …: Conflicting lock
+  // is held"), matched here as well so a lock that reaches this function
+  // unwrapped is still classified rather than falling through to "other".
+  if (
+    msg.includes("locked by another process") ||
+    msg.includes("conflicting lock") ||
+    msg.includes("could not set lock")
+  )
+    return "store_locked"
   // altimate_change end
   if (msg.includes("password") || msg.includes("authentication") || msg.includes("unauthorized") || msg.includes("jwt"))
     return "auth_failed"
@@ -298,14 +307,26 @@ export function categorizeConnectionError(e: unknown): string {
 
 // altimate_change start — distinguish infrastructure faults from config faults
 /**
- * Categories where the local client is broken, not the connection's config and
- * not the remote warehouse. A caller cannot fix these by correcting
+ * Categories where the fault is in this machine, not the connection's config
+ * and not the remote warehouse. A caller cannot fix these by correcting
  * credentials, and a harness must not score them as a task failure.
  */
 const INFRASTRUCTURE_CATEGORIES = new Set(["driver_missing", "driver_open_timeout", "store_locked"])
 
+/**
+ * The subset of the above that clears on its own once another process lets go.
+ * Still infrastructure — nothing about the connection's config is wrong — but
+ * the right response is to close the conflicting connection and retry, not to
+ * stop and report a broken install.
+ */
+const RECOVERABLE_CATEGORIES = new Set(["store_locked"])
+
 export function isInfrastructureFailure(category: string): boolean {
   return INFRASTRUCTURE_CATEGORIES.has(category)
+}
+
+export function isRecoverableFailure(category: string): boolean {
+  return RECOVERABLE_CATEGORIES.has(category)
 }
 // altimate_change end
 
@@ -426,7 +447,13 @@ export function list(): { warehouses: WarehouseInfo[] } {
 /** Test a connection by running a simple query. */
 export async function test(
   name: string,
-): Promise<{ connected: boolean; error?: string; error_category?: string; infrastructure?: boolean }> {
+): Promise<{
+  connected: boolean
+  error?: string
+  error_category?: string
+  infrastructure?: boolean
+  recoverable?: boolean
+}> {
   try {
     const connector = await get(name)
     const config = configs.get(name)
@@ -450,6 +477,7 @@ export async function test(
       error: String(e),
       error_category: category,
       infrastructure: isInfrastructureFailure(category),
+      recoverable: isRecoverableFailure(category),
     }
     // altimate_change end
   }
@@ -545,9 +573,16 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
   }
 }
 
-/** Reload all configs and clear cached connectors. */
-export async function reload(): Promise<void> {
-  // Close all cached connectors
+// altimate_change start — a way to release native handles without reloading
+/**
+ * Close every cached connector and drop it from the cache.
+ *
+ * `reset()` cannot do this: it is synchronous, and `close()` is not. Callers
+ * that create real connectors (tests, and `reload()` below) must await this,
+ * otherwise the native handle behind each connector stays open — on Windows
+ * that also blocks deleting the file underneath it.
+ */
+export async function closeAll(): Promise<void> {
   for (const [, connector] of connectors) {
     try {
       await connector.close()
@@ -556,6 +591,12 @@ export async function reload(): Promise<void> {
     }
   }
   connectors.clear()
+}
+// altimate_change end
+
+/** Reload all configs and clear cached connectors. */
+export async function reload(): Promise<void> {
+  await closeAll()
   loaded = false
   load()
 }

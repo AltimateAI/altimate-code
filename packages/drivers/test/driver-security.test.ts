@@ -136,6 +136,13 @@ describe("DuckDB driver", () => {
     })
   })
 
+  // Verbatim DuckDB output for a cross-process lock collision. It contains
+  // "lock" but never "locked", which is why the driver's original
+  // `.includes("locked")` check never matched a real collision.
+  const REAL_DUCKDB_LOCK_ERROR =
+    'IO Error: Could not set lock on file "/tmp/test.duckdb": Conflicting lock is held in ' +
+    "/usr/bin/node (PID 65001) by user someone."
+
   describe("connect retry with READ_ONLY", () => {
     test("retries with READ_ONLY when file DB is locked on initial connect", async () => {
       let connectAttempts = 0
@@ -180,6 +187,51 @@ describe("DuckDB driver", () => {
       expect(accessModes[1]).toBe("READ_ONLY")
 
       await connector.close()
+    })
+
+    test("wraps a lock error on an explicitly read-only open, and does not retry it", async () => {
+      // A caller that set `readonly` already gets READ_ONLY on the first open,
+      // so there is nothing for the retry to try differently — DuckDB's file
+      // lock is exclusive against read-only opens too. The failure must still
+      // be *labelled* a lock, though: consumers classify it by the wrapper's
+      // "locked by another process" wording, and this branch used to rethrow
+      // DuckDB's raw text, which contains "lock" but never "locked".
+      let attempts = 0
+      const accessModes: Array<string | undefined> = []
+      mock.module("duckdb", () => ({
+        default: {
+          Database: class {
+            constructor(_path: string, optsOrCb: any, cb?: (err: Error | null) => void) {
+              const opts = typeof optsOrCb === "function" ? undefined : optsOrCb
+              accessModes.push(opts?.access_mode)
+              attempts++
+              setTimeout(() => openCallback(optsOrCb, cb)(new Error(REAL_DUCKDB_LOCK_ERROR)), 0)
+            }
+            connect() {
+              return {}
+            }
+            close(cb: any) {
+              if (cb) cb(null)
+            }
+          },
+        },
+      }))
+
+      const { connect } = await import("../src/duckdb")
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb", readonly: true })
+
+      try {
+        await connector.connect()
+        expect.unreachable("Should have thrown")
+      } catch (e: any) {
+        expect(e.message).toContain("locked by another process")
+        // DuckDB's own text survives: it names the PID holding the lock.
+        expect(e.message).toContain("Conflicting lock is held")
+      }
+
+      // Exactly one attempt, and it asked for READ_ONLY up front.
+      expect(attempts).toBe(1)
+      expect(accessModes).toEqual(["READ_ONLY"])
     })
 
     test("does not retry in-memory DB on lock error", async () => {

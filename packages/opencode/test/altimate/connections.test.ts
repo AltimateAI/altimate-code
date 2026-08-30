@@ -10,7 +10,12 @@ afterAll(() => { delete process.env.ALTIMATE_TELEMETRY_DISABLED })
 // ---------------------------------------------------------------------------
 
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { detectAuthMethod } from "../../src/altimate/native/connections/registry"
+import {
+  categorizeConnectionError,
+  detectAuthMethod,
+  isInfrastructureFailure,
+  isRecoverableFailure,
+} from "../../src/altimate/native/connections/registry"
 import * as CredentialStore from "../../src/altimate/native/connections/credential-store"
 import { parseDbtProfiles, dbtConnectionsToConfigs } from "../../src/altimate/native/connections/dbt-profiles"
 import { discoverContainers, containerToConfig } from "../../src/altimate/native/connections/docker-discovery"
@@ -19,6 +24,57 @@ import { registerAll } from "../../src/altimate/native/connections/register"
 // ---------------------------------------------------------------------------
 // ConnectionRegistry
 // ---------------------------------------------------------------------------
+
+// altimate_change start — classification of local-client faults
+describe("categorizeConnectionError: local-client faults", () => {
+  // Verbatim DuckDB output. It contains "lock" but never "locked", which is
+  // why matching only the driver's own wrapper wording missed it.
+  const RAW_DUCKDB_LOCK =
+    'IO Error: Could not set lock on file "/tmp/warehouse.duckdb": Conflicting lock is held in ' +
+    "/usr/bin/node (PID 65001) by user someone. See also https://duckdb.org/docs/stable/connect/concurrency"
+
+  test("the raw DuckDB lock message never contains the substring 'locked'", () => {
+    expect(RAW_DUCKDB_LOCK.toLowerCase().includes("locked")).toBe(false)
+  })
+
+  test("classifies the raw DuckDB lock message as store_locked", () => {
+    expect(categorizeConnectionError(new Error(RAW_DUCKDB_LOCK))).toBe("store_locked")
+  })
+
+  test("classifies the driver's wrapped lock message as store_locked", () => {
+    const wrapped = new Error(`Database "/tmp/w.duckdb" is locked by another process. ${RAW_DUCKDB_LOCK}`)
+    expect(categorizeConnectionError(wrapped)).toBe("store_locked")
+  })
+
+  test("classifies the open deadline as driver_open_timeout, not a remote timeout", () => {
+    const err = new Error('DuckDB store "/tmp/w.duckdb" did not finish opening within 30000ms.')
+    expect(categorizeConnectionError(err)).toBe("driver_open_timeout")
+  })
+
+  test("still classifies a real credentials failure as auth_failed", () => {
+    expect(categorizeConnectionError(new Error("password authentication failed for user"))).toBe("auth_failed")
+  })
+
+  test("a locked store is infrastructure, and is the one that is recoverable", () => {
+    expect(isInfrastructureFailure("store_locked")).toBe(true)
+    expect(isRecoverableFailure("store_locked")).toBe(true)
+  })
+
+  test("a broken install is infrastructure but NOT recoverable", () => {
+    for (const category of ["driver_missing", "driver_open_timeout"]) {
+      expect(isInfrastructureFailure(category)).toBe(true)
+      expect(isRecoverableFailure(category)).toBe(false)
+    }
+  })
+
+  test("a config or credentials fault is neither infrastructure nor recoverable", () => {
+    for (const category of ["auth_failed", "config_error", "network_error", "other"]) {
+      expect(isInfrastructureFailure(category)).toBe(false)
+      expect(isRecoverableFailure(category)).toBe(false)
+    }
+  })
+})
+// altimate_change end
 
 describe("ConnectionRegistry", () => {
   beforeEach(() => {

@@ -60,6 +60,14 @@ jobs:
               - 'packages/opencode/test/altimate/drivers-mongodb-e2e.test.ts'
               - 'packages/opencode/test/altimate/drivers-clickhouse-e2e.test.ts'
               - 'packages/opencode/test/altimate/connections.test.ts'
+              # Run by the "DuckDB store-open E2E" step in the driver-e2e job.
+              # Without these, a PR touching only these files skips that job,
+              # and the main TypeScript job runs them with ALTIMATE_DUCKDB_E2E
+              # unset, which skips every test in them — no execution anywhere.
+              - 'packages/opencode/test/altimate/duckdb-open-e2e.test.ts'
+              - 'packages/opencode/test/altimate/warehouse-test-duckdb-e2e.test.ts'
+              - 'packages/opencode/test/altimate/duckdb-lock-helper.ts'
+              - 'packages/opencode/src/altimate/tools/warehouse-test.ts'
             dbt-tools:
               - 'packages/dbt-tools/**'
             installer:

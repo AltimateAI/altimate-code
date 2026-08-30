@@ -490,6 +490,7 @@
     "tree-sitter-powershell",
     "protobufjs",
     "web-tree-sitter",
+    "duckdb",
     "tree-sitter-bash",
   ],
   "patchedDependencies": {
