@@ -335,6 +335,41 @@ describe("repeat_signature loop detection", () => {
     })
     expect(c).not.toBe(a)
   })
+
+  // altimate_change start — PR #1171 review: the signature ignored the successful
+  // result, so repeated identical calls whose OUTPUT changed (a file being
+  // rewritten between reads, a status/poll call reporting progress) hashed
+  // identically and could climb the ladder to a hard stop on a session that was
+  // in fact progressing. A false stop costs a whole run.
+  test("a changing successful outcome breaks the repeat chain", () => {
+    const call = { tool: "read", args: { filePath: "/a.sql" }, touchedFiles: ["/a.sql"] }
+    const first = SessionStarvation.repeatSignature({ ...call, output: "rows: 1" })
+    const second = SessionStarvation.repeatSignature({ ...call, output: "rows: 2" })
+    expect(first).not.toBe(second)
+  })
+
+  test("an unchanged successful outcome still repeats", () => {
+    const call = { tool: "read", args: { filePath: "/a.sql" }, touchedFiles: ["/a.sql"] }
+    expect(SessionStarvation.repeatSignature({ ...call, output: "rows: 1" })).toBe(
+      SessionStarvation.repeatSignature({ ...call, output: "rows:  1 " }),
+    )
+  })
+
+  test("identical repeated FAILURES are unaffected — failure text already keys the signature", () => {
+    const attempt = { tool: "edit", args: { filePath: "/a.sql" }, touchedFiles: ["/a.sql"] }
+    expect(SessionStarvation.repeatSignature({ ...attempt, failureMessage: "not found" })).toBe(
+      SessionStarvation.repeatSignature({ ...attempt, failureMessage: "not found" }),
+    )
+  })
+
+  test("a repeated read whose contents change no longer registers a repeat loop", () => {
+    const t = tracker()
+    const call = { tool: "read", input: { filePath: "/a.sql" }, touchedFiles: ["/a.sql"] }
+    for (let i = 0; i < 6; i++) {
+      const outcome = t.onToolResult({ ...call, output: `rows: ${i}` })
+      expect(outcome.repeatLoop).toBeUndefined()
+    }
+  })
 })
 
 describe("doom-loop escalation ladder — re-keyed on (toolName + normalized args)", () => {

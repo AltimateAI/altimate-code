@@ -207,6 +207,16 @@ export namespace SessionStarvation {
     args: unknown
     touchedFiles?: string[]
     failureMessage?: string
+    // altimate_change start — the OUTCOME is part of the signature. Without it,
+    // repeated SUCCESSFUL calls whose results differ — three reads of a file
+    // that keeps changing, or a status/poll call reporting real progress —
+    // hashed identically and could drive the armed breaker to a hard stop on a
+    // session that was in fact progressing. A false stop costs a whole run, so
+    // the detector must treat a changing outcome as change. Failures are
+    // unaffected: their text already enters through `failureMessage`.
+    /** Successful result text; hashed so a changing outcome breaks the repeat chain. */
+    output?: string
+    // altimate_change end
   }): string {
     return sha(
       [
@@ -214,6 +224,8 @@ export namespace SessionStarvation {
         normalizeArgs(input.args),
         [...(input.touchedFiles ?? [])].sort().join(","),
         (input.failureMessage ?? "").replace(/\s+/g, " ").trim(),
+        // altimate_change — hashed, not embedded: results are unbounded, the signature is not.
+        input.output === undefined ? "" : sha(input.output.replace(/\s+/g, " ").trim()),
       ].join("\u0000"),
     )
   }
@@ -465,6 +477,8 @@ export namespace SessionStarvation {
           args: input.input,
           touchedFiles: input.touchedFiles,
           failureMessage: input.failureMessage,
+          // altimate_change — a changing successful result is progress, not a repeat.
+          output: input.output,
         })
         if (signature === lastSignature) consecutiveIdenticalSignatures++
         else {
