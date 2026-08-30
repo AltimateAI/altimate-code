@@ -24,6 +24,7 @@ import * as path from "path"
 import { createRequire } from "node:module"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { spawn } from "node:child_process"
+import { performance } from "node:perf_hooks"
 
 /**
  * Quote a path for a copy-pasteable shell command on the current platform.
@@ -409,135 +410,248 @@ export interface InstallResult {
   readonly error?: string
 }
 
-/**
- * Terminate a spawned shell and everything it started.
- *
- * Awaitable because on Windows the kill is itself a child process: `taskkill`
- * runs asynchronously, so returning before it exits released the install queue
- * while the timed-out npm tree was still writing to the shared driver
- * directory, and the next queued install could overlap it.
- */
-function killTree(child: ReturnType<typeof spawn>): Promise<void> {
-  const pid = child.pid
-  if (pid === undefined) return Promise.resolve()
-  if (process.platform === "win32") {
-    // No process groups on Windows; taskkill walks the tree instead.
-    return new Promise<void>((done) => {
-      const fallback = () => {
-        try {
-          child.kill()
-        } catch {
-          // Already gone.
-        }
-        done()
-      }
-      try {
-        const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" })
-        // spawn reports a missing binary through an asynchronous `error` event,
-        // not a throw, so the surrounding try/catch never sees it — and an
-        // unhandled `error` on a ChildProcess takes the process down while npm
-        // carries on running.
-        killer.on("error", fallback)
-        // Resolve only once taskkill has exited: that is the point at which the
-        // tree is actually gone and the directory is safe to hand over.
-        killer.on("close", () => done())
-      } catch {
-        fallback()
-      }
-    })
+interface KillTreeResult {
+  readonly verified: boolean
+  readonly detail?: string
+}
+
+interface TaskkillResult {
+  readonly code: number | null
+  readonly detail?: string
+  readonly timedOut?: boolean
+}
+
+type SpawnProcess = typeof spawn
+
+interface KillTreeOptions {
+  platform?: NodeJS.Platform
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  groupAlive?: (pid: number) => boolean
+  processAlive?: (pid: number) => boolean
+  signalGroup?: (pid: number, signal: NodeJS.Signals) => void
+  taskkill?: (pid: number, timeoutMs: number) => Promise<TaskkillResult>
+  termGraceMs?: number
+  totalTimeoutMs?: number
+  pollMs?: number
+}
+
+interface RunNpmOptions {
+  spawnProcess?: SpawnProcess
+  killTree?: (child: ReturnType<typeof spawn>) => Promise<KillTreeResult>
+}
+
+const KILL_TERM_GRACE_MS = 2_000
+const KILL_TOTAL_TIMEOUT_MS = 5_000
+const KILL_POLL_MS = 25
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM means the process exists but this user cannot signal it. Only ESRCH
+    // proves absence; every other error stays conservative until the deadline.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH"
   }
-  return new Promise<void>((done) => {
+}
+
+function processGroupExists(pid: number): boolean {
+  return processExists(-pid)
+}
+
+/** Run Windows' process-tree killer, including a bound for a hung taskkill. */
+function runTaskkill(pid: number, timeoutMs: number, spawnProcess: SpawnProcess = spawn): Promise<TaskkillResult> {
+  return new Promise((resolve) => {
     let settled = false
-    const finish = () => {
+    let killer: ReturnType<typeof spawn> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = (result: TaskkillResult) => {
       if (settled) return
       settled = true
-      clearTimeout(escalation)
-      done()
+      if (timer) clearTimeout(timer)
+      resolve(result)
     }
-    // Signalling is not reaping: SIGTERM delivery is asynchronous, so resolving
-    // straight after `process.kill` hands the directory over while npm is still
-    // shutting down. Wait for the child to actually exit.
-    child.once("close", finish)
-    child.once("exit", finish)
 
-    let signalled = false
     try {
-      // Negative pid targets the whole process group created by `detached`.
-      process.kill(-pid, "SIGTERM")
-      signalled = true
-    } catch {
-      try {
-        child.kill("SIGTERM")
-        signalled = true
-      } catch {
-        // Already gone — nothing will emit, so settle now.
-        finish()
-      }
+      killer = spawnProcess("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      })
+    } catch (error) {
+      finish({ code: null, detail: error instanceof Error ? error.message : String(error) })
+      return
     }
 
-    // A process group that ignores SIGTERM must not stall the install queue.
-    const escalation = signalled
-      ? setTimeout(() => {
-          try {
-            process.kill(-pid, "SIGKILL")
-          } catch {
-            try {
-              child.kill("SIGKILL")
-            } catch {
-              finish()
-            }
-          }
-        }, 2_000)
-      : undefined
-    if (escalation && typeof escalation === "object" && "unref" in escalation) escalation.unref()
+    killer.once("error", (error) => finish({ code: null, detail: error.message }))
+    killer.once("close", (code) => finish({ code, detail: code === 0 ? undefined : `taskkill exited ${code}` }))
+    timer = setTimeout(
+      () => {
+        try {
+          killer?.kill()
+        } catch {
+          // The taskkill process may already be gone; the timeout remains the
+          // authoritative result either way.
+        }
+        finish({ code: null, timedOut: true, detail: `taskkill did not exit within ${timeoutMs}ms` })
+      },
+      Math.max(0, timeoutMs),
+    )
   })
 }
 
-/** @internal — exported for unit tests. Production code calls this via `runNpm`. */
-export const _testing = { killTree }
+async function waitUntilGone(alive: () => boolean, deadline: number, options: Required<KillTreeOptions>) {
+  while (alive()) {
+    const remaining = deadline - options.now()
+    if (remaining <= 0) return false
+    await options.sleep(Math.min(options.pollMs, remaining))
+  }
+  return true
+}
 
-function runNpm(args: string[], cwd: string, timeoutMs: number): Promise<{ code: number; output: string }> {
+/**
+ * Terminate a spawned shell and everything it started.
+ *
+ * A child `exit` or `close` event proves only that the shell exited, not that
+ * its descendants stopped. POSIX therefore polls the detached process group;
+ * Windows trusts only a successful `taskkill /T /F`. Every path shares one
+ * absolute deadline so a failed teardown cannot wedge the install queue.
+ */
+async function killTree(child: ReturnType<typeof spawn>, overrides: KillTreeOptions = {}): Promise<KillTreeResult> {
+  const options: Required<KillTreeOptions> = {
+    platform: process.platform,
+    now: () => performance.now(),
+    sleep,
+    groupAlive: processGroupExists,
+    processAlive: processExists,
+    signalGroup: (pid, signal) => process.kill(-pid, signal),
+    taskkill: (pid, timeoutMs) => runTaskkill(pid, timeoutMs),
+    termGraceMs: KILL_TERM_GRACE_MS,
+    totalTimeoutMs: KILL_TOTAL_TIMEOUT_MS,
+    pollMs: KILL_POLL_MS,
+    ...overrides,
+  }
+  const pid = child.pid
+  if (pid === undefined) return { verified: true }
+  const started = options.now()
+  const deadline = started + Math.max(0, options.totalTimeoutMs)
+
+  try {
+    if (options.platform === "win32") {
+      const result = await options.taskkill(pid, Math.max(0, deadline - options.now()))
+      if (result.code === 0) return { verified: true }
+
+      // A failed taskkill cannot verify the descendants. Kill and briefly wait
+      // for the shell as a bounded fallback, but report the tree as unverified.
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        // It may already have exited.
+      }
+      await waitUntilGone(() => options.processAlive(pid), deadline, options)
+      return { verified: false, detail: result.detail ?? "taskkill failed" }
+    }
+
+    if (!options.groupAlive(pid)) return { verified: true }
+    try {
+      options.signalGroup(pid, "SIGTERM")
+    } catch {
+      try {
+        child.kill("SIGTERM")
+      } catch {
+        // Liveness polling below remains authoritative.
+      }
+    }
+
+    const termDeadline = Math.min(deadline, started + Math.max(0, options.termGraceMs))
+    if (await waitUntilGone(() => options.groupAlive(pid), termDeadline, options)) return { verified: true }
+
+    try {
+      options.signalGroup(pid, "SIGKILL")
+    } catch {
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        // Liveness polling below remains authoritative.
+      }
+    }
+
+    if (await waitUntilGone(() => options.groupAlive(pid), deadline, options)) return { verified: true }
+    return {
+      verified: false,
+      detail: `process group ${pid} remained observable after ${Math.round(options.totalTimeoutMs)}ms`,
+    }
+  } catch (error) {
+    return { verified: false, detail: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function runNpm(
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  options: RunNpmOptions = {},
+): Promise<{ code: number; output: string }> {
   return new Promise((resolve) => {
     // npm ships as a shell script on POSIX and a .cmd on Windows; `shell: true`
     // lets the platform resolve whichever is present on PATH. `detached` puts
     // the shell in its own process group on POSIX so a timeout can take the
-    // whole group down — see killTree below.
-    const child = spawn("npm", args, {
-      cwd,
-      shell: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-    })
+    // whole group down.
+    let child: ReturnType<typeof spawn>
+    try {
+      child = (options.spawnProcess ?? spawn)("npm", args, {
+        cwd,
+        shell: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: process.platform !== "win32",
+      })
+    } catch (error) {
+      resolve({ code: 127, output: error instanceof Error ? error.message : String(error) })
+      return
+    }
+
     let output = ""
-    let settled = false
+    let state: "running" | "terminating" | "settled" = "running"
+    let timer: ReturnType<typeof setTimeout> | undefined
     const finish = (code: number) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
+      if (state === "settled") return
+      state = "settled"
+      if (timer) clearTimeout(timer)
       resolve({ code, output: output.trim() })
     }
-    const timer = setTimeout(() => {
-      // Killing the child alone leaves npm running: with `shell: true` the child
-      // is the shell, and npm is its descendant. An orphaned install keeps
-      // writing to the shared driver directory long after this promise settles,
-      // which the in-flight map cannot prevent — it serializes promises, not
-      // processes.
-      // Settle only after the tree is down, so the in-flight queue does not hand
-      // this directory to the next install while npm is still writing to it.
-      void killTree(child).then(() => {
-        output += `\nTimed out after ${Math.round(timeoutMs / 1000)}s.`
-        finish(124)
-      })
+
+    timer = setTimeout(async () => {
+      if (state !== "running") return
+      state = "terminating"
+      let cleanup: KillTreeResult
+      try {
+        cleanup = await (options.killTree ?? killTree)(child)
+      } catch (error) {
+        cleanup = { verified: false, detail: error instanceof Error ? error.message : String(error) }
+      }
+      output += `\nTimed out after ${Math.round(timeoutMs / 1000)}s.`
+      if (!cleanup.verified)
+        output += ` Process-tree cleanup could not be verified: ${cleanup.detail ?? "unknown error"}.`
+      finish(124)
     }, timeoutMs)
     child.stdout?.on("data", (chunk) => (output += String(chunk)))
     child.stderr?.on("data", (chunk) => (output += String(chunk)))
-    child.on("error", (err) => {
-      output += String(err instanceof Error ? err.message : err)
+    child.on("error", (error) => {
+      if (state !== "running") return
+      output += String(error instanceof Error ? error.message : error)
       finish(127)
     })
-    child.on("close", (code) => finish(code ?? 1))
+    child.on("close", (code) => {
+      if (state !== "running") return
+      finish(code ?? 1)
+    })
   })
 }
+
+/** @internal — exported only for focused lifecycle and queue unit tests. */
+export const _testing = { killTree, runNpm, runTaskkill, installOptionalDriver: installOptionalDriverInternal }
 
 /**
  * Delete `packages` from the managed directory so a reinstall genuinely rebuilds
@@ -573,26 +687,32 @@ export function npmInstallArgs(packages: readonly string[]): string[] {
  * module exists to fix. Verified on npm 11.12.1 —
  * `added 12 packages, and removed 14 packages`.
  */
-export async function installOptionalDriver(driver: DriverName, options: InstallOptions = {}): Promise<InstallResult> {
+export function installOptionalDriver(driver: DriverName, options: InstallOptions = {}): Promise<InstallResult> {
+  return installOptionalDriverInternal(driver, options)
+}
+
+async function installOptionalDriverInternal(
+  driver: DriverName,
+  options: InstallOptions = {},
+  installed: (driver: DriverName) => boolean = isDriverInstalled,
+): Promise<InstallResult> {
   const packages = DRIVER_PACKAGES[driver]
   const dir = driverInstallDir()
 
-  // `force` exists because the caller may know something this check cannot:
-  // that the package resolves but does not import. Without it the early return
-  // below reported success for a copy it never rebuilt, so the repair path was
-  // unreachable no matter what the caller had detected.
-  if (!options.force && isDriverInstalled(driver)) {
-    return { driver, packages, dir, installed: true, alreadyPresent: true }
-  }
-
-  // Serialize per directory: concurrent npm runs against one manifest can leave
-  // the managed directory inconsistent. Chain onto the current tail rather than
-  // awaiting it first — awaiting released every queued caller at once, so with
-  // three or more installs the second and third still overlapped.
+  // Serialize both readiness and mutation per directory. Checking readiness
+  // before joining the queue let a caller return "already present" while a
+  // forced repair ahead of it was deleting that same package.
   const pending = installsInFlight.get(dir)
   const run = Promise.resolve(pending)
     .catch(() => undefined)
-    .then(() => performInstall(driver, packages, dir, options))
+    .then(() => {
+      // `force` exists because the caller may know something this resolution
+      // check cannot: that the package resolves but does not import.
+      if (!options.force && installed(driver)) {
+        return { driver, packages, dir, installed: true, alreadyPresent: true }
+      }
+      return performInstall(driver, packages, dir, options)
+    })
   installsInFlight.set(dir, run)
   try {
     return await run
@@ -674,9 +794,10 @@ async function performInstall(
     }
   }
 
-  // Confirm against the resolver rather than trusting npm's exit code — an
-  // install that lands somewhere we do not search is not a working driver.
-  if (!isDriverInstalled(driver)) {
+  // Confirm the target, not every ambient root. A broken project/NODE_PATH copy
+  // can still resolve and is exactly what sends callers down the force-repair
+  // path; letting it satisfy this check makes a no-op npm exit report success.
+  if (!isDriverInstalled(driver, [path.join(dir, "node_modules")])) {
     return {
       driver,
       packages,
