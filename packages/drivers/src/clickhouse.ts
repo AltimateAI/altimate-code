@@ -8,6 +8,38 @@
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
 
+function connectionUrl(config: ConnectionConfig): string {
+  const tlsRequested = Boolean(config.tls || config.ssl)
+  const configuredProtocol = typeof config.protocol === "string" ? config.protocol.trim().toLowerCase() : ""
+  const secureIntent = tlsRequested || configuredProtocol === "https"
+  const configured = typeof config.connection_string === "string" ? config.connection_string.trim() : ""
+
+  if (configured) {
+    if (secureIntent) {
+      let protocol: string
+      try {
+        protocol = new URL(configured).protocol.toLowerCase()
+      } catch {
+        throw new Error("ClickHouse TLS requires a valid https:// connection_string")
+      }
+      if (protocol !== "https:") {
+        throw new Error("ClickHouse TLS was requested, but connection_string is not https://")
+      }
+    }
+    return configured
+  }
+
+  if (tlsRequested && configuredProtocol && configuredProtocol !== "https") {
+    throw new Error("ClickHouse TLS was requested, but protocol is not https")
+  }
+
+  const protocol = configuredProtocol || (tlsRequested ? "https" : "http")
+  const defaultPort = protocol === "https" ? 8443 : 8123
+  const parsedPort = Number(config.port)
+  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : defaultPort
+  return `${protocol}://${config.host ?? "localhost"}:${port}`
+}
+
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let createClient: any
   const clickhouseModule = await loadOptionalDriver("clickhouse", "@clickhouse/client")
@@ -20,9 +52,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   return {
     async connect() {
-      const url =
-        config.connection_string ??
-        `${config.protocol ?? "http"}://${config.host ?? "localhost"}:${config.port ?? 8123}`
+      const url = connectionUrl(config)
 
       const clientConfig: Record<string, unknown> = {
         url,

@@ -15,6 +15,8 @@ import * as os from "os"
 import * as path from "path"
 
 import { spawn } from "child_process"
+import { EventEmitter, once } from "node:events"
+import { PassThrough } from "node:stream"
 import {
   _testing,
   DRIVER_PACKAGES,
@@ -43,6 +45,31 @@ function installFakePackage(root: string, name: string, body: string): string {
   fs.writeFileSync(path.join(dir, "index.js"), body)
   fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name, version: "1.0.0", main: "index.js" }))
   return dir
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => (resolve = done))
+  return { promise, resolve }
+}
+
+function fakeChild(pid = 42) {
+  const child = new EventEmitter() as EventEmitter & {
+    pid: number
+    stdout: PassThrough
+    stderr: PassThrough
+    killedSignals: Array<NodeJS.Signals | undefined>
+    kill: (signal?: NodeJS.Signals) => boolean
+  }
+  child.pid = pid
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.killedSignals = []
+  child.kill = (signal) => {
+    child.killedSignals.push(signal)
+    return true
+  }
+  return child
 }
 
 beforeEach(() => {
@@ -153,6 +180,27 @@ describe("driverSearchRoots", () => {
 
     expect(roots.length).toBe(new Set(roots).size)
   })
+
+  test("does not trust project or ancestor node_modules implicitly", () => {
+    const ancestor = path.join(tmpRoot, "ancestor")
+    const workspace = path.join(ancestor, "workspace")
+    installFakePackage(ancestor, "altimate-hostile-ancestor-sdk", "module.exports = {}")
+    installFakePackage(workspace, "altimate-hostile-project-sdk", "module.exports = {}")
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "managed")
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(workspace)
+      const roots = driverSearchRoots()
+
+      expect(roots).not.toContain(path.join(workspace, "node_modules"))
+      expect(roots).not.toContain(path.join(ancestor, "node_modules"))
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
 })
 
 describe("resolveOptionalPackage", () => {
@@ -203,6 +251,65 @@ describe("loadOptionalDriver", () => {
     const mod: any = await loadOptionalDriver("postgres", "altimate-fake-sdk")
 
     expect(mod.marker ?? mod.default?.marker).toBe("resolved-from-disk")
+  })
+
+  test("does not import a package found only in project or ancestor roots", async () => {
+    const ancestor = path.join(tmpRoot, "ancestor")
+    const workspace = path.join(ancestor, "workspace")
+    const specifier = "altimate-hostile-project-sdk"
+    installFakePackage(ancestor, specifier, "module.exports = { marker: 'ancestor' }")
+    installFakePackage(workspace, specifier, "module.exports = { marker: 'project' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "managed")
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+    const attempts: string[] = []
+    const importer = async (spec: string) => {
+      attempts.push(spec)
+      throw Object.assign(new Error(`Cannot find package '${spec}'`), { code: "ERR_MODULE_NOT_FOUND" })
+    }
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(workspace)
+      await expect(loadOptionalDriver("postgres", specifier, importer)).rejects.toBeInstanceOf(DriverNotInstalledError)
+    } finally {
+      process.chdir(originalCwd)
+    }
+
+    expect(attempts).toEqual([specifier])
+    expect(attempts.some((attempt) => attempt.startsWith("file:"))).toBe(false)
+  })
+
+  test("prefers a managed SDK over an untrusted project copy", async () => {
+    const managed = path.join(tmpRoot, "managed")
+    const workspace = path.join(tmpRoot, "workspace")
+    const specifier = "altimate-managed-priority-sdk"
+    installFakePackage(managed, specifier, "module.exports = { marker: 'managed' }")
+    installFakePackage(workspace, specifier, "module.exports = { marker: 'project' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = managed
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(workspace)
+      const mod: any = await loadOptionalDriver("postgres", specifier)
+      expect(mod.marker ?? mod.default?.marker).toBe("managed")
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
+
+  test("loads an SDK from an explicit NODE_PATH root", async () => {
+    const explicit = path.join(tmpRoot, "explicit")
+    const specifier = "altimate-explicit-node-path-sdk"
+    installFakePackage(explicit, specifier, "module.exports = { marker: 'node-path' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "managed")
+    process.env["NODE_PATH"] = path.join(explicit, "node_modules")
+
+    const mod: any = await loadOptionalDriver("postgres", specifier)
+
+    expect(mod.marker ?? mod.default?.marker).toBe("node-path")
   })
 
   test("throws DriverNotInstalledError naming the searched roots", async () => {
@@ -525,6 +632,117 @@ describe("repairing a broken install", () => {
 
     expect(maxActive).toBe(1)
   })
+
+  test("normal callers recheck readiness inside the queue", async () => {
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+    let calls = 0
+    let ready = false
+    const runNpm = async () => {
+      calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      installFakePackage(tmpRoot, "oracledb", "module.exports = {}")
+      ready = true
+      return { code: 0, output: "" }
+    }
+    const install = () => _testing.installOptionalDriver("oracle", { runNpm }, () => ready)
+
+    const [first, second] = await Promise.all([install(), install()])
+
+    expect(calls).toBe(1)
+    expect(first.alreadyPresent).toBe(false)
+    expect(second.alreadyPresent).toBe(true)
+  })
+
+  test("a non-force caller waits for a forced repair and then rechecks", async () => {
+    installFakePackage(tmpRoot, "oracledb", "throw new Error('broken')")
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+    const repairStarted = deferred<void>()
+    const releaseRepair = deferred<void>()
+    let followerRanNpm = false
+
+    const repair = installOptionalDriver("oracle", {
+      force: true,
+      runNpm: async () => {
+        repairStarted.resolve()
+        await releaseRepair.promise
+        installFakePackage(tmpRoot, "oracledb", "module.exports = { repaired: true }")
+        return { code: 0, output: "" }
+      },
+    })
+    const follower = installOptionalDriver("oracle", {
+      runNpm: async () => {
+        followerRanNpm = true
+        return { code: 1, output: "should not run" }
+      },
+    })
+
+    await repairStarted.promise
+    let followerSettled = false
+    void follower.then(() => (followerSettled = true))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(followerSettled).toBe(false)
+
+    releaseRepair.resolve()
+    const [repairResult, followerResult] = await Promise.all([repair, follower])
+    expect(repairResult.installed).toBe(true)
+    expect(followerResult.alreadyPresent).toBe(true)
+    expect(followerRanNpm).toBe(false)
+  })
+
+  test("a follower rechecks and installs after a failed forced repair", async () => {
+    installFakePackage(tmpRoot, "oracledb", "throw new Error('broken')")
+    process.env["ALTIMATE_DRIVER_DIR"] = tmpRoot
+    const repairStarted = deferred<void>()
+    const releaseRepair = deferred<void>()
+
+    const managedInstalled = () => isDriverInstalled("oracle", [path.join(tmpRoot, "node_modules")])
+    const repair = _testing.installOptionalDriver(
+      "oracle",
+      {
+        force: true,
+        runNpm: async () => {
+          repairStarted.resolve()
+          await releaseRepair.promise
+          return { code: 1, output: "repair failed" }
+        },
+      },
+      managedInstalled,
+    )
+    const follower = _testing.installOptionalDriver(
+      "oracle",
+      {
+        runNpm: async () => {
+          installFakePackage(tmpRoot, "oracledb", "module.exports = {}")
+          return { code: 0, output: "" }
+        },
+      },
+      managedInstalled,
+    )
+
+    await repairStarted.promise
+    releaseRepair.resolve()
+    const [repairResult, followerResult] = await Promise.all([repair, follower])
+    expect(repairResult.installed).toBe(false)
+    expect(followerResult.installed).toBe(true)
+    expect(followerResult.alreadyPresent).toBe(false)
+  })
+
+  test("npm success is verified against the managed directory, not an ambient copy", async () => {
+    const managed = path.join(tmpRoot, "managed")
+    const ambient = path.join(tmpRoot, "ambient")
+    process.env["ALTIMATE_DRIVER_DIR"] = managed
+    process.env["NODE_PATH"] = path.join(ambient, "node_modules")
+    installFakePackage(ambient, "oracledb", "throw new Error('wrong architecture')")
+
+    expect(isDriverInstalled("oracle")).toBe(true)
+    const result = await installOptionalDriver("oracle", {
+      force: true,
+      runNpm: async () => ({ code: 0, output: "npm claimed success without installing anything" }),
+    })
+
+    expect(result.installed).toBe(false)
+    expect(result.error).toContain("still not resolvable")
+  })
 })
 
 describe("a broken ambient copy does not hide a good one on disk", () => {
@@ -656,37 +874,165 @@ describe("manual-install hints are copy-pasteable", () => {
 })
 
 describe("killTree", () => {
-  // The timeout path had no coverage at all, and the bug it hides is ordering:
-  // killTree used to start the kill and return, so runNpm settled while the npm
-  // tree was still writing to the shared driver directory and the next queued
-  // install could overlap it. The contract under test is therefore "the tree is
-  // gone by the time the promise resolves", not merely "a kill was requested".
-  test("resolves only once the spawned tree is actually dead", async () => {
-    if (process.platform === "win32") return // taskkill ordering needs a Windows runner
-    const child = spawn("sleep 30", [], { shell: true, detached: true, stdio: "ignore" })
+  test("waits for a stubborn descendant after the shell leader exits", async () => {
+    if (process.platform === "win32") return
+    const child = spawn(
+      "/bin/sh",
+      ["-c", "(trap '' TERM; printf ready; while :; do sleep 1; done) & trap 'exit 0' TERM; wait"],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+    )
     const pid = child.pid!
-    expect(pid).toBeDefined()
+    await once(child.stdout!, "data")
 
-    const alive = () => {
+    const groupAlive = () => {
       try {
-        process.kill(pid, 0)
+        process.kill(-pid, 0)
         return true
       } catch {
         return false
       }
     }
-    expect(alive()).toBe(true)
 
-    await _testing.killTree(child)
+    try {
+      const result = await _testing.killTree(child, { termGraceMs: 25, totalTimeoutMs: 2_000, pollMs: 5 })
+      expect(result.verified).toBe(true)
+      expect(groupAlive()).toBe(false)
+    } finally {
+      try {
+        process.kill(-pid, "SIGKILL")
+      } catch {
+        // Already gone.
+      }
+    }
+  })
 
-    // No polling: if killTree resolved before the group was signalled this is
-    // the assertion that fails, which is exactly the regression being pinned.
-    expect(alive()).toBe(false)
+  test("escalates and returns unverified at one absolute deadline", async () => {
+    const child = fakeChild()
+    const signals: NodeJS.Signals[] = []
+    let now = 100
+    const result = await _testing.killTree(child as any, {
+      platform: "linux",
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      },
+      groupAlive: () => true,
+      signalGroup: (_pid, signal) => signals.push(signal),
+      termGraceMs: 20,
+      totalTimeoutMs: 50,
+      pollMs: 7,
+    })
+
+    expect(result.verified).toBe(false)
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"])
+    expect(now).toBe(150)
   })
 
   test("is awaitable when the child never started", async () => {
     const dead = spawn("this-binary-does-not-exist-anywhere", [], { stdio: "ignore" })
     dead.on("error", () => {})
-    await expect(_testing.killTree(dead)).resolves.toBeUndefined()
+    await expect(_testing.killTree(dead)).resolves.toEqual({ verified: true })
+  })
+
+  test("only a zero taskkill exit verifies a Windows tree", async () => {
+    const success = await _testing.killTree(fakeChild() as any, {
+      platform: "win32",
+      taskkill: async () => ({ code: 0 }),
+    })
+    const failedChild = fakeChild()
+    const failure = await _testing.killTree(failedChild as any, {
+      platform: "win32",
+      taskkill: async () => ({ code: 1, detail: "access denied" }),
+      processAlive: () => false,
+    })
+
+    expect(success).toEqual({ verified: true })
+    expect(failure).toEqual({ verified: false, detail: "access denied" })
+    expect(failedChild.killedSignals).toEqual(["SIGKILL"])
+  })
+})
+
+describe("runTaskkill", () => {
+  function taskkillProcess() {
+    const killer = new EventEmitter() as EventEmitter & { kill: () => boolean; killed: boolean }
+    killer.killed = false
+    killer.kill = () => {
+      killer.killed = true
+      return true
+    }
+    return killer
+  }
+
+  test.each([
+    [0, true],
+    [1, false],
+  ] as const)("handles close code %i", async (code, verified) => {
+    const killer = taskkillProcess()
+    const spawned = (() => killer as any) as typeof spawn
+    const resultPromise = _testing.runTaskkill(42, 100, spawned)
+    queueMicrotask(() => killer.emit("close", code))
+    const result = await resultPromise
+
+    expect(result.code === 0).toBe(verified)
+  })
+
+  test("handles an asynchronous spawn error", async () => {
+    const killer = taskkillProcess()
+    const spawned = (() => killer as any) as typeof spawn
+    const resultPromise = _testing.runTaskkill(42, 100, spawned)
+    queueMicrotask(() => killer.emit("error", new Error("taskkill missing")))
+
+    expect(await resultPromise).toEqual({ code: null, detail: "taskkill missing" })
+  })
+
+  test("bounds a taskkill process that never closes", async () => {
+    const killer = taskkillProcess()
+    const spawned = (() => killer as any) as typeof spawn
+    const result = await _testing.runTaskkill(42, 5, spawned)
+
+    expect(result.timedOut).toBe(true)
+    expect(killer.killed).toBe(true)
+  })
+})
+
+describe("runNpm timeout", () => {
+  test("a child close cannot settle while teardown is still running", async () => {
+    const child = fakeChild()
+    const teardownStarted = deferred<void>()
+    const releaseTeardown = deferred<void>()
+    const resultPromise = _testing.runNpm([], tmpRoot, 1, {
+      spawnProcess: (() => child as any) as typeof spawn,
+      killTree: async () => {
+        teardownStarted.resolve()
+        child.emit("close", 0)
+        await releaseTeardown.promise
+        return { verified: true }
+      },
+    })
+
+    await teardownStarted.promise
+    let settled = false
+    void resultPromise.then(() => (settled = true))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(settled).toBe(false)
+
+    releaseTeardown.resolve()
+    const result = await resultPromise
+    expect(result.code).toBe(124)
+    expect(result.output).toContain("Timed out")
+  })
+
+  test("an unexpected teardown rejection still settles as a timeout", async () => {
+    const child = fakeChild()
+    const result = await _testing.runNpm([], tmpRoot, 1, {
+      spawnProcess: (() => child as any) as typeof spawn,
+      killTree: async () => {
+        throw new Error("cleanup exploded")
+      },
+    })
+
+    expect(result.code).toBe(124)
+    expect(result.output).toContain("could not be verified")
+    expect(result.output).toContain("cleanup exploded")
   })
 })
