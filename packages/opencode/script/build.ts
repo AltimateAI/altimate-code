@@ -18,6 +18,7 @@ process.chdir(dir)
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 import { walkInputs } from "./stamp-inputs"
+import { assertUsableCatalog, catalogDiagnosticOrigin, formatCatalogSummary } from "./models-catalog"
 
 // Python engine has been eliminated — all methods run natively in TypeScript.
 // ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
@@ -27,11 +28,95 @@ const changelogPath = path.resolve(dir, "../../CHANGELOG.md")
 const changelog = fs.existsSync(changelogPath) ? await Bun.file(changelogPath).text() : ""
 console.log(`Loaded CHANGELOG.md (${changelog.length} chars)`)
 
-const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
-// Fetch and generate models.dev snapshot
-const modelsData = process.env.MODELS_DEV_API_JSON
-  ? await Bun.file(process.env.MODELS_DEV_API_JSON).text()
-  : await fetch(`${modelsUrl}/api.json`).then((x) => x.text())
+const modelsUrlOverride = process.env.OPENCODE_MODELS_URL || undefined
+const modelsUrl = modelsUrlOverride ?? "https://models.dev"
+
+const CATALOG_FETCH_TIMEOUT_MS = 60_000
+// The hard backstop must lose the race to `AbortSignal.timeout` in every case the
+// signal CAN handle, or it fires first and replaces the precise per-stage message
+// ("fetch failed", "body read failed") with its own generic one. The margin is
+// what makes it a backstop rather than the primary timeout.
+const CATALOG_HARD_DEADLINE_MS = CATALOG_FETCH_TIMEOUT_MS + 15_000
+
+/** Fetch the models.dev catalog, failing loudly rather than hanging or
+ * returning an error page.
+ *
+ * `fetch` resolves for 4xx/5xx, so without the `res.ok` check a load-balancer
+ * error page flows straight into the snapshot. An HTML body would at least break
+ * the build at parse time, but a JSON error body (`{"error": ...}`) is valid
+ * TypeScript and would ship as a catalog with no providers in it. */
+async function fetchModelsCatalog(url: string, diagnosticOrigin: string): Promise<string> {
+  // Backstop for the case where the abort signal fires but the fetch promise never
+  // settles, so the `catch` below is never reached. `AbortSignal.timeout` cannot
+  // cancel a blocked `getaddrinfo()` — documented in src/provider/models.ts
+  // (#1052 D14), where a sandboxed-network DNS blackhole outlived the signal.
+  //
+  // HONEST LIMIT: this is a timer on the event loop, so it cannot preempt a
+  // genuinely blocked main thread either. If `getaddrinfo` blocks the loop
+  // outright, neither the signal nor this fires and the workflow `timeout-minutes`
+  // stays the real backstop. What this does cover is the more common shape — the
+  // loop still ticking while a request hangs unresolved — turning a silent
+  // full-length job timeout into a fast, labelled failure. Either way the build
+  // fails; it never falls through to a stale catalog.
+  const deadline = setTimeout(() => {
+    console.error(
+      `error: models.dev fetch from ${diagnosticOrigin} did not settle within ${CATALOG_HARD_DEADLINE_MS}ms ` +
+        `(host unreachable or unresolvable); failing the build`,
+    )
+    process.exit(1)
+  }, CATALOG_HARD_DEADLINE_MS)
+  try {
+    let res: Response
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) })
+    } catch {
+      throw new Error(
+        `models.dev fetch from ${diagnosticOrigin} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`,
+      )
+    }
+    if (!res.ok)
+      throw new Error(`models.dev fetch failed: HTTP ${res.status} ${res.statusText} from ${diagnosticOrigin}`)
+    try {
+      // Inside its own try: a host that sends headers promptly then stalls
+      // mid-body aborts here, and an uncaught abort surfaces as a bare
+      // AbortError carrying none of the context above.
+      return await res.text()
+    } catch {
+      throw new Error(
+        `models.dev body read from ${diagnosticOrigin} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`,
+      )
+    }
+  } finally {
+    clearTimeout(deadline)
+  }
+}
+
+async function readModelsCatalog(file: string, diagnosticOrigin: string): Promise<string> {
+  try {
+    return await Bun.file(file).text()
+  } catch {
+    throw new Error(`models.dev catalog read from ${diagnosticOrigin} failed`)
+  }
+}
+
+// Fetch and generate models.dev snapshot. MODELS_DEV_API_JSON pins the catalog to
+// a local file for hermetic builds (ci.yml, pre-release-check.ts); release builds
+// leave it unset so the shipped binary embeds a release-time catalog.
+// `|| undefined` rather than `??`: an env var that is SET BUT EMPTY has to read as
+// unset, or the origin keeps "" while the data branch falls through to the fetch
+// and the build dies on `fetch("")` with ERR_INVALID_URL.
+const modelsFile = process.env.MODELS_DEV_API_JSON || undefined
+const modelsOrigin = modelsFile ?? `${modelsUrl}/api.json`
+const modelsDiagnosticOrigin = catalogDiagnosticOrigin(modelsOrigin, modelsFile ? "file" : "url")
+const modelsData = modelsFile
+  ? await readModelsCatalog(modelsFile, modelsDiagnosticOrigin)
+  : await fetchModelsCatalog(modelsOrigin, modelsDiagnosticOrigin)
+// A release is held to the full floor however its catalog was sourced, so pointing
+// a release build at a custom catalog cannot quietly skip the size and
+// required-provider checks.
+const strictCatalog = !!process.env.OPENCODE_RELEASE || (!modelsFile && !modelsUrlOverride)
+const catalogSummary = assertUsableCatalog(modelsData, modelsDiagnosticOrigin, strictCatalog)
+console.log(formatCatalogSummary(catalogSummary, modelsDiagnosticOrigin))
 await Bun.write(
   path.join(dir, "src/provider/models-snapshot.ts"),
   `// Auto-generated by build.ts - do not edit\nexport const snapshot = ${modelsData.trim()} as const\n`,
