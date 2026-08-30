@@ -253,6 +253,19 @@ describe("workspace binding cache", () => {
           headers: { "Content-Type": "application/json" },
         })
       }
+      // Answer binding lookups in the shape `lookupBinding` actually parses.
+      // Falling through to the `{datamates:[…]}` body below classified every
+      // revalidation as "unknown", which is neither memoized nor stamped — so
+      // the counter filter above was hiding a lookup that could never succeed
+      // and a fresh round trip on every bind. (bot review)
+      if (url.includes("/datamate-project-bindings/by-")) {
+        return new Response(
+          JSON.stringify({
+            binding: { datamate_id: 9, datamate_name: "Warm", repo_remote: null, project_path: proj },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      }
       return new Response(JSON.stringify({ datamates: [{ id: 9, name: "Warm", memory_enabled: true }] }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
