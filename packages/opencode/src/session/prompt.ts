@@ -831,7 +831,9 @@ export namespace SessionPrompt {
           sessionID,
           auto: task.auto,
           overflow: task.overflow,
+          // altimate_change start — keep nudge delivery scoped to this prompt generation
           nudgeGeneration,
+          // altimate_change end
           // altimate_change start — reuse the one-pass full history hydration for the ledger
           unfilteredMessages: unfilteredCompactionHistory,
           // altimate_change end
@@ -1044,7 +1046,9 @@ export namespace SessionPrompt {
         sessionID: sessionID,
         model,
         abort,
+        // altimate_change start — keep nudge delivery scoped to this prompt generation
         nudgeGeneration,
+        // altimate_change end
       })
       using _ = defer(() => InstructionPrompt.clear(processor.message.id))
 

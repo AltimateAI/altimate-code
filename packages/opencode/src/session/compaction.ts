@@ -1151,7 +1151,9 @@ export namespace SessionCompaction {
       sessionID: input.sessionID,
       model,
       abort: input.abort,
+      // altimate_change start — keep nudge delivery scoped to this prompt generation
       nudgeGeneration: input.nudgeGeneration,
+      // altimate_change end
     })
     // Allow plugins to inject context or replace compaction prompt
     const compacting = await Plugin.trigger(
@@ -1223,6 +1225,7 @@ When constructing the summary, try to stick to this template:
     if (pinEnabled(cfg) && pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID }) > 0)
       promptText += "\n\n" + PIN_SUMMARY_ADDITION
     // altimate_change end
+    // altimate_change start — measure the assembled summarizer request overhead
     const summaryPromptMessage = {
       role: "user" as const,
       content: [{ type: "text" as const, text: promptText }],
@@ -1243,6 +1246,7 @@ When constructing the summary, try to stick to this template:
           toolChoice: "none",
         }),
       ) + 512
+    // altimate_change end
     // altimate_change start — summarizer integrity:
     // hoist the summarizer input so a failed attempt can be retried with identical
     // input, and pass an explicit toolChoice "none". Previously toolChoice was
