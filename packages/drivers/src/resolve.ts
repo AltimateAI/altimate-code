@@ -452,8 +452,35 @@ function loadFailure(driver: DriverName, where: string, error: unknown): Error {
 function ambientLoadFailure(driver: DriverName, error: unknown, detail: string): Error {
   return new Error(
     `${DRIVER_LABELS[driver]} driver failed to load from the default module resolution: ` +
-      `${error instanceof Error ? error.message : String(error)}\n${detail}`,
+      `${error instanceof Error ? error.message : String(error)}\n${detail}${loadDiagnostics(error)}`,
   )
+}
+
+/**
+ * Context a reader needs to tell a resolution fault apart from a broken
+ * package, appended to load failures.
+ *
+ * Driver-load failures have twice been diagnosed from the error text alone and
+ * twice been diagnosed wrong, because the text named a path without saying what
+ * the process's own view of the filesystem was. The expensive question each
+ * time was "is this absolute path being re-anchored to the working directory?"
+ * — which is answerable on the spot, and only from inside the failing process.
+ */
+function loadDiagnostics(error: unknown): string {
+  const lines = [`cwd=${process.cwd()}`, `execPath=${process.execPath}`]
+  const message = error instanceof Error ? error.message : String(error)
+  for (const match of message.matchAll(/['"`]((?:\/|[A-Za-z]:[\\/])[^'"`\n]+)['"`]/g)) {
+    const named = match[1]
+    if (!named) continue
+    const repaired = repairCwdPrefixedPath(named)
+    if (repaired) {
+      lines.push(
+        `NOTE: "${named}" does not exist, but "${repaired}" does — the working ` +
+          `directory appears to have been concatenated onto an absolute path.`,
+      )
+    }
+  }
+  return `\n(${lines.join("; ")})`
 }
 
 function describeSearched(searched: readonly string[]): string {
@@ -810,7 +837,16 @@ async function installOptionalDriverInternal(
       if (!options.force && installed(driver)) {
         return { driver, packages, dir, installed: true, alreadyPresent: true }
       }
-      return performInstall(driver, packages, dir, options)
+      // Take the cross-process lock, then check readiness again. The peer that
+      // held it has usually just installed the very thing we queued for, so
+      // most contenders return "already present" instead of running a second
+      // npm over the same tree — which is what produced the ENOTEMPTY races.
+      return withInstallLock(dir, async (acquired) => {
+        if (acquired && !options.force && installed(driver)) {
+          return { driver, packages, dir, installed: true, alreadyPresent: true }
+        }
+        return performInstall(driver, packages, dir, options)
+      })
     })
   installsInFlight.set(dir, run)
   try {
@@ -822,6 +858,138 @@ async function installOptionalDriverInternal(
 
 /** In-flight installs keyed by target directory (see the note above). */
 const installsInFlight = new Map<string, Promise<InstallResult>>()
+
+// ---------------------------------------------------------------------------
+// Cross-process install lock
+// ---------------------------------------------------------------------------
+
+/**
+ * `installsInFlight` serialises installs inside one process. It cannot see
+ * other processes, and the managed driver directory is shared by all of them,
+ * so N CLIs starting together each run `npm install` over the same tree:
+ *
+ *     npm install failed (exit 217) … ENOTEMPTY …
+ *       rmdir /root/.local/share/altimate-code/drivers/node_modules/duckdb/…
+ *
+ * That is not benchmark-specific — any concurrent use of the CLI hits it.
+ *
+ * `mkdir` is atomic and fails with EEXIST when the directory exists, on both
+ * POSIX and Windows, which makes a lock directory the portable primitive here.
+ * The lock lives beside the install directory rather than inside it so npm
+ * never sees it as stray package content.
+ */
+function installLockPath(dir: string): string {
+  return `${dir.replace(/[\\/]+$/, "")}.lock`
+}
+
+interface LockHolder {
+  pid: number
+  hostname: string
+  /** Absent when the owner file is malformed; age then falls back to mtime. */
+  startedAt?: number
+}
+
+function readLockHolder(lockDir: string): LockHolder | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object") return undefined
+    const holder = parsed as Partial<LockHolder>
+    if (typeof holder.pid !== "number") return undefined
+    return {
+      pid: holder.pid,
+      hostname: typeof holder.hostname === "string" ? holder.hostname : "",
+      startedAt: typeof holder.startedAt === "number" ? holder.startedAt : undefined,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * True when a lock cannot belong to a live install any more: its owner is gone,
+ * or it has outlived any plausible npm run. Both checks are needed — a killed
+ * process leaves no signal beyond its absence, and a lock from another host
+ * (shared home directory) can only be judged by age.
+ */
+function isStaleLock(lockDir: string, holder: LockHolder | undefined, maxAgeMs: number): boolean {
+  if (holder && holder.hostname === os.hostname() && !processExists(holder.pid)) return true
+  const startedAt = holder?.startedAt
+  if (typeof startedAt === "number" && Date.now() - startedAt > maxAgeMs) return true
+  try {
+    return Date.now() - fs.statSync(lockDir).mtimeMs > maxAgeMs
+  } catch {
+    // Vanished between checks — someone else released it, so it is not stale.
+    return false
+  }
+}
+
+/**
+ * Run `fn` while holding an exclusive lock on `dir`, across processes.
+ *
+ * On timeout the work runs anyway rather than failing. A driver install that
+ * races is recoverable — npm is largely idempotent here and the readiness check
+ * afterwards is authoritative — whereas refusing to install because a lock
+ * could not be taken turns a slow peer into a hard failure.
+ */
+export async function withInstallLock<T>(
+  dir: string,
+  fn: (acquired: boolean) => Promise<T>,
+  options: { timeoutMs?: number; staleAfterMs?: number; pollMs?: number } = {},
+): Promise<T> {
+  const lockDir = installLockPath(dir)
+  const timeoutMs = options.timeoutMs ?? 240_000
+  const staleAfterMs = options.staleAfterMs ?? 300_000
+  const pollMs = options.pollMs ?? 100
+  const deadline = Date.now() + timeoutMs
+  let acquired = false
+
+  for (;;) {
+    try {
+      fs.mkdirSync(lockDir, { recursive: false })
+      acquired = true
+      break
+    } catch (e) {
+      // Anything but "already held" — an unwritable parent, say — means we
+      // cannot lock at all, so proceed unlocked rather than block forever.
+      const code = e && typeof e === "object" && "code" in e ? (e as { code?: unknown }).code : undefined
+      if (code !== "EEXIST") break
+      if (isStaleLock(lockDir, readLockHolder(lockDir), staleAfterMs)) {
+        try {
+          fs.rmSync(lockDir, { recursive: true, force: true })
+        } catch {
+          // Another process won the cleanup; fall through and retry.
+        }
+        continue
+      }
+      if (Date.now() >= deadline) break
+      await sleep(pollMs)
+    }
+  }
+
+  if (acquired) {
+    try {
+      fs.writeFileSync(
+        path.join(lockDir, "owner.json"),
+        JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now() } satisfies LockHolder),
+      )
+    } catch {
+      // Diagnostics only — the lock is the directory, not the file in it.
+    }
+  }
+
+  try {
+    return await fn(acquired)
+  } finally {
+    if (acquired) {
+      try {
+        fs.rmSync(lockDir, { recursive: true, force: true })
+      } catch {
+        // Leaving it behind is safe: the next contender ages it out as stale.
+      }
+    }
+  }
+}
 
 async function performInstall(
   driver: DriverName,
