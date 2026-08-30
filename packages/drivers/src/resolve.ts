@@ -157,6 +157,60 @@ function nodeModulesUpward(start: string): string[] {
 }
 
 /**
+ * Repair a path that had the working directory concatenated onto an
+ * already-absolute path, e.g. `<cwd>/usr/lib/node_modules/…` for a package
+ * that really lives at `/usr/lib/node_modules/…`.
+ *
+ * Observed from a globally installed CLI (`npm install -g`, package tree under
+ * `/usr/lib/node_modules/altimate-code`) run from an unrelated directory: the
+ * runtime's own resolution reported
+ * `ENOENT … open '<cwd>/usr/lib/node_modules/altimate-code/node_modules/duckdb/package.json'`
+ * while the file existed at that path without the `<cwd>` prefix.
+ *
+ * Deliberately conservative — it fires only when the named path is absent, is
+ * genuinely prefixed by the working directory, and the de-prefixed remainder
+ * exists. That last check is what keeps a legitimately nested
+ * `<cwd>/node_modules/…` from being mangled.
+ */
+export function repairCwdPrefixedPath(candidate: string, cwd = process.cwd()): string | undefined {
+  if (!candidate || fs.existsSync(candidate)) return undefined
+  if (!candidate.startsWith(cwd + path.sep)) return undefined
+  const remainder = candidate.slice(cwd.length)
+  if (!path.isAbsolute(remainder)) return undefined
+  return fs.existsSync(remainder) ? remainder : undefined
+}
+
+/**
+ * `node_modules` directories named by an error the runtime raised while trying
+ * to resolve a package itself.
+ *
+ * When ambient resolution fails it often names the exact absolute location it
+ * was reaching for. That location is better evidence than anything we can
+ * infer, so it is worth searching — after repairing a concatenated working
+ * directory, which is the failure this exists for. Returns roots only when they
+ * exist on disk, so a nonsense path contributes nothing.
+ */
+export function searchRootsFromError(error: unknown): string[] {
+  const message = error instanceof Error ? error.message : String(error)
+  const roots: string[] = []
+  // Absolute paths the runtime quoted, POSIX or Windows.
+  for (const match of message.matchAll(/['"`]((?:\/|[A-Za-z]:[\\/])[^'"`\n]+)['"`]/g)) {
+    const named = match[1]
+    if (!named) continue
+    for (const candidate of [named, repairCwdPrefixedPath(named)]) {
+      if (!candidate) continue
+      // Walk back to the enclosing node_modules directory.
+      const marker = `${path.sep}node_modules${path.sep}`
+      const at = candidate.lastIndexOf(marker)
+      if (at === -1) continue
+      const root = candidate.slice(0, at + marker.length - 1)
+      if (isDirectory(root) && !roots.includes(root)) roots.push(root)
+    }
+  }
+  return roots
+}
+
+/**
  * Directories to search for an optional SDK, most specific first.
  *
  * The managed install dir comes first so a driver we installed wins over a
@@ -317,12 +371,19 @@ export async function loadOptionalDriver(
     return await importer(specifier)
   } catch (ambientError) {
     const ambientBroken = !isModuleNotFound(ambientError, specifier)
-    const roots = driverSearchRoots()
+    // Search the location the runtime itself named first. When ambient
+    // resolution fails it frequently quotes the absolute path it was reaching
+    // for, and that beats anything we can infer — including the case where it
+    // concatenated the working directory onto an already-absolute path.
+    const roots = [...searchRootsFromError(ambientError), ...driverSearchRoots()]
     const resolved = resolveOptionalPackage(specifier, roots)
 
     if (!resolved) {
-      // A broken ambient copy is a load failure, not an absence.
-      if (ambientBroken) throw loadFailure(driver, specifier, ambientError)
+      // Nothing was found anywhere, so there is no location to name. Saying
+      // "found at <specifier>" here would report the bare specifier as though
+      // it were a place on disk, which reads as a load failure at a known path
+      // and sends the reader looking for a file that was never located.
+      if (ambientBroken) throw ambientLoadFailure(driver, ambientError, describeSearched(roots))
       throw new DriverNotInstalledError(driver, DRIVER_PACKAGES[driver], roots)
     }
 
@@ -332,7 +393,18 @@ export async function loadOptionalDriver(
       // On disk but will not load — a half-installed copy, or a native addon
       // built for another platform. When an ambient copy was also broken,
       // report that one: it is the copy the runtime would normally pick.
-      throw loadFailure(driver, ambientBroken ? specifier : resolved, ambientBroken ? ambientError : loadError)
+      if (ambientBroken) {
+        // Both copies are unusable. Lead with the ambient one — it is the copy
+        // the runtime would normally pick — but name the on-disk path we also
+        // tried, rather than passing the specifier off as a location.
+        throw ambientLoadFailure(
+          driver,
+          ambientError,
+          `A copy at ${resolved} was also tried and failed to load: ` +
+            (loadError instanceof Error ? loadError.message : String(loadError)),
+        )
+      }
+      throw loadFailure(driver, resolved, loadError)
     }
   }
 }
@@ -369,6 +441,29 @@ function loadFailure(driver: DriverName, where: string, error: unknown): Error {
 }
 
 /**
+ * The ambient import failed for a reason other than "not installed".
+ *
+ * We do not know where that copy lives — the runtime resolved it, not us — so
+ * the specifier must not be reported as though it were a location on disk. The
+ * previous wording, `found at duckdb but failed to load`, read as a load
+ * failure at a known path for a package that had in fact never been located,
+ * and sent readers looking for a file that was not there.
+ */
+function ambientLoadFailure(driver: DriverName, error: unknown, detail: string): Error {
+  return new Error(
+    `${DRIVER_LABELS[driver]} driver failed to load from the default module resolution: ` +
+      `${error instanceof Error ? error.message : String(error)}\n${detail}`,
+  )
+}
+
+function describeSearched(searched: readonly string[]): string {
+  return searched.length
+    ? `It was not found in any searchable location. Searched ${searched.length} ` +
+        `location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`
+    : "It was not found in any searchable location, and no driver directory exists yet."
+}
+
+/**
  * Import an optional package that is not a warehouse driver, returning
  * undefined when it is unavailable.
  *
@@ -381,7 +476,10 @@ export async function loadOptionalPackage(specifier: string): Promise<any | unde
     return await import(/* @vite-ignore */ specifier)
   } catch (ambientError) {
     if (!isModuleNotFound(ambientError, specifier)) throw ambientError
-    const resolved = resolveOptionalPackage(specifier)
+    const resolved = resolveOptionalPackage(specifier, [
+      ...searchRootsFromError(ambientError),
+      ...driverSearchRoots(),
+    ])
     if (!resolved) return undefined
     return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
   }
