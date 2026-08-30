@@ -46,9 +46,9 @@ export namespace Glob {
     "**/vendor/**",
     "**/coverage/**",
   ]
-  // altimate_change end
 
   /** Translate the wrapper contract to `glob` without dropping traversal ignores. */
+  // altimate_change end
   function toGlobOptions(options: Options): GlobOptions {
     return {
       cwd: options.cwd,
