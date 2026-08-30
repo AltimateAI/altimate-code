@@ -329,6 +329,17 @@ export interface WarehouseTestParams {
 export interface WarehouseTestResult {
   connected: boolean
   error?: string
+  // altimate_change start — distinguish infrastructure faults from config faults
+  /** Coarse cause, from `categorizeConnectionError` (e.g. `driver_missing`, `auth_failed`). */
+  error_category?: string
+  /**
+   * True when the failure is in the local client — a driver that will not load,
+   * an open that never completed — rather than in the connection's
+   * configuration or the remote warehouse. These are not the caller's fault and
+   * are not fixable by editing the connection.
+   */
+  infrastructure?: boolean
+  // altimate_change end
 }
 
 // --- Warehouse Management ---

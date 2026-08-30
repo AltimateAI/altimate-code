@@ -54,7 +54,10 @@ describe("DuckDB driver", () => {
         expect.unreachable("Should have thrown")
       } catch (e: any) {
         expect(e.message).toContain("locked by another process")
-        expect(e.message).toContain("does not support concurrent write access")
+        expect(e.message).toContain("exclusive file lock")
+        // DuckDB's own text names the PID holding the lock, so it must survive
+        // being wrapped rather than being replaced by the friendly summary.
+        expect(e.message).toContain("SQLITE_BUSY: database is locked")
       }
 
       await connector.close()

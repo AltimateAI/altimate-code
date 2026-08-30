@@ -294,6 +294,18 @@ jobs:
           TEST_PG_PORT: "15432"
           TEST_PG_PASSWORD: testpass123
 
+      # Needs a dedicated process: four files in test/altimate install a
+      # top-level mock.module("@altimateai/drivers/duckdb", …), and Bun
+      # evaluates every test file's top level before running any test, so in a
+      # whole-directory run these would silently exercise a fake. With
+      # ALTIMATE_DUCKDB_E2E=1 a missing or mocked driver fails the step rather
+      # than skipping it.
+      - name: Run DuckDB store-open E2E (real store, no mocks)
+        run: bun test test/altimate/duckdb-open-e2e.test.ts test/altimate/warehouse-test-duckdb-e2e.test.ts
+        working-directory: packages/opencode
+        env:
+          ALTIMATE_DUCKDB_E2E: "1"
+
       - name: Run Docker driver E2E (MySQL, SQL Server, Redshift)
         run: bun test test/altimate/drivers-docker-e2e.test.ts
         working-directory: packages/opencode

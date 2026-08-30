@@ -4,6 +4,34 @@
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
+// altimate_change start — configurable, generous open budget
+/**
+ * How long to wait for DuckDB to finish opening a store before giving up.
+ *
+ * This is a liveness guard, not a performance budget. Opening a store is
+ * dispatched to the libuv threadpool, so the wait covers queueing behind every
+ * other threadpool user in the process (fs, dns, crypto), not just DuckDB's own
+ * work. A busy agent process can therefore push a healthy open well past a
+ * second, and the previous hard-coded 2s ceiling turned that into an
+ * unrecoverable failure on a store that was fine.
+ */
+const DEFAULT_OPEN_TIMEOUT_MS = 30_000
+
+/** Read a positive, finite millisecond budget, or `undefined` if unusable. */
+function positiveMs(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+function resolveOpenTimeoutMs(config: ConnectionConfig): number {
+  return (
+    positiveMs(config.open_timeout_ms) ??
+    positiveMs(globalThis.process?.env?.["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"]) ??
+    DEFAULT_OPEN_TIMEOUT_MS
+  )
+}
+// altimate_change end
+
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let duckdb: any
   try {
@@ -14,6 +42,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   }
 
   const dbPath = (config.path as string) ?? ":memory:"
+  // altimate_change start — configurable open budget
+  const openTimeoutMs = resolveOpenTimeoutMs(config)
+  // altimate_change end
   let db: any
   let connection: any
 
@@ -35,10 +66,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   function wrapDuckDBError(err: Error): Error {
     if (isLockError(err)) {
+      // Keep DuckDB's own text: it names the PID and executable holding the
+      // conflicting lock, which is the only way to find the other process.
       return new Error(
         `Database "${dbPath}" is locked by another process. ` +
-        `DuckDB does not support concurrent write access. ` +
-        `Close other connections to this file and try again.`,
+        `DuckDB takes an exclusive file lock, so a store already open ` +
+        `read-write elsewhere cannot be opened again — not even read-only. ` +
+        `Close the other connection and try again.\n${err.message || String(err)}`,
       )
     }
     return err
@@ -72,10 +106,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           let timeout: ReturnType<typeof setTimeout> | undefined
           let instance: any
           // Sentinel for an open callback that fired synchronously (before
-          // `instance` was assigned): `undefined` = not yet fired, `null` =
-          // fired with success, `Error` = fired with failure. Replayed once
-          // `instance` exists.
-          let pendingOpen: Error | null | undefined
+          // `instance` was assigned), replayed once `instance` exists.
+          //
+          // This MUST be a value the callback can never supply. It used to be
+          // `undefined`, which is exactly what a success callback invoked with
+          // no arguments passes — so such a callback was recorded and then
+          // never replayed, the promise never settled, and the open failed on
+          // the deadline below with a timeout message that named nothing.
+          const NOT_FIRED = Symbol("duckdb-open-not-fired")
+          let pendingOpen: Error | null | typeof NOT_FIRED = NOT_FIRED
           const opts = accessMode ? { access_mode: accessMode } : undefined
           const closeQuietly = () => {
             try {
@@ -84,9 +123,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
               // best-effort cleanup of a half-open handle
             }
           }
-          const onOpen = (err: Error | null) => {
+          const onOpen = (err?: Error | null) => {
+            // Normalise a zero-argument success callback to `null` so it is
+            // never confused with "has not fired yet".
+            const outcome = err ?? null
             if (!instance) {
-              pendingOpen = err
+              pendingOpen = outcome
               return
             }
             if (resolved) {
@@ -95,15 +137,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             }
             resolved = true
             if (timeout) clearTimeout(timeout)
-            if (err) {
+            if (outcome) {
               // Open failed — release the half-open handle so it doesn't leak.
+              // Reject with DuckDB's own error: callers classify it with
+              // isLockError(), and its text names the conflicting process.
               closeQuietly()
-              const msg = err.message || String(err)
-              if (msg.toLowerCase().includes("locked") || msg.includes("SQLITE_BUSY") || msg.includes("DUCKDB_LOCKED")) {
-                reject(new Error("DUCKDB_LOCKED"))
-              } else {
-                reject(err)
-              }
+              reject(outcome)
             } else {
               resolve(instance)
             }
@@ -111,16 +150,24 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           instance = opts
             ? new duckdb.Database(dbPath, opts, onOpen)
             : new duckdb.Database(dbPath, onOpen)
-          // Bun: native callback may not fire; fall back after 2s. Arm the timer
-          // BEFORE replaying a synchronous callback so a sync resolve/reject can
-          // actually clear it (otherwise it lingers ~2s and delays process exit).
+          // Liveness guard against an open callback that never fires. Arm the
+          // timer BEFORE replaying a synchronous callback so a sync
+          // resolve/reject can actually clear it (otherwise it lingers and
+          // delays process exit).
           timeout = setTimeout(() => {
             if (!resolved) {
               resolved = true
-              reject(new Error(`Timed out opening DuckDB database "${dbPath}"`))
+              reject(
+                new Error(
+                  `DuckDB store "${dbPath}" did not finish opening within ${openTimeoutMs}ms. ` +
+                  `This is a client-side deadline in the DuckDB driver, not a fault in the store ` +
+                  `— the open may simply be queued behind other work in this process. ` +
+                  `Raise it with ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`,
+                ),
+              )
             }
-          }, 2000)
-          if (pendingOpen !== undefined) onOpen(pendingOpen)
+          }, openTimeoutMs)
+          if (pendingOpen !== NOT_FIRED) onOpen(pendingOpen)
         })
 
       // altimate_change start — honour an explicit read-only connection.

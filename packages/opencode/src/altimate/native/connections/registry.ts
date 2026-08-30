@@ -282,6 +282,12 @@ export function detectAuthMethod(config: ConnectionConfig | null | undefined): s
 export function categorizeConnectionError(e: unknown): string {
   const msg = String(e).toLowerCase()
   if (msg.includes("not installed") || msg.includes("cannot find module")) return "driver_missing"
+  // altimate_change start — categories for local-client faults
+  // Checked before the generic "timeout"/"not found" rules below, which are
+  // about the remote warehouse and would otherwise swallow these.
+  if (msg.includes("did not finish opening")) return "driver_open_timeout"
+  if (msg.includes("locked by another process")) return "store_locked"
+  // altimate_change end
   if (msg.includes("password") || msg.includes("authentication") || msg.includes("unauthorized") || msg.includes("jwt"))
     return "auth_failed"
   if (msg.includes("timeout") || msg.includes("timed out")) return "timeout"
@@ -289,6 +295,19 @@ export function categorizeConnectionError(e: unknown): string {
   if (msg.includes("config") || msg.includes("not found") || msg.includes("missing")) return "config_error"
   return "other"
 }
+
+// altimate_change start — distinguish infrastructure faults from config faults
+/**
+ * Categories where the local client is broken, not the connection's config and
+ * not the remote warehouse. A caller cannot fix these by correcting
+ * credentials, and a harness must not score them as a task failure.
+ */
+const INFRASTRUCTURE_CATEGORIES = new Set(["driver_missing", "driver_open_timeout", "store_locked"])
+
+export function isInfrastructureFailure(category: string): boolean {
+  return INFRASTRUCTURE_CATEGORIES.has(category)
+}
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -405,7 +424,9 @@ export function list(): { warehouses: WarehouseInfo[] } {
 }
 
 /** Test a connection by running a simple query. */
-export async function test(name: string): Promise<{ connected: boolean; error?: string }> {
+export async function test(
+  name: string,
+): Promise<{ connected: boolean; error?: string; error_category?: string; infrastructure?: boolean }> {
   try {
     const connector = await get(name)
     const config = configs.get(name)
@@ -422,7 +443,15 @@ export async function test(name: string): Promise<{ connected: boolean; error?: 
     }
     return { connected: true }
   } catch (e) {
-    return { connected: false, error: String(e) }
+    // altimate_change start — report *why* the test failed, not just that it did
+    const category = categorizeConnectionError(e)
+    return {
+      connected: false,
+      error: String(e),
+      error_category: category,
+      infrastructure: isInfrastructureFailure(category),
+    }
+    // altimate_change end
   }
 }
 
