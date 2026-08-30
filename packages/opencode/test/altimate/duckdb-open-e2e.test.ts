@@ -26,6 +26,14 @@ const ddbTest = RUN ? test : test.skip
 
 let dir = ""
 let storePath = ""
+  // The lock tests use their own store, which THIS process never opens
+  // successfully. That is not tidiness: DuckDB's lock is per-process, and this
+  // process holds a write lock on `storePath` for as long as its own handle
+  // lives — the driver's close() has to fall back to a timer in Bun because the
+  // native close callback does not always fire, so "closed" is not instantaneous.
+  // Sharing one store would make these tests race that fallback. The lock holder
+  // creates `lockedPath` itself, so the only writer is the foreign process.
+  let lockedPath = ""
 
 /** Run `fn` and return the error message it threw, or "" if it succeeded. */
 async function messageFrom(fn: () => Promise<unknown>): Promise<string> {
@@ -42,6 +50,7 @@ describe("DuckDB driver: opening a real store", () => {
     if (!RUN) return
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "duckdb-open-"))
     storePath = path.join(dir, "warehouse.duckdb")
+    lockedPath = path.join(dir, "locked.duckdb")
     const c = await connect({ type: "duckdb", path: storePath })
     await c.connect()
     await c.execute("CREATE TABLE t AS SELECT 1 AS a, 'x' AS b")
@@ -162,9 +171,9 @@ describe("DuckDB driver: opening a real store", () => {
     // `wantReadOnly` branch, which correctly skips the read-only retry, and
     // before this fix that branch rethrew DuckDB's raw error, so every consumer
     // classified a plain lock collision as an unknown failure.
-    const lock = await holdWriteLock(storePath, dir)
+    const lock = await holdWriteLock(lockedPath, dir)
     try {
-      const c = await connect({ type: "duckdb", path: storePath, readonly: true })
+      const c = await connect({ type: "duckdb", path: lockedPath, readonly: true })
       const message = await messageFrom(() => c.connect())
       expect(message).toContain("is locked by another process")
       // DuckDB's own text survives: it names the PID holding the lock, which is
@@ -176,9 +185,9 @@ describe("DuckDB driver: opening a real store", () => {
   })
 
   ddbTest("a read-write open that hits a foreign lock also reports it as a lock", async () => {
-    const lock = await holdWriteLock(storePath, dir)
+    const lock = await holdWriteLock(lockedPath, dir)
     try {
-      const c = await connect({ type: "duckdb", path: storePath })
+      const c = await connect({ type: "duckdb", path: lockedPath })
       const message = await messageFrom(() => c.connect())
       expect(message).toContain("is locked by another process")
       expect(message.toLowerCase()).toContain("conflicting lock")
@@ -191,12 +200,15 @@ describe("DuckDB driver: opening a real store", () => {
     // Guards the helper itself. If release() did not actually free the lock,
     // the two tests above would pass for the wrong reason and would poison
     // every test that runs after them.
-    const lock = await holdWriteLock(storePath, dir)
+    const lock = await holdWriteLock(lockedPath, dir)
     await lock.release()
-    const c = await connect({ type: "duckdb", path: storePath })
+    const c = await connect({ type: "duckdb", path: lockedPath })
     await c.connect()
-    const r = await c.execute("SELECT count(*) AS n FROM t")
-    expect(Number(r.rows[0][0])).toBe(1)
+    // `lock_probe` is the table the holder creates when it takes the lock, so
+    // reading it proves both that the lock is gone and that the holder really
+    // wrote through it rather than merely touching the file.
+    const r = await c.execute("SELECT count(*) AS n FROM lock_probe")
+    expect(Number(r.rows[0][0])).toBe(0)
     await c.close()
   })
 

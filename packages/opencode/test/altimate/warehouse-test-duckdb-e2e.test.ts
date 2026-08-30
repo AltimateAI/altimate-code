@@ -21,6 +21,10 @@ const ddbTest = RUN ? test : test.skip
 
 let dir = ""
 let storePath = ""
+// A store this process never opens — see the note in duckdb-open-e2e.test.ts.
+// DuckDB's lock is per-process, so a store this process has open cannot be
+// locked against it by anyone else.
+let lockedPath = ""
 // Captured so afterAll can put the environment back exactly as it found it.
 // Unconditionally deleting would clear a value the surrounding process had set.
 let prevTelemetryDisabled: string | undefined
@@ -36,6 +40,7 @@ describe("warehouse.test against a real DuckDB store", () => {
     if (!RUN) return
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "warehouse-test-"))
     storePath = path.join(dir, "warehouse.duckdb")
+    lockedPath = path.join(dir, "locked.duckdb")
     Registry.reset()
     Registry.setConfigs({ seed: { type: "duckdb", path: storePath } })
     const c = await Registry.get("seed")
@@ -114,11 +119,11 @@ describe("warehouse.test against a real DuckDB store", () => {
   })
 
   ddbTest("a store locked by another process is reported as a recoverable lock", async () => {
-    const lock = await holdWriteLock(storePath, dir)
+    const lock = await holdWriteLock(lockedPath, dir)
     try {
       await Registry.closeAll()
       Registry.reset()
-      Registry.setConfigs({ local: { type: "duckdb", path: storePath } })
+      Registry.setConfigs({ local: { type: "duckdb", path: lockedPath } })
       const result = await warehouseTest("local")
       expect(result.connected).toBe(false)
       // Not "other": before this, an unwrapped lock error fell through every
@@ -137,11 +142,11 @@ describe("warehouse.test against a real DuckDB store", () => {
   ddbTest("the tool tells a caller to clear a lock, not to stop and report it", async () => {
     const tool = await initTool(WarehouseTestTool)
     const ctx = { sessionID: "s", messageID: "m", agent: "build", abort: new AbortController().signal, messages: [] }
-    const lock = await holdWriteLock(storePath, dir)
+    const lock = await holdWriteLock(lockedPath, dir)
     try {
       await Registry.closeAll()
       Registry.reset()
-      Registry.setConfigs({ local: { type: "duckdb", path: storePath } })
+      Registry.setConfigs({ local: { type: "duckdb", path: lockedPath } })
       const locked = await tool.execute({ name: "local" }, ctx)
       expect(locked.title).toContain("STORE LOCKED")
       expect(locked.metadata.recoverable).toBe(true)

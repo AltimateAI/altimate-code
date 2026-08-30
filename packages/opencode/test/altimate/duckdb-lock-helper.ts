@@ -1,4 +1,4 @@
-import { createRequire } from "node:module"
+import { fileURLToPath } from "node:url"
 import fs from "node:fs"
 import path from "node:path"
 
@@ -20,28 +20,31 @@ export interface HeldLock {
   release(): Promise<void>
 }
 
-const require_ = createRequire(import.meta.url)
+// The child takes the lock through the driver itself, by absolute path, rather
+// than resolving the `duckdb` package on its own. Resolving `duckdb` from this
+// directory works in some layouts and not others — it failed in CI, where the
+// package is a dependency of `packages/drivers` and not reachable from here —
+// which is the same class of fault this PR exists to fix, so it has no business
+// being reintroduced by the test that proves the fix. The specifier below is
+// the one both E2E suites already import successfully.
+const DRIVER_PATH = fileURLToPath(new URL("../../../drivers/src/duckdb.ts", import.meta.url))
 
 export async function holdWriteLock(storePath: string, scratchDir: string): Promise<HeldLock> {
-  // Resolve `duckdb` here rather than in the child: the child's cwd is not
-  // guaranteed to sit under the node_modules tree that resolves it, and a
-  // resolution failure there would look like "no lock was taken".
-  const duckdbEntry = require_.resolve("duckdb")
-
-  const scriptPath = path.join(scratchDir, "hold-duckdb-lock.cjs")
+  const scriptPath = path.join(scratchDir, "hold-duckdb-lock.ts")
   fs.writeFileSync(
     scriptPath,
     [
-      `const duckdb = require(${JSON.stringify(duckdbEntry)})`,
-      `const mod = duckdb.default || duckdb`,
-      `const db = new mod.Database(process.argv[2], (err) => {`,
-      `  if (err) { process.stderr.write("HOLD_FAILED " + (err.message || err) + "\\n"); process.exit(1) }`,
-      // Take a real write so the lock is unambiguously a writer's.
-      `  db.run("CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)", (e) => {`,
-      `    if (e) { process.stderr.write("HOLD_FAILED " + (e.message || e) + "\\n"); process.exit(1) }`,
-      `    process.stdout.write("READY\\n")`,
-      `  })`,
-      `})`,
+      `const { connect } = await import(${JSON.stringify(DRIVER_PATH)})`,
+      `try {`,
+      `  const c = await connect({ type: "duckdb", path: process.argv[2] })`,
+      `  await c.connect()`,
+      // A real write, so the lock is unambiguously a writer's.
+      `  await c.execute("CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)")`,
+      `  process.stdout.write("READY\\n")`,
+      `} catch (e) {`,
+      `  process.stderr.write("HOLD_FAILED " + (e instanceof Error ? e.message : String(e)) + "\\n")`,
+      `  process.exit(1)`,
+      `}`,
       `setInterval(() => {}, 1 << 30)`,
     ].join("\n"),
     "utf-8",
