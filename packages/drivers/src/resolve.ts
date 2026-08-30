@@ -211,8 +211,26 @@ function safeCwd(): string | undefined {
 function workspaceScope(): { cwd: string | undefined; ancestors: string[] } {
   const cwd = safeCwd()
   if (!cwd) return { cwd: undefined, ancestors: [] }
-  const resolved = path.resolve(cwd)
-  return { cwd: resolved, ancestors: nodeModulesUpward(resolved).map((dir) => path.resolve(dir)) }
+  const resolved = realPath(cwd)
+  return { cwd: resolved, ancestors: nodeModulesUpward(resolved).map(realPath) }
+}
+
+/**
+ * Absolute *real* path, falling back to the lexical one when the link cannot be
+ * followed.
+ *
+ * The containment check below must compare real paths. `isDirectory` follows
+ * symlinks, so a symlinked `node_modules` whose lexical path sits outside the
+ * working directory but whose target sits inside it would pass a lexical
+ * exclusion and be imported — reintroducing the workspace-controlled code the
+ * exclusion exists to keep out.
+ */
+function realPath(candidate: string): string {
+  try {
+    return fs.realpathSync(path.resolve(candidate))
+  } catch {
+    return path.resolve(candidate)
+  }
 }
 
 /**
@@ -225,26 +243,36 @@ function dedupeRoots(roots: readonly string[]): string[] {
 }
 
 /**
- * The `node_modules` directory enclosing `candidate`, or undefined when there
- * is none.
+ * Every `node_modules` directory enclosing `candidate`, innermost first.
+ *
+ * All of them, not just the innermost: a quoted path often runs through a
+ * driver's own dependency — `/opt/node_modules/duckdb/node_modules/node-addon-api/…`
+ * — where the innermost root holds the dependency and the *outer* one holds the
+ * driver we are actually looking for. Returning only the innermost left the
+ * driver unfindable in exactly the nested case.
  *
  * `sep` is a parameter so the Windows behaviour is testable from a POSIX host.
  * It matters because Windows quotes both `C:\…` and `C:/…` in errors, while the
  * marker is built from the platform separator — a forward-slash path would
- * never match a backslash marker, and the root would silently not be harvested.
+ * never match a backslash marker, and nothing would be harvested at all.
  * Rewriting separators is length-preserving, so the slice offsets still hold.
  */
-export function enclosingNodeModulesRoot(candidate: string, sep: string = path.sep): string | undefined {
+export function enclosingNodeModulesRoots(candidate: string, sep: string = path.sep): string[] {
   const normalized = sep === "\\" ? candidate.replace(/\//g, "\\") : candidate
   const marker = `${sep}node_modules${sep}`
-  const at = normalized.lastIndexOf(marker)
-  if (at === -1) return undefined
-  return normalized.slice(0, at + marker.length - 1)
+  const roots: string[] = []
+  for (let at = normalized.lastIndexOf(marker); at !== -1; at = normalized.lastIndexOf(marker, at - 1)) {
+    roots.push(normalized.slice(0, at + marker.length - 1))
+    if (at === 0) break
+  }
+  return roots
 }
 
 /** True when `root` is workspace-controlled and must not be imported from. */
 function isWorkspaceRoot(root: string, scope: { cwd: string | undefined; ancestors: string[] }): boolean {
-  const resolved = path.resolve(root)
+  // Real paths on both sides: a symlink pointing into the workspace must not
+  // slip past a purely lexical comparison.
+  const resolved = realPath(root)
   if (scope.ancestors.includes(resolved)) return true
   if (!scope.cwd) return false
   const rel = path.relative(scope.cwd, resolved)
@@ -277,11 +305,12 @@ export function searchRootsFromError(error: unknown): string[] {
     if (!named) continue
     for (const candidate of [named, repairCwdPrefixedPath(named)]) {
       if (!candidate) continue
-      // Walk back to the enclosing node_modules directory.
-      const root = enclosingNodeModulesRoot(candidate)
-      if (!root || !isDirectory(root)) continue
-      if (isWorkspaceRoot(root, scope)) continue
-      if (!roots.includes(root)) roots.push(root)
+      // Walk back to every enclosing node_modules directory, innermost first.
+      for (const root of enclosingNodeModulesRoots(candidate)) {
+        if (!isDirectory(root)) continue
+        if (isWorkspaceRoot(root, scope)) continue
+        if (!roots.includes(root)) roots.push(root)
+      }
     }
   }
   return roots
@@ -935,12 +964,21 @@ async function installOptionalDriverInternal(
       // held it has usually just installed the very thing we queued for, so
       // most contenders return "already present" instead of running a second
       // npm over the same tree — which is what produced the ENOTEMPTY races.
-      return withInstallLock(dir, async (acquired) => {
-        if (acquired && !options.force && installed(driver)) {
-          return { driver, packages, dir, installed: true, alreadyPresent: true }
-        }
-        return performInstall(driver, packages, dir, options)
-      })
+      return withInstallLock(
+        dir,
+        async (acquired) => {
+          if (acquired && !options.force && installed(driver)) {
+            return { driver, packages, dir, installed: true, alreadyPresent: true }
+          }
+          return performInstall(driver, packages, dir, options)
+        },
+        // Outlast one peer's install. A lock wait shorter than the install it is
+        // waiting on means a contender gives up while the holder's npm is still
+        // running and then installs unlocked over the same tree, which is the
+        // race this lock exists to stop. The two timeouts were independent
+        // constants, so raising the install timeout alone silently broke it.
+        { timeoutMs: (options.timeoutMs ?? 180_000) + 60_000 },
+      )
     })
   installsInFlight.set(dir, run)
   try {
@@ -974,6 +1012,20 @@ const installsInFlight = new Map<string, Promise<InstallResult>>()
  */
 export function installLockPath(dir: string): string {
   return `${dir.replace(/[\\/]+$/, "")}.lock`
+}
+
+/**
+ * The atomically-created lock itself, which lives *inside* the container
+ * `installLockPath()` names.
+ *
+ * Two directories rather than one so every path this mechanism writes sits
+ * under a single approved prefix. Stale recovery renames the held lock aside
+ * before deleting it, and that destination has to be somewhere the install tool
+ * asked permission for; a sibling of the container would be outside the
+ * `<dir>.lock/*` pattern the tool brokers.
+ */
+function heldLockPath(dir: string): string {
+  return path.join(installLockPath(dir), "held")
 }
 
 interface LockHolder {
@@ -1019,16 +1071,45 @@ function readLockHolder(lockDir: string): LockHolder | undefined {
  *   directory). Liveness cannot be established, so age is the only signal
  *   available and the lock ages out.
  */
-function isStaleLock(lockDir: string, holder: LockHolder | undefined, maxAgeMs: number): boolean {
-  if (holder && holder.hostname === os.hostname()) return !processExists(holder.pid)
+function isStaleLock(
+  lockDir: string,
+  holder: LockHolder | undefined,
+  maxAgeMs: number,
+  hardMaxAgeMs: number,
+): boolean {
+  const age = lockAgeMs(lockDir, holder)
+  if (holder && holder.hostname === os.hostname()) {
+    if (!processExists(holder.pid)) return true
+    // `processExists` answers "some process holds this pid", not "our installer
+    // is still running": a crashed owner's pid can be recycled by an unrelated
+    // long-lived process, and liveness alone would then keep the lock forever,
+    // making every later install wait out its timeout and run unlocked. So a
+    // live same-host owner is protected, but only up to a backstop far beyond
+    // any real npm run — long enough never to interrupt an install, short
+    // enough that a recycled pid cannot wedge the directory permanently.
+    return age !== undefined && age > hardMaxAgeMs
+  }
+  // No readable owner, or an owner on another host sharing a home directory.
+  // Liveness is not decidable, so age is the only signal there is.
+  return age !== undefined && age > maxAgeMs
+}
+
+/** How long the lock has been held, by owner record or directory mtime. */
+function lockAgeMs(lockDir: string, holder: LockHolder | undefined): number | undefined {
   const startedAt = holder?.startedAt
-  if (typeof startedAt === "number") return Date.now() - startedAt > maxAgeMs
+  if (typeof startedAt === "number") return Date.now() - startedAt
   try {
-    return Date.now() - fs.statSync(lockDir).mtimeMs > maxAgeMs
+    return Date.now() - fs.statSync(lockDir).mtimeMs
   } catch {
     // Vanished between checks — someone else released it, so it is not stale.
-    return false
+    return undefined
   }
+}
+
+/** True when two owner records describe the same acquisition. */
+function sameHolder(a: LockHolder | undefined, b: LockHolder | undefined): boolean {
+  if (!a || !b) return a === b
+  return a.pid === b.pid && a.hostname === b.hostname && a.startedAt === b.startedAt && a.token === b.token
 }
 
 /**
@@ -1042,21 +1123,42 @@ function isStaleLock(lockDir: string, holder: LockHolder | undefined, maxAgeMs: 
  * and only that process goes on to delete it. The loser's rename fails and it
  * simply retries against whatever state now exists.
  */
-function claimStaleLock(lockDir: string): void {
-  const claimed = `${lockDir}.stale-${process.pid}-${Date.now()}`
+function claimStaleLock(lockDir: string, judged: LockHolder | undefined): boolean {
+  // The staleness verdict was formed before this call, and the owner can have
+  // released the lock and a peer re-taken it since. Renaming blindly would move
+  // a *live* lock aside and put two installs over the same tree. Check the owner
+  // record still matches the one judged stale before touching anything.
+  if (!sameHolder(judged, readLockHolder(lockDir))) return false
+
+  const claimed = path.join(path.dirname(lockDir), `stale-${process.pid}-${Date.now().toString(36)}`)
   try {
     fs.renameSync(lockDir, claimed)
   } catch {
-    // Another process claimed it first, or the owner released it. Either way
-    // there is nothing of ours to clean up; retry the acquire.
-    return
+    // Another process claimed it first, the owner released it, or the parent
+    // does not permit rename. Nothing of ours to clean up.
+    return false
   }
+
+  // The check above narrows the window but cannot close it — nothing makes
+  // "read the owner" and "rename" one operation. So confirm what was actually
+  // moved, and put it back if a peer had re-taken the lock in between.
+  if (!sameHolder(judged, readLockHolder(claimed))) {
+    try {
+      fs.renameSync(claimed, lockDir)
+      return false
+    } catch {
+      // Cannot restore — a third process has already re-created the lock. Fall
+      // through and remove what we moved rather than leaking it.
+    }
+  }
+
   try {
     fs.rmSync(claimed, { recursive: true, force: true })
   } catch {
     // The rename already made the lock unreachable, so a leftover directory
-    // beside it costs nothing but disk.
+    // costs nothing but disk.
   }
+  return true
 }
 
 /**
@@ -1068,12 +1170,22 @@ function claimStaleLock(lockDir: string): void {
  * the successor's live lock and admit a third process. The token is written
  * when the lock is taken, so a mismatch means the directory is somebody else's.
  */
-function releaseInstallLock(lockDir: string, token: string): void {
+function releaseInstallLock(lockDir: string, token: string, ino: number | undefined): void {
   const holder = readLockHolder(lockDir)
-  // An unreadable owner file leaves nothing to compare against; the lock is
-  // most likely still ours (we wrote it) and leaking it would wedge every later
-  // install behind a lock nobody releases, so remove it.
-  if (holder?.token !== undefined && holder.token !== token) return
+  if (holder?.token !== undefined) {
+    if (holder.token !== token) return
+  } else if (ino !== undefined) {
+    // No token to compare against. There is a real window for this: the lock
+    // directory is created before `owner.json` is written, so a successor that
+    // re-took the lock in between holds a live lock carrying no token, and
+    // removing it by pathname would admit a third process. The directory's own
+    // identity settles it — a different inode is a different lock.
+    try {
+      if (fs.statSync(lockDir).ino !== ino) return
+    } catch {
+      return
+    }
+  }
   try {
     fs.rmSync(lockDir, { recursive: true, force: true })
   } catch {
@@ -1092,22 +1204,24 @@ function releaseInstallLock(lockDir: string, token: string): void {
 export async function withInstallLock<T>(
   dir: string,
   fn: (acquired: boolean) => Promise<T>,
-  options: { timeoutMs?: number; staleAfterMs?: number; pollMs?: number } = {},
+  options: { timeoutMs?: number; staleAfterMs?: number; hardStaleAfterMs?: number; pollMs?: number } = {},
 ): Promise<T> {
-  const lockDir = installLockPath(dir)
+  const lockDir = heldLockPath(dir)
   const timeoutMs = options.timeoutMs ?? 240_000
   const staleAfterMs = options.staleAfterMs ?? 300_000
+  const hardStaleAfterMs = options.hardStaleAfterMs ?? Math.max(staleAfterMs, 3_600_000)
   const pollMs = options.pollMs ?? 100
   const deadline = Date.now() + timeoutMs
   const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
   let acquired = false
+  let ino: number | undefined
 
-  // The lock's parent must exist before the atomic mkdir can land. On a cold
-  // machine nothing has created the XDG data directory yet — `performInstall`
-  // is the first thing that does, and it runs *after* this — so a non-recursive
-  // mkdir would fail ENOENT, take the "cannot lock" branch, and drop every
-  // caller straight to an unlocked install. That is precisely the cold-start
-  // stampede this lock exists to prevent, so create the parent first.
+  // The container must exist before the atomic mkdir inside it can land. On a
+  // cold machine nothing has created the XDG data directory yet —
+  // `performInstall` is the first thing that does, and it runs *after* this — so
+  // a non-recursive mkdir would fail ENOENT, take the "cannot lock" branch, and
+  // drop every caller straight into an unlocked install. That is precisely the
+  // cold-start stampede this lock exists to prevent.
   try {
     fs.mkdirSync(path.dirname(lockDir), { recursive: true })
   } catch {
@@ -1119,15 +1233,24 @@ export async function withInstallLock<T>(
     try {
       fs.mkdirSync(lockDir, { recursive: false })
       acquired = true
+      try {
+        ino = fs.statSync(lockDir).ino
+      } catch {
+        // Identity check is skipped on release; the token check still applies.
+      }
       break
     } catch (e) {
       // Anything but "already held" — an unwritable parent, say — means we
       // cannot lock at all, so proceed unlocked rather than block forever.
       const code = e && typeof e === "object" && "code" in e ? (e as { code?: unknown }).code : undefined
       if (code !== "EEXIST") break
-      if (isStaleLock(lockDir, readLockHolder(lockDir), staleAfterMs)) {
-        claimStaleLock(lockDir)
-        continue
+      const holder = readLockHolder(lockDir)
+      if (isStaleLock(lockDir, holder, staleAfterMs, hardStaleAfterMs)) {
+        // A claim can fail persistently — a lock owned by another user, or a
+        // container that permits inspection but not rename. Retrying such a
+        // claim without yielding spins at full CPU and never reaches the
+        // deadline, so only a claim that actually succeeded skips the wait.
+        if (claimStaleLock(lockDir, holder)) continue
       }
       if (Date.now() >= deadline) break
       await sleep(pollMs)
@@ -1153,7 +1276,7 @@ export async function withInstallLock<T>(
   try {
     return await fn(acquired)
   } finally {
-    if (acquired) releaseInstallLock(lockDir, token)
+    if (acquired) releaseInstallLock(lockDir, token, ino)
   }
 }
 

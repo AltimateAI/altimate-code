@@ -18,6 +18,17 @@ import { installLockPath, withInstallLock } from "../src/resolve"
 
 const resolveModule = fileURLToPath(new URL("../src/resolve.ts", import.meta.url))
 
+/** The atomic lock inside the container, which is what contention is fought over. */
+const heldPath = (target: string) => path.join(installLockPath(target), "held")
+
+/** Plant a lock with a given owner record, as a peer process would leave it. */
+function plantLock(target: string, holder: Record<string, unknown>) {
+  const held = heldPath(target)
+  fs.mkdirSync(held, { recursive: true })
+  fs.writeFileSync(path.join(held, "owner.json"), JSON.stringify(holder))
+  return held
+}
+
 let dir = ""
 
 beforeEach(() => {
@@ -26,7 +37,6 @@ beforeEach(() => {
 
 afterEach(() => {
   if (dir) fs.rmSync(dir, { recursive: true, force: true })
-  fs.rmSync(`${dir}.lock`, { recursive: true, force: true })
 })
 
 describe("cross-process install lock", () => {
@@ -87,15 +97,15 @@ process.exit(0)
     }
   }, 60_000)
 
-  test("takes the lock when its parent directory does not exist yet", async () => {
-    // The cold-start shape this change exists for. `<dir>.lock` sits beside the
+  test("takes the lock when its container does not exist yet", async () => {
+    // The cold-start shape this change exists for. The lock sits beside the
     // managed directory, and on a fresh machine nothing has created the XDG data
     // directory yet — `performInstall` is the first thing that does, and it runs
     // *after* the lock is taken. A non-recursive mkdir would fail ENOENT, take
     // the "cannot lock" branch, and drop every concurrent CLI into an unlocked
     // install: exactly the stampede the lock is meant to stop.
     const target = path.join(dir, "fresh", "xdg", "altimate-code", "drivers")
-    expect(fs.existsSync(path.dirname(installLockPath(target)))).toBe(false)
+    expect(fs.existsSync(installLockPath(target))).toBe(false)
 
     let sawAcquired: boolean | undefined
     await withInstallLock(
@@ -112,11 +122,7 @@ process.exit(0)
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
     // Hold the lock with a live owner so it cannot be judged stale.
-    fs.mkdirSync(`${target}.lock`)
-    fs.writeFileSync(
-      path.join(`${target}.lock`, "owner.json"),
-      JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now() }),
-    )
+    const held = plantLock(target, { pid: process.pid, hostname: os.hostname(), startedAt: Date.now() })
 
     let sawAcquired: boolean | undefined
     await withInstallLock(
@@ -130,18 +136,14 @@ process.exit(0)
     // turn contention into a hard failure — but it knows it was unlocked.
     expect(sawAcquired).toBe(false)
     // A lock we did not take must not be deleted on the way out.
-    expect(fs.existsSync(`${target}.lock`)).toBe(true)
+    expect(fs.existsSync(held)).toBe(true)
   })
 
   test("breaks a lock whose owner is gone", async () => {
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
-    fs.mkdirSync(`${target}.lock`)
-    fs.writeFileSync(
-      path.join(`${target}.lock`, "owner.json"),
-      // PID 0x7FFFFFFF is not a live process on any platform we run on.
-      JSON.stringify({ pid: 0x7fffffff, hostname: os.hostname(), startedAt: Date.now() }),
-    )
+    // PID 0x7FFFFFFF is not a live process on any platform we run on.
+    plantLock(target, { pid: 0x7fffffff, hostname: os.hostname(), startedAt: Date.now() })
 
     let sawAcquired: boolean | undefined
     await withInstallLock(
@@ -159,11 +161,11 @@ process.exit(0)
     // sharing a home directory, because its pid means nothing here.
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
-    fs.mkdirSync(`${target}.lock`)
-    fs.writeFileSync(
-      path.join(`${target}.lock`, "owner.json"),
-      JSON.stringify({ pid: process.pid, hostname: `${os.hostname()}-other`, startedAt: Date.now() - 10 * 60_000 }),
-    )
+    plantLock(target, {
+      pid: process.pid,
+      hostname: `${os.hostname()}-other`,
+      startedAt: Date.now() - 10 * 60_000,
+    })
 
     let sawAcquired: boolean | undefined
     await withInstallLock(
@@ -181,14 +183,14 @@ process.exit(0)
     // as oracledb, or a caller that raised its own install timeout. Breaking a
     // live owner's lock would put two npm runs over the same tree, which is the
     // corruption this lock exists to prevent. Where liveness is decidable it is
-    // the only thing that counts.
+    // what counts.
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
-    fs.mkdirSync(`${target}.lock`)
-    fs.writeFileSync(
-      path.join(`${target}.lock`, "owner.json"),
-      JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now() - 60 * 60_000 }),
-    )
+    const held = plantLock(target, {
+      pid: process.pid,
+      hostname: os.hostname(),
+      startedAt: Date.now() - 60 * 60_000,
+    })
 
     let sawAcquired: boolean | undefined
     await withInstallLock(
@@ -196,12 +198,54 @@ process.exit(0)
       async (acquired) => {
         sawAcquired = acquired
       },
-      { timeoutMs: 200, staleAfterMs: 1_000, pollMs: 20 },
+      { timeoutMs: 200, staleAfterMs: 1_000, hardStaleAfterMs: 24 * 60 * 60_000, pollMs: 20 },
     )
     // Waited, then proceeded unlocked rather than stealing a running install.
     expect(sawAcquired).toBe(false)
-    expect(fs.existsSync(`${target}.lock`)).toBe(true)
+    expect(fs.existsSync(held)).toBe(true)
   })
+
+  test("breaks a live-looking lock once past the hard backstop", async () => {
+    // `processExists` answers "some process holds this pid", not "our installer
+    // is still running". A crashed owner's pid can be recycled by an unrelated
+    // long-lived process, and liveness alone would then keep that lock forever —
+    // every later install waiting out its timeout and running unlocked. The
+    // backstop bounds that without interrupting any real install.
+    const target = path.join(dir, "drivers")
+    fs.mkdirSync(target, { recursive: true })
+    plantLock(target, { pid: process.pid, hostname: os.hostname(), startedAt: Date.now() - 48 * 60 * 60_000 })
+
+    let sawAcquired: boolean | undefined
+    await withInstallLock(
+      target,
+      async (acquired) => {
+        sawAcquired = acquired
+      },
+      { timeoutMs: 5000, staleAfterMs: 1_000, hardStaleAfterMs: 60_000, pollMs: 20 },
+    )
+    expect(sawAcquired).toBe(true)
+  })
+
+  test("gives up by the deadline when a stale lock cannot be claimed", async () => {
+    // A claim can fail persistently: a lock owned by another user, or a
+    // container that permits inspection but not rename. Retrying that without
+    // yielding spins at full CPU and never reaches the deadline, so this test
+    // hangs rather than fails if the bound is lost.
+    const target = path.join(dir, "drivers")
+    fs.mkdirSync(target, { recursive: true })
+    plantLock(target, { pid: 0x7fffffff, hostname: os.hostname(), startedAt: Date.now() })
+    const container = installLockPath(target)
+    fs.chmodSync(container, 0o555)
+
+    const started = Date.now()
+    try {
+      await withInstallLock(target, async () => {}, { timeoutMs: 300, pollMs: 20 })
+    } finally {
+      fs.chmodSync(container, 0o755)
+    }
+    // Bounded either way: root can still rename and simply acquires the lock.
+    expect(Date.now() - started).toBeLessThan(10_000)
+  }, 30_000)
 
   test("does not delete a lock that has been re-taken by a peer", async () => {
     // A lock we hold can be broken as stale and re-acquired by someone else
@@ -210,19 +254,36 @@ process.exit(0)
     // release only removes a lock still carrying our own token.
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
-    const lockDir = installLockPath(target)
+    const held = heldPath(target)
 
     await withInstallLock(target, async (acquired) => {
       expect(acquired).toBe(true)
       // A peer breaks our lock and takes its own.
       fs.writeFileSync(
-        path.join(lockDir, "owner.json"),
+        path.join(held, "owner.json"),
         JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now(), token: "successor" }),
       )
     })
 
-    expect(fs.existsSync(lockDir)).toBe(true)
-    fs.rmSync(lockDir, { recursive: true, force: true })
+    expect(fs.existsSync(held)).toBe(true)
+  })
+
+  test("does not delete a successor lock that has no owner record yet", async () => {
+    // The lock directory is created before `owner.json` is written, so a
+    // successor can hold a live lock carrying no token at all. Identity of the
+    // directory itself is what settles ownership in that window.
+    const target = path.join(dir, "drivers")
+    fs.mkdirSync(target, { recursive: true })
+    const held = heldPath(target)
+
+    await withInstallLock(target, async (acquired) => {
+      expect(acquired).toBe(true)
+      // Replace the lock with a different directory carrying no owner record.
+      fs.rmSync(held, { recursive: true, force: true })
+      fs.mkdirSync(held, { recursive: true })
+    })
+
+    expect(fs.existsSync(held)).toBe(true)
   })
 
   test("releases the lock when the critical section throws", async () => {
@@ -237,6 +298,6 @@ process.exit(0)
       thrown = e instanceof Error ? e.message : String(e)
     }
     expect(thrown).toBe("boom")
-    expect(fs.existsSync(`${target}.lock`)).toBe(false)
+    expect(fs.existsSync(heldPath(target))).toBe(false)
   })
 })

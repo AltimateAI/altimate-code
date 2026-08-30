@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 
 import {
-  enclosingNodeModulesRoot,
+  enclosingNodeModulesRoots,
   loadOptionalDriver,
   repairCwdPrefixedPath,
   searchRootsFromError,
@@ -186,34 +186,38 @@ describe("cwd concatenated onto an absolute path", () => {
   })
 })
 
-describe("enclosing node_modules root", () => {
+describe("enclosing node_modules roots", () => {
   test("finds the root in a platform-native path", () => {
-    expect(enclosingNodeModulesRoot("/a/node_modules/pkg/index.js", "/")).toBe("/a/node_modules")
+    expect(enclosingNodeModulesRoots("/a/node_modules/pkg/index.js", "/")).toEqual(["/a/node_modules"])
   })
 
-  test("finds the last root when the path nests several", () => {
-    expect(enclosingNodeModulesRoot("/a/node_modules/b/node_modules/c/index.js", "/")).toBe(
-      "/a/node_modules/b/node_modules",
-    )
+  test("returns every enclosing root, innermost first", () => {
+    // A quoted path often runs through a driver's own dependency. The innermost
+    // root holds that dependency; the *outer* one holds the driver being looked
+    // for, so returning only the innermost left the driver unfindable.
+    expect(enclosingNodeModulesRoots("/opt/node_modules/duckdb/node_modules/node-addon-api/x.js", "/")).toEqual([
+      "/opt/node_modules/duckdb/node_modules",
+      "/opt/node_modules",
+    ])
   })
 
   test("returns nothing when the path names no node_modules", () => {
-    expect(enclosingNodeModulesRoot("/a/b/index.js", "/")).toBeUndefined()
+    expect(enclosingNodeModulesRoots("/a/b/index.js", "/")).toEqual([])
   })
 
   test("handles a Windows path quoted with forward slashes", () => {
     // Windows runtimes quote both shapes. The marker is built from the platform
     // separator, so without normalisation a forward-slash path would never match
-    // a backslash marker and the root would silently not be harvested.
-    expect(enclosingNodeModulesRoot("C:/app/node_modules/pkg/index.js", "\\")).toBe("C:\\app\\node_modules")
+    // a backslash marker and nothing would be harvested at all.
+    expect(enclosingNodeModulesRoots("C:/app/node_modules/pkg/index.js", "\\")).toEqual(["C:\\app\\node_modules"])
   })
 
   test("handles a Windows path quoted with backslashes", () => {
-    expect(enclosingNodeModulesRoot("C:\\app\\node_modules\\pkg\\index.js", "\\")).toBe("C:\\app\\node_modules")
+    expect(enclosingNodeModulesRoots("C:\\app\\node_modules\\pkg\\index.js", "\\")).toEqual(["C:\\app\\node_modules"])
   })
 
   test("handles a Windows path with mixed separators", () => {
-    expect(enclosingNodeModulesRoot("C:\\app/node_modules\\pkg/index.js", "\\")).toBe("C:\\app\\node_modules")
+    expect(enclosingNodeModulesRoots("C:\\app/node_modules\\pkg/index.js", "\\")).toEqual(["C:\\app\\node_modules"])
   })
 })
 
@@ -310,6 +314,28 @@ describe("harvested roots respect the workspace boundary", () => {
 
     const error = new Error(`ENOENT: no such file or directory, open '${path.join(ancestorModules, "duckdb", "package.json")}'`)
     expect(searchRootsFromError(error)).not.toContain(ancestorModules)
+  })
+
+  test("refuses a symlinked root whose target is inside the working directory", () => {
+    // The containment check must compare real paths. `isDirectory` follows
+    // symlinks, so a link whose lexical path sits outside the workspace but
+    // whose target sits inside it would otherwise pass a lexical exclusion and
+    // import workspace-controlled code anyway.
+    workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "resolve-ws-")))
+    const real = path.join(workspace, "inside")
+    writePackage(path.join(real, "node_modules"), "duckdb", "index.js", "module.exports = {}\n")
+    // The link lives outside the workspace and points back into it.
+    const linkHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "resolve-link-")))
+    const link = path.join(linkHome, "node_modules")
+    fs.symlinkSync(path.join(real, "node_modules"), link, "dir")
+    process.chdir(workspace)
+
+    try {
+      const error = new Error(`ENOENT: no such file or directory, open '${path.join(link, "duckdb", "package.json")}'`)
+      expect(searchRootsFromError(error)).toEqual([])
+    } finally {
+      fs.rmSync(linkHome, { recursive: true, force: true })
+    }
   })
 
   test("still harvests a root outside the workspace", () => {
