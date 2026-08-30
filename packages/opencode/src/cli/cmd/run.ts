@@ -636,7 +636,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const events = await sdk.event.subscribe(undefined, { signal: eventAbort.signal })
       // altimate_change end
       let error: string | undefined
+      // altimate_change start — retain overflow trace errors until compaction proves recovery
       const recoverableOverflowTraceErrors = RunAccounting.createRecoverableOverflowTraceErrors()
+      // altimate_change end
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
@@ -888,8 +890,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 : undefined,
             )
             // altimate_change end
+            // altimate_change start — keep overflow trace failures recoverable only through compaction
             if (props.error.name === "ContextOverflowError") recoverableOverflowTraceErrors.add(err)
             else error = error ? error + EOL + err : err
+            // altimate_change end
             if (emit("error", { error: props.error })) continue
             UI.error(err)
           }
@@ -1422,8 +1426,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Finalize trace and save to disk
       if (tracer) {
         Tracer.setActive(null)
+        // altimate_change start — persist only overflow errors that never reached a recovery event
         const traceError = [error, ...recoverableOverflowTraceErrors.values()].filter(Boolean).join(EOL) || undefined
         const tracePath = await tracer.endTrace(traceError)
+        // altimate_change end
         if (tracePath) {
           emit("trace_saved", { path: tracePath })
           if (args.format !== "json" && process.stdout.isTTY) {

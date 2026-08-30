@@ -99,6 +99,7 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
+  // altimate_change start — testable validator completion gate shared by the dispatch path
   /** @internal Pure completion-gate predicate used by focused regression tests. */
   export function shouldDispatchValidators(input: {
     active: boolean
@@ -117,6 +118,7 @@ export namespace SessionPrompt {
       input.validatorCount > 0
     )
   }
+  // altimate_change end
 
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
   // user-facing phase label.
