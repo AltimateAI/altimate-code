@@ -4,11 +4,13 @@
  */
 
 import { Database } from "bun:sqlite"
-import { allowsCreate, assertStoreExists } from "./file-store"
+import { allowsCreate, assertStoreExists, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
-  const dbPath = (config.path as string) ?? ":memory:"
+  // altimate_change start — a missing path must fail loudly, not become :memory:
+  const dbPath = requireStorePath(config, "SQLite")
+  // altimate_change end
   let db: Database | null = null
 
   return {

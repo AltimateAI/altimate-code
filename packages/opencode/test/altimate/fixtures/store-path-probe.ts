@@ -35,11 +35,29 @@ async function main() {
   const connection = arg("connection") ?? "probe"
   const schema = arg("schema") ?? "main"
 
-  const read = async () => {
-    const connector = await Registry.get(connection)
-    const tables = await connector.listTables(schema)
-    await connector.close()
-    return tables.map((t) => t.name).sort()
+  // `--via dispatcher` (the default) drives the same entry point the CLI's
+  // sql_execute tool uses: Dispatcher.call -> sql.execute -> Registry -> driver.
+  // Reaching the driver any other way can pass while the product path is broken,
+  // which is exactly how a guard gets shipped that never runs.
+  const via = arg("via") ?? "dispatcher"
+
+  const read = async (): Promise<{ tables: string[]; error?: string }> => {
+    if (via === "registry") {
+      const connector = await Registry.get(connection)
+      const tables = await connector.listTables(schema)
+      await connector.close()
+      return { tables: tables.map((t) => t.name).sort() }
+    }
+    // Import the native index, not the dispatcher module: the index is what
+    // installs the lazy registration hook in production. Importing the
+    // dispatcher alone yields "No native handler for sql.execute".
+    const { Dispatcher } = await import("../../../src/altimate/native")
+    const result = (await Dispatcher.call("sql.execute", {
+      sql: "SELECT name FROM sqlite_master WHERE type = 'table'",
+      warehouse: connection,
+    })) as { rows?: unknown[][]; error?: unknown }
+    if (result.error !== undefined) return { tables: [], error: String(result.error) }
+    return { tables: (result.rows ?? []).map((r) => String(r[0])).sort() }
   }
 
   // `--instance-dir` models a server or `run --attach` request: the working
@@ -51,7 +69,7 @@ async function main() {
   if (!instanceDir && dir) process.chdir(dir)
 
   try {
-    const tables = instanceDir
+    const outcome = instanceDir
       ? await (
           await import("../../../src/project/instance")
         ).Instance.provide({
@@ -59,7 +77,13 @@ async function main() {
           fn: read,
         })
       : await read()
-    console.log(JSON.stringify({ ok: true, cwd: process.cwd(), tables }))
+    console.log(
+      JSON.stringify(
+        outcome.error !== undefined
+          ? { ok: false, cwd: process.cwd(), error: outcome.error }
+          : { ok: true, cwd: process.cwd(), tables: outcome.tables },
+      ),
+    )
   } catch (e) {
     console.log(
       JSON.stringify({

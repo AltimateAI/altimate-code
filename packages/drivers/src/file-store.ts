@@ -39,6 +39,31 @@ export function isLocalFilePath(dbPath: string): boolean {
   return true
 }
 
+/**
+ * The store path a file-backed connection names, or a loud failure.
+ *
+ * Both drivers used to read `(config.path as string) ?? ":memory:"`. That turns
+ * ANY failure to carry a path — a config the registry never loaded, a field
+ * under the wrong name, a lookup that fell through — into a successful
+ * connection over an empty in-memory database. Every query then returns no rows
+ * and no error, which reads as a healthy warehouse that happens to be empty.
+ *
+ * It is a worse failure than creating a store on disk: a stray file can at
+ * least be found afterwards, whereas an in-memory database leaves nothing
+ * behind to explain the empty answer. `:memory:` remains available, but only
+ * when a caller asks for it by name.
+ */
+export function requireStorePath(config: ConnectionConfig, engine: string): string {
+  const value = config.path
+  if (typeof value === "string" && value !== "") return value
+  throw new Error(
+    `${engine} connection is missing its "path". A file-backed warehouse must name its database explicitly — ` +
+      `falling back to an in-memory database would answer every query with no rows and no error, ` +
+      `which is indistinguishable from a healthy but empty warehouse. ` +
+      `Set "path" to the database file, or to ":memory:" if a throwaway empty database is genuinely what you want.`,
+  )
+}
+
 /** Whether the caller explicitly opted in to creating the store. */
 export function allowsCreate(config: ConnectionConfig): boolean {
   return config.create === true

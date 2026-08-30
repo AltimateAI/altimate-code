@@ -5,7 +5,7 @@ export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from 
 export { normalizeConfig, sanitizeConnectionString } from "./normalize"
 
 // Re-export file-backed store guards
-export { allowsCreate, assertStoreExists, isLocalFilePath } from "./file-store"
+export { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 
 // Re-export driver connect functions
 export { connect as connectPostgres } from "./postgres"
