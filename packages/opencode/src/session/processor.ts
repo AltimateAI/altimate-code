@@ -641,19 +641,19 @@ export namespace SessionProcessor {
                         })
                       return capped.content
                     })()
-                    // altimate_change end
                     await Session.updatePart({
                       ...match,
                       state: {
                         status: "error",
                         input: value.input ?? match.state.input,
-                        error: toolErrorText,
+                        error: toolErrorText, // altimate_change — dispatch-capped (see above)
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
                       },
                     })
+                    // altimate_change end
 
                     if (
                       value.error instanceof PermissionNext.RejectedError ||
