@@ -375,7 +375,9 @@ describe("bot review wave", () => {
     })
 
     const r = await DbtBuildGreenValidator.check(ctx())
-    expect(r.details!["verdict"]).not.toBe("non-executing-artifact")
+    // Trusted all the way through: its model rows still certify the build,
+    // rather than being quietly downgraded to inconclusive.
+    expect(r.details!["verdict"]).toBe("fresh-build")
     expect(r.ok).toBe(true)
   })
 

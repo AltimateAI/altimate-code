@@ -1042,7 +1042,12 @@ const NON_EXECUTING_DBT_COMMANDS = new Set([
  */
 export function runResultsExecutedModels(command: string | null): boolean {
   if (command === null || command.length === 0) return true
-  return MODEL_EXECUTING_DBT_COMMANDS.has(command)
+  if (MODEL_EXECUTING_DBT_COMMANDS.has(command)) return true
+  // Only a command we RECOGNISE as not building models is denied. Anything
+  // unrecognised reads as executing, which is what the permissive default
+  // above promises — denying it would quietly downgrade a green build to
+  // `coverage-inconclusive` on a future dbt subcommand.
+  return !NON_MODEL_EXECUTING_DBT_COMMANDS.has(command) && !NON_EXECUTING_DBT_COMMANDS.has(command)
 }
 
 /**
