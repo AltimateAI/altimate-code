@@ -14,6 +14,7 @@ import {
   clampReasoningBudget,
   effectiveContextWindow,
   estimateInputTokens,
+  mergeRequestHeaders,
 } from "@/provider/output-token-budget"
 // altimate_change end
 import { SystemPrompt } from "../system"
@@ -176,6 +177,25 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
+  const requestHeaders = mergeRequestHeaders(
+    input.model.providerID.startsWith("opencode")
+      ? {
+          ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
+          "x-opencode-session": input.sessionID,
+          "x-opencode-request": input.user.id,
+          "x-opencode-client": input.flags.client,
+          "User-Agent": USER_AGENT,
+        }
+      : {
+          "x-session-affinity": input.sessionID,
+          "X-Session-Id": input.sessionID,
+          ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+          "User-Agent": USER_AGENT,
+        },
+    input.model.headers,
+    headers,
+  )
+
   // altimate_change start — clamp after tools, headers, and plugin options are finalized.
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
   const maxOutputTokens = clampOutputTokens({
@@ -183,7 +203,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     requested: params.maxOutputTokens,
     context: effectiveContextWindow({
       model: input.model,
-      headerSources: [input.model.headers, headers, input.provider.options],
+      // Provider defaults are lower precedence than the exact case-normalized outgoing record.
+      headerSources: [input.provider.options, requestHeaders],
     }),
     inputTokens: () =>
       estimateInputTokens({
@@ -209,24 +230,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     params: clampedParams,
     messageTransformOptions: requestOptions,
     // altimate_change end
-    headers: {
-      ...(input.model.providerID.startsWith("opencode")
-        ? {
-            ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
-            "x-opencode-session": input.sessionID,
-            "x-opencode-request": input.user.id,
-            "x-opencode-client": input.flags.client,
-            "User-Agent": USER_AGENT,
-          }
-        : {
-            "x-session-affinity": input.sessionID,
-            "X-Session-Id": input.sessionID,
-            ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-            "User-Agent": USER_AGENT,
-          }),
-      ...input.model.headers,
-      ...headers,
-    },
+    headers: requestHeaders,
   }
 })
 

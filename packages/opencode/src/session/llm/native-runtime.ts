@@ -1,8 +1,10 @@
 import type { Auth } from "@/auth"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — share case-insensitive provider-to-request header precedence
+import { mergeRequestHeaders } from "@/provider/output-token-budget"
+// altimate_change end
 import { errorMessage } from "@/util/error"
-import { isRecord } from "@/util/record"
 import { asSchema, type ModelMessage, type Tool } from "ai"
 import { Cause, Effect, FiberSet, Queue } from "effect"
 import * as Stream from "effect/Stream"
@@ -98,7 +100,9 @@ export function stream(input: StreamInput): StreamResult {
     topK: input.topK,
     maxOutputTokens: input.maxOutputTokens,
     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
-    headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
+    // altimate_change start — canonical names keep request headers authoritative regardless of casing
+    headers: mergeRequestHeaders(input.provider.options.headers, input.headers),
+    // altimate_change end
   })
   const stream = Stream.scoped(
     Stream.unwrap(
@@ -150,13 +154,6 @@ function providerFetch(input: Pick<StreamInput, "provider" | "auth">): typeof gl
   const value: unknown = input.provider.options.fetch
   if (typeof value !== "function") return undefined
   return value as typeof globalThis.fetch
-}
-
-function providerHeaders(value: unknown): Record<string, string> | undefined {
-  if (!isRecord(value)) return undefined
-  return Object.fromEntries(
-    Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-  )
 }
 
 function nativeSchema(value: unknown): JsonSchema {

@@ -15,7 +15,8 @@ const MEDIA_TOKEN_ALLOWANCE = 2_048
 const FILE_TOKEN_ALLOWANCE = 16_384
 const PDF_TOKEN_ALLOWANCE = 32_768
 const PDF_TOKENS_PER_PAGE = 5_000
-const PDF_FALLBACK_BYTES_PER_TOKEN = 4
+const PDF_SCAN_BYTE_LIMIT = 64 * 1_024
+const DATA_URL_HEADER_LIMIT = 1_024
 const PDF_PAGE_LIMIT = 600
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
@@ -118,6 +119,31 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+/** Merge outgoing request headers with HTTP's case-insensitive last-source precedence. */
+export function mergeRequestHeaders(...sources: readonly unknown[]): Record<string, string> {
+  const result: Record<string, string> = {}
+  const set = (name: unknown, value: unknown) => {
+    if (typeof name !== "string" || typeof value !== "string") return
+    result[name.toLowerCase()] = value
+  }
+  for (const source of sources) {
+    if (!source) continue
+    if (source instanceof Headers) {
+      source.forEach((value, name) => set(name, value))
+      continue
+    }
+    if (Array.isArray(source)) {
+      for (const entry of source) {
+        if (Array.isArray(entry)) set(entry[0], entry[1])
+      }
+      continue
+    }
+    if (!isRecord(source)) continue
+    for (const [name, value] of Object.entries(source)) set(name, value)
+  }
+  return result
+}
+
 /** Estimate heterogeneous text in small chunks and conservatively count non-ASCII scripts. */
 function estimateTextTokens(input: string): number {
   let total = 0
@@ -155,53 +181,88 @@ function mediaType(part: JsonRecord, payload: unknown): string | undefined {
   if (declared) return declared.split(";", 1)[0].trim().toLowerCase()
 
   const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
-  const dataType = value?.match(/^data:([^;,]+)/i)?.[1]
+  const prefix = value?.slice(0, DATA_URL_HEADER_LIMIT)
+  const dataType = prefix?.match(/^data:([^;,]+)/i)?.[1]
   if (dataType) return dataType.toLowerCase()
-  if (value && /\.pdf(?:[?#]|$)/i.test(value)) return "application/pdf"
+  if (value && /\.pdf(?:[?#]|$)/i.test(value.slice(-DATA_URL_HEADER_LIMIT))) return "application/pdf"
   if (String(part.type).startsWith("image")) return "image/*"
   return undefined
 }
 
-/** Decode inline PDF bytes for page-tree inspection; remote URLs and file IDs stay unknown. */
-function inlinePdfBytes(payload: unknown): Uint8Array | undefined {
+/** Return an inline payload's decoded byte size without allocating its encoded contents. */
+function inlinePayloadSize(payload: unknown): number | undefined {
+  if (ArrayBuffer.isView(payload)) return payload.byteLength
+  if (payload instanceof ArrayBuffer) return payload.byteLength
+  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
+  if (!value || /^https?:/i.test(value)) return undefined
+
+  const dataURL = /^data:/i.test(value)
+  const prefix = dataURL ? value.slice(0, DATA_URL_HEADER_LIMIT) : ""
+  const comma = dataURL ? prefix.indexOf(",") : -1
+  // A delimiter outside the bounded header prefix is malformed for admission purposes. Charge
+  // its complete encoded length without scanning or copying the attacker-controlled payload.
+  if (dataURL && comma === -1) return value.length
+  const bodyOffset = comma === -1 ? 0 : comma + 1
+  const bodyLength = value.length - bodyOffset
+  if (comma !== -1 && !/;base64(?:;|$)/i.test(prefix.slice(0, comma))) return bodyLength
+
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
+  return Math.max(0, Math.floor((bodyLength * 3) / 4) - padding)
+}
+
+/** Decode at most one bounded prefix for optional PDF page-tree evidence. */
+function inlinePdfPrefix(payload: unknown): string | undefined {
   if (ArrayBuffer.isView(payload)) {
-    return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength)
+    const length = Math.min(payload.byteLength, PDF_SCAN_BYTE_LIMIT)
+    return Buffer.from(payload.buffer, payload.byteOffset, length).toString("latin1")
   }
-  if (payload instanceof ArrayBuffer) return new Uint8Array(payload)
+  if (payload instanceof ArrayBuffer) {
+    return Buffer.from(payload, 0, Math.min(payload.byteLength, PDF_SCAN_BYTE_LIMIT)).toString("latin1")
+  }
 
   const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
   if (!value || /^https?:/i.test(value)) return undefined
+  const dataURL = /^data:/i.test(value)
+  const prefix = dataURL ? value.slice(0, DATA_URL_HEADER_LIMIT) : ""
+  const comma = dataURL ? prefix.indexOf(",") : -1
+  if (dataURL && comma === -1) return undefined
+  const bodyOffset = comma === -1 ? 0 : comma + 1
+  if (comma !== -1 && !/;base64(?:;|$)/i.test(prefix.slice(0, comma))) {
+    return value.slice(bodyOffset, bodyOffset + PDF_SCAN_BYTE_LIMIT)
+  }
+
   try {
-    if (/^data:/i.test(value)) {
-      const comma = value.indexOf(",")
-      if (comma === -1) return undefined
-      const header = value.slice(0, comma)
-      const body = value.slice(comma + 1)
-      return /;base64(?:;|$)/i.test(header)
-        ? Buffer.from(body, "base64")
-        : Buffer.from(decodeURIComponent(body), "latin1")
-    }
-    return Buffer.from(value, "base64")
+    const encodedLimit = Math.ceil(PDF_SCAN_BYTE_LIMIT / 3) * 4
+    return Buffer.from(value.slice(bodyOffset, bodyOffset + encodedLimit), "base64")
+      .subarray(0, PDF_SCAN_BYTE_LIMIT)
+      .toString("latin1")
   } catch {
     return undefined
   }
 }
 
-/** Estimate PDF pages from the standard page tree, including conservative object-stream fallback. */
-function pdfTokenAllowance(payload: unknown): number {
-  const bytes = inlinePdfBytes(payload)
-  if (!bytes) return PDF_TOKEN_ALLOWANCE
+/** Estimate page count only from the bounded PDF prefix. */
+function pdfPageCount(source: string | undefined): number {
+  if (!source) return 0
+  let pages = 0
+  const leaf = /\/Type\s*\/Page\b/g
+  while (leaf.exec(source) && pages < PDF_PAGE_LIMIT) pages++
 
-  const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1")
-  const leafPages = source.match(/\/Type\s*\/Page\b/g)?.length ?? 0
-  let pages = leafPages
-  for (const match of source.matchAll(/\/Count\s+(\d+)/g)) {
-    pages = Math.max(pages, Number(match[1]))
+  const trees = [/\/Type\s*\/Pages\b[^>]{0,512}?\/Count\s+(\d+)/g, /\/Count\s+(\d+)[^>]{0,512}?\/Type\s*\/Pages\b/g]
+  for (const tree of trees) {
+    for (let match = tree.exec(source); match; match = tree.exec(source)) {
+      pages = Math.max(pages, Number(match[1]))
+    }
   }
-  pages = Math.min(pages, PDF_PAGE_LIMIT)
-  if (pages > 0) return Math.max(MEDIA_TOKEN_ALLOWANCE, pages * PDF_TOKENS_PER_PAGE)
+  return Math.min(pages, PDF_PAGE_LIMIT)
+}
 
-  return Math.max(PDF_TOKEN_ALLOWANCE, Math.ceil(bytes.byteLength / PDF_FALLBACK_BYTES_PER_TOKEN))
+/** Combine fixed, monotonic byte-size, and bounded page evidence for inline PDFs. */
+function pdfTokenAllowance(payload: unknown): number {
+  const bytes = inlinePayloadSize(payload) ?? 0
+  const pages = pdfPageCount(inlinePdfPrefix(payload))
+  // One decoded byte per token is deliberately conservative for compressed and multilingual files.
+  return Math.max(PDF_TOKEN_ALLOWANCE, bytes, pages * PDF_TOKENS_PER_PAGE)
 }
 
 /** Assign an allowance that matches the semantic media kind rather than its encoded bytes. */
@@ -210,7 +271,9 @@ function mediaTokenAllowance(part: JsonRecord): number {
   const mime = mediaType(part, payload)
   if (mime?.startsWith("image/") || String(part.type).startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
   if (mime === "application/pdf") return pdfTokenAllowance(payload)
-  if (FILE_PART_TYPES.has(String(part.type))) return FILE_TOKEN_ALLOWANCE
+  if (FILE_PART_TYPES.has(String(part.type))) {
+    return Math.max(FILE_TOKEN_ALLOWANCE, inlinePayloadSize(payload) ?? 0)
+  }
   return MEDIA_TOKEN_ALLOWANCE
 }
 

@@ -19,6 +19,7 @@ import {
   clampReasoningBudget,
   effectiveContextWindow,
   estimateInputTokens,
+  mergeRequestHeaders,
 } from "@/provider/output-token-budget"
 // altimate_change end
 // altimate_change start — tool retrieval
@@ -174,6 +175,25 @@ export namespace LLM {
       },
     )
 
+    const requestHeaders = mergeRequestHeaders(
+      input.model.providerID.startsWith("opencode")
+        ? {
+            "x-opencode-project": Instance.project.id,
+            "x-opencode-session": input.sessionID,
+            "x-opencode-request": input.user.id,
+            "x-opencode-client": Flag.OPENCODE_CLIENT,
+          }
+        : input.model.providerID !== "anthropic"
+          ? {
+              // altimate_change start — upstream_fix: UA brand
+              "User-Agent": `altimate-code/${Installation.VERSION}`,
+              // altimate_change end
+            }
+          : undefined,
+      input.model.headers,
+      headers,
+    )
+
     const tools = await resolveTools(input)
 
     // altimate_change start — ensure tool definitions exist for all tool_use blocks in history
@@ -231,7 +251,8 @@ export namespace LLM {
       requested: params.maxOutputTokens,
       context: effectiveContextWindow({
         model: input.model,
-        headerSources: [input.model.headers, headers, provider.options],
+        // Provider defaults are lower precedence than the exact case-normalized outgoing record.
+        headerSources: [provider.options, requestHeaders],
       }),
       inputTokens: () =>
         estimateInputTokens({
@@ -288,24 +309,7 @@ export namespace LLM {
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
-      headers: {
-        ...(input.model.providerID.startsWith("opencode")
-          ? {
-              "x-opencode-project": Instance.project.id,
-              "x-opencode-session": input.sessionID,
-              "x-opencode-request": input.user.id,
-              "x-opencode-client": Flag.OPENCODE_CLIENT,
-            }
-          : input.model.providerID !== "anthropic"
-            ? {
-                // altimate_change start — upstream_fix: UA brand
-                "User-Agent": `altimate-code/${Installation.VERSION}`,
-                // altimate_change end
-              }
-            : undefined),
-        ...input.model.headers,
-        ...headers,
-      },
+      headers: requestHeaders,
       maxRetries: input.retries ?? 0,
       messages: [
         ...system.map(

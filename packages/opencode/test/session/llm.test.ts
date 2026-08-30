@@ -697,7 +697,11 @@ describe("session.llm.stream", () => {
             enabled_providers: [providerID],
             provider: {
               [providerID]: {
-                options: { apiKey: "test-google-key", baseURL: `${server.url.origin}/v1beta` },
+                options: {
+                  apiKey: "test-google-key",
+                  baseURL: `${server.url.origin}/v1beta`,
+                  headers: { "Anthropic-Beta": "context-1m-2025-08-07" },
+                },
               },
             },
           }),
@@ -711,6 +715,7 @@ describe("session.llm.stream", () => {
         const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
         const budgeted = {
           ...resolved,
+          headers: { "anthropic-beta": "interleaved-thinking-2025-05-14" },
           limit: { ...resolved.limit, context: 65_536, output: 16_384 },
         }
         const sessionID = SessionID.make("session-budget-stream")
@@ -767,6 +772,7 @@ describe("session.llm.stream", () => {
         expect(maxOutputTokens!).toBeGreaterThanOrEqual(1_024)
         expect(config?.thinkingConfig?.thinkingBudget).toBe(maxOutputTokens! - 1_024)
         expect(JSON.stringify(capture.body.tools)).toContain(schemaMarker)
+        expect(capture.headers.get("anthropic-beta")).toBe("interleaved-thinking-2025-05-14")
       },
     })
   }, 30_000)

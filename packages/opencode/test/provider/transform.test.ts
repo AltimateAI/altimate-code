@@ -4956,6 +4956,100 @@ describe("output token budget", () => {
     expect(estimated).toBeGreaterThanOrEqual(60_000)
   })
 
+  test("never lets a page marker suppress the PDF byte-size floor", () => {
+    const pdf = ["%PDF-1.7", "1 0 obj << /Type /Page >> endobj", "x".repeat(200_000), "%%EOF"].join("\n")
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: Buffer.from(pdf).toString("base64") }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThan(200_000)
+  })
+
+  test("bounds PDF page-tree scanning to a fixed prefix", () => {
+    const pdf = ["%PDF-1.7", "x".repeat(70 * 1_024), "<< /Type /Pages /Count 600 >>", "%%EOF"].join("\n")
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: Buffer.from(pdf).toString("base64") }],
+        },
+      ],
+    })
+    // The late page tree is outside the 64 KiB inspection prefix. Size still participates, but
+    // the estimator does not scan the full payload and inflate this to 600 * 5,000 tokens.
+    expect(estimated).toBeGreaterThan(70_000)
+    expect(estimated).toBeLessThan(100_000)
+  })
+
+  test("bounds malformed data-URL header inspection and keeps its size floor", () => {
+    const lateDelimiter = [
+      "data:application/pdf",
+      "x".repeat(70 * 1_024),
+      ",%PDF-1.7 << /Type /Pages /Count 600 >> %%EOF",
+    ].join("")
+    const lateEstimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: lateDelimiter }],
+        },
+      ],
+    })
+    // The comma and page tree are outside the bounded data-URL header prefix. The full string
+    // still establishes a conservative size floor, but the late page marker is never scanned.
+    expect(lateEstimated).toBeGreaterThan(70_000)
+    expect(lateEstimated).toBeLessThan(100_000)
+
+    const missingDelimiter = `data:application/pdf${"A".repeat(100_000)}`
+    const missingEstimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: missingDelimiter }],
+        },
+      ],
+    })
+    expect(missingEstimated).toBeGreaterThan(100_000)
+  })
+
+  test("scales inline non-PDF files with decoded payload size", () => {
+    const text = "漢".repeat(50_000)
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "text/plain", data: Buffer.from(text, "utf8").toString("base64") }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThanOrEqual(150_000)
+  })
+
+  test("uses a conservative fixed fallback for remote PDFs", () => {
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "file", mediaType: "application/pdf", data: new URL("https://example.invalid/report.pdf") },
+          ],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThan(32_000)
+    expect(estimated).toBeLessThan(40_000)
+  })
+
   test("counts every AI SDK v6 tool-result media variant once per transport occurrence", () => {
     const payload = "A".repeat(1_048_576)
     const variants = [
@@ -5208,6 +5302,9 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
       readonly agentOptions?: Record<string, unknown>
       readonly outputTokenMax?: number
       readonly messages?: ModelMessage[]
+      readonly providerOptions?: Record<string, unknown>
+      readonly modelHeaders?: Record<string, string>
+      readonly chatHeaders?: Record<string, string>
     } = {},
   ) =>
     Effect.runPromise(
@@ -5221,7 +5318,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
           model: { providerID: "openai-compatible", modelID: "large-window-model" },
         } as any,
         sessionID,
-        model,
+        model: { ...model, headers: overrides.modelHeaders ?? model.headers },
         agent: {
           name: "test",
           mode: "primary",
@@ -5232,15 +5329,21 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
         system: [],
         messages: overrides.messages ?? messages,
         tools: overrides.tools ?? {},
-        provider: { id: "openai-compatible", options: {} } as any,
+        provider: { id: "openai-compatible", options: overrides.providerOptions ?? {} } as any,
         auth: undefined,
         plugin: {
-          trigger: (name: string, _input: unknown, output: unknown) =>
-            Effect.succeed(
-              name === "chat.params" && overrides.outputTokenMax !== undefined
-                ? { ...(output as Record<string, unknown>), maxOutputTokens: overrides.outputTokenMax }
-                : output,
-            ),
+          trigger: (name: string, _input: unknown, output: unknown) => {
+            if (name === "chat.params" && overrides.outputTokenMax !== undefined) {
+              return Effect.succeed({
+                ...(output as Record<string, unknown>),
+                maxOutputTokens: overrides.outputTokenMax,
+              })
+            }
+            if (name === "chat.headers" && overrides.chatHeaders) {
+              return Effect.succeed({ headers: overrides.chatHeaders })
+            }
+            return Effect.succeed(output)
+          },
           list: () => Effect.succeed([]),
           init: () => Effect.void,
         } as any,
@@ -5271,6 +5374,28 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
   test("a small system prompt keeps the full model reservation", async () => {
     const result = await run("You are a helpful assistant.")
     expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("uses provider then model then chat header precedence at the request boundary", async () => {
+    const beta = "context-1m-2025-08-07"
+    const disabled = "interleaved-thinking-2025-05-14"
+    const clamped = await run(largePrompt, {
+      providerOptions: { headers: { "Anthropic-Beta": beta } },
+      modelHeaders: { "Anthropic-Beta": beta },
+      chatHeaders: { "anthropic-beta": disabled },
+    })
+    expect(clamped.params.maxOutputTokens).toBeLessThan(16_384)
+    expect(new Headers(clamped.headers).get("anthropic-beta")).toBe(disabled)
+    expect(Object.keys(clamped.headers).filter((key) => key.toLowerCase() === "anthropic-beta")).toHaveLength(1)
+
+    const widened = await run(largePrompt, {
+      providerOptions: { headers: { "Anthropic-Beta": disabled } },
+      modelHeaders: { "Anthropic-Beta": disabled },
+      chatHeaders: { "anthropic-beta": beta },
+    })
+    expect(widened.params.maxOutputTokens).toBe(16_384)
+    expect(new Headers(widened.headers).get("anthropic-beta")).toBe(beta)
+    expect(Object.keys(widened.headers).filter((key) => key.toLowerCase() === "anthropic-beta")).toHaveLength(1)
   })
 
   test("unsupported media is normalized before the request-builder estimate", async () => {
