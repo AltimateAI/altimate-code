@@ -18,6 +18,7 @@ process.chdir(dir)
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 import { walkInputs } from "./stamp-inputs"
+import { assertUsableCatalog, catalogDiagnosticOrigin, formatCatalogSummary } from "./models-catalog"
 
 // Python engine has been eliminated — all methods run natively in TypeScript.
 // ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
@@ -30,52 +31,12 @@ console.log(`Loaded CHANGELOG.md (${changelog.length} chars)`)
 const modelsUrlOverride = process.env.OPENCODE_MODELS_URL || undefined
 const modelsUrl = modelsUrlOverride ?? "https://models.dev"
 
-// The providers whose absence would make a shipped binary visibly broken.
-const REQUIRED_CATALOG_PROVIDERS = ["anthropic", "openai", "google"]
-// Size floor for the real models.dev catalog: live carries 200+ providers and the
-// checked-in fixture 105, so anything under this is a fetch that went wrong rather
-// than a real shrink. Applied only in strict mode — a private catalog pinned via
-// OPENCODE_MODELS_URL / MODELS_DEV_API_JSON is legitimately allowed to be small.
-const MIN_CATALOG_PROVIDERS = 50
 const CATALOG_FETCH_TIMEOUT_MS = 60_000
 // The hard backstop must lose the race to `AbortSignal.timeout` in every case the
 // signal CAN handle, or it fires first and replaces the precise per-stage message
 // ("fetch failed", "body read failed") with its own generic one. The margin is
 // what makes it a backstop rather than the primary timeout.
 const CATALOG_HARD_DEADLINE_MS = CATALOG_FETCH_TIMEOUT_MS + 15_000
-
-/** Describe the first structural problem in a provider entry, or undefined when
- * it is well formed.
- *
- * The provider-level rules match the runtime's own predicate (`isCatalogEntry` in
- * src/provider/models-catalog.ts, which `Provider.state()` screens every entry
- * with). The per-model rules cover exactly the fields the runtime dereferences
- * WITHOUT a guard: `Provider.fromModelsDevModel` reads `model.limit.context`
- * directly while every neighbouring field uses `?.`/`??`, so a model record
- * missing `limit` crashes provider initialisation on cold start instead of
- * degrading. Catching it here turns that into a failed release build.
- *
- * Deliberately NOT the zod `Provider` schema, which requires an `options` record
- * real models.dev entries do not carry and would reject valid live data — see the
- * note on `isCatalogEntry` for that history. Verified against every model in the
- * release fixture (4108), the committed snapshot (5299) and the live catalog
- * (7487): zero failures. */
-function providerEntryProblem(id: string, entry: unknown): string | undefined {
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return `${id} (not an object)`
-  if (!("id" in entry) || typeof entry.id !== "string") return `${id} (no string id)`
-  if (!("models" in entry)) return `${id} (no models)`
-  const models = entry.models
-  if (typeof models !== "object" || models === null || Array.isArray(models)) return `${id} (models is not a map)`
-  for (const [modelId, model] of Object.entries(models)) {
-    const where = `${id}/${modelId}`
-    if (typeof model !== "object" || model === null || Array.isArray(model)) return `${where} (not an object)`
-    if (!("limit" in model)) return `${where} (no limit)`
-    const limit = model.limit
-    if (typeof limit !== "object" || limit === null || Array.isArray(limit)) return `${where} (limit is not an object)`
-    if (!("context" in limit) || typeof limit.context !== "number") return `${where} (limit.context is not a number)`
-  }
-  return undefined
-}
 
 /** Fetch the models.dev catalog, failing loudly rather than hanging or
  * returning an error page.
@@ -84,7 +45,7 @@ function providerEntryProblem(id: string, entry: unknown): string | undefined {
  * error page flows straight into the snapshot. An HTML body would at least break
  * the build at parse time, but a JSON error body (`{"error": ...}`) is valid
  * TypeScript and would ship as a catalog with no providers in it. */
-async function fetchModelsCatalog(url: string): Promise<string> {
+async function fetchModelsCatalog(url: string, diagnosticOrigin: string): Promise<string> {
   // Backstop for the case where the abort signal fires but the fetch promise never
   // settles, so the `catch` below is never reached. `AbortSignal.timeout` cannot
   // cancel a blocked `getaddrinfo()` — documented in src/provider/models.ts
@@ -99,7 +60,7 @@ async function fetchModelsCatalog(url: string): Promise<string> {
   // fails; it never falls through to a stale catalog.
   const deadline = setTimeout(() => {
     console.error(
-      `error: models.dev fetch from ${url} did not settle within ${CATALOG_HARD_DEADLINE_MS}ms ` +
+      `error: models.dev fetch from ${diagnosticOrigin} did not settle within ${CATALOG_HARD_DEADLINE_MS}ms ` +
         `(host unreachable or unresolvable); failing the build`,
     )
     process.exit(1)
@@ -108,84 +69,34 @@ async function fetchModelsCatalog(url: string): Promise<string> {
     let res: Response
     try {
       res = await fetch(url, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) })
-    } catch (e) {
-      throw new Error(`models.dev fetch from ${url} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`, {
-        cause: e,
-      })
+    } catch {
+      throw new Error(
+        `models.dev fetch from ${diagnosticOrigin} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`,
+      )
     }
-    if (!res.ok) throw new Error(`models.dev fetch failed: HTTP ${res.status} ${res.statusText} from ${url}`)
+    if (!res.ok)
+      throw new Error(`models.dev fetch failed: HTTP ${res.status} ${res.statusText} from ${diagnosticOrigin}`)
     try {
       // Inside its own try: a host that sends headers promptly then stalls
       // mid-body aborts here, and an uncaught abort surfaces as a bare
       // AbortError carrying none of the context above.
       return await res.text()
-    } catch (e) {
-      throw new Error(`models.dev body read from ${url} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`, {
-        cause: e,
-      })
+    } catch {
+      throw new Error(
+        `models.dev body read from ${diagnosticOrigin} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`,
+      )
     }
   } finally {
     clearTimeout(deadline)
   }
 }
 
-/** Reject a catalog that parses but is not usable.
- *
- * Release builds embed this in every binary, so an empty, truncated or
- * structurally broken payload has to stop the release rather than ship a CLI
- * that offers no models.
- *
- * `strict` adds the checks that only make sense for the real models.dev catalog:
- * the size floor, and the requirement that the major providers carry models rather
- * than merely appear as keys. It is ON for every release build and for any plain
- * default-endpoint build, and OFF only when an operator has deliberately pointed
- * the build at a custom catalog, which is allowed to be small. The structural
- * checks run in both modes — a key count alone is not enough, since a payload can
- * carry 50+ keys whose values are junk and still parse. */
-function assertUsableCatalog(text: string, origin: string, strict: boolean): void {
-  let parsed: unknown
+async function readModelsCatalog(file: string, diagnosticOrigin: string): Promise<string> {
   try {
-    parsed = JSON.parse(text)
-  } catch (e) {
-    throw new Error(`models.dev catalog from ${origin} is not valid JSON`, { cause: e })
+    return await Bun.file(file).text()
+  } catch {
+    throw new Error(`models.dev catalog read from ${diagnosticOrigin} failed`)
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-    throw new Error(`models.dev catalog from ${origin} is not a provider object`)
-  const catalog = new Map<string, unknown>(Object.entries(parsed))
-  if (catalog.size === 0) throw new Error(`models.dev catalog from ${origin} is empty`)
-  const problems = [...catalog.entries()]
-    .map(([id, entry]) => providerEntryProblem(id, entry))
-    .filter((p): p is string => p !== undefined)
-  if (problems.length > 0)
-    throw new Error(
-      `models.dev catalog from ${origin} has ${problems.length} malformed provider entries: ` +
-        `${problems.slice(0, 5).join(", ")}${problems.length > 5 ? ", …" : ""}`,
-    )
-  const modelCount = (id: string): number => {
-    const entry = catalog.get(id)
-    if (typeof entry !== "object" || entry === null || !("models" in entry)) return 0
-    const models = entry.models
-    return typeof models === "object" && models !== null ? Object.keys(models).length : 0
-  }
-  if (!strict) {
-    console.log(`models.dev catalog from ${origin}: ${catalog.size} providers (custom catalog, size floor not applied)`)
-    return
-  }
-  if (catalog.size < MIN_CATALOG_PROVIDERS)
-    throw new Error(
-      `models.dev catalog from ${origin} has only ${catalog.size} providers, expected at least ${MIN_CATALOG_PROVIDERS}`,
-    )
-  const missing = REQUIRED_CATALOG_PROVIDERS.filter((p) => !catalog.has(p))
-  if (missing.length > 0)
-    throw new Error(`models.dev catalog from ${origin} is missing required providers: ${missing.join(", ")}`)
-  // Every required provider must actually carry models, not just exist as a key.
-  const empty = REQUIRED_CATALOG_PROVIDERS.filter((p) => modelCount(p) === 0)
-  if (empty.length > 0)
-    throw new Error(`models.dev catalog from ${origin} has no usable models for: ${empty.join(", ")}`)
-  console.log(
-    `models.dev catalog from ${origin}: ${catalog.size} providers ` +
-      `(${REQUIRED_CATALOG_PROVIDERS.map((p) => `${p}=${modelCount(p)}`).join(", ")})`,
-  )
 }
 
 // Fetch and generate models.dev snapshot. MODELS_DEV_API_JSON pins the catalog to
@@ -196,12 +107,16 @@ function assertUsableCatalog(text: string, origin: string, strict: boolean): voi
 // and the build dies on `fetch("")` with ERR_INVALID_URL.
 const modelsFile = process.env.MODELS_DEV_API_JSON || undefined
 const modelsOrigin = modelsFile ?? `${modelsUrl}/api.json`
-const modelsData = modelsFile ? await Bun.file(modelsFile).text() : await fetchModelsCatalog(modelsOrigin)
+const modelsDiagnosticOrigin = catalogDiagnosticOrigin(modelsOrigin, modelsFile ? "file" : "url")
+const modelsData = modelsFile
+  ? await readModelsCatalog(modelsFile, modelsDiagnosticOrigin)
+  : await fetchModelsCatalog(modelsOrigin, modelsDiagnosticOrigin)
 // A release is held to the full floor however its catalog was sourced, so pointing
 // a release build at a custom catalog cannot quietly skip the size and
 // required-provider checks.
 const strictCatalog = !!process.env.OPENCODE_RELEASE || (!modelsFile && !modelsUrlOverride)
-assertUsableCatalog(modelsData, modelsOrigin, strictCatalog)
+const catalogSummary = assertUsableCatalog(modelsData, modelsDiagnosticOrigin, strictCatalog)
+console.log(formatCatalogSummary(catalogSummary, modelsDiagnosticOrigin))
 await Bun.write(
   path.join(dir, "src/provider/models-snapshot.ts"),
   `// Auto-generated by build.ts - do not edit\nexport const snapshot = ${modelsData.trim()} as const\n`,
