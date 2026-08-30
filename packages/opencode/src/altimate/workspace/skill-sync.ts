@@ -522,7 +522,12 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // credentials" — the first is a decision the user made and must take
     // effect, the second is unknown, and unknown never destroys a snapshot.
     if (!(await AltimateApi.isConfigured())) {
-      if (await deactivate(canon, "no altimate credentials")) changed = true
+      // Symlink-guarded like every other deletion here. This branch runs BEFORE
+      // the `pathsAreReal` check below, so without its own guard a symlinked
+      // `.altimate-code` has `removeManaged`/`sweepStaging` resolve through the
+      // link and delete the target's tree. (bot review)
+      if ((await pathsAreReal(canon).catch(() => false)) && (await deactivate(canon, "no altimate credentials")))
+        changed = true
       return
     }
 

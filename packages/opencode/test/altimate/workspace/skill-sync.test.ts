@@ -1028,6 +1028,36 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("the no-credentials purge refuses to follow a symlink", async () => {
+    // Same hazard as the opt-out purge: this branch runs before the
+    // `pathsAreReal` check inside the sync, so it needs its own guard or a
+    // symlinked `.altimate-code` has the delete resolve through the link. The
+    // target must hold a tree the purge WOULD remove, or this passes for the
+    // wrong reason.
+    const outside = path.join(SANDBOX, `nocreds-${Math.random().toString(36).slice(2)}`)
+    const victim = path.join(outside, "skill", "_workspace")
+    mkdirSync(path.join(victim, "pub-x"), { recursive: true })
+    writeFileSync(path.join(victim, "pub-x", "SKILL.md"), "must survive")
+    writeFileSync(
+      path.join(victim, ".manifest.json"),
+      JSON.stringify({ version: 1, tenant: TENANT, apiUrl: API_URL, datamateId: 1, skills: {} }),
+    )
+
+    const proj2 = path.join(SANDBOX, `symlinked-nocreds-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(proj2, { recursive: true })
+    symlinkSync(outside, path.join(proj2, ".altimate-code"))
+
+    const credsFile = path.join(SANDBOX, "home", ".altimate", "altimate.json")
+    const saved = readFileSync(credsFile, "utf8")
+    rmSync(credsFile, { force: true })
+    try {
+      await syncSkills(proj2)
+      expect(readFileSync(path.join(victim, "pub-x", "SKILL.md"), "utf8")).toBe("must survive")
+    } finally {
+      writeFileSync(credsFile, saved)
+    }
+  })
+
   test("a cached binding the server no longer recognises is not retained", async () => {
     // The cache is written by an explicit link and otherwise never expires, so
     // without revalidation a project detached in the SaaS keeps serving its old
