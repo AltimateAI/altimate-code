@@ -107,6 +107,13 @@ export const INTEGRATION_TYPE: Readonly<Record<string, string>> = {
 
 const CAPABILITIES: Capability[] = ["sql_execute", "sql_explain", "schema_inspect"]
 
+// altimate_change start — terse capability label for the human-facing surfaces (the
+// toast line and a `warehouse_list` row), where one line is the whole budget. The
+// prompt section uses its own fuller wording: different audiences, deliberately
+// different schemes.
+const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
+// altimate_change end
+
 export interface ShadowEntry {
   /** Engine tool name, without the MCP server prefix. */
   engineTool: string
@@ -976,17 +983,13 @@ export function inventoryLine(precedence: Precedence): string {
         return ""
     }
   }
-  const parts: string[] = []
-  const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
-  for (const type of precedence.shadowed.keys()) {
-    const servedCaps = servedFor(precedence, type)
-    if (servedCaps.length === 0) continue
-    const local = CAPABILITIES.filter((c) => !servedCaps.includes(c)).map(short)
-    parts.push(
-      `${type}: ${servedCaps.map(short).join("/")} via workspace ${precedence.workspaceName}` +
-        (local.length ? `, ${local.join("/")} stay local` : ""),
-    )
-  }
+  // altimate_change - reads the shared projection so this line and the model-facing
+  // section can never disagree about what is served.
+  const parts = servedInventory(precedence).map(
+    ({ type, served, local }) =>
+      `${type}: ${served.map((s) => short(s.capability)).join("/")} via workspace ${precedence.workspaceName}` +
+      (local.length ? `, ${local.map(short).join("/")} stay local` : ""),
+  )
   if (parts.length === 0) return ""
   const shadowedCount = countShadowedConnections(precedence)
   return `Workspace integrations — ${parts.join("; ")}. ${shadowedCount} local connection${shadowedCount === 1 ? "" : "s"} shadowed.`
@@ -1008,13 +1011,12 @@ export function warehouseListNote(precedence: Precedence | undefined, warehouseT
   if (!precedence?.enabled) return null
   const type = canonicalType(warehouseType)
   if (!type) return null
-  const servedCaps = servedFor(precedence, type)
-  if (servedCaps.length === 0) return null
-  const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
-  const served = servedCaps.map(short)
-  const local = CAPABILITIES.filter((c) => !servedCaps.includes(c)).map(short)
+  // altimate_change - same projection as the toast and the prompt section.
+  const entry = servedInventory(precedence).find((e) => e.type === type)
+  if (!entry) return null
   return (
-    `${served.join("/")} via workspace ${precedence.workspaceName}` + (local.length ? `; ${local.join("/")} local` : "")
+    `${entry.served.map((s) => short(s.capability)).join("/")} via workspace ${precedence.workspaceName}` +
+    (entry.local.length ? `; ${entry.local.map(short).join("/")} local` : "")
   )
 }
 
