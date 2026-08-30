@@ -608,6 +608,31 @@ describe("manual-install hints are copy-pasteable", () => {
     expect(prefix!.startsWith("'") || prefix!.startsWith('"')).toBe(true)
   })
 
+  test("DriverNotInstalledError names a location when nothing was searched", () => {
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(path.sep, "tmp", "altimate-drivers-absent")
+
+    // The first-run state: no driver directory exists, so driverSearchRoots()
+    // returns nothing. The message must still name somewhere.
+    const err = new DriverNotInstalledError("duckdb", DRIVER_PACKAGES.duckdb, [])
+
+    expect(err.message).not.toContain("Searched 0 locations:")
+    expect(err.message).toContain("Searched nothing")
+    expect(err.message).toContain(path.join("altimate-drivers-absent", "node_modules"))
+    // Still distinguishable from a broken install, and still actionable.
+    expect(err.message).toContain("DuckDB driver not installed.")
+    expect(err.message).toContain("npm install --prefix")
+  })
+
+  test("DriverNotInstalledError lists the roots it did search", () => {
+    const roots = [path.join(path.sep, "a", "node_modules"), path.join(path.sep, "b", "node_modules")]
+
+    const err = new DriverNotInstalledError("duckdb", DRIVER_PACKAGES.duckdb, roots)
+
+    expect(err.message).toContain("Searched 2 locations:")
+    for (const root of roots) expect(err.message).toContain(root)
+    expect(err.message).not.toContain("Searched nothing")
+  })
+
   test("no source builds a --prefix hint without shellQuote", () => {
     // Structural, because the behavioural tests can only cover the sites someone
     // remembered to write a case for. This fails when a NEW unquoted hint is

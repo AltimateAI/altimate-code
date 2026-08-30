@@ -90,11 +90,21 @@ export class DriverNotInstalledError extends Error {
 
   constructor(driver: DriverName, packages: readonly string[], searched: readonly string[]) {
     const label = DRIVER_LABELS[driver]
+    const installDir = driverInstallDir()
+    // `driverSearchRoots()` only returns directories that exist, so on a machine
+    // that has never installed a driver it returns nothing at all — the normal
+    // first-run state, given drivers are deliberately not shipped. That left the
+    // message ending in a bare "Searched 0 locations:" with nothing after the
+    // colon, which names nowhere and reads like a bug. Say plainly that there was
+    // nothing to search, and name the directory the install command creates.
+    const searchedLine = searched.length
+      ? `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`
+      : `Searched nothing: no driver directory exists yet, not even ${path.join(installDir, "node_modules")}.`
     super(
       `${label} driver not installed.\n` +
         `Install it with the warehouse_install_driver tool, or run:\n` +
-        `  npm install --prefix ${shellQuote(driverInstallDir())} ${packages.join(" ")}\n` +
-        `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`,
+        `  npm install --prefix ${shellQuote(installDir)} ${packages.join(" ")}\n` +
+        searchedLine,
     )
     this.name = "DriverNotInstalledError"
     this.driver = driver
