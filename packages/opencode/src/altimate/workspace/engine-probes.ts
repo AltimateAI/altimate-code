@@ -8,26 +8,37 @@ import { AltimateApi } from "@/altimate/api/client"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
-import { readLocalBindingScoped } from "./state"
-import { log, syncInternals, type ScopedBinding } from "./engine-seams"
+import { readLocalBindingScopedStrict } from "./state"
+import { log, syncInternals, type BindingRead, type ScopedBinding } from "./engine-seams"
 import type { Declared, Toast } from "./engine-types"
 
 /** How long the allowlist lookup may hold a turn. Once per workspace per process. */
 export const DECLARED_TIMEOUT_MS = 4_000
 
-export async function resolveBinding(directory: string): Promise<ScopedBinding | null> {
-  if (syncInternals.resolveBinding) return syncInternals.resolveBinding(directory)
+/** The directory's binding, read strictly: a cache or credentials file that
+ * is present but unreadable is `failed`, never `unbound`, so a transient read
+ * error cannot pass for an unlink and hand the key to another source. The
+ * test seam keeps the plain shape and may throw; a throw from it takes the
+ * same path a production one does. */
+export async function resolveBinding(directory: string): Promise<BindingRead> {
   try {
-    // One credential snapshot validates the hit and names its scope, so the
-    // binding cannot be paired with another tenant's scope by a credentials
-    // change between two reads. The id alone is tenant-local.
-    const { binding, scope } = await readLocalBindingScoped(directory)
-    if (!binding) return null
-    return { ...binding, scope: scope ?? undefined }
+    const binding = syncInternals.resolveBinding
+      ? await syncInternals.resolveBinding(directory)
+      : await readScoped(directory)
+    return binding ? { kind: "bound", binding } : { kind: "unbound" }
   } catch (err) {
-    log.warn("could not resolve the workspace binding", { err: String(err) })
-    return null
+    log.warn("could not read the workspace binding", { err: String(err) })
+    return { kind: "failed", error: String(err) }
   }
+}
+
+async function readScoped(directory: string): Promise<ScopedBinding | null> {
+  // One credential snapshot validates the hit and names its scope, so the
+  // binding cannot be paired with another tenant's scope by a credentials
+  // change between two reads. The id alone is tenant-local.
+  const { binding, scope } = await readLocalBindingScopedStrict(directory)
+  if (!binding) return null
+  return { ...binding, scope: scope ?? undefined }
 }
 
 export function which(cmd: string): string | null {

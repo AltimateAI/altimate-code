@@ -196,11 +196,13 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     const transport = await readDatamateTransportFromIde(projectRoot())
 
     // altimate_change start — in workspace mode the shared `datamate` key is the
-    // bound workspace's own engine, derived at config load. With an IDE transport
-    // the add would go under that key; refuse and say why, before anything is
-    // looked up — the refusal must not depend on the API being reachable.
+    // bound workspace's own engine, derived at config load. The add goes under
+    // that key on two routes — an IDE transport, or an explicit `name` of
+    // "datamate" — and both are refused, with the reason, before anything is
+    // looked up: the refusal must not depend on the API being reachable.
     // Standalone `datamate-<name>` entries are a different key and stay the user's.
-    const managed = transport !== null ? await managedWorkspaceLoaded() : null
+    const wantsManagedKey = transport !== null || args.name === DATAMATE_KEY
+    const managed = wantsManagedKey ? await managedWorkspaceLoaded() : null
     if (managed) {
       return {
         title: `Datamate add: '${DATAMATE_KEY}' is managed by workspace "${managed.name}"`,

@@ -82,14 +82,22 @@ function isValidCacheFile(raw: unknown): raw is CacheFile {
   return true
 }
 
-function readCache(): CacheFile | null {
+/** `strict`: a cache file that is present but cannot be read, parsed or
+ * validated throws instead of reading as absent. The engine overlay needs the
+ * difference — an unreadable link must not pass for an unlinked directory —
+ * while every other caller degrades to "no cache" as before. */
+function readCache(opts: { strict?: boolean } = {}): CacheFile | null {
   const p = cachePath()
   if (!existsSync(p)) return null
   try {
     const raw = JSON.parse(readFileSync(p, "utf8")) as unknown
-    if (!isValidCacheFile(raw)) return null
+    if (!isValidCacheFile(raw)) {
+      if (opts.strict) throw new Error("workspace binding cache has an unexpected shape")
+      return null
+    }
     return raw
   } catch (err) {
+    if (opts.strict) throw err
     log.warn("workspace binding cache is corrupt, discarding", {
       code: (err as NodeJS.ErrnoException)?.code,
     })
@@ -205,11 +213,25 @@ export async function readLocalBindingScoped(
   return { binding: await readCachedBinding(directory, key), scope }
 }
 
+/** `readLocalBindingScoped` for the engine overlay, which must not mistake an
+ * unreadable link for an unlinked directory. Absent credentials or an absent
+ * cache file still read as unbound; a credentials or cache file that is
+ * present and cannot be read or parsed throws instead. */
+export async function readLocalBindingScopedStrict(
+  directory: string,
+): Promise<{ binding: CachedBinding | null; scope: string | null }> {
+  if (!(await AltimateApi.isConfigured())) return { binding: null, scope: null }
+  const c = await AltimateApi.getCredentials()
+  const key = { tenant: c.altimateInstanceName, apiUrl: c.altimateUrl }
+  return { binding: await readCachedBinding(directory, key, { strict: true }), scope: `${key.tenant}|${key.apiUrl}` }
+}
+
 async function readCachedBinding(
   directory: string,
   key: { tenant: string; apiUrl: string },
+  opts: { strict?: boolean } = {},
 ): Promise<CachedBinding | null> {
-  let cache = readCache()
+  let cache = readCache(opts)
   if (!cache) return null
   if (cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return null
   const canon = canonicalizeKey(directory)

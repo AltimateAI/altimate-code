@@ -185,14 +185,24 @@ export async function overlay(
       state.current = null
       return
     }
-    const binding = await resolveBinding(directory)
-    if (!binding) {
+    const read = await resolveBinding(directory)
+    if (read.kind === "failed") {
+      // Whether the directory is bound is unknown. Treated like any other
+      // failed derivation: nothing claimed, retried at the probe TTL, and the
+      // turn boundary decides what may run under the key meanwhile.
+      log.warn("workspace engine overlay failed: the binding could not be read", { directory, err: read.error })
+      state.current = null
+      state.failedAt = now()
+      return
+    }
+    if (read.kind === "unbound") {
       // Logged because "flag on, nothing happened" is the question every
       // first-run report asks; the directory is the usual answer.
       log.info("workspace engine overlay skipped: directory is not bound", { directory })
       state.current = null
       return
     }
+    const binding = read.binding
     const workspace = {
       id: String(binding.datamateId),
       name: binding.datamateName,
@@ -235,10 +245,12 @@ export async function overlay(
 export function managedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
   if (!directory) return null
   const state = directories.get(directory)
-  // While a transient overlay failure is being retried, the turn boundary
-  // keeps the applied engine running; the key stays owned for that long too,
-  // or a writer could replace the very engine the sessions are still using.
-  const workspace = state?.current?.workspace ?? (state?.failedAt !== undefined ? state.applied?.workspace : undefined)
+  // The key stays owned for as long as an applied engine is running — through
+  // a transient overlay failure being retried, and through the unlink teardown
+  // between the reload that clears `current` and the release that clears
+  // `applied`. A writer answered "free" in either window could replace the
+  // very engine the sessions are still using.
+  const workspace = state?.current?.workspace ?? state?.applied?.workspace
   return workspace ? { id: workspace.id, name: workspace.name } : null
 }
 
@@ -402,7 +414,27 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     return
   }
 
-  const binding = await resolveBinding(directory)
+  const read = await resolveBinding(directory)
+  if (read.kind === "failed") {
+    // An unreadable link is not an unlink. Fail closed: an engine of ours
+    // keeps running and the key stays owned; with nothing of ours running,
+    // whatever MCP started from the loaded config is dropped rather than left
+    // to answer for a workspace this directory may well be bound to. The
+    // binding is read again at the next boundary.
+    if (!state.applied?.entry && DATAMATE_KEY in (await mcp().status())) await mcp().remove(DATAMATE_KEY)
+    const outcome: Outcome = { kind: "connect-failed", error: "the workspace link could not be read" }
+    record(sessionID, outcome)
+    const kept = state.applied?.entry ? "the running engine is kept and " : ""
+    await announceRefusal(sessionID, outcome, {
+      title: state.applied
+        ? `Workspace "${state.applied.workspace.name}": link could not be read`
+        : "Workspace link could not be read",
+      message: `${outcome.error} (${read.error}); ${kept}it is read again next turn.`,
+      variant: "warning",
+    })
+    return
+  }
+  const binding = read.kind === "bound" ? read.binding : null
   if (!binding) {
     // Unlinked (or never linked): the key is not ours to fill.
     let loaded: { mcp?: Record<string, unknown> } | undefined

@@ -7,13 +7,15 @@ import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 
 /** Oldest engine this client works against.
  *
- * 0.7.0 is the first engine that LOCKS the `--datamate` pin, so a settings
- * change in the IDE cannot swap the workspace out from under a running engine.
- * 0.7.1 additionally resolves a default connection when no local selection
- * exists, which the workspace promise rests on: integrations configured purely
- * in the workspace UI must produce working tools with no local files. It also
- * passes the resolved connection to MCP-type handlers, so their credential
- * placeholders resolve. Everything below it can drift. */
+ * Two engine versions matter. 0.7.0 is the first that LOCKS the `--datamate`
+ * pin, so a settings change in the IDE cannot swap the workspace out from
+ * under a running engine; below it the pin can drift. 0.7.1 additionally
+ * resolves a default connection when no local selection exists, which the
+ * workspace promise rests on: integrations configured purely in the workspace
+ * UI must produce working tools with no local files. It also passes the
+ * resolved connection to MCP-type handlers, so their credential placeholders
+ * resolve. A 0.7.0 engine holds the pin but serves none of those tools, which
+ * is why the floor is 0.7.1. */
 export const MIN_ENGINE_VERSION = "0.7.1"
 export const ENGINE_PACKAGE = "@altimateai/datamate"
 export const ENGINE_BINARY = "datamate"

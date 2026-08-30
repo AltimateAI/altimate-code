@@ -8,6 +8,7 @@ import {
   FAILED_PROBE_TTL_MS,
   INSTALL_COMMAND,
   MAX_TRACKED_SESSIONS,
+  MIN_ENGINE_VERSION,
   atTurnStart,
   beforeTurn,
   invalidateProbe,
@@ -234,7 +235,7 @@ describe("overlay — what the config loader gets", () => {
   })
 
   test("a pre-release of the floor version does not clear it", async () => {
-    const h = install({ version: "0.7.0-beta.1" })
+    const h = install({ version: `${MIN_ENGINE_VERSION}-beta.1` })
     await overlay(DIR, h.config)
     expect(overlayForTests()?.entry).toBeNull()
   })
@@ -287,6 +288,65 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toEqual([])
     expect(h.removes).toBe(0)
     expect(h.toasts).toEqual([])
+  })
+
+  test("a binding read that fails at the turn boundary keeps the running engine and the key", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    syncInternals.resolveBinding = async () => {
+      throw new Error("EBUSY")
+    }
+    await beforeTurn("s1")
+    // Not an unlink: nothing is released, the key stays owned, and the
+    // session hears why it is no longer attested.
+    expect(settledOutcome("s1")).toEqual({ kind: "connect-failed", error: "the workspace link could not be read" })
+    expect(h.removes).toBe(0)
+    expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+    expect(h.toasts.map((t) => t.title)).toContain('Workspace "analytics": link could not be read')
+    // The next readable boundary attests again without restarting the engine
+    // MCP bootstrapped from the first config load.
+    syncInternals.resolveBinding = async () => h.binding
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    expect(h.added).toEqual([])
+    expect(h.removes).toBe(0)
+  })
+
+  test("a binding read that fails before anything was attached drops a foreign entry rather than serving it", async () => {
+    const h = install({ mcp: { datamate: IDE_ENTRY } })
+    syncInternals.resolveBinding = async () => {
+      throw new Error("EBUSY")
+    }
+    // Instance start: the config loads with the overlay unable to derive, so
+    // MCP bootstraps the IDE entry the config carries.
+    await syncInternals.config!.get()
+    expect(h.config.mcp).toEqual({ datamate: IDE_ENTRY })
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    expect(h.removes).toBe(1)
+    expect(h.added).toEqual([])
+    expect(managedWorkspace()).toBeNull()
+    expect(h.toasts.map((t) => t.title)).toEqual(["Workspace link could not be read"])
+  })
+
+  test("the key stays owned through the unlink teardown", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+    h.binding = null
+    const seen: Array<{ id: string; name: string } | null> = []
+    const remove = syncInternals.mcp!.remove
+    syncInternals.mcp!.remove = async (name) => {
+      seen.push(managedWorkspace())
+      return remove(name)
+    }
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+    // A writer asking while the engine is being released is still refused;
+    // the key is free only once the release is done.
+    expect(seen).toEqual([{ id: "42", name: "analytics" }])
+    expect(managedWorkspace()).toBeNull()
   })
 
   test("a connected engine settles attached with the inventory and announces it once", async () => {

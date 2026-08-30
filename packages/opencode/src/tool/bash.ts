@@ -181,6 +181,10 @@ export const BashTool = Tool.define("bash", async () => {
       // launched from here may well have a TUI. Left in place, the child would
       // inherit "headless" and print to stderr instead of showing its surface.
       delete mergedEnv["ALTIMATE_CODE_HEADLESS"]
+      // And the serve marker: it names the extension's host process, where
+      // workspace mode is off. A terminal `altimate-code` started from here
+      // under that host is not the host, and would otherwise settle disabled.
+      delete mergedEnv["ALTIMATE_CODE_SERVE"]
       // altimate_change end
       const sep = process.platform === "win32" ? ";" : ":"
       const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""

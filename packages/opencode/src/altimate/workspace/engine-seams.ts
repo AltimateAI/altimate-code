@@ -15,6 +15,11 @@ export const log = Log.create({ service: "workspace-engine" })
  * Absent when the scope could not be resolved. */
 export type ScopedBinding = CachedBinding & { scope?: string }
 
+/** What a binding read established. `failed` is not `unbound`: the link may
+ * well exist, it could not be read, and nothing may be handed the key on the
+ * strength of that. */
+export type BindingRead = { kind: "bound"; binding: ScopedBinding } | { kind: "unbound" } | { kind: "failed"; error: string }
+
 export const syncInternals: {
   resolveBinding?: (directory: string) => Promise<ScopedBinding | null>
   which?: (cmd: string) => string | null
