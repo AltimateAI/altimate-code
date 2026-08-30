@@ -313,7 +313,9 @@ describe("loadOptionalDriver", () => {
   })
 
   test("throws DriverNotInstalledError naming the searched roots", async () => {
-    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "empty")
+    const managedRoot = path.join(tmpRoot, "empty", "node_modules")
+    fs.mkdirSync(managedRoot, { recursive: true })
+    process.env["ALTIMATE_DRIVER_DIR"] = path.dirname(managedRoot)
     delete process.env["ALTIMATE_BIN_DIR"]
     delete process.env["NODE_PATH"]
 
@@ -332,6 +334,7 @@ describe("loadOptionalDriver", () => {
     // target directory and no account of where we had looked.
     expect(err.message).toContain("--prefix")
     expect(err.message).toContain("Searched")
+    expect(err.message).toContain(managedRoot)
   })
 
   test("reports a disk-resolved package that throws on import as a load failure", async () => {
