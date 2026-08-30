@@ -168,11 +168,27 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
+  // altimate_change start — clamp the reserved completion budget against the real prompt size.
+  // `maxOutputTokens` is a per-model ceiling that ignores `limit.context`, so a large system
+  // prompt could push `input + reservation` past the window and the provider rejected the request
+  // with a hard 400 before generating anything. `input.messages` is used rather than the merged
+  // `messages` because the latter can already carry `system` as leading system messages, which
+  // would double-count the prompt. Throws when no usable budget is left.
+  const clampedParams = {
+    ...params,
+    maxOutputTokens: ProviderTransform.clampOutputTokens({
+      model: input.model,
+      requested: params.maxOutputTokens,
+      inputTokens: ProviderTransform.estimateInputTokens(system, input.messages),
+    }),
+  }
+  // altimate_change end
+
   return {
     system,
     messages,
     tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
-    params,
+    params: clampedParams,
     messageTransformOptions: options,
     headers: {
       ...(input.model.providerID.startsWith("opencode")

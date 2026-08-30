@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import type { ModelMessage } from "ai"
 import { ProviderTransform } from "@/provider/transform"
 import { LLMRequestPrep } from "@/session/llm/request"
 // ProviderTransform.message expects a Provider.Model with the fork's ModelID/ProviderID brands.
@@ -4648,5 +4649,203 @@ describe("ProviderTransform.providerOptions - ai-gateway-provider", () => {
     // which @ai-sdk/openai-compatible never reads, silently dropping reasoningEffort.
     const result = ProviderTransform.providerOptions(createModel(), { reasoningEffort: "high" })
     expect(result).toEqual({ openaiCompatible: { reasoningEffort: "high" } })
+  })
+})
+
+// Regression suite for the output-token reservation exceeding the context window.
+//
+// Reported failure: with a large system prompt on a model declaring a 65,536-token window, the
+// shipped 16,384-token reservation produced a hard provider 400 before any model work —
+// "You requested a total of 68564 tokens: 52180 tokens from the input messages and 16384 tokens
+// for the completion". The reservation was applied without ever being compared to the input size.
+describe("ProviderTransform.clampOutputTokens", () => {
+  const createWindowModel = (limit: { context: number; input?: number; output: number }) =>
+    ({
+      id: "large-window-model",
+      providerID: "openai-compatible",
+      api: { id: "large-window-model", url: "https://example.invalid/v1", npm: "@ai-sdk/openai-compatible" },
+      name: "Large Window Model",
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: true,
+        input: { text: true, audio: false, image: false, video: false, pdf: false },
+        output: { text: true, audio: false, image: false, video: false, pdf: false },
+        interleaved: false,
+      },
+      cost: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      limit,
+      status: "active",
+      options: {},
+      headers: {},
+    }) as any
+
+  // The exact reported case.
+  const REPORTED = { inputTokens: 52_180, requested: 16_384, context: 65_536 }
+
+  test("the reported case is clamped instead of being sent as-is", () => {
+    const model = createWindowModel({ context: REPORTED.context, output: 16_384 })
+    const result = ProviderTransform.clampOutputTokens({
+      model,
+      requested: REPORTED.requested,
+      inputTokens: REPORTED.inputTokens,
+    })!
+
+    // Unclamped, this is exactly the request the provider rejected.
+    expect(REPORTED.inputTokens + REPORTED.requested).toBeGreaterThan(REPORTED.context)
+    expect(result).toBeLessThan(REPORTED.requested)
+    // The clamped request fits, with the estimator margin (2%, min 512) still spare.
+    expect(REPORTED.inputTokens + result).toBeLessThanOrEqual(REPORTED.context)
+    // 65536 - 52180 - ceil(52180 * 0.02) = 12312
+    expect(result).toBe(12_312)
+    // Still a usable completion budget, not a stub.
+    expect(result).toBeGreaterThanOrEqual(ProviderTransform.OUTPUT_TOKEN_FLOOR)
+  })
+
+  test("throws with the actual numbers when even the floor does not fit", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    let thrown: unknown
+    try {
+      ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 65_000 })
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(ProviderTransform.OutputTokenBudgetError)
+    const message = (thrown as Error).message
+    // The message must name input tokens, the requested reservation and the window.
+    expect(message).toContain("65000")
+    expect(message).toContain("16384")
+    expect(message).toContain("65536")
+    expect(message).toContain("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX")
+  })
+
+  test("throws rather than clamping to an unusable budget just above zero", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    // 65536 - 65000 = 536 would "fit" arithmetically but is below the floor.
+    expect(536).toBeLessThan(ProviderTransform.OUTPUT_TOKEN_FLOOR)
+    expect(() => ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 65_000 })).toThrow()
+  })
+
+  test("leaves a config that already fits completely unchanged", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 10_000 })).toBe(16_384)
+    // Exactly filling the window is still a valid request and must not be touched.
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 49_152 })).toBe(16_384)
+  })
+
+  test("leaves large-window models unchanged", () => {
+    const model = createWindowModel({ context: 200_000, output: 8_192 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 8_192, inputTokens: 150_000 })).toBe(8_192)
+  })
+
+  test("does not clamp models that budget input separately from output", () => {
+    // limit.input means the two budgets are not shared, so input + output can exceed context.
+    const model = createWindowModel({ context: 65_536, input: 65_536, output: 16_384 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(16_384)
+  })
+
+  test("does not clamp when the model declares no context window", () => {
+    const model = createWindowModel({ context: 0, output: 16_384 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(16_384)
+  })
+
+  test("does not clamp a window too small to hold even a floor-sized completion", () => {
+    // A declared window this small is a placeholder or a test fixture, not a real limit. Failing
+    // the request client-side on numbers we do not believe would be worse than letting the
+    // provider answer, so the guard stays out of the way.
+    const model = createWindowModel({ context: 20, output: 10 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 10, inputTokens: 11 })).toBe(10)
+  })
+
+  test("passes an omitted reservation through untouched", () => {
+    // Codex and GitHub Copilot deliberately send no maxOutputTokens.
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: undefined, inputTokens: 60_000 })).toBeUndefined()
+  })
+})
+
+describe("LLMRequestPrep.prepare - output token reservation", () => {
+  const sessionID = "ses_clamp-test"
+
+  const model = {
+    id: "large-window-model",
+    providerID: "openai-compatible",
+    api: { id: "large-window-model", url: "https://example.invalid/v1", npm: "@ai-sdk/openai-compatible" },
+    name: "Large Window Model",
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+    limit: { context: 65_536, output: 16_384 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  const messages: ModelMessage[] = [{ role: "user", content: "Hello" }]
+
+  const run = (systemPrompt: string) =>
+    Effect.runPromise(
+      LLMRequestPrep.prepare({
+        user: {
+          id: "msg_user-clamp",
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model: { providerID: "openai-compatible", modelID: "large-window-model" },
+        } as any,
+        sessionID,
+        model,
+        agent: { name: "test", mode: "primary", options: {}, permission: [], prompt: systemPrompt } as any,
+        system: [],
+        messages,
+        tools: {},
+        provider: { id: "openai-compatible", options: {} } as any,
+        auth: undefined,
+        plugin: {
+          trigger: (_name: string, _input: unknown, output: unknown) => Effect.succeed(output),
+          list: () => Effect.succeed([]),
+          init: () => Effect.void,
+        } as any,
+        flags: { outputTokenMax: 32_000, client: "test" } as any,
+        isWorkflow: false,
+      }),
+    )
+
+  // Prose with no code or JSON characters, so Token.estimate uses its default 3.7 chars/token.
+  const PROSE = "the quick brown fox jumps over the lazy dog "
+  const largePrompt = PROSE.repeat(Math.ceil((52_180 * 3.7) / PROSE.length))
+
+  test("a ~52K-token system prompt does not produce an unclamped request", async () => {
+    const estimated = ProviderTransform.estimateInputTokens([largePrompt], messages)
+    // Sized to reproduce the reported 52,180-token prompt.
+    expect(estimated).toBeGreaterThan(51_500)
+    expect(estimated).toBeLessThan(53_500)
+    // Unclamped this is the request the provider rejected: 52,180 + 16,384 > 65,536.
+    expect(estimated + 16_384).toBeGreaterThan(65_536)
+
+    const result = await run(largePrompt)
+    const maxOutputTokens = result.params.maxOutputTokens!
+    expect(maxOutputTokens).toBeLessThan(16_384)
+    expect(estimated + maxOutputTokens).toBeLessThanOrEqual(65_536)
+    expect(maxOutputTokens).toBeGreaterThanOrEqual(ProviderTransform.OUTPUT_TOKEN_FLOOR)
+  })
+
+  test("a small system prompt keeps the full model reservation", async () => {
+    const result = await run("You are a helpful assistant.")
+    expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("a system prompt that leaves no usable budget fails before the request is built", async () => {
+    const hugePrompt = PROSE.repeat(Math.ceil((65_000 * 3.7) / PROSE.length))
+    await expect(run(hugePrompt)).rejects.toThrow(/Context budget exceeded/)
   })
 })

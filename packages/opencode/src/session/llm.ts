@@ -150,6 +150,18 @@ export namespace LLM {
     )
     // altimate_change end
 
+    // altimate_change start — clamp the reserved completion budget against the real prompt size.
+    // `maxOutputTokens` is a per-model ceiling that ignores `limit.context`, so a large system
+    // prompt could push `input + reservation` past the window and the provider rejected the
+    // request with a hard 400 before generating anything. Clamped after the chat.params hook so
+    // a plugin override is checked too. Throws when no usable budget is left.
+    const maxOutputTokens = ProviderTransform.clampOutputTokens({
+      model: input.model,
+      requested: params.maxOutputTokens,
+      inputTokens: ProviderTransform.estimateInputTokens(system, input.messages),
+    })
+    // altimate_change end
+
     const { headers } = await Plugin.trigger(
       "chat.headers",
       {
@@ -249,8 +261,9 @@ export namespace LLM {
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       toolChoice: input.toolChoice,
-      // altimate_change start — read maxOutputTokens from params (now plumbed through chat.params hook)
-      maxOutputTokens: params.maxOutputTokens,
+      // altimate_change start — read maxOutputTokens from params (now plumbed through chat.params
+      // hook), clamped above so it cannot exceed the model's context window
+      maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
       headers: {

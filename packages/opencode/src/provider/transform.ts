@@ -6,6 +6,10 @@ import type { Provider } from "./provider"
 import type { ModelsDev } from "./models"
 import { iife } from "@/util/iife"
 import { Flag } from "@/flag/flag"
+// altimate_change start — output-token clamp needs prompt sizing and a logger
+import { Token } from "@/util/token"
+import { Log } from "@/util/log"
+// altimate_change end
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -19,6 +23,9 @@ function mimeToModality(mime: string): Modality | undefined {
 
 export namespace ProviderTransform {
   export const OUTPUT_TOKEN_MAX = Flag.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
+  // altimate_change start — logger for the output-token clamp below
+  const log = Log.create({ service: "provider.transform" })
+  // altimate_change end
   // altimate_change start — keep OpenAI encrypted reasoning include values consistent across transforms
   const INCLUDE_ENCRYPTED_REASONING = ["reasoning.encrypted_content"] as const
 
@@ -1277,6 +1284,108 @@ export namespace ProviderTransform {
     return Math.min(model.limit.output, ceiling) || ceiling
     // altimate_change end
   }
+
+  // altimate_change start — clamp the reserved completion budget against the real prompt size.
+  //
+  // `maxOutputTokens` above is a per-model ceiling. It never reads `limit.context`, so on a
+  // model where input and completion share one window a large system prompt can push
+  // `input + reservation` past that window and the provider rejects the request with a hard
+  // 400 before generating anything. The client already knows all three numbers, so it can
+  // either shrink the reservation to fit or refuse with an actionable message.
+
+  /**
+   * Smallest completion budget worth sending. Below this an agent turn cannot reliably emit
+   * even one tool call, so a request that would clamp this far is refused instead of being
+   * sent to come back as a silently truncated response.
+   */
+  export const OUTPUT_TOKEN_FLOOR = 1_024
+
+  // `inputTokens` is a character-ratio estimate, not the provider's tokenizer. Measured drift
+  // against a provider's own accounting on a ~52K prompt was under 1%, so a clamped budget
+  // keeps a 2% (minimum 512-token) margin rather than filling the window exactly.
+  const CLAMP_MARGIN_FRACTION = 0.02
+  const CLAMP_MARGIN_MIN = 512
+
+  /** Thrown before the request is sent when no usable completion budget fits in the window. */
+  export class OutputTokenBudgetError extends Error {
+    constructor(
+      readonly info: {
+        modelID: string
+        providerID: string
+        inputTokens: number
+        requested: number
+        context: number
+        floor: number
+      },
+    ) {
+      super(
+        [
+          `Context budget exceeded before the request was sent.`,
+          `${info.providerID}/${info.modelID} declares a ${info.context}-token context window,`,
+          `the prompt is ~${info.inputTokens} tokens, and ${info.requested} tokens are reserved for`,
+          `the completion — ${info.inputTokens + info.requested} in total.`,
+          `Even after clamping, fewer than ${info.floor} tokens would remain for the response.`,
+          `Reduce the system prompt (fewer instructions, skills, or AGENTS.md content), lower the`,
+          `output reservation via OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, or use a model with a`,
+          `larger context window.`,
+        ].join(" "),
+      )
+      this.name = "OutputTokenBudgetError"
+    }
+  }
+
+  /** Rough token count for the prompt about to be sent, used only for the clamp decision. */
+  export function estimateInputTokens(system: string[], messages: unknown[]): number {
+    return Token.estimate(system.join("\n")) + Token.estimate(JSON.stringify(messages))
+  }
+
+  /**
+   * Shrink `requested` so `inputTokens + result` fits `model.limit.context`.
+   *
+   * Returns `requested` unchanged whenever it already fits, when the caller omitted it, when the
+   * model declares no context window, when the declared window is too small to hold even a
+   * floor-sized completion (those limits are not credible enough to fail a request on — the
+   * provider stays the authority), or when the model budgets input separately via `limit.input`
+   * (there the two budgets are not shared and clamping would be wrong).
+   * Throws `OutputTokenBudgetError` when the remaining budget is below `OUTPUT_TOKEN_FLOOR`.
+   */
+  export function clampOutputTokens(input: {
+    model: Provider.Model
+    requested: number | undefined
+    inputTokens: number
+  }): number | undefined {
+    const requested = input.requested
+    if (requested === undefined) return undefined
+
+    const context = input.model.limit.context
+    if (!context || context <= OUTPUT_TOKEN_FLOOR) return requested
+    if (input.model.limit.input) return requested
+    if (input.inputTokens <= 0) return requested
+    if (input.inputTokens + requested <= context) return requested
+
+    const margin = Math.max(CLAMP_MARGIN_MIN, Math.ceil(input.inputTokens * CLAMP_MARGIN_FRACTION))
+    const clamped = context - input.inputTokens - margin
+    if (clamped < OUTPUT_TOKEN_FLOOR) {
+      throw new OutputTokenBudgetError({
+        modelID: input.model.id,
+        providerID: input.model.providerID,
+        inputTokens: input.inputTokens,
+        requested,
+        context,
+        floor: OUTPUT_TOKEN_FLOOR,
+      })
+    }
+    log.warn("clamped output token reservation to fit context window", {
+      providerID: input.model.providerID,
+      modelID: input.model.id,
+      context,
+      inputTokens: input.inputTokens,
+      requested,
+      clamped,
+    })
+    return clamped
+  }
+  // altimate_change end
 
   // altimate_change start — lower MCP/tool JSON Schema to provider-compatible subsets
   type JsonRecord = Record<string, unknown>
