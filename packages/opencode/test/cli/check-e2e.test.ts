@@ -211,6 +211,18 @@ function parseJson(stdout: string): any {
 // ===========================================================================
 
 describe("check command E2E", () => {
+  test("default discovery keeps output-directory SQL while pruning dependencies", async () => {
+    await writeSql(tmpDir.dir, "build/model.sql", "SELECT 1;")
+    await writeSql(tmpDir.dir, "out/schema.ddl", "CREATE TABLE t (id INT);")
+    await writeSql(tmpDir.dir, "node_modules/pkg/vendored.sql", "SELECT 2;")
+
+    const r = await runHandler(baseArgs({ files: [], checks: "lint" }))
+    const j = parseJson(r.stdout)
+
+    expect(j.files_checked).toBe(2)
+    expect(r.stderr).toContain("Found 2 SQL file(s)")
+  })
+
   test("runs lint on a single SQL file — JSON output", async () => {
     const file = await writeSql(tmpDir.dir, "model.sql", "SELECT * FROM users;")
 

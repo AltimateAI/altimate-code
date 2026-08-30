@@ -2,6 +2,7 @@ import { describe, expect } from "bun:test"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Project } from "@/project/project"
 import { $ } from "bun"
+import { mkdir } from "fs/promises"
 import path from "path"
 import { tmpdirScoped } from "../fixture/fixture"
 import { GlobalBus } from "../../src/bus/global"
@@ -468,6 +469,29 @@ describe("Project.discover", () => {
       expect(updated!.icon?.url).toStartWith("data:")
       expect(updated!.icon?.url).toContain("base64")
       expect(updated!.icon?.color).toBeUndefined()
+    }),
+  )
+
+  it.live("keeps output-directory favicons while pruning dependency stores", () =>
+    Effect.gen(function* () {
+      const project = yield* Project.Service
+      const tmp = yield* tmpdirScoped({ git: true })
+      const result = yield* project.fromDirectory(tmp)
+      const dependencyPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01])
+      const outputPng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x02])
+
+      yield* Effect.promise(async () => {
+        await mkdir(path.join(tmp, "node_modules", "pkg"), { recursive: true })
+        await mkdir(path.join(tmp, "out"), { recursive: true })
+        await Bun.write(path.join(tmp, "node_modules", "pkg", "favicon.png"), dependencyPng)
+        await Bun.write(path.join(tmp, "out", "favicon.png"), outputPng)
+      })
+
+      yield* project.discover(result.project)
+
+      const updated = yield* project.get(result.project.id)
+      expect(updated?.icon?.url).toContain(outputPng.toString("base64"))
+      expect(updated?.icon?.url).not.toContain(dependencyPng.toString("base64"))
     }),
   )
 

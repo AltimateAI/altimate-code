@@ -18,27 +18,37 @@ export namespace Glob {
   }
 
   /**
-   * Directories that no project-tree scan should ever descend into: package
-   * manager stores, VCS metadata, and build output. Every pattern ends in
-   * `/**` so `glob` prunes the subtree instead of walking it and discarding
-   * the matches afterwards.
+   * Dependency, VCS, and tool-cache trees that are never authored project
+   * content. Use this narrower set for content discovery that must still see
+   * user files under directories named `build`, `dist`, `out`, etc.
    */
-  export const DEFAULT_IGNORE: readonly string[] = [
+  export const DEPENDENCY_IGNORE: readonly string[] = [
     "**/node_modules/**",
     "**/.git/**",
+    "**/.pnpm/**",
+    "**/.venv/**",
+    "**/.turbo/**",
+  ]
+
+  /**
+   * Full generated/dependency exclusion set for discovery paths that already
+   * rejected these directories before traversal pruning was restored (notably
+   * MCP config discovery). Every pattern ends in `/**` so `glob` prunes the
+   * subtree instead of walking it and discarding the matches afterwards.
+   */
+  export const DEFAULT_IGNORE: readonly string[] = [
+    ...DEPENDENCY_IGNORE,
     "**/dist/**",
     "**/build/**",
-    "**/.pnpm/**",
     "**/target/**",
     "**/.next/**",
     "**/out/**",
     "**/vendor/**",
     "**/coverage/**",
-    "**/.venv/**",
-    "**/.turbo/**",
   ]
   // altimate_change end
 
+  /** Translate the wrapper contract to `glob` without dropping traversal ignores. */
   function toGlobOptions(options: Options): GlobOptions {
     return {
       cwd: options.cwd,

@@ -50,6 +50,20 @@ describe("Glob.scan ignore", () => {
     expect(found).toEqual([".vscode/mcp.json", "src/mcp.json"])
   })
 
+  test("dependency ignore keeps project content under output-named directories", async () => {
+    const found = (
+      await Glob.scan("**/mcp.json", {
+        cwd: root,
+        absolute: true,
+        dot: true,
+        ignore: [...Glob.DEPENDENCY_IGNORE],
+      })
+    )
+      .map(rel)
+      .sort()
+    expect(found).toEqual([".vscode/mcp.json", "dist/mcp.json", "src/mcp.json"])
+  })
+
   test("scanSync honours ignore too", () => {
     const found = Glob.scanSync("**/mcp.json", {
       cwd: root,
@@ -85,6 +99,15 @@ describe("Glob.DEFAULT_IGNORE", () => {
   test("covers the package-manager, VCS and build output directories", () => {
     for (const dir of ["node_modules", ".git", "dist", "build", "target", ".venv"]) {
       expect(Glob.DEFAULT_IGNORE).toContain(`**/${dir}/**`)
+    }
+  })
+
+  test("the content-safe subset does not exclude user output directory names", () => {
+    for (const pattern of Glob.DEPENDENCY_IGNORE) {
+      expect(pattern.endsWith("/**")).toBe(true)
+    }
+    for (const dir of ["dist", "build", "out", "target", "vendor", "coverage"]) {
+      expect(Glob.DEPENDENCY_IGNORE).not.toContain(`**/${dir}/**`)
     }
   })
 })
