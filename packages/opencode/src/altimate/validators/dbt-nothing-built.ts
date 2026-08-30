@@ -35,19 +35,14 @@ import {
   extractRequiredDeliverables,
   readRunResults,
   isFailedRunStatus,
+  resolveDbtSourcePaths,
+  runResultsExecutedModels,
   type RequiredDeliverables,
 } from "./validator-utils"
 
 /** Env flag that forces the gate on regardless of task-file discovery. */
 const OPT_IN_ENV = "ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS"
 
-/**
- * Directories whose contents count as "the session produced something". Wider
- * than `models/` on purpose: editing a seed, a snapshot, a macro or a schema
- * file is real work, and this gate must only fire on a session that produced
- * nothing whatsoever.
- */
-const AUTHORED_DIRS = ["models", "seeds", "snapshots", "data", "analyses", "macros", "tests"]
 /**
  * Root-level project files whose edit is also real work. A session that only
  * had to change `dbt_project.yml` or add a package produced something, and
@@ -105,18 +100,48 @@ async function artifactExpectation(
   return null
 }
 
+/** What a session authored under the project during its lifetime. */
+interface AuthoredWork {
+  /** True when anything at all was written. */
+  any: boolean
+  /** Bare, lowercased base names of authored files (`fct_orders.sql` → `fct_orders`). */
+  names: Set<string>
+  /** Authored paths relative to the project root, lowercased, `/`-separated. */
+  relPaths: Set<string>
+}
+
+/** Normalise a project-relative path for comparison against a task contract. */
+function normalizeRelPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase()
+}
+
 /**
- * True as soon as any authored file under the project was written during this
- * session. Short-circuits on the first hit so the common case is cheap.
+ * Collect what the session authored under the project.
+ *
+ * Returns the names as well as the bare boolean, because "did you write
+ * anything at all" is too coarse a bar once the task names deliverables: a
+ * session asked for `fct_orders` that writes only `macros/helper.sql` has
+ * produced nothing the task asked for, and answering the coarse question lets
+ * it through.
  */
-async function anyAuthoredFileSince(dbtRoot: string, sinceMs: number): Promise<boolean> {
-  async function scan(dir: string, depth: number): Promise<boolean> {
-    if (depth > SCAN_MAX_DEPTH) return false
+async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<AuthoredWork> {
+  const out: AuthoredWork = { any: false, names: new Set(), relPaths: new Set() }
+  const record = (full: string): void => {
+    out.any = true
+    const base = full.split(/[\\/]/).pop() ?? ""
+    const dot = base.lastIndexOf(".")
+    const stem = (dot > 0 ? base.slice(0, dot) : base).toLowerCase()
+    if (stem.length > 0) out.names.add(stem)
+    const rel = full.startsWith(dbtRoot) ? full.slice(dbtRoot.length).replace(/^[\\/]+/, "") : full
+    out.relPaths.add(normalizeRelPath(rel))
+  }
+  async function scan(dir: string, depth: number): Promise<void> {
+    if (depth > SCAN_MAX_DEPTH) return
     let entries: import("fs").Dirent[]
     try {
       entries = await fs.readdir(dir, { withFileTypes: true })
     } catch {
-      return false
+      return
     }
     for (const entry of entries) {
       if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "target") {
@@ -130,25 +155,36 @@ async function anyAuthoredFileSince(dbtRoot: string, sinceMs: number): Promise<b
         continue
       }
       if (stat.isDirectory()) {
-        if (await scan(full, depth + 1)) return true
+        await scan(full, depth + 1)
       } else if (stat.isFile() && stat.mtimeMs >= sinceMs) {
-        return true
+        record(full)
       }
     }
-    return false
   }
-  for (const dir of AUTHORED_DIRS) {
-    if (await scan(join(dbtRoot, dir), 0)) return true
+  // Directories come from `dbt_project.yml`, so a project on custom
+  // `model-paths` is not reported as having authored nothing.
+  const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
+  const dirs = [
+    ...sourcePaths.models,
+    ...sourcePaths.seeds,
+    ...sourcePaths.snapshots,
+    ...sourcePaths.analyses,
+    ...sourcePaths.macros,
+    ...sourcePaths.tests,
+  ]
+  for (const dir of dirs) {
+    await scan(dir, 0)
   }
   for (const name of AUTHORED_ROOT_FILES) {
+    const full = join(dbtRoot, name)
     try {
-      const stat = await fs.stat(join(dbtRoot, name))
-      if (stat.isFile() && stat.mtimeMs >= sinceMs) return true
+      const stat = await fs.stat(full)
+      if (stat.isFile() && stat.mtimeMs >= sinceMs) record(full)
     } catch {
       // absent — keep looking
     }
   }
-  return false
+  return out
 }
 
 export const DbtNothingBuiltValidator: Validator = {
@@ -176,37 +212,71 @@ export const DbtNothingBuiltValidator: Validator = {
       }
     }
 
-    const authored = await anyAuthoredFileSince(dbtRoot, ctx.sessionStartMs)
+    const authoredWork = await authoredWorkSince(dbtRoot, ctx.sessionStartMs)
+    const authored = authoredWork.any
     const runResults = await readRunResults(dbtRoot)
-    const freshRun =
-      runResults !== null &&
-      runResults.mtimeMs >= ctx.sessionStartMs &&
-      runResults.results.some(
-        (r) =>
-          BUILDABLE_NODE_PREFIXES.some((prefix) => r.uniqueId.startsWith(prefix)) &&
-          !isFailedRunStatus(r.status),
-      )
+    // A `dbt compile` artifact records every model as `success` without
+    // building anything, so it is not evidence a deliverable was produced.
+    const runResultsAreABuild =
+      runResults !== null && runResultsExecutedModels(runResults.command)
+    const builtNodeNames = new Set<string>()
+    if (runResults !== null && runResultsAreABuild && runResults.mtimeMs >= ctx.sessionStartMs) {
+      for (const r of runResults.results) {
+        if (!BUILDABLE_NODE_PREFIXES.some((prefix) => r.uniqueId.startsWith(prefix))) continue
+        if (isFailedRunStatus(r.status)) continue
+        builtNodeNames.add(r.name)
+      }
+    }
+    const freshRun = builtNodeNames.size > 0
+
+    // When the task names deliverables, the evidence has to be about THOSE
+    // names. Asking only "was anything written" lets a session asked for
+    // `fct_orders` clear the gate by touching `macros/helper.sql`. That is
+    // normally masked by `dbt-deliverable-names`, but under the
+    // require-artifacts opt-in this gate stands alone.
+    const namedModels = expectation.required?.models ?? []
+    const namedFiles = expectation.required?.files ?? []
+    const hasNamedDeliverables = namedModels.length > 0 || namedFiles.length > 0
+    const matchedDeliverables = hasNamedDeliverables
+      ? [
+          ...namedModels.filter(
+            (name) => authoredWork.names.has(name.toLowerCase()) || builtNodeNames.has(name.toLowerCase()),
+          ),
+          ...namedFiles.filter((file) => authoredWork.relPaths.has(normalizeRelPath(file))),
+        ]
+      : []
+    const satisfied = hasNamedDeliverables
+      ? matchedDeliverables.length > 0
+      : // No named deliverables (the bare opt-in): the coarse bar is all there
+        // is to go on, and it is the right one — any project write counts.
+        authored || freshRun
 
     const details = {
       expectation: expectation.kind,
       task_file: expectation.taskFile ?? null,
-      required_models: expectation.required?.models ?? [],
+      required_models: namedModels,
+      required_files: namedFiles,
       required_source: expectation.required?.source ?? null,
       authored_files: authored,
       fresh_run_results: freshRun,
+      matched_deliverables: matchedDeliverables,
       run_results_path: runResults?.path ?? null,
+      run_results_command: runResults?.command ?? null,
       dbt_root: dbtRoot,
       session_id: ctx.sessionID,
       elapsed_ms: Date.now() - startedAt,
     }
 
-    if (authored || freshRun) return { ok: true, details }
+    if (satisfied) return { ok: true, details }
 
-    const named = expectation.required?.models ?? []
+    const named = namedModels
     const namedText = named.length > 0 ? `: ${named.join(", ")}` : ""
+    const wroteSomethingElse = hasNamedDeliverables && authored
     const reason =
       expectation.kind === "task-file"
-        ? `The task document at ${expectation.taskFile} names required deliverables${namedText}, but this session wrote no project files and produced no fresh successful build artifact. Nothing was built, so the task is not done.`
+        ? wroteSomethingElse
+          ? `The task document at ${expectation.taskFile} names required deliverables${namedText}, and this session wrote project files but none of them is any of those deliverables. The named work was not done.`
+          : `The task document at ${expectation.taskFile} names required deliverables${namedText}, but this session wrote no project files and produced no fresh successful build artifact. Nothing was built, so the task is not done.`
         : `This session wrote no project files and produced no fresh successful build artifact, but the workspace is configured to require artifacts. Nothing was built, so the task is not done.`
 
     return {

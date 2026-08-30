@@ -420,13 +420,41 @@ describe("DbtNothingBuiltValidator — check", () => {
     expect(r.details!["authored_files"]).toBe(true)
   })
 
-  test("passes when the session authored a macro rather than a model", async () => {
+  // Regression: this used to pass. The gate asked only "was ANYTHING written
+  // under the project", so a session told to create `fct_orders` cleared it by
+  // touching an unrelated macro. `dbt-deliverable-names` normally masks that,
+  // but under ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS=1 this gate stands alone.
+  test("an unrelated macro does not satisfy a named model deliverable", async () => {
     await makeProject()
     await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
     await fs.mkdir(join(dir, "macros"))
     await fs.writeFile(join(dir, "macros", "helper.sql"), "{% macro h() %}{% endmacro %}")
     const r = await DbtNothingBuiltValidator.check(ctxPast())
+    expect(r.ok).toBe(false)
+    expect(r.details!["authored_files"]).toBe(true)
+    expect(r.details!["matched_deliverables"]).toEqual([])
+    expect(r.reason).toContain("fct_orders")
+  })
+
+  test("a macro DOES satisfy the bare opt-in, which names no deliverables", async () => {
+    await makeProject()
+    process.env.ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS = "1"
+    await fs.mkdir(join(dir, "macros"))
+    await fs.writeFile(join(dir, "macros", "helper.sql"), "{% macro h() %}{% endmacro %}")
+    const r = await DbtNothingBuiltValidator.check(ctxPast())
     expect(r.ok).toBe(true)
+    expect(r.details!["authored_files"]).toBe(true)
+  })
+
+  test("authoring the named model itself satisfies the gate", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
+    await fs.mkdir(join(dir, "macros"))
+    await fs.writeFile(join(dir, "macros", "helper.sql"), "{% macro h() %}{% endmacro %}")
+    await writeModel("fct_orders")
+    const r = await DbtNothingBuiltValidator.check(ctxPast())
+    expect(r.ok).toBe(true)
+    expect(r.details!["matched_deliverables"]).toEqual(["fct_orders"])
   })
 
   test("passes on a fresh successful run artifact even with no file writes", async () => {
@@ -484,16 +512,56 @@ describe("DbtNothingBuiltValidator — check", () => {
     expect(r.ok).toBe(false)
   })
 
-  test("a fresh seed build does count as a build", async () => {
-    const c = await buildOnlySession([{ id: "seed.t.countries", status: "success" }])
+  test("a fresh seed build of the required name does count as a build", async () => {
+    // The task names `fct_orders`; a seed row for that name is a real build of
+    // the requested deliverable, so seed rows count as buildable evidence.
+    const c = await buildOnlySession([{ id: "seed.t.fct_orders", status: "success" }])
     const r = await DbtNothingBuiltValidator.check(c)
     expect(r.details!["fresh_run_results"]).toBe(true)
     expect(r.ok).toBe(true)
   })
 
-  test("editing a root project file counts as having authored something", async () => {
+  test("a fresh build of an UNRELATED node does not satisfy a named deliverable", async () => {
+    const c = await buildOnlySession([{ id: "seed.t.countries", status: "success" }])
+    const r = await DbtNothingBuiltValidator.check(c)
+    // The build was real, but it was not the requested work.
+    expect(r.details!["fresh_run_results"]).toBe(true)
+    expect(r.details!["matched_deliverables"]).toEqual([])
+    expect(r.ok).toBe(false)
+  })
+
+  test("a `dbt compile` artifact is not a build", async () => {
+    // `dbt compile` writes a full set of `success` model rows without running
+    // anything, including for a model that cannot execute at all.
     await makeProject()
     await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
+    const old = Date.now() / 1000 - 3600
+    for (const rel of ["dbt_project.yml", "TASK.md", "models"]) {
+      await fs.utimes(join(dir, rel), old, old)
+    }
+    await fs.mkdir(join(dir, "target"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "target", "run_results.json"),
+      JSON.stringify({
+        metadata: { dbt_schema_version: "v5" },
+        args: { which: "compile" },
+        results: [{ unique_id: "model.t.fct_orders", status: "success", message: null }],
+      }),
+    )
+    const r = await DbtNothingBuiltValidator.check({
+      ...ctxPast(),
+      sessionStartMs: Date.now() - 60_000,
+    })
+    expect(r.details!["run_results_command"]).toBe("compile")
+    expect(r.details!["fresh_run_results"]).toBe(false)
+    expect(r.ok).toBe(false)
+  })
+
+  test("editing a root project file counts as having authored something", async () => {
+    await makeProject()
+    // Opt-in with no named deliverables: the coarse "wrote nothing at all" bar
+    // is the right one, and a root-file edit is real work.
+    process.env.ALTIMATE_VALIDATORS_REQUIRE_ARTIFACTS = "1"
     // dbt_project.yml was written by makeProject() during this "session".
     const r = await DbtNothingBuiltValidator.check(ctxPast())
     expect(r.ok).toBe(true)

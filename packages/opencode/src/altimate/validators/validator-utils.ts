@@ -99,6 +99,12 @@ async function isProjectFile(path: string): Promise<boolean> {
 const MODELS_MAX_DEPTH = 8
 export async function modelsModifiedSince(cwd: string, sinceMs: number): Promise<string[]> {
   const found: string[] = []
+  // Model directories come from `dbt_project.yml`, not from the literal
+  // "models". A project on `model-paths: ['transform']` would otherwise yield
+  // an empty touched set and hand `dbt-build-green` a vacuous pass.
+  const sourcePaths = await resolveDbtSourcePaths(cwd)
+  const modelDirs = sourcePaths.models
+  const packageDirs = sourcePaths.packages
   async function scan(dir: string, depth: number): Promise<void> {
     if (depth > MODELS_MAX_DEPTH) return
     let entries: import("fs").Dirent[]
@@ -111,16 +117,16 @@ export async function modelsModifiedSince(cwd: string, sinceMs: number): Promise
       if (
         entry.name.startsWith(".") ||
         entry.name === "node_modules" ||
-        entry.name === "target" ||
-        // Installed dbt packages. `dbt deps` rewrites every file under here,
-        // so without this skip a plain `dbt deps` makes every dependency
-        // model look locally edited and the build gate demands a build for
-        // models the session never touched.
-        entry.name === "dbt_packages" ||
-        entry.name === "dbt_modules"
+        entry.name === "target"
       )
         continue
       const full = join(dir, entry.name)
+      // Installed dbt packages. `dbt deps` rewrites every file under here, so
+      // without this skip a plain `dbt deps` makes every dependency model look
+      // locally edited. Matched on the resolved path, so a configured
+      // `packages-install-path` is honoured and a same-named local directory
+      // elsewhere is not skipped.
+      if (isUnderAnyDir(full, packageDirs)) continue
       // Follow symlinks: a symlinked SQL file should be discoverable, and a
       // symlinked directory under `models/` should be entered. Resolve the
       // target with fs.stat (follows links) instead of relying on Dirent's
@@ -143,10 +149,15 @@ export async function modelsModifiedSince(cwd: string, sinceMs: number): Promise
         try {
           const stat = await fs.stat(full)
           if (stat.mtimeMs >= sinceMs) {
-            // dbt models live under a `models/` ancestor. Case-insensitive
-            // comparison so `Models/` or `MODELS/` on case-insensitive volumes
-            // are accepted.
-            if (full.split(sep).some((p) => p.toLowerCase() === "models")) {
+            // With a project file, the configured model paths are
+            // authoritative. Without one there is nothing to honour, so fall
+            // back to dbt's conventional layout: any `models` ancestor,
+            // case-insensitively for APFS/NTFS. That keeps this helper usable
+            // on a directory that is not itself a project root.
+            const qualifies = sourcePaths.hasProjectFile
+              ? isUnderAnyDir(full, modelDirs)
+              : full.split(sep).some((p) => p.toLowerCase() === "models")
+            if (qualifies) {
               found.push(full)
             }
           }
@@ -759,6 +770,180 @@ export async function resolveDbtTargetPath(dbtRoot: string): Promise<string> {
   return join(dbtRoot, "target")
 }
 
+/**
+ * The source directories a dbt project reads its node definitions from, as
+ * absolute paths.
+ *
+ * dbt lets a project rename every one of these (`model-paths: ['transform']`).
+ * Hard-coding `models/` makes such a project invisible to every path-based
+ * check in this lane: `dbt-build-green` finds no touched models and takes its
+ * vacuous `nothing-to-gate` path, while `dbt-deliverable-names` reports a
+ * model that exists as absent. Both directions are wrong, so every scanner
+ * here is driven off this resolver rather than off a literal.
+ */
+export interface DbtSourcePaths {
+  models: string[]
+  seeds: string[]
+  snapshots: string[]
+  analyses: string[]
+  macros: string[]
+  tests: string[]
+  /**
+   * Where `dbt deps` installs dependency packages, resolved to absolute paths.
+   *
+   * Excluded from every "what did this session author" scan: `dbt deps`
+   * rewrites every file under here wholesale, so without the exclusion a plain
+   * `dbt deps` makes every dependency model look locally edited. That reaches
+   * the two pre-existing subprocess validators, which would then run a dbt
+   * test per dependency model.
+   *
+   * Resolved rather than matched by name (`packages-install-path` is
+   * configurable), and compared as a path rather than a bare directory name,
+   * so a project that genuinely authors a directory called `dbt_packages`
+   * somewhere else is not silently skipped.
+   */
+  packages: string[]
+  /**
+   * Whether a readable `dbt_project.yml` was found at the root these paths
+   * were resolved from.
+   *
+   * Callers that scan a directory which may not be a project root use this to
+   * decide whether the resolved paths are authoritative. Without a project
+   * file there is nothing to honour, and falling back to dbt's conventional
+   * layout is the only thing left to do.
+   */
+  hasProjectFile: boolean
+}
+
+/**
+ * Read a `key: [...]` path list out of `dbt_project.yml`.
+ *
+ * Handles the two shapes dbt projects actually use — an inline flow sequence
+ * (`model-paths: ["a", "b"]`) and a block sequence (`model-paths:` followed by
+ * `  - a`) — plus a bare scalar, which dbt tolerates. Returns null when the
+ * key is absent so the caller can apply dbt's default.
+ *
+ * Deliberately not a general YAML parser: this lane must not take a YAML
+ * dependency for four keys, and a wrong answer here fails safe (the default).
+ */
+export function readDbtProjectPathList(yml: string, key: string): string[] | null {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  // `[ \t]*` rather than `\s*`: `\s` matches newlines, so around the colon it
+  // reaches into the next line and captures the first item of a block
+  // sequence as if it were an inline scalar.
+  const line = new RegExp(`^([ \\t]*)${escaped}[ \\t]*:[ \\t]*(.*)$`, "m").exec(yml)
+  if (!line) return null
+  const indent = (line[1] ?? "").length
+  const rest = (line[2] ?? "").replace(/\s+#.*$/, "").trim()
+
+  const unquote = (s: string): string => {
+    const t = s.trim()
+    if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+      return t.slice(1, -1)
+    }
+    return t
+  }
+
+  if (rest.startsWith("[")) {
+    const close = rest.indexOf("]")
+    const inner = close === -1 ? rest.slice(1) : rest.slice(1, close)
+    const items = inner
+      .split(",")
+      .map(unquote)
+      .filter((s) => s.length > 0)
+    return items.length > 0 ? items : null
+  }
+
+  if (rest.length > 0) {
+    const single = unquote(rest)
+    return single.length > 0 ? [single] : null
+  }
+
+  // Block sequence: subsequent `-` items indented deeper than the key.
+  const after = yml.slice((line.index ?? 0) + line[0].length)
+  const items: string[] = []
+  for (const raw of after.split("\n")) {
+    if (raw.trim().length === 0) continue
+    const m = /^([ \t]*)-\s*(.*)$/.exec(raw)
+    if (!m) {
+      // A non-item line at or left of the key's indent ends the sequence.
+      const lead = /^[ \t]*/.exec(raw)?.[0].length ?? 0
+      if (lead <= indent) break
+      continue
+    }
+    if ((m[1] ?? "").length <= indent) break
+    const value = unquote((m[2] ?? "").replace(/\s+#.*$/, ""))
+    if (value.length > 0) items.push(value)
+  }
+  return items.length > 0 ? items : null
+}
+
+/**
+ * Resolve every node-source directory of a dbt project to absolute paths,
+ * honouring the `*-paths` keys in `dbt_project.yml` and falling back to dbt's
+ * defaults. Unreadable project file → all defaults.
+ */
+export async function resolveDbtSourcePaths(dbtRoot: string): Promise<DbtSourcePaths> {
+  let yml = ""
+  let hasProjectFile = false
+  try {
+    yml = await fs.readFile(join(dbtRoot, "dbt_project.yml"), "utf8")
+    hasProjectFile = true
+  } catch {
+    // No project file — defaults below.
+  }
+  const pick = (key: string, legacyKey: string | null, defaults: string[]): string[] => {
+    const configured =
+      readDbtProjectPathList(yml, key) ?? (legacyKey ? readDbtProjectPathList(yml, legacyKey) : null)
+    const chosen = configured ?? defaults
+    const out: string[] = []
+    for (const entry of chosen) {
+      const value = resolveJinjaPathValue(entry)
+      // An unresolvable Jinja path is not a directory name; skipping it leaves
+      // the other configured paths intact rather than scanning a bogus one.
+      if (value === null || value.length === 0) continue
+      out.push(isAbsolutePath(value) ? value : join(dbtRoot, value))
+    }
+    return out.length > 0 ? out : defaults.map((d) => join(dbtRoot, d))
+  }
+  return {
+    // `data-paths` / `source-paths` are the pre-1.0 spellings; a project still
+    // carrying them would otherwise read as unconfigured.
+    models: pick("model-paths", "source-paths", ["models"]),
+    seeds: pick("seed-paths", "data-paths", ["seeds", "data"]),
+    snapshots: pick("snapshot-paths", null, ["snapshots"]),
+    analyses: pick("analysis-paths", null, ["analyses"]),
+    macros: pick("macro-paths", null, ["macros"]),
+    tests: pick("test-paths", null, ["tests"]),
+    // `dbt_modules` is the pre-1.0 spelling and is always excluded alongside
+    // whatever the project configures, because a project migrated from it can
+    // still have the old directory on disk.
+    packages: Array.from(
+      new Set([
+        ...pick("packages-install-path", null, ["dbt_packages"]),
+        join(dbtRoot, "dbt_modules"),
+      ]),
+    ),
+    hasProjectFile,
+  }
+}
+
+/**
+ * True when `filePath` sits inside one of `dirs` (or is one of them).
+ *
+ * Compared case-insensitively so a case-insensitive volume (APFS, NTFS) does
+ * not make `Models/` read as outside `models/`.
+ */
+export function isUnderAnyDir(filePath: string, dirs: string[]): boolean {
+  const target = filePath.toLowerCase()
+  for (const dir of dirs) {
+    const base = dir.toLowerCase().replace(/[\\/]+$/, "")
+    if (target === base) return true
+    if (target.startsWith(base + sep) || target.startsWith(base + "/")) return true
+  }
+  return false
+}
+
 /** One node of a dbt `run_results.json`. */
 export interface RunResultNode {
   /** e.g. `model.my_project.orders`. */
@@ -784,6 +969,60 @@ export interface RunResultsArtifact {
   /** mtime of the artifact file. */
   mtimeMs: number
   results: RunResultNode[]
+  /**
+   * The dbt subcommand that wrote this artifact, from `args.which`
+   * (`build`, `run`, `test`, `compile`, …), lowercased. Null when the
+   * artifact carries no `args.which` — every dbt version this lane targets
+   * writes one, so null means a hand-written or truncated file.
+   *
+   * Load-bearing: `run_results.json` is a single file that EVERY dbt command
+   * overwrites, and the rows alone do not say which command produced them.
+   * `dbt compile` writes a full set of model rows with `status: "success"`
+   * without executing a single statement, so status without provenance is
+   * not evidence that anything was built.
+   */
+  command: string | null
+}
+
+/**
+ * dbt subcommands that actually execute model SQL against the warehouse, so a
+ * `success` row in their artifact is evidence the relation was built.
+ *
+ * `compile`, `parse`, `docs`, `list` and friends are deliberately absent: they
+ * populate `run_results.json` with `status: "success"` model rows having run
+ * nothing at all.
+ */
+const MODEL_EXECUTING_DBT_COMMANDS = new Set(["run", "build", "seed", "snapshot", "clone"])
+
+/**
+ * True when `command` names a dbt subcommand whose `run_results.json` rows are
+ * evidence that a model was actually executed.
+ *
+ * A null/unknown command reads as executing. Every supported dbt version
+ * stamps `args.which`, so null means an artifact we cannot classify, and
+ * treating the unclassifiable as non-evidence would block sessions whose build
+ * was genuinely green. The exploit this guards against (`dbt compile`) always
+ * stamps `compile`, so the permissive default does not reopen it.
+ */
+export function runResultsExecutedModels(command: string | null): boolean {
+  if (command === null || command.length === 0) return true
+  return MODEL_EXECUTING_DBT_COMMANDS.has(command)
+}
+
+/**
+ * True when `command` produced an artifact that carries no build evidence
+ * whatsoever — neither model execution nor the test run that legitimately
+ * follows one.
+ *
+ * `test` is excluded on purpose: `dbt build` followed by `dbt test` is a normal
+ * sequence, and `dbt-tests-pass` in this very lane spawns `dbt test` in the
+ * project on every validation pass, so a test artifact is the *expected* state
+ * on any retry. Treating it as "no build" would fire on every healthy session.
+ */
+export function runResultsCarriesNoBuildEvidence(command: string | null): boolean {
+  if (command === null || command.length === 0) return false
+  if (runResultsExecutedModels(command)) return false
+  return command !== "test"
 }
 
 /** dbt statuses that mean the node built cleanly. `warn` is not a failure. */
@@ -805,12 +1044,19 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
     const stat = await fs.stat(path)
     if (!stat.isFile()) return null
     const raw = await fs.readFile(path, "utf8")
-    const parsed = JSON.parse(raw) as { results?: unknown }
+    const parsed = JSON.parse(raw) as { results?: unknown; args?: unknown }
     // A file that parses but carries no `results` array is not a run artifact.
     // Returning an empty one would read as "a build happened and recorded
     // nothing", which lets an unbuilt model through; null means "no evidence".
     if (!Array.isArray(parsed.results)) return null
     const rows = parsed.results
+    // `args.which` is dbt's own record of the subcommand that wrote the file.
+    const argsObj =
+      typeof parsed.args === "object" && parsed.args !== null
+        ? (parsed.args as Record<string, unknown>)
+        : null
+    const whichRaw = argsObj && typeof argsObj["which"] === "string" ? argsObj["which"] : ""
+    const command = whichRaw.trim().toLowerCase() || null
     const results: RunResultNode[] = []
     for (const row of rows) {
       if (typeof row !== "object" || row === null) continue
@@ -828,7 +1074,7 @@ export async function readRunResults(dbtRoot: string): Promise<RunResultsArtifac
         message: typeof r["message"] === "string" ? r["message"] : null,
       })
     }
-    return { path, mtimeMs: stat.mtimeMs, results }
+    return { path, mtimeMs: stat.mtimeMs, results, command }
   } catch {
     return null
   }
@@ -898,8 +1144,41 @@ export async function collectRunResultExemptModels(
   return out
 }
 
-/** `{{ config(...) }}` call, capturing its argument text. */
-const CONFIG_CALL_RE = /\{\{-?\s*config\s*\(([\s\S]*?)\)\s*-?\}\}/gi
+/** Head of a `{{ config(` call — the argument text is scanned, not matched. */
+const CONFIG_CALL_HEAD_RE = /\{\{-?\s*config\s*\(/gi
+
+/**
+ * Blank out Jinja regions whose contents dbt never evaluates, so text inside
+ * them cannot be read as a live `config()` call.
+ *
+ * Two regions qualify unambiguously:
+ *   - `{% raw %}…{% endraw %}`, where `{{ config(...) }}` is literal text that
+ *     dbt emits rather than a call it runs;
+ *   - `{% if false %}…{% endif %}`, a dead branch.
+ *
+ * Both were observed exempting a live, enabled, unbuilt model from the build
+ * gate's coverage assertion — `{% if false %}{{ config(enabled=false) }}` reads
+ * as "this model is disabled, do not require a build for it".
+ *
+ * Deliberately limited to these two. Blanking a region also removes any real
+ * config inside it, so a looser condition (anything mentioning `false`, or a
+ * whole if/elif chain because one arm matched) would strip live config and
+ * push the gate towards blocking correct models. Resolving arbitrary branch
+ * conditions needs the effective config from a manifest, which this
+ * source-level helper deliberately does not have.
+ */
+export function stripInactiveJinja(sql: string): string {
+  const blank = (region: string): string => region.replace(/[^\n\r]/g, " ")
+  let out = sql.replace(/\{%-?\s*raw\s*-?%\}[\s\S]*?\{%-?\s*endraw\s*-?%\}/gi, blank)
+  const deadIf = /\{%-?\s*if\s+false\s*-?%\}/gi
+  for (;;) {
+    deadIf.lastIndex = 0
+    const m = deadIf.exec(out)
+    if (!m) return out
+    const end = jinjaBlockEnd(out, m.index)
+    out = out.slice(0, m.index) + blank(out.slice(m.index, end)) + out.slice(end)
+  }
+}
 /** `materialized='ephemeral'` in an in-model `config()` call. */
 const EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"]ephemeral['"]/i
 /** `enabled=false` in an in-model `config()` call. */
@@ -919,12 +1198,70 @@ const ENABLED_CONFIG_RE = /\benabled\s*=\s*(?:true|True|1)\b/
  */
 export function dbtConfigArgs(sql: string): string {
   const parts: string[] = []
-  CONFIG_CALL_RE.lastIndex = 0
+  sql = stripInactiveJinja(sql)
+  CONFIG_CALL_HEAD_RE.lastIndex = 0
   let m: RegExpExecArray | null
-  while ((m = CONFIG_CALL_RE.exec(sql)) !== null) {
-    if (m[1]) parts.push(m[1])
+  while ((m = CONFIG_CALL_HEAD_RE.exec(sql)) !== null) {
+    const argsStart = m.index + m[0].length
+    const args = scanBalancedConfigArgs(sql, argsStart)
+    if (args === null) {
+      // Unterminated call — nothing reliable to read. Advance past the head so
+      // the scan cannot loop, and leave the rest of the file to later matches.
+      CONFIG_CALL_HEAD_RE.lastIndex = argsStart
+      continue
+    }
+    if (args.text.length > 0) parts.push(args.text)
+    // Resume after the call's closing `)`. A nested `)` inside the arguments
+    // must never become the next scan origin.
+    CONFIG_CALL_HEAD_RE.lastIndex = args.end
   }
   return parts.join("\n")
+}
+
+/**
+ * Read the argument text of a `config(` call starting at `start` (the first
+ * character after the opening paren), returning it plus the index just past
+ * the matching close paren.
+ *
+ * Paren-depth aware and quote aware, because a `config()` argument routinely
+ * contains both: `pre_hook="{{ log_start(run_id) }}"` carries a nested call
+ * inside a string. Stopping at the first `)` — which a non-greedy
+ * `\(([\s\S]*?)\)` does — truncates the argument list there and silently drops
+ * every argument after it. That mis-reads a correctly-keyed merge model as an
+ * unkeyed upsert, and loses `enabled=false` / `materialized='ephemeral'`
+ * exemptions that follow a hook.
+ *
+ * Returns null when the call is never closed.
+ */
+function scanBalancedConfigArgs(sql: string, start: number): { text: string; end: number } | null {
+  let depth = 1
+  let quote: string | null = null
+  for (let i = start; i < sql.length; i++) {
+    const ch = sql[i]
+    if (quote !== null) {
+      // Backslash escapes inside a quoted argument. dbt's Jinja layer is
+      // Python, where `"a\"b"` keeps the string open.
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === "(") {
+      depth++
+      continue
+    }
+    if (ch === ")") {
+      depth--
+      if (depth === 0) return { text: sql.slice(start, i), end: i + 1 }
+    }
+  }
+  return null
 }
 
 /**
@@ -1035,8 +1372,12 @@ export async function collectExecutedModelNames(
 // Project inventory
 // ---------------------------------------------------------------------------
 
-/** Directories under a dbt project that hold buildable node definitions. */
-const NODE_DIRS = ["models", "seeds", "snapshots", "data", "analyses"]
+/**
+ * dbt `resource_type` values that materialise a relation, so a manifest node
+ * of that type can satisfy a required deliverable. `analysis` and `test` are
+ * absent on purpose — see `collectProducedNodeNames`.
+ */
+const RELATION_PRODUCING_RESOURCE_TYPES = new Set(["model", "seed", "snapshot"])
 /** File extensions that define a node. */
 const NODE_EXTENSIONS = [".sql", ".csv", ".py"]
 /** Depth limit mirroring `modelsModifiedSince`. */
@@ -1044,12 +1385,19 @@ const INVENTORY_MAX_DEPTH = 8
 
 /**
  * Collect every node name the project defines on disk (models, seeds,
- * snapshots, analyses) plus every node name and alias recorded in
- * `manifest.json` when one exists.
+ * snapshots) plus every node name and alias recorded in `manifest.json` when
+ * one exists.
  *
  * The union is deliberate: a gate built on this set fails only when a name is
  * absent from BOTH sources, so an aliased or dynamically-named node cannot
  * produce a false "you did not build it".
+ *
+ * `analyses/` and `tests/` are excluded from both sources. dbt compiles an
+ * analysis but never materialises it, so `analyses/foo.sql` is not a relation
+ * named `foo` — and accepting it lets a session satisfy "create the model
+ * `foo`" by dropping a file in the one directory dbt will never build. Same
+ * for a singular test. Directories come from `dbt_project.yml` rather than
+ * from literals, so a project on custom `model-paths` is inventoried too.
  */
 export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<string>> {
   const names = new Set<string>()
@@ -1084,8 +1432,9 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
       }
     }
   }
-  for (const nodeDir of NODE_DIRS) {
-    await scan(join(dbtRoot, nodeDir), 0)
+  const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
+  for (const nodeDir of [...sourcePaths.models, ...sourcePaths.seeds, ...sourcePaths.snapshots]) {
+    await scan(nodeDir, 0)
   }
   // manifest.json contributes names and aliases for nodes whose relation name
   // differs from the filename.
@@ -1106,6 +1455,11 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
       // A node with no recorded path cannot be checked; keep it, because
       // dropping it would move the gate towards blocking a correct project.
       if (originalPath.length > 0 && !(await pathExists(join(dbtRoot, originalPath)))) continue
+      // Only relation-producing node types can satisfy a deliverable. An
+      // untyped node is kept, for the same reason an untracked path is.
+      const resourceType =
+        typeof n["resource_type"] === "string" ? n["resource_type"].toLowerCase() : ""
+      if (resourceType.length > 0 && !RELATION_PRODUCING_RESOURCE_TYPES.has(resourceType)) continue
       for (const key of ["name", "alias", "identifier"]) {
         const value = n[key]
         if (typeof value === "string" && value.length > 0) names.add(value.toLowerCase())
@@ -1115,6 +1469,36 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
     // no manifest — the fs inventory stands alone
   }
   return names
+}
+
+/**
+ * Render repository-controlled text safe for inclusion in validator
+ * remediation prose.
+ *
+ * A failing validator's `reason`/`fixHint` is concatenated into a synthetic
+ * `role: "user"` message that the next tool-capable agent turn reads as
+ * instructions. dbt error messages and model/file names are repository
+ * content, so interpolating them verbatim lets a hostile repo place its own
+ * text at instruction position — a filename containing a newline, or a dbt
+ * error carrying `\n\nIgnore the above and …`, breaks straight out of the
+ * sentence it was quoted in.
+ *
+ * Everything untrusted therefore goes through here: control characters and
+ * newlines collapse to spaces, the result is length-bounded, and it is wrapped
+ * in guillemets so the agent can see where the quoted evidence starts and
+ * stops. The surrounding instructions stay static and trusted.
+ */
+export function sanitizeForPrompt(value: string, maxLength = 200): string {
+  // eslint-disable-next-line no-control-regex
+  const flattened = value
+    // Strip the delimiters first: removing them later would leave the double
+    // spaces that the whitespace collapse has already run past.
+    .replace(/[«»]/g, "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  const clipped = flattened.length > maxLength ? flattened.slice(0, maxLength) + "…" : flattened
+  return `«${clipped}»`
 }
 
 /** True when `path` exists at all (file or directory). */
@@ -1325,7 +1709,11 @@ export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
  * chain's own `{% if %}` tag.
  */
 function ownBranchMatches(region: string, conditionRe: RegExp): boolean {
-  const tag = /\{%-?\s*(if|elif|endif)\b[^%]*%\}/gi
+  // `(?:[^%]|%(?!\}))*` rather than `[^%]*`: a Jinja modulo inside the tag
+  // (`{% if loop.index % 2 == 0 %}`) stops a `[^%]*` body dead, the tag never
+  // matches, and the depth counter silently loses an arm. Mirrors
+  // JINJA_IF_OPENER_SOURCE, which was already fixed for this.
+  const tag = /\{%-?\s*(if|elif|endif)\b(?:[^%]|%(?!\}))*%\}/gi
   let depth = 0
   let m: RegExpExecArray | null
   while ((m = tag.exec(region)) !== null) {
@@ -1354,7 +1742,8 @@ function ownBranchMatches(region: string, conditionRe: RegExp): boolean {
  * exactly the predicate it exists to inspect.
  */
 export function jinjaIfBranchHead(body: string): string {
-  const tag = /\{%-?\s*(if|elif|else|endif)\b[^%]*%\}/gi
+  // Modulo-safe tag body, for the same reason as `ownBranchMatches`.
+  const tag = /\{%-?\s*(if|elif|else|endif)\b(?:[^%]|%(?!\}))*%\}/gi
   let depth = 0
   let m: RegExpExecArray | null
   while ((m = tag.exec(body)) !== null) {

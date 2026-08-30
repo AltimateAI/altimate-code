@@ -31,12 +31,35 @@
  *     exempt from the coverage assertion. Requiring a row that dbt will never
  *     write is a gate no agent can clear.
  *
- * `run_results.json` is a single file that every dbt command overwrites, so a
- * session whose last command was `dbt test` leaves an artifact with test nodes
- * only. Coverage is therefore established from two sources: the run artifact,
- * plus the model DDL dbt writes under `<target>/run/`, which a test invocation
- * does not touch. When neither source can speak, the verdict is recorded as
- * `coverage-inconclusive` rather than passing silently.
+ * `run_results.json` is a single file that every dbt command overwrites, and it
+ * does not say what a row means on its own. Two things follow.
+ *
+ * First, provenance is checked before status is believed. `dbt compile` writes
+ * a complete set of `status: "success"` model rows having executed nothing —
+ * including for a model that cannot run at all — so an artifact from a command
+ * that does not execute model SQL is not build evidence.
+ *
+ * Second, a session whose last command was `dbt test` leaves an artifact with
+ * test nodes only. Coverage is therefore established from two sources: the run
+ * artifact, plus the model DDL dbt writes under `<target>/run/`, which a test
+ * invocation does not overwrite.
+ *
+ * The verdict says which of those held, because "passed" and "was actually
+ * verified" are different claims and the telemetry has to tell them apart:
+ *
+ *   - `fresh-build` — every in-scope model has a success row from a
+ *     model-executing command. This is the only verified pass.
+ *   - `build-unproven` — coverage rests on `<target>/run/` DDL alone, or a
+ *     model was edited inside the freshness grace window. dbt writes that DDL
+ *     *before* execution, so it survives a model that then failed; it proves
+ *     the model was attempted, not that it succeeded.
+ *   - `coverage-inconclusive` — neither evidence source can speak.
+ *   - `nothing-verified` / `exempt-only` — the scope was empty, or everything
+ *     in it was legitimately exempt. Nothing was checked, and the verdict says
+ *     so rather than reading as a verified build.
+ *   - `non-executing-artifact` / `no-fresh-build` — blocking states.
+ *
+ * Only `fresh-build` may be read as "this session's models were built green".
  */
 
 import { promises as fs } from "fs"
@@ -52,6 +75,9 @@ import {
   sourceExemptsFromRunResults,
   sourceDeclaresNonEphemeral,
   sourceDeclaresEnabled,
+  runResultsExecutedModels,
+  runResultsCarriesNoBuildEvidence,
+  sanitizeForPrompt,
   type RunResultsArtifact,
 } from "./validator-utils"
 
@@ -119,12 +145,23 @@ export const DbtBuildGreenValidator: Validator = {
 
     const touchedPaths = await modelsModifiedSince(dbtRoot, ctx.sessionStartMs)
     const artifact = await readRunResults(dbtRoot)
-    const artifactIsFresh = artifact !== null && artifact.mtimeMs >= ctx.sessionStartMs
+    // `run_results.json` is one file that every dbt command overwrites, and a
+    // `success` row in it means "this command finished this node", not "this
+    // model was built". `dbt compile` writes a complete set of model rows with
+    // `status: "success"` having executed nothing — including for a model that
+    // cannot run at all. So provenance is checked before status is believed.
+    const noBuildEvidence = artifact !== null && runResultsCarriesNoBuildEvidence(artifact.command)
+    const artifactIsFresh =
+      artifact !== null && artifact.mtimeMs >= ctx.sessionStartMs && !noBuildEvidence
+    /** A fresh artifact that exists but proves nothing (a `dbt compile` run). */
+    const freshButNotABuild =
+      artifact !== null && artifact.mtimeMs >= ctx.sessionStartMs && noBuildEvidence
 
     const baseDetails = {
       models_touched: touchedPaths.length,
       run_results_path: artifact?.path ?? null,
       run_results_fresh: artifactIsFresh,
+      run_results_command: artifact?.command ?? null,
       dbt_root: dbtRoot,
       session_id: ctx.sessionID,
       elapsed_ms: Date.now() - startedAt,
@@ -139,27 +176,41 @@ export const DbtBuildGreenValidator: Validator = {
       const reason =
         artifact === null
           ? `You edited ${touchedPaths.length} model(s) but this project has no dbt build artifact — the models were never built, so nothing shows they compile or run.`
-          : `You edited ${touchedPaths.length} model(s) but the only build artifact (${artifact.path}) predates this session. Your edits have never been built.`
+          : freshButNotABuild
+            ? `You edited ${touchedPaths.length} model(s) and the only fresh artifact (${sanitizeForPrompt(artifact.path, 160)}) was written by the dbt command ${sanitizeForPrompt(artifact.command ?? "", 40)}, which does not execute any model SQL. That command records every model as "success" without building it, so it is not evidence your edits work.`
+            : `You edited ${touchedPaths.length} model(s) but the only build artifact (${sanitizeForPrompt(artifact.path, 160)}) predates this session. Your edits have never been built.`
       return {
         ok: false,
         reason,
-        fixHint:
-          "Run `dbt build` (or `dbt run` followed by `dbt test`) for the models you changed, confirm it finishes without errors, then declare done. If the build fails, fix the model SQL — do not delete the failing model or narrow the selector to hide it.",
-        details: { ...baseDetails, verdict: "no-fresh-build" },
+        fixHint: freshButNotABuild
+          ? `That command only parses and renders SQL — it never runs it against the warehouse. Run \`dbt build\` for the models you changed and confirm it finishes without errors before declaring done.`
+          : "Run `dbt build` for the models you changed, confirm it finishes without errors, then declare done. If the build fails, fix the model SQL — do not delete the failing model or narrow the selector to hide it.",
+        details: {
+          ...baseDetails,
+          verdict: freshButNotABuild ? "non-executing-artifact" : "no-fresh-build",
+        },
       }
     }
 
-    // From here on there IS a fresh artifact.
+    // From here on there IS a fresh artifact that carries build evidence.
     const fresh = artifact as RunResultsArtifact
-    const modelNodes = modelNodeNames(fresh)
+    // Only a command that actually executed model SQL can speak to a model's
+    // status. A `test` artifact reaches here (it is the normal successor to a
+    // build, and this lane's own `dbt-tests-pass` writes one on every pass),
+    // but it carries no model rows, so coverage falls to the `<target>/run/`
+    // DDL below.
+    const artifactExecutedModels = runResultsExecutedModels(fresh.command)
+    const modelNodes = artifactExecutedModels ? modelNodeNames(fresh) : new Set<string>()
     // Statuses come from model rows only. A singular test can carry the same
     // bare name as the model it tests, and letting its row stand in for the
     // model's would both fabricate coverage and mis-attribute its failure.
     const statusByName = new Map<string, { status: string; message: string | null }>()
-    for (const r of fresh.results) {
-      if (!r.uniqueId.startsWith("model.")) continue
-      for (const key of resultKeys(r)) {
-        statusByName.set(key, { status: r.status, message: r.message })
+    if (artifactExecutedModels) {
+      for (const r of fresh.results) {
+        if (!r.uniqueId.startsWith("model.")) continue
+        for (const key of resultKeys(r)) {
+          statusByName.set(key, { status: r.status, message: r.message })
+        }
       }
     }
 
@@ -167,10 +218,20 @@ export const DbtBuildGreenValidator: Validator = {
     // under `<target>/run/`. A `dbt test` invocation overwrites
     // `run_results.json` but does not touch these, so this is what keeps the
     // coverage assertion alive after the agent's last command was a test run.
-    const executed = await collectExecutedModelNames(dbtRoot, ctx.sessionStartMs)
+    //
+    // Both scans below walk the project tree, which is the expensive part of
+    // this gate on a large repo. With nothing touched there is no per-model
+    // question to answer, so neither is worth paying for.
+    const executed =
+      touchedPaths.length > 0
+        ? await collectExecutedModelNames(dbtRoot, ctx.sessionStartMs)
+        : new Map<string, number>()
     // Models dbt never records a run-result row for. Requiring one for these
     // is a gate the agent cannot clear by doing anything correct.
-    const exemptFromManifest = await collectRunResultExemptModels(dbtRoot)
+    const exemptFromManifest =
+      touchedPaths.length > 0
+        ? await collectRunResultExemptModels(dbtRoot)
+        : { ephemeral: new Set<string>(), disabled: new Set<string>() }
 
     const states: ModelBuildState[] = []
     const exemptModels: string[] = []
@@ -250,22 +311,68 @@ export const DbtBuildGreenValidator: Validator = {
     // is the DDL's own mtime — `run_results.json` is rewritten by a later
     // `dbt test`, and dating the build from it would forgive every edit made
     // between the build and the test.
-    const staleBuild = states.filter((s) => {
+    const builtAtFor = (s: ModelBuildState): number | undefined => {
       const ddlMtime = executed.get(s.name)
-      const builtAt =
-        s.status !== null
-          ? ddlMtime !== undefined
-            ? Math.min(fresh.mtimeMs, ddlMtime)
-            : fresh.mtimeMs
-          : ddlMtime
+      return s.status !== null
+        ? ddlMtime !== undefined
+          ? Math.min(fresh.mtimeMs, ddlMtime)
+          : fresh.mtimeMs
+        : ddlMtime
+    }
+    const staleBuild = states.filter((s) => {
+      const builtAt = builtAtFor(s)
       if (builtAt === undefined) return false
       return s.mtimeMs > builtAt + BUILD_FRESHNESS_TOLERANCE_MS
     })
+    // Edited after the build but inside the grace window. The tolerance exists
+    // because a formatter or a trailing-newline fix landing seconds after a
+    // green build was blocking healthy sessions, and it stays — but it is a
+    // heuristic about *why* the file changed, not evidence that what was built
+    // still matches what is on disk. A substantive rewrite inside the window
+    // lands here too, so these are reported as unproven rather than folded
+    // silently into a verified pass. Closing this properly needs a content
+    // hash taken at build time (follow-up 4).
+    const editedWithinGrace = states.filter((s) => {
+      const builtAt = builtAtFor(s)
+      if (builtAt === undefined) return false
+      return s.mtimeMs > builtAt && s.mtimeMs <= builtAt + BUILD_FRESHNESS_TOLERANCE_MS
+    })
+
+    // Models whose only evidence is `<target>/run/` DDL. dbt writes that DDL
+    // *before* the warehouse executes the statement, so it survives a model
+    // that then errored — it proves the model was attempted, never that it
+    // succeeded. Reporting these as `fresh-build` is what let a failed build
+    // followed by `dbt test` record as green, and it contaminates the shadow
+    // telemetry this lane exists to collect. They are labelled distinctly so
+    // the measurement is honest; the pass/fail decision is unchanged, because
+    // narrowing it would block the healthy `dbt run` / `dbt test` sequence
+    // (see follow-up 8).
+    const unprovenModels = [
+      ...states.filter((s) => s.status === null && executed.has(s.name)),
+      ...editedWithinGrace,
+    ].filter((s, i, all) => all.findIndex((o) => o.name === s.name) === i)
+    // `nothing-verified` rather than `fresh-build` when the scope emptied out:
+    // no touched models at all, or every touched model exempted. Both used to
+    // report the same verdict as a genuinely verified build, which is the
+    // "zero models checked" observability bug this lane exists to avoid.
+    const verdict =
+      states.length === 0
+        ? touchedPaths.length === 0
+          ? "nothing-verified"
+          : "exempt-only"
+        : !coverageAssertable
+          ? "coverage-inconclusive"
+          : unprovenModels.length > 0
+            ? "build-unproven"
+            : "fresh-build"
 
     const details = {
       ...baseDetails,
-      verdict: coverageAssertable || states.length === 0 ? "fresh-build" : "coverage-inconclusive",
+      verdict,
       coverage_assertable: coverageAssertable,
+      models_verified: states.filter((s) => s.status !== null).length,
+      unproven_models: unprovenModels.map((s) => s.name),
+      edited_within_grace: editedWithinGrace.map((s) => s.name),
       model_nodes_in_artifact: modelNodes.size,
       executed_models: executed.size,
       exempt_models: exemptModels,
@@ -280,26 +387,31 @@ export const DbtBuildGreenValidator: Validator = {
     }
 
     const reasonParts: string[] = []
+    // Node names and dbt messages are repository content and end up inside a
+    // synthetic user turn, so they are quoted as data rather than spliced into
+    // the instruction text. See `sanitizeForPrompt`.
     if (failedInScope.length > 0) {
       reasonParts.push(
-        `${failedInScope.length} node(s) failed in the last build: ${failedInScope.map((r) => `${r.name} (${r.status})`).join(", ")}`,
+        `${failedInScope.length} node(s) failed in the last build: ${failedInScope.map((r) => `${sanitizeForPrompt(r.name, 80)} (${sanitizeForPrompt(r.status, 40)})`).join(", ")}`,
       )
     }
     if (notBuilt.length > 0) {
       reasonParts.push(
-        `${notBuilt.length} model(s) you edited were never built: ${notBuilt.map((s) => s.name).join(", ")}`,
+        `${notBuilt.length} model(s) you edited were never built: ${notBuilt.map((s) => sanitizeForPrompt(s.name, 80)).join(", ")}`,
       )
     }
     if (staleBuild.length > 0) {
       reasonParts.push(
-        `${staleBuild.length} model(s) were edited after the last build: ${staleBuild.map((s) => s.name).join(", ")}`,
+        `${staleBuild.length} model(s) were edited after the last build: ${staleBuild.map((s) => sanitizeForPrompt(s.name, 80)).join(", ")}`,
       )
     }
 
     const hintLines: string[] = []
     for (const failure of failedInScope.slice(0, 10)) {
-      const msg = (failure.message ?? "").split("\n")[0]?.slice(0, 200)
-      hintLines.push(`  • ${failure.name} — ${failure.status}${msg ? `: ${msg}` : ""}`)
+      const msg = failure.message ? sanitizeForPrompt(failure.message, 200) : ""
+      hintLines.push(
+        `  • ${sanitizeForPrompt(failure.name, 80)} — ${sanitizeForPrompt(failure.status, 40)}${msg ? `: ${msg}` : ""}`,
+      )
     }
     if (failedInScope.length > 10) {
       hintLines.push(`  • …and ${failedInScope.length - 10} more`)

@@ -210,11 +210,16 @@ export const DbtDialectGuardValidator: Validator = {
     }
 
     const findings: Finding[] = []
+    // A model we could not read is not a model we checked. Counting it as
+    // clean makes a coverage failure indistinguishable from a verified pass,
+    // so it is tracked and surfaced in `details`.
+    const unreadable: string[] = []
     for (const path of touched) {
       let raw: string
       try {
         raw = await fs.readFile(path, "utf8")
       } catch {
+        unreadable.push(modelNameFromPath(path))
         continue
       }
       const sql = executableSql(raw)
@@ -229,6 +234,9 @@ export const DbtDialectGuardValidator: Validator = {
 
     const details = {
       models_touched: touched.length,
+      models_scanned: touched.length - unreadable.length,
+      unreadable_models: unreadable,
+      coverage_complete: unreadable.length === 0,
       findings,
       dbt_root: dbtRoot,
       session_id: ctx.sessionID,

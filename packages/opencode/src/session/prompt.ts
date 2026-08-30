@@ -1654,10 +1654,15 @@ export namespace SessionPrompt {
       //
       // ALTIMATE_VALIDATORS_SHADOW=1 runs validators WITHOUT enforcement so
       // telemetry can measure "would have fired" rates against historical
-      // traffic, but no subprocess spawns or synthetic-message retries happen
-      // unless this is also set. By default, NEITHER flag is set so
-      // non-opting-in sessions skip the entire dispatch path (no fs scan,
-      // no subprocess spawn, no perf tax).
+      // traffic. Shadow suppresses ONLY the synthetic-message retry: every
+      // applicable validator still executes in full, including the two that
+      // spawn one `altimate-dbt` child per touched model. Shadow is therefore
+      // free of behavioural risk but NOT free of cost — it pays the same
+      // filesystem scans, subprocess time and warehouse work as enforcement,
+      // just without acting on the result. Budget for it accordingly.
+      //
+      // By default NEITHER flag is set, so non-opting-in sessions skip the
+      // entire dispatch path (no fs scan, no subprocess spawn, no perf tax).
       const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
       const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
       const validatorsActive = validatorsEnabled || validatorsShadow

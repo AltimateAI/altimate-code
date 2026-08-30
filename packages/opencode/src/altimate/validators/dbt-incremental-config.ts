@@ -130,6 +130,19 @@ const IDEMPOTENCY_NEGATION_AFTER_RE =
 /** Strategies whose semantics require a key to match rows on. */
 const KEYED_STRATEGIES = new Set(["merge", "delete+insert"])
 
+/**
+ * Incremental strategies whose re-runs converge without an `is_incremental()`
+ * guard, because the adapter itself bounds what each run replaces.
+ *
+ * `insert_overwrite` replaces whole partitions rather than appending, so a
+ * re-run rewrites the same partitions with the same rows. `microbatch`
+ * (dbt 1.9+) derives its own batch boundaries from `event_time` and
+ * `batch_size`. Demanding a guard on either is a false positive on a correct,
+ * idiomatic model — and the remediation it prescribes (add a guard, or add a
+ * `unique_key`) changes what the model does rather than fixing a defect.
+ */
+const SELF_IDEMPOTENT_STRATEGIES = new Set(["insert_overwrite", "microbatch"])
+
 /** One inconsistency found in one model. */
 interface Finding {
   model: string
@@ -235,11 +248,15 @@ export const DbtIncrementalConfigValidator: Validator = {
     const advisories: Array<{ model: string; functions: string[] }> = []
     let incrementalModels = 0
 
+    // A model we could not read is not a model we checked; see the same
+    // tracking in `dbt-dialect-guard`.
+    const unreadable: string[] = []
     for (const path of touched) {
       let raw: string
       try {
         raw = await fs.readFile(path, "utf8")
       } catch {
+        unreadable.push(modelNameFromPath(path))
         continue
       }
       // Config parsing reads the literals (`materialized='incremental'`), so
@@ -269,8 +286,12 @@ export const DbtIncrementalConfigValidator: Validator = {
       // matches on the key rather than appending, so a full re-scan converges
       // on the same table. Only a guardless model with no such key can
       // duplicate rows on re-run.
-      const hasGuard = IS_INCREMENTAL_RE.test(sql)
-      if (idempotencyDemanded && !hasGuard && !(keyed && hasUniqueKey)) {
+      // Masked source, like every other scan here: an `is_incremental()`
+      // inside a projected string (`select 'is_incremental()' as note`) is not
+      // a guard, and counting it suppresses a real finding.
+      const hasGuard = IS_INCREMENTAL_RE.test(scanSql)
+      const selfIdempotent = strategy !== null && SELF_IDEMPOTENT_STRATEGIES.has(strategy)
+      if (idempotencyDemanded && !hasGuard && !(keyed && hasUniqueKey) && !selfIdempotent) {
         findings.push({
           model,
           kind: "missing-is-incremental-guard",
@@ -295,6 +316,9 @@ export const DbtIncrementalConfigValidator: Validator = {
 
     const details = {
       models_touched: touched.length,
+      models_scanned: touched.length - unreadable.length,
+      unreadable_models: unreadable,
+      coverage_complete: unreadable.length === 0,
       incremental_models: incrementalModels,
       idempotency_demanded: idempotencyDemanded,
       findings: findings.map((f) => ({ model: f.model, kind: f.kind })),

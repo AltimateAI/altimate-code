@@ -1,6 +1,42 @@
 # Completion-gate validators: end-to-end evidence
 
-**Status:** measurement report, input to an enable/shadow/revert decision
+> ## ⚠️ SUPERSEDED for the enable decision — read this first
+>
+> This report measured commit `7aa9087`, **before** the six-reviewer consensus
+> review. Its false-positive inventory and its "shadow only" verdict describe
+> code that no longer exists, so do **not** carry either into an enable/hold
+> decision. It is kept because the measurement itself was real and the
+> methodology section is still the right protocol; the conclusions are not.
+>
+> What changed under it:
+>
+> * The review found a class of failure this report did **not** measure:
+>   `dbt-build-green` certifying builds that failed or never ran. A `dbt compile`
+>   artifact records every model as `success` without executing anything, and was
+>   read as `verdict: "fresh-build", ok: true`. That is now rejected. Any
+>   `fresh-build` verdict in the tables below may be one of these.
+> * Because of that, **the shadow-mode numbers in this report are not a clean
+>   baseline.** Red builds were recorded as green, so the very telemetry an
+>   enable decision would rest on was contaminated. Re-measure before deciding.
+> * Several of the five false positives were addressed (custom `model-paths`,
+>   `insert_overwrite` incremental models, config args truncated at a nested
+>   hook). The remaining inventory has not been re-measured.
+> * `dbt-build-green` verdicts are now finer-grained: `fresh-build` means every
+>   in-scope model has a success row from a model-executing dbt command.
+>   `build-unproven`, `coverage-inconclusive`, `nothing-verified`, `exempt-only`
+>   and `non-executing-artifact` split apart states this report could not tell
+>   from a verified pass.
+> * **Correction on shadow mode.** This report treats shadow as observation-only.
+>   It is not free: shadow suppresses only the retry. Every applicable validator
+>   still runs in full, including the two that spawn one `altimate-dbt` child per
+>   touched model. Shadow costs the same filesystem scans, subprocess time and
+>   warehouse work as enforcement. Budget wall-clock for it accordingly — the
+>   subprocess timeout is per child, not per validator.
+>
+> Open items the review left unclosed are tracked in
+> `.github/meta/harness-review-followups.md`.
+
+**Status:** superseded measurement report — see the banner above
 **Date:** 2026-08-29
 **Scope:** the five validators added in PR #1175 —
 `dbt-nothing-built`, `dbt-build-green`, `dbt-deliverable-names`,
@@ -414,7 +450,9 @@ On a GCP VM, isolated from developer machines:
   Add **arm S (`ALTIMATE_VALIDATORS_SHADOW=1`)**: validators run and log but do
   not enforce, so shadow tells you the true fire rate on unperturbed sessions,
   and the arm-A/arm-S verdict difference should be zero (a sanity check on the
-  harness).
+  harness). Note that arm S is **not** cheaper than arm B in wall-clock: shadow
+  suppresses the retry, not the work, and still spawns one `altimate-dbt` child
+  per touched model. Size arm S like arm B minus the retries.
 * **Tasks that can actually fire the gates.** Of the 10 `real-*` prompts, only
   one yields a deliverable contract and none establishes a `target.type`
   convention, so three of the five validators are structurally unreachable on
