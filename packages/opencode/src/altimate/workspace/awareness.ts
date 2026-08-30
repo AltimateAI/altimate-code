@@ -22,7 +22,7 @@
 // SERVER-SIDE ONLY, for the same reason `precedence.ts` is: the TUI plugin runtime
 // loads plugins in a separate module realm, so an import from there would read a
 // different, always-empty `Precedence` map. Import this only from the session layer.
-import { type Capability, type Precedence, servedInventory, localCapabilitiesFor } from "./precedence"
+import { type Capability, type Precedence, servedInventory } from "./precedence"
 
 /** Hard ceiling on the rendered section. Deliberately independent of
  * `UNIFIED_INJECTION_BUDGET`: this is a routing directive, not knowledge, and must
@@ -33,16 +33,24 @@ export const MAX_SECTION_CHARS = 2_000
 
 const HEADING = "## Workspace integrations"
 
-/** How each capability is named to the model, and the local tool it would otherwise
- * reach for. Keyed on the `Capability` union so a new capability cannot be added
- * without deciding both. */
-const CAPABILITY_COPY: Record<Capability, { label: string; localTool: string }> = {
-  sql_execute: { label: "execute", localTool: "sql_execute" },
-  sql_explain: { label: "explain plan", localTool: "sql_explain" },
-  schema_inspect: { label: "table stats / schema inspection", localTool: "schema_inspect" },
+/** How each capability is named to the model. Keyed on the `Capability` union, so a
+ * new capability is a compile error here rather than an unlabelled row. */
+const CAPABILITY_LABEL: Record<Capability, string> = {
+  sql_execute: "execute",
+  sql_explain: "explain plan",
+  schema_inspect: "table stats / schema inspection",
 }
 
-const ALL_LOCAL_TOOLS = "`sql_execute`, `sql_explain`, `schema_inspect`"
+/** The `Capability` union IS the native tool id — `describeNativeTool` relies on the
+ * same identity (`precedence.ts`, `(CAPABILITIES as string[]).includes(toolID)`), so
+ * there is no separate mapping to keep in step. */
+const localToolOf = (c: Capability) => `\`${c}\``
+
+/** Derived, never hand-written: `CAPABILITY_LABEL` is exhaustive over `Capability`,
+ * so a new capability updates this list by construction. A literal here would go
+ * stale silently and tell the model an incomplete set of local tools — the exact
+ * over-steering the converse paragraph exists to prevent. */
+const ALL_LOCAL_TOOLS = (Object.keys(CAPABILITY_LABEL) as Capability[]).map(localToolOf).join(", ")
 
 /** Said when the escape hatch is on. Engine tools can still materialise in that
  * session — `derive` refuses before it looks at them, but the MCP client connects the
@@ -57,38 +65,43 @@ const ESCAPE_HATCH_SECTION = [
 ].join("\n")
 
 /**
- * Render the per-turn section, or "" when there is nothing to steer.
+ * Render the section, or "" when there is nothing to steer.
  *
- * Pure projection of the snapshot `Precedence.refresh` already stored for this turn —
- * the same object the tool descriptions were built from and that `check()` will read
- * mid-turn. One snapshot, one truth: the section cannot advertise a routing that the
- * guard would not perform.
+ * Pure projection of the snapshot `Precedence.refresh` stored for this turn — the same
+ * object the tool descriptions were built from and that `check()` will read mid-turn.
+ * One snapshot, one truth: the section cannot advertise a routing the guard would not
+ * perform.
+ *
+ * Called once per STEP, not per turn: the prompt loop reassembles the system array on
+ * every generation, so a 40-tool-call turn renders this 40 times. Kept cheap and
+ * allocation-light for that reason, and deliberately not memoised — the snapshot is
+ * re-derived per turn and a cached section outliving its snapshot would advertise
+ * routing that no longer holds.
  */
+/** What a non-routing session is told, keyed on the union so a new `disabledReason`
+ * is a compile error here rather than silently rendering nothing. Only the escape
+ * hatch speaks: the others mean "no routing to describe", and the toast layer already
+ * tells the human why. */
+const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> = {
+  "pilot-off": "",
+  "escape-hatch": ESCAPE_HATCH_SECTION,
+  unbound: "",
+  unattributed: "",
+  "nothing-materialised": "",
+}
+
 export function systemSection(precedence: Precedence | undefined): string {
   if (!precedence) return ""
-  if (!precedence.enabled) {
-    return precedence.disabledReason === "escape-hatch" ? ESCAPE_HATCH_SECTION : ""
-  }
+  if (!precedence.enabled) return precedence.disabledReason ? DISABLED_COPY[precedence.disabledReason] : ""
 
-  // Reachability-filtered: an agent forbidden the engine keys (the `analyst` default
-  // denies what it does not name) has nothing routed, so it is told nothing rather
-  // than being pointed at a tool it cannot call.
   const served = servedInventory(precedence)
   if (served.length === 0) return ""
 
-  const byType = new Map<string, { capability: Capability; modelKey: string }[]>()
-  for (const entry of served) {
-    const rows = byType.get(entry.type)
-    if (rows) rows.push(entry)
-    else byType.set(entry.type, [{ capability: entry.capability, modelKey: entry.modelKey }])
-  }
-
-  const typeLines = [...byType.entries()].map(([type, rows]) => {
-    const servedPart = rows.map((r) => `${CAPABILITY_COPY[r.capability].label}: \`${r.modelKey}\``).join("; ")
-    const local = localCapabilitiesFor(precedence, type)
+  const typeLines = served.map(({ type, served: rows, local }) => {
+    const servedPart = rows.map((r) => `${CAPABILITY_LABEL[r.capability]}: \`${r.modelKey}\``).join("; ")
     const localPart = local.length
-      ? ` (${local.map((c) => CAPABILITY_COPY[c].label).join(" and ")} for ${type} stay on the local ` +
-        `${local.map((c) => `\`${CAPABILITY_COPY[c].localTool}\``).join(" / ")})`
+      ? ` (${local.map((c) => CAPABILITY_LABEL[c]).join(" and ")} for ${type} stay on the local ` +
+        `${local.map(localToolOf).join(" / ")})`
       : ""
     return `- ${type} — ${servedPart}${localPart}`
   })
@@ -101,8 +114,9 @@ export function systemSection(precedence: Precedence | undefined): string {
  * without it the section reads as "prefer the workspace for everything", which is the
  * over-steering failure this design most needs to avoid. */
 function assemble(workspaceName: string, typeLines: string[]): string {
-  const render = (lines: string[], omitted: number) =>
-    [
+  const render = (lines: string[]) => {
+    const omitted = typeLines.length - lines.length
+    return [
       HEADING,
       "",
       `This project is bound to Altimate workspace "${workspaceName}". For the connection types ` +
@@ -110,17 +124,20 @@ function assemble(workspaceName: string, typeLines: string[]): string {
         "tool directly:",
       "",
       ...lines,
-      ...(omitted > 0 ? [`- …and ${omitted} further connection type${omitted === 1 ? "" : "s"} served by this workspace.`] : []),
+      ...(omitted > 0
+        ? [`- …and ${omitted} further connection type${omitted === 1 ? "" : "s"} served by this workspace.`]
+        : []),
       "",
       `Every other connection type uses the local tools (${ALL_LOCAL_TOOLS}). Do not use ` +
         "`datamate_*` warehouse tools for connection types that are not listed above.",
     ].join("\n")
+  }
 
   let lines = typeLines
-  let out = render(lines, 0)
+  let out = render(lines)
   while (out.length > MAX_SECTION_CHARS && lines.length > 1) {
     lines = lines.slice(0, -1)
-    out = render(lines, typeLines.length - lines.length)
+    out = render(lines)
   }
   return out
 }

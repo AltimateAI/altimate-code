@@ -24,37 +24,17 @@ import {
   warehouseListNote,
   warehouseListNotes,
   servedInventory,
-  localCapabilitiesFor,
 } from "../../../src/altimate/workspace/precedence"
 import * as Registry from "../../../src/altimate/native/connections/registry"
+// altimate_change - shared with awareness.test.ts; see precedence-fixture.ts
+import { BIGQUERY_TOOLS, SNOWFLAKE_TOOLS, WAREHOUSE_CONFIGS, bindTo } from "./precedence-fixture"
 import { canonicalType } from "../../../src/altimate/native/connections/registry"
 
 const SESSION = "ses_precedence"
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
 
-/** The engine tools a workspace with a Snowflake connection materialises. Snowflake is
- * the only integration serving all three capabilities. */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
-
-const SNOWFLAKE_TOOLS = {
-  datamate_snowflake_execute_database_query: {},
-  datamate_snowflake_get_query_explain_plan: {},
-  datamate_snowflake_get_table_stats: {},
-  datamate_snowflake_list_database_connections: {},
-}
-
-/** BigQuery and postgresql ship execute + list only — no explain, no table stats. */
-const BIGQUERY_TOOLS = {
-  datamate_bigquery_execute_database_query: {},
-  datamate_bigquery_list_database_connections: {},
-}
-
-function bindTo(id = 42, name = "analytics") {
-  precedenceInternals.binding = async () => ({ datamateId: id, datamateName: name })
-  precedenceInternals.attributedTo = async () => String(id)
-  precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
-}
 
 beforeEach(() => {
   resetForTests()
@@ -64,13 +44,7 @@ beforeEach(() => {
   // Real local connections. Without them `check()` would return "run" simply because
   // the connection is unknown, and every "stays local" assertion below would pass
   // without proving anything.
-  Registry.setConfigs({
-    local_snow: { type: "snowflake", account: "acct", user: "u" } as never,
-    local_duck: { type: "duckdb", path: ":memory:" } as never,
-    bq_conn: { type: "bigquery", project: "p" } as never,
-    pg_conn: { type: "postgresql", host: "h" } as never,
-    rs_conn: { type: "redshift", host: "h" } as never,
-  })
+  Registry.setConfigs({ ...WAREHOUSE_CONFIGS })
 })
 
 afterEach(() => {
@@ -414,7 +388,9 @@ describe("mechanism 1a — attributed to the bound workspace", () => {
     let reads = 0
     precedenceInternals.config = {
       get: async () =>
-        reads++ === 0 ? PINNED_TO_42 : { mcp: { datamate: { command: ["datamate", "start-stdio", "--datamate", "77"] } } },
+        reads++ === 0
+          ? PINNED_TO_42
+          : { mcp: { datamate: { command: ["datamate", "start-stdio", "--datamate", "77"] } } },
       invalidate: async () => {},
     }
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
@@ -1330,9 +1306,15 @@ describe("servedInventory — what the model will be told is routed", () => {
   test("lists every materialised capability with its model-facing key", async () => {
     const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(servedInventory(p)).toEqual([
-      { type: "snowflake", capability: "sql_execute", modelKey: "datamate_snowflake_execute_database_query" },
-      { type: "snowflake", capability: "sql_explain", modelKey: "datamate_snowflake_get_query_explain_plan" },
-      { type: "snowflake", capability: "schema_inspect", modelKey: "datamate_snowflake_get_table_stats" },
+      {
+        type: "snowflake",
+        served: [
+          { capability: "sql_execute", modelKey: "datamate_snowflake_execute_database_query" },
+          { capability: "sql_explain", modelKey: "datamate_snowflake_get_query_explain_plan" },
+          { capability: "schema_inspect", modelKey: "datamate_snowflake_get_table_stats" },
+        ],
+        local: [],
+      },
     ])
   })
 
@@ -1341,9 +1323,12 @@ describe("servedInventory — what the model will be told is routed", () => {
     // explain tool that does not exist on the engine side.
     const p = await refresh(SESSION, BIGQUERY_TOOLS)
     expect(servedInventory(p)).toEqual([
-      { type: "bigquery", capability: "sql_execute", modelKey: "datamate_bigquery_execute_database_query" },
+      {
+        type: "bigquery",
+        served: [{ capability: "sql_execute", modelKey: "datamate_bigquery_execute_database_query" }],
+        local: ["sql_explain", "schema_inspect"],
+      },
     ])
-    expect(localCapabilitiesFor(p, "bigquery")).toEqual(["sql_explain", "schema_inspect"])
   })
 
   test("is empty for every disabled snapshot", async () => {
@@ -1376,9 +1361,11 @@ describe("servedInventory — what the model will be told is routed", () => {
   test("agrees with check() on the same snapshot", async () => {
     // The property that matters: anything the section advertises, the guard redirects.
     const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
-    for (const entry of servedInventory(p)) {
-      const verdict = await check(SESSION, entry.capability, "local_snow")
-      expect(verdict.redirect?.metadata.redirect_to).toBe(entry.modelKey)
+    const rows = servedInventory(p).flatMap((t) => t.served)
+    expect(rows.length).toBe(3)
+    for (const row of rows) {
+      const verdict = await check(SESSION, row.capability, "local_snow")
+      expect(verdict.redirect?.metadata.redirect_to).toBe(row.modelKey)
     }
   })
 })

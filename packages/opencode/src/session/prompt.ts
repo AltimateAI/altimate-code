@@ -1451,12 +1451,12 @@ export namespace SessionPrompt {
           })
       // altimate_change end
       // altimate_change start — workspace tool awareness.
-      // Reads the snapshot `Precedence.refresh` already stored for this turn during
-      // tool resolution (which runs earlier in this same step), so the section, the
-      // tool descriptions and the mid-turn `check()` verdict all derive from one
-      // object. Renders "" unless a bound workspace's engine is attributed AND its
-      // tools materialised — so a session with no workspace assembles exactly the
-      // array it did before this shipped.
+      // Reads the snapshot `Precedence.refresh` stored for this turn during tool
+      // resolution, so the section, the tool descriptions and the mid-turn `check()`
+      // verdict all derive from one object. This runs on every step of the loop, not
+      // once per turn, so it stays a cheap pure render. Yields "" unless a bound
+      // workspace's engine is attributed AND its tools materialised — so a session
+      // with no workspace assembles exactly the array it did before this shipped.
       const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
       // altimate_change end
       const system = [

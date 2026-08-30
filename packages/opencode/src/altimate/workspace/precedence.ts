@@ -613,40 +613,37 @@ function servedFor(precedence: Precedence, type: string): Capability[] {
 // reads the same snapshot the redirects read and filters through the same `servedFor`,
 // so the section can never advertise a routing that `check()` would not perform, nor
 // one the caller's agent is forbidden to follow.
-export interface ServedCapability {
+export interface ServedType {
   /** Canonical local driver type the workspace serves, e.g. `snowflake`. */
   type: string
-  capability: Capability
-  /** Model-facing key the caller must invoke, i.e. `<server>_<engineTool>`. */
-  modelKey: string
+  /** Served capabilities, with the model-facing key each one must be called by. */
+  served: { capability: Capability; modelKey: string }[]
+  /** The remaining capabilities, which stay on the local tool. Carried alongside
+   * rather than re-derived at the call site: an execute-only integration must be able
+   * to say so, and computing it here reuses the one `servedFor` pass above. */
+  local: Capability[]
 }
 
 /**
- * Every (type, capability) pair this caller will really have routed, in a stable
- * order: types in shadow-table insertion order, capabilities in `CAPABILITIES` order.
- * Empty when precedence is disabled, or when the caller may reach none of the
- * destinations — both of which must render no section at all.
+ * What this caller will really have routed, grouped by type — types in shadow-table
+ * insertion order, capabilities in `CAPABILITIES` order. Empty when precedence is
+ * disabled, or when the caller may reach none of the destinations; both must render
+ * no section at all.
  */
-export function servedInventory(precedence: Precedence): ServedCapability[] {
+export function servedInventory(precedence: Precedence): ServedType[] {
   if (!precedence.enabled) return []
-  const out: ServedCapability[] = []
-  for (const type of precedence.shadowed.keys()) {
-    const byCapability = precedence.shadowed.get(type)
-    if (!byCapability) continue
-    for (const capability of servedFor(precedence, type)) {
-      const entry = byCapability.get(capability)
-      if (!entry) continue
-      out.push({ type, capability, modelKey: entry.modelKey })
-    }
+  const out: ServedType[] = []
+  for (const [type, byCapability] of precedence.shadowed) {
+    const servedCaps = servedFor(precedence, type)
+    if (servedCaps.length === 0) continue
+    out.push({
+      type,
+      // Non-null is sound: `servedFor` only returns capabilities whose entry exists.
+      served: servedCaps.map((capability) => ({ capability, modelKey: byCapability.get(capability)!.modelKey })),
+      local: CAPABILITIES.filter((c) => !servedCaps.includes(c)),
+    })
   }
   return out
-}
-
-/** The capabilities NOT served for a type — what the section must say stays local, so
- * an execute-only integration never steers `sql_explain` away from the local tool. */
-export function localCapabilitiesFor(precedence: Precedence, type: string): Capability[] {
-  const served = servedFor(precedence, type)
-  return CAPABILITIES.filter((c) => !served.includes(c))
 }
 // altimate_change end
 

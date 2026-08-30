@@ -9,30 +9,12 @@ import { MAX_SECTION_CHARS, systemSection } from "../../../src/altimate/workspac
 import type { Precedence } from "../../../src/altimate/workspace/precedence"
 import { forSession, precedenceInternals, refresh, resetForTests } from "../../../src/altimate/workspace/precedence"
 import * as Registry from "../../../src/altimate/native/connections/registry"
+// altimate_change - shared with precedence.test.ts; see precedence-fixture.ts
+import { ANALYST_RULESET, BIGQUERY_TOOLS, SNOWFLAKE_TOOLS, WAREHOUSE_CONFIGS, bindTo } from "./precedence-fixture"
 
 const SESSION = "ses_awareness"
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
-
-/** Snowflake is the only integration serving all three capabilities. */
-const SNOWFLAKE_TOOLS = {
-  datamate_snowflake_execute_database_query: {},
-  datamate_snowflake_get_query_explain_plan: {},
-  datamate_snowflake_get_table_stats: {},
-  datamate_snowflake_list_database_connections: {},
-}
-
-/** BigQuery ships execute only — no explain, no table stats. */
-const BIGQUERY_TOOLS = {
-  datamate_bigquery_execute_database_query: {},
-  datamate_bigquery_list_database_connections: {},
-}
-
-function bindTo(id = 42, name = "analytics") {
-  precedenceInternals.binding = async () => ({ datamateId: id, datamateName: name })
-  precedenceInternals.attributedTo = async () => String(id)
-  precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
-}
 
 /** Render whatever the session's current snapshot says, the way prompt.ts does. */
 const section = () => systemSection(forSession(SESSION))
@@ -42,11 +24,7 @@ beforeEach(() => {
   delete process.env.ALTIMATE_INTEGRATIONS
   process.env.ALTIMATE_WORKSPACE = "1"
   bindTo()
-  Registry.setConfigs({
-    local_snow: { type: "snowflake", account: "acct", user: "u" } as never,
-    local_duck: { type: "duckdb", path: ":memory:" } as never,
-    bq_conn: { type: "bigquery", project: "p" } as never,
-  })
+  Registry.setConfigs({ ...WAREHOUSE_CONFIGS })
 })
 
 afterEach(() => {
@@ -97,9 +75,7 @@ describe("the section is silent unless the workspace is really routing", () => {
 
 describe("the escape hatch", () => {
   test("says so explicitly rather than falling silent", async () => {
-    // Engine tools can still materialise with the hatch on — `derive` refuses before
-    // it looks at them, but MCP connects the configured entry regardless. Silence
-    // would leave the model free to use tools it can see and should not.
+    // Rationale lives on ESCAPE_HATCH_SECTION in awareness.ts.
     process.env.ALTIMATE_INTEGRATIONS = "local"
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(forSession(SESSION)?.disabledReason).toBe("escape-hatch")
@@ -135,9 +111,7 @@ describe("what the section tells the model", () => {
   })
 
   test("carries the converse so unserved types keep running locally", async () => {
-    // Without this the section reads as "prefer the workspace for everything", which
-    // is the over-steering failure mode: a DuckDB connection has no engine tool at
-    // all, so a model that avoids the local tools cannot do the work.
+    // Rationale lives on `assemble` in awareness.ts.
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     const out = section()
     expect(out).toContain("Every other connection type uses the local tools")
@@ -155,22 +129,15 @@ describe("what the section tells the model", () => {
     // The `analyst` shape: permitted the native reads, forbidden everything it does
     // not name. A redirect it cannot follow is a dead end, so precedence keeps those
     // calls local — and the section must agree rather than advertise the engine.
-    const analystLike = [
-      { permission: "*", pattern: "*", action: "deny" as const },
-      { permission: "sql_execute", pattern: "*", action: "allow" as const },
-      { permission: "sql_explain", pattern: "*", action: "allow" as const },
-      { permission: "schema_inspect", pattern: "*", action: "allow" as const },
-    ]
-    await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    await refresh(SESSION, SNOWFLAKE_TOOLS, ANALYST_RULESET)
     expect(section()).toBe("")
   })
 })
 
 describe("the size ceiling", () => {
   test("stays under the cap and degrades by dropping whole types", async () => {
-    // Four integrations x three capabilities is far under the cap today; the cap
-    // exists so an engine advertising many integrations degrades predictably rather
-    // than crowding the prompt. Synthesised here to exercise that path.
+    // Rationale lives on MAX_SECTION_CHARS in awareness.ts. Synthesised to exercise
+    // the truncation path, which real engines do not reach today.
     const many: Record<string, unknown> = {}
     for (const id of ["snowflake", "bigquery", "postgresql", "databricks"]) {
       many[`datamate_${id === "databricks" ? "databricks_execute_sql" : `${id}_execute_database_query`}`] = {}
@@ -192,51 +159,39 @@ describe("the size ceiling", () => {
 
 describe("the regression guard", () => {
   // The whole safety case for shipping this: a session that is not routing must
-  // assemble exactly the system prompt it did before this module existed. These two
-  // tests are what make that checkable rather than merely argued.
+  // assemble exactly the system prompt it did before this module existed.
 
   test("every disabled reason is decided explicitly, and only the hatch speaks", () => {
-    // Typed as the union, so adding a `disabledReason` without deciding what the
-    // model should be told fails to compile rather than silently rendering "".
-    const reasons: NonNullable<Precedence["disabledReason"]>[] = [
-      "pilot-off",
-      "escape-hatch",
-      "unbound",
-      "unattributed",
-      "nothing-materialised",
-    ]
-    for (const reason of reasons) {
+    // A `Record` over the union, NOT an array of it: `Reason[]` would accept a short
+    // list, so a sixth reason would compile and silently render "". The Record is
+    // exhaustiveness-checked, so this table is the compile-time decision point.
+    const speaks: Record<NonNullable<Precedence["disabledReason"]>, boolean> = {
+      "pilot-off": false,
+      "escape-hatch": true,
+      unbound: false,
+      unattributed: false,
+      "nothing-materialised": false,
+    }
+    for (const [reason, expected] of Object.entries(speaks)) {
       const snapshot: Precedence = {
         workspaceName: "analytics",
         enabled: false,
-        disabledReason: reason,
+        disabledReason: reason as NonNullable<Precedence["disabledReason"]>,
         shadowed: new Map(),
       }
       const out = systemSection(snapshot)
-      if (reason === "escape-hatch") expect(out).toContain("--integrations=local")
-      else expect(out).toBe("")
+      expect(out.includes("--integrations=local")).toBe(expected)
+      if (!expected) expect(out).toBe("")
     }
   })
 
-  test("contributes nothing to the system array when it is not routing", async () => {
-    // Mirrors the spread in prompt.ts. An unbound session must produce an array that
-    // is element-for-element what it was before the section was introduced.
+  test("contributes a section only once the workspace is really routing", async () => {
+    // Mirrors the spread in prompt.ts. The "" cases are covered above and in the
+    // silence suite; what needs proving here is that the section is not inert — a
+    // routing session must actually add an element.
     const assemble = (section: string) => ["environment", "skills", ...(section ? [section] : []), "instructions"]
-    const before = ["environment", "skills", "instructions"]
-
-    expect(assemble(systemSection(undefined))).toEqual(before)
-
-    precedenceInternals.binding = async () => null
     await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(assemble(section())).toEqual(before)
-
-    bindTo()
-    await refresh(SESSION, {})
-    expect(assemble(section())).toEqual(before)
-
-    // ...and it DOES contribute once the workspace is really routing, so the test
-    // above is not passing because the section is broken.
-    await refresh(SESSION, SNOWFLAKE_TOOLS)
-    expect(assemble(section()).length).toBe(4)
+    expect(assemble(section())).toHaveLength(4)
+    expect(assemble(section())[2]).toContain("## Workspace integrations")
   })
 })
