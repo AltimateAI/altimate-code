@@ -17,6 +17,7 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+import { NudgeArbiter } from "./nudge"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
@@ -113,12 +114,7 @@ export namespace SessionPrompt {
   // The trace span is a sibling of the root (tracing.ts:1009 assigns
   // parentSpanId to rootSpanId), not a nested child — good enough for
   // waterfall correlation via timestamps, and no schema change is required.
-  async function traceSpan<T>(
-    name: string,
-    fn: () => Promise<T>,
-    input?: unknown,
-    sessionID?: SessionID,
-  ): Promise<T> {
+  async function traceSpan<T>(name: string, fn: () => Promise<T>, input?: unknown, sessionID?: SessionID): Promise<T> {
     const startTime = Date.now()
     if (sessionID) void SessionStatus.publishPhase(sessionID, name, true)
     try {
@@ -403,6 +399,11 @@ export namespace SessionPrompt {
     // altimate_change start — cancel() became async (SessionStatus.set is async); use `await using` for async dispose
     await using _ = defer(() => cancel(sessionID))
     // altimate_change end
+    // A directive is valid only for this active generation. If the loop stops,
+    // aborts, or throws after a detector registers but before the next turn
+    // consumes it, do not leak that stale directive into a later resume.
+    const nudgeGeneration = NudgeArbiter.begin(sessionID)
+    using _nudgeGeneration = defer(() => NudgeArbiter.clear(sessionID, nudgeGeneration))
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
@@ -436,12 +437,7 @@ export namespace SessionPrompt {
     let session: Awaited<ReturnType<typeof Session.get>>
     let altCfg: Awaited<ReturnType<typeof Config.get>>
     try {
-      session = await traceSpan(
-        "bootstrap.session-get",
-        () => Session.get(sessionID),
-        { sessionID },
-        sessionID,
-      )
+      session = await traceSpan("bootstrap.session-get", () => Session.get(sessionID), { sessionID }, sessionID)
       // altimate_change start - detect environment fingerprint at session start
       altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
       if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
@@ -571,10 +567,12 @@ export namespace SessionPrompt {
       // into the next loop instead of terminating the session.
       const lastAssistantHasToolParts =
         lastAssistant !== undefined &&
-        (msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts.some((part) => {
-          if (part.type !== "tool") return false
-          return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
-        }) ??
+        (msgs
+          .find((msg) => msg.info.id === lastAssistant.id)
+          ?.parts.some((part) => {
+            if (part.type !== "tool") return false
+            return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
+          }) ??
           false)
       if (
         lastAssistant?.finish &&
@@ -614,9 +612,7 @@ export namespace SessionPrompt {
       // TODO: centralize "invoke tool" logic
       if (task?.type === "subtask") {
         // altimate_change start — v1.17.9: TaskTool is an Effect of Info; init() yields the executable def
-        const taskTool = await AppRuntime.runPromise(
-          Effect.flatMap(TaskTool, (info) => info.init()),
-        )
+        const taskTool = await AppRuntime.runPromise(Effect.flatMap(TaskTool, (info) => info.init()))
         // altimate_change end
         const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
         const assistantMessage = (await Session.updateMessage({
@@ -812,6 +808,7 @@ export namespace SessionPrompt {
           sessionID,
           auto: task.auto,
           overflow: task.overflow,
+          nudgeGeneration,
         })
         // altimate_change start — treat any non-"continue" result as stop: an
         // undefined/unknown result must never fall through to `continue`, which
@@ -872,9 +869,7 @@ export namespace SessionPrompt {
         model,
       })
       msgs = reminderResult.messages
-      const hoistedReminders = isAnthropicLikeModel(model)
-        ? []
-        : reminderResult.trustedReminderParts.map((p) => p.text)
+      const hoistedReminders = isAnthropicLikeModel(model) ? [] : reminderResult.trustedReminderParts.map((p) => p.text)
       // altimate_change end
 
       // altimate_change start — plan refinement detection and telemetry
@@ -1023,6 +1018,7 @@ export namespace SessionPrompt {
         sessionID: sessionID,
         model,
         abort,
+        nudgeGeneration,
       })
       using _ = defer(() => InstructionPrompt.clear(processor.message.id))
 
@@ -1445,7 +1441,13 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({ kind: "dispatch_enter", sessionID, step, cwd: vCtx.workingDirectory, sessionStartMs: vCtx.sessionStartMs }),
+                JSON.stringify({
+                  kind: "dispatch_enter",
+                  sessionID,
+                  step,
+                  cwd: vCtx.workingDirectory,
+                  sessionStartMs: vCtx.sessionStartMs,
+                }),
             )
           }
           const checks = await ValidatorRegistry.runAll(vCtx)
@@ -1515,6 +1517,7 @@ export namespace SessionPrompt {
               messageID: syntheticMessageID,
               sessionID,
               type: "text",
+              synthetic: true,
               text: body,
               time: { start: Date.now(), end: Date.now() },
             })
@@ -1548,7 +1551,12 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({ kind: "dispatch_error", sessionID, step, error: e instanceof Error ? e.message : String(e) }),
+                JSON.stringify({
+                  kind: "dispatch_error",
+                  sessionID,
+                  step,
+                  error: e instanceof Error ? e.message : String(e),
+                }),
             )
           }
         }
@@ -2450,14 +2458,17 @@ export namespace SessionPrompt {
    */
   export function estimateUncountedTail(msgs: MessageV2.WithParts[], lastFinishedID: MessageID | undefined): number {
     if (!lastFinishedID) return 0
-    const index = msgs.findIndex((m) => m.info.id === lastFinishedID)
-    if (index < 0) return 0
+    const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
+    if (!lastFinished) return 0
     let tokens = 0
-    for (const part of msgs[index]?.parts ?? []) {
-      if (part.type === "tool" && part.state?.status === "completed")
-        tokens += Token.estimate(part.state.output ?? "")
+    for (const part of lastFinished.parts) {
+      if (part.type === "tool" && part.state?.status === "completed") tokens += Token.estimate(part.state.output ?? "")
     }
-    for (const m of msgs.slice(index + 1)) {
+    // filterCompacted deliberately reorders retained-tail and summary messages,
+    // so array position is not chronology. IDs are monotonic; select genuinely
+    // newer messages by ID regardless of their rendered position.
+    for (const m of msgs) {
+      if (m.info.id <= lastFinishedID) continue
       for (const part of m.parts) {
         if (part.type === "text") tokens += Token.estimate(part.text ?? "")
         if (part.type === "tool" && part.state?.status === "completed")
@@ -2527,7 +2538,11 @@ export namespace SessionPrompt {
     // Constraint/prohibition lines, kept verbatim in full.
     const constraints: string[] = []
     for (const line of text.split("\n")) {
-      if (/\b(do not|don'?t|never|must(?: not)?|should not|shall not|avoid|only|require[sd]?|forbidden|prohibited)\b/i.test(line)) {
+      if (
+        /\b(do not|don'?t|never|must(?: not)?|should not|shall not|avoid|only|require[sd]?|forbidden|prohibited)\b/i.test(
+          line,
+        )
+      ) {
         const v = take(line)
         if (v) constraints.push(v)
       }
@@ -2570,7 +2585,11 @@ export namespace SessionPrompt {
    * Exported for unit tests. Returns the pin body: the task verbatim when it
    * fits the cap; otherwise verbatim head+tail plus the contract card.
    */
-  export function buildPinnedTask(input: { text: string; capTokens: number; cardCapTokens: number }): string | undefined {
+  export function buildPinnedTask(input: {
+    text: string
+    capTokens: number
+    cardCapTokens: number
+  }): string | undefined {
     if (input.capTokens <= 0) return undefined
     const text = input.text
     if (Token.estimate(text) <= input.capTokens) return text
@@ -2578,7 +2597,8 @@ export namespace SessionPrompt {
     // the evidence shows decaying — pair verbatim head+tail with the card.
     const cardCap = Math.min(input.cardCapTokens, Math.floor(input.capTokens / 2))
     const card = extractContractCard(text, cardCap)
-    const marker = "\n\n[... middle of the original task truncated — literal terms preserved in the contract card below ...]\n\n"
+    const marker =
+      "\n\n[... middle of the original task truncated — literal terms preserved in the contract card below ...]\n\n"
     const bodyBudget = input.capTokens - Token.estimate(card) - Token.estimate(marker) - 8
     if (bodyBudget <= 0) return card || undefined
     // Token.estimate is ratio-based; shrink the char budget geometrically until
@@ -3225,7 +3245,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
     if (input.command === "mcps") {
-
       // Helper: build and persist an assistant reply for a command shortcut.
       async function respond(
         parentID: MessageID,
@@ -3234,17 +3253,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       ): Promise<MessageV2.WithParts> {
         const now = Date.now()
         const assistantMsg: MessageV2.Assistant = {
-          id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
-          parentID, modelID: model.modelID, providerID: model.providerID,
-          mode: "builder", agent: "builder",
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: input.sessionID,
+          parentID,
+          modelID: model.modelID,
+          providerID: model.providerID,
+          mode: "builder",
+          agent: "builder",
           path: { cwd: Instance.directory, root: Instance.worktree },
-          cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          finish: "stop", time: { created: now, completed: now },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          finish: "stop",
+          time: { created: now, completed: now },
         }
         await Session.updateMessage(assistantMsg)
         const textPart: MessageV2.TextPart = {
-          id: PartID.ascending(), sessionID: input.sessionID, messageID: assistantMsg.id,
-          type: "text", text: responseText, time: { start: now, end: now },
+          id: PartID.ascending(),
+          sessionID: input.sessionID,
+          messageID: assistantMsg.id,
+          type: "text",
+          text: responseText,
+          time: { start: now, end: now },
         }
         await Session.updatePart(textPart)
         AppRuntime.runPromise(
@@ -3298,11 +3328,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (!cfg.mcp?.[name]) {
           const known = Object.keys(cfg.mcp ?? {})
           const suffix = known.length ? ` Known servers: ${known.join(", ")}.` : ""
-          return respond(
-            userMsg.info.id,
-            `MCP server **${name}** not found in config.${suffix}`,
-            model,
-          )
+          return respond(userMsg.info.id, `MCP server **${name}** not found in config.${suffix}`, model)
         }
 
         let responseText: string
@@ -3315,7 +3341,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             responseText = `MCP server **${name}** enabled. Status: connected.`
           } else {
             const errSuffix = entry?.status === "failed" ? " — " + entry.error : ""
-          responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
+            responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
           }
         } else {
           await MCP.disconnect(name)

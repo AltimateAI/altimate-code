@@ -32,6 +32,7 @@ Log.init({ print: false })
 // infrastructure modules.
 
 const ref = { providerID: ProviderID.make("test"), modelID: ModelID.make("test-model") }
+const savedRunMode = process.env.ALTIMATE_RUN_MODE
 
 const fakeModel = {
   id: "test-model",
@@ -47,7 +48,7 @@ const fakeModel = {
     input: { text: true, image: false, audio: false, video: false },
     output: { text: true, image: false, audio: false, video: false },
   },
-  api: { npm: "@ai-sdk/anthropic" },
+  api: { id: "test", npm: "@ai-sdk/anthropic" },
   options: {},
 } as unknown as Provider.Model
 
@@ -126,11 +127,14 @@ spyOn(SessionProcessor, "create").mockImplementation((input: any) => {
 
 afterAll(() => {
   mock.restore()
+  if (savedRunMode === undefined) delete process.env.ALTIMATE_RUN_MODE
+  else process.env.ALTIMATE_RUN_MODE = savedRunMode
   Object.defineProperty(Instance, "directory", instanceDescriptors.directory)
   Object.defineProperty(Instance, "worktree", instanceDescriptors.worktree)
 })
 
 beforeEach(() => {
+  process.env.ALTIMATE_RUN_MODE = "1"
   store.messages = []
   store.parts = []
   processCalls = []
@@ -368,6 +372,20 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
     expect(continuePart?.text).toContain(SessionTermination.COMPLETION_NUDGE)
     expect(continuePart?.text).toContain("reply with DONE")
     expect(continuePart?.text).toContain("ask for clarification")
+  })
+
+  test("interactive compaction retains the ordinary continuation and never injects run-only DONE instructions", async () => {
+    process.env.ALTIMATE_RUN_MODE = "0"
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+
+    const result = await run({ sessionID, messages, markerID })
+
+    expect(result).toBe("continue")
+    const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
+    expect(continuePart?.text).toContain("Continue if you have next steps")
+    expect(continuePart?.text).not.toContain(SessionTermination.COMPLETION_NUDGE)
   })
 
   test("one-directive-per-turn contract: exactly ONE directive block — pending lower-precedence directives are consumed", async () => {

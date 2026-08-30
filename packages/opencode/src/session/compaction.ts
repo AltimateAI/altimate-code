@@ -22,6 +22,8 @@ import type { LLM } from "./llm"
 // altimate_change start — completion-aware continue nudge via the nudge arbiter
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
+import { Flag } from "@/flag/flag"
+import { SystemPrompt } from "./system"
 // altimate_change end
 // altimate_change end
 // altimate_change start — Effect Context.Service facade for the upstream runtime
@@ -114,7 +116,9 @@ export namespace SessionCompaction {
       env = Number(raw)
       if (!Number.isFinite(env)) log.warn("invalid ALTIMATE_CONTEXT_SAFETY_FRACTION ignored", { value: raw })
     }
-    const value = Number.isFinite(env) ? env : (cfg?.compaction?.context_safety_fraction ?? DEFAULT_CONTEXT_SAFETY_FRACTION)
+    const value = Number.isFinite(env)
+      ? env
+      : (cfg?.compaction?.context_safety_fraction ?? DEFAULT_CONTEXT_SAFETY_FRACTION)
     if (!Number.isFinite(value)) return DEFAULT_CONTEXT_SAFETY_FRACTION
     return Math.min(1, Math.max(0.1, value))
   }
@@ -244,8 +248,7 @@ export namespace SessionCompaction {
     // carry can actually be emitted. With both features off the reservation was
     // still taken out of the tail budget, and a large `ledger_max_tokens` could
     // drive the retained tail to zero for text that is never rendered.
-    const ledgerEmitted =
-      input.cfg.compaction?.state_ledger !== false || input.cfg.compaction?.summary_carry !== false
+    const ledgerEmitted = input.cfg.compaction?.state_ledger !== false || input.cfg.compaction?.summary_carry !== false
     const ledgerMax = ledgerEmitted ? (input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS) : 0
     // altimate_change end
     const retainCap = Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION) - ledgerMax)
@@ -302,7 +305,13 @@ export namespace SessionCompaction {
   // one turn) that the summarization request itself no longer fits, which used
   // to terminate the session with "too large to compact". Summarizing a
   // truncated head is lossy; killing the session loses everything.
-  export async function fitHead(input: { head: MessageV2.WithParts[]; model: Provider.Model; fraction?: number }) {
+  export async function fitHead(input: {
+    head: MessageV2.WithParts[]
+    model: Provider.Model
+    fraction?: number
+    /** Estimated tokens for the assembled summarizer prompt, system text, and request framing. */
+    overheadTokens?: number
+  }) {
     const context = input.model.limit.context
     if (context === 0) return { head: input.head, dropped: 0 }
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
@@ -310,12 +319,18 @@ export namespace SessionCompaction {
     // The summarization-request budget derives from the SAME safety-fraction
     // helper as the overflow trigger — Token.estimate undercounts dense
     // code/tool output, and a fallback sized against the raw limit can itself
-    // overflow under that estimator error. 2k covers the summary prompt.
+    // overflow under that estimator error. Callers assembling a real summary
+    // request pass its measured overhead; 2k remains a conservative default for
+    // direct/test callers.
     const fraction = input.fraction ?? contextSafetyFraction()
-    const budget = Math.max(0, effectiveContextLimit(base, fraction) - maxOutput - 2_000)
-    if (budget <= 0) return { head: input.head, dropped: 0 }
+    const overheadTokens = input.overheadTokens ?? 2_000
+    const budget = Math.max(0, effectiveContextLimit(base, fraction) - maxOutput - overheadTokens)
     let head = input.head
     let dropped = 0
+    // A non-positive history budget is the most constrained case, not a reason
+    // to return every message. The boundary-aware loop below safely reduces a
+    // multi-turn head to its newest user-led turn; a single-turn head still
+    // fails closed rather than becoming assistant/tool-led.
     while (head.length > 1 && (await estimate({ messages: head, model: input.model })) > budget) {
       const step = Math.max(1, Math.floor(head.length / 8))
       // Round the cut forward to the next turn boundary: a head that starts
@@ -491,6 +506,61 @@ export namespace SessionCompaction {
   const LEDGER_WRITE_TOOLS = new Set(["write", "edit"])
   const LEDGER_DETAIL_MAX = 100
 
+  /**
+   * Ledger text is persisted into a later model prompt, so treat every tool
+   * argument as sensitive. This intentionally over-redacts opaque credentials
+   * and signed URL material; losing a diagnostic fragment is safer than
+   * carrying a credential across compaction or provider changes.
+   */
+  export function redactLedgerDetail(value: string): string {
+    const sensitiveName =
+      /(?:api[_-]?key|access[_-]?key|access[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|(?:^|[_-])(?:key|token|secret|password|passwd|credential|signature|authorization|cookie)(?:$|[_-]))/i
+    let masked = Telemetry.maskString(value)
+
+    // Strip URL userinfo and signed/query material before applying structural
+    // command redaction. This works for HTTP-compatible and custom schemes.
+    masked = masked.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (raw) => {
+      try {
+        const url = new URL(raw)
+        url.username = ""
+        url.password = ""
+        url.search = ""
+        url.hash = ""
+        return url.toString()
+      } catch {
+        return "<redacted-url>"
+      }
+    })
+
+    // Match assignment and flag SHAPES first, then classify the complete name.
+    // This catches provider-prefixed forms such as AWS_SECRET_ACCESS_KEY and
+    // --aws-secret-access-key without turning ordinary words ending in "key"
+    // (for example, "monkey") into secret names.
+    masked = masked
+      .replace(
+        /\b([A-Za-z_][A-Za-z0-9_-]*)(\s*(?:=|:)\s*)(?:("[^"]*")|('[^']*')|([^\s,;]+))/g,
+        (match, name: string, separator: string) =>
+          sensitiveName.test(name) ? `${name}${separator}<redacted>` : match,
+      )
+      .replace(
+        /(--[A-Za-z0-9_-]+)(=|\s+)(?:("[^"]*")|('[^']*')|([^\s,;]+))/g,
+        (match, name: string, separator: string) =>
+          sensitiveName.test(name.slice(2)) ? `${name}${separator}<redacted>` : match,
+      )
+      .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 <redacted>")
+      .replace(
+        /\b(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
+        "<redacted>",
+      )
+      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<redacted>")
+
+    // Header syntax is too permissive to identify a reliable shell-token end
+    // after quote flattening. Once a sensitive header begins, drop the rest of
+    // this diagnostic detail rather than risk retaining a short scheme tail,
+    // another cookie field, or a following credential.
+    return masked.replace(/\b((?:proxy-)?authorization|(?:set-)?cookie)\s*:[\s\S]*$/i, "$1: <redacted>")
+  }
+
   export type LedgerWrite = { path: string; mtime: number; tool: string }
   export type LedgerCall = {
     tool: string
@@ -504,7 +574,7 @@ export namespace SessionCompaction {
     if (!input || typeof input !== "object") return ""
     // Generic primary-argument pick — identical treatment for every tool.
     const candidate = input.command ?? input.filePath ?? input.path ?? input.pattern ?? ""
-    const str = typeof candidate === "string" ? candidate.replace(/\s+/g, " ").trim() : ""
+    const str = typeof candidate === "string" ? redactLedgerDetail(candidate.replace(/\s+/g, " ").trim()) : ""
     return str.length > LEDGER_DETAIL_MAX ? str.slice(0, LEDGER_DETAIL_MAX) + "…" : str
   }
 
@@ -587,7 +657,9 @@ export namespace SessionCompaction {
     if (ledger.writes.length) {
       lines.push("Files you wrote this session (verified write/edit tool events):")
       for (const w of ledger.writes) {
-        lines.push(`- ${w.path} — last written by you at ${new Date(w.mtime).toISOString()} via ${w.tool}`)
+        lines.push(
+          `- ${redactLedgerDetail(w.path)} — last written by you at ${new Date(w.mtime).toISOString()} via ${w.tool}`,
+        )
       }
     }
     if (ledger.sawBash) {
@@ -606,7 +678,13 @@ export namespace SessionCompaction {
       // altimate_change end
       lines.push(`Recent tool calls, newest first (last ${recent.length} of ${ledger.calls.length}):`)
       for (const c of recent) {
-        const status = c.errored ? "errored" : c.exit === undefined ? "ok" : c.exit === null ? "exit ?" : `exit ${c.exit}`
+        const status = c.errored
+          ? "errored"
+          : c.exit === undefined
+            ? "ok"
+            : c.exit === null
+              ? "exit ?"
+              : `exit ${c.exit}`
         lines.push(`- ${c.tool} (${status})${c.detail ? ` — ${c.detail}` : ""}`)
       }
     }
@@ -716,10 +794,15 @@ export namespace SessionCompaction {
     // Append-only carry grows monotonically; when over budget drop the OLDEST
     // items (front of the list) — the freshest anchors are the ones the next
     // round needs to not lose.
-    while (body.length > 1 && Token.estimate([...header, ...body, ...footer].join("\n")) > maxTokens) {
+    while (body.length > 0 && Token.estimate([...header, ...body, ...footer].join("\n")) > maxTokens) {
       body = body.slice(1)
     }
-    return [...header, ...body, ...footer].join("\n")
+    // Dropping the final oversized item preserves the item's integrity. A
+    // truncated `[verified]` claim could point at the wrong artifact, while an
+    // empty carry safely falls back to the fresh summary.
+    if (!body.length) return ""
+    const rendered = [...header, ...body, ...footer].join("\n")
+    return Token.estimate(rendered) <= maxTokens ? rendered : ""
   }
 
   /** Most recent committed summary text, if any (assistant, summary, finished, no error). */
@@ -739,7 +822,7 @@ export namespace SessionCompaction {
   // ── 5c: first-person summary reframe — layered as an ADDITION to whatever
   // summary prompt is active (default or plugin-provided), never a replacement.
   export const FIRST_PERSON_REFRAME =
-    "Additionally: write the summary in the first person, as your own working memory — you are summarizing YOUR OWN work in progress, and the agent reading it next is you, continuing the same task. Say \"I edited…\", \"I verified…\", \"I still need to…\" rather than describing the work as another agent's or the user's."
+    'Additionally: write the summary in the first person, as your own working memory — you are summarizing YOUR OWN work in progress, and the agent reading it next is you, continuing the same task. Say "I edited…", "I verified…", "I still need to…" rather than describing the work as another agent\'s or the user\'s.'
   // altimate_change end
 
   // altimate_change start — compaction attempt tracking for loop protection
@@ -897,6 +980,7 @@ export namespace SessionCompaction {
     abort: AbortSignal
     auto: boolean
     overflow?: boolean
+    nudgeGeneration?: NudgeArbiter.Generation
   }) {
     // altimate_change start — telemetry, attempt tracking, and circuit breaker
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
@@ -1000,6 +1084,7 @@ export namespace SessionCompaction {
       model,
     })
     // altimate_change end
+    // altimate_change end
     const msg = (await Session.updateMessage({
       id: MessageID.ascending(),
       role: "assistant",
@@ -1031,6 +1116,7 @@ export namespace SessionCompaction {
       sessionID: input.sessionID,
       model,
       abort: input.abort,
+      nudgeGeneration: input.nudgeGeneration,
     })
     // Allow plugins to inject context or replace compaction prompt
     const compacting = await Plugin.trigger(
@@ -1102,6 +1188,26 @@ When constructing the summary, try to stick to this template:
     if (pinEnabled(cfg) && pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID }) > 0)
       promptText += "\n\n" + PIN_SUMMARY_ADDITION
     // altimate_change end
+    const summaryPromptMessage = {
+      role: "user" as const,
+      content: [{ type: "text" as const, text: promptText }],
+    }
+    // Measure the actual assembled static request overhead. This includes a
+    // plugin-supplied compaction prompt, carry anchors, the session/system
+    // prompt, and the final user framing. Provider transforms may still add a
+    // small amount of protocol metadata, so keep a bounded transport reserve.
+    const summarizerOverheadTokens =
+      Token.estimate(
+        JSON.stringify({
+          system: [
+            ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),
+            ...(userMessage.system ? [userMessage.system] : []),
+          ],
+          messages: [summaryPromptMessage],
+          tools: {},
+          toolChoice: "none",
+        }),
+      ) + 512
     // altimate_change start — summarizer integrity:
     // hoist the summarizer input so a failed attempt can be retried with identical
     // input, and pass an explicit toolChoice "none". Previously toolChoice was
@@ -1120,7 +1226,12 @@ When constructing the summary, try to stick to this template:
         // trim the head from the front when even the summarization request cannot fit the window
         ...(await MessageV2.toModelMessages(
           await (async () => {
-            const fitted = await fitHead({ head: selected.head, model, fraction: contextSafetyFraction(cfg) })
+            const fitted = await fitHead({
+              head: selected.head,
+              model,
+              fraction: contextSafetyFraction(cfg),
+              overheadTokens: summarizerOverheadTokens,
+            })
             if (fitted.dropped > 0) {
               log.warn("compaction head truncated to fit window", {
                 dropped: fitted.dropped,
@@ -1140,15 +1251,7 @@ When constructing the summary, try to stick to this template:
           { stripMedia: true },
         )),
         // altimate_change end
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: promptText,
-            },
-          ],
-        },
+        summaryPromptMessage,
       ],
       model,
     }
@@ -1265,15 +1368,24 @@ When constructing the summary, try to stick to this template:
         //     nudge has top precedence, so it always wins at this site.
         // (d) the overflow notice is mechanism-accurate — the old text falsely
         //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE).
-        NudgeArbiter.register(input.sessionID, {
-          source: "termination_challenge",
-          kind: "completion_nudge",
-          text: SessionTermination.COMPLETION_NUDGE,
-        })
-        const directive = NudgeArbiter.take(input.sessionID)
+        let continuation =
+          "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+        if (Flag.ALTIMATE_RUN_MODE) {
+          NudgeArbiter.register(
+            input.sessionID,
+            {
+              source: "termination_challenge",
+              kind: "completion_nudge",
+              text: SessionTermination.COMPLETION_NUDGE,
+            },
+            input.nudgeGeneration,
+          )
+          continuation =
+            NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? SessionTermination.COMPLETION_NUDGE
+        }
         const text =
           (input.overflow ? SessionTermination.OVERFLOW_NOTICE + "\n\n" : "") +
-          (directive?.text ?? SessionTermination.COMPLETION_NUDGE) +
+          continuation +
           // altimate_change end
           // altimate_change start — state ledger
           (ledgerText ? "\n\n" + ledgerText : "")

@@ -18,10 +18,10 @@
 //         heredocs) that produce no edit event. "Last build green" alone certifies
 //         nothing about the current diff.
 //   (ii)  GENERIC verify classification: the project-configured verify command
-//         (ALTIMATE_RUN_VERIFY_COMMAND) when set; otherwise the most recent
-//         side-effecting bash command (a conservative read-only-head classifier —
-//         NO vertical/product tokens). Classifier errs toward
-//         "read-only" so a trivial `ls`/`git status` can never count as a verify.
+//         (ALTIMATE_RUN_VERIFY_COMMAND) when set; otherwise a positively
+//         classified build/test/check/lint command (NO vertical/product tokens).
+//         Unknown commands are ineligible, so installs, deploys, and arbitrary
+//         wrappers cannot stand in as completion evidence.
 //   (iii) suppressed while ANY tool call (incl. task-tool subagents) is still
 //         running or a permission request is pending.
 //   (iv)  compaction-gated: at least `minCompactions` completed compaction cycles —
@@ -146,6 +146,51 @@ export namespace IdleDone {
     "config",
   ])
 
+  const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+  ])
+  const GIT_GLOBAL_FLAGS = new Set([
+    "--bare",
+    "--literal-pathspecs",
+    "--no-optional-locks",
+    "--no-pager",
+    "--no-replace-objects",
+    "--no-literal-pathspecs",
+    "--no-glob-pathspecs",
+    "--no-icase-pathspecs",
+    "--paginate",
+    "-p",
+    "-P",
+  ])
+
+  function gitSubcommand(tokens: string[]): string | undefined {
+    for (let i = 1; i < tokens.length; i++) {
+      const token = tokens[i]!
+      if (token === "--") return tokens[i + 1]
+      if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(token)) {
+        i++
+        continue
+      }
+      if (
+        /^(?:-C|--config-env|--exec-path|--git-dir|--namespace|--super-prefix|--work-tree)=/.test(token) ||
+        /^-c.+/.test(token)
+      )
+        continue
+      if (GIT_GLOBAL_FLAGS.has(token)) continue
+      // Unknown global options fail closed as non-read-only.
+      if (token.startsWith("-")) return undefined
+      return token
+    }
+    return undefined
+  }
+
   /** True when every pipeline/statement head in the command is read-only. */
   export function isReadOnlyCommand(command: string): boolean {
     const statements = command
@@ -159,7 +204,7 @@ export namespace IdleDone {
       const head = tokens[0]?.replace(/^\(+/, "")
       if (!head) continue
       if (head === "git") {
-        const sub = tokens[1]
+        const sub = gitSubcommand(tokens)
         if (!sub || !GIT_READ_ONLY_SUBCOMMANDS.has(sub)) return false
         continue
       }
@@ -214,6 +259,7 @@ export namespace IdleDone {
       const head = tokens[0]?.replace(/^\(+/, "")
       if (head && MUTATING_HEADS.has(head)) return true
     }
+    // altimate_change end
     return false
   }
 
@@ -225,6 +271,78 @@ export namespace IdleDone {
   // untouched and a stale green verification still passed the idle-done gate.
   const MUTATING_TOOLS = new Set(["write", "edit", "multiedit", "patch", "apply_patch"])
   // altimate_change end
+
+  const VERIFY_WORD = /^(?:build|check|lint|test|tests|typecheck|verify)(?:[-_.:].*)?$/i
+  const VERIFY_HEADS = new Set([
+    "ava",
+    "biome",
+    "eslint",
+    "jest",
+    "mocha",
+    "mypy",
+    "nose",
+    "pyright",
+    "pytest",
+    "ruff",
+    "tap",
+    "tsc",
+    "vitest",
+  ])
+
+  function hasUnsafeVerificationControl(command: string): boolean {
+    // `&&` preserves failure, as do fd-duplication forms such as `2>&1`.
+    // Remaining shell control operators can replace/mask the verifier's status.
+    const controls = command.replace(/&&/g, "").replace(/\d*>&\d+/g, "")
+    return /[;|&\n]/.test(controls)
+  }
+
+  /** Positive, generic verification evidence used only when no explicit command is configured. */
+  export function isVerificationCommand(command: string): boolean {
+    // altimate_change start — fail closed on shell constructs that can mask a
+    // verifier's exit status (`npm test || true`, pipelines, or a later command).
+    // `&&` is safe: the compound command is green only when every earlier
+    // statement, including the verifier, succeeded.
+    if (hasUnsafeVerificationControl(command)) return false
+    for (const statement of command.split(/&&/)) {
+      const tokens = statement
+        .trim()
+        .split(/\s+/)
+        .filter((t) => t && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
+      const rawHead = tokens[0]?.replace(/^\(+/, "")
+      if (!rawHead) continue
+      const head = rawHead.split(/[\\/]/).pop()!.toLowerCase()
+      if (VERIFY_HEADS.has(head)) return true
+      // POSIX `test` evaluates a shell expression; it does not verify the
+      // deliverable. Keep test-shaped scripts (test.sh/test.ts) eligible.
+      if (head !== "test" && VERIFY_WORD.test(head.replace(/\.(?:bash|cmd|js|mjs|py|sh|ts)$/i, ""))) return true
+      if (head === "make" || head === "just" || head === "task") {
+        if (tokens.slice(1).some((token) => VERIFY_WORD.test(token))) return true
+        continue
+      }
+      if (["bun", "npm", "pnpm", "yarn"].includes(head)) {
+        const args = tokens.slice(1).filter((token) => !token.startsWith("-"))
+        const target = args[0] === "run" ? args[1] : args[0]
+        if (target && VERIFY_WORD.test(target)) return true
+        continue
+      }
+      if (["cargo", "dotnet", "gradle", "gradlew", "mvn", "mvnw", "go"].includes(head)) {
+        if (tokens.slice(1).some((token) => VERIFY_WORD.test(token))) return true
+        continue
+      }
+      if (/^python(?:\d+(?:\.\d+)*)?$/.test(head)) {
+        const target = tokens.find((token, index) => index > 0 && !token.startsWith("-"))
+        const name = target?.split(/[\\/]/).pop()?.replace(/\.py$/i, "") ?? ""
+        if (
+          VERIFY_HEADS.has(name) ||
+          VERIFY_WORD.test(name) ||
+          /(?:^|[-_.])(?:test|tests|check|verify|lint|typecheck)(?:[-_.]|$)/i.test(name)
+        )
+          return true
+      }
+    }
+    // altimate_change end
+    return false
+  }
 
   export interface Deps {
     /** From RunAccounting — resolves whether a message belongs to compaction machinery. */
@@ -262,16 +380,9 @@ export namespace IdleDone {
 
     function observeBash(part: PartSlice) {
       const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
-      // altimate_change start — a mutating command is never a verification. With
-      // no verify command configured the fallback treated EVERY non-read-only
-      // command as a verification candidate, so a zero-exit `rm`/`mv`/`cp`
-      // counted as a green verification and the MUTATING_HEADS branch below was
-      // unreachable. Excluding mutators here restores it and stops a destructive
-      // command from standing in as evidence that the work is finished.
       const isCandidate = options.verifyCommand
-        ? command.trimStart().startsWith(options.verifyCommand)
-        : !isReadOnlyCommand(command) && !isMutatingCommand(command)
-      // altimate_change end
+        ? command.trimStart().startsWith(options.verifyCommand) && !hasUnsafeVerificationControl(command)
+        : isVerificationCommand(command) && !isMutatingCommand(command)
       if (isCandidate) {
         const exit = part.state?.metadata?.["exit"]
         lastVerifySeq = seq

@@ -103,6 +103,31 @@ describe("NudgeArbiter one-directive-per-turn contract", () => {
     expect(NudgeArbiter.pending(SID)).toHaveLength(0)
   })
 
+  test("stale callbacks cannot register or clear a newer loop generation", () => {
+    const oldGeneration = NudgeArbiter.begin(SID)
+    NudgeArbiter.register(
+      SID,
+      { source: "starvation_breaker", kind: "starvation", text: "old" },
+      oldGeneration,
+    )
+
+    const currentGeneration = NudgeArbiter.begin(SID)
+    NudgeArbiter.register(
+      SID,
+      { source: "budget_reminder", kind: "budget", text: "current" },
+      currentGeneration,
+    )
+    NudgeArbiter.register(
+      SID,
+      { source: "termination_challenge", kind: "confirm_done", text: "stale" },
+      oldGeneration,
+    )
+    NudgeArbiter.clear(SID, oldGeneration)
+
+    expect(NudgeArbiter.take(SID, currentGeneration)?.text).toBe("current")
+    expect(NudgeArbiter.pending(SID)).toHaveLength(0)
+  })
+
   test("take() on an empty registry returns undefined", () => {
     expect(NudgeArbiter.take(SID)).toBeUndefined()
   })

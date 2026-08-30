@@ -64,7 +64,7 @@ describe("SessionCompaction.fitHead", () => {
   })
 
   test("drops oldest messages until an oversized head fits the window", async () => {
-    // ~64 chars/token estimate baseline: 40 messages x 20k chars ≈ 200k tokens,
+    // ~4 chars/token estimate baseline: 40 messages x 20k chars ≈ 200k tokens,
     // far over a 32k window minus output reserve.
     const head = Array.from({ length: 40 }, (_, i) => userMessage(`m${i}`, "x".repeat(20_000)))
     const result = await SessionCompaction.fitHead({ head, model: model(32768, 8192) })
@@ -86,6 +86,36 @@ describe("SessionCompaction.fitHead", () => {
     // At fraction 1 the same head fits the raw window untrimmed.
     const raw = await SessionCompaction.fitHead({ head, model: model(32768, 8192), fraction: 1 })
     expect(raw.dropped).toBe(0)
+  })
+
+  test("measured summarizer overhead reduces the retained head", async () => {
+    const head = Array.from({ length: 20 }, (_, i) => userMessage(`m${i}`, "x".repeat(2_400)))
+    const smallPrompt = await SessionCompaction.fitHead({
+      head,
+      model: model(32768, 8192),
+      fraction: 0.65,
+      overheadTokens: 500,
+    })
+    const pluginPrompt = await SessionCompaction.fitHead({
+      head,
+      model: model(32768, 8192),
+      fraction: 0.65,
+      overheadTokens: 8_000,
+    })
+    expect(pluginPrompt.dropped).toBeGreaterThan(smallPrompt.dropped)
+    expect(pluginPrompt.head.length).toBeLessThan(smallPrompt.head.length)
+  })
+
+  test("non-positive history budget keeps only the newest user-led turn", async () => {
+    const head = Array.from({ length: 20 }, (_, i) => userMessage(`m${i}`, "x".repeat(2_000)))
+    const result = await SessionCompaction.fitHead({
+      head,
+      model: model(16_384, 8_192),
+      fraction: 0.65,
+      overheadTokens: 2_569,
+    })
+    expect(result.dropped).toBe(19)
+    expect(result.head).toEqual([head.at(-1)!])
   })
 
   test("cuts only at user boundaries — a single-leading-user head fails closed", async () => {

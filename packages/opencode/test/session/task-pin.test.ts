@@ -16,10 +16,7 @@ function nextID() {
   return `msg_${String(seq).padStart(6, "0")}`
 }
 
-function userMsg(
-  text: string,
-  opts: { synthetic?: boolean; compaction?: boolean } = {},
-): MessageV2.WithParts {
+function userMsg(text: string, opts: { synthetic?: boolean; compaction?: boolean } = {}): MessageV2.WithParts {
   const id = nextID()
   const parts: any[] = []
   if (opts.compaction) parts.push({ id: nextID(), messageID: id, sessionID: "ses_test", type: "compaction" })
@@ -100,6 +97,12 @@ describe("selectPinSource — mode-aware pin selection", () => {
       false,
     )
     expect(empty).toBeUndefined()
+  })
+
+  test("framework-generated validator retries cannot replace the user's task pin", () => {
+    const task = userMsg("Fix the checkout race and add a regression test.")
+    const validatorRetry = userMsg("[altimate-validator: tests] validation failed", { synthetic: true })
+    expect(SessionPrompt.selectPinSource([task, validatorRetry], false)?.id).toBe(task.info.id)
   })
 
   test("empty history yields no pin", () => {
@@ -231,7 +234,10 @@ describe("buildPinnedTask — verbatim under cap, head+tail + contract card over
     expect(card).not.toBe("")
     expect(Token.estimate(card)).toBeLessThanOrEqual(500)
     for (const line of card.split("\n").slice(1)) {
-      const body = line.replace(/^- (files\/paths|identifiers|code\/commands|quoted terms): /, "").replace(/^- constraints \(verbatim lines\):$/, "").replace(/^ {2}- /, "")
+      const body = line
+        .replace(/^- (files\/paths|identifiers|code\/commands|quoted terms): /, "")
+        .replace(/^- constraints \(verbatim lines\):$/, "")
+        .replace(/^ {2}- /, "")
       if (!body) continue
       for (const item of body.split(", ")) {
         if (!item) continue
@@ -261,8 +267,8 @@ describe("pinBudget — dynamic cap min(4k, fraction × usable) with the liveloc
   beforeEach(() => SessionCompaction.resetPinState())
 
   test("large window: capped at PIN_MAX_TOKENS (4k)", () => {
-    // context 200k, output 8k → reserved default 20k, threshold 180k;
-    // fraction cap 31.5k, invariant cap 158k → min is 4096.
+    // context 200k, default headroom 20k, safety fraction 0.65 → effective
+    // threshold 110k; fraction cap 19,250 and invariant cap 108k → min is 4096.
     const budget = SessionCompaction.pinBudget({ cfg: cfg(), model: model({ context: 200_000, output: 8_192 }) })
     expect(budget).toBe(SessionCompaction.PIN_MAX_TOKENS)
   })

@@ -111,8 +111,9 @@ export namespace RunAccounting {
         lastFinishReason = reason
         lastFinishMessageID = messageID
       },
-      onText(messageID: string, text: string) {
+      onText(messageID: string, text: string, synthetic = false) {
         if (isCompactionStep(messageID)) return
+        if (synthetic) return
         lastTextExplicitDone = SessionTermination.isExplicitDone(text)
         lastTextMessageID = messageID
         lastExplicitDoneTurn = lastTextExplicitDone ? turnCount : undefined
@@ -177,6 +178,11 @@ export namespace RunAccounting {
           }
           fatalError ??= { name: `AbnormalFinish:${info.finish}`, timeout: false }
         }
+      },
+      /** A non-2xx SDK response can carry `error` without a terminal message. */
+      onPromptSendError(error: unknown, status?: number) {
+        const detail = serializeSessionError(error)
+        this.onSessionError("PromptRequestError", status ? `status ${status}: ${detail}` : detail)
       },
       /** True when the run ended by fatal abort — the process must exit nonzero. */
       get fatal() {

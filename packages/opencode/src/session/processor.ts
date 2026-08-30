@@ -100,12 +100,18 @@ export namespace SessionProcessor {
 
   export function createToolCallIDCoercer(salt?: string) {
     const aliases = new Map<string, string>()
+    const owners = new Map<string, string>()
     return (raw: unknown): string => {
       const key = typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw))
       const existing = aliases.get(key)
       if (existing !== undefined) return existing
-      const sanitized = MessageV2.sanitizeToolCallID(raw, salt)
+      const base = MessageV2.sanitizeToolCallID(raw, salt)
+      let sanitized = base
+      for (let suffix = 1; owners.has(sanitized) && owners.get(sanitized) !== key; suffix++) {
+        sanitized = `${base}_${suffix}`
+      }
       aliases.set(key, sanitized)
+      owners.set(sanitized, key)
       return sanitized
     }
   }
@@ -116,6 +122,7 @@ export namespace SessionProcessor {
     sessionID: SessionID
     model: Provider.Model
     abort: AbortSignal
+    nudgeGeneration?: NudgeArbiter.Generation
   }) {
     // altimate_change start — Map (not plain object) so adversarial ids can
     // never resolve to inherited Object.prototype members.
@@ -200,7 +207,7 @@ export namespace SessionProcessor {
         // after compaction would silently never see the breaker/loop nudge.
         let effectiveStreamInput = streamInput
         if (runMode && !input.assistantMessage.summary) {
-          const directive = NudgeArbiter.take(input.sessionID)
+          const directive = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)
           // altimate_change end
           if (directive) {
             // Attribute the injection to the DIRECTIVE that won arbitration,
@@ -436,6 +443,11 @@ export namespace SessionProcessor {
                       const call = starvation.onToolCall({ tool: value.toolName, input: value.input })
                       if (call.doomLoop) {
                         const wouldStop = call.doomLoop.escalation === "stop"
+                        // The stream can keep yielding calls after the first
+                        // terminal rung. Record one logical stop per step; the
+                        // tracker may start a new ladder before this stream
+                        // drains, but that is not a new generation.
+                        if (sbArmed && starvationStop && wouldStop) break
                         Telemetry.track({
                           type: "starvation_breaker",
                           timestamp: Date.now(),
@@ -470,11 +482,18 @@ export namespace SessionProcessor {
                               time: { start: Date.now(), end: Date.now() },
                             })
                           } else {
-                            NudgeArbiter.register(input.sessionID, {
-                              source: "starvation_breaker",
-                              kind: call.doomLoop.escalation === "nudge" ? "doom_loop_nudge" : "doom_loop_status_check",
-                              text: call.doomLoop.directive,
-                            })
+                            NudgeArbiter.register(
+                              input.sessionID,
+                              {
+                                source: "starvation_breaker",
+                                kind:
+                                  call.doomLoop.escalation === "nudge"
+                                    ? "doom_loop_nudge"
+                                    : "doom_loop_status_check",
+                                text: call.doomLoop.directive,
+                              },
+                              input.nudgeGeneration,
+                            )
                           }
                         }
                       }
@@ -536,11 +555,15 @@ export namespace SessionProcessor {
                           count: outcome.repeatLoop.count,
                         })
                         if (sbArmed) {
-                          NudgeArbiter.register(input.sessionID, {
-                            source: "starvation_breaker",
-                            kind: "repeat_signature",
-                            text: outcome.repeatLoop.directive,
-                          })
+                          NudgeArbiter.register(
+                            input.sessionID,
+                            {
+                              source: "starvation_breaker",
+                              kind: "repeat_signature",
+                              text: outcome.repeatLoop.directive,
+                            },
+                            input.nudgeGeneration,
+                          )
                         }
                       }
                     }
@@ -616,11 +639,15 @@ export namespace SessionProcessor {
                           count: outcome.repeatLoop.count,
                         })
                         if (sbArmed) {
-                          NudgeArbiter.register(input.sessionID, {
-                            source: "starvation_breaker",
-                            kind: "repeat_signature",
-                            text: outcome.repeatLoop.directive,
-                          })
+                          NudgeArbiter.register(
+                            input.sessionID,
+                            {
+                              source: "starvation_breaker",
+                              kind: "repeat_signature",
+                              text: outcome.repeatLoop.directive,
+                            },
+                            input.nudgeGeneration,
+                          )
                         }
                       }
                     }
@@ -857,11 +884,15 @@ export namespace SessionProcessor {
                         armed: sbArmed,
                       })
                       if (sbArmed) {
-                        NudgeArbiter.register(input.sessionID, {
-                          source: "starvation_breaker",
-                          kind: "starvation",
-                          text: stepOutcome.starvation.directive,
-                        })
+                        NudgeArbiter.register(
+                          input.sessionID,
+                          {
+                            source: "starvation_breaker",
+                            kind: "starvation",
+                            text: stepOutcome.starvation.directive,
+                          },
+                          input.nudgeGeneration,
+                        )
                       }
                     }
                   }

@@ -1,7 +1,7 @@
 // Harness reliability (c) unit gates — idle-done detection, the run-mode-only
 // FALLBACK termination path. Every hard precondition is exercised:
 //   (i)   green verify temporally AFTER the last file mutation (event-stream order)
-//   (ii)  generic verify classification (configured command or side-effecting bash;
+//   (ii)  generic verify classification (configured command or positive build/test/check evidence;
 //         classifier contains no vertical tokens — leak-lens hard requirement)
 //   (iii) suppression while tools/subagents/permissions are outstanding
 //   (iv)  compaction-gated + N consecutive post-compaction text-only turns
@@ -147,6 +147,12 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isReadOnlyCommand("git push")).toBe(false)
   })
 
+  test("git global options are skipped before classifying the subcommand", () => {
+    expect(IdleDone.isReadOnlyCommand("git -C /repo status")).toBe(true)
+    expect(IdleDone.isReadOnlyCommand("git --git-dir /repo/.git log -1")).toBe(true)
+    expect(IdleDone.isReadOnlyCommand("git -C /repo commit -m x")).toBe(false)
+  })
+
   test("leading env assignments are skipped when classifying the head", () => {
     expect(IdleDone.isReadOnlyCommand("FOO=1 cat x")).toBe(true)
     expect(IdleDone.isReadOnlyCommand("FOO=1 make check")).toBe(false)
@@ -199,6 +205,24 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
   test("plain read-only commands are not mutating", () => {
     for (const cmd of ["ls -la", "cat file.txt", "grep -r pattern .", "git status", "sed s/a/b/ f.txt"]) {
       expect(IdleDone.isMutatingCommand(cmd)).toBe(false)
+    }
+  })
+
+  test("fallback verification requires positive generic evidence", () => {
+    for (const command of ["make check", "npm test", "bun run typecheck", "cargo build", "./scripts/verify.sh --all"]) {
+      expect(IdleDone.isVerificationCommand(command)).toBe(true)
+    }
+    for (const command of [
+      "deploy production",
+      "install package",
+      "./scripts/release.sh",
+      "custom-wrapper --all",
+      "test -f package.json",
+      "npm test || true",
+      "npm test | cat",
+      "npm test &",
+    ]) {
+      expect(IdleDone.isVerificationCommand(command)).toBe(false)
     }
   })
 
@@ -277,6 +301,32 @@ describe("IdleDone hard preconditions", () => {
     for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
     expect(d.shouldChallenge()).toBe(false)
   })
+
+  test("(ii) an unknown zero-exit command is not verification evidence", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_unknown", "deploy production", 0))
+    d.observePart(stepFinish("m_unknown"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    expect(d.snapshot().last_verify_green).toBe(false)
+  })
+
+  test("(ii) a green POSIX test expression is not project verification evidence", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_expression", "test -f package.json", 0))
+    d.observePart(stepFinish("m_expression"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    expect(d.snapshot().last_verify_green).toBe(false)
+  })
   // altimate_change end
 
   // Snapshots off (`snapshot: false`) means no patch part reports a
@@ -313,6 +363,20 @@ describe("IdleDone hard preconditions", () => {
     d.observePart(stepFinish("cmp_2"))
     for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
     expect(d.shouldChallenge()).toBe(true)
+  })
+
+  test("(ii) a configured verifier cannot mask its failure with shell control flow", () => {
+    const opts: IdleDone.Options = { ...OPTS, verifyCommand: "make check" }
+    const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_masked", "make check || true", 0))
+    d.observePart(stepFinish("m_masked"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    expect(d.snapshot().last_verify_green).toBe(false)
   })
 
   test("(iv) NEVER fires in a never-compacted session", () => {

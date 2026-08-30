@@ -66,7 +66,11 @@ describe("RunAccounting termination attribution (E4)", () => {
     acc.onStepStart("m1")
     acc.onStepFinish("m1", "tool-calls")
     acc.onBudgetExhausted()
-    expect(acc.termination()).toEqual({ why_model_stopped: "tool-call", why_harness_stopped: "budget-exhausted", done_reason: "none" })
+    expect(acc.termination()).toEqual({
+      why_model_stopped: "tool-call",
+      why_harness_stopped: "budget-exhausted",
+      done_reason: "none",
+    })
     expect(acc.fatal).toBe(true)
   })
 
@@ -128,6 +132,13 @@ describe("RunAccounting termination attribution (E4)", () => {
   test("terminal message carrying an error field is fatal via the session-error path", () => {
     const acc = RunAccounting.create()
     acc.onPromptResult({ finish: "stop", error: { name: "APIError", data: { message: "boom" } } })
+    expect(acc.fatal).toBe(true)
+    expect(acc.termination().why_harness_stopped).toBe("error")
+  })
+
+  test("non-retryable SDK send errors without data.info are fatal", () => {
+    const acc = RunAccounting.create()
+    acc.onPromptSendError({ name: "BadRequestError", data: { message: "invalid request" } }, 400)
     expect(acc.fatal).toBe(true)
     expect(acc.termination().why_harness_stopped).toBe("error")
   })
@@ -257,6 +268,16 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     expect(t.done_reason).toBe("explicit_done")
     expect(t.why_model_stopped).toBe("explicit-done")
     expect(t.why_harness_stopped).toBe("none")
+  })
+
+  test("synthetic text appended after DONE does not clear explicit-DONE attribution", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "m1", agent: "plan" })
+    acc.onStepStart("m1")
+    acc.onText("m1", "Plan is complete.\nDONE")
+    acc.onText("m1", "altimate-code: plan agent stopped without writing a plan", true)
+    acc.onStepFinish("m1", "stop")
+    expect(acc.termination().done_reason).toBe("explicit_done")
   })
 
   test("DONE elicited by the idle-done challenge reports idle_heuristic + harness idle-done", () => {

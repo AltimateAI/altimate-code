@@ -18,6 +18,7 @@ import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
+import { createHash } from "node:crypto"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -35,7 +36,7 @@ export namespace MessageV2 {
   // OpenAI-compatible servers emit non-string (numeric/object) tool-call ids;
   // providers reject any request whose tool_use/tool_result pair carries a
   // malformed or mismatched id. Valid non-empty strings pass through untouched.
-  // Anything else is regenerated deterministically (FNV-1a over the JSON form),
+  // Anything else is regenerated deterministically (SHA-256 over the JSON form),
   // so the SAME raw value always maps to the SAME id — the property that keeps
   // the call half and the result half of a pair consistent whether coerced at
   // ingestion (processor.ts) or defensively at replay (toModelMessagesEffect).
@@ -46,12 +47,7 @@ export namespace MessageV2 {
   export function sanitizeToolCallID(id: unknown, salt?: string): string {
     if (typeof id === "string" && id.length > 0) return id
     const raw = (salt ?? "") + "\u0000" + (typeof id === "string" ? id : (JSON.stringify(id) ?? String(id)))
-    let hash = 0x811c9dc5
-    for (let i = 0; i < raw.length; i++) {
-      hash ^= raw.charCodeAt(i)
-      hash = Math.imul(hash, 0x01000193)
-    }
-    return "call_" + (hash >>> 0).toString(16).padStart(8, "0")
+    return "call_" + createHash("sha256").update(raw).digest("hex").slice(0, 32)
   }
   // altimate_change end
 
@@ -815,9 +811,7 @@ export namespace MessageV2 {
             // altimate_change end
             if (part.state.status === "completed") {
               // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
-              const rawOutputText = part.state.time.compacted
-                ? "[Old tool result content cleared]"
-                : part.state.output
+              const rawOutputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
               const maxChars = options?.toolOutputMaxChars
               const outputText =
                 !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars

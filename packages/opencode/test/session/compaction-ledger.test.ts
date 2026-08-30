@@ -50,8 +50,7 @@ function toolPart(overrides: {
         time: { start: 1000, end: overrides.end ?? 2000 },
       },
     }
-  if (status === "running")
-    return { ...base, state: { status, input: overrides.input ?? {}, time: { start: 1000 } } }
+  if (status === "running") return { ...base, state: { status, input: overrides.input ?? {}, time: { start: 1000 } } }
   return { ...base, state: { status, input: overrides.input ?? {}, raw: "{}" } }
 }
 
@@ -147,9 +146,7 @@ describe("SessionCompaction.buildLedger", () => {
   })
 
   test("errored tool calls are recorded as errored and never count as writes", () => {
-    const messages = [
-      assistantMsg([toolPart({ tool: "edit", status: "error", input: { filePath: "/repo/a.ts" } })]),
-    ]
+    const messages = [assistantMsg([toolPart({ tool: "edit", status: "error", input: { filePath: "/repo/a.ts" } })])]
     const ledger = SessionCompaction.buildLedger(messages)
     expect(ledger.writes).toEqual([])
     expect(ledger.calls[0]).toEqual({ tool: "edit", detail: "/repo/a.ts", exit: undefined, errored: true })
@@ -264,7 +261,8 @@ describe("SessionCompaction.renderLedger", () => {
 
   test("lists at most recentCalls tool calls, newest first", () => {
     const parts = []
-    for (let i = 1; i <= 15; i++) parts.push(toolPart({ tool: "bash", input: { command: `cmd-${i}` }, metadata: { exit: 0 } }))
+    for (let i = 1; i <= 15; i++)
+      parts.push(toolPart({ tool: "bash", input: { command: `cmd-${i}` }, metadata: { exit: 0 } }))
     const ledger = SessionCompaction.buildLedger([assistantMsg(parts)])
     const text = SessionCompaction.renderLedger(ledger, { recentCalls: 10 })
     expect(text).toContain("cmd-15")
@@ -334,6 +332,41 @@ describe("SessionCompaction.renderLedger", () => {
     expect(text).toContain("bash (exit ?) — killed-cmd")
     expect(text).toContain("glob (errored) — **/*.ts")
   })
+
+  test("redacts prefixed credentials, short headers, and signed URL material", () => {
+    const sensitive = [
+      "AWS_SECRET_ACCESS_KEY=dummy-assignment",
+      "OPENAI_API_KEY=dummy-openai",
+      "tool --aws-secret-access-key dummy-flag",
+      "curl -H 'Authorization: Bearer x'",
+      "curl -H 'Proxy-Authorization: Basic eA=='",
+      "curl -H 'Cookie: sid=x; csrf=y'",
+    ]
+    for (const input of sensitive) {
+      const detail = SessionCompaction.redactLedgerDetail(input)
+      expect(detail).not.toContain("dummy-")
+      expect(detail).not.toContain("Bearer x")
+      expect(detail).not.toContain("Basic eA==")
+      expect(detail).not.toContain("sid=x")
+      expect(detail).not.toContain("csrf=y")
+    }
+
+    const signed = SessionCompaction.redactLedgerDetail(
+      "curl https://example.com/download?X-Amz-Signature=dummy-signature#dummy-fragment",
+    )
+    expect(signed).toContain("https://example.com/download")
+    expect(signed).not.toContain("X-Amz-Signature")
+    expect(signed).not.toContain("dummy-fragment")
+
+    const basicAuth = SessionCompaction.redactLedgerDetail(
+      "curl https://dummy-user:dummy-pass@example.com/download",
+    )
+    expect(basicAuth).not.toContain("dummy-user")
+    expect(basicAuth).not.toContain("dummy-pass")
+
+    const harmless = "bun test packages/opencode/test/session"
+    expect(SessionCompaction.redactLedgerDetail(harmless)).toBe(harmless)
+  })
 })
 
 // ─── 5b: extractAccomplished / corroborateCarry / renderCarryAnchors ────────
@@ -375,7 +408,11 @@ describe("SessionCompaction.corroborateCarry", () => {
   const ledger = SessionCompaction.buildLedger([
     assistantMsg([
       toolPart({ tool: "write", input: { filePath: "/repo/models/orders.sql" }, end: 5000 }),
-      toolPart({ tool: "bash", input: { command: "python scripts/export.py --out report.csv" }, metadata: { exit: 0 } }),
+      toolPart({
+        tool: "bash",
+        input: { command: "python scripts/export.py --out report.csv" },
+        metadata: { exit: 0 },
+      }),
       toolPart({ tool: "bash", input: { command: "validate broken_thing.json" }, metadata: { exit: 1 } }),
     ]),
   ])
@@ -476,6 +513,15 @@ describe("SessionCompaction.renderCarryAnchors", () => {
     expect(text).toContain("item-59 ")
   })
 
+  test("a single oversized anchor is dropped rather than exceeding the cap", () => {
+    const text = SessionCompaction.renderCarryAnchors(
+      [{ text: "oversized " + "z".repeat(20_000), status: "verified" }],
+      100,
+    )
+    expect(text).toBe("")
+    expect(Token.estimate(text)).toBeLessThanOrEqual(100)
+  })
+
   test("deterministic rendering", () => {
     const items = [
       { text: "one", status: "verified" as const },
@@ -524,8 +570,6 @@ describe("leak guard", () => {
     const a = mk("dbt build --select orders")
     const b = mk("qqq build --select orders".replace("build", "frobnicate"))
     // Same structure: swapping the command text is the ONLY difference (no classifier).
-    expect(a.replace("dbt build --select orders", "CMD")).toBe(
-      b.replace("qqq frobnicate --select orders", "CMD"),
-    )
+    expect(a.replace("dbt build --select orders", "CMD")).toBe(b.replace("qqq frobnicate --select orders", "CMD"))
   })
 })

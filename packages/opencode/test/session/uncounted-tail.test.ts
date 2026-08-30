@@ -19,7 +19,8 @@ function msg(id: string, role: "user" | "assistant", text: string): MessageV2.Wi
 
 function model(context: number): Provider.Model {
   return {
-    id: "m", providerID: "p",
+    id: "m",
+    providerID: "p",
     api: { npm: "@ai-sdk/openai-compatible" },
     limit: { context, output: 4096 },
   } as unknown as Provider.Model
@@ -71,22 +72,32 @@ function assistantWithTool(id: string, text: string, output: string): MessageV2.
 describe("SessionPrompt.estimateUncountedTail", () => {
   test("counts a tool result attached to the last finished message itself", () => {
     const giant = "x".repeat(40_000)
-    const msgs = [msg("u", "user", "task"), assistantWithTool("a", "working", giant)]
-    const estimate = SessionPrompt.estimateUncountedTail(msgs, "a" as any)
+    const msgs = [msg("m1", "user", "task"), assistantWithTool("m2", "working", giant)]
+    const estimate = SessionPrompt.estimateUncountedTail(msgs, "m2" as any)
     expect(estimate).toBeGreaterThan(0)
     expect(estimate).toBe(Token.estimate(giant))
   })
 
   test("does not double-count the last finished message's own text", () => {
     // its text is already inside the provider-reported tokens.output
-    const msgs = [msg("u", "user", "task"), assistantWithTool("a", "some assistant prose here", "")]
-    expect(SessionPrompt.estimateUncountedTail(msgs, "a" as any)).toBe(0)
+    const msgs = [msg("m1", "user", "task"), assistantWithTool("m2", "some assistant prose here", "")]
+    expect(SessionPrompt.estimateUncountedTail(msgs, "m2" as any)).toBe(0)
   })
 
   test("still counts everything after the last finished message", () => {
     const later = "y".repeat(9_000)
-    const msgs = [msg("u", "user", "task"), assistantWithTool("a", "working", ""), msg("u2", "user", later)]
-    expect(SessionPrompt.estimateUncountedTail(msgs, "a" as any)).toBe(Token.estimate(later))
+    const msgs = [msg("m1", "user", "task"), assistantWithTool("m2", "working", ""), msg("m3", "user", later)]
+    expect(SessionPrompt.estimateUncountedTail(msgs, "m2" as any)).toBe(Token.estimate(later))
+  })
+
+  test("selects newer messages by monotonic ID when compacted rendering reorders the array", () => {
+    const newer = "n".repeat(9_000)
+    const older = "o".repeat(4_000)
+    const finished = assistantWithTool("m2", "working", "")
+    // filterCompacted may render retained newer content before the summary and
+    // older content after it. Array slicing would miss `m3` and count `m1`.
+    const reordered = [msg("m3", "user", newer), finished, msg("m1", "user", older)]
+    expect(SessionPrompt.estimateUncountedTail(reordered, "m2" as any)).toBe(Token.estimate(newer))
   })
 
   test("returns 0 for an unknown or absent id", () => {

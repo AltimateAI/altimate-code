@@ -231,8 +231,8 @@ describe("malformed-id round-trip: ingest → persist → replay", () => {
       const idA = a(raw)
       const idB = b(raw)
       expect(idA).not.toBe(idB)
-      expect(idA).toMatch(/^call_[0-9a-f]{8}$/)
-      expect(idB).toMatch(/^call_[0-9a-f]{8}$/)
+      expect(idA).toMatch(/^call_[0-9a-f]{32}$/)
+      expect(idB).toMatch(/^call_[0-9a-f]{32}$/)
     }
     // Within one processor the mapping stays deterministic (pairing contract).
     expect(a("")).toBe(a(""))

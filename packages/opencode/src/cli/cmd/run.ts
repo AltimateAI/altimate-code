@@ -821,7 +821,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "text" && part.time?.end) {
               tracer?.logText(part)
               // altimate_change start — explicit-done attribution input
-              accounting.onText(part.messageID, part.text)
+              accounting.onText(part.messageID, part.text, part.synthetic === true)
               // altimate_change end
               if (emit("text", { part })) continue
               const text = part.text.trim()
@@ -1171,7 +1171,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       // the prompt response carries the TERMINAL assistant message —
       // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
-      accounting.onPromptResult(sendResult?.data?.info)
+      if (sendResult?.error) accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
+      else accounting.onPromptResult(sendResult?.data?.info)
       // altimate_change end
 
       // Wait for the event loop to drain (breaks when session reaches idle)
@@ -1226,9 +1227,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 // back to technical output under --audience executive.
                 ...(audienceSystem ? { system: audienceSystem } : {}),
                 // altimate_change end
-                parts: [
-                  { type: "text", text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE },
-                ],
+                parts: [{ type: "text", text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE }],
               })
               .catch((e) => ({ error: e }) as SendResult)) as SendResult
             if (!res?.error) return res
@@ -1253,10 +1252,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // cancel the still-pending event subscription so nothing keeps
         // listening on a session whose confirmation path is dead.
         const challengeResult = await challengePromise.catch((e) => {
-          accounting.onSessionError(
-            "IdleDoneChallengeFailed",
-            e instanceof Error ? e.message : String(e),
-          )
+          accounting.onSessionError("IdleDoneChallengeFailed", e instanceof Error ? e.message : String(e))
           return undefined
         })
         // altimate_change start — upstream_fix: abort was only reached on the
