@@ -46,7 +46,7 @@ writeFileSync(
   }),
 )
 
-const { syncSkills, recentlySynced, registryStale, markRegistryApplied } =
+const { syncSkills, recentlySynced, registryStale, markRegistryApplied, flushPendingSyncs } =
   await import("@/altimate/workspace/skill-sync")
 const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
 
@@ -603,6 +603,28 @@ describe("workspace skill sync", () => {
     // registry change in the other direction and must refresh just the same.
     rmSync(path.join(project, MANAGED), { recursive: true, force: true })
     expect(registryStale(project)).toBe(true)
+  })
+
+  test("flushPendingSyncs waits for a sync a short-lived process would abandon", async () => {
+    // `run` exits as soon as its turn ends, which is routinely sooner than a
+    // cold sync finishes. Without this the staged tree was dropped on exit and,
+    // since nothing had been persisted, the next `run` started cold and lost the
+    // same race — the project never got its skills at all.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      await new Promise((r) => setTimeout(r, 40))
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+
+    const running = syncSkills(project)
+    // Still in flight: this is what a process exiting here would have thrown
+    // away, and it is what makes the assertion after the flush meaningful.
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+
+    await flushPendingSyncs()
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    await running
   })
 
   test("the published snapshot ignores itself in git", async () => {

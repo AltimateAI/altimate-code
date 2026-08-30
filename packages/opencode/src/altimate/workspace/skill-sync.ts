@@ -199,6 +199,34 @@ export function markRegistryApplied(directory: string): void {
   registryAppliedAt.set(canon, snapshotFingerprint(canon))
 }
 
+/** Await every sync still in flight, so a short-lived process does not exit
+ * with one half-finished.
+ *
+ * A one-shot `run` ends as soon as its turn does, which is routinely sooner
+ * than a cold sync completes — measured at ~7.6s against a local backend
+ * against a 2s wait bound. The staged tree was then discarded on exit and,
+ * because nothing had been persisted, the next `run` started cold and lost the
+ * same race: such a project never received its skills at all, however many
+ * times it was run. The TUI never showed this because it outlives the sync.
+ * Same reasoning as `awaitBackfill` on the bind path. */
+export async function flushPendingSyncs(timeoutMs = 30_000): Promise<void> {
+  const pending = [...inFlight.values()]
+  if (pending.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    // An armed timer keeps the event loop alive — the very thing this is
+    // called to avoid depending on.
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Has this project's snapshot been checked within the poll interval? Callers
  * on a per-message path use this to skip the network entirely. */
 export async function recentlySynced(directory: string): Promise<boolean> {

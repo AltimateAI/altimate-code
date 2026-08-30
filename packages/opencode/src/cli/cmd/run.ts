@@ -4,6 +4,9 @@ import { pathToFileURL } from "url"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { Flag } from "../../flag/flag"
+// altimate_change start — workspace feature gate (see the flush after loopPromise)
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { bootstrap } from "../bootstrap"
 import { EOL } from "os"
 import { Filesystem } from "../../util/filesystem"
@@ -903,6 +906,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
+
+      // altimate_change start — a cold workspace skill sync outlives a short
+      // turn, and this process exits the moment the turn ends. Without this the
+      // staged tree is discarded on exit and, since nothing was persisted, the
+      // next `run` starts cold and loses the same race — so such a project never
+      // received its skills at all. Imported lazily and only when the feature is
+      // on, so an opted-out run does not load the module.
+      if (CoreFlag.ALTIMATE_WORKSPACE) {
+        await import("../../altimate/workspace/skill-sync")
+          .then((m) => m.flushPendingSyncs())
+          .catch(() => {})
+      }
+      // altimate_change end
 
       // Remove crash handlers — trace will be finalized cleanly
       process.removeListener("SIGINT", onSigint)
