@@ -36,6 +36,10 @@ function stringArrayProblem(value: unknown, where: string): string | undefined {
 
 /** Describe the first runtime-relevant structural problem in a provider entry. */
 function providerEntryProblem(id: string, entry: unknown): string | undefined {
+  // build.ts emits the source JSON as a JavaScript object literal, where this
+  // otherwise-valid JSON key mutates the object's prototype instead of creating
+  // an own property. Reject it so the validated and emitted catalogs are equal.
+  if (id === "__proto__") return `${id} (reserved catalog key)`
   if (!isRecord(entry)) return `${id} (not an object)`
   if (typeof entry.id !== "string" || entry.id.length === 0) return `${id} (no non-empty string id)`
   if (entry.id !== id) return `${id} (id does not match catalog key)`
@@ -55,6 +59,7 @@ function providerEntryProblem(id: string, entry: unknown): string | undefined {
 
   for (const [modelId, model] of Object.entries(entry.models)) {
     const where = `${id}/${modelId}`
+    if (modelId === "__proto__") return `${where} (reserved catalog key)`
     if (!isRecord(model)) return `${where} (not an object)`
     if (typeof model.id !== "string" || model.id.length === 0) return `${where} (no non-empty string id)`
     if (model.id !== modelId) return `${where} (id does not match catalog key)`

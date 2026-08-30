@@ -138,6 +138,15 @@ describe("build models catalog validation", () => {
       message: "acme (id does not match catalog key)",
     },
     {
+      label: "a provider using the reserved __proto__ key",
+      mutate: (catalog) =>
+        Object.defineProperty(catalog, "__proto__", {
+          enumerable: true,
+          value: { ...catalog.acme, id: "__proto__" },
+        }),
+      message: "__proto__ (reserved catalog key)",
+    },
+    {
       label: "a provider without a string name",
       mutate: (catalog) => (catalog.acme.name = 42),
       message: "acme.name is not a non-empty string",
@@ -151,6 +160,15 @@ describe("build models catalog validation", () => {
       label: "a model ID that differs from its catalog key",
       mutate: (catalog) => (catalog.acme.models["acme-one"].id = "other"),
       message: "acme/acme-one (id does not match catalog key)",
+    },
+    {
+      label: "a model using the reserved __proto__ key",
+      mutate: (catalog) =>
+        Object.defineProperty(catalog.acme.models, "__proto__", {
+          enumerable: true,
+          value: { ...catalog.acme.models["acme-one"], id: "__proto__" },
+        }),
+      message: "acme/__proto__ (reserved catalog key)",
     },
     {
       label: "a model without a name",
