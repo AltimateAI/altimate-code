@@ -185,6 +185,36 @@ describe("SessionProcessor.createToolCallIDCoercer (ingestion half)", () => {
     expect(coerce.result("42")).toBe(first)
     expect(coerce.result("42")).toBe(second)
   })
+
+  test("an explicitly identified out-of-order result removes the matching occurrence", () => {
+    const coerce = SessionProcessor.createToolCallIDCoercer("msg_out_of_order")
+    const first = coerce.start("")
+    const second = coerce.start("")
+    expect(coerce.call("")).toBe(first)
+    expect(coerce.call("")).toBe(second)
+    expect(coerce.pending("")).toEqual([first, second])
+    expect(coerce.result("", second)).toBe(second)
+    expect(coerce.pending("")).toEqual([first])
+    expect(coerce.result("", first)).toBe(first)
+    expect(coerce.pending("")).toEqual([])
+  })
+
+  test("repeated ids are identity-matched and ambiguous identical calls fail closed", () => {
+    const running = (tool: string, input: unknown) =>
+      ({ tool, state: { status: "running", input, time: { start: 1 } } }) as MessageV2.ToolPart
+    const parts = new Map<string, MessageV2.ToolPart>([
+      ["call_a", running("read", { filePath: "a.ts" })],
+      ["call_b", running("read", { filePath: "b.ts" })],
+    ])
+    expect(
+      SessionProcessor.matchToolCallID(["call_a", "call_b"], { toolName: "read", input: { filePath: "b.ts" } }, parts),
+    ).toBe("call_b")
+
+    parts.set("call_b", running("read", { filePath: "a.ts" }))
+    expect(
+      SessionProcessor.matchToolCallID(["call_a", "call_b"], { toolName: "read", input: { filePath: "a.ts" } }, parts),
+    ).toBeUndefined()
+  })
 })
 
 describe("malformed-id round-trip: ingest → persist → replay", () => {

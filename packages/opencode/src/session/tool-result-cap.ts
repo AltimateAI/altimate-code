@@ -40,6 +40,7 @@ export namespace ToolResultCap {
     Math.floor(UNKNOWN_MODEL_CONTEXT * DEFAULT_SAFETY_FRACTION) * DEFAULT_LIMIT_FRACTION,
   )
 
+  // altimate_change start — cap partial output preserved on interrupted tools
   /**
    * Resolve the per-result token cap: an explicit `tool_output.dispatch_max_tokens`
    * config wins; otherwise min(existing byte-cap expressed in tokens, 15% of the
@@ -155,4 +156,20 @@ export namespace ToolResultCap {
     // hard-slice — a ≤ capTokens * 3-char head can never estimate above the cap.
     return { content: output.slice(0, Math.max(1, Math.floor(capTokens * MIN_CHARS_PER_TOKEN))), truncated: true }
   }
+
+  /**
+   * Preserve an interrupted tool's diagnostic metadata without letting partial
+   * stdout/stderr bypass the same dispatch cap enforced for settled results.
+   */
+  export function capInterruptedMetadata(
+    metadata: Record<string, unknown> | undefined,
+    capTokens: number,
+  ): Record<string, unknown> {
+    const next: Record<string, unknown> = { ...metadata, interrupted: true }
+    if (typeof next.output === "string") {
+      next.output = apply(next.output, capTokens, { outcome: "error" }).content
+    }
+    return next
+  }
+  // altimate_change end
 }

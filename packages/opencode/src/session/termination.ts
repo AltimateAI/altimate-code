@@ -39,16 +39,13 @@ export namespace SessionTermination {
     // trailing `\r`, which fails the closing fence's whitespace-only check and
     // leaves every fence permanently open (a genuine DONE is then rejected);
     // on bare-CR input the text never splits at all.
-    const lines = text
-      .replace(/\r\n?/g, "\n")
-      .replace(/\s+$/, "")
-      .split("\n")
+    const lines = text.replace(/\r\n?/g, "\n").replace(/\s+$/, "").split("\n")
     const last = lines[lines.length - 1]
     if (last === undefined) return false
-    // Markdown-indented code (4+ spaces or a tab) is demonstration text.
-    if (/^(?: {4,}|\t)/.test(last)) return false
-    // Up to 3 leading spaces is plain text in Markdown; anything else must match exactly.
-    if (last.replace(/^ {0,3}/, "") !== DONE_TOKEN) return false
+    // Require an unindented token. CommonMark permits up to three leading
+    // spaces in several block constructs; accepting them lets a nested list
+    // demonstration (`- Expected marker:` then `  DONE`) terminate the run.
+    if (last !== DONE_TOKEN) return false
     // Reject a final line inside an unclosed code fence — the block's content is
     // quoted material, not an assertion. Fence state follows CommonMark: a fence
     // opens with a run of >= 3 backticks or tildes (an info string, e.g. an
@@ -71,11 +68,7 @@ export namespace SessionTermination {
         // assertion.
         if (marker[0] === "`" && rest.includes("`")) continue
         open = { char: marker[0]!, length: marker.length }
-      } else if (
-        marker[0] === open.char &&
-        marker.length >= open.length &&
-        /^[ \t]*$/.test(rest)
-      ) {
+      } else if (marker[0] === open.char && marker.length >= open.length && /^[ \t]*$/.test(rest)) {
         open = undefined
       }
     }

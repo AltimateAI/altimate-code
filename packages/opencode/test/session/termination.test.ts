@@ -13,7 +13,7 @@ describe("SessionTermination.isExplicitDone", () => {
     expect(SessionTermination.isExplicitDone("Verified the build.\n\nDONE")).toBe(true)
     expect(SessionTermination.isExplicitDone("DONE  ")).toBe(true)
     expect(SessionTermination.isExplicitDone("DONE\n\n")).toBe(true)
-    expect(SessionTermination.isExplicitDone("  DONE  ")).toBe(true)
+    expect(SessionTermination.isExplicitDone("  DONE  ")).toBe(false)
   })
 
   test("rejects ordinary text and mid-sentence mentions", () => {
@@ -71,6 +71,7 @@ describe("SessionTermination.isExplicitDone", () => {
     expect(SessionTermination.isExplicitDone("The instructions said:\n> DONE")).toBe(false)
     expect(SessionTermination.isExplicitDone("Example:\n    DONE")).toBe(false)
     expect(SessionTermination.isExplicitDone("Example:\n\tDONE")).toBe(false)
+    expect(SessionTermination.isExplicitDone("- Expected marker:\n  DONE")).toBe(false)
   })
 
   test("is case-sensitive: prose 'done' never counts", () => {
@@ -151,9 +152,9 @@ describe("SessionTermination.explicitDoneStop (stop-path decision)", () => {
   })
 
   test("no text parts at all → no stop", () => {
-    expect(
-      SessionTermination.explicitDoneStop({ finish: "stop", hasError: false, parts: [{ type: "tool" }] }),
-    ).toBe(false)
+    expect(SessionTermination.explicitDoneStop({ finish: "stop", hasError: false, parts: [{ type: "tool" }] })).toBe(
+      false,
+    )
   })
 })
 

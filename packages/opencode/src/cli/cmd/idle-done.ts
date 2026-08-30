@@ -412,20 +412,24 @@ export namespace IdleDone {
         return
       }
       const configuredPrefix = options.verifyCommand?.trim()
+      const trimmedCommand = command.trimStart()
+      const configuredMatches = (() => {
+        if (!configuredPrefix || !trimmedCommand.startsWith(configuredPrefix)) return false
+        const boundary = trimmedCommand[configuredPrefix.length]
+        return boundary === undefined || /[\s;&|<>]/.test(boundary)
+      })()
       let configuredTailMutates = false
-      if (configuredPrefix && command.trimStart().startsWith(configuredPrefix)) {
+      if (configuredPrefix && configuredMatches) {
         // Trust the configured verifier itself (it may intentionally redirect
         // output), but not extra chained work appended after that prefix. A
         // green `npm test && rm generated.ts` verifies the pre-deletion state;
         // the deletion must advance the mutation watermark instead.
-        const suffix = command.trimStart().slice(configuredPrefix.length)
+        const suffix = trimmedCommand.slice(configuredPrefix.length)
         const chained = suffix.indexOf("&&")
         configuredTailMutates = chained >= 0 && isMutatingCommand(suffix.slice(chained + 2))
       }
       const isCandidate = configuredPrefix
-        ? command.trimStart().startsWith(configuredPrefix) &&
-          !hasUnsafeVerificationControl(command) &&
-          !configuredTailMutates
+        ? configuredMatches && !hasUnsafeVerificationControl(command) && !configuredTailMutates
         : isVerificationCommand(command) && !isMutatingCommand(command)
       if (isCandidate) {
         const exit = part.state?.metadata?.["exit"]

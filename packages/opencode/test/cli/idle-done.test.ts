@@ -466,6 +466,19 @@ describe("IdleDone hard preconditions", () => {
     expect(d.shouldChallenge()).toBe(true)
   })
 
+  test("(ii) a configured verifier requires a shell-token boundary", () => {
+    const opts: IdleDone.Options = { ...OPTS, verifyCommand: "make test" }
+    const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_fixture", "make testdata", 0))
+    d.observePart(stepFinish("m_fixture"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+  })
+
   test("(i)/(ii) work chained after a configured verifier is tracked as a later mutation", () => {
     const opts: IdleDone.Options = { ...OPTS, verifyCommand: "npm test" }
     const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))

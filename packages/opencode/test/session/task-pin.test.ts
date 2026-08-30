@@ -86,6 +86,20 @@ describe("selectPinSource — mode-aware pin selection", () => {
     expect(source?.text).toBe(TASK_REDIRECT)
   })
 
+  test("interactive acknowledgements never replace the latest task-bearing instruction", () => {
+    for (const acknowledgement of ["yes", "continue", "looks good", "Go ahead."]) {
+      const task = userMsg(TASK_REDIRECT)
+      const ack = userMsg(acknowledgement)
+      expect(SessionPrompt.selectPinSource([task, ack], false)?.id).toBe(task.info.id)
+    }
+    expect(SessionPrompt.selectPinSource([userMsg("yes"), userMsg("continue")], false)).toBeUndefined()
+  })
+
+  test("run mode skips a leading acknowledgement and pins the first actual task", () => {
+    const task = userMsg(TASK_RUN)
+    expect(SessionPrompt.selectPinSource([userMsg("okay"), task], true)?.id).toBe(task.info.id)
+  })
+
   test("synthetic-only and compaction-marker user messages are never pin sources", () => {
     const { history, cont } = historyWithRedirect()
     // interactive: latest substantive is the redirect, NOT the synthetic continue msg

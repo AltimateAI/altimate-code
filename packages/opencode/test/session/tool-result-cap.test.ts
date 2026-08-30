@@ -252,3 +252,15 @@ describe("ToolResultCap.apply", () => {
     expect(Math.ceil(after * 1.55)).toBeLessThan(65_536)
   })
 })
+
+describe("ToolResultCap.capInterruptedMetadata", () => {
+  test("caps preserved partial output and keeps unrelated metadata", () => {
+    const giant = "failure-output\n".repeat(20_000)
+    const metadata = ToolResultCap.capInterruptedMetadata({ output: giant, exit: null }, 300)
+    expect(metadata.interrupted).toBe(true)
+    expect(metadata.exit).toBeNull()
+    expect(typeof metadata.output).toBe("string")
+    expect(Token.estimate(metadata.output as string)).toBeLessThanOrEqual(300)
+    expect(metadata.output).not.toBe(giant)
+  })
+})

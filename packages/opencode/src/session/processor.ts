@@ -36,6 +36,7 @@ import { ToolResultCap } from "./tool-result-cap"
 // thin delegating facade that preserves behavior exactly.
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
+import { isDeepStrictEqual } from "node:util"
 // altimate_change end
 
 export namespace SessionProcessor {
@@ -98,6 +99,29 @@ export namespace SessionProcessor {
   }
   // altimate_change end
 
+  // A provider may repeat one malformed raw tool-call id for concurrent calls.
+  // FIFO is correct only when those calls settle in start order; use the
+  // tool-name/input identity carried by execution and result events to select
+  // the one unambiguous running part. Returning undefined is deliberate:
+  // silently attaching an output to the wrong call corrupts the transcript.
+  export type ToolCallIdentity = { toolName?: string; input?: unknown }
+
+  /** @internal Exported for focused pairing tests. */
+  export function matchToolCallID(
+    candidates: readonly string[],
+    identity: ToolCallIdentity,
+    parts: ReadonlyMap<string, MessageV2.ToolPart>,
+  ): string | undefined {
+    if (candidates.length <= 1) return candidates[0]
+    const matches = candidates.filter((id) => {
+      const part = parts.get(id)
+      if (!part || part.state.status !== "running") return false
+      if (identity.toolName !== undefined && part.tool !== identity.toolName) return false
+      return identity.input === undefined || isDeepStrictEqual(part.state.input, identity.input)
+    })
+    return matches.length === 1 ? matches[0] : undefined
+  }
+
   export function createToolCallIDCoercer(salt?: string) {
     const aliases = new Map<string, string>()
     const owners = new Map<string, string>()
@@ -140,10 +164,16 @@ export namespace SessionProcessor {
       queue.push(value)
       table.set(key, queue)
     }
-    const dequeue = (table: Map<string, string[]>, raw: unknown) => {
+    const dequeue = (table: Map<string, string[]>, raw: unknown, expected?: string) => {
       const key = keyOf(raw)
       const queue = table.get(key)
-      const value = queue?.shift()
+      const value = (() => {
+        if (!queue) return undefined
+        if (expected === undefined) return queue.shift()
+        const index = queue.indexOf(expected)
+        if (index < 0) return undefined
+        return queue.splice(index, 1)[0]
+      })()
       if (queue?.length === 0) table.delete(key)
       return value
     }
@@ -161,11 +191,14 @@ export namespace SessionProcessor {
         enqueue(awaitingResult, raw, id)
         return id
       },
-      result(raw: unknown) {
-        return dequeue(awaitingResult, raw) ?? stable(raw)
+      result(raw: unknown, expected?: string) {
+        return dequeue(awaitingResult, raw, expected) ?? stable(raw)
       },
       peek(raw: unknown) {
         return awaitingResult.get(keyOf(raw))?.[0] ?? stable(raw)
+      },
+      pending(raw: unknown) {
+        return [...(awaitingResult.get(keyOf(raw)) ?? [])]
       },
     })
   }
@@ -187,6 +220,14 @@ export namespace SessionProcessor {
     // BOTH the persisted callID and the pairing key. Salted per processor so
     // regenerated ids for empty/duplicate raw values cannot collide across steps.
     const coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
+    const consumeToolCallID = (raw: unknown, identity: ToolCallIdentity) => {
+      const candidates = coerceToolCallID.pending(raw)
+      const matched = matchToolCallID(candidates, identity, toolcalls)
+      if (candidates.length > 1 && matched === undefined) {
+        throw new Error("Cannot safely pair an out-of-order result for a repeated malformed tool-call id")
+      }
+      return coerceToolCallID.result(raw, matched)
+    }
     // per-tool call counter for varied-input loop detection
     const toolCallCounts = new Map<string, number>()
     // altimate_change end
@@ -210,11 +251,16 @@ export namespace SessionProcessor {
       get message() {
         return input.assistantMessage
       },
-      partFromToolCall(toolCallID: string) {
-        // altimate_change start — tool-execution lookups use the same coercion
-        return toolcalls.get(coerceToolCallID.peek(toolCallID))
-        // altimate_change end
+      // altimate_change start — disambiguate repeated concurrent tool-call ids
+      partFromToolCall(toolCallID: string, identity: ToolCallIdentity = {}) {
+        // Tool metadata may arrive out of order too. Skip an ambiguous update
+        // instead of mutating a different concurrent call's persisted part.
+        const candidates = coerceToolCallID.pending(toolCallID)
+        const matched = matchToolCallID(candidates, identity, toolcalls)
+        if (candidates.length > 1 && matched === undefined) return undefined
+        return toolcalls.get(matched ?? coerceToolCallID.peek(toolCallID))
       },
+      // altimate_change end
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
@@ -574,7 +620,10 @@ export namespace SessionProcessor {
                 }
                 case "tool-result": {
                   // altimate_change start — resolve the pair via the coerced id
-                  const toolResultCallID = coerceToolCallID.result(value.toolCallId)
+                  const toolResultCallID = consumeToolCallID(value.toolCallId, {
+                    toolName: value.toolName,
+                    input: value.input,
+                  })
                   const match = toolcalls.get(toolResultCallID)
                   // altimate_change end
                   if (match && match.state.status === "running") {
@@ -680,7 +729,10 @@ export namespace SessionProcessor {
 
                 case "tool-error": {
                   // altimate_change start — resolve the pair via the coerced id
-                  const toolErrorCallID = coerceToolCallID.result(value.toolCallId)
+                  const toolErrorCallID = consumeToolCallID(value.toolCallId, {
+                    toolName: value.toolName,
+                    input: value.input,
+                  })
                   const match = toolcalls.get(toolErrorCallID)
                   // altimate_change end
                   if (match && match.state.status === "running") {
@@ -1099,10 +1151,15 @@ export namespace SessionProcessor {
               }
               // altimate_change end
               input.assistantMessage.error = error
-              Bus.publish(Session.Event.Error, {
+              // altimate_change start — order terminal error before idle publication
+              // Publish the error before idle. The run harness drains this
+              // generation through idle before opening a challenge stream; an
+              // unawaited publish can otherwise arrive on that fresh stream.
+              await Bus.publish(Session.Event.Error, {
                 sessionID: input.assistantMessage.sessionID,
                 error: input.assistantMessage.error,
               })
+              // altimate_change end
               // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
               // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
               // APIError (provider failures after retry exhaustion), AuthError, and any other streaming error.
@@ -1139,7 +1196,9 @@ export namespace SessionProcessor {
             if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
               // altimate_change start — upstream_fix: mark aborted tools so partial output is replayed correctly.
               const metadata =
-                part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true }
+                part.state.status === "running"
+                  ? ToolResultCap.capInterruptedMetadata(part.state.metadata, toolResultCapTokens)
+                  : { interrupted: true }
               // altimate_change end
               await Session.updatePart({
                 ...part,

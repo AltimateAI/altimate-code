@@ -523,6 +523,33 @@ export namespace SessionCompaction {
   const LEDGER_WRITE_TOOLS = new Set(["write", "edit"])
   const LEDGER_DETAIL_MAX = 100
 
+  // A short acknowledgement can steer the live conversation but is not an
+  // authoritative task specification worth pinning through compaction. Keep
+  // this intentionally narrow: uncertain text remains task-bearing.
+  export function isPinnableTaskText(value: string): boolean {
+    const normalized = value
+      .trim()
+      .replace(/[.!?…]+$/u, "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+    if (!normalized) return false
+    return !/^(?:yes|yep|yeah|ok|okay|sure|continue|proceed|go ahead|do it|looks good|sounds good|lgtm|approved|thanks|thank you)$/.test(
+      normalized,
+    )
+  }
+
+  export function hasPinnableTask(messages: MessageV2.WithParts[]): boolean {
+    return messages.some((msg) => {
+      if (msg.info.role !== "user" || msg.parts.some((part) => part.type === "compaction")) return false
+      const text = msg.parts
+        .filter((part): part is MessageV2.TextPart => part.type === "text" && part.synthetic !== true)
+        .map((part) => part.text)
+        .join("\n\n")
+      return isPinnableTaskText(text)
+    })
+  }
+
   /**
    * Ledger text is persisted into a later model prompt, so treat every tool
    * argument as sensitive. This intentionally over-redacts opaque credentials
@@ -533,6 +560,20 @@ export namespace SessionCompaction {
     const sensitiveName =
       /(?:api[_-]?key|access[_-]?key|access[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|(?:^|[_-])(?:key|token|secret|password|passwd|credential|signature|authorization|cookie)(?:$|[_-]))/i
     let masked = Telemetry.maskString(value)
+
+    // curl-style authentication flags are credentials even though the generic
+    // long-flag classifier cannot safely treat every `user` argument as secret.
+    // Cover spaced, equals, and attached short-flag forms.
+    masked = masked
+      .replace(
+        /(^|\s)(--user)(=|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+        (_match, lead: string, flag: string, separator: string) => `${lead}${flag}${separator}<redacted>`,
+      )
+      .replace(
+        /(^|\s)(-u)(?:(=|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))/gi,
+        (_match, lead: string, flag: string, separator: string | undefined) =>
+          `${lead}${flag}${separator ?? ""}<redacted>`,
+      )
 
     // Strip URL userinfo and signed/query material before applying structural
     // command redaction. This works for HTTP-compatible and custom schemes.
@@ -1226,7 +1267,11 @@ When constructing the summary, try to stick to this template:
     // small-window session, which would otherwise tell the summarizer to omit
     // the task while no pin exists to compensate. Layered as an ADDITION to
     // whichever summary prompt is active — never a replacement.
-    if (pinEnabled(cfg) && pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID }) > 0)
+    if (
+      pinEnabled(cfg) &&
+      pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID }) > 0 &&
+      hasPinnableTask(input.unfilteredMessages ?? input.messages)
+    )
       promptText += "\n\n" + PIN_SUMMARY_ADDITION
     // altimate_change end
     // altimate_change start — measure the assembled summarizer request overhead

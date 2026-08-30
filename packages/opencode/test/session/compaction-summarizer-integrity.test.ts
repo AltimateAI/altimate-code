@@ -298,6 +298,17 @@ describe("session.compaction summarizer integrity (/ item 3)", () => {
 
     expect(summarizerPromptText()).not.toContain(SessionCompaction.PIN_SUMMARY_ADDITION)
   })
+
+  test("PIN_SUMMARY_ADDITION is omitted when history contains only an acknowledgement", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    messages[0].parts[0].text = "continue"
+    processBehaviors = [writeSummary("a real summary")]
+
+    await run({ sessionID, messages, markerID })
+
+    expect(summarizerPromptText()).not.toContain(SessionCompaction.PIN_SUMMARY_ADDITION)
+  })
   // altimate_change end
 
   test("does not retry when the first attempt produces summary text", async () => {

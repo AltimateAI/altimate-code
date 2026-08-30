@@ -478,9 +478,20 @@ describe("run command request/stream lifecycle contracts", () => {
   test("abort suppression is initial-stream-only and a declined challenge enqueues continuation", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
     expect(source).toContain("options?.suppressInterruptedPromptAbort")
-    expect(source).toContain('loop(events.stream, { suppressInterruptedPromptAbort: true })')
+    expect(source).toContain("loop(events.stream, { suppressInterruptedPromptAbort: true })")
+    expect(source).toMatch(/await sdk\.session\.abort\(\{ sessionID \}\)[\s\S]{0,500}?continue/)
     expect(source).toContain("SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE")
     expect(source).toContain('"IdleDoneContinuationUnconfirmed"')
+  })
+
+  test("an SSE-triggered request abort preserves the original stream failure", async () => {
+    const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
+    expect(source).toMatch(
+      /if \(sendFailure\) \{[\s\S]*?if \(eventLoopFailure\) error = RunAccounting\.serializeSessionError\(eventLoopFailure\)/,
+    )
+    expect(source).toMatch(
+      /else if \(sendResult\?\.error\) \{[\s\S]*?if \(eventLoopFailure\) error = RunAccounting\.serializeSessionError\(eventLoopFailure\)/,
+    )
   })
 })
 // altimate_change end

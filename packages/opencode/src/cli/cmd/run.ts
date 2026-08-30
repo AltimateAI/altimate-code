@@ -819,7 +819,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
                   )
                 }
                 await sdk.session.abort({ sessionID })
-                break
+                // Keep the initial subscription alive until this interrupted
+                // generation publishes its ordered MessageAbortedError -> idle
+                // tail. Starting the challenge subscription before that tail is
+                // drained lets the intentional abort poison the fresh phase.
+                continue
               }
               // altimate_change end
               if (emit("step_finish", { part })) continue
@@ -1298,12 +1302,21 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // the prompt response carries the TERMINAL assistant message —
       // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
       if (sendFailure) {
-        accounting.onPromptSendError(sendFailure)
-        error = RunAccounting.serializeSessionError(sendFailure)
+        // Losing SSE intentionally aborts the synchronous POST. Attribute that
+        // derivative AbortError to the original stream failure; otherwise it
+        // overwrites timeout/error classification and the actionable message.
+        if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
+        else {
+          accounting.onPromptSendError(sendFailure)
+          error = RunAccounting.serializeSessionError(sendFailure)
+        }
         eventAbort.abort()
       } else if (sendResult?.error) {
-        accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
-        error = RunAccounting.serializeSessionError(sendResult.error)
+        if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
+        else {
+          accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
+          error = RunAccounting.serializeSessionError(sendResult.error)
+        }
         eventAbort.abort()
       } else accounting.onPromptResult(sendResult?.data?.info)
       // altimate_change end

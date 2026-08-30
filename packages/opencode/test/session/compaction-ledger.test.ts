@@ -363,6 +363,10 @@ describe("SessionCompaction.renderLedger", () => {
       "curl -H 'Authorization: Bearer x'",
       "curl -H 'Proxy-Authorization: Basic eA=='",
       "curl -H 'Cookie: sid=x; csrf=y'",
+      "curl -u alice:dummy-password https://example.com",
+      "curl --user alice:dummy-password https://example.com",
+      "curl --user=alice:dummy-password https://example.com",
+      "curl -ualice:dummy-password https://example.com",
     ]
     for (const input of sensitive) {
       const detail = SessionCompaction.redactLedgerDetail(input)

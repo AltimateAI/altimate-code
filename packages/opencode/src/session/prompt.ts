@@ -178,6 +178,7 @@ export namespace SessionPrompt {
           abort: AbortController
           // altimate_change start — prevent idle listeners attaching to a closing prompt generation
           closing?: boolean
+          loopOwned?: boolean
           // altimate_change end
           callbacks: {
             resolve(input: MessageV2.WithParts): void
@@ -382,10 +383,20 @@ export namespace SessionPrompt {
       return
     }
     match.abort.abort()
-    delete s[sessionID]
-    // Do NOT set idle status here — on abort the processor's catch block
-    // publishes session.error THEN sets idle, preserving correct event ordering.
-    // On normal completion, loop() sets idle after the while loop exits (see below).
+    if (!match.loopOwned) {
+      // shell() also uses start(), but it has no loop disposer when no prompt
+      // callbacks are queued. That owner must restore idle directly.
+      if (s[sessionID] === match) delete s[sessionID]
+      await SessionStatus.set(sessionID, { type: "idle" })
+      return
+    }
+    // Keep this exact generation registered until loop()'s generation-scoped
+    // disposer runs. Deleting it here makes the disposer miss its fallback-idle
+    // transition when cancellation lands during bootstrap, compaction, or any
+    // other path outside the processor catch block. The tombstone is not marked
+    // closing yet, so a new prompt cannot overlap the still-unwinding generation.
+    // Processor-owned aborts still publish session.error before idle; the
+    // disposer observes that idle and only removes the registry entry.
   }
   // altimate_change end
 
@@ -403,10 +414,14 @@ export namespace SessionPrompt {
         callbacks.push({ resolve, reject })
       })
     }
+    // altimate_change start — bind lifecycle cleanup to this active loop generation
+    const generation = state()[sessionID]
+    if (generation?.abort.signal === abort) generation.loopOwned = true
+    // altimate_change end
 
     // altimate_change start — generation-scoped cleanup owns the fallback idle.
-    // Remove this exact loop generation from the registry before publishing
-    // idle, so an event consumer can safely start the next prompt immediately.
+    // Retain this exact loop generation until its missing idle transition has
+    // been published, then remove it without touching any replacement.
     // Processor errors may already have published error -> idle; in that case
     // SessionStatus is already idle and cleanup must not publish a stale second
     // idle into the next generation. Failures outside the processor (notably
@@ -1787,7 +1802,8 @@ export namespace SessionPrompt {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
 
-    const context = (args: any, options: ToolCallOptions): Tool.Context => ({
+    // altimate_change start — carry tool identity into repeated-id metadata lookup
+    const context = (toolName: string, args: any, options: ToolCallOptions): Tool.Context => ({
       sessionID: input.session.id,
       abort: options.abortSignal!,
       messageID: input.processor.message.id,
@@ -1800,7 +1816,7 @@ export namespace SessionPrompt {
       metadata: (val: { title?: string; metadata?: any }) =>
         // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
         Effect.promise(async () => {
-          const match = input.processor.partFromToolCall(options.toolCallId)
+          const match = input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
           if (match && match.state.status === "running") {
             await Session.updatePart({
               ...match,
@@ -1829,6 +1845,7 @@ export namespace SessionPrompt {
         }),
       // altimate_change end
     })
+    // altimate_change end
 
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
@@ -1842,7 +1859,9 @@ export namespace SessionPrompt {
         description: item.description,
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
-          const ctx = context(args, options)
+          // altimate_change start — disambiguate repeated concurrent tool-call ids
+          const ctx = context(item.id, args, options)
+          // altimate_change end
           await Plugin.trigger(
             "tool.execute.before",
             {
@@ -1902,7 +1921,9 @@ export namespace SessionPrompt {
       item.inputSchema = jsonSchema(transformed)
       // Wrap execute to add plugin hooks and format output
       item.execute = async (args, opts) => {
-        const ctx = context(args, opts)
+        // altimate_change start — disambiguate repeated concurrent tool-call ids
+        const ctx = context(key, args, opts)
+        // altimate_change end
 
         await Plugin.trigger(
           "tool.execute.before",
@@ -2563,7 +2584,7 @@ export namespace SessionPrompt {
         .map((p) => p.text)
         .join("\n\n")
         .trim()
-      if (!text) continue
+      if (!SessionCompaction.isPinnableTaskText(text)) continue
       candidates.push({ id: msg.info.id, text })
     }
     if (!candidates.length) return undefined
@@ -3025,11 +3046,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       throw new Session.BusyError(input.sessionID)
     }
 
-    using _ = defer(() => {
+    // altimate_change start — await idle restoration for shell-owned generations
+    await using _ = defer(async () => {
       // If no queued callbacks, cancel (the default)
       const callbacks = state()[input.sessionID]?.callbacks ?? []
       if (callbacks.length === 0) {
-        cancel(input.sessionID)
+        await cancel(input.sessionID)
       } else {
         // Otherwise, trigger the session loop to process queued items
         loop({ sessionID: input.sessionID, resume_existing: true }).catch((error) => {
@@ -3037,6 +3059,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       }
     })
+    // altimate_change end
 
     const session = await Session.get(input.sessionID)
     if (session.revert) {
