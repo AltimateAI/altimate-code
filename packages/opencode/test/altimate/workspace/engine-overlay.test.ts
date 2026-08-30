@@ -330,6 +330,40 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts.map((t) => t.title)).toEqual(["Workspace link could not be read"])
   })
 
+  test("a binding read that fails at instance start attaches at the first readable boundary", async () => {
+    const h = install({})
+    let calls = 0
+    syncInternals.resolveBinding = async () => {
+      calls += 1
+      if (calls === 1) throw new Error("EBUSY")
+      return h.binding
+    }
+    await syncInternals.config!.get()
+    expect(overlayForTests()).toBeNull()
+    // Not a probe failure: no TTL stands between a readable boundary and the attach.
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    expect(h.added).toHaveLength(1)
+    expect(h.probes).toBe(1)
+  })
+
+  test("a foreign entry dropped over an unreadable link is handed back once the directory reads as unbound", async () => {
+    const h = install({ binding: null, mcp: { datamate: HOSTED_ENTRY } })
+    let unreadable = true
+    syncInternals.resolveBinding = async () => {
+      if (unreadable) throw new Error("EBUSY")
+      return null
+    }
+    await syncInternals.config!.get()
+    await beforeTurn("s1")
+    expect(h.removes).toBe(1)
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    unreadable = false
+    await beforeTurn("s1")
+    expect(settledOutcome("s1")).toEqual({ kind: "unbound" })
+    expect(h.added).toEqual([HOSTED_ENTRY])
+  })
+
   test("the key stays owned through the unlink teardown", async () => {
     const h = install({})
     await beforeTurn("s1")

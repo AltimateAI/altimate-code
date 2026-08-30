@@ -45,6 +45,9 @@ beforeEach(() => {
 
 afterEach(() => {
   resetForTests()
+  // `resetForTests` forgets state, not seams: clear every override so nothing
+  // set here reaches another test reading the module-global seam.
+  for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured = originalIsConfigured
   if (originalFlag === undefined) delete process.env.ALTIMATE_WORKSPACE
   else process.env.ALTIMATE_WORKSPACE = originalFlag

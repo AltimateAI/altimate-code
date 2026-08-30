@@ -135,6 +135,13 @@ type DirectoryState = {
   /** When the last overlay attempt threw. A failed attempt is retried at the
    * probe TTL, not on every turn — each retry invalidates the whole config. */
   failedAt?: number
+  /** The last overlay attempt could not read the binding: a file that is
+   * present but unreadable, not a derivation failure, so not throttled — the
+   * next readable boundary reloads at once. Holds the read's error. */
+  linkUnreadable?: string
+  /** The turn hook dropped a foreign entry under the key over an unreadable
+   * link. Should the directory then read as unbound, the entry is handed back. */
+  droppedForeign?: boolean
   /** The key is set by organisation-managed config: nothing here claims it. */
   managed?: boolean
 }
@@ -171,6 +178,7 @@ export async function overlay(
 ): Promise<void> {
   const state = stateFor(directory)
   state.failedAt = undefined
+  state.linkUnreadable = undefined
   state.managed = opts.managed === true
   try {
     if (!isEnabled() || isServe()) {
@@ -187,12 +195,12 @@ export async function overlay(
     }
     const read = await resolveBinding(directory)
     if (read.kind === "failed") {
-      // Whether the directory is bound is unknown. Treated like any other
-      // failed derivation: nothing claimed, retried at the probe TTL, and the
-      // turn boundary decides what may run under the key meanwhile.
+      // Whether the directory is bound is unknown: nothing claimed, and the
+      // turn boundary decides what may run under the key meanwhile. Not a
+      // derivation failure, so the boundary reloads as soon as it can read.
       log.warn("workspace engine overlay failed: the binding could not be read", { directory, err: read.error })
       state.current = null
-      state.failedAt = now()
+      state.linkUnreadable = read.error
       return
     }
     if (read.kind === "unbound") {
@@ -312,6 +320,27 @@ function config() {
   )
 }
 
+/** An unreadable link is not an unlink. Fail closed: an engine of ours keeps
+ * running and the key stays owned; with nothing of ours running, whatever MCP
+ * started from the loaded config is dropped rather than left to answer for a
+ * workspace this directory may well be bound to — and remembered, so that a
+ * directory which then reads as unbound gets its entry back. The binding is
+ * read again at the next boundary. */
+async function refuseUnreadableLink(sessionID: string, state: DirectoryState, error: string): Promise<void> {
+  if (!state.applied?.entry && DATAMATE_KEY in (await mcp().status())) {
+    await mcp().remove(DATAMATE_KEY)
+    state.droppedForeign = true
+  }
+  const outcome: Outcome = { kind: "connect-failed", error: "the workspace link could not be read" }
+  record(sessionID, outcome)
+  const kept = state.applied?.entry ? "the running engine is kept and " : ""
+  await announceRefusal(sessionID, outcome, {
+    title: state.applied ? `Workspace "${state.applied.workspace.name}": link could not be read` : "Workspace link could not be read",
+    message: `${outcome.error} (${error}); ${kept}it is read again next turn.`,
+    variant: "warning",
+  })
+}
+
 /** Hand the key back to whatever the reloaded config says now that the overlay
  * no longer fills it: the user's own hosted or IDE-written entry, if any. MCP
  * enumerates live clients only, so a restored config entry must be started or
@@ -415,36 +444,21 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   }
 
   const read = await resolveBinding(directory)
-  if (read.kind === "failed") {
-    // An unreadable link is not an unlink. Fail closed: an engine of ours
-    // keeps running and the key stays owned; with nothing of ours running,
-    // whatever MCP started from the loaded config is dropped rather than left
-    // to answer for a workspace this directory may well be bound to. The
-    // binding is read again at the next boundary.
-    if (!state.applied?.entry && DATAMATE_KEY in (await mcp().status())) await mcp().remove(DATAMATE_KEY)
-    const outcome: Outcome = { kind: "connect-failed", error: "the workspace link could not be read" }
-    record(sessionID, outcome)
-    const kept = state.applied?.entry ? "the running engine is kept and " : ""
-    await announceRefusal(sessionID, outcome, {
-      title: state.applied
-        ? `Workspace "${state.applied.workspace.name}": link could not be read`
-        : "Workspace link could not be read",
-      message: `${outcome.error} (${read.error}); ${kept}it is read again next turn.`,
-      variant: "warning",
-    })
-    return
-  }
+  if (read.kind === "failed") return refuseUnreadableLink(sessionID, state, read.error)
   const binding = read.kind === "bound" ? read.binding : null
   if (!binding) {
     // Unlinked (or never linked): the key is not ours to fill.
     let loaded: { mcp?: Record<string, unknown> } | undefined
-    if (state.current || state.applied) {
+    if (state.current || state.applied || state.droppedForeign) {
       await config().invalidate()
       loaded = await config().get()
     }
     // Whether the overlay had an engine running or had refused one (and so had
-    // removed the key from the config it shadowed), the key is handed back.
+    // removed the key from the config it shadowed), the key is handed back —
+    // as is a foreign entry dropped while the link could not be read.
     if (state.applied) await releaseKey(loaded, !!state.applied.entry)
+    else if (state.droppedForeign) await releaseKey(loaded, false)
+    state.droppedForeign = false
     state.applied = null
     record(sessionID, { kind: "unbound" })
     return
@@ -452,11 +466,12 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   const boundKey = workspaceKey(binding)
 
   // Reload the overlay when the binding moved — to another workspace, or the
-  // same id under another account — or when a refused engine may have
-  // appeared since (the probe memo bounds how often that is asked).
+  // same id under another account — when the last load could not read the
+  // binding at all, or when a refused engine may have appeared since (the
+  // probe memo bounds how often that is asked).
   let reload = state.current
     ? state.current.workspace.key !== boundKey
-    : state.failedAt === undefined || now() - state.failedAt >= FAILED_PROBE_TTL_MS
+    : state.linkUnreadable !== undefined || state.failedAt === undefined || now() - state.failedAt >= FAILED_PROBE_TTL_MS
   if (!reload && state.current && !state.current.entry) {
     const probe = await probeEngine()
     reload = probe.kind === "ok"
@@ -466,6 +481,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     await config().invalidate()
     loaded = await config().get()
   }
+  // The boundary read the binding but the reload could not: the link is
+  // flapping, and the reload's verdict is the one the config now reflects.
+  if (!state.current && state.linkUnreadable !== undefined) return refuseUnreadableLink(sessionID, state, state.linkUnreadable)
 
   // A transient overlay failure (its retry is throttled above) keeps what was
   // last applied for this same workspace: a running engine is not released
@@ -513,6 +531,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     await mcp().remove(DATAMATE_KEY)
   }
   state.applied = overlayNow
+  state.droppedForeign = false
 
   if (!overlayNow.entry) {
     const refusal = overlayNow.refusal ?? { kind: "engine-missing" as const }
