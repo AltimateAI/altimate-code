@@ -285,15 +285,24 @@ export function categorizeConnectionError(e: unknown): string {
   // altimate_change start — categories for local-client faults
   // Checked before the generic "timeout"/"not found" rules below, which are
   // about the remote warehouse and would otherwise swallow these.
-  if (msg.includes("did not finish opening")) return "driver_open_timeout"
-  // "locked by another process" is the DuckDB driver's own wrapper. The other
-  // two are DuckDB's raw text ("Could not set lock on file …: Conflicting lock
-  // is held"), matched here as well so a lock that reaches this function
-  // unwrapped is still classified rather than falling through to "other".
+  if (msg.includes("did not finish opening")) {
+    // A deadline the connection itself set is the connection's fault, and the
+    // remedy is to raise or drop that setting. Reporting it as a broken client
+    // — "stop and report, nothing about your config is wrong" — is the exact
+    // mirror of the confusion this categorisation exists to remove. Only a
+    // deadline the caller did not choose per-connection is infrastructure.
+    return msg.includes("deadline was set on this connection") ? "config_error" : "driver_open_timeout"
+  }
+  // "locked by another process" is the DuckDB driver's own wrapper. The second
+  // clause is DuckDB's raw text ("Could not set lock on file …: Conflicting
+  // lock is held"), matched here as well so a lock that reaches this function
+  // unwrapped is still classified rather than falling through to "other". Both
+  // halves of that clause are required: "could not set lock" on its own is
+  // generic enough to appear in an unrelated remote error, and claiming it
+  // would tell the user to close a local process over a remote fault.
   if (
     msg.includes("locked by another process") ||
-    msg.includes("conflicting lock") ||
-    msg.includes("could not set lock")
+    (msg.includes("could not set lock") && msg.includes("conflicting lock"))
   )
     return "store_locked"
   // altimate_change end

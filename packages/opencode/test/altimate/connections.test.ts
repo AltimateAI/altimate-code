@@ -51,6 +51,22 @@ describe("categorizeConnectionError: local-client faults", () => {
     expect(categorizeConnectionError(err)).toBe("driver_open_timeout")
   })
 
+  test("a deadline the connection set is a config fault, not a broken client", () => {
+    const err = new Error(
+      'DuckDB store "/tmp/w.duckdb" did not finish opening within 1ms. ' +
+        "This deadline was set on this connection as open_timeout_ms=1; raise or remove it.",
+    )
+    expect(categorizeConnectionError(err)).toBe("config_error")
+    expect(isInfrastructureFailure(categorizeConnectionError(err))).toBe(false)
+  })
+
+  test("does not claim another driver's error just because it mentions a lock", () => {
+    // "could not set lock" alone is generic enough to appear in an unrelated
+    // remote failure; claiming it would tell the user to close a local process
+    // over a warehouse-side fault.
+    expect(categorizeConnectionError(new Error("ERROR: could not set lock timeout"))).not.toBe("store_locked")
+  })
+
   test("still classifies a real credentials failure as auth_failed", () => {
     expect(categorizeConnectionError(new Error("password authentication failed for user"))).toBe("auth_failed")
   })

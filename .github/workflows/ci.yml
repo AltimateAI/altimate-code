@@ -68,6 +68,13 @@ jobs:
               - 'packages/opencode/test/altimate/warehouse-test-duckdb-e2e.test.ts'
               - 'packages/opencode/test/altimate/duckdb-lock-helper.ts'
               - 'packages/opencode/src/altimate/tools/warehouse-test.ts'
+              - 'packages/drivers/test/**'
+              # These govern whether the native DuckDB binding is fetched at all
+              # (`trustedDependencies`, and the pinned version). A change to them
+              # can break every real-DuckDB test while touching no test file.
+              - 'package.json'
+              - 'bun.lock'
+              - 'packages/drivers/package.json'
             dbt-tools:
               - 'packages/dbt-tools/**'
             installer:
@@ -294,6 +301,14 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      # `packages/drivers` declares no scripts and no job had it as a working
+      # directory, so its 141 unit tests — including the driver's lock, timeout
+      # and read-only regressions — never ran in CI at all. The main TypeScript
+      # job runs `bun test` from `packages/opencode` only.
+      - name: Run drivers unit suite
+        run: bun test --timeout 60000
+        working-directory: packages/drivers
+
       - name: Run local driver E2E (DuckDB, SQLite, PostgreSQL)
         run: bun test test/altimate/drivers-e2e.test.ts
         working-directory: packages/opencode
@@ -308,8 +323,14 @@ jobs:
       # whole-directory run these would silently exercise a fake. With
       # ALTIMATE_DUCKDB_E2E=1 a missing or mocked driver fails the step rather
       # than skipping it.
+      #
+      # `--timeout` is explicit because invoking `bun test` directly does not use
+      # the package's `test` script, so it would otherwise take the CLI default
+      # of 5000ms — shorter than both the driver's 30s default open budget and
+      # the lock helper's 30s readiness budget, which would reimpose exactly the
+      # kind of too-short outer deadline this PR removes.
       - name: Run DuckDB store-open E2E (real store, no mocks)
-        run: bun test test/altimate/duckdb-open-e2e.test.ts test/altimate/warehouse-test-duckdb-e2e.test.ts
+        run: bun test --timeout 90000 test/altimate/duckdb-open-e2e.test.ts test/altimate/warehouse-test-duckdb-e2e.test.ts
         working-directory: packages/opencode
         env:
           ALTIMATE_DUCKDB_E2E: "1"

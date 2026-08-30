@@ -34,8 +34,11 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
   fs.writeFileSync(
     scriptPath,
     [
-      `const { connect } = await import(${JSON.stringify(DRIVER_PATH)})`,
       `try {`,
+      // Inside the try, so a driver that fails to load is reported through the
+      // same HOLD_FAILED channel as any other failure rather than surfacing as
+      // a bare unhandled rejection the parent has to guess at.
+      `  const { connect } = await import(${JSON.stringify(DRIVER_PATH)})`,
       `  const c = await connect({ type: "duckdb", path: process.argv[2] })`,
       `  await c.connect()`,
       // A real write, so the lock is unambiguously a writer's.
@@ -73,15 +76,21 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
     throw new Error(`lock holder exited without taking the lock: ${err || "(no output)"}`)
   })()
 
-  const timeout = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error("lock holder did not report READY within 30s")), 30_000),
-  )
+  // The handle is kept so it can be cleared: an un-cleared timer holds the
+  // event loop open, which would make the whole test process sit for the full
+  // 30s after its last assertion, once per call.
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("lock holder did not report READY within 30s")), 30_000)
+  })
 
   try {
     await Promise.race([ready, timeout])
   } catch (e) {
     child.kill()
     throw e
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 
   return {

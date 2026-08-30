@@ -189,6 +189,50 @@ describe("DuckDB driver", () => {
       await connector.close()
     })
 
+    test("retries with READ_ONLY when the first open fails with DuckDB's real lock text", async () => {
+      // The other retry test drives a fabricated "DUCKDB_LOCKED: file is locked"
+      // string, which the driver's original `.includes("locked")` check already
+      // matched. Only this one uses the message DuckDB actually emits, so only
+      // this one would catch a regression that broke detection of a real lock
+      // collision on the retry path.
+      let attempts = 0
+      const accessModes: Array<string | undefined> = []
+      mock.module("duckdb", () => ({
+        default: {
+          Database: class {
+            constructor(_path: string, optsOrCb: any, cb?: (err: Error | null) => void) {
+              const opts = typeof optsOrCb === "function" ? undefined : optsOrCb
+              const done = openCallback(optsOrCb, cb)
+              accessModes.push(opts?.access_mode)
+              attempts++
+              if (attempts === 1) setTimeout(() => done(new Error(REAL_DUCKDB_LOCK_ERROR)), 0)
+              else setTimeout(() => done(null), 0)
+            }
+            connect() {
+              return {
+                all: (_sql: string, cb: (err: Error | null, rows: any[]) => void) => {
+                  cb(null, [{ result: 1 }])
+                },
+              }
+            }
+            close(cb: any) {
+              if (cb) cb(null)
+            }
+          },
+        },
+      }))
+
+      const { connect } = await import("../src/duckdb")
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb" })
+      await connector.connect()
+
+      expect(attempts).toBe(2)
+      expect(accessModes[0]).toBeUndefined()
+      expect(accessModes[1]).toBe("READ_ONLY")
+
+      await connector.close()
+    })
+
     test("wraps a lock error on an explicitly read-only open, and does not retry it", async () => {
       // A caller that set `readonly` already gets READ_ONLY on the first open,
       // so there is nothing for the retry to try differently — DuckDB's file

@@ -129,7 +129,18 @@ describe("DuckDB driver: opening a real store", () => {
     // The old message was `Timed out opening DuckDB database "<path>"`, which
     // reads as "the store is broken" and sent investigators after the file.
     expect(message).toContain("not a fault in the store")
-    expect(message).toContain("ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS")
+  })
+
+  ddbTest("a deadline the connection set says so, so it is not read as a broken client", async () => {
+    // The remedy differs by source, so the message has to name it. A budget the
+    // connection chose is fixed by changing that connection; the default firing
+    // says something about the machine instead.
+    const c = await connect({ type: "duckdb", path: storePath, open_timeout_ms: 1 })
+    const message = await messageFrom(() => c.connect())
+    expect(message).toContain("deadline was set on this connection as open_timeout_ms=1")
+    // It must NOT point at the env var, which does not override a per-connection
+    // setting and so would not fix anything here.
+    expect(message).not.toContain("ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS")
   })
 
   ddbTest("the open deadline is tunable by environment variable", async () => {
@@ -137,7 +148,12 @@ describe("DuckDB driver: opening a real store", () => {
     process.env["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"] = "1"
     try {
       const c = await connect({ type: "duckdb", path: storePath })
-      expect(await messageFrom(() => c.connect())).toContain("did not finish opening within 1ms")
+      const message = await messageFrom(() => c.connect())
+      expect(message).toContain("did not finish opening within 1ms")
+      // Sourced from the environment, not the connection, so the message points
+      // at the knobs that would actually change it.
+      expect(message).toContain("ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS")
+      expect(message).not.toContain("deadline was set on this connection")
     } finally {
       if (prev === undefined) delete process.env["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"]
       else process.env["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"] = prev

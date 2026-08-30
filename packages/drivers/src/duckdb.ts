@@ -32,12 +32,20 @@ function positiveMs(value: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_TIMER_MS) : undefined
 }
 
-function resolveOpenTimeoutMs(config: ConnectionConfig): number {
-  return (
-    positiveMs(config.open_timeout_ms) ??
-    positiveMs(globalThis.process?.env?.["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"]) ??
-    DEFAULT_OPEN_TIMEOUT_MS
-  )
+/**
+ * Where the budget came from, which decides how a caller should read a
+ * deadline failure: one the connection set is that connection's own doing and
+ * is fixed by changing it, while the default or a machine-wide env var firing
+ * says something about the machine instead.
+ */
+type TimeoutSource = "connection" | "env" | "default"
+
+function resolveOpenTimeoutMs(config: ConnectionConfig): { ms: number; source: TimeoutSource } {
+  const fromConfig = positiveMs(config.open_timeout_ms)
+  if (fromConfig !== undefined) return { ms: fromConfig, source: "connection" }
+  const fromEnv = positiveMs(globalThis.process?.env?.["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"])
+  if (fromEnv !== undefined) return { ms: fromEnv, source: "env" }
+  return { ms: DEFAULT_OPEN_TIMEOUT_MS, source: "default" }
 }
 // altimate_change end
 
@@ -52,7 +60,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   const dbPath = (config.path as string) ?? ":memory:"
   // altimate_change start — configurable open budget
-  const openTimeoutMs = resolveOpenTimeoutMs(config)
+  const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
   let db: any
   let connection: any
@@ -176,8 +184,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
                   `DuckDB store "${dbPath}" did not finish opening within ${openTimeoutMs}ms. ` +
                   `This is a client-side deadline in the DuckDB driver, not a fault in the store ` +
                   `— the open may simply be queued behind other work in this process. ` +
-                  `Raise the budget with this connection's open_timeout_ms (which takes ` +
-                  `priority) or ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`,
+                  (openTimeoutSource === "connection"
+                    ? // Named so callers can tell a self-inflicted deadline from one
+                      // they did not choose. Registry.categorizeConnectionError keys
+                      // off this phrase to report it as configuration rather than as
+                      // a broken client.
+                      `This deadline was set on this connection as open_timeout_ms=${openTimeoutMs}; ` +
+                      `raise or remove it.`
+                    : `Raise the budget with this connection's open_timeout_ms (which takes ` +
+                      `priority) or ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS if the machine is loaded.`),
                 ),
               )
             }
