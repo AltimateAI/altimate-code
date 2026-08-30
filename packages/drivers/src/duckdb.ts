@@ -2,6 +2,7 @@
  * DuckDB driver using the `duckdb` package.
  */
 
+import { assertStoreExists } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
 
@@ -118,6 +119,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   return {
     async connect() {
+      // altimate_change start — never conjure an empty store on open
+      assertStoreExists(config, dbPath, "DuckDB")
+      // altimate_change end
       // altimate_change start — retry with read-only on lock errors
       const tryConnect = (accessMode?: string): Promise<any> =>
         new Promise<any>((resolve, reject) => {

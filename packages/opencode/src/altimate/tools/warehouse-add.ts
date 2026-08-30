@@ -31,10 +31,11 @@ export const WarehouseAddTool = Tool.define("warehouse_add", {
 - mysql: host, port, database, user, password, ssl (or ssl_ca, ssl_cert, ssl_key)
 - sqlserver: host, port, database, user, password, encrypt, trust_server_certificate
 - oracle: connection_string (or host, port, service_name), user, password
-- duckdb: path (file path or ":memory:")
-- sqlite: path (file path)
+- duckdb: path (file path or ":memory:"), create (optional, default false)
+- sqlite: path (file path), create (optional, default false)
 - clickhouse: host, port, database, user, password, protocol (http/https), connection_string, request_timeout, tls_ca_cert, tls_cert, tls_key, clickhouse_settings
 - trino: host, port, catalog, schema, user, password, protocol (http/https), connection_string, access_token, extra_headers
+File-backed stores (duckdb, sqlite): the store must already exist — connecting never creates it, because an empty database answers every query with no rows. Pass "create": true only when the store is meant to be created. A relative "path" is resolved against the directory of the config that declares it (the global config resolves against ~/.altimate-code), never against the current working directory; prefer an absolute path.
 Snowflake auth examples: (1) Password: {"type":"snowflake","account":"xy12345","user":"admin","password":"secret","warehouse":"WH","database":"db"}. (2) Key-pair: {"type":"snowflake","account":"xy12345","user":"admin","private_key_path":"/path/rsa_key.p8","warehouse":"WH","database":"db"}. (3) OAuth: {"type":"snowflake","account":"xy12345","authenticator":"oauth","token":"<token>","warehouse":"WH","database":"db"}. (4) SSO: {"type":"snowflake","account":"xy12345","user":"admin","authenticator":"externalbrowser","warehouse":"WH","database":"db"}.
 IMPORTANT: For private key file paths, always use "private_key_path" (not "private_key").`,
     ),

@@ -74,7 +74,9 @@ describe("DuckDB driver: opening a real store", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "duckdb-open-"))
     storePath = path.join(dir, "warehouse.duckdb")
     lockedPath = path.join(dir, "locked.duckdb")
-    const c = await connect({ type: "duckdb", path: storePath })
+    // `create: true`: this deliberately materializes a fresh scratch store for
+    // the suite, which is exactly the case the store-existence guard exempts.
+    const c = await connect({ type: "duckdb", path: storePath, create: true })
     await c.connect()
     await c.execute("CREATE TABLE t AS SELECT 1 AS a, 'x' AS b")
     const probe = await c.execute("SELECT count(*) AS n FROM t")

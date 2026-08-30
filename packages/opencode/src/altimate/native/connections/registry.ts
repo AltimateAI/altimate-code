@@ -7,14 +7,21 @@
  *   3. ALTIMATE_CODE_CONN_* environment variables
  *
  * Connectors are created lazily via dynamic import of the appropriate driver.
+ *
+ * A relative `path` on a file-backed connection (duckdb, sqlite) is resolved
+ * once at load time against the directory that declared it — the global config
+ * resolves against ~/.altimate-code, a project config and the environment
+ * variables resolve against the project root. It is never re-resolved against
+ * the working directory at connect time, which `--dir` changes.
  */
 
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
+import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
-import { normalizeConfig } from "@altimateai/drivers"
+import { isLocalFilePath, normalizeConfig } from "@altimateai/drivers"
 import { resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
@@ -40,9 +47,87 @@ function globalConfigPath(): string {
   return path.join(os.homedir(), ".altimate-code", "connections.json")
 }
 
-function localConfigPath(): string {
-  return path.join(process.cwd(), ".altimate-code", "connections.json")
+// altimate_change start — the project root, not the process working directory
+/**
+ * The directory the current request is working in.
+ *
+ * A server or `run --attach` session never chdirs: it carries the project in
+ * the instance context and leaves the working directory wherever the server was
+ * launched (server.ts routes every request through `Instance.provide`). Reading
+ * `process.cwd()` there picks up the launch directory, which is somebody else's
+ * project. `Instance.directory` throws synchronously when there is no instance
+ * context — early CLI paths and unit tests — and the working directory is the
+ * right answer in exactly those cases, since `run --dir` has already chdir'd.
+ *
+ * The registry itself is still process-global: `loaded` latches on first
+ * access, so one server process serving two projects keeps the first project's
+ * configs for both. That predates this change — the base was simply the launch
+ * directory for everyone — and making the registry per-instance is a larger
+ * change than this fix. What this does guarantee is that whichever project
+ * loads resolves against itself, not against wherever the server was started.
+ */
+function projectRoot(): string {
+  try {
+    return Instance.directory
+  } catch {
+    return process.cwd()
+  }
 }
+// altimate_change end
+
+function localConfigPath(): string {
+  // altimate_change start — resolve against the project, not the launch cwd
+  return path.join(projectRoot(), ".altimate-code", "connections.json")
+  // altimate_change end
+}
+
+// ---------------------------------------------------------------------------
+// Store path resolution
+// ---------------------------------------------------------------------------
+
+// altimate_change start — resolve file-backed store paths against a stable base
+/** Driver types whose `path` field names a database file on local disk. */
+const FILE_STORE_TYPES = new Set(["duckdb", "sqlite"])
+
+/**
+ * Absolutize the `path` of every file-backed connection in `entries` against
+ * `baseDir`, once, at load time.
+ *
+ * A relative store path must not follow the process working directory. `run`
+ * and `attach` call `process.chdir()` for `--dir` (see cli/cmd/run.ts), so a
+ * path resolved lazily at connect time points somewhere different depending on
+ * how the CLI was invoked — and both file-backed engines answer a miss by
+ * creating an empty database rather than failing.
+ *
+ * The base is the directory that declared the path, which is stable for the
+ * life of the config file:
+ *   - global config  -> ~/.altimate-code (the config file's own directory)
+ *   - project config -> the project root (the parent of its .altimate-code)
+ *   - environment    -> the project root, the only directory an ambient
+ *                       variable can reasonably mean
+ */
+function resolveStorePaths(
+  entries: Record<string, ConnectionConfig>,
+  baseDir: string,
+): Record<string, ConnectionConfig> {
+  const resolved: Record<string, ConnectionConfig> = {}
+  for (const [name, config] of Object.entries(entries)) {
+    const storePath = config?.path
+    const type = typeof config?.type === "string" ? config.type.toLowerCase() : ""
+    if (
+      !FILE_STORE_TYPES.has(type) ||
+      typeof storePath !== "string" ||
+      !isLocalFilePath(storePath) ||
+      path.isAbsolute(storePath)
+    ) {
+      resolved[name] = config
+      continue
+    }
+    resolved[name] = { ...config, path: path.resolve(baseDir, storePath) }
+  }
+  return resolved
+}
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Loading
@@ -85,9 +170,13 @@ function loadFromEnv(): Record<string, ConnectionConfig> {
 export function load(): void {
   configs.clear()
 
-  const global = loadFromFile(globalConfigPath())
-  const local = loadFromFile(localConfigPath())
-  const env = loadFromEnv()
+  // altimate_change start — absolutize store paths against the directory that
+  // declared them, so a later process.chdir() (--dir) cannot move the store.
+  const base = projectRoot()
+  const global = resolveStorePaths(loadFromFile(globalConfigPath()), path.dirname(globalConfigPath()))
+  const local = resolveStorePaths(loadFromFile(localConfigPath()), base)
+  const env = resolveStorePaths(loadFromEnv(), base)
+  // altimate_change end
 
   // Merge: global < local < env
   for (const [name, config] of Object.entries(global)) {
@@ -525,7 +614,11 @@ export async function add(
 
     // Normalize field names before saving so sensitive fields under alias
     // names (e.g., keyfileJson → credentials_json) are properly detected
-    const normalized = normalizeConfig(config)
+    // altimate_change start — a relative store path means "relative to where
+    // the user typed this"; persist it absolute so the saved global config is
+    // not silently re-pointed by the next invocation's working directory.
+    const normalized = resolveStorePaths({ [name]: normalizeConfig(config) }, projectRoot())[name]
+    // altimate_change end
 
     // Store credentials in keychain, get sanitized config
     const { sanitized, warnings } = await saveConnection(name, normalized)
