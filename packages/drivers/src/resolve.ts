@@ -274,7 +274,11 @@ function isWorkspaceRoot(root: string, scope: { cwd: string | undefined; ancesto
   // slip past a purely lexical comparison.
   const resolved = realPath(root)
   if (scope.ancestors.includes(resolved)) return true
-  if (!scope.cwd) return false
+  // Fail closed. With no working directory there is nothing to compare against,
+  // and treating that as "not workspace content" would admit every root an error
+  // happens to name — turning the one case where the process cannot see its own
+  // filesystem into the case with no boundary at all.
+  if (!scope.cwd) return true
   const rel = path.relative(scope.cwd, resolved)
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
 }
@@ -1011,7 +1015,14 @@ const installsInFlight = new Map<string, Promise<InstallResult>>()
  * never sees it as stray package content.
  */
 export function installLockPath(dir: string): string {
-  return `${dir.replace(/[\\/]+$/, "")}.lock`
+  const trimmed = dir.replace(/[\\/]+$/, "")
+  // Trailing separators are stripped so `<dir>/` and `<dir>` agree on one lock.
+  // A filesystem root is the exception: stripping there destroys the root — "/"
+  // would become the *relative* ".lock", and "C:\" the drive-relative "C:.lock"
+  // — so two processes started from different working directories would take
+  // different locks while installing into the same place.
+  const base = trimmed === "" || /^[A-Za-z]:$/.test(trimmed) ? dir : trimmed
+  return `${base}.lock`
 }
 
 /**

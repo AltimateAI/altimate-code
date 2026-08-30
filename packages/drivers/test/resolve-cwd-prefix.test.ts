@@ -338,6 +338,25 @@ describe("harvested roots respect the workspace boundary", () => {
     }
   })
 
+  test("harvests nothing at all when the working directory cannot be established", () => {
+    // Fail closed. With no cwd there is nothing to compare a root against, and
+    // treating that as "not workspace content" would admit every root an error
+    // names — turning the one case where the process cannot see its own
+    // filesystem into the case with no boundary at all.
+    const realCwd = process.cwd.bind(process)
+    process.cwd = () => {
+      throw Object.assign(new Error("ENOENT: no such file or directory, uv_cwd"), { code: "ENOENT" })
+    }
+    try {
+      const error = new Error(
+        `ENOENT: no such file or directory, open '${path.join(outsideModules, "duckdb", "package.json")}'`,
+      )
+      expect(searchRootsFromError(error)).toEqual([])
+    } finally {
+      process.cwd = realCwd
+    }
+  })
+
   test("still harvests a root outside the workspace", () => {
     // The exclusion must not swallow the case the harvesting exists for.
     workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "resolve-ws-")))

@@ -39,6 +39,21 @@ afterEach(() => {
   if (dir) fs.rmSync(dir, { recursive: true, force: true })
 })
 
+describe("install lock path", () => {
+  test("agrees on one lock whether or not the directory has a trailing separator", () => {
+    expect(installLockPath("/a/drivers/")).toBe(installLockPath("/a/drivers"))
+  })
+
+  test("keeps a filesystem root intact", () => {
+    // Stripping the separator from a root turns the lock into a *relative*
+    // path, so processes with different working directories would take
+    // different locks while installing into the same directory.
+    expect(installLockPath("/")).toBe("/.lock")
+    expect(path.isAbsolute(installLockPath("/"))).toBe(true)
+    expect(installLockPath("C:\\")).toBe("C:\\.lock")
+  })
+})
+
 describe("cross-process install lock", () => {
   test("excludes concurrent processes from the critical section", async () => {
     const target = path.join(dir, "drivers")
