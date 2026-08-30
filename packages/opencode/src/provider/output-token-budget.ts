@@ -12,6 +12,11 @@ const CLAMP_MARGIN_FRACTION = 0.02
 const CLAMP_MARGIN_MIN = 512
 const ESTIMATE_CHUNK_SIZE = 400
 const MEDIA_TOKEN_ALLOWANCE = 2_048
+const FILE_TOKEN_ALLOWANCE = 16_384
+const PDF_TOKEN_ALLOWANCE = 32_768
+const PDF_TOKENS_PER_PAGE = 5_000
+const PDF_FALLBACK_BYTES_PER_TOKEN = 4
+const PDF_PAGE_LIMIT = 600
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
@@ -30,6 +35,7 @@ const MEDIA_PART_TYPES = new Set([
   "image-file-id",
 ])
 const MEDIA_PAYLOAD_KEYS = new Set(["data", "image", "file", "audio", "video", "url", "fileId"])
+const FILE_PART_TYPES = new Set(["file", "media", "file-data", "file-url", "file-id"])
 
 type JsonRecord = Record<string, unknown>
 
@@ -134,9 +140,83 @@ function estimateTextTokens(input: string): number {
   return total
 }
 
+/** Return the first transport payload carried by a semantic media part. */
+function mediaPayload(part: JsonRecord): unknown {
+  for (const key of MEDIA_PAYLOAD_KEYS) {
+    if (part[key] !== undefined && part[key] !== null) return part[key]
+  }
+  return undefined
+}
+
+/** Resolve a media part's MIME type from its declared type, data URL, or URL suffix. */
+function mediaType(part: JsonRecord, payload: unknown): string | undefined {
+  const declared =
+    typeof part.mediaType === "string" ? part.mediaType : typeof part.mime === "string" ? part.mime : undefined
+  if (declared) return declared.split(";", 1)[0].trim().toLowerCase()
+
+  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
+  const dataType = value?.match(/^data:([^;,]+)/i)?.[1]
+  if (dataType) return dataType.toLowerCase()
+  if (value && /\.pdf(?:[?#]|$)/i.test(value)) return "application/pdf"
+  if (String(part.type).startsWith("image")) return "image/*"
+  return undefined
+}
+
+/** Decode inline PDF bytes for page-tree inspection; remote URLs and file IDs stay unknown. */
+function inlinePdfBytes(payload: unknown): Uint8Array | undefined {
+  if (ArrayBuffer.isView(payload)) {
+    return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength)
+  }
+  if (payload instanceof ArrayBuffer) return new Uint8Array(payload)
+
+  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
+  if (!value || /^https?:/i.test(value)) return undefined
+  try {
+    if (/^data:/i.test(value)) {
+      const comma = value.indexOf(",")
+      if (comma === -1) return undefined
+      const header = value.slice(0, comma)
+      const body = value.slice(comma + 1)
+      return /;base64(?:;|$)/i.test(header)
+        ? Buffer.from(body, "base64")
+        : Buffer.from(decodeURIComponent(body), "latin1")
+    }
+    return Buffer.from(value, "base64")
+  } catch {
+    return undefined
+  }
+}
+
+/** Estimate PDF pages from the standard page tree, including conservative object-stream fallback. */
+function pdfTokenAllowance(payload: unknown): number {
+  const bytes = inlinePdfBytes(payload)
+  if (!bytes) return PDF_TOKEN_ALLOWANCE
+
+  const source = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("latin1")
+  const leafPages = source.match(/\/Type\s*\/Page\b/g)?.length ?? 0
+  let pages = leafPages
+  for (const match of source.matchAll(/\/Count\s+(\d+)/g)) {
+    pages = Math.max(pages, Number(match[1]))
+  }
+  pages = Math.min(pages, PDF_PAGE_LIMIT)
+  if (pages > 0) return Math.max(MEDIA_TOKEN_ALLOWANCE, pages * PDF_TOKENS_PER_PAGE)
+
+  return Math.max(PDF_TOKEN_ALLOWANCE, Math.ceil(bytes.byteLength / PDF_FALLBACK_BYTES_PER_TOKEN))
+}
+
+/** Assign an allowance that matches the semantic media kind rather than its encoded bytes. */
+function mediaTokenAllowance(part: JsonRecord): number {
+  const payload = mediaPayload(part)
+  const mime = mediaType(part, payload)
+  if (mime?.startsWith("image/") || String(part.type).startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
+  if (mime === "application/pdf") return pdfTokenAllowance(payload)
+  if (FILE_PART_TYPES.has(String(part.type))) return FILE_TOKEN_ALLOWANCE
+  return MEDIA_TOKEN_ALLOWANCE
+}
+
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
-function messageMediaContainers(messages: readonly unknown[]): WeakSet<object> {
-  const result = new WeakSet<object>()
+function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
+  const result = new WeakMap<object, number>()
   const visited = new WeakSet<object>()
 
   const visitContent = (content: unknown) => {
@@ -144,7 +224,7 @@ function messageMediaContainers(messages: readonly unknown[]): WeakSet<object> {
     visited.add(content)
     for (const part of content) {
       if (!isRecord(part)) continue
-      if (MEDIA_PART_TYPES.has(String(part.type))) result.add(part)
+      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, mediaTokenAllowance(part))
 
       // Tool-result media is nested in the AI SDK's typed content output.
       if (part.type !== "tool-result" || !isRecord(part.output)) continue
@@ -161,9 +241,9 @@ function messageMediaContainers(messages: readonly unknown[]): WeakSet<object> {
 /** Serialize request structures without expanding semantic media payloads into fake text tokens. */
 function serializeForEstimate(
   value: unknown,
-  mediaContainers?: WeakSet<object>,
-): { readonly text: string; readonly mediaParts: number } {
-  let mediaParts = 0
+  mediaContainers?: WeakMap<object, number>,
+): { readonly text: string; readonly mediaTokens: number } {
+  let mediaTokens = 0
   const ancestors: object[] = []
   const text =
     JSON.stringify(value, function (key, child) {
@@ -177,12 +257,12 @@ function serializeForEstimate(
       if (typeof child === "object" && child !== null) {
         if (ancestors.includes(child)) return "[circular value omitted]"
         // Count transport occurrences, not object identities: JSON duplicates shared aliases.
-        if (mediaContainers?.has(child)) mediaParts++
+        mediaTokens += mediaContainers?.get(child) ?? 0
         ancestors.push(child)
       }
       return child
     }) ?? ""
-  return { text, mediaParts }
+  return { text, mediaTokens }
 }
 
 /** Collect Anthropic beta values only from header-shaped records. */
@@ -209,11 +289,14 @@ export function effectiveContextWindow(input: {
   readonly headerSources?: readonly unknown[]
 }): number {
   let context = input.model.limit.context
+  let finalValues: string[] = []
   for (const source of input.headerSources ?? []) {
-    for (const value of anthropicBetaValues(source)) {
-      for (const beta of value.split(/[\s,]+/)) {
-        context = Math.max(context, CONTEXT_WINDOW_BETAS.get(beta) ?? 0)
-      }
+    const values = anthropicBetaValues(source)
+    if (values.length > 0) finalValues = values
+  }
+  for (const value of finalValues) {
+    for (const beta of value.split(/[\s,]+/)) {
+      context = Math.max(context, CONTEXT_WINDOW_BETAS.get(beta) ?? 0)
     }
   }
   return context
@@ -229,8 +312,8 @@ export function estimateInputTokens(input: {
   const system = input.system.join("\n")
   let total = estimateTextTokens(system)
 
-  const messages = serializeForEstimate(input.messages, messageMediaContainers(input.messages))
-  total += estimateTextTokens(messages.text) + messages.mediaParts * MEDIA_TOKEN_ALLOWANCE
+  const messages = serializeForEstimate(input.messages, messageMediaAllowances(input.messages))
+  total += estimateTextTokens(messages.text) + messages.mediaTokens
 
   if (input.tools !== undefined) {
     const tools = serializeForEstimate(input.tools)
@@ -239,7 +322,7 @@ export function estimateInputTokens(input: {
 
   if (input.instructions !== undefined && input.instructions !== system) {
     const serialized = serializeForEstimate(input.instructions)
-    total += estimateTextTokens(serialized.text) + serialized.mediaParts * MEDIA_TOKEN_ALLOWANCE
+    total += estimateTextTokens(serialized.text) + serialized.mediaTokens
   }
   return total
 }
@@ -283,10 +366,6 @@ export function clampOutputTokens(input: {
   const floor = Math.min(OUTPUT_TOKEN_FLOOR, requested)
   const clamped = Math.floor(context - inputTokens - margin)
   if (clamped < floor) {
-    // If only the estimator margin causes the failure, preserve a reservation that still fits
-    // the declared window. The provider remains authoritative for its exact tokenizer.
-    const withoutMargin = Math.floor(context - inputTokens)
-    if (withoutMargin >= floor) return Math.min(requested, withoutMargin)
     throw new OutputTokenBudgetError({
       modelID: input.model.id,
       providerID: input.model.providerID,

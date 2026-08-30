@@ -4766,7 +4766,10 @@ describe("output token budget", () => {
 
   test("never demands more headroom than the model's own output reservation", () => {
     const model = createWindowModel({ context: 8_192, output: 512 })
-    expect(clampOutputTokens({ model, requested: 512, inputTokens: 7_169 })).toBe(512)
+    expect(clampOutputTokens({ model, requested: 512, inputTokens: 7_168 })).toBe(512)
+    // One token more would require discarding the estimator margin. Refuse instead of sending an
+    // exact-fill request that is likely to reproduce the provider context error.
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 7_169 })).toThrow(OutputTokenBudgetError)
     expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 8_000 })).toThrow(OutputTokenBudgetError)
   })
 
@@ -4900,7 +4903,7 @@ describe("output token budget", () => {
     expect(estimated).toBeLessThan(base + 3_000)
   })
 
-  test("keeps binary image and PDF tool-result payloads on the fixed media allowance", () => {
+  test("keeps binary images bounded while scaling PDF estimates with document size", () => {
     const binaryImage = estimateInputTokens({
       system: [],
       messages: [
@@ -4929,10 +4932,28 @@ describe("output token budget", () => {
         },
       ],
     })
-    for (const estimated of [binaryImage, pdfToolResult]) {
-      expect(estimated).toBeGreaterThan(2_000)
-      expect(estimated).toBeLessThan(10_000)
-    }
+    expect(binaryImage).toBeGreaterThan(2_000)
+    expect(binaryImage).toBeLessThan(10_000)
+    expect(pdfToolResult).toBeGreaterThan(100_000)
+  })
+
+  test("charges PDFs by page count when the document page tree is available", () => {
+    const pdf = [
+      "%PDF-1.7",
+      "1 0 obj << /Type /Pages /Count 12 /Kids [] >> endobj",
+      "2 0 obj << /Type /Page /Parent 1 0 R >> endobj",
+      "%%EOF",
+    ].join("\n")
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: Buffer.from(pdf).toString("base64") }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThanOrEqual(60_000)
   })
 
   test("counts every AI SDK v6 tool-result media variant once per transport occurrence", () => {
@@ -4964,8 +4985,12 @@ describe("output token budget", () => {
           },
         ],
       })
-      expect(estimated).toBeGreaterThan(2_000)
-      expect(estimated).toBeLessThan(10_000)
+      if (variant.type.startsWith("image")) {
+        expect(estimated).toBeGreaterThan(2_000)
+        expect(estimated).toBeLessThan(10_000)
+      } else {
+        expect(estimated).toBeGreaterThan(16_000)
+      }
     }
 
     const shared = { type: "image-data" as const, mediaType: "image/png", data: "AQ==" }
@@ -5084,6 +5109,28 @@ describe("output token budget", () => {
         headerSources: [{ aiGatewayHeaders: { "anthropic-beta": "interleaved-thinking-2025-05-14" } }],
       }),
     ).toBe(200_000)
+  })
+
+  test("uses the final outgoing Anthropic beta header value", () => {
+    const model = createWindowModel({ context: 200_000, output: 16_384 })
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [
+          { "anthropic-beta": "context-1m-2025-08-07" },
+          { "Anthropic-Beta": "interleaved-thinking-2025-05-14" },
+        ],
+      }),
+    ).toBe(200_000)
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [
+          { "anthropic-beta": "interleaved-thinking-2025-05-14" },
+          { aiGatewayHeaders: { "anthropic-beta": "context-1m-2025-08-07" } },
+        ],
+      }),
+    ).toBe(1_000_000)
   })
 
   test("clamps fixed reasoning budgets with the output reservation without mutating inputs", () => {
