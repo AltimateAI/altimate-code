@@ -14,6 +14,11 @@ const ESTIMATE_CHUNK_SIZE = 400
 const MEDIA_TOKEN_ALLOWANCE = 2_048
 const FILE_TOKEN_ALLOWANCE = 16_384
 const PDF_TOKEN_ALLOWANCE = 32_768
+const PDF_TOKENS_PER_PAGE = 5_000
+const PDF_UNINSPECTABLE_TOKEN_ALLOWANCE = 100 * PDF_TOKENS_PER_PAGE
+// Above this decoded size, the one-byte/one-token floor already exceeds the maximum
+// documented 100-page allowance, so structural parsing cannot raise the estimate.
+const PDF_PARSE_BYTE_LIMIT = PDF_UNINSPECTABLE_TOKEN_ALLOWANCE
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
@@ -207,21 +212,73 @@ function inlinePayloadSize(payload: unknown): number | undefined {
   return Math.max(0, Math.floor((bodyLength * 3) / 4) - padding)
 }
 
-/** Combine fixed and monotonic byte-size evidence without trusting unparsed PDF metadata. */
-function pdfTokenAllowance(payload: unknown): number {
-  const bytes = inlinePayloadSize(payload) ?? 0
-  // Raw PDF bytes cannot authenticate page-tree metadata: comments, strings, streams, stale
-  // objects, and incremental revisions may all contain convincing but unreachable markers.
-  // One decoded byte per token plus the fixed floor stays conservative without amplification.
-  return Math.max(PDF_TOKEN_ALLOWANCE, bytes)
+/** Decode a bounded inline payload for structural PDF parsing. */
+function inlinePayloadBytes(payload: unknown, size: number): Uint8Array | undefined {
+  if (size > PDF_PARSE_BYTE_LIMIT) return undefined
+  if (ArrayBuffer.isView(payload)) {
+    return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength)
+  }
+  if (payload instanceof ArrayBuffer) return new Uint8Array(payload)
+
+  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
+  if (!value || /^https?:/i.test(value)) return undefined
+  const dataURL = /^data:/i.test(value)
+  const prefix = dataURL ? value.slice(0, DATA_URL_HEADER_LIMIT) : ""
+  const comma = dataURL ? prefix.indexOf(",") : -1
+  if (dataURL && comma === -1) return undefined
+  const bodyOffset = comma === -1 ? 0 : comma + 1
+  const body = value.slice(bodyOffset)
+
+  try {
+    if (comma !== -1 && !/;base64(?:;|$)/i.test(prefix.slice(0, comma))) {
+      return Buffer.from(decodeURIComponent(body), "latin1")
+    }
+    return Buffer.from(body, "base64")
+  } catch {
+    return undefined
+  }
+}
+
+/** Combine byte size with a page count obtained from a real PDF object graph. */
+async function pdfTokenAllowance(payload: unknown): Promise<number> {
+  const size = inlinePayloadSize(payload)
+  if (size === undefined) {
+    // Remote URLs and provider file IDs cannot be inspected locally. Reserve the documented
+    // 100-page request maximum at the same deliberately conservative per-page rate.
+    return PDF_UNINSPECTABLE_TOKEN_ALLOWANCE
+  }
+
+  const baseline = Math.max(PDF_TOKEN_ALLOWANCE, size)
+  const bytes = inlinePayloadBytes(payload, size)
+  // Inputs above the parser cap already carry a decoded-byte allowance at least as large as the
+  // maximum page allowance. Smaller inputs that cannot be inspected use the remote/file-ID
+  // fallback rather than pretending their page expansion is known.
+  if (!bytes) return size > PDF_PARSE_BYTE_LIMIT ? baseline : Math.max(baseline, PDF_UNINSPECTABLE_TOKEN_ALLOWANCE)
+
+  try {
+    const { PDFDocument, ParseSpeeds } = await import("pdf-lib")
+    const document = await PDFDocument.load(bytes, {
+      parseSpeed: ParseSpeeds.Fastest,
+      throwOnInvalidObject: true,
+      updateMetadata: false,
+      capNumbers: true,
+    })
+    const pages = document.getPageCount()
+    if (!Number.isSafeInteger(pages) || pages <= 0) {
+      return Math.max(baseline, PDF_UNINSPECTABLE_TOKEN_ALLOWANCE)
+    }
+    return Math.max(baseline, pages * PDF_TOKENS_PER_PAGE)
+  } catch {
+    return Math.max(baseline, PDF_UNINSPECTABLE_TOKEN_ALLOWANCE)
+  }
 }
 
 /** Assign an allowance that matches the semantic media kind rather than its encoded bytes. */
-function mediaTokenAllowance(part: JsonRecord): number {
+async function mediaTokenAllowance(part: JsonRecord): Promise<number> {
   const payload = mediaPayload(part)
   const mime = mediaType(part, payload)
   if (mime?.startsWith("image/") || String(part.type).startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
-  if (mime === "application/pdf") return pdfTokenAllowance(payload)
+  if (mime === "application/pdf") return await pdfTokenAllowance(payload)
   if (FILE_PART_TYPES.has(String(part.type))) {
     return Math.max(FILE_TOKEN_ALLOWANCE, inlinePayloadSize(payload) ?? 0)
   }
@@ -229,25 +286,27 @@ function mediaTokenAllowance(part: JsonRecord): number {
 }
 
 /** Mark only actual ModelMessage content parts whose payload is provider media. */
-function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
+async function messageMediaAllowances(messages: readonly unknown[]): Promise<WeakMap<object, number>> {
   const result = new WeakMap<object, number>()
   const visited = new WeakSet<object>()
 
-  const visitContent = (content: unknown) => {
+  const visitContent = async (content: unknown): Promise<void> => {
     if (!Array.isArray(content) || visited.has(content)) return
     visited.add(content)
     for (const part of content) {
       if (!isRecord(part)) continue
-      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, mediaTokenAllowance(part))
+      if (MEDIA_PART_TYPES.has(String(part.type)) && !result.has(part)) {
+        result.set(part, await mediaTokenAllowance(part))
+      }
 
       // Tool-result media is nested in the AI SDK's typed content output.
       if (part.type !== "tool-result" || !isRecord(part.output)) continue
-      if (part.output.type === "content") visitContent(part.output.value)
+      if (part.output.type === "content") await visitContent(part.output.value)
     }
   }
 
   for (const message of messages) {
-    if (isRecord(message)) visitContent(message.content)
+    if (isRecord(message)) await visitContent(message.content)
   }
   return result
 }
@@ -317,16 +376,16 @@ export function effectiveContextWindow(input: {
 }
 
 /** Estimate the text, finalized tools, instructions, and media allowance sent in one request. */
-export function estimateInputTokens(input: {
+export async function estimateInputTokens(input: {
   readonly system: readonly string[]
   readonly messages: readonly unknown[]
   readonly tools?: Readonly<Record<string, unknown>>
   readonly instructions?: unknown
-}): number {
+}): Promise<number> {
   const system = input.system.join("\n")
   let total = estimateTextTokens(system)
 
-  const messages = serializeForEstimate(input.messages, messageMediaAllowances(input.messages))
+  const messages = serializeForEstimate(input.messages, await messageMediaAllowances(input.messages))
   total += estimateTextTokens(messages.text) + messages.mediaTokens
 
   if (input.tools !== undefined) {

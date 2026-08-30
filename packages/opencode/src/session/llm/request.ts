@@ -200,6 +200,17 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
 
   // altimate_change start — clamp after tools, headers, and plugin options are finalized.
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
+  const inputTokens =
+    params.maxOutputTokens === undefined
+      ? 0
+      : yield* Effect.promise(() =>
+          estimateInputTokens({
+            system,
+            messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+            tools: sortedTools,
+            instructions: params.options.instructions,
+          }),
+        )
   const maxOutputTokens = clampOutputTokens({
     model: input.model,
     requested: params.maxOutputTokens,
@@ -208,13 +219,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       // Provider defaults are lower precedence than the exact case-normalized outgoing record.
       headerSources: [input.provider.options, requestHeaders],
     }),
-    inputTokens: () =>
-      estimateInputTokens({
-        system,
-        messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-        tools: sortedTools,
-        instructions: params.options.instructions,
-      }),
+    inputTokens,
   })
   const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
   const clampedParams = {

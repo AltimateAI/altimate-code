@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
+import { convertToModelMessages, jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { ProviderTransform } from "@/provider/transform"
 import {
   clampOutputTokens,
@@ -4803,9 +4803,9 @@ describe("output token budget", () => {
     expect(evaluated).toBeFalse()
   })
 
-  test("counts tool schemas and provider instructions", () => {
-    const base = estimateInputTokens({ system: ["system"], messages: [{ role: "user", content: "hello" }] })
-    const complete = estimateInputTokens({
+  test("counts tool schemas and provider instructions", async () => {
+    const base = await estimateInputTokens({ system: ["system"], messages: [{ role: "user", content: "hello" }] })
+    const complete = await estimateInputTokens({
       system: ["system"],
       messages: [{ role: "user", content: "hello" }],
       instructions: "provider instruction ".repeat(400),
@@ -4819,8 +4819,8 @@ describe("output token budget", () => {
     expect(complete).toBeGreaterThan(base + 1_000)
   })
 
-  test("does not tokenize encoded media bytes as literal prompt text", () => {
-    const estimated = estimateInputTokens({
+  test("does not tokenize encoded media bytes as literal prompt text", async () => {
+    const estimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -4833,7 +4833,7 @@ describe("output token budget", () => {
     expect(estimated).toBeLessThan(10_000)
   })
 
-  test("counts data-URL-shaped text in every textual request field", () => {
+  test("counts data-URL-shaped text in every textual request field", async () => {
     const prefixes = [
       "data:image/png;base64,",
       "data:audio/wav;base64,",
@@ -4843,7 +4843,7 @@ describe("output token budget", () => {
     for (const prefix of prefixes) {
       const text = prefix + "漢".repeat(70_000)
       expect(
-        estimateInputTokens({
+        await estimateInputTokens({
           system: [],
           messages: [{ role: "user", content: [{ type: "text", text }] }],
         }),
@@ -4852,14 +4852,14 @@ describe("output token budget", () => {
 
     const text = prefixes[0] + "漢".repeat(70_000)
     const estimates = [
-      estimateInputTokens({ system: [], messages: [{ role: "user", content: text }] }),
-      estimateInputTokens({ system: [], messages: [], instructions: text }),
-      estimateInputTokens({
+      await estimateInputTokens({ system: [], messages: [{ role: "user", content: text }] }),
+      await estimateInputTokens({ system: [], messages: [], instructions: text }),
+      await estimateInputTokens({
         system: [],
         messages: [],
         tools: { inspect: { description: text, inputSchema: { type: "object" } } },
       }),
-      estimateInputTokens({
+      await estimateInputTokens({
         system: [],
         messages: [
           {
@@ -4870,7 +4870,7 @@ describe("output token budget", () => {
           },
         ],
       }),
-      estimateInputTokens({
+      await estimateInputTokens({
         system: [],
         messages: [
           {
@@ -4888,9 +4888,9 @@ describe("output token budget", () => {
     )
   })
 
-  test("charges the same fixed allowance for URL-backed media", () => {
-    const base = estimateInputTokens({ system: [], messages: [{ role: "user", content: "show this" }] })
-    const estimated = estimateInputTokens({
+  test("charges the same fixed allowance for URL-backed media", async () => {
+    const base = await estimateInputTokens({ system: [], messages: [{ role: "user", content: "show this" }] })
+    const estimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -4903,8 +4903,8 @@ describe("output token budget", () => {
     expect(estimated).toBeLessThan(base + 3_000)
   })
 
-  test("keeps binary images bounded while scaling PDF estimates with document size", () => {
-    const binaryImage = estimateInputTokens({
+  test("keeps binary images bounded while scaling PDF estimates with document size", async () => {
+    const binaryImage = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -4913,7 +4913,7 @@ describe("output token budget", () => {
         },
       ],
     })
-    const pdfToolResult = estimateInputTokens({
+    const pdfToolResult = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -4937,13 +4937,36 @@ describe("output token budget", () => {
     expect(pdfToolResult).toBeGreaterThan(100_000)
   })
 
-  test("does not trust unparsed PDF metadata as page-count evidence", () => {
+  test("does not trust unparsed PDF metadata as page-count evidence", async () => {
     const marker = "/Type /Pages /Count 600"
+    const buildPdf = (input: { comment?: string; note?: string; stream?: string; unreachable?: string }) => {
+      const content = input.stream ?? ""
+      const objects = [
+        `<< /Type /Catalog /Pages 2 0 R${input.note ? ` /Note (${input.note})` : ""} >>`,
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>",
+        `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`,
+        ...(input.unreachable ? [`<< ${input.unreachable} >>`] : []),
+      ]
+      let source = `%PDF-1.4\n% ${input.comment ?? "control"}\n`
+      const offsets = [0]
+      for (const [index, object] of objects.entries()) {
+        offsets[index + 1] = Buffer.byteLength(source)
+        source += `${index + 1} 0 obj\n${object}\nendobj\n`
+      }
+      const xref = Buffer.byteLength(source)
+      source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+      for (const offset of offsets.slice(1)) {
+        source += `${String(offset).padStart(10, "0")} 00000 n \n`
+      }
+      source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+      return source
+    }
     const variants = [
-      ["%PDF-1.4", `% ${marker}`, "1 0 obj << /Type /Pages /Count 1 >> endobj", "%%EOF"].join("\n"),
-      ["%PDF-1.4", `1 0 obj << /Note (${marker}) >> endobj`, "%%EOF"].join("\n"),
-      ["%PDF-1.4", "1 0 obj << /Length 24 >> stream", marker, "endstream endobj", "%%EOF"].join("\n"),
-      ["%PDF-1.4", `99 0 obj << ${marker} >> endobj`, "%%EOF"].join("\n"),
+      buildPdf({ comment: marker }),
+      buildPdf({ note: marker }),
+      buildPdf({ stream: `% ${marker}` }),
+      buildPdf({ unreachable: marker }),
     ]
     const estimate = (data: string | Uint8Array | ArrayBuffer) =>
       estimateInputTokens({
@@ -4960,7 +4983,7 @@ describe("output token budget", () => {
         bytes.buffer,
       ]
       for (const payload of payloads) {
-        const estimated = estimate(payload)
+        const estimated = await estimate(payload)
         expect(estimated).toBeGreaterThan(32_000)
         expect(estimated).toBeLessThan(40_000)
         expect(
@@ -4974,9 +4997,68 @@ describe("output token budget", () => {
     }
   })
 
-  test("never lets a page marker suppress the PDF byte-size floor", () => {
+  test("charges compact valid PDFs by their parsed reachable page count", async () => {
+    const pages = 100
+    const line = "word ".repeat(20)
+    const content =
+      "BT /F1 6 Tf 7 TL 10 780 Td\n" + Array.from({ length: 100 }, () => `(${line}) Tj T*\n`).join("") + "ET"
+    const objects: string[] = []
+    objects[1] = "<< /Type /Catalog /Pages 2 0 R >>"
+    objects[2] =
+      `<< /Type /Pages /Count ${pages} /Kids [` +
+      Array.from({ length: pages }, (_, index) => `${index + 3} 0 R`).join(" ") +
+      "] >>"
+    for (let index = 0; index < pages; index++) {
+      objects[index + 3] =
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] " +
+        "/Resources << /Font << /F1 104 0 R >> >> /Contents 103 0 R >>"
+    }
+    objects[103] = `<< /Length ${Buffer.byteLength(content)} >>\nstream\n${content}\nendstream`
+    objects[104] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+    let source = "%PDF-1.4\n"
+    const offsets = [0]
+    for (let index = 1; index <= 104; index++) {
+      offsets[index] = Buffer.byteLength(source)
+      source += `${index} 0 obj\n${objects[index]}\nendobj\n`
+    }
+    const xref = Buffer.byteLength(source)
+    source += "xref\n0 105\n0000000000 65535 f \n"
+    for (let index = 1; index <= 104; index++) {
+      source += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`
+    }
+    source += `trailer\n<< /Size 105 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+    const pdf = Buffer.from(source)
+
+    const messages = await convertToModelMessages([
+      {
+        role: "user",
+        parts: [
+          {
+            type: "file",
+            url: `data:application/pdf;base64,${pdf.toString("base64")}`,
+            mediaType: "application/pdf",
+            filename: "reused-content.pdf",
+          },
+        ],
+      },
+    ])
+    const estimated = await estimateInputTokens({ system: [], messages })
+
+    expect(pdf.byteLength).toBeLessThan(32_000)
+    expect(estimated).toBeGreaterThanOrEqual(pages * 5_000)
+    expect(() =>
+      clampOutputTokens({
+        model: createWindowModel({ context: 200_000, input: 200_000, output: 64_000 }),
+        requested: 64_000,
+        inputTokens: estimated,
+      }),
+    ).toThrow(InputTokenBudgetError)
+  })
+
+  test("never lets a page marker suppress the PDF byte-size floor", async () => {
     const pdf = ["%PDF-1.7", "1 0 obj << /Type /Page >> endobj", "x".repeat(200_000), "%%EOF"].join("\n")
-    const estimated = estimateInputTokens({
+    const estimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -4988,13 +5070,13 @@ describe("output token budget", () => {
     expect(estimated).toBeGreaterThan(200_000)
   })
 
-  test("bounds malformed data-URL header inspection and keeps its size floor", () => {
+  test("bounds malformed data-URL header inspection and keeps its size floor", async () => {
     const lateDelimiter = [
       "data:application/pdf",
       "x".repeat(70 * 1_024),
       ",%PDF-1.7 << /Type /Pages /Count 600 >> %%EOF",
     ].join("")
-    const lateEstimated = estimateInputTokens({
+    const lateEstimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -5003,13 +5085,13 @@ describe("output token budget", () => {
         },
       ],
     })
-    // The comma is outside the bounded data-URL header prefix. The full string still establishes
-    // a conservative size floor without inspecting attacker-controlled PDF metadata.
-    expect(lateEstimated).toBeGreaterThan(70_000)
-    expect(lateEstimated).toBeLessThan(100_000)
+    // The comma is outside the bounded data-URL header prefix, so the document is not safely
+    // inspectable and receives the same conservative allowance as a remote PDF.
+    expect(lateEstimated).toBeGreaterThan(499_000)
+    expect(lateEstimated).toBeLessThan(510_000)
 
     const missingDelimiter = `data:application/pdf${"A".repeat(100_000)}`
-    const missingEstimated = estimateInputTokens({
+    const missingEstimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -5018,12 +5100,13 @@ describe("output token budget", () => {
         },
       ],
     })
-    expect(missingEstimated).toBeGreaterThan(100_000)
+    expect(missingEstimated).toBeGreaterThan(499_000)
+    expect(missingEstimated).toBeLessThan(510_000)
   })
 
-  test("scales inline non-PDF files with decoded payload size", () => {
+  test("scales inline non-PDF files with decoded payload size", async () => {
     const text = "漢".repeat(50_000)
-    const estimated = estimateInputTokens({
+    const estimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -5035,8 +5118,8 @@ describe("output token budget", () => {
     expect(estimated).toBeGreaterThanOrEqual(150_000)
   })
 
-  test("uses a conservative fixed fallback for remote PDFs", () => {
-    const estimated = estimateInputTokens({
+  test("uses a conservative fixed fallback for remote PDFs", async () => {
+    const estimated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -5047,11 +5130,11 @@ describe("output token budget", () => {
         },
       ],
     })
-    expect(estimated).toBeGreaterThan(32_000)
-    expect(estimated).toBeLessThan(40_000)
+    expect(estimated).toBeGreaterThan(499_000)
+    expect(estimated).toBeLessThan(510_000)
   })
 
-  test("counts every AI SDK v6 tool-result media variant once per transport occurrence", () => {
+  test("counts every AI SDK v6 tool-result media variant once per transport occurrence", async () => {
     const payload = "A".repeat(1_048_576)
     const variants = [
       { type: "media" as const, mediaType: "application/pdf", data: payload },
@@ -5064,7 +5147,7 @@ describe("output token budget", () => {
     ]
 
     for (const variant of variants) {
-      const estimated = estimateInputTokens({
+      const estimated = await estimateInputTokens({
         system: [],
         messages: [
           {
@@ -5089,7 +5172,7 @@ describe("output token budget", () => {
     }
 
     const shared = { type: "image-data" as const, mediaType: "image/png", data: "AQ==" }
-    const repeated = estimateInputTokens({
+    const repeated = await estimateInputTokens({
       system: [],
       messages: [
         {
@@ -5108,7 +5191,7 @@ describe("output token budget", () => {
     expect(repeated).toBeGreaterThan(64 * 2_000)
   })
 
-  test("projects unsupported media before estimation without discounting supported media", () => {
+  test("projects unsupported media before estimation without discounting supported media", async () => {
     const unsupported = createWindowModel({ context: 65_536, output: 16_384 })
     const messages = [
       {
@@ -5123,7 +5206,7 @@ describe("output token budget", () => {
     const projected = ProviderTransform.messagesForInputEstimate(messages, unsupported)
     expect((messages[0].content[0] as { type: string }).type).toBe("image")
     expect((projected[0]!.content[0] as { type: string }).type).toBe("text")
-    const projectedEstimate = estimateInputTokens({ system: [], messages: projected })
+    const projectedEstimate = await estimateInputTokens({ system: [], messages: projected })
     expect(projectedEstimate).toBeLessThan(10_000)
     expect(clampOutputTokens({ model: unsupported, requested: 16_384, inputTokens: projectedEstimate })).toBe(16_384)
 
@@ -5136,10 +5219,10 @@ describe("output token budget", () => {
     }
     const preserved = ProviderTransform.messagesForInputEstimate(messages, supported)
     expect((preserved[0]!.content[0] as { type: string }).type).toBe("image")
-    expect(estimateInputTokens({ system: [], messages: preserved })).toBeGreaterThan(64 * 2_000)
+    expect(await estimateInputTokens({ system: [], messages: preserved })).toBeGreaterThan(64 * 2_000)
   })
 
-  test("projects every valid unsupported image payload and case-normalized file media type", () => {
+  test("projects every valid unsupported image payload and case-normalized file media type", async () => {
     const unsupported = createWindowModel({ context: 65_536, output: 16_384 })
     const messages = [
       {
@@ -5158,11 +5241,11 @@ describe("output token budget", () => {
 
     const projected = ProviderTransform.messagesForInputEstimate(messages, unsupported)
     expect((projected[0]!.content as Array<{ type: string }>).every((part) => part.type === "text")).toBeTrue()
-    expect(estimateInputTokens({ system: [], messages: projected })).toBeLessThan(10_000)
+    expect(await estimateInputTokens({ system: [], messages: projected })).toBeLessThan(10_000)
     expect((messages[0].content as Array<{ type: string }>).every((part) => part.type !== "text")).toBeTrue()
   })
 
-  test("counts repeated shared tool objects while terminating true cycles", () => {
+  test("counts repeated shared tool objects while terminating true cycles", async () => {
     const sharedTool = tool({
       description: "shared schema documentation ".repeat(1_200),
       inputSchema: jsonSchema({
@@ -5170,18 +5253,22 @@ describe("output token budget", () => {
         properties: { query: { type: "string", description: "query details ".repeat(1_200) } },
       }),
     })
-    const once = estimateInputTokens({ system: [], messages: [], tools: { first: sharedTool } })
-    const twice = estimateInputTokens({ system: [], messages: [], tools: { first: sharedTool, second: sharedTool } })
+    const once = await estimateInputTokens({ system: [], messages: [], tools: { first: sharedTool } })
+    const twice = await estimateInputTokens({
+      system: [],
+      messages: [],
+      tools: { first: sharedTool, second: sharedTool },
+    })
     expect(twice).toBeGreaterThan(once * 1.8)
 
     const circular: Record<string, unknown> = { text: "still counted" }
     circular.self = circular
-    expect(estimateInputTokens({ system: [], messages: [circular] })).toBeGreaterThan(0)
+    expect(await estimateInputTokens({ system: [], messages: [circular] })).toBeGreaterThan(0)
   })
 
-  test("uses a conservative multilingual floor instead of the ASCII ratio", () => {
+  test("uses a conservative multilingual floor instead of the ASCII ratio", async () => {
     const text = "漢".repeat(10_000)
-    expect(estimateInputTokens({ system: [text], messages: [] })).toBeGreaterThanOrEqual(10_000)
+    expect(await estimateInputTokens({ system: [text], messages: [] })).toBeGreaterThanOrEqual(10_000)
   })
 
   test("honors the known one-million-token Anthropic beta header", () => {
@@ -5358,7 +5445,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
   const largePrompt = PROSE.repeat(Math.ceil((52_180 * 3.7) / PROSE.length))
 
   test("a ~52K-token system prompt does not produce an unclamped request", async () => {
-    const estimated = estimateInputTokens({ system: [largePrompt], messages })
+    const estimated = await estimateInputTokens({ system: [largePrompt], messages })
     // Sized to reproduce the reported 52,180-token prompt.
     expect(estimated).toBeGreaterThan(51_500)
     expect(estimated).toBeLessThan(53_500)
