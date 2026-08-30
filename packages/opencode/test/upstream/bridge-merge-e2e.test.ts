@@ -378,9 +378,7 @@ describe("E2E: OAuth callback XSS prevention (cycle 1 + 2)", () => {
     // util (src/util/html.ts); oauth-callback.ts now imports it. Accept either an
     // inline `function escapeHtml` (legacy) or the shared-util import — the XSS
     // property below is what actually matters and is asserted unchanged.
-    expect(content).toMatch(
-      /function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/,
-    )
+    expect(content).toMatch(/function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/)
     // Every ${error} or ${error_description} interpolation must go through escapeHtml
     const errorInterps = content.match(/\$\{(error[A-Za-z_]*?)\}/g) ?? []
     for (const interp of errorInterps) {
@@ -526,10 +524,13 @@ describe("E2E: chat.params maxOutputTokens hook (cycle 6)", () => {
     expect(hookBlock).toMatch(/maxOutputTokens/)
   })
 
-  test("session/llm.ts reads params.maxOutputTokens (not the local var) for streamText", async () => {
+  test("session/llm.ts routes params.maxOutputTokens through the context clamp", async () => {
     const content = readFileSync(path.join(srcDir, "session", "llm.ts"), "utf-8")
-    // streamText config must reference params.maxOutputTokens
-    expect(content).toMatch(/maxOutputTokens:\s*params\.maxOutputTokens/)
+    // altimate_change start — the plugin result is now clamped before streamText receives it
+    expect(content).toMatch(/requested:\s*params\.maxOutputTokens/)
+    expect(content).toMatch(/const maxOutputTokens = clampOutputTokens/)
+    expect(content).toMatch(/return streamText\([\s\S]*?maxOutputTokens,/)
+    // altimate_change end
   })
 
   test("plugin/codex.ts chat.params hook still sets output.maxOutputTokens = undefined", async () => {

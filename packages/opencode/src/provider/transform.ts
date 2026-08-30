@@ -6,10 +6,6 @@ import type { Provider } from "./provider"
 import type { ModelsDev } from "./models"
 import { iife } from "@/util/iife"
 import { Flag } from "@/flag/flag"
-// altimate_change start — output-token clamp needs prompt sizing and a logger
-import { Token } from "@/util/token"
-import { Log } from "@/util/log"
-// altimate_change end
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -23,9 +19,6 @@ function mimeToModality(mime: string): Modality | undefined {
 
 export namespace ProviderTransform {
   export const OUTPUT_TOKEN_MAX = Flag.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
-  // altimate_change start — logger for the output-token clamp below
-  const log = Log.create({ service: "provider.transform" })
-  // altimate_change end
   // altimate_change start — keep OpenAI encrypted reasoning include values consistent across transforms
   const INCLUDE_ENCRYPTED_REASONING = ["reasoning.encrypted_content"] as const
 
@@ -383,7 +376,10 @@ export namespace ProviderTransform {
         content: msg.content.map((part) => {
           const partType = (part as { type?: string }).type
           if (partType === "tool-approval-request" || partType === "tool-approval-response") return part
-          return { ...part, providerOptions: transform((part as { providerOptions?: Record<string, any> }).providerOptions) }
+          return {
+            ...part,
+            providerOptions: transform((part as { providerOptions?: Record<string, any> }).providerOptions),
+          }
         }),
       } as typeof msg
     })
@@ -405,9 +401,8 @@ export namespace ProviderTransform {
         model.id.includes("claude") ||
         model.api.npm === "@ai-sdk/anthropic" ||
         // altimate_change start — Alibaba Anthropic-compatible cache-control namespace
-        model.api.npm === "@ai-sdk/alibaba"
-        // altimate_change end
-      ) &&
+        model.api.npm === "@ai-sdk/alibaba") &&
+      // altimate_change end
       model.api.npm !== "@ai-sdk/gateway"
     ) {
       msgs = applyCaching(msgs, model)
@@ -569,16 +564,9 @@ export namespace ProviderTransform {
       return ["low", "medium", "high", "xhigh", "max"]
     }
     if (
-      [
-        "opus-4-6",
-        "opus-4.6",
-        "4-6-opus",
-        "4.6-opus",
-        "sonnet-4-6",
-        "sonnet-4.6",
-        "4-6-sonnet",
-        "4.6-sonnet",
-      ].some((v) => apiId.includes(v))
+      ["opus-4-6", "opus-4.6", "4-6-opus", "4.6-opus", "sonnet-4-6", "sonnet-4.6", "4-6-sonnet", "4.6-sonnet"].some(
+        (v) => apiId.includes(v),
+      )
     ) {
       return ["low", "medium", "high", "max"]
     }
@@ -819,7 +807,9 @@ export namespace ProviderTransform {
           return Object.fromEntries(["none", "high"].map((effort) => [effort, { reasoningEffort: effort }]))
         }
         if (model.api.id.toLowerCase().includes("deepseek-v4")) {
-          return Object.fromEntries([...WIDELY_SUPPORTED_EFFORTS, "max"].map((effort) => [effort, { reasoningEffort: effort }]))
+          return Object.fromEntries(
+            [...WIDELY_SUPPORTED_EFFORTS, "max"].map((effort) => [effort, { reasoningEffort: effort }]),
+          )
         }
         // altimate_change end
         return Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
@@ -954,15 +944,13 @@ export namespace ProviderTransform {
         // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-generative-ai
         return googleThinkingVariants(model)
 
-      case "@ai-sdk/mistral":
-        // https://v5.ai-sdk.dev/providers/ai-sdk-providers/mistral
-        // altimate_change start — only Mistral Small 4 and Medium 3.5 expose adjustable reasoning
-        {
-          const mistralId = model.api.id.toLowerCase()
-          const ids = ["mistral-small-2603", "mistral-small-latest", "mistral-medium-3.5", "mistral-medium-2604"]
-          if (!ids.some((item) => mistralId.includes(item))) return {}
-          return { high: { reasoningEffort: "high" } }
-        }
+      case "@ai-sdk/mistral": {
+        // altimate_change start — only Mistral Small 4 and Medium 3.5 expose adjustable reasoning // https://v5.ai-sdk.dev/providers/ai-sdk-providers/mistral
+        const mistralId = model.api.id.toLowerCase()
+        const ids = ["mistral-small-2603", "mistral-small-latest", "mistral-medium-3.5", "mistral-medium-2604"]
+        if (!ids.some((item) => mistralId.includes(item))) return {}
+        return { high: { reasoningEffort: "high" } }
+      }
       // altimate_change end
 
       case "@ai-sdk/cohere":
@@ -1011,7 +999,9 @@ export namespace ProviderTransform {
         }
         if (apiId.includes("gpt") || /\bo[1-9]/.test(apiId)) {
           const efforts = openaiReasoningEfforts(apiId, model.release_date)
-          return wrapInSapModelParams(Object.fromEntries(efforts.map((effort) => [effort, { reasoning_effort: effort }])))
+          return wrapInSapModelParams(
+            Object.fromEntries(efforts.map((effort) => [effort, { reasoning_effort: effort }])),
+          )
         }
         return wrapInSapModelParams(
           Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoning_effort: effort }])),
@@ -1047,7 +1037,10 @@ export namespace ProviderTransform {
     }
     // altimate_change end
 
-    if (input.model.api.npm === "@openrouter/ai-sdk-provider" || input.model.api.npm === "@llmgateway/ai-sdk-provider") {
+    if (
+      input.model.api.npm === "@openrouter/ai-sdk-provider" ||
+      input.model.api.npm === "@llmgateway/ai-sdk-provider"
+    ) {
       result["usage"] = {
         include: true,
       }
@@ -1284,108 +1277,6 @@ export namespace ProviderTransform {
     return Math.min(model.limit.output, ceiling) || ceiling
     // altimate_change end
   }
-
-  // altimate_change start — clamp the reserved completion budget against the real prompt size.
-  //
-  // `maxOutputTokens` above is a per-model ceiling. It never reads `limit.context`, so on a
-  // model where input and completion share one window a large system prompt can push
-  // `input + reservation` past that window and the provider rejects the request with a hard
-  // 400 before generating anything. The client already knows all three numbers, so it can
-  // either shrink the reservation to fit or refuse with an actionable message.
-
-  /**
-   * Smallest completion budget worth sending. Below this an agent turn cannot reliably emit
-   * even one tool call, so a request that would clamp this far is refused instead of being
-   * sent to come back as a silently truncated response.
-   */
-  export const OUTPUT_TOKEN_FLOOR = 1_024
-
-  // `inputTokens` is a character-ratio estimate, not the provider's tokenizer. Measured drift
-  // against a provider's own accounting on a ~52K prompt was under 1%, so a clamped budget
-  // keeps a 2% (minimum 512-token) margin rather than filling the window exactly.
-  const CLAMP_MARGIN_FRACTION = 0.02
-  const CLAMP_MARGIN_MIN = 512
-
-  /** Thrown before the request is sent when no usable completion budget fits in the window. */
-  export class OutputTokenBudgetError extends Error {
-    constructor(
-      readonly info: {
-        modelID: string
-        providerID: string
-        inputTokens: number
-        requested: number
-        context: number
-        floor: number
-      },
-    ) {
-      super(
-        [
-          `Context budget exceeded before the request was sent.`,
-          `${info.providerID}/${info.modelID} declares a ${info.context}-token context window,`,
-          `the prompt is ~${info.inputTokens} tokens, and ${info.requested} tokens are reserved for`,
-          `the completion — ${info.inputTokens + info.requested} in total.`,
-          `Even after clamping, fewer than ${info.floor} tokens would remain for the response.`,
-          `Reduce the system prompt (fewer instructions, skills, or AGENTS.md content), lower the`,
-          `output reservation via OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, or use a model with a`,
-          `larger context window.`,
-        ].join(" "),
-      )
-      this.name = "OutputTokenBudgetError"
-    }
-  }
-
-  /** Rough token count for the prompt about to be sent, used only for the clamp decision. */
-  export function estimateInputTokens(system: string[], messages: unknown[]): number {
-    return Token.estimate(system.join("\n")) + Token.estimate(JSON.stringify(messages))
-  }
-
-  /**
-   * Shrink `requested` so `inputTokens + result` fits `model.limit.context`.
-   *
-   * Returns `requested` unchanged whenever it already fits, when the caller omitted it, when the
-   * model declares no context window, when the declared window is too small to hold even a
-   * floor-sized completion (those limits are not credible enough to fail a request on — the
-   * provider stays the authority), or when the model budgets input separately via `limit.input`
-   * (there the two budgets are not shared and clamping would be wrong).
-   * Throws `OutputTokenBudgetError` when the remaining budget is below `OUTPUT_TOKEN_FLOOR`.
-   */
-  export function clampOutputTokens(input: {
-    model: Provider.Model
-    requested: number | undefined
-    inputTokens: number
-  }): number | undefined {
-    const requested = input.requested
-    if (requested === undefined) return undefined
-
-    const context = input.model.limit.context
-    if (!context || context <= OUTPUT_TOKEN_FLOOR) return requested
-    if (input.model.limit.input) return requested
-    if (input.inputTokens <= 0) return requested
-    if (input.inputTokens + requested <= context) return requested
-
-    const margin = Math.max(CLAMP_MARGIN_MIN, Math.ceil(input.inputTokens * CLAMP_MARGIN_FRACTION))
-    const clamped = context - input.inputTokens - margin
-    if (clamped < OUTPUT_TOKEN_FLOOR) {
-      throw new OutputTokenBudgetError({
-        modelID: input.model.id,
-        providerID: input.model.providerID,
-        inputTokens: input.inputTokens,
-        requested,
-        context,
-        floor: OUTPUT_TOKEN_FLOOR,
-      })
-    }
-    log.warn("clamped output token reservation to fit context window", {
-      providerID: input.model.providerID,
-      modelID: input.model.id,
-      context,
-      inputTokens: input.inputTokens,
-      requested,
-      clamped,
-    })
-    return clamped
-  }
-  // altimate_change end
 
   // altimate_change start — lower MCP/tool JSON Schema to provider-compatible subsets
   type JsonRecord = Record<string, unknown>

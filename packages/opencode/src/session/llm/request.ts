@@ -8,6 +8,14 @@ import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — size and clamp the finalized provider request
+import {
+  clampOutputTokens,
+  clampReasoningBudget,
+  effectiveContextWindow,
+  estimateInputTokens,
+} from "@/provider/output-token-budget"
+// altimate_change end
 import { SystemPrompt } from "../system"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
@@ -168,30 +176,39 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
-  // altimate_change start — clamp the reserved completion budget against the real prompt size.
-  // `maxOutputTokens` is a per-model ceiling that ignores `limit.context`, so a large system
-  // prompt could push `input + reservation` past the window and the provider rejected the request
-  // with a hard 400 before generating anything. `input.messages` is used rather than the merged
-  // `messages` because the latter can already carry `system` as leading system messages, which
-  // would double-count the prompt. Throws when no usable budget is left.
+  // altimate_change start — clamp after tools, headers, and plugin options are finalized.
+  const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
+  const maxOutputTokens = clampOutputTokens({
+    model: input.model,
+    requested: params.maxOutputTokens,
+    context: effectiveContextWindow({
+      model: input.model,
+      headerSources: [input.model.headers, headers, input.provider.options],
+    }),
+    inputTokens: () =>
+      estimateInputTokens({
+        system,
+        messages: input.messages,
+        tools: sortedTools,
+        instructions: params.options.instructions,
+      }),
+  })
+  const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
   const clampedParams = {
     ...params,
-    maxOutputTokens: ProviderTransform.clampOutputTokens({
-      model: input.model,
-      requested: params.maxOutputTokens,
-      inputTokens: ProviderTransform.estimateInputTokens(system, input.messages),
-    }),
+    maxOutputTokens,
+    options: requestOptions,
   }
   // altimate_change end
 
   return {
     system,
     messages,
-    tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
+    tools: sortedTools,
     // altimate_change start — return the context-window-clamped params built above
     params: clampedParams,
     // altimate_change end
-    messageTransformOptions: options,
+    messageTransformOptions: requestOptions,
     headers: {
       ...(input.model.providerID.startsWith("opencode")
         ? {

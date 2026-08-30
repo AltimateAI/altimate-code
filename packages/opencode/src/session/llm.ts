@@ -13,6 +13,14 @@ import {
 } from "ai"
 import { mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — size and clamp the finalized provider request
+import {
+  clampOutputTokens,
+  clampReasoningBudget,
+  effectiveContextWindow,
+  estimateInputTokens,
+} from "@/provider/output-token-budget"
+// altimate_change end
 // altimate_change start — tool retrieval
 import { Retrieval } from "@/tool/retrieval"
 // altimate_change end
@@ -73,7 +81,9 @@ export namespace LLM {
     ])
     const isCodex = provider.id === "openai" && auth?.type === "oauth"
 
-    const system = []
+    // altimate_change start — keep the request-budget input typed before the first push
+    const system: string[] = []
+    // altimate_change end
     system.push(
       [
         // use agent prompt otherwise provider prompt
@@ -150,18 +160,6 @@ export namespace LLM {
     )
     // altimate_change end
 
-    // altimate_change start — clamp the reserved completion budget against the real prompt size.
-    // `maxOutputTokens` is a per-model ceiling that ignores `limit.context`, so a large system
-    // prompt could push `input + reservation` past the window and the provider rejected the
-    // request with a hard 400 before generating anything. Clamped after the chat.params hook so
-    // a plugin override is checked too. Throws when no usable budget is left.
-    const maxOutputTokens = ProviderTransform.clampOutputTokens({
-      model: input.model,
-      requested: params.maxOutputTokens,
-      inputTokens: ProviderTransform.estimateInputTokens(system, input.messages),
-    })
-    // altimate_change end
-
     const { headers } = await Plugin.trigger(
       "chat.headers",
       {
@@ -223,6 +221,29 @@ export namespace LLM {
     }
     // altimate_change end
 
+    // altimate_change start — clamp after every context-affecting request field is finalized.
+    // Tool schemas and provider instructions consume the shared context window, while encoded
+    // media bytes do not count as literal text. The estimator runs lazily so providers that omit
+    // maxOutputTokens pay no serialization cost. Known context beta headers widen the catalog
+    // limit before the clamp. Fixed reasoning budgets are reconciled with the final reservation.
+    const maxOutputTokens = clampOutputTokens({
+      model: input.model,
+      requested: params.maxOutputTokens,
+      context: effectiveContextWindow({
+        model: input.model,
+        headerSources: [input.model.headers, headers, provider.options],
+      }),
+      inputTokens: () =>
+        estimateInputTokens({
+          system,
+          messages: input.messages,
+          tools,
+          instructions: params.options.instructions,
+        }),
+    })
+    const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
+    // altimate_change end
+
     return streamText({
       onError(error) {
         l.error("stream error", {
@@ -257,12 +278,11 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
-      providerOptions: ProviderTransform.providerOptions(input.model, params.options),
+      providerOptions: ProviderTransform.providerOptions(input.model, requestOptions),
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       toolChoice: input.toolChoice,
-      // altimate_change start — read maxOutputTokens from params (now plumbed through chat.params
-      // hook), clamped above so it cannot exceed the model's context window
+      // altimate_change start — use the plugin-selected reservation after context clamping
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
@@ -302,7 +322,7 @@ export namespace LLM {
             async transformParams(args) {
               if (args.type === "stream") {
                 // @ts-expect-error
-                args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, options)
+                args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, requestOptions)
               }
               return args.params
             },
