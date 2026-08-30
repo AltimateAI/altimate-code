@@ -33,6 +33,7 @@
 // detection is per-skill ``updated_at`` and the only integrity check available
 // is byte length.
 import fs from "fs/promises"
+import { statSync } from "node:fs"
 import path from "path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
@@ -97,9 +98,37 @@ function managedRoot(directory: string): string {
   return path.join(directory, MANAGED_DIR)
 }
 
+/** Every mutable table below is anchored on a process-global rather than being
+ * plain module state. This file is reached through two different module graphs
+ * in the same process — the bind path resolves it via one specifier and the
+ * per-turn hook via another — and the runtime keeps a separate module record
+ * for each, so module-level `Map`s silently fork — `inFlight` included, which
+ * would let a bind and a turn stage and swap the same project concurrently.
+ * A symbol-keyed global gives every copy of this module the same tables.
+ *
+ * Note this only reaches copies sharing a realm. Threads do NOT share
+ * `globalThis`, so anything a bind must hand to a later turn goes through disk
+ * instead — see `snapshotFingerprint`. */
+const STORE_KEY = Symbol.for("altimate.workspace.skill-sync.store")
+
+interface SyncStore {
+  inFlight: Map<string, Promise<{ changed: boolean }>>
+  lastSyncedAt: Map<string, number>
+  registryAppliedAt: Map<string, number>
+  syncedFor: Map<string, string>
+}
+
+const globals = globalThis as unknown as Record<symbol, SyncStore | undefined>
+const store: SyncStore = (globals[STORE_KEY] ??= {
+  inFlight: new Map(),
+  lastSyncedAt: new Map(),
+  registryAppliedAt: new Map(),
+  syncedFor: new Map(),
+})
+
 /** In-flight sync per canonical project directory, so a bind and a session
  * start racing on the same project do not both stage and swap. */
-const inFlight = new Map<string, Promise<{ changed: boolean }>>()
+const inFlight = store.inFlight
 
 /** How long a snapshot is trusted before the next turn re-checks the workspace.
  *
@@ -122,31 +151,52 @@ const MAX_TOTAL_FILES = 2000
 /** Last SUCCESSFUL sync per canonical project, for the interval above. A failed
  * attempt must not stamp: doing so suppresses retry for a full interval on a
  * transient error, which is the opposite of what a failure should cause. */
-const lastSyncedAt = new Map<string, number>()
+const lastSyncedAt = store.lastSyncedAt
 
-/** When this project's on-disk snapshot last changed, and when a caller last
- * refreshed the skill registry for it.
+/** Which snapshot this caller has already refreshed its skill registry for.
  *
- * These are separate because the two events happen in different places: a bind
- * changes disk without any registry to refresh, while the per-turn hook holds
- * the instance context that CAN refresh. Comparing them is what lets a turn
- * notice that a bind (or another caller) already moved the snapshot, even
- * though this turn's own sync did nothing. */
-const snapshotChangedAt = new Map<string, number>()
-const registryAppliedAt = new Map<string, number>()
+ * The comparison is against a fingerprint taken from DISK, not from a sibling
+ * in-memory table. A bind and a turn do not share memory: the runtime loads this
+ * module once per thread, so each gets its own module record AND its own
+ * `globalThis`. A bind stamping an in-process map is invisible to the thread
+ * that serves the next turn, which is exactly why a workspace linked
+ * mid-session stayed invisible to the agent until the process restarted. The
+ * manifest is swapped into place by every sync that changes files and removed
+ * by a deactivate, so its mtime moves on exactly the events a refresh must
+ * follow — and every thread reads the same number. */
+const registryAppliedAt = store.registryAppliedAt
 
-/** Does the skill registry still reflect an older snapshot than the one on
- * disk? True after a sync that changed files until `markRegistryApplied`. */
+/** mtime of the snapshot manifest, or 0 when there is no snapshot. Both
+ * directions matter: a sync that adds one moves this off 0, and a deactivate
+ * that removes it moves it back, so a purge refreshes the registry too. */
+function snapshotFingerprint(canon: string): number {
+  try {
+    return statSync(path.join(managedRoot(canon), MANIFEST_NAME)).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/** Does the skill registry still reflect a different snapshot than the one on
+ * disk? True until `markRegistryApplied` records the current fingerprint. */
 export function registryStale(directory: string): boolean {
   const canon = path.resolve(directory)
-  const changed = snapshotChangedAt.get(canon)
-  if (changed === undefined) return false
-  return (registryAppliedAt.get(canon) ?? 0) < changed
+  const current = snapshotFingerprint(canon)
+  const applied = registryAppliedAt.get(canon)
+  // Nothing applied yet: stale only if there IS a snapshot. A project that has
+  // never synced must not pay a config invalidation on the first turn of every
+  // session. A bound project does pay one — this cannot tell a snapshot that
+  // predates boot from one a bind just wrote, and refreshing a registry that
+  // was already current is a cheap rescan, while missing a new one is the bug
+  // this whole path exists to prevent.
+  if (applied === undefined) return current !== 0
+  return applied !== current
 }
 
 /** Record that the caller has refreshed the registry for the current snapshot. */
 export function markRegistryApplied(directory: string): void {
-  registryAppliedAt.set(path.resolve(directory), Date.now())
+  const canon = path.resolve(directory)
+  registryAppliedAt.set(canon, snapshotFingerprint(canon))
 }
 
 /** Has this project's snapshot been checked within the poll interval? Callers
@@ -179,7 +229,7 @@ export async function recentlySynced(directory: string): Promise<boolean> {
 }
 
 /** Which account each project's snapshot was last fetched for. */
-const syncedFor = new Map<string, string>()
+const syncedFor = store.syncedFor
 
 function accountKeyOf(tenant: string, apiUrl: string): string {
   return `${tenant}\u0000${apiUrl}`
@@ -439,7 +489,6 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     const dropped = (await pathsAreReal(canon).catch(() => false))
       ? await deactivate(canon, "the workspace feature is off").catch(() => false)
       : false
-    if (dropped) snapshotChangedAt.set(canon, Date.now())
     return { changed: dropped }
   }
   const existing = inFlight.get(canon)
@@ -693,7 +742,6 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // Only a clean run earns the poll interval. `failed` is set by the inner
     // catch, which swallows so that skills can never block a turn.
     if (ok && !failed && sawRemote) lastSyncedAt.set(canon, Date.now())
-    if (changed) snapshotChangedAt.set(canon, Date.now())
     return { changed }
   })()
   inFlight.set(canon, settled)

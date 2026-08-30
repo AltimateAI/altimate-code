@@ -113,9 +113,22 @@ export namespace SessionPrompt {
     // retried on every subsequent turn forever, and the next real snapshot
     // change re-arms this anyway.
     skillSync.markRegistryApplied(dir)
-    const { Config } = await import("../config/config")
-    await Config.invalidate()
-    await import("../skill").then((m) => m.Skill.refresh())
+    const { Skill } = await import("../skill")
+    // Both drops go through the in-context services rather than the imperative
+    // facades. Discovery re-derives its roots from `Config.directories()`, which
+    // walks up looking for `.altimate-code/`; on a project that has never synced,
+    // that directory does not exist at boot, so the list holds a miss that only
+    // an invalidate reaching *this* instance can clear. Invalidating through the
+    // facade leaves it, and the refreshed registry then rescans the same empty
+    // root set — the skills stay invisible for the rest of the session.
+    await AppRuntime.runPromise(
+      Effect.gen(function* () {
+        const config = yield* Config.Service
+        const skill = yield* Skill.Service
+        yield* config.invalidate()
+        yield* skill.refresh()
+      }),
+    )
   }
   // altimate_change end
 

@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import {
   existsSync,
   mkdirSync,
+  utimesSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -570,6 +571,38 @@ describe("workspace skill sync", () => {
     expect(registryStale(project)).toBe(true)
     markRegistryApplied(project)
     expect(registryStale(project)).toBe(false)
+  })
+
+  test("registryStale follows the snapshot on disk, not an in-process stamp", async () => {
+    // The bind and the turn that must refresh do not share memory — the runtime
+    // loads this module once per thread, so each has its own module record and
+    // its own `globalThis`. An in-process "changed" stamp is therefore invisible
+    // to the thread serving the next turn, which is what kept a workspace linked
+    // mid-session from ever reaching the agent. Simulating that here: the
+    // manifest moves WITHOUT this module having run a sync, and staleness must
+    // still be reported.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    markRegistryApplied(project)
+    expect(registryStale(project)).toBe(false)
+
+    const manifest = path.join(project, MANAGED, ".manifest.json")
+    const later = new Date(Date.now() + 5000)
+    utimesSync(manifest, later, later)
+
+    expect(registryStale(project)).toBe(true)
+  })
+
+  test("registryStale reports a purge, so opting out refreshes too", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    markRegistryApplied(project)
+    expect(registryStale(project)).toBe(false)
+
+    // A deactivate removes the whole managed tree, manifest included. That is a
+    // registry change in the other direction and must refresh just the same.
+    rmSync(path.join(project, MANAGED), { recursive: true, force: true })
+    expect(registryStale(project)).toBe(true)
   })
 
   test("the published snapshot ignores itself in git", async () => {
