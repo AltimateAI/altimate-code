@@ -91,11 +91,19 @@ export class DriverNotInstalledError extends Error {
 
   constructor(driver: DriverName, packages: readonly string[], searched: readonly string[]) {
     const label = DRIVER_LABELS[driver]
+    const installDir = driverInstallDir()
+    // `driverSearchRoots()` only returns directories that exist, so a compiled
+    // first run can have no searchable roots at all. The old message then ended
+    // in a bare "Searched 0 locations:" with nothing after the colon. Describe
+    // only what the empty list proves and name the managed location users need.
+    const searchedLine = searched.length
+      ? `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`
+      : `No searchable driver locations were found. Expected managed location: ${path.join(installDir, "node_modules")}.`
     super(
       `${label} driver not installed.\n` +
         `Install it with the warehouse_install_driver tool, or run:\n` +
-        `  npm install --prefix ${shellQuote(driverInstallDir())} ${packages.join(" ")}\n` +
-        `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`,
+        `  npm install --prefix ${shellQuote(installDir)} ${packages.join(" ")}\n` +
+        searchedLine,
     )
     this.name = "DriverNotInstalledError"
     this.driver = driver
