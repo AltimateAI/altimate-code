@@ -35,23 +35,38 @@ const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
 // a shipped binary visibly broken.
 const MIN_CATALOG_PROVIDERS = 50
 const REQUIRED_CATALOG_PROVIDERS = ["anthropic", "openai", "google"]
+// A blackholed connection is the one failure `fetch` will not surface on its own:
+// no error, no bytes, just a hang until the job's own timeout kills it with no
+// useful message. Bound it so the build fails with a reason instead.
+const CATALOG_FETCH_TIMEOUT_MS = 60_000
 
-/** Fetch the models.dev catalog, failing loudly on a non-2xx.
+/** Fetch the models.dev catalog, failing loudly rather than hanging or
+ * returning an error page.
  *
- * `fetch` resolves for 4xx/5xx, so without this check a load-balancer error page
- * flows straight into the snapshot. An HTML body would at least break the build
- * at parse time, but a JSON error body (`{"error": ...}`) is valid TypeScript and
- * would ship as a catalog with no providers in it. */
+ * `fetch` resolves for 4xx/5xx, so without the `res.ok` check a load-balancer
+ * error page flows straight into the snapshot. An HTML body would at least break
+ * the build at parse time, but a JSON error body (`{"error": ...}`) is valid
+ * TypeScript and would ship as a catalog with no providers in it. */
 async function fetchModelsCatalog(url: string): Promise<string> {
-  const res = await fetch(url)
+  let res: Response
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) })
+  } catch (e) {
+    throw new Error(`models.dev fetch from ${url} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`, {
+      cause: e,
+    })
+  }
   if (!res.ok) throw new Error(`models.dev fetch failed: HTTP ${res.status} ${res.statusText} from ${url}`)
   return await res.text()
 }
 
 /** Reject a catalog that parses but is obviously not usable.
  *
- * Release builds embed this in every binary, so an empty or truncated payload
- * has to stop the release rather than ship a CLI that offers no models. */
+ * Release builds embed this in every binary, so an empty, truncated or
+ * structurally broken payload has to stop the release rather than ship a CLI
+ * that offers no models. Checking the top-level key count alone is not enough:
+ * a payload can carry 50+ keys whose values are junk, which parses fine and
+ * ships a catalog with nothing selectable in it. */
 function assertUsableCatalog(text: string, origin: string): void {
   let parsed: unknown
   try {
@@ -61,24 +76,37 @@ function assertUsableCatalog(text: string, origin: string): void {
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
     throw new Error(`models.dev catalog from ${origin} is not a provider object`)
-  const providers = Object.keys(parsed)
+  const catalog = new Map<string, unknown>(Object.entries(parsed))
+  const providers = [...catalog.keys()]
   if (providers.length < MIN_CATALOG_PROVIDERS)
     throw new Error(
       `models.dev catalog from ${origin} has only ${providers.length} providers, expected at least ${MIN_CATALOG_PROVIDERS}`,
     )
-  const missing = REQUIRED_CATALOG_PROVIDERS.filter((p) => !providers.includes(p))
+  const missing = REQUIRED_CATALOG_PROVIDERS.filter((p) => !catalog.has(p))
   if (missing.length > 0)
     throw new Error(`models.dev catalog from ${origin} is missing required providers: ${missing.join(", ")}`)
-  console.log(`models.dev catalog from ${origin}: ${providers.length} providers`)
+  // Every required provider must actually carry models, not just exist as a key.
+  const modelCount = (id: string): number => {
+    const entry = catalog.get(id)
+    if (typeof entry !== "object" || entry === null || !("models" in entry)) return 0
+    const models = entry.models
+    return typeof models === "object" && models !== null && !Array.isArray(models) ? Object.keys(models).length : 0
+  }
+  const empty = REQUIRED_CATALOG_PROVIDERS.filter((p) => modelCount(p) === 0)
+  if (empty.length > 0)
+    throw new Error(`models.dev catalog from ${origin} has no usable models for: ${empty.join(", ")}`)
+  console.log(
+    `models.dev catalog from ${origin}: ${providers.length} providers ` +
+      `(${REQUIRED_CATALOG_PROVIDERS.map((p) => `${p}=${modelCount(p)}`).join(", ")})`,
+  )
 }
 
 // Fetch and generate models.dev snapshot. MODELS_DEV_API_JSON pins the catalog to
 // a local file for hermetic builds (ci.yml, pre-release-check.ts); release builds
 // leave it unset so the shipped binary embeds a release-time catalog.
-const modelsOrigin = process.env.MODELS_DEV_API_JSON ?? `${modelsUrl}/api.json`
-const modelsData = process.env.MODELS_DEV_API_JSON
-  ? await Bun.file(process.env.MODELS_DEV_API_JSON).text()
-  : await fetchModelsCatalog(`${modelsUrl}/api.json`)
+const modelsFile = process.env.MODELS_DEV_API_JSON
+const modelsOrigin = modelsFile ?? `${modelsUrl}/api.json`
+const modelsData = modelsFile ? await Bun.file(modelsFile).text() : await fetchModelsCatalog(modelsOrigin)
 assertUsableCatalog(modelsData, modelsOrigin)
 await Bun.write(
   path.join(dir, "src/provider/models-snapshot.ts"),
