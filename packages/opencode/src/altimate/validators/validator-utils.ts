@@ -834,7 +834,14 @@ export function readDbtProjectPathList(yml: string, key: string): string[] | nul
   const line = new RegExp(`^([ \\t]*)${escaped}[ \\t]*:[ \\t]*(.*)$`, "m").exec(yml)
   if (!line) return null
   const indent = (line[1] ?? "").length
-  const rest = (line[2] ?? "").replace(/\s+#.*$/, "").trim()
+  // Strip a trailing comment, and a comment that is the whole value. Without
+  // the second case `model-paths:  # TODO` parses as a directory literally
+  // named "# TODO", and the project's real models become invisible to every
+  // gate instead of falling back to dbt's default.
+  const rest = (line[2] ?? "")
+    .replace(/\s+#.*$/, "")
+    .replace(/^#.*$/, "")
+    .trim()
 
   const unquote = (s: string): string => {
     const t = s.trim()
@@ -992,7 +999,36 @@ export interface RunResultsArtifact {
  * populate `run_results.json` with `status: "success"` model rows having run
  * nothing at all.
  */
-const MODEL_EXECUTING_DBT_COMMANDS = new Set(["run", "build", "seed", "snapshot", "clone"])
+const MODEL_EXECUTING_DBT_COMMANDS = new Set(["run", "build"])
+
+/**
+ * dbt subcommands that execute *something*, but never a model.
+ *
+ * `seed`, `snapshot` and `clone` build their own node types, so their rows
+ * cannot speak for a model — but they are a normal thing to run after a build,
+ * exactly like `test`, so they must not be treated as "no build happened"
+ * either. They fall through to the `<target>/run/` DDL evidence path.
+ */
+const NON_MODEL_EXECUTING_DBT_COMMANDS = new Set(["test", "seed", "snapshot", "clone"])
+
+/**
+ * dbt subcommands known to execute nothing at all: they populate
+ * `run_results.json` from the manifest without touching the warehouse.
+ */
+const NON_EXECUTING_DBT_COMMANDS = new Set([
+  "compile",
+  "parse",
+  "docs",
+  "generate",
+  "list",
+  "ls",
+  "source",
+  "freshness",
+  "deps",
+  "debug",
+  "clean",
+  "init",
+])
 
 /**
  * True when `command` names a dbt subcommand whose `run_results.json` rows are
@@ -1010,19 +1046,26 @@ export function runResultsExecutedModels(command: string | null): boolean {
 }
 
 /**
- * True when `command` produced an artifact that carries no build evidence
- * whatsoever — neither model execution nor the test run that legitimately
- * follows one.
+ * True when `command` is a dbt subcommand KNOWN to execute nothing, so its
+ * artifact is not evidence that anything was built.
  *
- * `test` is excluded on purpose: `dbt build` followed by `dbt test` is a normal
- * sequence, and `dbt-tests-pass` in this very lane spawns `dbt test` in the
- * project on every validation pass, so a test artifact is the *expected* state
- * on any retry. Treating it as "no build" would fire on every healthy session.
+ * Only commands on the known-non-executing list qualify. An unrecognised
+ * command — a future dbt subcommand, a wrapper's own spelling — reads as
+ * executing, matching the permissive default in `runResultsExecutedModels`.
+ * Blocking on a command we simply do not recognise would fail a session whose
+ * build was green, and the exploit this guards against (`dbt compile`) is on
+ * the list explicitly.
+ *
+ * `test`, `seed`, `snapshot` and `clone` are excluded on purpose: each is a
+ * normal successor to a build, and `dbt-tests-pass` in this very lane spawns
+ * `dbt test` in the project on every validation pass, so a test artifact is
+ * the *expected* state on any retry. Treating any of them as "no build" would
+ * fire on healthy sessions. They fall through to the DDL evidence path.
  */
 export function runResultsCarriesNoBuildEvidence(command: string | null): boolean {
   if (command === null || command.length === 0) return false
-  if (runResultsExecutedModels(command)) return false
-  return command !== "test"
+  if (NON_MODEL_EXECUTING_DBT_COMMANDS.has(command)) return false
+  return NON_EXECUTING_DBT_COMMANDS.has(command)
 }
 
 /** dbt statuses that mean the node built cleanly. `warn` is not a failure. */

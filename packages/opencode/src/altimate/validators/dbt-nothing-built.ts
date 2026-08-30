@@ -127,16 +127,25 @@ function normalizeRelPath(path: string): string {
  */
 async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<AuthoredWork> {
   const out: AuthoredWork = { any: false, names: new Set(), relPaths: new Set() }
-  const record = (full: string): void => {
+  /**
+   * `relationProducing` gates only the NAME index. Editing
+   * `macros/fct_orders.sql` is real work — it counts towards `any` and is
+   * recorded in `relPaths` — but it does not define a model called
+   * `fct_orders`, so letting its stem satisfy a required model would recreate
+   * the vacuous pass this correlation exists to close.
+   */
+  const record = (full: string, relationProducing: boolean): void => {
     out.any = true
-    const base = full.split(/[\\/]/).pop() ?? ""
-    const dot = base.lastIndexOf(".")
-    const stem = (dot > 0 ? base.slice(0, dot) : base).toLowerCase()
-    if (stem.length > 0) out.names.add(stem)
+    if (relationProducing) {
+      const base = full.split(/[\\/]/).pop() ?? ""
+      const dot = base.lastIndexOf(".")
+      const stem = (dot > 0 ? base.slice(0, dot) : base).toLowerCase()
+      if (stem.length > 0) out.names.add(stem)
+    }
     const rel = full.startsWith(dbtRoot) ? full.slice(dbtRoot.length).replace(/^[\\/]+/, "") : full
     out.relPaths.add(normalizeRelPath(rel))
   }
-  async function scan(dir: string, depth: number): Promise<void> {
+  async function scan(dir: string, depth: number, relationProducing: boolean): Promise<void> {
     if (depth > SCAN_MAX_DEPTH) return
     let entries: import("fs").Dirent[]
     try {
@@ -156,31 +165,28 @@ async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<Auth
         continue
       }
       if (stat.isDirectory()) {
-        await scan(full, depth + 1)
+        await scan(full, depth + 1, relationProducing)
       } else if (stat.isFile() && stat.mtimeMs >= sinceMs) {
-        record(full)
+        record(full, relationProducing)
       }
     }
   }
   // Directories come from `dbt_project.yml`, so a project on custom
   // `model-paths` is not reported as having authored nothing.
   const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
-  const dirs = [
-    ...sourcePaths.models,
-    ...sourcePaths.seeds,
-    ...sourcePaths.snapshots,
-    ...sourcePaths.analyses,
-    ...sourcePaths.macros,
-    ...sourcePaths.tests,
-  ]
-  for (const dir of dirs) {
-    await scan(dir, 0)
+  // Only these three define relations, so only these contribute names.
+  for (const dir of [...sourcePaths.models, ...sourcePaths.seeds, ...sourcePaths.snapshots]) {
+    await scan(dir, 0, true)
+  }
+  // Real work, but not a relation definition.
+  for (const dir of [...sourcePaths.analyses, ...sourcePaths.macros, ...sourcePaths.tests]) {
+    await scan(dir, 0, false)
   }
   for (const name of AUTHORED_ROOT_FILES) {
     const full = join(dbtRoot, name)
     try {
       const stat = await fs.stat(full)
-      if (stat.isFile() && stat.mtimeMs >= sinceMs) record(full)
+      if (stat.isFile() && stat.mtimeMs >= sinceMs) record(full, false)
     } catch {
       // absent — keep looking
     }

@@ -342,6 +342,71 @@ describe("finding 5 — node type is checked", () => {
   })
 })
 
+describe("bot review wave", () => {
+  test("a path key whose whole value is a comment falls back to the default", async () => {
+    // `model-paths:  # TODO` parsed as a directory literally named "# TODO",
+    // which made the project's real models invisible to every gate.
+    await makeProject(
+      "name: t\nversion: '1.0'\nconfig-version: 2\nprofile: t\nmodel-paths:  # TODO decide\n",
+    )
+    await fs.writeFile(join(dir, "models", "orders.sql"), "select 1 as id")
+
+    const paths = await resolveDbtSourcePaths(dir)
+    expect(paths.models.some((p) => p.includes("TODO"))).toBe(false)
+    expect(await modelsModifiedSince(dir, 0)).toHaveLength(1)
+  })
+
+  test("a trailing inline comment is still stripped", async () => {
+    await makeProject(
+      "name: t\nversion: '1.0'\nconfig-version: 2\nprofile: t\nmodel-paths: transform  # here\n",
+    )
+    const paths = await resolveDbtSourcePaths(dir)
+    expect(paths.models.some((p) => p.endsWith("transform"))).toBe(true)
+  })
+
+  test("an unrecognised dbt command is trusted rather than blocking", async () => {
+    // The permissive default the doc promises: a future subcommand, or a
+    // wrapper's own spelling, must not fail a session whose build was green.
+    await makeProject()
+    await fs.writeFile(join(dir, "models", "orders.sql"), "select 1 as id")
+    await writeRunResults({
+      which: "some-future-command",
+      nodes: [{ id: "model.t.orders", status: "success" }],
+    })
+
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.details!["verdict"]).not.toBe("non-executing-artifact")
+    expect(r.ok).toBe(true)
+  })
+
+  test("a seed artifact cannot certify a model, but does not block either", async () => {
+    // `dbt seed` executes seeds, not models — a normal thing to run after a
+    // build, so it falls through to the DDL evidence path like `test` does.
+    await makeProject()
+    await fs.writeFile(join(dir, "models", "orders.sql"), "select 1 as id")
+    await writeRunResults({
+      which: "seed",
+      nodes: [{ id: "seed.t.orders", status: "success" }],
+    })
+
+    const r = await DbtBuildGreenValidator.check(ctx())
+    expect(r.details!["verdict"]).not.toBe("fresh-build")
+    expect(r.details!["verdict"]).not.toBe("non-executing-artifact")
+  })
+
+  test("an edited macro sharing a required model's stem does not mark it delivered", async () => {
+    await makeProject()
+    await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.")
+    await fs.mkdir(join(dir, "macros"), { recursive: true })
+    await fs.writeFile(join(dir, "macros", "fct_orders.sql"), "{% macro fct_orders() %}{% endmacro %}")
+
+    const r = await DbtNothingBuiltValidator.check(ctx())
+    expect(r.details!["authored_files"]).toBe(true)
+    expect(r.details!["matched_deliverables"]).toEqual([])
+    expect(r.ok).toBe(false)
+  })
+})
+
 describe("a stale task document must not trap the session", () => {
   test("a required model already on disk satisfies the gate without being touched", async () => {
     // A TASK.md naming a deliverable that some earlier session already
