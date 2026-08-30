@@ -376,10 +376,7 @@ export namespace ProviderTransform {
         content: msg.content.map((part) => {
           const partType = (part as { type?: string }).type
           if (partType === "tool-approval-request" || partType === "tool-approval-response") return part
-          return {
-            ...part,
-            providerOptions: transform((part as { providerOptions?: Record<string, any> }).providerOptions),
-          }
+          return { ...part, providerOptions: transform((part as { providerOptions?: Record<string, any> }).providerOptions) }
         }),
       } as typeof msg
     })
@@ -401,8 +398,9 @@ export namespace ProviderTransform {
         model.id.includes("claude") ||
         model.api.npm === "@ai-sdk/anthropic" ||
         // altimate_change start — Alibaba Anthropic-compatible cache-control namespace
-        model.api.npm === "@ai-sdk/alibaba") &&
-      // altimate_change end
+        model.api.npm === "@ai-sdk/alibaba"
+        // altimate_change end
+      ) &&
       model.api.npm !== "@ai-sdk/gateway"
     ) {
       msgs = applyCaching(msgs, model)
@@ -564,9 +562,16 @@ export namespace ProviderTransform {
       return ["low", "medium", "high", "xhigh", "max"]
     }
     if (
-      ["opus-4-6", "opus-4.6", "4-6-opus", "4.6-opus", "sonnet-4-6", "sonnet-4.6", "4-6-sonnet", "4.6-sonnet"].some(
-        (v) => apiId.includes(v),
-      )
+      [
+        "opus-4-6",
+        "opus-4.6",
+        "4-6-opus",
+        "4.6-opus",
+        "sonnet-4-6",
+        "sonnet-4.6",
+        "4-6-sonnet",
+        "4.6-sonnet",
+      ].some((v) => apiId.includes(v))
     ) {
       return ["low", "medium", "high", "max"]
     }
@@ -807,9 +812,7 @@ export namespace ProviderTransform {
           return Object.fromEntries(["none", "high"].map((effort) => [effort, { reasoningEffort: effort }]))
         }
         if (model.api.id.toLowerCase().includes("deepseek-v4")) {
-          return Object.fromEntries(
-            [...WIDELY_SUPPORTED_EFFORTS, "max"].map((effort) => [effort, { reasoningEffort: effort }]),
-          )
+          return Object.fromEntries([...WIDELY_SUPPORTED_EFFORTS, "max"].map((effort) => [effort, { reasoningEffort: effort }]))
         }
         // altimate_change end
         return Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoningEffort: effort }]))
@@ -944,13 +947,15 @@ export namespace ProviderTransform {
         // https://v5.ai-sdk.dev/providers/ai-sdk-providers/google-generative-ai
         return googleThinkingVariants(model)
 
-      case "@ai-sdk/mistral": {
-        // altimate_change start — only Mistral Small 4 and Medium 3.5 expose adjustable reasoning // https://v5.ai-sdk.dev/providers/ai-sdk-providers/mistral
-        const mistralId = model.api.id.toLowerCase()
-        const ids = ["mistral-small-2603", "mistral-small-latest", "mistral-medium-3.5", "mistral-medium-2604"]
-        if (!ids.some((item) => mistralId.includes(item))) return {}
-        return { high: { reasoningEffort: "high" } }
-      }
+      case "@ai-sdk/mistral":
+        // https://v5.ai-sdk.dev/providers/ai-sdk-providers/mistral
+        // altimate_change start — only Mistral Small 4 and Medium 3.5 expose adjustable reasoning
+        {
+          const mistralId = model.api.id.toLowerCase()
+          const ids = ["mistral-small-2603", "mistral-small-latest", "mistral-medium-3.5", "mistral-medium-2604"]
+          if (!ids.some((item) => mistralId.includes(item))) return {}
+          return { high: { reasoningEffort: "high" } }
+        }
       // altimate_change end
 
       case "@ai-sdk/cohere":
@@ -999,9 +1004,7 @@ export namespace ProviderTransform {
         }
         if (apiId.includes("gpt") || /\bo[1-9]/.test(apiId)) {
           const efforts = openaiReasoningEfforts(apiId, model.release_date)
-          return wrapInSapModelParams(
-            Object.fromEntries(efforts.map((effort) => [effort, { reasoning_effort: effort }])),
-          )
+          return wrapInSapModelParams(Object.fromEntries(efforts.map((effort) => [effort, { reasoning_effort: effort }])))
         }
         return wrapInSapModelParams(
           Object.fromEntries(WIDELY_SUPPORTED_EFFORTS.map((effort) => [effort, { reasoning_effort: effort }])),
@@ -1037,10 +1040,7 @@ export namespace ProviderTransform {
     }
     // altimate_change end
 
-    if (
-      input.model.api.npm === "@openrouter/ai-sdk-provider" ||
-      input.model.api.npm === "@llmgateway/ai-sdk-provider"
-    ) {
+    if (input.model.api.npm === "@openrouter/ai-sdk-provider" || input.model.api.npm === "@llmgateway/ai-sdk-provider") {
       result["usage"] = {
         include: true,
       }

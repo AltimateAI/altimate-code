@@ -278,7 +278,9 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
+      // altimate_change start — use the reasoning options reconciled with the final output reservation
       providerOptions: ProviderTransform.providerOptions(input.model, requestOptions),
+      // altimate_change end
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       toolChoice: input.toolChoice,

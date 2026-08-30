@@ -204,11 +204,11 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   return {
     system,
     messages,
+    // altimate_change start — return the finalized tools and context-window-clamped request values
     tools: sortedTools,
-    // altimate_change start — return the context-window-clamped params built above
     params: clampedParams,
-    // altimate_change end
     messageTransformOptions: requestOptions,
+    // altimate_change end
     headers: {
       ...(input.model.providerID.startsWith("opencode")
         ? {
