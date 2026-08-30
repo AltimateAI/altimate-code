@@ -279,15 +279,21 @@ export function clampOutputTokens(input: {
   if (!context || context <= OUTPUT_TOKEN_FLOOR) return requested
   if (inputTokens + requested + margin <= context) return requested
 
+  // Do not reject a model for failing to reach a floor above its own reservation.
+  const floor = Math.min(OUTPUT_TOKEN_FLOOR, requested)
   const clamped = Math.floor(context - inputTokens - margin)
-  if (clamped < OUTPUT_TOKEN_FLOOR) {
+  if (clamped < floor) {
+    // If only the estimator margin causes the failure, preserve a reservation that still fits
+    // the declared window. The provider remains authoritative for its exact tokenizer.
+    const withoutMargin = Math.floor(context - inputTokens)
+    if (withoutMargin >= floor) return Math.min(requested, withoutMargin)
     throw new OutputTokenBudgetError({
       modelID: input.model.id,
       providerID: input.model.providerID,
       inputTokens,
       requested,
       context,
-      floor: OUTPUT_TOKEN_FLOOR,
+      floor,
     })
   }
   log.warn("clamped output token reservation to fit context window", {

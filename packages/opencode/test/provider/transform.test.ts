@@ -4764,6 +4764,12 @@ describe("output token budget", () => {
     expect(clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(16_384)
   })
 
+  test("never demands more headroom than the model's own output reservation", () => {
+    const model = createWindowModel({ context: 8_192, output: 512 })
+    expect(clampOutputTokens({ model, requested: 512, inputTokens: 7_169 })).toBe(512)
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 8_000 })).toThrow(OutputTokenBudgetError)
+  })
+
   test("does not clamp a window too small to hold even a floor-sized completion", () => {
     // A declared window this small is a placeholder or a test fixture, not a real limit. Failing
     // the request client-side on numbers we do not believe would be worse than letting the
@@ -5066,6 +5072,18 @@ describe("output token budget", () => {
         headerSources: [{ aiGatewayHeaders: { "anthropic-beta": "context-1m-2025-08-07" } }],
       }),
     ).toBe(1_000_000)
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [{ "Anthropic-Beta": "context-1m-2025-08-07" }],
+      }),
+    ).toBe(1_000_000)
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [{ aiGatewayHeaders: { "anthropic-beta": "interleaved-thinking-2025-05-14" } }],
+      }),
+    ).toBe(200_000)
   })
 
   test("clamps fixed reasoning budgets with the output reservation without mutating inputs", () => {
@@ -5079,6 +5097,28 @@ describe("output token budget", () => {
     expect(result.thinkingConfig.thinkingBudget).toBe(11_288)
     expect(result.reasoningConfig.budgetTokens).toBe(11_288)
     expect(options.thinking.budgetTokens).toBe(16_000)
+  })
+
+  test("preserves non-JSON provider options while lowering reasoning budgets", () => {
+    const callback = () => undefined
+    const options = {
+      thinking: { budgetTokens: 31_999 },
+      keepUndefined: undefined,
+      keepFunction: callback,
+      keepBigInt: 10n,
+      nested: [{ thinkingBudget: 31_999 }, { untouched: "value" }],
+    }
+    const result = clampReasoningBudget(options, 8_192)
+    expect(result.thinking.budgetTokens).toBe(7_168)
+    expect(result.nested[0]!.thinkingBudget).toBe(7_168)
+    expect(result.nested[1]!.untouched).toBe("value")
+    expect("keepUndefined" in result).toBeTrue()
+    expect(result.keepFunction).toBe(callback)
+    expect(result.keepBigInt).toBe(10n)
+    expect(options.thinking.budgetTokens).toBe(31_999)
+
+    const unchanged = { thinking: { budgetTokens: 512 } }
+    expect(clampReasoningBudget(unchanged, 8_192)).toBe(unchanged)
   })
 
   test("fails clearly when reasoning and visible output cannot both fit", () => {
