@@ -173,14 +173,20 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   // prompt could push `input + reservation` past the window and the provider rejected the request
   // with a hard 400 before generating anything. `input.messages` is used rather than the merged
   // `messages` because the latter can already carry `system` as leading system messages, which
-  // would double-count the prompt. Throws when no usable budget is left.
+  // would double-count the prompt. Tool schemas are counted too — providers bill them as prompt
+  // tokens. Throws when no usable budget is left.
+  const clampedMaxOutputTokens = ProviderTransform.clampOutputTokens({
+    model: input.model,
+    requested: params.maxOutputTokens,
+    context: ProviderTransform.effectiveContext(input.model, headers),
+    reasoningBudget: ProviderTransform.configuredReasoningBudget(params.options),
+    inputTokens: () => ProviderTransform.estimateInputTokens(system, input.messages, tools),
+  })
   const clampedParams = {
     ...params,
-    maxOutputTokens: ProviderTransform.clampOutputTokens({
-      model: input.model,
-      requested: params.maxOutputTokens,
-      inputTokens: ProviderTransform.estimateInputTokens(system, input.messages),
-    }),
+    maxOutputTokens: clampedMaxOutputTokens,
+    // A clamped completion budget must still leave room for the configured thinking budget.
+    options: ProviderTransform.clampReasoningBudget(params.options, clampedMaxOutputTokens),
   }
   // altimate_change end
 

@@ -150,18 +150,6 @@ export namespace LLM {
     )
     // altimate_change end
 
-    // altimate_change start — clamp the reserved completion budget against the real prompt size.
-    // `maxOutputTokens` is a per-model ceiling that ignores `limit.context`, so a large system
-    // prompt could push `input + reservation` past the window and the provider rejected the
-    // request with a hard 400 before generating anything. Clamped after the chat.params hook so
-    // a plugin override is checked too. Throws when no usable budget is left.
-    const maxOutputTokens = ProviderTransform.clampOutputTokens({
-      model: input.model,
-      requested: params.maxOutputTokens,
-      inputTokens: ProviderTransform.estimateInputTokens(system, input.messages),
-    })
-    // altimate_change end
-
     const { headers } = await Plugin.trigger(
       "chat.headers",
       {
@@ -223,6 +211,27 @@ export namespace LLM {
     }
     // altimate_change end
 
+    // altimate_change start — clamp the reserved completion budget against the real prompt size.
+    // `maxOutputTokens` is a per-model ceiling that ignores `limit.context`, so a large system
+    // prompt could push `input + reservation` past the window and the provider rejected the
+    // request with a hard 400 before generating anything. Placed after the chat.params hook so a
+    // plugin override is checked too, and after tool resolution and retrieval filtering so the
+    // estimate covers the tool schemas actually sent. Throws when no usable budget is left.
+    // Read outside the closure below: `system` is declared as an untyped array upstream and its
+    // evolved element type is not visible from inside a callback.
+    const systemParts: string[] = system
+    const reasoningBudget = ProviderTransform.configuredReasoningBudget(params.options)
+    const maxOutputTokens = ProviderTransform.clampOutputTokens({
+      model: input.model,
+      requested: params.maxOutputTokens,
+      context: ProviderTransform.effectiveContext(input.model, headers),
+      reasoningBudget,
+      inputTokens: () => ProviderTransform.estimateInputTokens(systemParts, input.messages, tools),
+    })
+    // A clamped completion budget must still leave room for the configured thinking budget.
+    const clampedOptions = ProviderTransform.clampReasoningBudget(params.options, maxOutputTokens)
+    // altimate_change end
+
     return streamText({
       onError(error) {
         l.error("stream error", {
@@ -257,7 +266,9 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
-      providerOptions: ProviderTransform.providerOptions(input.model, params.options),
+      // altimate_change start — use the reasoning-budget-clamped options built above
+      providerOptions: ProviderTransform.providerOptions(input.model, clampedOptions),
+      // altimate_change end
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       toolChoice: input.toolChoice,

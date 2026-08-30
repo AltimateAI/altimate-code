@@ -4727,11 +4727,22 @@ describe("ProviderTransform.clampOutputTokens", () => {
     expect(() => ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 65_000 })).toThrow()
   })
 
-  test("leaves a config that already fits completely unchanged", () => {
+  test("leaves a config with room to spare unchanged", () => {
     const model = createWindowModel({ context: 65_536, output: 16_384 })
     expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 10_000 })).toBe(16_384)
-    // Exactly filling the window is still a valid request and must not be touched.
-    expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 49_152 })).toBe(16_384)
+  })
+
+  test("applies the estimator margin to a request that only just fits", () => {
+    // `inputTokens` is a character-ratio estimate, so a prompt that appears to fill the window
+    // exactly can still overflow it at the provider's tokenizer. Without the margin on this path
+    // the boundary is discontinuous: one token over clamps to a ~1K cushion, one token under is
+    // sent with no protection at all and reproduces the reported 400.
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    const exactFill = ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 49_152 })!
+    expect(exactFill).toBeLessThan(16_384)
+    // 65536 - 49152 - ceil(49152 * 0.02) = 15400
+    expect(exactFill).toBe(15_400)
+    expect(49_152 + exactFill).toBeLessThan(65_536)
   })
 
   test("leaves large-window models unchanged", () => {
@@ -4739,10 +4750,15 @@ describe("ProviderTransform.clampOutputTokens", () => {
     expect(ProviderTransform.clampOutputTokens({ model, requested: 8_192, inputTokens: 150_000 })).toBe(8_192)
   })
 
-  test("does not clamp models that budget input separately from output", () => {
-    // limit.input means the two budgets are not shared, so input + output can exceed context.
+  test("clamps models that declare limit.input, which is an input ceiling inside the same window", () => {
+    // `limit.input` is not a separate budget. `Session.Overflow.usable` subtracts the reserved
+    // completion from it, and catalog-shaped fixtures pair `input` with an equal or larger
+    // `context` (e.g. context 200K / input 200K / output 32K), so input plus the reservation
+    // still has to fit `context`. Skipping these models left the exact 400 this guard prevents.
     const model = createWindowModel({ context: 65_536, input: 65_536, output: 16_384 })
-    expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(16_384)
+    const clamped = ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })!
+    expect(clamped).toBeLessThan(16_384)
+    expect(60_000 + clamped).toBeLessThan(65_536)
   })
 
   test("does not clamp when the model declares no context window", () => {
@@ -4762,6 +4778,137 @@ describe("ProviderTransform.clampOutputTokens", () => {
     // Codex and GitHub Copilot deliberately send no maxOutputTokens.
     const model = createWindowModel({ context: 65_536, output: 16_384 })
     expect(ProviderTransform.clampOutputTokens({ model, requested: undefined, inputTokens: 60_000 })).toBeUndefined()
+  })
+
+  test("does not estimate the prompt on paths that return before the estimate is needed", () => {
+    // Serializing the whole history costs real time and allocation on long sessions. Codex and
+    // GitHub Copilot send no reservation at all, so the estimate must never run for them.
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    let calls = 0
+    const inputTokens = () => {
+      calls++
+      return 60_000
+    }
+    expect(ProviderTransform.clampOutputTokens({ model, requested: undefined, inputTokens })).toBeUndefined()
+    expect(calls).toBe(0)
+
+    ProviderTransform.clampOutputTokens({
+      model: createWindowModel({ context: 0, output: 16_384 }),
+      requested: 16_384,
+      inputTokens,
+    })
+    expect(calls).toBe(0)
+
+    ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens })
+    expect(calls).toBe(1)
+  })
+
+  test("respects a context window widened by a request header", () => {
+    // The GitLab AI-gateway loader always sends `anthropic-beta: context-1m-2025-08-07` while its
+    // catalog entries still declare 200K. Clamping against the catalog value would refuse prompts
+    // the provider route accepts.
+    const model = createWindowModel({ context: 200_000, output: 16_384 })
+    expect(ProviderTransform.effectiveContext(model, {})).toBe(200_000)
+    expect(ProviderTransform.effectiveContext(model, { "anthropic-beta": "context-1m-2025-08-07" })).toBe(1_000_000)
+
+    // Without the widened window this 300K prompt would be refused client-side.
+    expect(() => ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 300_000 })).toThrow(
+      ProviderTransform.OutputTokenBudgetError,
+    )
+    expect(
+      ProviderTransform.clampOutputTokens({
+        model,
+        requested: 16_384,
+        inputTokens: 300_000,
+        context: ProviderTransform.effectiveContext(model, { "anthropic-beta": "context-1m-2025-08-07" }),
+      }),
+    ).toBe(16_384)
+  })
+
+  test("keeps room for a configured reasoning budget", () => {
+    // Anthropic rejects a request whose thinking budget is not below max_tokens, and this repo
+    // configures fixed 16,000/31,999-token budgets. A clamp that ignores them turns one provider
+    // 400 into another.
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    const clamped = ProviderTransform.clampOutputTokens({
+      model,
+      requested: 16_384,
+      inputTokens: 52_180,
+      reasoningBudget: 16_000,
+    })!
+    // The floor rises to OUTPUT_TOKEN_FLOOR + 1024 so thinking and an answer both fit.
+    expect(clamped).toBeGreaterThanOrEqual(ProviderTransform.OUTPUT_TOKEN_FLOOR + 1_024)
+
+    const options = { anthropic: { thinking: { type: "enabled", budgetTokens: 16_000 } } }
+    const adjusted = ProviderTransform.clampReasoningBudget(options, clamped) as typeof options
+    expect(adjusted.anthropic.thinking.budgetTokens).toBeLessThan(clamped)
+    expect(adjusted.anthropic.thinking.budgetTokens).toBe(clamped - ProviderTransform.OUTPUT_TOKEN_FLOOR)
+    // The original object is not mutated.
+    expect(options.anthropic.thinking.budgetTokens).toBe(16_000)
+
+    // A budget that already fits is left exactly as it was.
+    const small = { google: { thinkingConfig: { thinkingBudget: 512 } } }
+    expect(ProviderTransform.clampReasoningBudget(small, 16_384)).toBe(small)
+  })
+
+  test("reads the configured reasoning budget out of nested provider options", () => {
+    expect(ProviderTransform.configuredReasoningBudget({ anthropic: { thinking: { budgetTokens: 31_999 } } })).toBe(
+      31_999,
+    )
+    expect(
+      ProviderTransform.configuredReasoningBudget({ google: { thinkingConfig: { thinkingBudget: 16_000 } } }),
+    ).toBe(16_000)
+    expect(ProviderTransform.configuredReasoningBudget({ openai: { reasoningEffort: "high" } })).toBe(0)
+    expect(ProviderTransform.configuredReasoningBudget(undefined)).toBe(0)
+  })
+})
+
+describe("ProviderTransform.estimateInputTokens", () => {
+  test("does not count base64 attachment bytes as prompt text", () => {
+    // A ~1 MiB screenshot arrives as a base64 payload on the model message. Counted as text it
+    // reads as hundreds of thousands of tokens and would refuse a request the provider accepts,
+    // so media is stripped first — the same trade-off Compaction.estimate makes.
+    const image = "A".repeat(1_000_000)
+    const withMedia = [{ role: "user", content: [{ type: "image", image }] }]
+    const withoutMedia = [{ role: "user", content: [{ type: "image", image: "" }] }]
+    expect(ProviderTransform.estimateInputTokens([], withMedia)).toBeLessThan(100)
+    expect(ProviderTransform.estimateInputTokens([], withMedia)).toBeCloseTo(
+      ProviderTransform.estimateInputTokens([], withoutMedia),
+      -1,
+    )
+
+    // File parts and data: URLs go the same way, as do raw byte arrays.
+    const file = [
+      { role: "user", content: [{ type: "file", mediaType: "application/pdf", data: "B".repeat(500_000) }] },
+    ]
+    expect(ProviderTransform.estimateInputTokens([], file)).toBeLessThan(100)
+    const dataUrl = [
+      { role: "user", content: [{ type: "image", url: `data:image/png;base64,${"C".repeat(500_000)}` }] },
+    ]
+    expect(ProviderTransform.estimateInputTokens([], dataUrl)).toBeLessThan(100)
+    const bytes = [{ role: "user", content: [{ type: "image", image: new Uint8Array(200_000) }] }]
+    expect(ProviderTransform.estimateInputTokens([], bytes)).toBeLessThan(100)
+  })
+
+  test("still counts ordinary message text", () => {
+    const text = "the quick brown fox jumps over the lazy dog ".repeat(500)
+    const messages = [{ role: "user", content: [{ type: "text", text }] }]
+    expect(ProviderTransform.estimateInputTokens([], messages)).toBeGreaterThan(4_000)
+  })
+
+  test("counts tool definitions, which providers bill as prompt tokens", () => {
+    // The clamp decides on this number, so omitting the tool schemas under-counts exactly the
+    // tool-heavy sessions most likely to overflow the window.
+    const messages = [{ role: "user", content: [{ type: "text", text: "hi" }] }]
+    const bare = ProviderTransform.estimateInputTokens([], messages)
+    const tools = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [
+        `tool_${i}`,
+        { description: "does a thing with several parameters ".repeat(20), inputSchema: { type: "object" } },
+      ]),
+    )
+    const withTools = ProviderTransform.estimateInputTokens([], messages, tools)
+    expect(withTools).toBeGreaterThan(bare + 5_000)
   })
 })
 

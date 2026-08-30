@@ -1334,52 +1334,155 @@ export namespace ProviderTransform {
     }
   }
 
-  /** Rough token count for the prompt about to be sent, used only for the clamp decision. */
-  export function estimateInputTokens(system: string[], messages: unknown[]): number {
-    return Token.estimate(system.join("\n")) + Token.estimate(JSON.stringify(messages))
+  /**
+   * Smallest reasoning budget the Anthropic API accepts. When a reasoning variant is configured
+   * the clamp has to leave room for both the thinking budget and an actual answer, so the floor
+   * rises by this much.
+   */
+  const MIN_REASONING_BUDGET = 1_024
+
+  // Attachments reach this point as base64 payloads or byte arrays on the model messages.
+  // Serializing them whole would count a 1 MiB screenshot as hundreds of thousands of text
+  // tokens and refuse a request the provider would have accepted, so they are replaced with a
+  // marker before estimating — the same trade-off `Compaction.estimate` makes via `stripMedia`.
+  const MEDIA_PLACEHOLDER = "[media]"
+
+  function stringifyWithoutMedia(value: unknown): string {
+    return JSON.stringify(value, (key, val) => {
+      if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) return MEDIA_PLACEHOLDER
+      if (typeof val !== "string") return val
+      if (key === "data" || key === "image") return MEDIA_PLACEHOLDER
+      if (key === "url" && val.startsWith("data:")) return MEDIA_PLACEHOLDER
+      return val
+    })
   }
 
   /**
-   * Shrink `requested` so `inputTokens + result` fits `model.limit.context`.
+   * Rough token count for the prompt about to be sent, used only for the clamp decision.
    *
-   * Returns `requested` unchanged whenever it already fits, when the caller omitted it, when the
-   * model declares no context window, when the declared window is too small to hold even a
-   * floor-sized completion (those limits are not credible enough to fail a request on — the
-   * provider stays the authority), or when the model budgets input separately via `limit.input`
-   * (there the two budgets are not shared and clamping would be wrong).
-   * Throws `OutputTokenBudgetError` when the remaining budget is below `OUTPUT_TOKEN_FLOOR`.
+   * Counts the system text, the messages with media stripped, and the tool definitions — tools
+   * are sent with the request and providers bill them as prompt tokens, so leaving them out
+   * would under-count exactly the tool-heavy sessions most likely to overflow.
+   */
+  export function estimateInputTokens(system: string[], messages: unknown[], tools?: unknown): number {
+    return (
+      Token.estimate(system.join("\n")) +
+      Token.estimate(stringifyWithoutMedia(messages)) +
+      (tools ? Token.estimate(stringifyWithoutMedia(tools)) : 0)
+    )
+  }
+
+  /**
+   * The context window actually in force for a request.
+   *
+   * The catalog value is a static declaration, but a request header can enable a larger window:
+   * the GitLab AI-gateway loader always sends `anthropic-beta: context-1m-2025-08-07` while its
+   * catalog entries still declare 200K. Clamping against the catalog number there would shrink
+   * or refuse prompts the provider route accepts.
+   */
+  export function effectiveContext(model: Provider.Model, headers?: Record<string, string>): number {
+    const context = model.limit.context
+    if (headers?.["anthropic-beta"]?.includes("context-1m-2025-08-07")) return Math.max(context, 1_000_000)
+    return context
+  }
+
+  /** Largest reasoning budget configured anywhere in the provider options, or 0 if none. */
+  export function configuredReasoningBudget(options: unknown): number {
+    let budget = 0
+    const visit = (value: unknown) => {
+      if (Array.isArray(value)) return value.forEach(visit)
+      if (typeof value !== "object" || value === null) return
+      for (const [key, val] of Object.entries(value)) {
+        if ((key === "budgetTokens" || key === "thinkingBudget") && typeof val === "number") {
+          budget = Math.max(budget, val)
+        } else visit(val)
+      }
+    }
+    visit(options)
+    return budget
+  }
+
+  /**
+   * Lower a configured reasoning budget so it stays below the (possibly clamped) completion
+   * budget. Anthropic rejects a request whose `thinking.budget_tokens` is not less than
+   * `max_tokens`, and this repository configures fixed 16,000/31,999-token budgets, so clamping
+   * `maxOutputTokens` on its own can turn one provider 400 into another.
+   */
+  export function clampReasoningBudget<T>(options: T, maxOutputTokens: number | undefined): T {
+    if (maxOutputTokens === undefined) return options
+    const ceiling = maxOutputTokens - OUTPUT_TOKEN_FLOOR
+    if (ceiling < MIN_REASONING_BUDGET) return options
+
+    let changed = false
+    const next = JSON.parse(JSON.stringify(options ?? null), (key, val) => {
+      if ((key === "budgetTokens" || key === "thinkingBudget") && typeof val === "number" && val > ceiling) {
+        changed = true
+        return ceiling
+      }
+      return val
+    })
+    return changed ? next : options
+  }
+
+  /**
+   * Shrink `requested` so `inputTokens + result` fits the context window.
+   *
+   * Returns `requested` unchanged whenever it already fits with the estimator margin to spare,
+   * when the caller omitted it, when the model declares no context window, or when the declared
+   * window is too small to hold even a floor-sized completion (those limits are not credible
+   * enough to fail a request on — the provider stays the authority).
+   * Throws `OutputTokenBudgetError` when the remaining budget is below the floor.
+   *
+   * `inputTokens` may be a thunk: serializing the whole history is wasted work on the paths that
+   * return before the estimate is needed (Codex and GitHub Copilot send no reservation at all).
    */
   export function clampOutputTokens(input: {
     model: Provider.Model
     requested: number | undefined
-    inputTokens: number
+    inputTokens: number | (() => number)
+    /** Overrides `model.limit.context`; see `effectiveContext`. */
+    context?: number
+    /** Configured reasoning budget, if any — raises the floor so thinking still fits. */
+    reasoningBudget?: number
   }): number | undefined {
     const requested = input.requested
     if (requested === undefined) return undefined
 
-    const context = input.model.limit.context
-    if (!context || context <= OUTPUT_TOKEN_FLOOR) return requested
-    if (input.model.limit.input) return requested
-    if (input.inputTokens <= 0) return requested
-    if (input.inputTokens + requested <= context) return requested
+    // A configured reasoning budget has to fit under the clamped value alongside a real answer.
+    const floor =
+      input.reasoningBudget && input.reasoningBudget > 0
+        ? OUTPUT_TOKEN_FLOOR + MIN_REASONING_BUDGET
+        : OUTPUT_TOKEN_FLOOR
 
-    const margin = Math.max(CLAMP_MARGIN_MIN, Math.ceil(input.inputTokens * CLAMP_MARGIN_FRACTION))
-    const clamped = context - input.inputTokens - margin
-    if (clamped < OUTPUT_TOKEN_FLOOR) {
+    const context = input.context ?? input.model.limit.context
+    if (!context || context <= floor) return requested
+
+    const inputTokens = typeof input.inputTokens === "function" ? input.inputTokens() : input.inputTokens
+    if (inputTokens <= 0) return requested
+
+    // The margin applies to the fit check as well as the clamp. `inputTokens` is a character-ratio
+    // estimate, so a prompt that appears to fill the window exactly can still overflow it; without
+    // this the boundary is discontinuous — one token over clamps to a ~1K cushion, one token under
+    // gets no protection at all.
+    const margin = Math.max(CLAMP_MARGIN_MIN, Math.ceil(inputTokens * CLAMP_MARGIN_FRACTION))
+    if (inputTokens + requested + margin <= context) return requested
+
+    const clamped = context - inputTokens - margin
+    if (clamped < floor) {
       throw new OutputTokenBudgetError({
         modelID: input.model.id,
         providerID: input.model.providerID,
-        inputTokens: input.inputTokens,
+        inputTokens,
         requested,
         context,
-        floor: OUTPUT_TOKEN_FLOOR,
+        floor,
       })
     }
     log.warn("clamped output token reservation to fit context window", {
       providerID: input.model.providerID,
       modelID: input.model.id,
       context,
-      inputTokens: input.inputTokens,
+      inputTokens,
       requested,
       clamped,
     })
