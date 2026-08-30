@@ -24,6 +24,7 @@ export namespace Glob {
    */
   export const DEPENDENCY_IGNORE: readonly string[] = [
     "**/node_modules/**",
+    "**/vendor/**",
     "**/.git/**",
     "**/.pnpm/**",
     "**/.venv/**",
@@ -43,7 +44,6 @@ export namespace Glob {
     "**/target/**",
     "**/.next/**",
     "**/out/**",
-    "**/vendor/**",
     "**/coverage/**",
   ]
 

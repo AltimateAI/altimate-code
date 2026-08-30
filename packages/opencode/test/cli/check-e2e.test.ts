@@ -215,6 +215,7 @@ describe("check command E2E", () => {
     await writeSql(tmpDir.dir, "build/model.sql", "SELECT 1;")
     await writeSql(tmpDir.dir, "out/schema.ddl", "CREATE TABLE t (id INT);")
     await writeSql(tmpDir.dir, "node_modules/pkg/vendored.sql", "SELECT 2;")
+    await writeSql(tmpDir.dir, "vendor/pkg/vendored.sql", "SELECT 3;")
 
     const r = await runHandler(baseArgs({ files: [], checks: "lint" }))
     const j = parseJson(r.stdout)

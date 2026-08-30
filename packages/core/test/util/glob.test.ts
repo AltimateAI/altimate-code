@@ -16,11 +16,13 @@ beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "glob-ignore-"))
   await mkdir(path.join(root, "src"), { recursive: true })
   await mkdir(path.join(root, "node_modules", "pkg", ".vscode"), { recursive: true })
+  await mkdir(path.join(root, "vendor"), { recursive: true })
   await mkdir(path.join(root, "dist"), { recursive: true })
   await mkdir(path.join(root, ".vscode"), { recursive: true })
   await writeFile(path.join(root, ".vscode", "mcp.json"), "{}")
   await writeFile(path.join(root, "src", "mcp.json"), "{}")
   await writeFile(path.join(root, "node_modules", "pkg", ".vscode", "mcp.json"), "{}")
+  await writeFile(path.join(root, "vendor", "mcp.json"), "{}")
   await writeFile(path.join(root, "dist", "mcp.json"), "{}")
 })
 
@@ -33,7 +35,13 @@ const rel = (abs: string) => path.relative(root, abs).split(path.sep).join("/")
 describe("Glob.scan ignore", () => {
   test("without ignore, dependency and build trees are returned", async () => {
     const found = (await Glob.scan("**/mcp.json", { cwd: root, absolute: true, dot: true })).map(rel).sort()
-    expect(found).toEqual([".vscode/mcp.json", "dist/mcp.json", "node_modules/pkg/.vscode/mcp.json", "src/mcp.json"])
+    expect(found).toEqual([
+      ".vscode/mcp.json",
+      "dist/mcp.json",
+      "node_modules/pkg/.vscode/mcp.json",
+      "src/mcp.json",
+      "vendor/mcp.json",
+    ])
   })
 
   test("ignore excludes dependency and build trees but keeps source matches", async () => {
@@ -50,7 +58,7 @@ describe("Glob.scan ignore", () => {
     expect(found).toEqual([".vscode/mcp.json", "src/mcp.json"])
   })
 
-  test("dependency ignore keeps project content under output-named directories", async () => {
+  test("dependency ignore keeps output-named project content but prunes vendored trees", async () => {
     const found = (
       await Glob.scan("**/mcp.json", {
         cwd: root,
@@ -106,7 +114,8 @@ describe("Glob.DEFAULT_IGNORE", () => {
     for (const pattern of Glob.DEPENDENCY_IGNORE) {
       expect(pattern.endsWith("/**")).toBe(true)
     }
-    for (const dir of ["dist", "build", "out", "target", "vendor", "coverage"]) {
+    expect(Glob.DEPENDENCY_IGNORE).toContain("**/vendor/**")
+    for (const dir of ["dist", "build", "out", "target", "coverage"]) {
       expect(Glob.DEPENDENCY_IGNORE).not.toContain(`**/${dir}/**`)
     }
   })
