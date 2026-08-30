@@ -111,11 +111,31 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
  * the mechanism is a small drop-in: fetch, keep ``visibility === "list"``, and
  * fall back to this set whenever the response is empty or the call fails.
  *
+ * RETIRED — ``gpt-5.4`` and ``gpt-5.4-mini`` are excluded as of
+ * 2026-08-31T19:00:00Z.
+ * ``openai/codex``'s own shipped catalog
+ * (codex-rs/models-manager/models.json) marks both ``visibility: "hide"`` with
+ * ``upgrade.retirement_at: "2026-08-31T19:00:00Z"`` and the migration text
+ * "GPT-5.4 is no longer available. Codex now uses GPT-5.6 Terra in place of
+ * GPT-5.4." The documented replacements — ``gpt-5.4`` -> ``gpt-5.6-terra``,
+ * ``gpt-5.4-mini`` -> ``gpt-5.6-luna`` — are both already in this set, so
+ * affected users have a working model without further change.
+ *
+ * This is a retirement from the ChatGPT-subscription picker, NOT an API
+ * deprecation: both ids still carry ``supported_in_api: true``, neither is on
+ * OpenAI's deprecations page, and models.dev does not mark either
+ * ``deprecated``. API-key auth is unaffected and follows a longer schedule —
+ * this filter only runs when ``auth.type === "oauth"`` (see the models loader
+ * below), so key-authenticated users keep both ids.
+ *
+ * Because models.dev keeps serving these entries (they are still live API
+ * models), leaving them here would NOT self-heal after the deadline: they
+ * would stay in the subscription picker and fail at request time with the same
+ * opaque 400 this allowlist exists to prevent.
+ *
  * Exported for unit-test coverage — see test/plugin/codex-allowlist.test.ts. */
 export const OAUTH_ALLOWED_MODELS = new Set([
   "gpt-5.3-codex-spark",
-  "gpt-5.4",
-  "gpt-5.4-mini",
   "gpt-5.5",
   "gpt-5.6-luna",
   "gpt-5.6-sol",
