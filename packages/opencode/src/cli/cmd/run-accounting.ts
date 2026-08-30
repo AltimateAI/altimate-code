@@ -34,6 +34,22 @@ export namespace RunAccounting {
   // Timeout classification for why_harness_stopped="timeout" and retry decisions.
   const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 
+  /** Holds only overflow errors whose trace status depends on later recovery. */
+  export function createRecoverableOverflowTraceErrors() {
+    let pending: string[] = []
+    return {
+      add(error: string) {
+        pending.push(error)
+      },
+      recover() {
+        pending = []
+      },
+      values() {
+        return [...pending]
+      },
+    }
+  }
+
   // the explicit model DONE assertion is the primary termination path.
   // Detection delegates to the SessionTermination completion-token contract —
   // the single detector shared with the processor stop-path and the idle-done

@@ -199,6 +199,24 @@ describe("SessionProcessor.createToolCallIDCoercer (ingestion half)", () => {
     expect(coerce.pending("")).toEqual([])
   })
 
+  test("execution settlement preserves out-of-order association when result input is absent", () => {
+    const coerce = SessionProcessor.createToolCallIDCoercer("msg_execution_association")
+    const first = coerce.start("")
+    const second = coerce.start("")
+    expect(coerce.call("")).toBe(first)
+    expect(coerce.call("")).toBe(second)
+
+    const firstExecution = coerce.beginExecution("")
+    const secondExecution = coerce.beginExecution("")
+    coerce.finishExecution(secondExecution)
+    coerce.finishExecution(firstExecution)
+
+    const secondSettlement = coerce.settled("")
+    const firstSettlement = coerce.settled("")
+    expect(coerce.result("", secondSettlement)).toBe(second)
+    expect(coerce.result("", firstSettlement)).toBe(first)
+  })
+
   test("repeated ids are identity-matched and ambiguous identical calls fail closed", () => {
     const running = (tool: string, input: unknown) =>
       ({ tool, state: { status: "running", input, time: { start: 1 } } }) as MessageV2.ToolPart

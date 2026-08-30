@@ -243,6 +243,11 @@ export namespace IdleDone {
 
   /** True when the command writes to the filesystem through a head, flag, or redirection. */
   export function isMutatingCommand(command: string): boolean {
+    // Command/process substitutions can execute arbitrary writes before the
+    // visible command reports its status (`make check$(rm generated.ts)`). We
+    // cannot safely parse their nested shell here, so invalidate earlier
+    // verification evidence conservatively whenever one is present.
+    if (/\$\(|`|[<>]\(/.test(command)) return true
     // altimate_change start — Output redirection to a file. Only fd DUPLICATION
     // (`2>&1`, `>&2`) is excluded, and duplication is identified by the `&`
     // that FOLLOWS the operator. The previous lookbehind also rejected a `>`

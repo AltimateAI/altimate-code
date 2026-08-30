@@ -105,6 +105,7 @@ export namespace SessionProcessor {
   // the one unambiguous running part. Returning undefined is deliberate:
   // silently attaching an output to the wrong call corrupts the transcript.
   export type ToolCallIdentity = { toolName?: string; input?: unknown }
+  export type ToolExecution = { raw: unknown; occurrence: number }
 
   /** @internal Exported for focused pairing tests. */
   export function matchToolCallID(
@@ -127,8 +128,11 @@ export namespace SessionProcessor {
     const owners = new Map<string, string>()
     const used = new Set<string>()
     const occurrences = new Map<string, number>()
+    const allocated = new Map<string, string[]>()
     const started = new Map<string, string[]>()
     const awaitingResult = new Map<string, string[]>()
+    const executionOccurrences = new Map<string, number>()
+    const settledExecutions = new Map<string, number[]>()
     const keyOf = (raw: unknown) => (typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw)))
     const stable = (raw: unknown): string => {
       const key = keyOf(raw)
@@ -156,6 +160,9 @@ export namespace SessionProcessor {
       while (used.has(candidate)) candidate = `${base}_${++occurrence}`
       occurrences.set(key, occurrence + 1)
       used.add(candidate)
+      const ids = allocated.get(key) ?? []
+      ids.push(candidate)
+      allocated.set(key, ids)
       return candidate
     }
     const enqueue = (table: Map<string, string[]>, raw: unknown, value: string) => {
@@ -192,13 +199,36 @@ export namespace SessionProcessor {
         return id
       },
       result(raw: unknown, expected?: string) {
-        return dequeue(awaitingResult, raw, expected) ?? stable(raw)
+        return dequeue(awaitingResult, raw, expected) ?? expected ?? stable(raw)
       },
       peek(raw: unknown) {
         return awaitingResult.get(keyOf(raw))?.[0] ?? stable(raw)
       },
       pending(raw: unknown) {
         return [...(awaitingResult.get(keyOf(raw)) ?? [])]
+      },
+      beginExecution(raw: unknown): ToolExecution {
+        const key = keyOf(raw)
+        const occurrence = executionOccurrences.get(key) ?? 0
+        executionOccurrences.set(key, occurrence + 1)
+        return { raw, occurrence }
+      },
+      finishExecution(execution: ToolExecution) {
+        const key = keyOf(execution.raw)
+        const queue = settledExecutions.get(key) ?? []
+        queue.push(execution.occurrence)
+        settledExecutions.set(key, queue)
+      },
+      settled(raw: unknown) {
+        const key = keyOf(raw)
+        const queue = settledExecutions.get(key)
+        const occurrence = queue?.shift()
+        if (queue?.length === 0) settledExecutions.delete(key)
+        if (occurrence === undefined) return undefined
+        return allocated.get(key)?.[occurrence]
+      },
+      executionID(execution: ToolExecution) {
+        return allocated.get(keyOf(execution.raw))?.[execution.occurrence]
       },
     })
   }
@@ -221,6 +251,12 @@ export namespace SessionProcessor {
     // regenerated ids for empty/duplicate raw values cannot collide across steps.
     const coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
     const consumeToolCallID = (raw: unknown, identity: ToolCallIdentity) => {
+      // Local tool wrappers preserve the exact execution occurrence through
+      // settlement, even when the provider repeats one malformed raw ID and
+      // omits input from tool-result/tool-error. Prefer that association over
+      // heuristic identity matching; provider-executed tools fall back below.
+      const executed = coerceToolCallID.settled(raw)
+      if (executed !== undefined) return coerceToolCallID.result(raw, executed)
       const candidates = coerceToolCallID.pending(raw)
       const matched = matchToolCallID(candidates, identity, toolcalls)
       if (candidates.length > 1 && matched === undefined) {
@@ -259,6 +295,16 @@ export namespace SessionProcessor {
         const matched = matchToolCallID(candidates, identity, toolcalls)
         if (candidates.length > 1 && matched === undefined) return undefined
         return toolcalls.get(matched ?? coerceToolCallID.peek(toolCallID))
+      },
+      beginToolExecution(toolCallID: string) {
+        return coerceToolCallID.beginExecution(toolCallID)
+      },
+      finishToolExecution(execution: ToolExecution) {
+        coerceToolCallID.finishExecution(execution)
+      },
+      partFromToolExecution(execution: ToolExecution) {
+        const id = coerceToolCallID.executionID(execution)
+        return id === undefined ? undefined : toolcalls.get(id)
       },
       // altimate_change end
       async process(streamInput: LLM.StreamInput) {

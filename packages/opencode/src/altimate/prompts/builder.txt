@@ -228,3 +228,6 @@ declare a task complete, ALWAYS:
 3. **If you are running low on turns or context**, stop exploring and commit:
    write the change, build, verify. A completed adequate solution beats an
    unfinished perfect one.
+4. **Signal completion explicitly**: only after every requirement above is
+   satisfied, end your final response with the literal token `DONE` on its own
+   final line. Do not emit `DONE` while work or verification remains.

@@ -299,6 +299,18 @@ describe("session.compaction summarizer integrity (/ item 3)", () => {
     expect(summarizerPromptText()).not.toContain(SessionCompaction.PIN_SUMMARY_ADDITION)
   })
 
+  test("PIN_SUMMARY_ADDITION is omitted when a positive cap cannot fit the reminder frame", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+    spyOn(Config, "get").mockImplementationOnce(async () => ({ compaction: { pin_max_tokens: 1 } }) as any)
+
+    await run({ sessionID, messages, markerID })
+
+    expect(SessionCompaction.pinBudget({ cfg: { compaction: { pin_max_tokens: 1 } } as any, model: fakeModel })).toBe(1)
+    expect(summarizerPromptText()).not.toContain(SessionCompaction.PIN_SUMMARY_ADDITION)
+  })
+
   test("PIN_SUMMARY_ADDITION is omitted when history contains only an acknowledgement", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)

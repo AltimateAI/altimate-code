@@ -636,6 +636,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const events = await sdk.event.subscribe(undefined, { signal: eventAbort.signal })
       // altimate_change end
       let error: string | undefined
+      const recoverableOverflowTraceErrors = RunAccounting.createRecoverableOverflowTraceErrors()
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
@@ -887,7 +888,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 : undefined,
             )
             // altimate_change end
-            error = error ? error + EOL + err : err
+            if (props.error.name === "ContextOverflowError") recoverableOverflowTraceErrors.add(err)
+            else error = error ? error + EOL + err : err
             if (emit("error", { error: props.error })) continue
             UI.error(err)
           }
@@ -898,6 +900,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // without it (disabled/failed compaction) the run exits nonzero.
           if (event.type === "session.compacted" && event.properties.sessionID === sessionID) {
             accounting.onCompactionRecovered()
+            recoverableOverflowTraceErrors.recover()
           }
           // altimate_change end
 
@@ -1419,7 +1422,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Finalize trace and save to disk
       if (tracer) {
         Tracer.setActive(null)
-        const tracePath = await tracer.endTrace(error)
+        const traceError = [error, ...recoverableOverflowTraceErrors.values()].filter(Boolean).join(EOL) || undefined
+        const tracePath = await tracer.endTrace(traceError)
         if (tracePath) {
           emit("trace_saved", { path: tracePath })
           if (args.format !== "json" && process.stdout.isTTY) {

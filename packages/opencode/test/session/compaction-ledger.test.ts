@@ -390,6 +390,11 @@ describe("SessionCompaction.renderLedger", () => {
 
     const harmless = "bun test packages/opencode/test/session"
     expect(SessionCompaction.redactLedgerDetail(harmless)).toBe(harmless)
+
+    for (const command of ["git push -u origin main", "python -u script.py"]) {
+      expect(SessionCompaction.redactLedgerDetail(command)).toBe(command)
+    }
+    expect(SessionCompaction.redactLedgerDetail("curl -u alice https://example.com")).not.toContain("alice")
   })
 })
 

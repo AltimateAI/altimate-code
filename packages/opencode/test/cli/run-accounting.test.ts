@@ -5,6 +5,22 @@
 import { describe, expect, test } from "bun:test"
 import { RunAccounting } from "../../src/cli/cmd/run-accounting"
 
+describe("RunAccounting recoverable overflow trace errors", () => {
+  test("a completed compaction removes the recovered overflow from final trace status", () => {
+    const errors = RunAccounting.createRecoverableOverflowTraceErrors()
+    errors.add("ContextOverflowError: context exceeded")
+    expect(errors.values()).toHaveLength(1)
+    errors.recover()
+    expect(errors.values()).toEqual([])
+  })
+
+  test("an unrecovered overflow remains available to mark the trace failed", () => {
+    const errors = RunAccounting.createRecoverableOverflowTraceErrors()
+    errors.add("ContextOverflowError: context exceeded")
+    expect(errors.values()).toEqual(["ContextOverflowError: context exceeded"])
+  })
+})
+
 describe("RunAccounting turn accounting", () => {
   test("counts ordinary assistant steps", () => {
     const acc = RunAccounting.create()
@@ -479,7 +495,9 @@ describe("run command request/stream lifecycle contracts", () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
     expect(source).toContain("options?.suppressInterruptedPromptAbort")
     expect(source).toContain("loop(events.stream, { suppressInterruptedPromptAbort: true })")
-    expect(source).toMatch(/await sdk\.session\.abort\(\{ sessionID \}\)[\s\S]{0,500}?continue/)
+    expect(source).toMatch(
+      /if \(idleDone\.shouldChallenge\(\)\) \{[\s\S]{0,1600}?await sdk\.session\.abort\(\{ sessionID \}\)[\s\S]{0,600}?continue\s*\n\s*\}/,
+    )
     expect(source).toContain("SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE")
     expect(source).toContain('"IdleDoneContinuationUnconfirmed"')
   })

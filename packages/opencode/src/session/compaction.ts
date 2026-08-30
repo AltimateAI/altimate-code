@@ -550,6 +550,33 @@ export namespace SessionCompaction {
     })
   }
 
+  function shellSegmentBefore(value: string, end: number): string {
+    let start = 0
+    let quote: "'" | '"' | undefined
+    let escaped = false
+    for (let i = 0; i < end; i++) {
+      const char = value[i]
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === "\\" && quote !== "'") {
+        escaped = true
+        continue
+      }
+      if (quote) {
+        if (char === quote) quote = undefined
+        continue
+      }
+      if (char === "'" || char === '"') {
+        quote = char
+        continue
+      }
+      if (char === ";" || char === "|" || char === "&" || char === "\n") start = i + 1
+    }
+    return value.slice(start, end)
+  }
+
   /**
    * Ledger text is persisted into a later model prompt, so treat every tool
    * argument as sensitive. This intentionally over-redacts opaque credentials
@@ -561,19 +588,32 @@ export namespace SessionCompaction {
       /(?:api[_-]?key|access[_-]?key|access[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|(?:^|[_-])(?:key|token|secret|password|passwd|credential|signature|authorization|cookie)(?:$|[_-]))/i
     let masked = Telemetry.maskString(value)
 
-    // curl-style authentication flags are credentials even though the generic
-    // long-flag classifier cannot safely treat every `user` argument as secret.
-    // Cover spaced, equals, and attached short-flag forms.
-    masked = masked
-      .replace(
-        /(^|\s)(--user)(=|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-        (_match, lead: string, flag: string, separator: string) => `${lead}${flag}${separator}<redacted>`,
-      )
-      .replace(
-        /(^|\s)(-u)(?:(=|\s+)(?:"[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))/gi,
-        (_match, lead: string, flag: string, separator: string | undefined) =>
-          `${lead}${flag}${separator ?? ""}<redacted>`,
-      )
+    // `-u` is also a benign flag for commands such as `git push -u` and
+    // `python -u`. Redact it as authentication only in the current curl shell
+    // segment, or when the value itself has a user:password shape. Long
+    // `--user` follows the same rule so task literals are not discarded merely
+    // because an unrelated CLI chose that option name.
+    masked = masked.replace(
+      /(^|\s)(--user|-u)(?:(=|\s+)("[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))/gi,
+      (
+        match,
+        lead: string,
+        flag: string,
+        separator: string | undefined,
+        separatedValue: string | undefined,
+        attachedValue: string | undefined,
+        offset: number,
+        whole: string,
+      ) => {
+        // Attached values are valid only for short `-u` (`-ualice:pass`).
+        if (flag.toLowerCase() === "--user" && separator === undefined) return match
+        const rawValue = (separatedValue ?? attachedValue ?? "").replace(/^["']|["']$/g, "")
+        const curlContext = /(?:^|[\s/])curl(?=\s|$)/i.test(shellSegmentBefore(whole, offset + lead.length))
+        const credentialShaped = /^[^:/\s]+:[^/\s]+$/.test(rawValue)
+        if (!curlContext && !credentialShaped) return match
+        return `${lead}${flag}${separator ?? ""}<redacted>`
+      },
+    )
 
     // Strip URL userinfo and signed/query material before applying structural
     // command redaction. This works for HTTP-compatible and custom schemes.
@@ -912,6 +952,22 @@ export namespace SessionCompaction {
   export const PIN_WINDOW_FRACTION = 0.175
   export const PIN_WORKING_SLACK = 2_000
   export const PIN_CARD_MAX_TOKENS = 500
+
+  const TASK_PIN_FRAME = {
+    open: "<system-reminder>",
+    description:
+      "Original task — authoritative over any summary. The conversation above was compacted into a summary; the task below is the user's own instruction, reproduced verbatim. If the summary and this task conflict, this task wins.",
+    close: "</system-reminder>",
+  } as const
+
+  export function renderTaskPin(body: string): string {
+    return [TASK_PIN_FRAME.open, TASK_PIN_FRAME.description, "", body, TASK_PIN_FRAME.close].join("\n")
+  }
+
+  /** Tokens available for the verbatim body after the fixed reminder frame. */
+  export function taskPinBodyBudget(capTokens: number): number {
+    return Math.max(0, capTokens - Token.estimate(renderTaskPin("")))
+  }
 
   export function pinEnabled(cfg: ConfigInfo) {
     return cfg.compaction?.pin_task !== false
@@ -1267,9 +1323,10 @@ When constructing the summary, try to stick to this template:
     // small-window session, which would otherwise tell the summarizer to omit
     // the task while no pin exists to compensate. Layered as an ADDITION to
     // whichever summary prompt is active — never a replacement.
+    const taskPinBudget = pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID })
     if (
       pinEnabled(cfg) &&
-      pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID }) > 0 &&
+      taskPinBodyBudget(taskPinBudget) > 0 &&
       hasPinnableTask(input.unfilteredMessages ?? input.messages)
     )
       promptText += "\n\n" + PIN_SUMMARY_ADDITION

@@ -378,9 +378,7 @@ describe("E2E: OAuth callback XSS prevention (cycle 1 + 2)", () => {
     // util (src/util/html.ts); oauth-callback.ts now imports it. Accept either an
     // inline `function escapeHtml` (legacy) or the shared-util import — the XSS
     // property below is what actually matters and is asserted unchanged.
-    expect(content).toMatch(
-      /function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/,
-    )
+    expect(content).toMatch(/function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/)
     // Every ${error} or ${error_description} interpolation must go through escapeHtml
     const errorInterps = content.match(/\$\{(error[A-Za-z_]*?)\}/g) ?? []
     for (const interp of errorInterps) {
@@ -685,6 +683,14 @@ describe("E2E: SessionStatus.set async drift fixed (cycle 4)", () => {
   test("SessionPrompt.cancel is async (became so when SessionStatus.set did)", async () => {
     const content = readFileSync(path.join(srcDir, "session", "prompt.ts"), "utf-8")
     expect(content).toMatch(/export\s+async\s+function\s+cancel\s*\(/)
+  })
+
+  test("SessionPrompt.cancel makes an aborted generation replaceable before aborting it", () => {
+    const content = readFileSync(path.join(srcDir, "session", "prompt.ts"), "utf-8")
+    const cancel = content.match(/export async function cancel\(sessionID:[\s\S]*?^  \}/m)?.[0]
+    expect(cancel).toBeDefined()
+    expect(cancel!.indexOf("match.closing = true")).toBeGreaterThan(-1)
+    expect(cancel!.indexOf("match.closing = true")).toBeLessThan(cancel!.indexOf("match.abort.abort()"))
   })
 
   test("SessionPrompt.loop scopes fallback idle restoration to its own generation", async () => {

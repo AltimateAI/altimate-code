@@ -18,6 +18,7 @@ import { familyVendor } from "../provider/family"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 import { NudgeArbiter } from "./nudge"
+import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
@@ -97,6 +98,25 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
+
+  /** @internal Pure completion-gate predicate used by focused regression tests. */
+  export function shouldDispatchValidators(input: {
+    active: boolean
+    result: SessionProcessor.Result
+    finish?: string
+    hasError: boolean
+    validatorCount: number
+    explicitDone: boolean
+  }): boolean {
+    return (
+      input.active &&
+      input.result !== "compact" &&
+      (input.result !== "stop" || input.explicitDone) &&
+      input.finish === "stop" &&
+      !input.hasError &&
+      input.validatorCount > 0
+    )
+  }
 
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
   // user-facing phase label.
@@ -382,6 +402,10 @@ export namespace SessionPrompt {
       await SessionStatus.set(sessionID, { type: "idle" })
       return
     }
+    // Make the tombstone replaceable before aborting. A replacement prompt may
+    // arrive synchronously after cancel() and must start a fresh generation,
+    // never queue its callback on the signal that was just aborted.
+    match.closing = true
     match.abort.abort()
     if (!match.loopOwned) {
       // shell() also uses start(), but it has no loop disposer when no prompt
@@ -393,8 +417,9 @@ export namespace SessionPrompt {
     // Keep this exact generation registered until loop()'s generation-scoped
     // disposer runs. Deleting it here makes the disposer miss its fallback-idle
     // transition when cancellation lands during bootstrap, compaction, or any
-    // other path outside the processor catch block. The tombstone is not marked
-    // closing yet, so a new prompt cannot overlap the still-unwinding generation.
+    // other path outside the processor catch block. The closing tombstone lets
+    // start() install a fresh generation without attaching callbacks to this
+    // aborted one; the old generation-scoped disposer ignores that replacement.
     // Processor-owned aborts still publish session.error before idle; the
     // disposer observes that idle and only removes the registry entry.
   }
@@ -1476,6 +1501,11 @@ export namespace SessionPrompt {
       const maxValidatorRetries = Number(process.env.ALTIMATE_VALIDATORS_MAX_RETRIES ?? "3")
       const validatorsDebug = process.env.ALTIMATE_VALIDATORS_DEBUG === "1"
       const validatorCount = ValidatorRegistry.list().length
+      const validatorExplicitDone = SessionTermination.explicitDoneStop({
+        finish: processor.message.finish,
+        hasError: processor.message.error !== undefined,
+        parts: stepParts,
+      })
       // Always emit to opencode's file log. Mirror to stderr only when
       // ALTIMATE_VALIDATORS_DEBUG=1 — needed during framework bring-up so
       // automated harness logs capture the hook signal, but noisy enough
@@ -1497,12 +1527,14 @@ export namespace SessionPrompt {
         console.error("[altimate-validators] " + JSON.stringify(diag))
       }
       if (
-        validatorsActive &&
-        result !== "stop" &&
-        result !== "compact" &&
-        processor.message.finish === "stop" &&
-        !processor.message.error &&
-        validatorCount > 0
+        shouldDispatchValidators({
+          active: validatorsActive,
+          result,
+          finish: processor.message.finish,
+          hasError: processor.message.error !== undefined,
+          validatorCount,
+          explicitDone: validatorExplicitDone,
+        })
       ) {
         try {
           const vCtx = {
@@ -1803,48 +1835,54 @@ export namespace SessionPrompt {
     const tools: Record<string, AITool> = {}
 
     // altimate_change start — carry tool identity into repeated-id metadata lookup
-    const context = (toolName: string, args: any, options: ToolCallOptions): Tool.Context => ({
-      sessionID: input.session.id,
-      abort: options.abortSignal!,
-      messageID: input.processor.message.id,
-      callID: options.toolCallId,
-      extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
-      agent: input.agent.name,
-      // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
-      messages: input.messages as unknown as Tool.Context["messages"],
-      // altimate_change end
-      metadata: (val: { title?: string; metadata?: any }) =>
-        // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
-        Effect.promise(async () => {
-          const match = input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
-          if (match && match.state.status === "running") {
-            await Session.updatePart({
-              ...match,
-              state: {
-                title: val.title,
-                metadata: val.metadata,
-                status: "running",
-                input: args,
-                time: {
-                  start: Date.now(),
+    const context = (toolName: string, args: any, options: ToolCallOptions) => {
+      const execution = input.processor.beginToolExecution(options.toolCallId)
+      const ctx: Tool.Context = {
+        sessionID: input.session.id,
+        abort: options.abortSignal!,
+        messageID: input.processor.message.id,
+        callID: options.toolCallId,
+        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
+        agent: input.agent.name,
+        // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+        messages: input.messages as unknown as Tool.Context["messages"],
+        // altimate_change end
+        metadata: (val: { title?: string; metadata?: any }) =>
+          // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+          Effect.promise(async () => {
+            const match =
+              input.processor.partFromToolExecution(execution) ??
+              input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
+            if (match && match.state.status === "running") {
+              await Session.updatePart({
+                ...match,
+                state: {
+                  title: val.title,
+                  metadata: val.metadata,
+                  status: "running",
+                  input: args,
+                  time: {
+                    start: Date.now(),
+                  },
                 },
-              },
-            })
-          }
-        }),
-      ask: (req) =>
-        Effect.promise(async () => {
-          // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
-          await PermissionNext.ask({
-            ...req,
-            sessionID: input.session.id,
-            tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-            ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
-          } as Parameters<typeof PermissionNext.ask>[0])
-          // altimate_change end
-        }),
-      // altimate_change end
-    })
+              })
+            }
+          }),
+        ask: (req) =>
+          Effect.promise(async () => {
+            // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+            await PermissionNext.ask({
+              ...req,
+              sessionID: input.session.id,
+              tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+              ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+            } as Parameters<typeof PermissionNext.ask>[0])
+            // altimate_change end
+          }),
+        // altimate_change end
+      }
+      return { ctx, execution }
+    }
     // altimate_change end
 
     for (const item of await ToolRegistry.tools(
@@ -1860,50 +1898,54 @@ export namespace SessionPrompt {
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           // altimate_change start — disambiguate repeated concurrent tool-call ids
-          const ctx = context(item.id, args, options)
+          const { ctx, execution } = context(item.id, args, options)
           // altimate_change end
-          await Plugin.trigger(
-            "tool.execute.before",
-            {
-              tool: item.id,
-              sessionID: ctx.sessionID,
-              callID: ctx.callID,
-            },
-            {
-              args,
-            },
-          )
-          // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
-          const result = await AppRuntime.runPromise(item.execute(args, ctx))
-          // altimate_change end
-          const output = {
-            ...result,
-            attachments: result.attachments?.map((attachment) => ({
-              ...attachment,
-              id: PartID.ascending(),
-              sessionID: ctx.sessionID,
-              messageID: input.processor.message.id,
-            })),
-          }
-          // altimate_change start — stamp authoritative tool source so clients render the right
-          // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
-          const stamped = stampRegistryToolSource(output, item)
-          // altimate_change end
-          await Plugin.trigger(
-            "tool.execute.after",
-            {
-              tool: item.id,
-              sessionID: ctx.sessionID,
-              callID: ctx.callID,
-              args,
-            },
-            // altimate_change start — plugins observe the source-stamped output
-            stamped,
+          try {
+            await Plugin.trigger(
+              "tool.execute.before",
+              {
+                tool: item.id,
+                sessionID: ctx.sessionID,
+                callID: ctx.callID,
+              },
+              {
+                args,
+              },
+            )
+            // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
+            const result = await AppRuntime.runPromise(item.execute(args, ctx))
             // altimate_change end
-          )
-          // altimate_change start — return the source-stamped output
-          return stamped
-          // altimate_change end
+            const output = {
+              ...result,
+              attachments: result.attachments?.map((attachment) => ({
+                ...attachment,
+                id: PartID.ascending(),
+                sessionID: ctx.sessionID,
+                messageID: input.processor.message.id,
+              })),
+            }
+            // altimate_change start — stamp authoritative tool source so clients render the right
+            // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
+            const stamped = stampRegistryToolSource(output, item)
+            // altimate_change end
+            await Plugin.trigger(
+              "tool.execute.after",
+              {
+                tool: item.id,
+                sessionID: ctx.sessionID,
+                callID: ctx.callID,
+                args,
+              },
+              // altimate_change start — plugins observe the source-stamped output
+              stamped,
+              // altimate_change end
+            )
+            // altimate_change start — return the source-stamped output
+            return stamped
+            // altimate_change end
+          } finally {
+            input.processor.finishToolExecution(execution)
+          }
         },
       })
     }
@@ -1922,102 +1964,105 @@ export namespace SessionPrompt {
       // Wrap execute to add plugin hooks and format output
       item.execute = async (args, opts) => {
         // altimate_change start — disambiguate repeated concurrent tool-call ids
-        const ctx = context(key, args, opts)
+        const { ctx, execution } = context(key, args, opts)
         // altimate_change end
+        try {
+          await Plugin.trigger(
+            "tool.execute.before",
+            {
+              tool: key,
+              sessionID: ctx.sessionID,
+              callID: opts.toolCallId,
+            },
+            {
+              args,
+            },
+          )
 
-        await Plugin.trigger(
-          "tool.execute.before",
-          {
-            tool: key,
-            sessionID: ctx.sessionID,
-            callID: opts.toolCallId,
-          },
-          {
-            args,
-          },
-        )
+          // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
+          // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
+          // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
+          await AppRuntime.runPromise(
+            ctx.ask({
+              permission: key,
+              metadata: {},
+              patterns: ["*"],
+              always: ["*"],
+            }),
+          )
+          // altimate_change end
 
-        // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
-        // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
-        // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
-        await AppRuntime.runPromise(
-          ctx.ask({
-            permission: key,
-            metadata: {},
-            patterns: ["*"],
-            always: ["*"],
-          }),
-        )
-        // altimate_change end
+          const result = await execute(args, opts)
 
-        const result = await execute(args, opts)
+          await Plugin.trigger(
+            "tool.execute.after",
+            {
+              tool: key,
+              sessionID: ctx.sessionID,
+              callID: opts.toolCallId,
+              args,
+            },
+            result,
+          )
 
-        await Plugin.trigger(
-          "tool.execute.after",
-          {
-            tool: key,
-            sessionID: ctx.sessionID,
-            callID: opts.toolCallId,
-            args,
-          },
-          result,
-        )
+          const textParts: string[] = []
+          const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
 
-        const textParts: string[] = []
-        const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
-
-        for (const contentItem of result.content) {
-          if (contentItem.type === "text") {
-            textParts.push(contentItem.text)
-          } else if (contentItem.type === "image") {
-            attachments.push({
-              type: "file",
-              mime: contentItem.mimeType,
-              url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
-            })
-          } else if (contentItem.type === "resource") {
-            const { resource } = contentItem
-            if (resource.text) {
-              textParts.push(resource.text)
-            }
-            if (resource.blob) {
+          for (const contentItem of result.content) {
+            if (contentItem.type === "text") {
+              textParts.push(contentItem.text)
+            } else if (contentItem.type === "image") {
               attachments.push({
                 type: "file",
-                mime: resource.mimeType ?? "application/octet-stream",
-                url: `data:${resource.mimeType ?? "application/octet-stream"};base64,${resource.blob}`,
-                filename: resource.uri,
+                mime: contentItem.mimeType,
+                url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
               })
+            } else if (contentItem.type === "resource") {
+              const { resource } = contentItem
+              if (resource.text) {
+                textParts.push(resource.text)
+              }
+              if (resource.blob) {
+                attachments.push({
+                  type: "file",
+                  mime: resource.mimeType ?? "application/octet-stream",
+                  url: `data:${resource.mimeType ?? "application/octet-stream"};base64,${resource.blob}`,
+                  filename: resource.uri,
+                })
+              }
             }
           }
-        }
 
-        const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
-        // altimate_change start — authoritative source + readable title from the original client
-        // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
-        const described = describeMcpTool(key, clientName)
-        // altimate_change end
-        const metadata = {
-          ...(result.metadata ?? {}),
-          truncated: truncated.truncated,
-          ...(truncated.truncated && { outputPath: truncated.outputPath }),
-          // altimate_change start — stamp the authoritative source badge
-          source: described.source,
+          const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
+          // altimate_change start — authoritative source + readable title from the original client
+          // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
+          const described = describeMcpTool(key, clientName)
           // altimate_change end
-        }
+          const metadata = {
+            ...(result.metadata ?? {}),
+            truncated: truncated.truncated,
+            ...(truncated.truncated && { outputPath: truncated.outputPath }),
+            // altimate_change start — stamp the authoritative source badge
+            source: described.source,
+            // altimate_change end
+          }
 
-        return {
-          // altimate_change start — MCP tools have no native title; give a readable label
-          title: described.title,
-          // altimate_change end
-          metadata,
-          output: truncated.content,
-          attachments: attachments.map((attachment) => ({
-            ...attachment,
-            id: PartID.ascending(),
-            sessionID: ctx.sessionID,
-            messageID: input.processor.message.id,
-          })),
-          content: result.content, // directly return content to preserve ordering when outputting to model
+          return {
+            // altimate_change start — MCP tools have no native title; give a readable label
+            title: described.title,
+            // altimate_change end
+            metadata,
+            output: truncated.content,
+            attachments: attachments.map((attachment) => ({
+              ...attachment,
+              id: PartID.ascending(),
+              sessionID: ctx.sessionID,
+              messageID: input.processor.message.id,
+            })),
+            content: result.content, // directly return content to preserve ordering when outputting to model
+          }
+        } finally {
+          input.processor.finishToolExecution(execution)
         }
       }
       tools[key] = item
@@ -2701,7 +2746,17 @@ export namespace SessionPrompt {
       if (Token.estimate(candidate) <= input.capTokens) return candidate
       charBudget = Math.floor(charBudget * 0.85)
     }
-    return card || undefined
+    if (card) return card
+    // A positive body budget must always be renderable; otherwise compaction
+    // could omit the task from its summary while the corresponding pin silently
+    // disappears. Fall back to the longest verbatim prefix that fits.
+    let prefixLength = Math.min(text.length, Math.max(1, Math.ceil(input.capTokens * 4)))
+    while (prefixLength > 0) {
+      const prefix = text.slice(0, prefixLength)
+      if (Token.estimate(prefix) <= input.capTokens) return prefix
+      prefixLength = Math.floor(prefixLength * 0.75)
+    }
+    return undefined
   }
 
   /**
@@ -2729,26 +2784,12 @@ export namespace SessionPrompt {
     // >=2k slack < compaction threshold) depends on. Budget the body against
     // cap minus the framing, and keep at least a token of body budget so a
     // tight configured cap degrades to a small pin rather than none.
-    const frame = [
-      "<system-reminder>",
-      "Original task — authoritative over any summary. The conversation above was compacted into a summary; the task below is the user's own instruction, reproduced verbatim. If the summary and this task conflict, this task wins.",
-      "",
-      "",
-      "</system-reminder>",
-    ]
-    const wrapperOverhead = Token.estimate(frame.join("\n"))
-    const bodyCap = input.capTokens - wrapperOverhead
+    const bodyCap = SessionCompaction.taskPinBodyBudget(input.capTokens)
     if (bodyCap <= 0) return undefined
     const body = buildPinnedTask({ text: source.text, capTokens: bodyCap, cardCapTokens: input.cardCapTokens })
     // altimate_change end
     if (!body) return undefined
-    return [
-      "<system-reminder>",
-      "Original task — authoritative over any summary. The conversation above was compacted into a summary; the task below is the user's own instruction, reproduced verbatim. If the summary and this task conflict, this task wins.",
-      "",
-      body,
-      "</system-reminder>",
-    ].join("\n")
+    return SessionCompaction.renderTaskPin(body)
   }
 
   /**

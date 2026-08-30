@@ -252,6 +252,16 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("FOO=1 mv a b")).toBe(true)
   })
 
+  test("command and process substitutions fail closed as mutations", () => {
+    for (const command of [
+      "make check$(rm generated.ts)",
+      "make check `rm generated.ts`",
+      "diff <(cat expected) <(make output)",
+    ]) {
+      expect(IdleDone.isMutatingCommand(command)).toBe(true)
+    }
+  })
+
   // altimate_change start — review regression: find's action predicates can
   // mutate even though its ordinary traversal forms are read-only.
   test("mutating find actions are classified conservatively", () => {
@@ -493,6 +503,23 @@ describe("IdleDone hard preconditions", () => {
     const snap = d.snapshot()
     expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
     expect(snap.last_verify_green).toBe(false)
+  })
+
+  test("(i)/(ii) a substitution attached to a configured verifier invalidates an earlier green verify", () => {
+    const opts: IdleDone.Options = { ...OPTS, verifyCommand: "make check" }
+    const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "make check", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(bashPart("m_verify_then_substitute", "make check$(rm generated.ts)", 0))
+    d.observePart(stepFinish("m_verify_then_substitute"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+
+    expect(d.shouldChallenge()).toBe(false)
+    expect(d.snapshot().last_mutation_seq).toBeGreaterThan(d.snapshot().last_verify_seq)
   })
 
   test("(i) git restore after a green verify advances the mutation watermark without a patch part", () => {

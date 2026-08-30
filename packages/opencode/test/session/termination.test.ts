@@ -231,3 +231,11 @@ describe("SessionTermination.isExplicitDone — fence-state conformance", () => 
     expect(SessionTermination.isExplicitDone(["```sh", "x", "```sh", "DONE"].join("\n"))).toBe(false)
   })
 })
+
+describe("builder completion contract", () => {
+  test("ordinary non-compacted runs are instructed to emit the trailing DONE token", async () => {
+    const prompt = await Bun.file(new URL("../../src/altimate/prompts/builder.txt", import.meta.url).pathname).text()
+    expect(prompt).toContain("literal token `DONE` on its own")
+    expect(prompt).toContain("Do not emit `DONE` while work or verification remains")
+  })
+})
