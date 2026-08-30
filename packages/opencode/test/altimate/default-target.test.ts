@@ -14,12 +14,18 @@
 // Concurrency contract matches dispatcher.test.ts: the connection registry is a
 // process-wide singleton mutated here via `setConfigs`/`reset`, which is safe under
 // bun's default sequential file execution.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { resolveDefaultTarget, resetDbtAdapter } from "../../src/altimate/native/connections/register"
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
+import { registerAll, resolveDefaultTarget, resetDbtAdapter } from "../../src/altimate/native/connections/register"
 import { Dispatcher } from "../../src/altimate/native"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
 const OPS = ["sql.execute", "sql.explain", "schema.inspect"] as const
+
+beforeAll(() => {
+  // Re-register handlers in case another test file called Dispatcher.reset(): the
+  // concurrency tests below dispatch `sql.execute`, which this module registers.
+  registerAll()
+})
 
 beforeEach(() => {
   resetDbtAdapter()

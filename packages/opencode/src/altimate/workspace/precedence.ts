@@ -144,6 +144,12 @@ export const precedenceInternals: {
   attributedTo?: () => Promise<string | null>
   attachOutcome?: () => Promise<Outcome | undefined>
   announce?: (line: string) => Promise<void>
+  /** The config read and invalidation behind the real `attributedTo`, so its refusal
+   * paths can be exercised without replacing the whole attribution. */
+  config?: {
+    get: () => Promise<unknown>
+    invalidate: () => Promise<void>
+  }
 } = {}
 
 /** Bound both per-session maps. A long-running `serve` process sees an unbounded
@@ -282,8 +288,9 @@ async function currentBinding(): Promise<{ datamateId: number; datamateName: str
  */
 async function attributedTo(expected: string): Promise<string | null> {
   if (precedenceInternals.attributedTo) return precedenceInternals.attributedTo()
+  const config = precedenceInternals.config ?? Config
   const read = async (): Promise<string | null> => {
-    const cfg = (await Config.get()) as { mcp?: Record<string, EntryLike | undefined> }
+    const cfg = (await config.get()) as { mcp?: Record<string, EntryLike | undefined> }
     const entry = cfg.mcp?.[DATAMATE_KEY]
     if (!entry) return null
     // Parsed by attach's own parser, not a second copy here. It handles both entry
@@ -303,7 +310,7 @@ async function attributedTo(expected: string): Promise<string | null> {
     // rather than re-reading all config on every turn.
     if (cached !== expected) return cached
     try {
-      await Config.invalidate()
+      await config.invalidate()
     } catch (err) {
       // A pin we could not re-confirm against disk must refuse, not enable: this is
       // the one direction the comment above calls dangerous.
@@ -449,6 +456,7 @@ export function resetForTests(): void {
   delete precedenceInternals.binding
   delete precedenceInternals.attributedTo
   delete precedenceInternals.attachOutcome
+  delete precedenceInternals.config
 }
 
 export interface RedirectResult {

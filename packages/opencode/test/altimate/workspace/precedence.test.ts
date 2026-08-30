@@ -303,6 +303,83 @@ describe("mechanism 1a — attributed to the bound workspace", () => {
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(inventoryLine(precedence)).toContain("could not be attributed")
   })
+
+  // The tests above replace attribution wholesale. These drive the REAL read through
+  // the config seam, so the refuse-on-uncertainty paths are the production ones.
+  const PINNED_TO_42 = { mcp: { datamate: { command: ["datamate", "start-stdio", "--datamate", "42"] } } }
+
+  test("a pin that cannot be re-confirmed against disk refuses rather than enables", async () => {
+    // The cached read says "pinned to us" — the one answer that must be confirmed
+    // against disk before it may enable routing. If that confirmation is impossible,
+    // the safe way to be wrong is to refuse.
+    delete precedenceInternals.attributedTo
+    precedenceInternals.config = {
+      get: async () => PINNED_TO_42,
+      invalidate: async () => {
+        throw new Error("config cache locked")
+      },
+    }
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.enabled).toBe(false)
+    expect(precedence.disabledReason).toBe("unattributed")
+  })
+
+  test("a pin re-confirmed against disk enables", async () => {
+    // Positive control for the seam: the same entry with a working invalidation
+    // attributes, so the refusal above is the invalidation's doing.
+    delete precedenceInternals.attributedTo
+    let invalidations = 0
+    precedenceInternals.config = {
+      get: async () => PINNED_TO_42,
+      invalidate: async () => void invalidations++,
+    }
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.enabled).toBe(true)
+    expect(invalidations).toBe(1)
+  })
+
+  test("the disk read after invalidation is the one that counts", async () => {
+    // An IDE rewrote the entry to another workspace after it was cached: the stale
+    // "pinned to us" must not survive the re-read.
+    delete precedenceInternals.attributedTo
+    let reads = 0
+    precedenceInternals.config = {
+      get: async () =>
+        reads++ === 0 ? PINNED_TO_42 : { mcp: { datamate: { command: ["datamate", "start-stdio", "--datamate", "77"] } } },
+      invalidate: async () => {},
+    }
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.enabled).toBe(false)
+    expect(precedence.disabledReason).toBe("unattributed")
+  })
+})
+
+describe("a named connection whose configured type is not recognised", () => {
+  test("runs locally with a notice naming the connection, not silently", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect((await check(SESSION, "sql_execute", "local_snow")).redirect).toBeDefined()
+
+    Registry.setConfigs({
+      local_snow: { type: "snowflake", account: "acct", user: "u" } as never,
+      mystery: { type: "weird" } as never,
+    })
+    expect(canonicalType("weird")).toBeNull()
+    const verdict = await check(SESSION, "sql_execute", "mystery")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain('"mystery"')
+    expect(verdict.notice).toContain("not recognised")
+  })
+})
+
+describe("resetForTests", () => {
+  test("releases every seam, so one test's overrides cannot leak into the next", () => {
+    precedenceInternals.attachOutcome = async () => undefined
+    precedenceInternals.config = { get: async () => ({}), invalidate: async () => {} }
+    resetForTests()
+    expect(precedenceInternals.attachOutcome).toBeUndefined()
+    expect(precedenceInternals.config).toBeUndefined()
+  })
 })
 
 describe("mechanism 2 — capability-scoped, not type-scoped", () => {
