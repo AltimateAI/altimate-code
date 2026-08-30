@@ -88,6 +88,22 @@ describe("ClickHouse driver unit tests", () => {
       expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:9443")
     })
 
+    test("accepts an integer port from serialized configuration", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", port: "9443", tls: true })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:9443")
+    })
+
+    for (const port of [0, -1, 1.5, 65536, "not-a-port", "", true] as const) {
+      test(`rejects invalid explicit port ${JSON.stringify(port)}`, async () => {
+        const invalid = await connect({ type: "clickhouse", host: "secure.example", port })
+
+        await expect(invalid.connect()).rejects.toThrow("ClickHouse port must be an integer between 1 and 65535")
+        expect(mockClientConfigs).toHaveLength(1)
+      })
+    }
+
     test("rejects an explicit plaintext connection string when TLS is requested", async () => {
       const insecure = await connect({
         type: "clickhouse",

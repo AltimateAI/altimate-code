@@ -106,4 +106,35 @@ describe("warehouse_install_driver permissions", () => {
     expect(install).not.toHaveBeenCalled()
     expect(result.metadata.alreadyPresent).toBe(true)
   })
+
+  test("a broken installed driver brokers permissions and forces repair", async () => {
+    const events: string[] = []
+    const requests: any[] = []
+    spyOn(DriverResolve, "isDriverInstalled").mockReturnValue(true)
+    spyOn(DriverResolve, "loadOptionalDriver").mockRejectedValue(new Error("native addon is incompatible"))
+    const install = spyOn(DriverResolve, "installOptionalDriver").mockImplementation(async (driver) => {
+      events.push("install")
+      return {
+        driver,
+        packages: DriverResolve.DRIVER_PACKAGES[driver],
+        dir: DriverResolve.driverInstallDir(),
+        installed: true,
+        alreadyPresent: false,
+      }
+    })
+
+    const result = await tool.execute(
+      { driver: "postgres" },
+      context(async (request) => {
+        requests.push(request)
+        events.push(`ask:${request.permission}`)
+      }),
+    )
+
+    expect(events).toEqual(["ask:external_directory", "ask:bash", "install"])
+    expect(requests.map((request) => request.permission)).toEqual(["external_directory", "bash"])
+    expect(install).toHaveBeenCalledWith("postgres", { force: true })
+    expect(result.metadata.installed).toBe(true)
+    expect(result.metadata.alreadyPresent).toBe(false)
+  })
 })

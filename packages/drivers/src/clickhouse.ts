@@ -35,8 +35,17 @@ function connectionUrl(config: ConnectionConfig): string {
 
   const protocol = configuredProtocol || (tlsRequested ? "https" : "http")
   const defaultPort = protocol === "https" ? 8443 : 8123
-  const parsedPort = Number(config.port)
-  const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : defaultPort
+  const hasExplicitPort = config.port !== undefined && config.port !== null
+  const parsedPort =
+    typeof config.port === "number"
+      ? config.port
+      : typeof config.port === "string" && config.port.trim()
+        ? Number(config.port)
+        : Number.NaN
+  if (hasExplicitPort && (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535)) {
+    throw new Error("ClickHouse port must be an integer between 1 and 65535")
+  }
+  const port = hasExplicitPort ? parsedPort : defaultPort
   return `${protocol}://${config.host ?? "localhost"}:${port}`
 }
 
