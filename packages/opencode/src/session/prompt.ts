@@ -1,4 +1,5 @@
 import path from "path"
+import { existsSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -317,15 +318,27 @@ export namespace SessionPrompt {
     // enabled must not perturb the turn at all.
     //
     // Opting out still has to take effect, since discovery loads whatever is on
-    // disk without consulting the flag — so the cleanup runs, detached. It has
-    // nothing to race: there is no snapshot for this turn to use.
+    // disk without consulting the flag. The gate is a synchronous `existsSync`,
+    // not a detached cleanup: a run with the flag ON leaves a snapshot behind,
+    // and turning the flag off does not delete it, so a later opted-out turn
+    // CAN find one. Detaching the purge let `createUserMessage` materialise
+    // those stale skills first, which put `alwaysApply` instructions into a
+    // turn the operator had disabled the feature for. Awaiting only when a
+    // snapshot is actually there keeps the tick off the path that regressed —
+    // a user who never opted in has no directory, so this costs one `stat` and
+    // does not even load the sync module.
     if (!CoreFlag.ALTIMATE_WORKSPACE) {
       const dir = Instance.directory
-      void import("../altimate/workspace/skill-sync")
-        .then(async (m) => {
+      // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
+      // rather than imported so the opted-out path stays free of that module.
+      if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) {
+        try {
+          const m = await import("../altimate/workspace/skill-sync")
           if ((await m.syncSkills(dir)).changed) await refreshSkillRegistry(dir)
-        })
-        .catch((err) => log.warn("workspace skill opt-out cleanup failed", { err: String(err) }))
+        } catch (err) {
+          log.warn("workspace skill opt-out cleanup failed", { err: String(err) })
+        }
+      }
     } else {
       try {
         const skillSync = await import("../altimate/workspace/skill-sync")

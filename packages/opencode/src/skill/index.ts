@@ -461,9 +461,11 @@ export async function get(name: string) {
 export async function available(agent?: Agent.Info) {
   return runSkill((svc) => svc.available(agent))
 }
-// altimate_change start — imperative wrapper for the same reason as the three
-// above: the workspace skill sync is plain async code running under the
-// instance ALS, which `attach()` propagates into this runtime.
+// Imperative wrapper for the same reason as the three above: the workspace
+// skill sync is plain async code running under the instance ALS, which
+// `attach()` propagates into this runtime. No marker of its own — this is
+// already inside the block opened above, and nesting them makes marker
+// coverage harder to account for. (bot review)
 export async function refresh() {
   return runSkill((svc) => svc.refresh())
 }

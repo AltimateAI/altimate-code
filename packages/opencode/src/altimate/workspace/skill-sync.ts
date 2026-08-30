@@ -481,21 +481,34 @@ async function removeManaged(directory: string): Promise<void> {
  * deliberate purge described below. */
 export async function syncSkills(directory: string): Promise<{ changed: boolean }> {
   const canon = path.resolve(directory)
-  if (!isEnabled()) {
-    // Opting out has to actually take effect: a snapshot left behind keeps
-    // loading into every session. Still gated on the symlink check — this path
-    // deletes, and it runs before the one inside `run`, so without it a
-    // symlinked `.altimate-code` would have the purge follow the link.
-    const dropped = (await pathsAreReal(canon).catch(() => false))
-      ? await deactivate(canon, "the workspace feature is off").catch(() => false)
-      : false
-    return { changed: dropped }
-  }
+  // Joined BEFORE the flag is read, so the opt-out purge is serialised against
+  // a sync too. Both paths write the same tree; with the purge outside this
+  // gate, an enabled run already past its own flag check could publish
+  // `_workspace` moments after a disabled run deleted it, leaving a snapshot on
+  // disk for a feature that is off. (bot review)
   const existing = inFlight.get(canon)
   if (existing) {
     // Report the joined run's real outcome. Returning a hard-coded `false` is a
     // false answer waiting for the next caller to trust it.
     return await existing.catch(() => ({ changed: false }))
+  }
+  if (!isEnabled()) {
+    // Opting out has to actually take effect: a snapshot left behind keeps
+    // loading into every session. Still gated on the symlink check — this path
+    // deletes, and it runs before the one inside `run`, so without it a
+    // symlinked `.altimate-code` would have the purge follow the link.
+    const purge = (async () => {
+      const dropped = (await pathsAreReal(canon).catch(() => false))
+        ? await deactivate(canon, "the workspace feature is off").catch(() => false)
+        : false
+      return { changed: dropped }
+    })()
+    inFlight.set(canon, purge)
+    try {
+      return await purge
+    } finally {
+      inFlight.delete(canon)
+    }
   }
   let changed = false
   let failed = false

@@ -259,6 +259,22 @@ function sameBinding(a: CachedBinding, b: CachedBinding): boolean {
  * real cache, which is what later reads consult. */
 const serverLookupMissed = new Map<string, number>()
 
+/** The composite key both the negative-lookup memo and the revalidation stamp
+ * are filed under. Includes the account, so switching tenants never inherits
+ * the other account's verdict for the same directory. */
+function accountScopedKey(directory: string, key: { tenant: string; apiUrl: string }): string {
+  return `${key.tenant}\u0000${key.apiUrl}\u0000${canonicalizeKey(directory)}`
+}
+
+/** Forget a memoized "no binding here" answer. An explicit link is newer
+ * information than any miss recorded before it: without this, linking within
+ * `MISS_TTL_MS` of a turn taken while unlinked has the revalidation below read
+ * the stale miss, call it authoritative, and delete the row the link just
+ * wrote. (bot review) */
+function clearLookupMiss(directory: string, key: { tenant: string; apiUrl: string }): void {
+  serverLookupMissed.delete(accountScopedKey(directory, key))
+}
+
 /** How long a "this project is unbound" answer is trusted. Bounded because the
  * answer changes the moment someone links the project in the SaaS: a permanent
  * memo means skills and memory never appear until the process restarts. Keyed
@@ -323,7 +339,7 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
   // the server decides, because it is the only thing that knows about a rebind
   // or a detach performed elsewhere.
   if (local) {
-    const validated = lastValidatedAt.get(canonicalizeKey(directory))
+    const validated = lastValidatedAt.get(accountScopedKey(directory, key))
     if (validated !== undefined && Date.now() - validated < REVALIDATE_MS) {
       return { status: "bound", binding: local }
     }
@@ -333,7 +349,7 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
       // a working setup down over a network blip.
       return { status: "bound", binding: local }
     }
-    lastValidatedAt.set(canonicalizeKey(directory), Date.now())
+    lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
     if (fresh.status === "unbound") {
       forgetBinding(directory, key)
       return { status: "unbound" }
@@ -363,7 +379,7 @@ async function lookupBinding(
   directory: string,
   key: { tenant: string; apiUrl: string },
 ): Promise<BindingOutcome> {
-  const canon = `${key.tenant}\u0000${key.apiUrl}\u0000${canonicalizeKey(directory)}`
+  const canon = accountScopedKey(directory, key)
   const missedAt = serverLookupMissed.get(canon)
   if (missedAt !== undefined && Date.now() - missedAt < MISS_TTL_MS) return { status: "unbound" }
 
@@ -386,7 +402,13 @@ async function lookupBinding(
   // outside the try above, aborting the whole sync. An unrecognised body is
   // unknown, not unbound — the same rule the rest of this feature follows.
   const row = (hit as { binding?: Partial<Binding> }).binding
-  if (!row || typeof row.datamate_id !== "number" || typeof row.datamate_name !== "string") {
+  if (
+    !row ||
+    typeof row.datamate_id !== "number" ||
+    typeof row.datamate_name !== "string" ||
+    (row.repo_remote !== null && row.repo_remote !== undefined && typeof row.repo_remote !== "string") ||
+    (row.project_path !== null && row.project_path !== undefined && typeof row.project_path !== "string")
+  ) {
     log.warn("workspace binding lookup returned an unrecognised body; treating as unknown")
     return { status: "unknown" }
   }
@@ -405,14 +427,21 @@ async function lookupBinding(
       existing && existing.tenant === key.tenant && existing.apiUrl === key.apiUrl
         ? existing
         : { version: CACHE_VERSION, tenant: key.tenant, apiUrl: key.apiUrl, bindings: {} }
-    cache.bindings[canonicalizeKey(directory)] = adopted
+    // Confirming the binding the cache already holds is not an adoption: keep
+    // the explicit-link label and the seed marker, or a later re-link re-runs
+    // the whole memory backfill and an explicit row silently becomes `adopted`.
+    const prior = cache.bindings[canonicalizeKey(directory)]
+    cache.bindings[canonicalizeKey(directory)] =
+      prior && prior.datamateId === adopted.datamateId
+        ? { ...adopted, adopted: prior.adopted, seededAt: prior.seededAt, linkedAt: prior.linkedAt }
+        : adopted
     writeCache(cache)
   } catch (err) {
     // The binding still stands for this call; only the cache write failed, so
     // the next process looks it up again. Same reasoning as recordApprovedBinding.
     log.warn("could not cache the workspace binding discovered on the server", { err: String(err) })
   }
-  lastValidatedAt.set(canonicalizeKey(directory), Date.now())
+  lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
   log.info("adopted the workspace binding this project already has on the server", {
     datamateId: adopted.datamateId,
   })
@@ -426,6 +455,13 @@ export async function recordApprovedBinding(
 ): Promise<void> {
   const key = await tenantKey()
   if (!key) return
+  // An explicit link is the newest word on this project, so retire any memoized
+  // "no binding here" from before it and count the row as server-validated —
+  // the link is what created it. Without the first, revalidation reads the
+  // stale miss and deletes the row this call just wrote; without the second,
+  // every bind pays an immediate round trip to confirm what it just did.
+  clearLookupMiss(directory, key)
+  lastValidatedAt.set(accountScopedKey(directory, key), Date.now())
   // Best-effort: cache persistence is a UX convenience, not the source of
   // truth (the server-side binding is). If the state directory is read-only
   // or the disk is full, callers otherwise report "link failed" and prompt

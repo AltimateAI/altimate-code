@@ -48,7 +48,7 @@ writeFileSync(
 
 const { syncSkills, recentlySynced, registryStale, markRegistryApplied } =
   await import("@/altimate/workspace/skill-sync")
-const { cachePath } = await import("@/altimate/workspace/state")
+const { cachePath, recordApprovedBinding } = await import("@/altimate/workspace/state")
 
 const MANAGED = path.join(".altimate-code", "skill", "_workspace")
 const ORIGINAL_FETCH = globalThis.fetch
@@ -739,6 +739,34 @@ describe("workspace skill sync", () => {
     }
   })
 
+  test("the opt-out purge serialises with a sync already in flight", async () => {
+    // Both paths write the same tree. With the purge outside the in-flight gate
+    // an enabled run — already past its own flag check — could republish
+    // `_workspace` moments after a disabled run deleted it, leaving a snapshot
+    // on disk for a feature that is off.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+
+    const enabled = syncSkills(project)
+    process.env.ALTIMATE_WORKSPACE = "0"
+    try {
+      // Joins the in-flight enabled run rather than deleting underneath it, so
+      // both observers agree and the tree is not left half-published.
+      const [first, second] = await Promise.all([enabled, syncSkills(project)])
+      expect(second).toEqual(first)
+    } finally {
+      process.env.ALTIMATE_WORKSPACE = "1"
+    }
+
+    // The purge still runs once nothing is in flight.
+    process.env.ALTIMATE_WORKSPACE = "0"
+    try {
+      await syncSkills(project)
+      expect(existsSync(path.join(project, MANAGED))).toBe(false)
+    } finally {
+      process.env.ALTIMATE_WORKSPACE = "1"
+    }
+  })
+
   test("an unreadable credentials file keeps the snapshot", async () => {
     // Unknown is not disconnected. A corrupt or unreadable file must not
     // destroy a snapshot the user is still entitled to.
@@ -1021,6 +1049,35 @@ describe("workspace skill sync", () => {
     expect(existsSync(path.join(project, MANAGED))).toBe(false)
     // And the stale row is gone, so a later read cannot resurrect it.
     expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeUndefined()
+  })
+
+  test("linking just after an unbound turn is not undone by the negative cache", async () => {
+    // A turn taken while the project is unlinked memoizes "no binding here" for
+    // MISS_TTL_MS. If linking inside that window reads the memo as an
+    // authoritative answer, revalidation deletes the row the link just wrote and
+    // the link silently does nothing — the user links and gets no skills.
+    rmSync(cachePath(), { force: true })
+    globalThis.fetch = (async (input: string | URL) => {
+      if (String(input).includes("/datamate-project-bindings/by-")) {
+        return new Response(JSON.stringify({ detail: "not found" }), { status: 404 })
+      }
+      return json({ items: [], total: 0, page: 1, size: 50, pages: 1 })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    // The link. Deliberately still inside the miss window.
+    await recordApprovedBinding(project, {
+      datamateId: 7,
+      datamateName: "ws-7",
+      repoRemote: null,
+      projectPath: project,
+      linkedAt: Date.now(),
+    })
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(JSON.parse(readFileSync(cachePath(), "utf8")).bindings[realpathSync(project)]).toBeDefined()
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("a cached binding survives a server that cannot be reached", async () => {
