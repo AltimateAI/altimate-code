@@ -687,9 +687,11 @@ describe("E2E: SessionStatus.set async drift fixed (cycle 4)", () => {
     expect(content).toMatch(/export\s+async\s+function\s+cancel\s*\(/)
   })
 
-  test("SessionPrompt.prompt uses `await using` for cancel disposer", async () => {
+  test("SessionPrompt.prompt awaits cancel before restoring idle in its async disposer", async () => {
     const content = readFileSync(path.join(srcDir, "session", "prompt.ts"), "utf-8")
-    expect(content).toMatch(/await\s+using\s+_\s*=\s*defer\(\s*\(\s*\)\s*=>\s*cancel\s*\(/)
+    expect(content).toMatch(
+      /await\s+using\s+_\s*=\s*defer\(\s*async\s*\(\s*\)\s*=>\s*\{[\s\S]*?await\s+cancel\s*\(\s*sessionID\s*\)[\s\S]*?await\s+SessionStatus\.set\s*\(\s*sessionID\s*,\s*\{\s*type:\s*"idle"/,
+    )
   })
 })
 

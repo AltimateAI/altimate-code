@@ -723,11 +723,13 @@ describe("bridge merge cycle 4: SessionStatus.set async drift", () => {
     expect(content).toMatch(/export\s+async\s+function\s+cancel\s*\(/)
   })
 
-  test("SessionPrompt.prompt uses `await using` for cancel disposer (not plain `using`)", async () => {
+  test("SessionPrompt.prompt awaits cancel before restoring idle in its async disposer", async () => {
     const content = await readText(path.join(srcDir, "session", "prompt.ts"))
-    // cancel() became async, so the defer disposer must be awaited or the cleanup
-    // race-condition returns at function scope before idle state flushes.
-    expect(content).toMatch(/await\s+using\s+_\s*=\s*defer\(\s*\(\s*\)\s*=>\s*cancel\s*\(/)
+    // The disposer is async because both operations must settle before prompt()
+    // leaves scope. Keep the order: cancel first, then the fail-safe idle write.
+    expect(content).toMatch(
+      /await\s+using\s+_\s*=\s*defer\(\s*async\s*\(\s*\)\s*=>\s*\{[\s\S]*?await\s+cancel\s*\(\s*sessionID\s*\)[\s\S]*?await\s+SessionStatus\.set\s*\(\s*sessionID\s*,\s*\{\s*type:\s*"idle"/,
+    )
   })
 })
 
