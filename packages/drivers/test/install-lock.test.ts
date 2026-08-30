@@ -133,6 +133,43 @@ process.exit(0)
     expect(sawAcquired).toBe(true)
   })
 
+  test("waits behind more than one peer without falling through unlocked", async () => {
+    // Every process counts its deadline from its own start, so a single budget
+    // only ever outlasts ONE holder. With three contenders the last one's
+    // deadline expires part-way through somebody else's install and it runs
+    // performInstall unlocked — the concurrent npm mutation the lock exists to
+    // prevent. The hold below is deliberately longer than the timeout so the
+    // test fails unless the wait is extended each time the lock changes hands.
+    const target = path.join(dir, "drivers")
+    fs.mkdirSync(target, { recursive: true })
+    const log = path.join(dir, "peers.txt")
+
+    const child = path.join(dir, "peer.ts")
+    fs.writeFileSync(
+      child,
+      `import fs from "node:fs"
+import { withInstallLock } from ${JSON.stringify(resolveModule)}
+const [target, log, id] = process.argv.slice(2)
+await withInstallLock(target, async (acquired) => {
+  fs.appendFileSync(log, \`\${acquired ? "locked" : "UNLOCKED"} \${id}\\n\`)
+  if (acquired) await new Promise((r) => setTimeout(r, 400))
+}, { timeoutMs: 600, pollMs: 20 })
+process.exit(0)
+`,
+    )
+
+    const kids = Array.from({ length: 3 }, (_, i) =>
+      Bun.spawn(["bun", child, target, log, String(i)], { stdout: "ignore", stderr: "ignore" }),
+    )
+    expect(await Promise.all(kids.map((k) => k.exited))).toEqual([0, 0, 0])
+
+    const events = fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
+    expect(events.length).toBe(3)
+    // Three holds of 400ms against a 600ms budget: the third can only succeed
+    // if watching the lock change hands renewed its wait.
+    expect(events.filter((e) => e.startsWith("UNLOCKED"))).toEqual([])
+  }, 60_000)
+
   test("reports the section ran unlocked when the lock cannot be taken in time", async () => {
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })

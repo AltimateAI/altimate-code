@@ -299,14 +299,29 @@ function isWorkspaceRoot(root: string, scope: { cwd: string | undefined; ancesto
  * resolved credentials; mining a path out of an error message must not become a
  * way around that invariant.
  */
+/**
+ * Absolute paths a runtime quoted inside an error message.
+ *
+ * Three absolute shapes, and the third is the one that is easy to leave out:
+ * POSIX `/…`, a drive letter `C:\…`, and a UNC share `\\server\share\…`. A
+ * Windows error naming a driver on a share yields no roots at all without it,
+ * so a driver stays unfindable even though the error named its exact location.
+ */
+export function quotedAbsolutePaths(message: string): string[] {
+  const found: string[] = []
+  const pattern = /['"`]((?:\/|[A-Za-z]:[\\/]|\\\\[^\\/'"`\n]+[\\/])[^'"`\n]+)['"`]/g
+  for (const match of message.matchAll(pattern)) {
+    const named = match[1]
+    if (named) found.push(named)
+  }
+  return found
+}
+
 export function searchRootsFromError(error: unknown): string[] {
   const message = error instanceof Error ? error.message : String(error)
   const scope = workspaceScope()
   const roots: string[] = []
-  // Absolute paths the runtime quoted, POSIX or Windows.
-  for (const match of message.matchAll(/['"`]((?:\/|[A-Za-z]:[\\/])[^'"`\n]+)['"`]/g)) {
-    const named = match[1]
-    if (!named) continue
+  for (const named of quotedAbsolutePaths(message)) {
     for (const candidate of [named, repairCwdPrefixedPath(named)]) {
       if (!candidate) continue
       // Walk back to every enclosing node_modules directory, innermost first.
@@ -1016,13 +1031,32 @@ const installsInFlight = new Map<string, Promise<InstallResult>>()
  */
 export function installLockPath(dir: string): string {
   const trimmed = dir.replace(/[\\/]+$/, "")
+  const separator = dir.includes("\\") ? "\\" : "/"
   // Trailing separators are stripped so `<dir>/` and `<dir>` agree on one lock.
-  // A filesystem root is the exception: stripping there destroys the root — "/"
-  // would become the *relative* ".lock", and "C:\" the drive-relative "C:.lock"
-  // — so two processes started from different working directories would take
-  // different locks while installing into the same place.
-  const base = trimmed === "" || /^[A-Za-z]:$/.test(trimmed) ? dir : trimmed
-  return `${base}.lock`
+  // A filesystem root is the exception: stripping there destroys the root, and
+  // the result names something *outside* the directory being locked, so two
+  // processes installing into the same place take different locks. Roots keep
+  // their separator and the lock goes inside them.
+  //
+  //   /                ->  /.lock                 not the relative .lock
+  //   C:\              ->  C:\.lock              not drive-relative C:.lock
+  //   \\server\share\  ->  \\server\share\.lock  not a *different share*
+  if (isFilesystemRoot(trimmed)) return `${trimmed}${separator}.lock`
+  return `${trimmed}.lock`
+}
+
+/**
+ * True when `candidate` — trailing separators already stripped — names a
+ * filesystem root rather than a directory inside one.
+ *
+ * The UNC case is the one that is easy to miss: a share root is a root in
+ * exactly the way a drive letter is, and appending `.lock` to it names an
+ * unrelated share rather than anything under the directory being locked.
+ */
+function isFilesystemRoot(candidate: string): boolean {
+  if (candidate === "") return true // POSIX "/" strips to ""
+  if (/^[A-Za-z]:$/.test(candidate)) return true // "C:\" strips to "C:"
+  return /^\\\\[^\\/]+\\[^\\/]+$/.test(candidate) // "\\server\share"
 }
 
 /**
@@ -1205,6 +1239,24 @@ function releaseInstallLock(lockDir: string, token: string, ino: number | undefi
 }
 
 /**
+ * A value that changes when the lock changes hands.
+ *
+ * The owner's token when it published one; otherwise the lock directory's own
+ * identity, which a fresh `mkdir` changes even when the owner file is missing
+ * or unreadable. `undefined` means we could not tell, and the caller then
+ * treats the holder as unchanged rather than inventing progress.
+ */
+function lockIdentity(lockDir: string, holder: LockHolder | undefined): string | undefined {
+  if (holder?.token) return holder.token
+  try {
+    const stat = fs.statSync(lockDir)
+    return `${stat.ino}:${stat.mtimeMs}`
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Run `fn` while holding an exclusive lock on `dir`, across processes.
  *
  * On timeout the work runs anyway rather than failing. A driver install that
@@ -1222,7 +1274,18 @@ export async function withInstallLock<T>(
   const staleAfterMs = options.staleAfterMs ?? 300_000
   const hardStaleAfterMs = options.hardStaleAfterMs ?? Math.max(staleAfterMs, 3_600_000)
   const pollMs = options.pollMs ?? 100
-  const deadline = Date.now() + timeoutMs
+  let deadline = Date.now() + timeoutMs
+  // The budget is per *holder*, not per wait. Every process counts its deadline
+  // from its own start, so a single budget only ever outlasts one peer: with
+  // three or more contenders the last one's deadline expires part-way through
+  // somebody else's install and it falls through to an unlocked performInstall
+  // — the concurrent npm mutation this lock exists to prevent. Seeing the lock
+  // change hands is proof the queue is moving rather than wedged, so each new
+  // holder gets its own budget. Extensions are capped so a machine that keeps
+  // feeding in contenders cannot block a caller indefinitely.
+  const maxHandovers = 32
+  let handovers = 0
+  let lastHolder: string | undefined
   const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
   let acquired = false
   let ino: number | undefined
@@ -1256,6 +1319,14 @@ export async function withInstallLock<T>(
       const code = e && typeof e === "object" && "code" in e ? (e as { code?: unknown }).code : undefined
       if (code !== "EEXIST") break
       const holder = readLockHolder(lockDir)
+      const identity = lockIdentity(lockDir, holder)
+      if (identity !== undefined && identity !== lastHolder) {
+        if (lastHolder !== undefined && handovers < maxHandovers) {
+          handovers++
+          deadline = Date.now() + timeoutMs
+        }
+        lastHolder = identity
+      }
       if (isStaleLock(lockDir, holder, staleAfterMs, hardStaleAfterMs)) {
         // A claim can fail persistently — a lock owned by another user, or a
         // container that permits inspection but not rename. Retrying such a

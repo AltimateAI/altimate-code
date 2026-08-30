@@ -3,7 +3,19 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+import { createRequire } from "node:module"
+import { pathToFileURL } from "node:url"
+
 import { driverSearchRoots, resolveOptionalPackage } from "../src/resolve"
+
+// Specifiers that exist nowhere but the tree each test builds. Asking for a
+// real driver name would let the repo's own `packages/drivers/node_modules`
+// satisfy the lookup through the execPath and module-location roots — which no
+// environment isolation can suppress — so the test would pass while proving
+// nothing about which root actually won.
+const FIXTURE = "altimate-chdir-fixture"
+const CWD_ONLY = "altimate-cwd-only-fixture"
+const MARKER = "resolved-from-the-fixture-tree"
 
 // Six pilots were spent on a driver-load failure that only appeared under
 // `--dir`, which calls `process.chdir()` (cli/cmd/run.ts) before any driver is
@@ -34,7 +46,7 @@ beforeEach(() => {
   pkgRoot = path.join(root, "lib", "node_modules", "altimate-code")
   nodeModules = path.join(pkgRoot, "node_modules")
   fs.mkdirSync(nodeModules, { recursive: true })
-  writePackage(nodeModules, "duckdb", "index.js", "module.exports = { Database: function () {} }\n")
+  writePackage(nodeModules, FIXTURE, "index.js", `module.exports = { marker: ${JSON.stringify(MARKER)} }\n`)
   elsewhere = path.join(root, "unrelated-run-dir")
   fs.mkdirSync(elsewhere, { recursive: true })
 })
@@ -46,11 +58,11 @@ afterEach(() => {
 
 describe("resolution does not depend on the working directory", () => {
   test("resolves the same package before and after a chdir", () => {
-    const before = resolveOptionalPackage("duckdb", [nodeModules])
+    const before = resolveOptionalPackage(FIXTURE, [nodeModules])
     expect(before).toBeDefined()
 
     process.chdir(elsewhere)
-    const after = resolveOptionalPackage("duckdb", [nodeModules])
+    const after = resolveOptionalPackage(FIXTURE, [nodeModules])
     expect(after).toBe(before)
   })
 
@@ -59,10 +71,13 @@ describe("resolution does not depend on the working directory", () => {
     // about it can contribute to resolution. This is the rig's shape: the run
     // directory and the install tree are unrelated.
     process.chdir(elsewhere)
-    const resolved = resolveOptionalPackage("duckdb", [nodeModules])
+    const resolved = resolveOptionalPackage(FIXTURE, [nodeModules])
     expect(resolved).toBeDefined()
     expect(resolved!.startsWith(nodeModules)).toBe(true)
-    expect(fs.existsSync(resolved!)).toBe(true)
+    // Load it and read the marker, so the test reports which root satisfied the
+    // lookup rather than merely that something was found.
+    const loaded = createRequire(pathToFileURL(resolved!).href)(resolved!)
+    expect(loaded.marker).toBe(MARKER)
   })
 
   test("does not resolve out of the working directory's own node_modules", () => {
@@ -70,23 +85,22 @@ describe("resolution does not depend on the working directory", () => {
     // workspace-controlled executable content and are deliberately not searched.
     const cwdModules = path.join(elsewhere, "node_modules")
     fs.mkdirSync(cwdModules, { recursive: true })
-    writePackage(cwdModules, "pg", "index.js", "module.exports = { Client: function () {} }\n")
+    writePackage(cwdModules, CWD_ONLY, "index.js", `module.exports = { marker: ${JSON.stringify(MARKER)} }\n`)
 
     process.chdir(elsewhere)
-    // Assert on provenance, not absence: this repo legitimately has `pg` under
-    // its own tree, which driverSearchRoots finds. What must never happen is a
-    // resolution out of the working directory.
-    const resolved = resolveOptionalPackage("pg", driverSearchRoots())
-    if (resolved !== undefined) expect(resolved.startsWith(elsewhere)).toBe(false)
+    // The specifier exists nowhere else on the machine, so this is absence with
+    // a known cause: anything but undefined means the lookup reached into the
+    // working directory.
+    expect(resolveOptionalPackage(CWD_ONLY, driverSearchRoots())).toBeUndefined()
   })
 
   test("a chdir between resolve and re-resolve does not change the answer", () => {
     process.chdir(elsewhere)
-    const first = resolveOptionalPackage("duckdb", [nodeModules])
+    const first = resolveOptionalPackage(FIXTURE, [nodeModules])
     process.chdir(originalCwd)
-    const second = resolveOptionalPackage("duckdb", [nodeModules])
+    const second = resolveOptionalPackage(FIXTURE, [nodeModules])
     process.chdir(root)
-    const third = resolveOptionalPackage("duckdb", [nodeModules])
+    const third = resolveOptionalPackage(FIXTURE, [nodeModules])
     expect(second).toBe(first)
     expect(third).toBe(first)
   })
