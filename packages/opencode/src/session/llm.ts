@@ -323,8 +323,10 @@ export namespace LLM {
             specificationVersion: "v3",
             async transformParams(args) {
               if (args.type === "stream") {
+                // altimate_change start — transform messages with the reconciled reasoning options
                 // @ts-expect-error
                 args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, requestOptions)
+                // altimate_change end
               }
               return args.params
             },
