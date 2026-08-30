@@ -23,11 +23,11 @@ Log.init({ print: false })
 const MAX_COMPACTION_ATTEMPTS = 3
 
 type LoopEvent =
-  | { type: "overflow" }            // isOverflow() returned true
-  | { type: "compact" }             // processor.process() returned "compact"
-  | { type: "continue" }            // processor.process() returned "continue"
-  | { type: "stop" }                // processor.process() returned "stop"
-  | { type: "compaction_task" }     // pending compaction task in queue
+  | { type: "overflow" } // isOverflow() returned true
+  | { type: "compact" } // processor.process() returned "compact"
+  | { type: "continue" } // processor.process() returned "continue"
+  | { type: "stop" } // processor.process() returned "stop"
+  | { type: "compaction_task" } // pending compaction task in queue
 
 type LoopOutcome =
   | { action: "compact"; attempts: number }
@@ -111,18 +111,13 @@ describe("session.prompt compaction loop protection", () => {
   })
 
   test("single compact increments counter to 1", () => {
-    const { compactionAttempts, outcomes } = simulateLoop([
-      { type: "compact" },
-    ])
+    const { compactionAttempts, outcomes } = simulateLoop([{ type: "compact" }])
     expect(compactionAttempts).toBe(1)
     expect(outcomes[0]).toEqual({ action: "compact", attempts: 1 })
   })
 
   test("consecutive compacts increment counter", () => {
-    const { compactionAttempts } = simulateLoop([
-      { type: "compact" },
-      { type: "compact" },
-    ])
+    const { compactionAttempts } = simulateLoop([{ type: "compact" }, { type: "compact" }])
     expect(compactionAttempts).toBe(2)
   })
 
@@ -137,12 +132,7 @@ describe("session.prompt compaction loop protection", () => {
   })
 
   test("4th consecutive compact exceeds MAX and terminates", () => {
-    const result = simulateLoop([
-      { type: "compact" },
-      { type: "compact" },
-      { type: "compact" },
-      { type: "compact" },
-    ])
+    const result = simulateLoop([{ type: "compact" }, { type: "compact" }, { type: "compact" }, { type: "compact" }])
     expect(result.terminated).toBe(true)
     expect(result.terminationReason).toBe("max_exceeded")
     expect(result.compactionAttempts).toBe(4)
@@ -167,14 +157,14 @@ describe("session.prompt compaction loop protection", () => {
     // Without the fix: counter reaches 4 and errors on the 4th turn.
     // With the fix: counter resets to 0 after each "continue".
     const result = simulateLoop([
-      { type: "compact" },     // turn 1: compaction (attempts=1)
-      { type: "continue" },    // turn 1: success (attempts=0)
-      { type: "compact" },     // turn 2: compaction (attempts=1)
-      { type: "continue" },    // turn 2: success (attempts=0)
-      { type: "compact" },     // turn 3: compaction (attempts=1)
-      { type: "continue" },    // turn 3: success (attempts=0)
-      { type: "compact" },     // turn 4: compaction (attempts=1)
-      { type: "continue" },    // turn 4: success (attempts=0)
+      { type: "compact" }, // turn 1: compaction (attempts=1)
+      { type: "continue" }, // turn 1: success (attempts=0)
+      { type: "compact" }, // turn 2: compaction (attempts=1)
+      { type: "continue" }, // turn 2: success (attempts=0)
+      { type: "compact" }, // turn 3: compaction (attempts=1)
+      { type: "continue" }, // turn 3: success (attempts=0)
+      { type: "compact" }, // turn 4: compaction (attempts=1)
+      { type: "continue" }, // turn 4: success (attempts=0)
     ])
     expect(result.terminated).toBe(false)
     expect(result.compactionAttempts).toBe(0)
@@ -195,26 +185,21 @@ describe("session.prompt compaction loop protection", () => {
   // ─── Overflow detection path ─────────────────────────────────────────
 
   test("overflow events also increment counter", () => {
-    const { compactionAttempts } = simulateLoop([
-      { type: "overflow" },
-    ])
+    const { compactionAttempts } = simulateLoop([{ type: "overflow" }])
     expect(compactionAttempts).toBe(1)
   })
 
   test("overflow and compact share the same counter", () => {
-    const { compactionAttempts } = simulateLoop([
-      { type: "overflow" },
-      { type: "compact" },
-    ])
+    const { compactionAttempts } = simulateLoop([{ type: "overflow" }, { type: "compact" }])
     expect(compactionAttempts).toBe(2)
   })
 
   test("mixed overflow and compact exceeds MAX on 4th total", () => {
     const result = simulateLoop([
-      { type: "overflow" },   // 1
-      { type: "compact" },    // 2
-      { type: "overflow" },   // 3
-      { type: "compact" },    // 4 — exceeds
+      { type: "overflow" }, // 1
+      { type: "compact" }, // 2
+      { type: "overflow" }, // 3
+      { type: "compact" }, // 4 — exceeds
     ])
     expect(result.terminated).toBe(true)
     expect(result.terminationReason).toBe("max_exceeded")
@@ -223,12 +208,12 @@ describe("session.prompt compaction loop protection", () => {
 
   test("continue resets counter from overflow-incremented state", () => {
     const result = simulateLoop([
-      { type: "overflow" },    // 1
-      { type: "overflow" },    // 2
-      { type: "continue" },   // reset to 0
-      { type: "overflow" },    // 1
-      { type: "overflow" },    // 2
-      { type: "overflow" },    // 3
+      { type: "overflow" }, // 1
+      { type: "overflow" }, // 2
+      { type: "continue" }, // reset to 0
+      { type: "overflow" }, // 1
+      { type: "overflow" }, // 2
+      { type: "overflow" }, // 3
     ])
     expect(result.terminated).toBe(false)
     expect(result.compactionAttempts).toBe(3)
@@ -237,10 +222,7 @@ describe("session.prompt compaction loop protection", () => {
   // ─── Stop behavior ──────────────────────────────────────────────────
 
   test("stop terminates loop regardless of counter", () => {
-    const result = simulateLoop([
-      { type: "compact" },
-      { type: "stop" },
-    ])
+    const result = simulateLoop([{ type: "compact" }, { type: "stop" }])
     expect(result.terminated).toBe(true)
     expect(result.terminationReason).toBe("stop")
     expect(result.compactionAttempts).toBe(1)
@@ -264,7 +246,7 @@ describe("session.prompt compaction loop protection", () => {
       { type: "compact" },
       { type: "compact" },
       { type: "compact" },
-      { type: "compact" },  // exceeds
+      { type: "compact" }, // exceeds
       { type: "continue" }, // should NOT reset — already terminated
     ])
     expect(result.terminated).toBe(true)
@@ -274,11 +256,7 @@ describe("session.prompt compaction loop protection", () => {
   // ─── Compaction task path (no counter effect) ─────────────────────────
 
   test("compaction_task does not affect counter", () => {
-    const result = simulateLoop([
-      { type: "compaction_task" },
-      { type: "compaction_task" },
-      { type: "compaction_task" },
-    ])
+    const result = simulateLoop([{ type: "compaction_task" }, { type: "compaction_task" }, { type: "compaction_task" }])
     expect(result.compactionAttempts).toBe(0)
     expect(result.terminated).toBe(false)
   })
@@ -322,10 +300,10 @@ describe("session.prompt compaction loop protection", () => {
   test("realistic: tight compact loop within single turn triggers protection", () => {
     // Same turn keeps compacting but context never shrinks enough
     const result = simulateLoop([
-      { type: "compact" },    // 1
-      { type: "compact" },    // 2
-      { type: "compact" },    // 3
-      { type: "compact" },    // 4 — triggers protection
+      { type: "compact" }, // 1
+      { type: "compact" }, // 2
+      { type: "compact" }, // 3
+      { type: "compact" }, // 4 — triggers protection
     ])
     expect(result.terminated).toBe(true)
     expect(result.terminationReason).toBe("max_exceeded")
@@ -333,12 +311,12 @@ describe("session.prompt compaction loop protection", () => {
 
   test("realistic: 2 compacts then success, then another 2 compacts then success — no error", () => {
     const result = simulateLoop([
-      { type: "compact" },    // 1
-      { type: "compact" },    // 2
-      { type: "continue" },   // reset
-      { type: "compact" },    // 1
-      { type: "compact" },    // 2
-      { type: "continue" },   // reset
+      { type: "compact" }, // 1
+      { type: "compact" }, // 2
+      { type: "continue" }, // reset
+      { type: "compact" }, // 1
+      { type: "compact" }, // 2
+      { type: "continue" }, // reset
     ])
     expect(result.terminated).toBe(false)
     expect(result.compactionAttempts).toBe(0)
@@ -346,23 +324,18 @@ describe("session.prompt compaction loop protection", () => {
 
   test("realistic: 3 compacts (at max) then success — recovers", () => {
     const result = simulateLoop([
-      { type: "compact" },    // 1
-      { type: "compact" },    // 2
-      { type: "compact" },    // 3 (at limit, but <= MAX so allowed)
-      { type: "continue" },   // reset to 0
-      { type: "compact" },    // 1 (fresh counter)
+      { type: "compact" }, // 1
+      { type: "compact" }, // 2
+      { type: "compact" }, // 3 (at limit, but <= MAX so allowed)
+      { type: "continue" }, // reset to 0
+      { type: "compact" }, // 1 (fresh counter)
     ])
     expect(result.terminated).toBe(false)
     expect(result.compactionAttempts).toBe(1)
   })
 
   test("outcome log tracks all state transitions", () => {
-    const result = simulateLoop([
-      { type: "compact" },
-      { type: "continue" },
-      { type: "overflow" },
-      { type: "stop" },
-    ])
+    const result = simulateLoop([{ type: "compact" }, { type: "continue" }, { type: "overflow" }, { type: "stop" }])
     expect(result.outcomes).toEqual([
       { action: "compact", attempts: 1 },
       { action: "continue_reset", attempts: 0 },
@@ -375,11 +348,7 @@ describe("session.prompt compaction loop protection", () => {
 // ─── isOverflow edge cases for loop protection integration ────────────
 // These test boundary conditions that would affect when compaction triggers.
 
-function createModel(opts: {
-  context: number
-  output: number
-  input?: number
-}): Provider.Model {
+function createModel(opts: { context: number; output: number; input?: number }): Provider.Model {
   return {
     id: "test-model",
     providerID: "test" as any,
@@ -456,7 +425,9 @@ describe("session.compaction.isOverflow boundary conditions", () => {
         // total=70K > usable=68K → overflow
         // component sum would be 10K (not overflow) — total should take precedence
         const tokens = {
-          input: 5_000, output: 5_000, reasoning: 0,
+          input: 5_000,
+          output: 5_000,
+          reasoning: 0,
           cache: { read: 0, write: 0 },
           total: 70_000,
         }
@@ -474,7 +445,9 @@ describe("session.compaction.isOverflow boundary conditions", () => {
         // headroom = max(20K, 32K) = 32K → usable = 68K
         // sum = 30K + 10K + 20K + 15K = 75K > usable 68K
         const tokens = {
-          input: 30_000, output: 10_000, reasoning: 0,
+          input: 30_000,
+          output: 10_000,
+          reasoning: 0,
           cache: { read: 20_000, write: 15_000 },
         }
         expect(await SessionCompaction.isOverflow({ tokens, model })).toBe(true)
@@ -511,10 +484,7 @@ describe("session.compaction.isOverflow boundary conditions", () => {
   test("custom reserved config overrides default buffer", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        await Bun.write(
-          `${dir}/opencode.json`,
-          JSON.stringify({ compaction: { reserved: 50_000 } }),
-        )
+        await Bun.write(`${dir}/opencode.json`, JSON.stringify({ compaction: { reserved: 50_000 } }))
       },
     })
     await Instance.provide({
@@ -532,10 +502,7 @@ describe("session.compaction.isOverflow boundary conditions", () => {
   test("custom reserved config with limit.input", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        await Bun.write(
-          `${dir}/opencode.json`,
-          JSON.stringify({ compaction: { reserved: 50_000 } }),
-        )
+        await Bun.write(`${dir}/opencode.json`, JSON.stringify({ compaction: { reserved: 50_000 } }))
       },
     })
     await Instance.provide({
@@ -580,10 +547,7 @@ describe("session.compaction.isOverflow boundary conditions", () => {
   test("compaction disabled via prune config still allows isOverflow", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        await Bun.write(
-          `${dir}/opencode.json`,
-          JSON.stringify({ compaction: { prune: false } }),
-        )
+        await Bun.write(`${dir}/opencode.json`, JSON.stringify({ compaction: { prune: false } }))
       },
     })
     await Instance.provide({
@@ -602,10 +566,7 @@ describe("session.compaction.prune with disabled config", () => {
   test("prune does not throw when prune config is false", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
-        await Bun.write(
-          `${dir}/opencode.json`,
-          JSON.stringify({ compaction: { prune: false } }),
-        )
+        await Bun.write(`${dir}/opencode.json`, JSON.stringify({ compaction: { prune: false } }))
       },
     })
     await Instance.provide({
@@ -619,32 +580,42 @@ describe("session.compaction.prune with disabled config", () => {
 })
 
 describe("session.compaction.process circuit breaker", () => {
-  // Real-module gate for the attempt>3 breaker: it must return "stop" (never
-  // undefined — the prompt loop treats non-"continue" as stop, and undefined
-  // previously fell through to `continue`, re-entering process() in a busy
-  // loop) and must clear the per-session counter so a later prompt gets a
-  // fresh bounded set of attempts.
-  test("attempt>3 returns 'stop' and resets the attempt counter", async () => {
+  // Real-module gate: the breaker must propagate a fatal error (never a clean
+  // "stop"/undefined) and clear the counter for a later prompt.
+  test("attempt>3 throws a fatal breaker error and resets the attempt counter", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const sessionID = "ses_breaker_test" as any
+        const controller = new AbortController()
         const input = () => ({
           messages: [] as any[],
           parentID: "msg_missing" as any,
-          abort: new AbortController().signal,
+          abort: controller.signal,
           sessionID,
           auto: true,
         })
-        // Attempts 1-3: breaker not yet tripped; the missing parent throws.
-        for (let i = 0; i < 3; i++) {
+        try {
+          // Attempts 1-3: breaker not yet tripped; the missing parent throws.
+          for (let i = 0; i < 3; i++) {
+            await expect(SessionCompaction.process(input())).rejects.toThrow(/Compaction parent/)
+          }
+          // Attempt 4: breaker trips BEFORE parent lookup and is fatal.
+          let breaker: unknown
+          try {
+            await SessionCompaction.process(input())
+          } catch (error) {
+            breaker = error
+          }
+          expect((breaker as { data?: { message?: string } })?.data?.message).toMatch(
+            /Compaction failed after 3 attempts/,
+          )
+          // Counter was cleared: the next call is attempt 1 again.
           await expect(SessionCompaction.process(input())).rejects.toThrow(/Compaction parent/)
+        } finally {
+          controller.abort()
         }
-        // Attempt 4: breaker trips BEFORE the parent lookup and returns "stop".
-        expect(await SessionCompaction.process(input())).toBe("stop")
-        // Counter was cleared: the next call is attempt 1 again (throws, not "stop").
-        await expect(SessionCompaction.process(input())).rejects.toThrow(/Compaction parent/)
       },
     })
   })
@@ -708,6 +679,16 @@ describe("small-window retained-content clamp", () => {
     const off = SessionCompaction.preserveRecentBudget({ cfg: bothOff, model })
     expect(SessionCompaction.preserveRecentBudget({ cfg: ledgerOnly, model })).toBeLessThan(off)
     expect(SessionCompaction.preserveRecentBudget({ cfg: carryOnly, model })).toBeLessThan(off)
+  })
+
+  test("an oversized configured ledger cap is clamped before reservation and rendering", () => {
+    const model = createModel({ context: 32_768, output: 8_192 })
+    const cfg = { compaction: { ledger_max_tokens: 100_000 } } as any
+    const retainCeiling = Math.floor(threshold(model, cfg) / 2)
+    const ledger = SessionCompaction.effectiveLedgerBudget({ cfg, model })
+    const tail = SessionCompaction.preserveRecentBudget({ cfg, model })
+    expect(ledger).toBe(retainCeiling)
+    expect(tail + ledger).toBeLessThanOrEqual(retainCeiling)
   })
   // altimate_change end
 })

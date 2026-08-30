@@ -185,11 +185,30 @@ export function preview(lines: string[], totalBytes: number, opts: ResolvedOptio
       // When head and tail share the one line, the suffix must not re-emit the
       // bytes the head prefix already showed.
       const available =
-        headPartial && lines.length === 1 ? Math.min(tailBudgetBytes, Buffer.byteLength(last, "utf-8") - headBytes) : tailBudgetBytes
+        headPartial && lines.length === 1
+          ? Math.min(tailBudgetBytes, Buffer.byteLength(last, "utf-8") - headBytes)
+          : tailBudgetBytes
       const partial = byteSuffix(last, available)
       if (partial) {
         tailLines = [partial]
         tailBytes = Buffer.byteLength(partial, "utf-8")
+      }
+    }
+    // A tiny split can leave both shares below one UTF-8 code point even when
+    // the unsplit maxBytes budget fits it (for example, one 4-byte emoji with a
+    // 2/2 middle split). Retry one boundary with the full budget so truncation
+    // never erases content that was representable within the configured cap.
+    if (headLines.length === 0 && tailLines.length === 0 && lines.length > 0) {
+      const first = bytePrefix(lines[0]!, maxBytes)
+      if (first) {
+        headLines = [first]
+        headBytes = Buffer.byteLength(first, "utf-8")
+      } else {
+        const last = byteSuffix(lines[lines.length - 1]!, maxBytes)
+        if (last) {
+          tailLines = [last]
+          tailBytes = Buffer.byteLength(last, "utf-8")
+        }
       }
     }
     // altimate_change end

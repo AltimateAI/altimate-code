@@ -630,7 +630,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
         return false
       }
 
-      const events = await sdk.event.subscribe()
+      // altimate_change start — every subscription has an explicit lifetime so
+      // prompt-send failures cannot leave an SSE stream keeping the process alive.
+      const eventAbort = new AbortController()
+      const events = await sdk.event.subscribe(undefined, { signal: eventAbort.signal })
+      // altimate_change end
       let error: string | undefined
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
@@ -875,6 +879,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.error(err)
           }
 
+          // altimate_change start — require an actual recovery event before forgiving overflow
+          // A ContextOverflowError is only recoverable after compaction really
+          // completes. This event closes the pending-overflow accounting state;
+          // without it (disabled/failed compaction) the run exits nonzero.
+          if (event.type === "session.compacted" && event.properties.sessionID === sessionID) {
+            accounting.onCompactionRecovered()
+          }
+          // altimate_change end
+
           // altimate_change start — track busy for the challenge-phase guard
           if (
             event.type === "session.status" &&
@@ -1021,12 +1034,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // to die here with rc 0). The flag (not just listener removal) makes the
       // outcome sticky in the right direction: a spurious firing during an
       // event-loop gap on a run that later completes must not poison the rc —
-      // the success path sets runFinished and restores exitCode explicitly.
-      let runFinished = false
-      const onBeforeExit = () => {
-        tracer?.flushSync("Process exited")
-        if (!runFinished) process.exitCode = 1
-      }
+      // the success path marks the shared guard finished and restores exitCode.
+      const beforeExit = RunAccounting.createBeforeExitGuard(process, () => tracer?.flushSync("Process exited"))
+      const onBeforeExit = beforeExit.onBeforeExit
       // altimate_change end
       process.on("SIGINT", onSigint)
       process.on("SIGTERM", onSigterm)
@@ -1034,11 +1044,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // Start event listener before sending the prompt so no events are missed
       // altimate_change start — pass the stream explicitly (see loop signature)
+      let eventLoopFailure: unknown
       const loopPromise = loop(events.stream).catch((e) => {
-        // altimate_change end
+        eventLoopFailure = e
+        accounting.onSessionError("EventStreamError", e instanceof Error ? e.message : String(e))
         console.error(e)
-        process.exit(1)
       })
+      // altimate_change end
 
       // altimate_change start — bounded retry-with-backoff on provider 5xx/timeout
       // at the enqueue boundary. Bounds are config-exposed via env (provenance:
@@ -1099,9 +1111,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
        *  evidence that the message did NOT land. Treating an unreachable
        *  server as "absent" would resend a task that may already be running,
        *  which is the duplication this whole mechanism exists to prevent. */
-      const acceptanceState = async (): Promise<"accepted" | "absent" | "unknown"> => {
+      const acceptanceState = async (messageID: string): Promise<"accepted" | "absent" | "unknown"> => {
         try {
-          const res = (await sdk.session.message({ sessionID, messageID: sendMessageID })) as {
+          const res = (await sdk.session.message({ sessionID, messageID })) as {
             data?: { info?: unknown }
             error?: unknown
             response?: { status?: number }
@@ -1122,6 +1134,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         data?: { info?: { finish?: string; error?: { name?: unknown; data?: unknown } } }
       }
       let sendResult: SendResult | undefined
+      let sendFailure: unknown
       for (let sendAttempt = 0; ; sendAttempt++) {
         let reason: string
         try {
@@ -1133,14 +1146,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
           }
           reason = `provider returned status ${status}`
         } catch (e) {
-          if (!RunAccounting.isRetryableThrown(e)) throw e
+          if (!RunAccounting.isRetryableThrown(e)) {
+            sendFailure = e
+            break
+          }
           reason = e instanceof Error ? e.message : String(e)
         }
         // altimate_change start — a retry may only proceed on definitive
         // evidence that the message did NOT land. Re-sending an accepted prompt
         // duplicates the task; re-sending on an UNKNOWN state risks the same,
         // so that case fails the run loudly instead of guessing.
-        const acceptance = await acceptanceState()
+        const acceptance = await acceptanceState(sendMessageID)
         if (acceptance === "accepted") {
           // The failure was on the response path only — the run is in flight,
           // so fall through and let the event loop drain to idle.
@@ -1153,13 +1169,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
           break
         }
         if (acceptance === "unknown") {
-          throw new Error(
+          sendFailure = new Error(
             `prompt failed and the server could not be reached to determine whether it was accepted; ` +
               `not retrying to avoid running the task twice — ${reason}`,
           )
+          break
         }
         // altimate_change end
-        if (sendAttempt >= retryMax) throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)
+        if (sendAttempt >= retryMax) {
+          sendFailure = new Error(`prompt failed after ${retryMax} retries: ${reason}`)
+          break
+        }
         const delay = RunAccounting.retryDelayMs(retryBaseMs, sendAttempt)
         if (!emit("retry", { attempt: sendAttempt + 1, max: retryMax, reason, delayMs: delay })) {
           UI.println(
@@ -1171,12 +1191,23 @@ You are speaking to a non-technical business executive. Follow these rules stric
       }
       // the prompt response carries the TERMINAL assistant message —
       // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
-      if (sendResult?.error) accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
-      else accounting.onPromptResult(sendResult?.data?.info)
+      if (sendFailure) {
+        accounting.onPromptSendError(sendFailure)
+        error = RunAccounting.serializeSessionError(sendFailure)
+        eventAbort.abort()
+      } else if (sendResult?.error) {
+        accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
+        error = RunAccounting.serializeSessionError(sendResult.error)
+        eventAbort.abort()
+      } else accounting.onPromptResult(sendResult?.data?.info)
       // altimate_change end
 
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
+      // altimate_change start — close the initial SSE lifetime on every outcome
+      eventAbort.abort()
+      if (eventLoopFailure && !error) error = RunAccounting.serializeSessionError(eventLoopFailure)
+      // altimate_change end
 
       // altimate_change start — one-shot confirm-DONE challenge phase.
       // Reached only when the idle-done detector fired (all hard preconditions
@@ -1210,7 +1241,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const challengeFailure = new Promise<void>((resolveFailure) => {
           challengeSendFailed = resolveFailure
         })
-        const challengePromise = (async () => {
+        const challengeMessageID = MessageID.ascending()
+        const challengePromise = (async (): Promise<SendResult | undefined> => {
           // The abort releases the session lock asynchronously — retry briefly
           // while the server still reports the session busy. Bounded so a
           // persistent failure surfaces instead of hanging the run.
@@ -1218,6 +1250,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             const res = (await sdk.session
               .prompt({
                 sessionID,
+                messageID: challengeMessageID,
                 agent,
                 model: args.model ? Provider.parseModel(args.model) : undefined,
                 variant: args.variant,
@@ -1227,13 +1260,36 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 // back to technical output under --audience executive.
                 ...(audienceSystem ? { system: audienceSystem } : {}),
                 // altimate_change end
-                parts: [{ type: "text", text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE }],
+                // Internal challenge text must never become the authoritative
+                // resumed-session task pin.
+                parts: [
+                  {
+                    type: "text",
+                    text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE,
+                    synthetic: true,
+                  },
+                ],
               })
               .catch((e) => ({ error: e }) as SendResult)) as SendResult
             if (!res?.error) return res
+            const status = res.response?.status
+            const detail = RunAccounting.serializeSessionError(res.error)
+            const retryable =
+              status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
+            if (!retryable) throw new Error(`idle-done challenge prompt failed: ${detail}`)
+
+            // As with the original task, retry only after definitive proof the
+            // server did not persist this exact challenge message.
+            const acceptance = await acceptanceState(challengeMessageID)
+            if (acceptance === "accepted") return undefined
+            if (acceptance === "unknown") {
+              throw new Error(
+                `idle-done challenge failed and acceptance could not be determined; not retrying to avoid duplication — ${detail}`,
+              )
+            }
             if (challengeAttempt >= 8) {
-              emit("idle_done_challenge_failed", { error: RunAccounting.serializeSessionError(res.error) })
-              throw new Error(`idle-done challenge prompt failed: ${RunAccounting.serializeSessionError(res.error)}`)
+              emit("idle_done_challenge_failed", { error: detail })
+              throw new Error(`idle-done challenge prompt failed: ${detail}`)
             }
             await new Promise((resolve) => setTimeout(resolve, 250 * (challengeAttempt + 1)))
           }
@@ -1241,8 +1297,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
         challengePromise.catch(() => challengeSendFailed())
         await Promise.race([
           loop(challengeEvents.stream, { requireBusyFirst: true }).catch((e) => {
+            accounting.onSessionError("ChallengeEventStreamError", e instanceof Error ? e.message : String(e))
             console.error(e)
-            process.exit(1)
+            challengeAbort.abort()
           }),
           challengeFailure,
         ])
@@ -1263,6 +1320,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         challengeAbort.abort()
         // altimate_change end
         accounting.onPromptResult(challengeResult?.data?.info)
+        accounting.onIdleDoneChallengeCompleted()
       }
       // altimate_change end
 
@@ -1270,8 +1328,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — the run loop drained normally: mark the run
       // finished and clear any exit code a premature beforeExit firing set.
       // accounting.fatal below remains the single authority for a nonzero rc.
-      runFinished = true
-      process.exitCode = 0
+      beforeExit.finish()
       // altimate_change end
       process.removeListener("SIGINT", onSigint)
       process.removeListener("SIGTERM", onSigterm)

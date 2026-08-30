@@ -2,13 +2,17 @@
 // most ONE system-authored directive block per injected turn, with precedence
 // termination_challenge (item 1) > starvation_breaker (item 4) > budget_reminder
 // (item 9). Items register candidates; the injection site takes the single winner.
-import { beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { NudgeArbiter } from "../../src/session/nudge"
 
 const SID = "ses_arbiter_test"
 
 beforeEach(() => {
   NudgeArbiter.clear(SID)
+})
+afterEach(() => {
+  NudgeArbiter.clear(SID)
+  NudgeArbiter.clear("ses_arbiter_other")
 })
 
 describe("NudgeArbiter precedence (one-directive-per-turn contract)", () => {
@@ -105,23 +109,11 @@ describe("NudgeArbiter one-directive-per-turn contract", () => {
 
   test("stale callbacks cannot register or clear a newer loop generation", () => {
     const oldGeneration = NudgeArbiter.begin(SID)
-    NudgeArbiter.register(
-      SID,
-      { source: "starvation_breaker", kind: "starvation", text: "old" },
-      oldGeneration,
-    )
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "old" }, oldGeneration)
 
     const currentGeneration = NudgeArbiter.begin(SID)
-    NudgeArbiter.register(
-      SID,
-      { source: "budget_reminder", kind: "budget", text: "current" },
-      currentGeneration,
-    )
-    NudgeArbiter.register(
-      SID,
-      { source: "termination_challenge", kind: "confirm_done", text: "stale" },
-      oldGeneration,
-    )
+    NudgeArbiter.register(SID, { source: "budget_reminder", kind: "budget", text: "current" }, currentGeneration)
+    NudgeArbiter.register(SID, { source: "termination_challenge", kind: "confirm_done", text: "stale" }, oldGeneration)
     NudgeArbiter.clear(SID, oldGeneration)
 
     expect(NudgeArbiter.take(SID, currentGeneration)?.text).toBe("current")

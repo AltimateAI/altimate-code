@@ -355,6 +355,15 @@ describe("repeat_signature loop detection", () => {
     )
   })
 
+  test("large outcome normalization stays deterministic without a full-size replace", () => {
+    const call = { tool: "read", args: { filePath: "/a.sql" } }
+    const spaced = ("row   value\n".repeat(100_000) + "done").trim()
+    const collapsed = ("row value ".repeat(100_000) + "done").trim()
+    expect(SessionStarvation.repeatSignature({ ...call, output: spaced })).toBe(
+      SessionStarvation.repeatSignature({ ...call, output: collapsed }),
+    )
+  })
+
   test("identical repeated FAILURES are unaffected — failure text already keys the signature", () => {
     const attempt = { tool: "edit", args: { filePath: "/a.sql" }, touchedFiles: ["/a.sql"] }
     expect(SessionStarvation.repeatSignature({ ...attempt, failureMessage: "not found" })).toBe(
@@ -530,14 +539,17 @@ describe("session-scoped tracker store", () => {
   test("trackers persist across processor instances (per-step create) for the same session", () => {
     const resolved = SessionStarvation.resolveConfig({ max_turns_without_mutation: 3 })
     SessionStarvation.clear("ses_store_1")
-    const first = SessionStarvation.forSession("ses_store_1", resolved)
-    first.onStepFinish({ mutatedFiles: [] })
-    first.onStepFinish({ mutatedFiles: [] })
-    // a new processor for the next step must see the accumulated state
-    const second = SessionStarvation.forSession("ses_store_1", resolved)
-    const out = second.onStepFinish({ mutatedFiles: [] })
-    expect(out.starvation).toBeDefined()
-    SessionStarvation.clear("ses_store_1")
+    try {
+      const first = SessionStarvation.forSession("ses_store_1", resolved)
+      first.onStepFinish({ mutatedFiles: [] })
+      first.onStepFinish({ mutatedFiles: [] })
+      // a new processor for the next step must see the accumulated state
+      const second = SessionStarvation.forSession("ses_store_1", resolved)
+      const out = second.onStepFinish({ mutatedFiles: [] })
+      expect(out.starvation).toBeDefined()
+    } finally {
+      SessionStarvation.clear("ses_store_1")
+    }
   })
 })
 

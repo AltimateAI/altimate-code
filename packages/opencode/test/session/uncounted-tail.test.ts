@@ -100,6 +100,21 @@ describe("SessionPrompt.estimateUncountedTail", () => {
     expect(SessionPrompt.estimateUncountedTail(reordered, "m2" as any)).toBe(Token.estimate(newer))
   })
 
+  test("counts failed and interrupted tool output exactly as replayed", () => {
+    const failed = assistantWithTool("m2", "working", "")
+    ;(failed.parts[1] as any).state = {
+      status: "error",
+      input: {},
+      error: "validation failed with details",
+      time: { start: 1, end: 2 },
+    }
+    expect(SessionPrompt.estimateUncountedTail([failed], "m2" as any)).toBe(
+      Token.estimate("validation failed with details"),
+    )
+    ;(failed.parts[1] as any).state.metadata = { interrupted: true, output: "partial output preserved" }
+    expect(SessionPrompt.estimateUncountedTail([failed], "m2" as any)).toBe(Token.estimate("partial output preserved"))
+  })
+
   test("returns 0 for an unknown or absent id", () => {
     const msgs = [msg("u", "user", "task")]
     expect(SessionPrompt.estimateUncountedTail(msgs, undefined)).toBe(0)

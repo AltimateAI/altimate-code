@@ -226,6 +226,21 @@ export namespace SessionCompaction {
   // tail + ledger at this fraction of the trigger threshold.
   const MAX_RETAINED_THRESHOLD_FRACTION = 0.5
 
+  /** Ledger/carry budget admitted by the same retention ceiling used for the tail. */
+  export function effectiveLedgerBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
+    const enabled = input.cfg.compaction?.state_ledger !== false || input.cfg.compaction?.summary_carry !== false
+    if (!enabled) return 0
+    const configured = Math.max(0, input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS)
+    const context = input.model.limit.context
+    if (context === 0) return configured
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const headroom = Math.max(input.cfg.compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
+    const base = input.model.limit.input ?? context
+    if (base <= headroom) return 0
+    const threshold = overflowThreshold({ base, headroom, fraction: 1 })
+    return Math.min(configured, Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION)))
+  }
+
   export function preserveRecentBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
     const context = input.model.limit.context
     if (context === 0) return 0
@@ -248,8 +263,7 @@ export namespace SessionCompaction {
     // carry can actually be emitted. With both features off the reservation was
     // still taken out of the tail budget, and a large `ledger_max_tokens` could
     // drive the retained tail to zero for text that is never rendered.
-    const ledgerEmitted = input.cfg.compaction?.state_ledger !== false || input.cfg.compaction?.summary_carry !== false
-    const ledgerMax = ledgerEmitted ? (input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS) : 0
+    const ledgerMax = effectiveLedgerBudget(input)
     // altimate_change end
     const retainCap = Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION) - ledgerMax)
     return Math.min(candidate, retainCap)
@@ -350,7 +364,10 @@ export namespace SessionCompaction {
   // altimate_change end
 
   async function select(input: { messages: MessageV2.WithParts[]; cfg: ConfigInfo; model: Provider.Model }) {
-    const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+    const compaction = input.cfg.compaction as
+      | (NonNullable<ConfigInfo["compaction"]> & { keep?: { turns?: number } })
+      | undefined
+    const limit = compaction?.keep?.turns ?? compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
     if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
     const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
     const all = turns(input.messages)
@@ -624,12 +641,17 @@ export namespace SessionCompaction {
         if (part.tool === "apply_patch") {
           const files = Array.isArray(metadata.files) ? metadata.files : []
           for (const f of files) {
+            const source = typeof f?.filePath === "string" ? f.filePath : undefined
             // A delete wrote nothing — recording it would advertise a file that
             // no longer exists as freshly written.
-            if (f?.type === "delete") continue
+            if (f?.type === "delete") {
+              if (source) writes.delete(source)
+              continue
+            }
             // On a move, `filePath` is the SOURCE and `movePath` is where the
             // content actually landed; the ledger must name the destination or
             // it sends the continuing agent back to the path that was removed.
+            if (typeof f?.movePath === "string" && source) writes.delete(source)
             const target = typeof f?.movePath === "string" ? f.movePath : f?.filePath
             if (typeof target === "string")
               writes.set(target, { path: target, mtime: state.time.end, tool: "apply_patch" })
@@ -688,13 +710,20 @@ export namespace SessionCompaction {
         lines.push(`- ${c.tool} (${status})${c.detail ? ` — ${c.detail}` : ""}`)
       }
     }
-    while (lines.length > 1 && Token.estimate(lines.join("\n")) > maxTokens) lines.pop()
-    // A header with every fact truncated away carries no information but is
-    // still charged against a budget the caller assumed was spent on facts —
-    // and `ledger_max_tokens: 0` (which the schema accepts) would otherwise
-    // inject unbudgeted text. Emit nothing when not even the header fits.
-    if (Token.estimate(lines.join("\n")) > maxTokens) return ""
-    return lines.join("\n")
+    // Find the longest fitting prefix in O(n log n); repeatedly joining after
+    // one pop made a many-file ledger quadratic on the recovery hot path.
+    let low = 1
+    let high = lines.length
+    let best = 0
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2)
+      if (Token.estimate(lines.slice(0, mid).join("\n")) <= maxTokens) {
+        best = mid
+        low = mid + 1
+      } else high = mid - 1
+    }
+    // A bare header has no fact content and must not consume the configured cap.
+    return best > 1 ? lines.slice(0, best).join("\n") : ""
   }
 
   // ── 5b: append-only summary carry ─────────────────────────────────────────
@@ -756,11 +785,6 @@ export namespace SessionCompaction {
         if (w.path === token || w.path.endsWith("/" + token)) return true
         if (base && w.path.split("/").pop() === base) return true
       }
-      // A zero-exit command naming the artifact also corroborates (command-agnostic —
-      // no build/test classifier; the exit code plus artifact mention is the evidence).
-      for (const c of ledger.calls) {
-        if (!c.errored && c.exit === 0 && c.detail.includes(token)) return true
-      }
     }
     return false
   }
@@ -788,7 +812,7 @@ export namespace SessionCompaction {
       "Earlier compaction rounds recorded these Accomplished items. Carry EVERY item below into the new summary's Accomplished section with its tag verbatim, then append newly accomplished work after them:",
     ]
     const footer = [
-      "Items tagged [claimed, unverified] had no corroborating tool event (no write/edit event or successful command naming that artifact); keep the tag so later agents do not treat them as established fact. Never promote or remove a tag yourself.",
+      "Items tagged [claimed, unverified] had no corroborating write/edit tool event; keep the tag so later agents do not treat them as established fact. Never promote or remove a tag yourself.",
     ]
     let body = items.map((i) => `- [${i.status}] ${i.text}`)
     // Append-only carry grows monotonically; when over budget drop the OLDEST
@@ -924,7 +948,11 @@ export namespace SessionCompaction {
 
   export function pinScale(sessionID?: string): number {
     if (!sessionID) return 1
-    return pinState.get(sessionID)?.scale ?? 1
+    const state = pinState.get(sessionID)
+    if (!state) return 1
+    pinState.delete(sessionID)
+    pinState.set(sessionID, state)
+    return state.scale
   }
 
   /** Test hook: clear livelock state for one session, or all sessions. */
@@ -980,7 +1008,12 @@ export namespace SessionCompaction {
     abort: AbortSignal
     auto: boolean
     overflow?: boolean
+    // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
+    // altimate_change end
+    // altimate_change start — optional one-pass history hydration from prompt loop
+    unfilteredMessages?: MessageV2.WithParts[]
+    // altimate_change end
   }) {
     // altimate_change start — telemetry, attempt tracking, and circuit breaker
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
@@ -1007,7 +1040,9 @@ export namespace SessionCompaction {
       // bounded set of attempts instead of tripping the breaker instantly.
       log.warn("compaction circuit breaker", { sessionID: input.sessionID, attempt })
       compactionAttempts.delete(input.sessionID)
-      return "stop"
+      throw new NamedError.Unknown({
+        message: `Compaction failed after ${attempt - 1} attempts; refusing to leave the session in an unresolved loop`,
+      })
     }
     // altimate_change end
     const parent = input.messages.findLast((m) => m.info.id === input.parentID)
@@ -1061,7 +1096,7 @@ export namespace SessionCompaction {
     const ledgerEnabled = cfg.compaction?.state_ledger !== false
     const carryEnabled = cfg.compaction?.summary_carry !== false
     const firstPersonEnabled = cfg.compaction?.summary_first_person !== false
-    const ledgerMaxTokens = cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS
+    const ledgerMaxTokens = effectiveLedgerBudget({ cfg, model: sessionModel })
     const ledgerRecentCalls = cfg.compaction?.ledger_recent_calls ?? LEDGER_RECENT_CALLS
     // altimate_change start — the ledger must be built from the UNFILTERED
     // session history. `input.messages` is the compaction-filtered view, so on
@@ -1072,7 +1107,7 @@ export namespace SessionCompaction {
     // failure falls back to the filtered view rather than losing the ledger.
     const ledger: Ledger =
       ledgerEnabled || carryEnabled
-        ? buildLedger(ledgerHistory(input.sessionID, input.messages))
+        ? buildLedger(input.unfilteredMessages ?? ledgerHistory(input.sessionID, input.messages))
         : { writes: [], calls: [], sawBash: false }
     // altimate_change end
     const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
@@ -1335,9 +1370,18 @@ When constructing the summary, try to stick to this template:
         // custom system prompt, output format, and variant. The compaction marker
         // (this branch's userMessage) never carries these fields, so source them from
         // the most recent real (non-compaction) user message; no-op when never set.
-        const original = messages.findLast(
-          (m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"),
-        )?.info as MessageV2.User | undefined
+        const substantiveUsers = messages.filter(
+          (m) =>
+            m.info.role === "user" &&
+            !m.parts.some((p) => p.type === "compaction") &&
+            m.parts.some((p) => !("synthetic" in p) || p.synthetic !== true),
+        )
+        const latestField = <K extends "format" | "tools" | "system" | "variant">(field: K) =>
+          (
+            substantiveUsers.findLast((m) => (m.info as MessageV2.User)[field] !== undefined)?.info as
+              | MessageV2.User
+              | undefined
+          )?.[field]
         const continueMsg = await Session.updateMessage({
           id: MessageID.ascending(),
           role: "user",
@@ -1345,10 +1389,10 @@ When constructing the summary, try to stick to this template:
           time: { created: Date.now() },
           agent: userMessage.agent,
           model: userMessage.model,
-          format: original?.format ?? userMessage.format,
-          tools: original?.tools ?? userMessage.tools,
-          system: original?.system ?? userMessage.system,
-          variant: original?.variant ?? userMessage.variant,
+          format: latestField("format") ?? userMessage.format,
+          tools: latestField("tools") ?? userMessage.tools,
+          system: latestField("system") ?? userMessage.system,
+          variant: latestField("variant") ?? userMessage.variant,
         })
         // altimate_change end
         // altimate_change start — deterministic corroborated-facts-only

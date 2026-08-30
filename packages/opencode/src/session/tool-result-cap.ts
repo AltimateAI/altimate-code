@@ -70,11 +70,15 @@ export namespace ToolResultCap {
     // Resolved BEFORE the unknown-model branch so the conservative fallback is
     // scaled by the configured fraction too, not only the known-limit path.
     const configuredFraction = input.config?.compaction?.context_safety_fraction
-    const fraction =
-      input.safetyFraction ??
-      (typeof configuredFraction === "number" && Number.isFinite(configuredFraction) && configuredFraction > 0
-        ? configuredFraction
-        : DEFAULT_SAFETY_FRACTION)
+    const requestedFraction = input.safetyFraction ?? configuredFraction ?? DEFAULT_SAFETY_FRACTION
+    // Config parsing deliberately accepts out-of-range numeric values so one
+    // typo cannot discard the whole config document. Keep this config-only
+    // resolution path consistent with SessionCompaction.contextSafetyFraction:
+    // non-finite values fall back, finite values clamp to the safe [0.1, 1]
+    // runtime range.
+    const fraction = Number.isFinite(requestedFraction)
+      ? Math.min(1, Math.max(0.1, requestedFraction))
+      : DEFAULT_SAFETY_FRACTION
     // Same shape as UNKNOWN_MODEL_CAP_TOKENS, but at the resolved fraction; with
     // the default fraction the two are identical.
     const unknownCapTokens = Math.floor(Math.floor(UNKNOWN_MODEL_CONTEXT * fraction) * DEFAULT_LIMIT_FRACTION)

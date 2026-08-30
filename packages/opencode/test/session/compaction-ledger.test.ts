@@ -196,6 +196,28 @@ describe("SessionCompaction.buildLedger", () => {
     expect(ledger.writes.map((w) => w.path).sort()).toEqual(["/repo/kept.py", "/repo/new.py"])
   })
 
+  test("later deletes and moves remove stale source paths from earlier writes", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/repo/old.py" }, end: 5000 }),
+        toolPart({ tool: "write", input: { filePath: "/repo/gone.py" }, end: 5001 }),
+      ]),
+      assistantMsg([
+        toolPart({
+          tool: "apply_patch",
+          metadata: {
+            files: [
+              { filePath: "/repo/old.py", movePath: "/repo/new.py", type: "update" },
+              { filePath: "/repo/gone.py", type: "delete" },
+            ],
+          },
+          end: 7000,
+        }),
+      ]),
+    ]
+    expect(SessionCompaction.buildLedger(messages).writes.map((w) => w.path)).toEqual(["/repo/new.py"])
+  })
+
   test("pending and running parts are ignored (facts only)", () => {
     const messages = [
       assistantMsg([
@@ -358,9 +380,7 @@ describe("SessionCompaction.renderLedger", () => {
     expect(signed).not.toContain("X-Amz-Signature")
     expect(signed).not.toContain("dummy-fragment")
 
-    const basicAuth = SessionCompaction.redactLedgerDetail(
-      "curl https://dummy-user:dummy-pass@example.com/download",
-    )
+    const basicAuth = SessionCompaction.redactLedgerDetail("curl https://dummy-user:dummy-pass@example.com/download")
     expect(basicAuth).not.toContain("dummy-user")
     expect(basicAuth).not.toContain("dummy-pass")
 
@@ -457,13 +477,24 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("verified")
   })
 
-  test("zero-exit command naming the artifact corroborates; failed command does not", () => {
+  test("commands alone never corroborate an artifact, even with exit zero", () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "exported report.csv" }, { text: "validated broken_thing.json" }],
       ledger,
     )
-    expect(out[0]!.status).toBe("verified")
+    expect(out[0]!.status).toBe("claimed, unverified")
     expect(out[1]!.status).toBe("claimed, unverified")
+  })
+
+  test("a destructive zero-exit command cannot verify a removed artifact", () => {
+    const destructive = {
+      writes: [],
+      calls: [{ tool: "bash", detail: "rm report.csv", exit: 0, errored: false }],
+      sawBash: true,
+    }
+    expect(SessionCompaction.corroborateCarry([{ text: "exported report.csv" }], destructive)[0]!.status).toBe(
+      "claimed, unverified",
+    )
   })
 
   test("append-only: a prior [verified] tag is preserved even without current evidence", () => {

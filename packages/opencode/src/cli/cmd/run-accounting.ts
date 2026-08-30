@@ -17,7 +17,7 @@
 import { SessionTermination } from "../../session/termination"
 
 export namespace RunAccounting {
-  export type WhyModelStopped = "stop" | "tool-call" | "explicit-done"
+  export type WhyModelStopped = "stop" | "tool-call" | "explicit-done" | "unknown"
   export type WhyHarnessStopped = "budget-exhausted" | "timeout" | "error" | "idle-done" | "none"
   // done_reason distinguishes an unprompted completion assertion
   // (explicit_done — the PRIMARY termination path) from one elicited by the
@@ -30,11 +30,6 @@ export namespace RunAccounting {
     why_harness_stopped: WhyHarnessStopped
     done_reason: DoneReason
   }
-
-  // Recoverable by design: auto-compaction handles context overflow and the session
-  // continues, so an overflow error event alone must not flip the run's rc or its
-  // harness-stop attribution.
-  const RECOVERABLE_ERROR_NAMES = new Set(["ContextOverflowError"])
 
   // Timeout classification for why_harness_stopped="timeout" and retry decisions.
   const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
@@ -59,16 +54,17 @@ export namespace RunAccounting {
     let lastTextMessageID: string | undefined
     // altimate_change end
     let lastTextExplicitDone = false
+    let lastTextFromChallenge = false
     let budgetExhausted = false
     let fatalError: { name: string; timeout: boolean } | undefined
-    // set when the run-mode idle-done fallback issued its one-shot
-    // confirm-DONE challenge (see cli/cmd/idle-done.ts). Scoped to the
-    // challenge GENERATION, not the run lifetime: the turn at issuance is
-    // recorded so only a DONE in the immediately-following generation is
-    // attributed to the heuristic — a later unprompted DONE (after the model
-    // declined the challenge and kept working) is honest explicit_done.
-    let idleDoneChallengeTurn: number | undefined
-    let lastExplicitDoneTurn: number | undefined
+    // An overflow is recoverable only after compaction actually completes. In
+    // particular, compaction can be disabled or its own summarizer can fail.
+    let pendingContextOverflow = false
+    // State for the one-shot confirm-DONE prompt. Attribution follows the
+    // actual challenge request lifetime, not step counts: one reply may use
+    // several tool-call steps before its final DONE assertion.
+    let idleDoneChallengeIssued = false
+    let challengeReplyActive = false
     // the harness delivers the challenge by aborting ONE in-flight prompt;
     // each suppression may fire at most once — later aborts/abnormal
     // finishes are real failures.
@@ -116,27 +112,35 @@ export namespace RunAccounting {
         if (synthetic) return
         lastTextExplicitDone = SessionTermination.isExplicitDone(text)
         lastTextMessageID = messageID
-        lastExplicitDoneTurn = lastTextExplicitDone ? turnCount : undefined
+        lastTextFromChallenge = lastTextExplicitDone && challengeReplyActive
       },
       /** the idle-done fallback issued its one-shot confirm-DONE challenge. */
       onIdleDoneChallengeIssued() {
-        idleDoneChallengeTurn = turnCount
+        idleDoneChallengeIssued = true
       },
       // altimate_change start — upstream_fix: see challengeReplySent above.
       /** the idle-done confirm-DONE challenge reply has been sent; suppression of the interrupted prompt's own abort no longer applies. */
       onIdleDoneChallengeReplySent() {
         challengeReplySent = true
+        challengeReplyActive = true
+      },
+      /** Close the challenge generation after its synchronous prompt returns. */
+      onIdleDoneChallengeCompleted() {
+        challengeReplyActive = false
       },
       // altimate_change end
       onSessionError(name: unknown, message?: string) {
         const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
-        if (RECOVERABLE_ERROR_NAMES.has(errorName)) return
+        if (errorName === "ContextOverflowError") {
+          pendingContextOverflow = true
+          return
+        }
         // the idle-done challenge is delivered by aborting the in-flight
         // prompt first; that harness-initiated abort surfaces as a
         // MessageAbortedError and must not be scored as a fatal run error.
         // Exactly ONE such abort exists per challenge — later aborts are real.
         if (
-          idleDoneChallengeTurn !== undefined &&
+          idleDoneChallengeIssued &&
           !challengeAbortSuppressed &&
           !challengeReplySent &&
           errorName === "MessageAbortedError"
@@ -148,6 +152,10 @@ export namespace RunAccounting {
           name: errorName,
           timeout: TIMEOUT_PATTERN.test(errorName) || TIMEOUT_PATTERN.test(message ?? ""),
         }
+      },
+      /** Confirm that a previously reported context overflow recovered. */
+      onCompactionRecovered() {
+        pendingContextOverflow = false
       },
       onBudgetExhausted() {
         budgetExhausted = true
@@ -172,7 +180,7 @@ export namespace RunAccounting {
           // the terminal message of the ONE prompt the idle-done fallback
           // aborted (to deliver its challenge) finishes abnormally by design;
           // any further abnormal finish is a real failure.
-          if (idleDoneChallengeTurn !== undefined && !challengeFinishSuppressed && !challengeReplySent) {
+          if (idleDoneChallengeIssued && !challengeFinishSuppressed && !challengeReplySent) {
             challengeFinishSuppressed = true
             return
           }
@@ -186,7 +194,7 @@ export namespace RunAccounting {
       },
       /** True when the run ended by fatal abort — the process must exit nonzero. */
       get fatal() {
-        return budgetExhausted || fatalError !== undefined
+        return budgetExhausted || fatalError !== undefined || pendingContextOverflow
       },
       /** Dual-attribution fields + done_reason for the run record/output. */
       termination(): Termination {
@@ -199,7 +207,8 @@ export namespace RunAccounting {
         const model: WhyModelStopped = (() => {
           if (lastFinishReason === "stop" && explicitDoneOnFinishMessage) return "explicit-done"
           if (lastFinishReason === "tool-calls" || lastFinishReason === "tool-call") return "tool-call"
-          return "stop"
+          if (lastFinishReason === "stop") return "stop"
+          return "unknown"
         })()
         // A completion assertion requires finishReason "stop" PLUS
         // the explicit DONE token — never bare "stop". If the assertion followed
@@ -207,18 +216,12 @@ export namespace RunAccounting {
         // heuristic, not to unprompted model completion.
         const done: DoneReason = (() => {
           if (lastFinishReason !== "stop" || !explicitDoneOnFinishMessage) return "none"
-          // idle_heuristic only when the DONE landed in the challenge's own
-          // generation (the turn it interrupted, or the reply turn right after).
-          const challengeScoped =
-            idleDoneChallengeTurn !== undefined &&
-            lastExplicitDoneTurn !== undefined &&
-            lastExplicitDoneTurn <= idleDoneChallengeTurn + 1
-          return challengeScoped ? "idle_heuristic" : "explicit_done"
+          return lastTextFromChallenge ? "idle_heuristic" : "explicit_done"
         })()
         const harness: WhyHarnessStopped = (() => {
           if (budgetExhausted) return "budget-exhausted"
           if (fatalError?.timeout) return "timeout"
-          if (fatalError) return "error"
+          if (fatalError || pendingContextOverflow) return "error"
           // the session ended on (or after) the idle-done challenge.
           if (done === "idle_heuristic") return "idle-done"
           // A session that idles because the model finished is attributed to the
@@ -230,6 +233,21 @@ export namespace RunAccounting {
     }
   }
   export type Info = ReturnType<typeof create>
+
+  /** Production beforeExit state machine, factored so its rc contract is tested directly. */
+  export function createBeforeExitGuard(proc: { exitCode?: string | number | null }, flush: () => void) {
+    let finished = false
+    return {
+      onBeforeExit() {
+        flush()
+        if (!finished) proc.exitCode = 1
+      },
+      finish() {
+        finished = true
+        proc.exitCode = 0
+      },
+    }
+  }
 
   /**
    * Serialize a session error event's payload to a real name/message/status string.

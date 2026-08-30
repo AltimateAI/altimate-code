@@ -199,6 +199,33 @@ export namespace SessionStarvation {
     return createHash("sha256").update(text).digest("hex")
   }
 
+  /** Hash trim/collapsed-whitespace text with bounded auxiliary memory. */
+  function normalizedWhitespaceSha(text: string): string {
+    const hash = createHash("sha256")
+    const chunk: string[] = []
+    let wrote = false
+    let pendingSpace = false
+    const whitespace = /\s/u
+    const flush = () => {
+      if (!chunk.length) return
+      hash.update(chunk.join(""))
+      chunk.length = 0
+    }
+    for (const char of text) {
+      if (whitespace.test(char)) {
+        if (wrote) pendingSpace = true
+        continue
+      }
+      if (pendingSpace) chunk.push(" ")
+      pendingSpace = false
+      chunk.push(char)
+      wrote = true
+      if (chunk.length >= 4096) flush()
+    }
+    flush()
+    return hash.digest("hex")
+  }
+
   /** repeat_signature = hash(tool + normalized args + touched files + failure message).
    *  Catches edit-verify-fail-revert-reedit loops that mutate files every turn but
    *  make no progress — invisible to zero-mutation counting. */
@@ -223,9 +250,11 @@ export namespace SessionStarvation {
         input.tool,
         normalizeArgs(input.args),
         [...(input.touchedFiles ?? [])].sort().join(","),
-        (input.failureMessage ?? "").replace(/\s+/g, " ").trim(),
-        // altimate_change — hashed, not embedded: results are unbounded, the signature is not.
-        input.output === undefined ? "" : sha(input.output.replace(/\s+/g, " ").trim()),
+        input.failureMessage === undefined ? "" : normalizedWhitespaceSha(input.failureMessage),
+        // altimate_change — stream-normalized hash: results are unbounded and
+        // must not allocate a second full-size normalized string before the
+        // dispatch cap runs in processor.ts.
+        input.output === undefined ? "" : normalizedWhitespaceSha(input.output),
       ].join("\u0000"),
     )
   }
@@ -392,7 +421,9 @@ export namespace SessionStarvation {
             ? ((input.input as any).command as string)
             : undefined
         const polling = command !== undefined && pollingRegex.test(command)
-        const threshold = polling ? config.doomLoopThreshold * config.pollingThresholdMultiplier : config.doomLoopThreshold
+        const threshold = polling
+          ? config.doomLoopThreshold * config.pollingThresholdMultiplier
+          : config.doomLoopThreshold
 
         let escalation: DoomEscalation | undefined
         if (consecutiveIdenticalCalls >= threshold * 3) escalation = "stop"

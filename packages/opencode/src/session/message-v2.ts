@@ -811,7 +811,12 @@ export namespace MessageV2 {
             // altimate_change end
             if (part.state.status === "completed") {
               // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
-              const rawOutputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
+              const storedMask = part.state.metadata?.observation_mask
+              const rawOutputText = part.state.time.compacted
+                ? typeof storedMask === "string" && storedMask.length > 0
+                  ? storedMask
+                  : "[Old tool result content cleared]"
+                : part.state.output
               const maxChars = options?.toolOutputMaxChars
               const outputText =
                 !part.state.time.compacted && maxChars !== undefined && rawOutputText.length > maxChars

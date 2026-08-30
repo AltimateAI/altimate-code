@@ -150,18 +150,16 @@ describe("Config", () => {
   )
   // altimate_change end
 
-  // altimate_change start — upstream_fix regression: a document authored
-  // directly in V2 (not migrated from V1) is decoded straight through
-  // ConfigV2.Compaction.Info, which previously had no bounds on these two
-  // fractions — only the V1 schema did. Assert the V2 schema rejects
-  // out-of-range values too.
-  it.effect("V2 compaction schema rejects out-of-range context_safety_fraction / pin_window_fraction", () =>
+  // altimate_change start — normalize the safety fraction at runtime instead
+  // of rejecting (and thereby dropping) an otherwise valid config document.
+  // pin_window_fraction has no runtime clamp, so it remains schema-bounded.
+  it.effect("V2 accepts clampable context_safety_fraction values but bounds pin_window_fraction", () =>
     Effect.sync(() => {
       const decodeCompaction = (compaction: Record<string, unknown>) =>
         Schema.decodeUnknownResult(Config.Info)({ compaction })
 
-      expect(decodeCompaction({ context_safety_fraction: 0.05 })._tag).toBe("Failure")
-      expect(decodeCompaction({ context_safety_fraction: 1.5 })._tag).toBe("Failure")
+      expect(decodeCompaction({ context_safety_fraction: 0.05 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 1.5 })._tag).toBe("Success")
       expect(decodeCompaction({ context_safety_fraction: 0.65 })._tag).toBe("Success")
 
       expect(decodeCompaction({ pin_window_fraction: -0.1 })._tag).toBe("Failure")
@@ -170,22 +168,19 @@ describe("Config", () => {
     }),
   )
 
-  // The float32-exact bound the fast-check generator needs must round DOWN.
-  // Rounding up (Math.fround(0.1) ≈ 0.10000000149) made the schema reject the
-  // documented minimum and both endpoints of the advertised [0.1, 1] range.
-  it.effect("both endpoints of the documented context_safety_fraction range decode", () =>
+  it.effect("V1 and V2 retain out-of-range safety fractions for runtime clamping", () =>
     Effect.sync(() => {
       const decodeCompaction = (compaction: Record<string, unknown>) =>
         Schema.decodeUnknownResult(Config.Info)({ compaction })
       expect(decodeCompaction({ context_safety_fraction: 0.1 })._tag).toBe("Success")
       expect(decodeCompaction({ context_safety_fraction: 1 })._tag).toBe("Success")
-      expect(decodeCompaction({ context_safety_fraction: 0.099 })._tag).toBe("Failure")
+      expect(decodeCompaction({ context_safety_fraction: 0.099 })._tag).toBe("Success")
 
       const decodeV1 = (compaction: Record<string, unknown>) =>
         Schema.decodeUnknownResult(ConfigV1.Info)({ compaction })
       expect(decodeV1({ context_safety_fraction: 0.1 })._tag).toBe("Success")
       expect(decodeV1({ context_safety_fraction: 1 })._tag).toBe("Success")
-      expect(decodeV1({ context_safety_fraction: 0.099 })._tag).toBe("Failure")
+      expect(decodeV1({ context_safety_fraction: 0.099 })._tag).toBe("Success")
     }),
   )
   // altimate_change end

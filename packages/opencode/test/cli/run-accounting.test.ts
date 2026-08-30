@@ -47,7 +47,7 @@ describe("RunAccounting termination attribution (E4)", () => {
   test("both fields are always present with valid enum values", () => {
     const acc = RunAccounting.create()
     const t = acc.termination()
-    expect(["stop", "tool-call", "explicit-done"]).toContain(t.why_model_stopped)
+    expect(["stop", "tool-call", "explicit-done", "unknown"]).toContain(t.why_model_stopped)
     expect(["budget-exhausted", "timeout", "error", "idle-done", "none"]).toContain(t.why_harness_stopped)
   })
 
@@ -104,12 +104,19 @@ describe("RunAccounting termination attribution (E4)", () => {
     expect(acc.termination().why_harness_stopped).toBe("timeout")
   })
 
-  test("recoverable ContextOverflowError does not flip fatal or the attribution", () => {
-    // Auto-compaction recovers overflow; the error event alone must not change rc.
+  test("ContextOverflowError is fatal until a completed compaction recovers it", () => {
     const acc = RunAccounting.create()
     acc.onSessionError("ContextOverflowError", "context window exceeded")
+    expect(acc.fatal).toBe(true)
+    expect(acc.termination().why_harness_stopped).toBe("error")
+    acc.onCompactionRecovered()
     expect(acc.fatal).toBe(false)
     expect(acc.termination().why_harness_stopped).toBe("none")
+  })
+
+  test("no finish event reports an unknown model stop", () => {
+    const acc = RunAccounting.create()
+    expect(acc.termination().why_model_stopped).toBe("unknown")
   })
 
   test("terminal message with abnormal finish (error/other) is fatal (swallowed transport failure)", () => {
@@ -284,8 +291,10 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onIdleDoneChallengeIssued()
+    acc.onIdleDoneChallengeReplySent()
     acc.onText("m1", "Confirmed.\nDONE")
     acc.onStepFinish("m1", "stop")
+    acc.onIdleDoneChallengeCompleted()
     const t = acc.termination()
     expect(t.done_reason).toBe("idle_heuristic")
     expect(t.why_harness_stopped).toBe("idle-done")
@@ -296,8 +305,10 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onIdleDoneChallengeIssued()
+    acc.onIdleDoneChallengeReplySent()
     acc.onText("m1", "Remaining: wire the config flag. Continuing.")
     acc.onStepFinish("m1", "stop")
+    acc.onIdleDoneChallengeCompleted()
     const t = acc.termination()
     expect(t.done_reason).toBe("none")
     expect(t.why_harness_stopped).toBe("none")
@@ -341,8 +352,10 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onStepStart("m1")
     acc.onIdleDoneChallengeIssued()
+    acc.onIdleDoneChallengeReplySent()
     acc.onText("m1", "Remaining: wire the config flag. Continuing.")
     acc.onStepFinish("m1", "stop")
+    acc.onIdleDoneChallengeCompleted()
     acc.onAssistantMessage({ id: "m2", agent: "build" })
     acc.onStepStart("m2")
     acc.onStepFinish("m2", "tool-calls")
@@ -353,6 +366,25 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     const t = acc.termination()
     expect(t.done_reason).toBe("explicit_done")
     expect(t.why_harness_stopped).toBe("none")
+  })
+
+  test("a challenge reply may use tools before DONE and remains idle_heuristic", () => {
+    const acc = RunAccounting.create()
+    acc.onIdleDoneChallengeIssued()
+    acc.onIdleDoneChallengeReplySent()
+    acc.onAssistantMessage({ id: "m1", agent: "build" })
+    acc.onStepStart("m1")
+    acc.onStepFinish("m1", "tool-calls")
+    acc.onAssistantMessage({ id: "m2", agent: "build" })
+    acc.onStepStart("m2")
+    acc.onText("m2", "Verified.\nDONE")
+    acc.onStepFinish("m2", "stop")
+    acc.onIdleDoneChallengeCompleted()
+    expect(acc.termination()).toEqual({
+      why_model_stopped: "explicit-done",
+      why_harness_stopped: "idle-done",
+      done_reason: "idle_heuristic",
+    })
   })
 
   // altimate_change start — upstream_fix regression: onText/onStepFinish are
@@ -388,6 +420,7 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "m1", agent: "build" })
     acc.onIdleDoneChallengeIssued()
+    acc.onIdleDoneChallengeReplySent()
     acc.onText("m1", "DONE")
     acc.onStepFinish("m1", "stop")
     acc.onSessionError("APIError", "boom")

@@ -397,10 +397,8 @@ describe("livelock guard — two consecutive failed compactions halve the pin", 
       SessionCompaction.notePinCompaction(`${prefix}${i}`, immediateRefire() as any)
       SessionCompaction.notePinCompaction(`${prefix}${i}`, immediateRefire() as any)
     }
-    // Every one of them halved.
+    // Every one of them halved; reading the oldest entry refreshes its LRU age.
     expect(SessionCompaction.pinScale(`${prefix}0`)).toBe(0.5)
-    // Touch the oldest-created session so it is no longer least-recently-used.
-    SessionCompaction.notePinCompaction(`${prefix}0`, normalProgress() as any)
     // A new session evicts #1 (now the LRU), not #0.
     SessionCompaction.notePinCompaction(`${prefix}new`, immediateRefire() as any)
     expect(SessionCompaction.pinScale(`${prefix}0`)).toBe(0.5)

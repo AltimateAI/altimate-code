@@ -101,19 +101,73 @@ export namespace SessionProcessor {
   export function createToolCallIDCoercer(salt?: string) {
     const aliases = new Map<string, string>()
     const owners = new Map<string, string>()
-    return (raw: unknown): string => {
-      const key = typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw))
+    const used = new Set<string>()
+    const occurrences = new Map<string, number>()
+    const started = new Map<string, string[]>()
+    const awaitingResult = new Map<string, string[]>()
+    const keyOf = (raw: unknown) => (typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw)))
+    const stable = (raw: unknown): string => {
+      const key = keyOf(raw)
       const existing = aliases.get(key)
       if (existing !== undefined) return existing
       const base = MessageV2.sanitizeToolCallID(raw, salt)
       let sanitized = base
-      for (let suffix = 1; owners.has(sanitized) && owners.get(sanitized) !== key; suffix++) {
+      for (
+        let suffix = 1;
+        (owners.has(sanitized) && owners.get(sanitized) !== key) ||
+        (used.has(sanitized) && owners.get(sanitized) !== key);
+        suffix++
+      ) {
         sanitized = `${base}_${suffix}`
       }
       aliases.set(key, sanitized)
       owners.set(sanitized, key)
       return sanitized
     }
+    const allocate = (raw: unknown) => {
+      const key = keyOf(raw)
+      const base = stable(raw)
+      let occurrence = occurrences.get(key) ?? 0
+      let candidate = occurrence === 0 ? base : `${base}_${occurrence}`
+      while (used.has(candidate)) candidate = `${base}_${++occurrence}`
+      occurrences.set(key, occurrence + 1)
+      used.add(candidate)
+      return candidate
+    }
+    const enqueue = (table: Map<string, string[]>, raw: unknown, value: string) => {
+      const key = keyOf(raw)
+      const queue = table.get(key) ?? []
+      queue.push(value)
+      table.set(key, queue)
+    }
+    const dequeue = (table: Map<string, string[]>, raw: unknown) => {
+      const key = keyOf(raw)
+      const queue = table.get(key)
+      const value = queue?.shift()
+      if (queue?.length === 0) table.delete(key)
+      return value
+    }
+    // The callable preserves the original stable raw→sanitized contract used
+    // by replay tests. Phase methods add occurrence-aware FIFO pairing for a
+    // provider that repeats the same malformed ID within one response.
+    return Object.assign(stable, {
+      start(raw: unknown) {
+        const id = allocate(raw)
+        enqueue(started, raw, id)
+        return id
+      },
+      call(raw: unknown) {
+        const id = dequeue(started, raw) ?? allocate(raw)
+        enqueue(awaitingResult, raw, id)
+        return id
+      },
+      result(raw: unknown) {
+        return dequeue(awaitingResult, raw) ?? stable(raw)
+      },
+      peek(raw: unknown) {
+        return awaitingResult.get(keyOf(raw))?.[0] ?? stable(raw)
+      },
+    })
   }
   // altimate_change end
 
@@ -122,7 +176,9 @@ export namespace SessionProcessor {
     sessionID: SessionID
     model: Provider.Model
     abort: AbortSignal
+    // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
+    // altimate_change end
   }) {
     // altimate_change start — Map (not plain object) so adversarial ids can
     // never resolve to inherited Object.prototype members.
@@ -156,7 +212,7 @@ export namespace SessionProcessor {
       },
       partFromToolCall(toolCallID: string) {
         // altimate_change start — tool-execution lookups use the same coercion
-        return toolcalls.get(coerceToolCallID(toolCallID))
+        return toolcalls.get(coerceToolCallID.peek(toolCallID))
         // altimate_change end
       },
       async process(streamInput: LLM.StreamInput) {
@@ -319,7 +375,7 @@ export namespace SessionProcessor {
 
                 // altimate_change start — sanitize the incoming id before it becomes the persisted callID and pairing key; braced so the consts do not leak into sibling clauses
                 case "tool-input-start": {
-                  const inputStartCallID = coerceToolCallID(value.id)
+                  const inputStartCallID = coerceToolCallID.start(value.id)
                   const part = await Session.updatePart({
                     id: toolcalls.get(inputStartCallID)?.id ?? PartID.ascending(),
                     messageID: input.assistantMessage.id,
@@ -346,7 +402,7 @@ export namespace SessionProcessor {
 
                 case "tool-call": {
                   // altimate_change start — resolve the pair via the coerced id
-                  const toolCallCallID = coerceToolCallID(value.toolCallId)
+                  const toolCallCallID = coerceToolCallID.call(value.toolCallId)
                   const match = toolcalls.get(toolCallCallID)
                   // altimate_change end
                   if (match) {
@@ -487,9 +543,7 @@ export namespace SessionProcessor {
                               {
                                 source: "starvation_breaker",
                                 kind:
-                                  call.doomLoop.escalation === "nudge"
-                                    ? "doom_loop_nudge"
-                                    : "doom_loop_status_check",
+                                  call.doomLoop.escalation === "nudge" ? "doom_loop_nudge" : "doom_loop_status_check",
                                 text: call.doomLoop.directive,
                               },
                               input.nudgeGeneration,
@@ -504,7 +558,7 @@ export namespace SessionProcessor {
                 }
                 case "tool-result": {
                   // altimate_change start — resolve the pair via the coerced id
-                  const toolResultCallID = coerceToolCallID(value.toolCallId)
+                  const toolResultCallID = coerceToolCallID.result(value.toolCallId)
                   const match = toolcalls.get(toolResultCallID)
                   // altimate_change end
                   if (match && match.state.status === "running") {
@@ -610,7 +664,7 @@ export namespace SessionProcessor {
 
                 case "tool-error": {
                   // altimate_change start — resolve the pair via the coerced id
-                  const toolErrorCallID = coerceToolCallID(value.toolCallId)
+                  const toolErrorCallID = coerceToolCallID.result(value.toolCallId)
                   const match = toolcalls.get(toolErrorCallID)
                   // altimate_change end
                   if (match && match.state.status === "running") {

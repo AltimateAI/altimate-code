@@ -164,6 +164,27 @@ describe("SessionProcessor.createToolCallIDCoercer (ingestion half)", () => {
     const coerce = SessionProcessor.createToolCallIDCoercer()
     expect(coerce("call_ok")).toBe("call_ok")
   })
+
+  test("duplicate malformed IDs in one response receive distinct FIFO-paired IDs", () => {
+    const coerce = SessionProcessor.createToolCallIDCoercer("msg_duplicate")
+    const start1 = coerce.start("")
+    const start2 = coerce.start("")
+    expect(start2).not.toBe(start1)
+    expect(coerce.call("")).toBe(start1)
+    expect(coerce.call("")).toBe(start2)
+    expect(coerce.result("")).toBe(start1)
+    expect(coerce.result("")).toBe(start2)
+  })
+
+  test("duplicate pairing survives numeric-to-string ID normalization", () => {
+    const coerce = SessionProcessor.createToolCallIDCoercer("msg_type_flip")
+    const first = coerce.start(42)
+    const second = coerce.start(42)
+    expect(coerce.call("42")).toBe(first)
+    expect(coerce.call("42")).toBe(second)
+    expect(coerce.result("42")).toBe(first)
+    expect(coerce.result("42")).toBe(second)
+  })
 })
 
 describe("malformed-id round-trip: ingest → persist → replay", () => {

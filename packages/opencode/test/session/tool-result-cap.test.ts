@@ -77,7 +77,10 @@ describe("ToolResultCap.resolve", () => {
     expect(withConfig).toBe(explicit)
     // and it genuinely differs from the default fraction
     expect(withConfig).not.toBe(
-      ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: ToolResultCap.DEFAULT_SAFETY_FRACTION }),
+      ToolResultCap.resolve({
+        model: { limit: { input: 65_536 } },
+        safetyFraction: ToolResultCap.DEFAULT_SAFETY_FRACTION,
+      }),
     )
   })
 
@@ -90,13 +93,29 @@ describe("ToolResultCap.resolve", () => {
     expect(cap).toBe(ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: 0.65 }))
   })
 
-  test("a nonsensical configured fraction falls back to the default", () => {
-    const cap = ToolResultCap.resolve({
+  test("out-of-range configured fractions use the same runtime clamp as compaction", () => {
+    const low = ToolResultCap.resolve({
       config: { compaction: { context_safety_fraction: 0 } },
       model: { limit: { input: 65_536 } },
     })
+    const high = ToolResultCap.resolve({
+      config: { compaction: { context_safety_fraction: 2 } },
+      model: { limit: { input: 65_536 } },
+    })
+    expect(low).toBe(ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: 0.1 }))
+    expect(high).toBe(ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: 1 }))
+  })
+
+  test("a non-finite configured fraction falls back to the default", () => {
+    const cap = ToolResultCap.resolve({
+      config: { compaction: { context_safety_fraction: Number.NaN } },
+      model: { limit: { input: 65_536 } },
+    })
     expect(cap).toBe(
-      ToolResultCap.resolve({ model: { limit: { input: 65_536 } }, safetyFraction: ToolResultCap.DEFAULT_SAFETY_FRACTION }),
+      ToolResultCap.resolve({
+        model: { limit: { input: 65_536 } },
+        safetyFraction: ToolResultCap.DEFAULT_SAFETY_FRACTION,
+      }),
     )
   })
 

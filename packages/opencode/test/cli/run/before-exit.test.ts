@@ -1,26 +1,23 @@
-// Mirrors the beforeExit crash-handler contract from cli/cmd/run.ts:
+// Exercises the beforeExit crash-handler contract used by cli/cmd/run.ts:
 // - the handler marks the run failed (exitCode 1) only while the run is
 //   still in flight (event loop drained before completion);
 // - a run that completes normally sets runFinished, restores exitCode, and
 //   removes the listener, so a premature/spurious firing can never poison a
 //   successful run's rc;
 // - fatal accounting remains the single authority for a nonzero rc afterwards.
-// If the handler logic in run.ts changes, update this mirror to match.
 import { describe, expect, test } from "bun:test"
+import { RunAccounting } from "../../../src/cli/cmd/run-accounting"
 
 function makeRun() {
   const proc = { exitCode: undefined as number | undefined, listeners: new Set<() => void>() }
-  let runFinished = false
-  const onBeforeExit = () => {
-    if (!runFinished) proc.exitCode = 1
-  }
+  const guard = RunAccounting.createBeforeExitGuard(proc, () => {})
+  const onBeforeExit = guard.onBeforeExit
   proc.listeners.add(onBeforeExit)
   const fireBeforeExit = () => {
     for (const listener of proc.listeners) listener()
   }
   const finish = (fatal: boolean) => {
-    runFinished = true
-    proc.exitCode = 0
+    guard.finish()
     proc.listeners.delete(onBeforeExit)
     if (fatal) proc.exitCode = 1
   }

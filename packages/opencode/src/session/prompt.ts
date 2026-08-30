@@ -402,8 +402,10 @@ export namespace SessionPrompt {
     // A directive is valid only for this active generation. If the loop stops,
     // aborts, or throws after a detector registers but before the next turn
     // consumes it, do not leak that stale directive into a later resume.
+    // altimate_change start — scope pending harness nudges to this prompt generation
     const nudgeGeneration = NudgeArbiter.begin(sessionID)
     using _nudgeGeneration = defer(() => NudgeArbiter.clear(sessionID, nudgeGeneration))
+    // altimate_change end
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
@@ -539,7 +541,28 @@ export namespace SessionPrompt {
       // altimate_change end
       log.info("loop", { step, sessionID })
       if (abort.aborted) break
-      let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+      // altimate_change start — when the newest message is a pending
+      // compaction marker, hydrate the stream once and pass that unfiltered
+      // history to the ledger. Previously filterCompacted read the recent view
+      // and process() synchronously hydrated the entire session a second time.
+      const messageStream = MessageV2.stream(sessionID)
+      const firstMessage = messageStream.next()
+      const newestIsCompaction =
+        !firstMessage.done && firstMessage.value.parts.some((part) => part.type === "compaction")
+      let unfilteredCompactionHistory: MessageV2.WithParts[] | undefined
+      let msgs: MessageV2.WithParts[]
+      if (newestIsCompaction) {
+        const newestFirst = [firstMessage.value, ...messageStream]
+        unfilteredCompactionHistory = newestFirst.slice().reverse()
+        msgs = MessageV2.filterCompacted(newestFirst)
+      } else {
+        function* fullStream() {
+          if (!firstMessage.done) yield firstMessage.value
+          yield* messageStream
+        }
+        msgs = MessageV2.filterCompacted(fullStream())
+      }
+      // altimate_change end
 
       let lastUser: MessageV2.User | undefined
       let lastAssistant: MessageV2.Assistant | undefined
@@ -809,6 +832,9 @@ export namespace SessionPrompt {
           auto: task.auto,
           overflow: task.overflow,
           nudgeGeneration,
+          // altimate_change start — reuse the one-pass full history hydration for the ledger
+          unfilteredMessages: unfilteredCompactionHistory,
+          // altimate_change end
         })
         // altimate_change start — treat any non-"continue" result as stop: an
         // undefined/unknown result must never fall through to `continue`, which
@@ -2460,9 +2486,21 @@ export namespace SessionPrompt {
     if (!lastFinishedID) return 0
     const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
     if (!lastFinished) return 0
+    const toolText = (part: MessageV2.ToolPart): string => {
+      if (part.state.status === "completed") {
+        if (!part.state.time.compacted) return part.state.output ?? ""
+        const mask = part.state.metadata?.observation_mask
+        return typeof mask === "string" && mask.length > 0 ? mask : "[Old tool result content cleared]"
+      }
+      if (part.state.status === "error") {
+        const partial = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+        return typeof partial === "string" ? partial : (part.state.error ?? "")
+      }
+      return "[Tool execution was interrupted]"
+    }
     let tokens = 0
     for (const part of lastFinished.parts) {
-      if (part.type === "tool" && part.state?.status === "completed") tokens += Token.estimate(part.state.output ?? "")
+      if (part.type === "tool") tokens += Token.estimate(toolText(part))
     }
     // filterCompacted deliberately reorders retained-tail and summary messages,
     // so array position is not chronology. IDs are monotonic; select genuinely
@@ -2471,8 +2509,7 @@ export namespace SessionPrompt {
       if (m.info.id <= lastFinishedID) continue
       for (const part of m.parts) {
         if (part.type === "text") tokens += Token.estimate(part.text ?? "")
-        if (part.type === "tool" && part.state?.status === "completed")
-          tokens += Token.estimate(part.state.output ?? "")
+        if (part.type === "tool") tokens += Token.estimate(toolText(part))
       }
     }
     return tokens

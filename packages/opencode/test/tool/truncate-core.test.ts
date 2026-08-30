@@ -150,7 +150,10 @@ describe("TruncateCore maxLines=1 edge", () => {
       direction: "middle",
       headRatio: TruncateCore.DEFAULT_HEAD_RATIO,
     })
-    const kept = [p.head, p.tail].filter((part) => part.length > 0).join("\n").split("\n")
+    const kept = [p.head, p.tail]
+      .filter((part) => part.length > 0)
+      .join("\n")
+      .split("\n")
     expect(kept).toHaveLength(1)
     // Tail-weighted design: the surviving line is the last one.
     expect(p.tail).toBe("final verdict line")
@@ -240,6 +243,12 @@ describe("TruncateCore oversized boundary lines", () => {
       const p = run(text, { maxBytes, maxLines: 10, direction: "middle" })
       expect(Buffer.byteLength(p.head + p.tail, "utf-8")).toBeLessThanOrEqual(maxBytes)
     }
+  })
+
+  test("a tiny split reuses the full budget when exactly one UTF-8 character fits", () => {
+    const p = run("😀", { maxBytes: 4, maxLines: 2, direction: "middle", headRatio: 0.5 })
+    expect(p.head + p.tail).toBe("😀")
+    expect(Buffer.byteLength(p.head + p.tail, "utf-8")).toBe(4)
   })
 
   test("a degraded middle preview assembles without a leading blank line", () => {

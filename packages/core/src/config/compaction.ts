@@ -1,7 +1,7 @@
 export * as ConfigCompaction from "./compaction"
 
 import { Schema } from "effect"
-import { NonNegativeInt, SAFETY_FRACTION_MIN } from "../schema"
+import { NonNegativeInt } from "../schema"
 
 export class Keep extends Schema.Class<Keep>("ConfigV2.Compaction.Keep")({
   tokens: NonNegativeInt.pipe(Schema.optional),
@@ -19,19 +19,10 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   // altimate_change start — V2 parity for the fork compaction keys (estimator
   // safety margin, state ledger/summary carry, task pin). Same names as V1 so
   // ConfigMigrateV1 can carry them through without renames.
-  // upstream_fix: Config.load decodes a document authored directly in V2 (not
-  // migrated from V1) through THIS schema, so the V1 bounds on these two
-  // fractions don't apply here — a direct V2 document could carry an
-  // out-of-range value straight through to
-  // SessionCompaction.contextSafetyFraction / pinBudget. Bound identically to
-  // the V1 schema (packages/core/src/v1/config/config.ts).
-  // SAFETY_FRACTION_MIN: Schema.toArbitrary's fast-check generator requires
-  // `.check()` bounds to be exact 32-bit floats, and the bound must round DOWN
-  // so the documented minimum `0.1` still decodes; see the matching V1 comment.
-  context_safety_fraction: Schema.Number.check(
-    Schema.isGreaterThanOrEqualTo(SAFETY_FRACTION_MIN),
-    Schema.isLessThanOrEqualTo(1),
-  ).pipe(Schema.optional),
+  // Accept finite numeric configuration here and clamp at the one runtime
+  // boundary (SessionCompaction.contextSafetyFraction). Rejecting the value at
+  // document decode drops the entire config instead of safely clamping it.
+  context_safety_fraction: Schema.Number.pipe(Schema.optional),
   state_ledger: Schema.Boolean.pipe(Schema.optional),
   ledger_max_tokens: NonNegativeInt.pipe(Schema.optional),
   ledger_recent_calls: NonNegativeInt.pipe(Schema.optional),
