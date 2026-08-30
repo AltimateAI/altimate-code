@@ -259,7 +259,7 @@ describe("offer routing — engine too old", () => {
 
 describe("offer is not raised when an engine is usable", () => {
   test("a healthy engine never reaches the offer path", async () => {
-    const h = install({ surface: true, which: "/usr/local/bin/datamate", version: "0.7.0" })
+    const h = install({ surface: true, which: "/usr/local/bin/datamate", version: MIN_ENGINE_VERSION })
     await beforeTurn("s1")
     expect(h.offers).toEqual([])
     expect(h.published).toBe(0)
@@ -284,7 +284,7 @@ describe("describeOffer — the TUI re-derives its own detail", () => {
     expect(await describeOffer(DIR)).toMatchObject({ reason: "engine-too-old", found: "0.6.3" })
   })
   test("returns null when an engine already clears the floor", async () => {
-    install({ which: "/usr/local/bin/datamate", version: "0.7.0" })
+    install({ which: "/usr/local/bin/datamate", version: MIN_ENGINE_VERSION })
     expect(await describeOffer(DIR)).toBeNull()
   })
   test("returns null when the project is not bound", async () => {

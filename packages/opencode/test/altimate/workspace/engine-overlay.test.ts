@@ -743,7 +743,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     const h = install({ version: "0.6.3" })
     await beforeTurn("s1")
     expect(h.probes).toBe(1)
-    h.version = "0.7.0"
+    h.version = MIN_ENGINE_VERSION
     await beforeTurn("s1")
     expect(h.probes).toBe(1)
     expect(settledOutcome("s1")?.kind).toBe("engine-too-old")
@@ -761,7 +761,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     await beforeTurn("s1")
     expect(h.probes).toBe(1)
     expect(settledOutcome("s1")?.kind).toBe("engine-too-old")
-    h.version = "0.7.0"
+    h.version = MIN_ENGINE_VERSION
     h.fingerprint = "bin-2"
     h.clock += 1_000
     await beforeTurn("s1")
@@ -773,7 +773,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     const u = install({ version: "0.6.3" })
     u.fingerprint = null
     await beforeTurn("s1")
-    u.version = "0.7.0"
+    u.version = MIN_ENGINE_VERSION
     u.clock += 1_000
     await beforeTurn("s1")
     expect(u.probes).toBe(1)
