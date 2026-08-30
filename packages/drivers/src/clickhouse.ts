@@ -6,26 +6,62 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
+
+function connectionUrl(config: ConnectionConfig): string {
+  const tlsRequested = Boolean(config.tls || config.ssl)
+  const configuredProtocol = typeof config.protocol === "string" ? config.protocol.trim().toLowerCase() : ""
+  const secureIntent = tlsRequested || configuredProtocol === "https"
+  const configured = typeof config.connection_string === "string" ? config.connection_string.trim() : ""
+
+  if (configured) {
+    if (secureIntent) {
+      let protocol: string
+      try {
+        protocol = new URL(configured).protocol.toLowerCase()
+      } catch {
+        throw new Error("ClickHouse TLS requires a valid https:// connection_string")
+      }
+      if (protocol !== "https:") {
+        throw new Error("ClickHouse TLS was requested, but connection_string is not https://")
+      }
+    }
+    return configured
+  }
+
+  if (tlsRequested && configuredProtocol && configuredProtocol !== "https") {
+    throw new Error("ClickHouse TLS was requested, but protocol is not https")
+  }
+
+  const protocol = configuredProtocol || (tlsRequested ? "https" : "http")
+  const defaultPort = protocol === "https" ? 8443 : 8123
+  const hasExplicitPort = config.port !== undefined && config.port !== null
+  const parsedPort =
+    typeof config.port === "number"
+      ? config.port
+      : typeof config.port === "string" && config.port.trim()
+        ? Number(config.port)
+        : Number.NaN
+  if (hasExplicitPort && (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535)) {
+    throw new Error("ClickHouse port must be an integer between 1 and 65535")
+  }
+  const port = hasExplicitPort ? parsedPort : defaultPort
+  return `${protocol}://${config.host ?? "localhost"}:${port}`
+}
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let createClient: any
-  try {
-    const mod = await import("@clickhouse/client")
-    createClient = mod.createClient ?? mod.default?.createClient
-    if (!createClient) {
-      throw new Error("createClient export not found in @clickhouse/client")
-    }
-  } catch {
-    throw new Error("ClickHouse driver not installed. Run: npm install @clickhouse/client")
+  const clickhouseModule = await loadOptionalDriver("clickhouse", "@clickhouse/client")
+  createClient = clickhouseModule.createClient ?? clickhouseModule.default?.createClient
+  if (!createClient) {
+    throw new Error("createClient export not found in @clickhouse/client — check the installed package version")
   }
 
   let client: any
 
   return {
     async connect() {
-      const url =
-        config.connection_string ??
-        `${config.protocol ?? "http"}://${config.host ?? "localhost"}:${config.port ?? 8123}`
+      const url = connectionUrl(config)
 
       const clientConfig: Record<string, unknown> = {
         url,

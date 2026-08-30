@@ -316,27 +316,18 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   const toRel = (abs: string) => path.relative(projectDir, abs).split(path.sep).join("/")
   let mcpJsonFiles: string[] = []
   try {
-    // altimate_change start — Glob.scan dropped its `ignore` option in v1.17.9; filter
-    // the scan results manually against the same exclusion globs to preserve behavior.
-    const IGNORE_GLOBS = [
-      "**/node_modules/**",
-      "**/.git/**",
-      "**/dist/**",
-      "**/build/**",
-      "**/.pnpm/**",
-      "**/target/**",
-      "**/.next/**",
-      "**/out/**",
-      "**/vendor/**",
-      "**/coverage/**",
-      "**/.venv/**",
-      "**/.turbo/**",
-    ]
+    // altimate_change start — prune dependency/build trees during traversal.
+    // Filtering results after an unrestricted `**/mcp.json` walk still reads
+    // every directory in the project: on a monorepo with node_modules present
+    // that costs ~6 CPU-seconds per invocation, spread across the whole runtime
+    // I/O thread pool. The post-filter stays as defence in depth.
+    const IGNORE_GLOBS = [...Glob.DEFAULT_IGNORE]
     const scanned = (
       await Glob.scan("**/mcp.json", {
         cwd: projectDir,
         absolute: true,
         dot: true,
+        ignore: IGNORE_GLOBS,
       })
     ).filter((abs) => {
       const rel = toRel(abs)

@@ -336,7 +336,11 @@ await $`rm -rf dist`
 // without bloating it with 5 platforms' worth of native addons.
 const requiredExternals: string[] = []
 const optionalExternals = [
-  // Database drivers — native addons, users install on demand per warehouse
+  // Database drivers — native addons, users install on demand per warehouse.
+  // Must stay in step with DRIVER_PACKAGES in packages/drivers/src/resolve.ts:
+  // a driver package that is missing here gets bundled into the binary, so the
+  // on-demand install path never runs for it and the bundled copy is frozen at
+  // whatever version built the release.
   "pg",
   "snowflake-sdk",
   "@google-cloud/bigquery",
@@ -345,10 +349,16 @@ const optionalExternals = [
   "mssql",
   "oracledb",
   "duckdb",
-  // Optional infra packages — native addons or heavy optional deps
+  "mongodb",
+  "@clickhouse/client",
+  "trino-client",
+  // Optional infra packages — native addons or heavy optional deps.
+  // @azure/identity is dynamically imported by the sqlserver driver for Azure
+  // AD auth; it resolves through the same on-disk loader as the drivers.
   "keytar",
   "ssh2",
   "dockerode",
+  "@azure/identity",
 ]
 
 const binaries: Record<string, string> = {}
@@ -584,6 +594,10 @@ for (const item of targets) {
       autoloadBunfig: false,
       autoloadDotenv: false,
       autoloadTsconfig: true,
+      // Load-bearing for the optional drivers above: it is what lets the
+      // compiled binary resolve an `external` package from node_modules on
+      // disk at runtime. Verified by compiling with and without it — without
+      // it every driver import fails inside bunfs, whatever NODE_PATH says.
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
       outfile: `dist/${name}/bin/altimate`,
