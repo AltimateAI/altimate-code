@@ -38,22 +38,56 @@ describe("NudgeArbiter precedence (one-directive-per-turn contract)", () => {
 // earliest registration, so a generation that crossed two rungs of the doom-loop
 // ladder delivered the stale nudge and dropped the stronger status_check.
 describe("NudgeArbiter escalation within a source", () => {
-  test("the latest directive from a source replaces the earlier one", () => {
-    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "nudge", text: "gentle nudge" })
-    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "status_check", text: "forced status check" })
-    expect(NudgeArbiter.pending(SID)).toHaveLength(1)
+  test("the STRONGEST directive from a source wins, not the earliest", () => {
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "doom_loop_nudge", text: "gentle nudge" })
+    NudgeArbiter.register(SID, {
+      source: "starvation_breaker",
+      kind: "doom_loop_status_check",
+      text: "forced status check",
+    })
     const winner = NudgeArbiter.take(SID)
-    expect(winner?.kind).toBe("status_check")
+    expect(winner?.kind).toBe("doom_loop_status_check")
     expect(winner?.text).toBe("forced status check")
   })
 
-  test("replacing within a source does not disturb other sources' precedence", () => {
-    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "nudge", text: "n" })
+  // Several INDEPENDENT detectors share the starvation_breaker source, and they
+  // fire at different points in a step (doom-loop during tool-call processing,
+  // write-starvation at step finish). Neither "earliest wins" nor "latest wins"
+  // is correct — a later, weaker detector must not clobber a stronger one.
+  test("a later WEAKER detector does not displace a stronger one from the same source", () => {
+    NudgeArbiter.register(SID, {
+      source: "starvation_breaker",
+      kind: "doom_loop_status_check",
+      text: "forced status check",
+    })
+    // registered later in the same step by the write-starvation detector
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "no writes lately" })
+    expect(NudgeArbiter.take(SID)?.kind).toBe("doom_loop_status_check")
+  })
+
+  test("repeat_signature outranks write-starvation but not the doom-loop status check", () => {
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "s" })
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "repeat_signature", text: "r" })
+    expect(NudgeArbiter.take(SID)?.kind).toBe("repeat_signature")
+
+    NudgeArbiter.clear(SID)
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "repeat_signature", text: "r" })
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "doom_loop_status_check", text: "sc" })
+    expect(NudgeArbiter.take(SID)?.kind).toBe("doom_loop_status_check")
+  })
+
+  test("a re-fire of the same kind replaces the earlier one (current information wins)", () => {
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "repeat_signature", text: "count 3" })
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "repeat_signature", text: "count 6" })
+    expect(NudgeArbiter.pending(SID)).toHaveLength(1)
+    expect(NudgeArbiter.take(SID)?.text).toBe("count 6")
+  })
+
+  test("kind ranking does not disturb cross-source precedence", () => {
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "doom_loop_status_check", text: "sc" })
     NudgeArbiter.register(SID, { source: "budget_reminder", kind: "budget", text: "b" })
-    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "status_check", text: "sc" })
-    const winner = NudgeArbiter.take(SID)
-    expect(winner?.source).toBe("starvation_breaker")
-    expect(winner?.kind).toBe("status_check")
+    NudgeArbiter.register(SID, { source: "termination_challenge", kind: "confirm_done", text: "t" })
+    expect(NudgeArbiter.take(SID)?.source).toBe("termination_challenge")
   })
 })
 // altimate_change end

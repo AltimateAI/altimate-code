@@ -49,16 +49,33 @@ export namespace NudgeArbiter {
     return b
   }
 
+  // altimate_change start — STRENGTH ordering within a source. Several
+  // independent detectors register under `starvation_breaker`
+  // (`doom_loop_nudge`, `doom_loop_status_check`, `repeat_signature`,
+  // `starvation`), so neither "earliest wins" nor "latest wins" is correct:
+  // the first delivered a stale nudge when the same generation had already
+  // escalated to a status check, and the second let a later, weaker detector
+  // clobber a stronger directive that fired earlier in the same step.
+  // Rank the kinds explicitly instead — highest rank wins, and equal ranks
+  // fall back to the latest registration (a re-fire of the same rung is
+  // current information).
+  const KIND_STRENGTH: Record<string, number> = {
+    doom_loop_status_check: 3,
+    repeat_signature: 2,
+    starvation: 1,
+    doom_loop_nudge: 1,
+  }
+
+  function strength(kind: string): number {
+    return KIND_STRENGTH[kind] ?? 0
+  }
+
   /** Register a candidate directive for the session's next injected turn.
-   *  altimate_change start — replace by SOURCE, not source+kind. Only one
-   *  directive per source is ever delivered, and `take()` picked the EARLIEST
-   *  match, so a single generation that crossed two rungs of the doom-loop
-   *  ladder (nudge, then the stronger status_check) delivered the stale nudge
-   *  and dropped the escalation with the rest of the bucket. The latest
-   *  registration from a source is the current one, so it wins. */
+   *  Registrations from the same source+kind replace; different kinds from one
+   *  source coexist and are ranked by strength at `take()` time. */
   export function register(sessionID: string, directive: Directive): void {
     const b = bucket(sessionID)
-    const existing = b.findIndex((d) => d.source === directive.source)
+    const existing = b.findIndex((d) => d.source === directive.source && d.kind === directive.kind)
     if (existing >= 0) b[existing] = directive
     else b.push(directive)
   }
@@ -76,7 +93,13 @@ export namespace NudgeArbiter {
     if (!b || b.length === 0) return undefined
     let winner: Directive | undefined
     for (const source of PRECEDENCE) {
-      winner = b.find((d) => d.source === source)
+      // altimate_change start — strongest directive within the winning source,
+      // not merely the first registered one.
+      for (const d of b) {
+        if (d.source !== source) continue
+        if (!winner || strength(d.kind) >= strength(winner.kind)) winner = d
+      }
+      // altimate_change end
       if (winner) break
     }
     pendingBySession.delete(sessionID)

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { applyRunModeDefault } from "@/cli/cmd/run/run-mode"
 import { Flag } from "@/flag/flag"
+// altimate_change — behavioural coverage of the child-env marker strip
+import { stripRunModeMarkers } from "@/tool/bash"
 
 // ─── `altimate-code run` implies run mode ───────────────────────
 // External drivers (harbor, CI) invoke `run` without exporting
@@ -150,21 +152,37 @@ describe("Flag.parseRunModeValue (strict trimmed boolean parser)", () => {
 // ALTIMATE_NON_INTERACTIVE. A nested `serve`/TUI therefore inherited run mode
 // and armed run-mode-only mechanisms in an interactive session.
 describe("run-mode markers do not leak into bash child processes", () => {
-  test("bash tool strips ALTIMATE_RUN_MODE and ALTIMATE_RUN_RESUMED from child env", async () => {
-    const source = await Bun.file(new URL("../../../src/tool/bash.ts", import.meta.url)).text()
-    expect(source).toContain('delete mergedEnv["ALTIMATE_RUN_MODE"]')
-    expect(source).toContain('delete mergedEnv["ALTIMATE_RUN_RESUMED"]')
-    // the pre-existing sibling strip must remain
-    expect(source).toContain('delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]')
-    expect(source).toContain("env: mergedEnv")
+  test("an active marker is stripped from the child environment", () => {
+    for (const value of ["1", "true", " 1 ", "TRUE"]) {
+      const env = stripRunModeMarkers({ ALTIMATE_RUN_MODE: value, ALTIMATE_RUN_RESUMED: "1", PATH: "/bin" })
+      expect(env["ALTIMATE_RUN_MODE"]).toBeUndefined()
+      expect(env["ALTIMATE_RUN_RESUMED"]).toBeUndefined()
+      // unrelated variables are untouched
+      expect(env["PATH"]).toBe("/bin")
+    }
   })
 
-  test("a nested run re-arms run mode for itself, so stripping loses nothing", () => {
-    // applyRunModeDefault is what `run` calls at handler startup; a child that
-    // should be in run mode sets it again from an empty environment.
-    const childEnv: Record<string, string | undefined> = {}
+  test("an explicit opt-out SURVIVES — deleting it would let a nested run re-arm run mode", () => {
+    for (const value of ["0", "false"]) {
+      const env = stripRunModeMarkers({ ALTIMATE_RUN_MODE: value })
+      expect(env["ALTIMATE_RUN_MODE"]).toBe(value)
+      // and a nested run must therefore stay opted out
+      applyRunModeDefault(env)
+      expect(Flag.parseRunModeValue(env["ALTIMATE_RUN_MODE"]!)).toBe(false)
+    }
+  })
+
+  test("a nested run re-arms run mode for itself, so stripping an active marker loses nothing", () => {
+    const childEnv = stripRunModeMarkers({ ALTIMATE_RUN_MODE: "1" })
+    expect(childEnv["ALTIMATE_RUN_MODE"]).toBeUndefined()
+    // applyRunModeDefault is what `run` calls at handler startup
     applyRunModeDefault(childEnv)
     expect(childEnv["ALTIMATE_RUN_MODE"]).toBe("1")
+  })
+
+  test("an absent marker stays absent", () => {
+    const env = stripRunModeMarkers({})
+    expect("ALTIMATE_RUN_MODE" in env).toBe(false)
   })
 })
 // altimate_change end

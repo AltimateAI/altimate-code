@@ -33,8 +33,11 @@ export namespace ToolResultCap {
   // the model had the smallest window this cap protects (64K, scaled by the
   // default safety fraction) rather than trusting the byte-derived cap
   // (~17K tokens), which can overwhelm a small window on its own.
+  /** The smallest window this cap protects; the unknown-model fallback is sized against it. */
+  export const UNKNOWN_MODEL_CONTEXT = 65_536
+
   export const UNKNOWN_MODEL_CAP_TOKENS = Math.floor(
-    Math.floor(65_536 * DEFAULT_SAFETY_FRACTION) * DEFAULT_LIMIT_FRACTION,
+    Math.floor(UNKNOWN_MODEL_CONTEXT * DEFAULT_SAFETY_FRACTION) * DEFAULT_LIMIT_FRACTION,
   )
 
   /**
@@ -58,25 +61,31 @@ export namespace ToolResultCap {
     const maxBytes = input.config?.tool_output?.max_bytes ?? TruncateCore.MAX_BYTES
     const existingCapTokens = Math.ceil(maxBytes / MIN_CHARS_PER_TOKEN)
 
-    const base = input.model?.limit?.input ?? input.model?.limit?.context ?? 0
-    if (base <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)
-
     // Default to the estimator safety fraction, not 1: an omitted fraction must
     // fail conservative (tool outputs are estimate-domain), never fail open.
     // altimate_change start — `config.compaction.context_safety_fraction` was
     // declared on this input and never read, so a caller that passed only the
     // config (every caller except processor.ts) silently got the default
     // instead of the configured fraction. Honour it as the second choice.
+    // Resolved BEFORE the unknown-model branch so the conservative fallback is
+    // scaled by the configured fraction too, not only the known-limit path.
     const configuredFraction = input.config?.compaction?.context_safety_fraction
     const fraction =
       input.safetyFraction ??
       (typeof configuredFraction === "number" && Number.isFinite(configuredFraction) && configuredFraction > 0
         ? configuredFraction
         : DEFAULT_SAFETY_FRACTION)
+    // Same shape as UNKNOWN_MODEL_CAP_TOKENS, but at the resolved fraction; with
+    // the default fraction the two are identical.
+    const unknownCapTokens = Math.floor(Math.floor(UNKNOWN_MODEL_CONTEXT * fraction) * DEFAULT_LIMIT_FRACTION)
     // altimate_change end
+
+    const base = input.model?.limit?.input ?? input.model?.limit?.context ?? 0
+    if (base <= 0) return Math.min(existingCapTokens, unknownCapTokens)
+
     const effectiveLimit = Math.floor(base * fraction)
     const limitCapTokens = Math.floor(effectiveLimit * DEFAULT_LIMIT_FRACTION)
-    if (limitCapTokens <= 0) return Math.min(existingCapTokens, UNKNOWN_MODEL_CAP_TOKENS)
+    if (limitCapTokens <= 0) return Math.min(existingCapTokens, unknownCapTokens)
     return Math.min(existingCapTokens, limitCapTokens)
   }
 
@@ -86,7 +95,15 @@ export namespace ToolResultCap {
    * marker as the tool-level truncation service) with a notice telling the model
    * the output was truncated.
    */
-  export function apply(output: string, capTokens: number): { content: string; truncated: boolean } {
+  export function apply(
+    output: string,
+    capTokens: number,
+    // altimate_change start — the hint must match the OUTCOME. The cap is now
+    // applied to failed tool results too, and the success wording would have
+    // told the model a real failure was a truncated success.
+    opts?: { outcome?: "success" | "error" },
+    // altimate_change end
+  ): { content: string; truncated: boolean } {
     if (capTokens <= 0) return { content: output, truncated: false }
     if (Token.estimate(output) <= capTokens) return { content: output, truncated: false }
 
@@ -99,8 +116,12 @@ export namespace ToolResultCap {
       for (let i = 0; i < line.length; i += LINE_CHUNK_CHARS) lines.push(line.slice(i, i + LINE_CHUNK_CHARS))
     }
     const totalBytes = Buffer.byteLength(output, "utf-8")
+    // altimate_change start — outcome-accurate hint (see `opts.outcome`).
     const hint =
-      "The tool call succeeded but the output exceeded the per-result context budget and was truncated before dispatch. Re-run the tool with a narrower query (filters, LIMIT, offset/limit) to view specific sections."
+      opts?.outcome === "error"
+        ? "The tool call FAILED and its error output exceeded the per-result context budget, so the error text below was truncated before dispatch. The failure is real — do not treat this as a successful result. Re-run with a narrower scope if you need the full error."
+        : "The tool call succeeded but the output exceeded the per-result context budget and was truncated before dispatch. Re-run the tool with a narrower query (filters, LIMIT, offset/limit) to view specific sections."
+    // altimate_change end
     const frame = (bodyBytes: number) => {
       const preview = TruncateCore.preview(lines, totalBytes, {
         maxLines: Number.MAX_SAFE_INTEGER,

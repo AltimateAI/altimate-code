@@ -1094,12 +1094,26 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ...(audienceSystem ? { system: audienceSystem } : {}),
         })
       }
-      /** True when the server already persisted this attempt's user message. */
-      const alreadyAccepted = async () => {
-        const res = await sdk.session
-          .message({ sessionID, messageID: sendMessageID })
-          .catch(() => undefined)
-        return Boolean((res as { data?: { info?: unknown } } | undefined)?.data?.info)
+      /** Did the server persist this attempt's user message?
+       *  Three-valued ON PURPOSE — a retry may only proceed on definitive
+       *  evidence that the message did NOT land. Treating an unreachable
+       *  server as "absent" would resend a task that may already be running,
+       *  which is the duplication this whole mechanism exists to prevent. */
+      const acceptanceState = async (): Promise<"accepted" | "absent" | "unknown"> => {
+        try {
+          const res = (await sdk.session.message({ sessionID, messageID: sendMessageID })) as {
+            data?: { info?: unknown }
+            error?: unknown
+            response?: { status?: number }
+          }
+          if (res?.data?.info) return "accepted"
+          // A definitive 404 from a reachable server is the only proof of absence.
+          if (res?.response?.status === 404) return "absent"
+          return "unknown"
+        } catch {
+          // The probe itself failed — the server is unreachable, so we cannot tell.
+          return "unknown"
+        }
       }
       // altimate_change end
       type SendResult = {
@@ -1122,10 +1136,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (!RunAccounting.isRetryableThrown(e)) throw e
           reason = e instanceof Error ? e.message : String(e)
         }
-        // altimate_change start — never re-send a prompt the server already
-        // accepted: that duplicates the task. The failure was on the response
-        // path, so fall through and let the event loop drain to idle instead.
-        if (await alreadyAccepted()) {
+        // altimate_change start — a retry may only proceed on definitive
+        // evidence that the message did NOT land. Re-sending an accepted prompt
+        // duplicates the task; re-sending on an UNKNOWN state risks the same,
+        // so that case fails the run loudly instead of guessing.
+        const acceptance = await acceptanceState()
+        if (acceptance === "accepted") {
+          // The failure was on the response path only — the run is in flight,
+          // so fall through and let the event loop drain to idle.
           if (!emit("retry_skipped", { reason, messageID: sendMessageID })) {
             UI.println(
               UI.Style.TEXT_WARNING_BOLD + "!",
@@ -1133,6 +1151,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             )
           }
           break
+        }
+        if (acceptance === "unknown") {
+          throw new Error(
+            `prompt failed and the server could not be reached to determine whether it was accepted; ` +
+              `not retrying to avoid running the task twice — ${reason}`,
+          )
         }
         // altimate_change end
         if (sendAttempt >= retryMax) throw new Error(`prompt failed after ${retryMax} retries: ${reason}`)

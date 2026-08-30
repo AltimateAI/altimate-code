@@ -633,7 +633,7 @@ export namespace SessionProcessor {
                     const toolErrorText = (() => {
                       const raw = (value.error as any).toString()
                       if (typeof raw !== "string") return raw
-                      const capped = ToolResultCap.apply(raw, toolResultCapTokens)
+                      const capped = ToolResultCap.apply(raw, toolResultCapTokens, { outcome: "error" })
                       if (capped.truncated)
                         log.info("tool error capped at dispatch", {
                           tool: match.tool,

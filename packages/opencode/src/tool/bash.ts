@@ -19,6 +19,30 @@ import { Truncate } from "./truncation"
 import { Plugin } from "@/plugin"
 import { Global } from "@/global"
 
+// altimate_change start — run-mode markers must not reach bash child processes.
+// `run` sets ALTIMATE_RUN_MODE on its own process to arm run-mode-only
+// mechanisms (DONE-termination gate, starvation directives, doom-loop
+// escalation ladder). A nested `serve`/TUI launched through the bash tool
+// inherited it and armed those mechanisms in an interactive session,
+// contradicting the invariant documented in session/processor.ts. A nested
+// `run` re-applies the default itself (cli/cmd/run/run-mode.ts), so nothing
+// that should be in run mode loses it.
+//
+// Only an ACTIVE marker is stripped: an explicit opt-out
+// (ALTIMATE_RUN_MODE=0/false) must SURVIVE into the child, because deleting it
+// would let a nested `run` re-apply the default and turn run mode back on —
+// the opposite of what the operator asked for.
+//
+// Exported so the contract is tested behaviourally rather than by reading this
+// file's source text.
+export function stripRunModeMarkers(env: Record<string, string | undefined>) {
+  const active = env["ALTIMATE_RUN_MODE"]?.trim().toLowerCase()
+  if (active === "1" || active === "true") delete env["ALTIMATE_RUN_MODE"]
+  delete env["ALTIMATE_RUN_RESUMED"]
+  return env
+}
+// altimate_change end
+
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
 
@@ -178,15 +202,7 @@ export const BashTool = Tool.define("bash", async () => {
       delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]
       // altimate_change end
       // altimate_change start — strip the run-mode markers for the same reason.
-      // `run` sets ALTIMATE_RUN_MODE on its own process to arm run-mode-only
-      // mechanisms (DONE-termination gate, starvation directives, doom-loop
-      // escalation). A nested `serve`/TUI launched through this tool inherited
-      // it and armed those mechanisms in an interactive session, contradicting
-      // the invariant that they never apply outside run mode. A nested `run`
-      // re-applies the default itself (cli/cmd/run/run-mode.ts), so nothing
-      // that should be in run mode loses it.
-      delete mergedEnv["ALTIMATE_RUN_MODE"]
-      delete mergedEnv["ALTIMATE_RUN_RESUMED"]
+      stripRunModeMarkers(mergedEnv)
       // altimate_change end
       const sep = process.platform === "win32" ? ";" : ":"
       const basePath = mergedEnv.PATH ?? mergedEnv.Path ?? ""

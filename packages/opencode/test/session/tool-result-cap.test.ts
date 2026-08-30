@@ -105,8 +105,54 @@ describe("ToolResultCap.resolve", () => {
       Math.floor(Math.floor(65_536 * ToolResultCap.DEFAULT_SAFETY_FRACTION) * ToolResultCap.DEFAULT_LIMIT_FRACTION),
     )
   })
+
+  // PR #1171 follow-up review: the fraction was resolved AFTER the unknown-model
+  // branch returned, so a configured fraction never scaled that fallback.
+  test("a configured fraction also scales the unknown-model fallback", () => {
+    const tight = ToolResultCap.resolve({ config: { compaction: { context_safety_fraction: 0.2 } } })
+    expect(tight).toBeLessThan(ToolResultCap.UNKNOWN_MODEL_CAP_TOKENS)
+    expect(tight).toBe(
+      Math.floor(Math.floor(ToolResultCap.UNKNOWN_MODEL_CONTEXT * 0.2) * ToolResultCap.DEFAULT_LIMIT_FRACTION),
+    )
+  })
+
+  test("with no configured fraction the unknown-model fallback is unchanged", () => {
+    expect(ToolResultCap.resolve({})).toBe(ToolResultCap.UNKNOWN_MODEL_CAP_TOKENS)
+  })
   // altimate_change end
 })
+
+// altimate_change start — PR #1171 follow-up review: the cap is now applied to
+// FAILED tool results too, and the success wording would have told the model a
+// real failure was a truncated success.
+describe("ToolResultCap.apply — outcome-accurate truncation hint", () => {
+  const giant = Array.from({ length: 4_000 }, (_, i) => `error line ${i}: something went wrong`).join("\n")
+
+  test("a capped ERROR never claims the tool call succeeded", () => {
+    const result = ToolResultCap.apply(giant, 500, { outcome: "error" })
+    expect(result.truncated).toBe(true)
+    expect(result.content).not.toContain("The tool call succeeded")
+    expect(result.content).toContain("FAILED")
+    expect(result.content).toContain("do not treat this as a successful result")
+  })
+
+  test("a capped SUCCESS keeps the original wording", () => {
+    const result = ToolResultCap.apply(giant, 500, { outcome: "success" })
+    expect(result.content).toContain("The tool call succeeded")
+  })
+
+  test("the outcome option is optional and defaults to the success wording", () => {
+    expect(ToolResultCap.apply(giant, 500).content).toContain("The tool call succeeded")
+  })
+
+  test("the error hint still respects the cap", () => {
+    for (const cap of [200, 500, 2_000]) {
+      const result = ToolResultCap.apply(giant, cap, { outcome: "error" })
+      expect(Token.estimate(result.content)).toBeLessThanOrEqual(cap)
+    }
+  })
+})
+// altimate_change end
 
 describe("ToolResultCap.apply", () => {
   test("output within the cap passes through unchanged", () => {
