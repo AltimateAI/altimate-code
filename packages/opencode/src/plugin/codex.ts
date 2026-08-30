@@ -121,11 +121,18 @@ const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
  * ``gpt-5.4-mini`` -> ``gpt-5.6-luna`` — are both already in this set, so
  * affected users have a working model without further change **provided their
  * catalog is current**. This filter only ever deletes; it cannot add a model
- * the catalog lacks. Release binaries built before the ``release.yml``
- * MODELS_DEV_API_JSON fix (#1186/#1188) embed a 2026-03-30 fixture that
- * contains neither replacement, so on a cold cache this removal leaves only
- * ``gpt-5.3-codex-spark`` selectable. That is why this change is sequenced
- * behind that fix rather than shipped on its own.
+ * the catalog lacks, and NEITHER replacement is present in any pre-#1188
+ * bundled catalog. On a cold cache this removal therefore leaves:
+ *
+ *   - shipped release binaries (embed the 2026-03-30 ``release.yml`` fixture —
+ *     see #1186/#1188): ``gpt-5.3-codex-spark`` only, down from three.
+ *   - running from source (the committed ``models-snapshot.ts`` blob, which is
+ *     newer): ``gpt-5.3-codex-spark`` and ``gpt-5.5``, down from four.
+ *
+ * Either way the user loses models with no gpt-5.6 replacement to move to,
+ * which is why this change is sequenced behind #1188 rather than shipped on its
+ * own. Once release binaries embed a release-time catalog the replacements are
+ * present and the gap closes.
  *
  * This is a retirement from the ChatGPT-subscription picker, NOT an API
  * deprecation: both ids still carry ``supported_in_api: true``, neither is on
