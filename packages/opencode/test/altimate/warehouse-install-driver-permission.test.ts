@@ -51,13 +51,19 @@ describe("warehouse_install_driver permissions", () => {
     )
 
     const dir = DriverResolve.driverInstallDir()
+    // The cross-process install lock is a sibling of the managed directory, not
+    // a child of it, so `<dir>/*` does not cover it. The tool creates, writes
+    // and removes that directory, so it has to be approved explicitly rather
+    // than mutated as an unapproved external path.
+    const lockDir = DriverResolve.installLockPath(dir)
+    expect(lockDir).toBe(`${dir}.lock`)
     expect(events).toEqual(["ask:external_directory", "ask:bash", "install"])
     expect(requests).toEqual([
       {
         permission: "external_directory",
-        patterns: [path.join(dir, "*")],
-        always: [path.join(dir, "*")],
-        metadata: { driver: "postgres", dir },
+        patterns: [path.join(dir, "*"), path.join(lockDir, "*")],
+        always: [path.join(dir, "*"), path.join(lockDir, "*")],
+        metadata: { driver: "postgres", dir, lockDir },
       },
       {
         permission: "bash",

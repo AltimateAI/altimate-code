@@ -172,12 +172,83 @@ function nodeModulesUpward(start: string): string[] {
  * exists. That last check is what keeps a legitimately nested
  * `<cwd>/node_modules/…` from being mangled.
  */
-export function repairCwdPrefixedPath(candidate: string, cwd = process.cwd()): string | undefined {
-  if (!candidate || fs.existsSync(candidate)) return undefined
-  if (!candidate.startsWith(cwd + path.sep)) return undefined
-  const remainder = candidate.slice(cwd.length)
-  if (!path.isAbsolute(remainder)) return undefined
-  return fs.existsSync(remainder) ? remainder : undefined
+export function repairCwdPrefixedPath(candidate: string, cwd = safeCwd()): string | undefined {
+  if (!candidate || !cwd || fs.existsSync(candidate)) return undefined
+  if (!candidate.startsWith(cwd)) return undefined
+  // POSIX concatenation yields `<cwd>/usr/…`, whose remainder carries the
+  // separator. Windows has no separator to carry: `C:\work` + `C:\global\…`
+  // concatenates to `C:\workC:\global\…`, and a join-shaped `C:\work\C:\global\…`
+  // leaves a stray leading separator on the remainder. Try each shape and
+  // accept only a remainder that is absolute and exists, so a near-miss such
+  // as cwd `/work` against `/workspace/…` contributes nothing.
+  const rest = candidate.slice(cwd.length)
+  for (const remainder of rest.startsWith(path.sep) ? [rest, rest.slice(1)] : [rest]) {
+    if (!remainder || !path.isAbsolute(remainder)) continue
+    if (fs.existsSync(remainder)) return remainder
+  }
+  return undefined
+}
+
+/**
+ * `process.cwd()` throws ENOENT when the working directory has been removed out
+ * from under the process. Every caller here is formatting an error or repairing
+ * a path, where throwing would replace the driver failure the caller is trying
+ * to report with an unrelated ENOENT — losing the actual diagnosis.
+ */
+function safeCwd(): string | undefined {
+  try {
+    return process.cwd()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The `node_modules` content `driverSearchRoots()` deliberately refuses to
+ * search: the working directory tree, and the project and ancestor
+ * `node_modules` above it.
+ */
+function workspaceScope(): { cwd: string | undefined; ancestors: string[] } {
+  const cwd = safeCwd()
+  if (!cwd) return { cwd: undefined, ancestors: [] }
+  const resolved = path.resolve(cwd)
+  return { cwd: resolved, ancestors: nodeModulesUpward(resolved).map((dir) => path.resolve(dir)) }
+}
+
+/**
+ * Preserve order, drop repeats. A harvested root often names a directory the
+ * inferred roots already cover, and listing it twice makes the searched-location
+ * count in the failure message overstate where we actually looked.
+ */
+function dedupeRoots(roots: readonly string[]): string[] {
+  return [...new Set(roots)]
+}
+
+/**
+ * The `node_modules` directory enclosing `candidate`, or undefined when there
+ * is none.
+ *
+ * `sep` is a parameter so the Windows behaviour is testable from a POSIX host.
+ * It matters because Windows quotes both `C:\…` and `C:/…` in errors, while the
+ * marker is built from the platform separator — a forward-slash path would
+ * never match a backslash marker, and the root would silently not be harvested.
+ * Rewriting separators is length-preserving, so the slice offsets still hold.
+ */
+export function enclosingNodeModulesRoot(candidate: string, sep: string = path.sep): string | undefined {
+  const normalized = sep === "\\" ? candidate.replace(/\//g, "\\") : candidate
+  const marker = `${sep}node_modules${sep}`
+  const at = normalized.lastIndexOf(marker)
+  if (at === -1) return undefined
+  return normalized.slice(0, at + marker.length - 1)
+}
+
+/** True when `root` is workspace-controlled and must not be imported from. */
+function isWorkspaceRoot(root: string, scope: { cwd: string | undefined; ancestors: string[] }): boolean {
+  const resolved = path.resolve(root)
+  if (scope.ancestors.includes(resolved)) return true
+  if (!scope.cwd) return false
+  const rel = path.relative(scope.cwd, resolved)
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
 }
 
 /**
@@ -189,9 +260,16 @@ export function repairCwdPrefixedPath(candidate: string, cwd = process.cwd()): s
  * infer, so it is worth searching — after repairing a concatenated working
  * directory, which is the failure this exists for. Returns roots only when they
  * exist on disk, so a nonsense path contributes nothing.
+ *
+ * Workspace-controlled roots are never returned. `driverSearchRoots()` refuses
+ * project and ancestor `node_modules` because importing a matching SDK during a
+ * warehouse read/test would bypass the permission boundary and can expose
+ * resolved credentials; mining a path out of an error message must not become a
+ * way around that invariant.
  */
 export function searchRootsFromError(error: unknown): string[] {
   const message = error instanceof Error ? error.message : String(error)
+  const scope = workspaceScope()
   const roots: string[] = []
   // Absolute paths the runtime quoted, POSIX or Windows.
   for (const match of message.matchAll(/['"`]((?:\/|[A-Za-z]:[\\/])[^'"`\n]+)['"`]/g)) {
@@ -200,11 +278,10 @@ export function searchRootsFromError(error: unknown): string[] {
     for (const candidate of [named, repairCwdPrefixedPath(named)]) {
       if (!candidate) continue
       // Walk back to the enclosing node_modules directory.
-      const marker = `${path.sep}node_modules${path.sep}`
-      const at = candidate.lastIndexOf(marker)
-      if (at === -1) continue
-      const root = candidate.slice(0, at + marker.length - 1)
-      if (isDirectory(root) && !roots.includes(root)) roots.push(root)
+      const root = enclosingNodeModulesRoot(candidate)
+      if (!root || !isDirectory(root)) continue
+      if (isWorkspaceRoot(root, scope)) continue
+      if (!roots.includes(root)) roots.push(root)
     }
   }
   return roots
@@ -278,7 +355,13 @@ export function packageNameOf(specifier: string): string {
  */
 export function resolveOptionalPackage(specifier: string, roots = driverSearchRoots()): string | undefined {
   const pkg = packageNameOf(specifier)
-  const require = createRequire(pathToFileURL(path.join(process.cwd(), "noop.js")).href)
+  // The anchor only has to be some absolute file URL — resolution is driven by
+  // the explicit `paths` below, not by this base. So it must not be the one
+  // thing that can throw: process.cwd() raises ENOENT when the working
+  // directory has been removed, and letting that escape here replaces every
+  // driver diagnosis with an unrelated uv_cwd error.
+  const anchor = safeCwd() ?? os.tmpdir()
+  const require = createRequire(pathToFileURL(path.join(anchor, "noop.js")).href)
 
   for (const root of roots) {
     const pkgDir = path.join(root, pkg)
@@ -371,11 +454,18 @@ export async function loadOptionalDriver(
     return await importer(specifier)
   } catch (ambientError) {
     const ambientBroken = !isModuleNotFound(ambientError, specifier)
-    // Search the location the runtime itself named first. When ambient
-    // resolution fails it frequently quotes the absolute path it was reaching
-    // for, and that beats anything we can infer — including the case where it
-    // concatenated the working directory onto an already-absolute path.
-    const roots = [...searchRootsFromError(ambientError), ...driverSearchRoots()]
+    // Trusted roots first, then the location the runtime itself named. When
+    // ambient resolution fails it frequently quotes the absolute path it was
+    // reaching for — including the case where it concatenated the working
+    // directory onto an already-absolute path — and that is the only evidence
+    // available when nothing else resolves. But it is evidence about wherever
+    // the runtime happened to point, which may be a stale or broken copy, so it
+    // must not preempt the managed installation: `driverSearchRoots()` puts the
+    // driver we installed first precisely so it wins over a stale copy
+    // elsewhere. Appending keeps that order and still recovers the failure this
+    // exists for, because a harvested root is reached whenever the roots ahead
+    // of it resolve nothing.
+    const roots = dedupeRoots([...driverSearchRoots(), ...searchRootsFromError(ambientError)])
     const resolved = resolveOptionalPackage(specifier, roots)
 
     if (!resolved) {
@@ -467,7 +557,11 @@ function ambientLoadFailure(driver: DriverName, error: unknown, detail: string):
  * — which is answerable on the spot, and only from inside the failing process.
  */
 function loadDiagnostics(error: unknown): string {
-  const lines = [`cwd=${process.cwd()}`, `execPath=${process.execPath}`]
+  // A deleted working directory makes process.cwd() throw. This runs while a
+  // driver failure is being formatted, so letting that escape would replace the
+  // fault the reader needs with an unrelated ENOENT from the reporting path.
+  const cwd = safeCwd()
+  const lines = [`cwd=${cwd ?? "<unavailable>"}`, `execPath=${process.execPath}`]
   const message = error instanceof Error ? error.message : String(error)
   for (const match of message.matchAll(/['"`]((?:\/|[A-Za-z]:[\\/])[^'"`\n]+)['"`]/g)) {
     const named = match[1]
@@ -503,10 +597,10 @@ export async function loadOptionalPackage(specifier: string): Promise<any | unde
     return await import(/* @vite-ignore */ specifier)
   } catch (ambientError) {
     if (!isModuleNotFound(ambientError, specifier)) throw ambientError
-    const resolved = resolveOptionalPackage(specifier, [
-      ...searchRootsFromError(ambientError),
-      ...driverSearchRoots(),
-    ])
+    const resolved = resolveOptionalPackage(
+      specifier,
+      dedupeRoots([...driverSearchRoots(), ...searchRootsFromError(ambientError)]),
+    )
     if (!resolved) return undefined
     return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
   }
@@ -878,7 +972,7 @@ const installsInFlight = new Map<string, Promise<InstallResult>>()
  * The lock lives beside the install directory rather than inside it so npm
  * never sees it as stray package content.
  */
-function installLockPath(dir: string): string {
+export function installLockPath(dir: string): string {
   return `${dir.replace(/[\\/]+$/, "")}.lock`
 }
 
@@ -887,6 +981,8 @@ interface LockHolder {
   hostname: string
   /** Absent when the owner file is malformed; age then falls back to mtime. */
   startedAt?: number
+  /** Identifies one acquisition, so a holder only ever releases its own lock. */
+  token?: string
 }
 
 function readLockHolder(lockDir: string): LockHolder | undefined {
@@ -900,6 +996,7 @@ function readLockHolder(lockDir: string): LockHolder | undefined {
       pid: holder.pid,
       hostname: typeof holder.hostname === "string" ? holder.hostname : "",
       startedAt: typeof holder.startedAt === "number" ? holder.startedAt : undefined,
+      token: typeof holder.token === "string" ? holder.token : undefined,
     }
   } catch {
     return undefined
@@ -907,20 +1004,80 @@ function readLockHolder(lockDir: string): LockHolder | undefined {
 }
 
 /**
- * True when a lock cannot belong to a live install any more: its owner is gone,
- * or it has outlived any plausible npm run. Both checks are needed — a killed
- * process leaves no signal beyond its absence, and a lock from another host
- * (shared home directory) can only be judged by age.
+ * True when a lock cannot belong to a live install any more.
+ *
+ * The two signals are not interchangeable, and which one applies depends on
+ * whether liveness is decidable at all:
+ *
+ * - **Owner on this host.** Liveness is decidable, so it is the only thing that
+ *   counts. Age must *not* also apply here: npm can legitimately run longer
+ *   than any duration we pick — a native build such as `oracledb` or `duckdb`,
+ *   or a caller that raised its own install timeout — and breaking a live
+ *   owner's lock puts two `npm install` runs over the same tree, which is the
+ *   exact corruption this lock exists to prevent.
+ * - **No readable owner, or an owner on another host** (a shared home
+ *   directory). Liveness cannot be established, so age is the only signal
+ *   available and the lock ages out.
  */
 function isStaleLock(lockDir: string, holder: LockHolder | undefined, maxAgeMs: number): boolean {
-  if (holder && holder.hostname === os.hostname() && !processExists(holder.pid)) return true
+  if (holder && holder.hostname === os.hostname()) return !processExists(holder.pid)
   const startedAt = holder?.startedAt
-  if (typeof startedAt === "number" && Date.now() - startedAt > maxAgeMs) return true
+  if (typeof startedAt === "number") return Date.now() - startedAt > maxAgeMs
   try {
     return Date.now() - fs.statSync(lockDir).mtimeMs > maxAgeMs
   } catch {
     // Vanished between checks — someone else released it, so it is not stale.
     return false
+  }
+}
+
+/**
+ * Take ownership of a lock judged stale, atomically, and remove it.
+ *
+ * Two processes can both judge the same lock stale. If each simply deleted the
+ * pathname, the first would delete the dead lock and acquire a fresh one, and
+ * the second would then delete *that* live lock and acquire its own — putting
+ * both inside the critical section, which is the failure the lock exists to
+ * prevent. `rename` is atomic: exactly one process can move a given directory,
+ * and only that process goes on to delete it. The loser's rename fails and it
+ * simply retries against whatever state now exists.
+ */
+function claimStaleLock(lockDir: string): void {
+  const claimed = `${lockDir}.stale-${process.pid}-${Date.now()}`
+  try {
+    fs.renameSync(lockDir, claimed)
+  } catch {
+    // Another process claimed it first, or the owner released it. Either way
+    // there is nothing of ours to clean up; retry the acquire.
+    return
+  }
+  try {
+    fs.rmSync(claimed, { recursive: true, force: true })
+  } catch {
+    // The rename already made the lock unreachable, so a leftover directory
+    // beside it costs nothing but disk.
+  }
+}
+
+/**
+ * Release a lock this process acquired, but only while it is still ours.
+ *
+ * A lock we hold can be broken as stale and re-taken by a peer while `fn` is
+ * still running — an install that outlives `staleAfterMs` on a machine whose
+ * owner record is unreadable, say. Removing it by pathname would then delete
+ * the successor's live lock and admit a third process. The token is written
+ * when the lock is taken, so a mismatch means the directory is somebody else's.
+ */
+function releaseInstallLock(lockDir: string, token: string): void {
+  const holder = readLockHolder(lockDir)
+  // An unreadable owner file leaves nothing to compare against; the lock is
+  // most likely still ours (we wrote it) and leaking it would wedge every later
+  // install behind a lock nobody releases, so remove it.
+  if (holder?.token !== undefined && holder.token !== token) return
+  try {
+    fs.rmSync(lockDir, { recursive: true, force: true })
+  } catch {
+    // Leaving it behind is safe: the next contender ages it out as stale.
   }
 }
 
@@ -942,7 +1099,21 @@ export async function withInstallLock<T>(
   const staleAfterMs = options.staleAfterMs ?? 300_000
   const pollMs = options.pollMs ?? 100
   const deadline = Date.now() + timeoutMs
+  const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
   let acquired = false
+
+  // The lock's parent must exist before the atomic mkdir can land. On a cold
+  // machine nothing has created the XDG data directory yet — `performInstall`
+  // is the first thing that does, and it runs *after* this — so a non-recursive
+  // mkdir would fail ENOENT, take the "cannot lock" branch, and drop every
+  // caller straight to an unlocked install. That is precisely the cold-start
+  // stampede this lock exists to prevent, so create the parent first.
+  try {
+    fs.mkdirSync(path.dirname(lockDir), { recursive: true })
+  } catch {
+    // Genuinely unwritable. The acquire below then fails too and we proceed
+    // unlocked, which is the documented degradation.
+  }
 
   for (;;) {
     try {
@@ -955,11 +1126,7 @@ export async function withInstallLock<T>(
       const code = e && typeof e === "object" && "code" in e ? (e as { code?: unknown }).code : undefined
       if (code !== "EEXIST") break
       if (isStaleLock(lockDir, readLockHolder(lockDir), staleAfterMs)) {
-        try {
-          fs.rmSync(lockDir, { recursive: true, force: true })
-        } catch {
-          // Another process won the cleanup; fall through and retry.
-        }
+        claimStaleLock(lockDir)
         continue
       }
       if (Date.now() >= deadline) break
@@ -971,7 +1138,12 @@ export async function withInstallLock<T>(
     try {
       fs.writeFileSync(
         path.join(lockDir, "owner.json"),
-        JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now() } satisfies LockHolder),
+        JSON.stringify({
+          pid: process.pid,
+          hostname: os.hostname(),
+          startedAt: Date.now(),
+          token,
+        } satisfies LockHolder),
       )
     } catch {
       // Diagnostics only — the lock is the directory, not the file in it.
@@ -981,13 +1153,7 @@ export async function withInstallLock<T>(
   try {
     return await fn(acquired)
   } finally {
-    if (acquired) {
-      try {
-        fs.rmSync(lockDir, { recursive: true, force: true })
-      } catch {
-        // Leaving it behind is safe: the next contender ages it out as stale.
-      }
-    }
+    if (acquired) releaseInstallLock(lockDir, token)
   }
 }
 
