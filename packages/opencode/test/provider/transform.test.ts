@@ -4766,6 +4766,20 @@ describe("ProviderTransform.clampOutputTokens", () => {
     expect(ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(16_384)
   })
 
+  test("never demands more headroom than the model's own output limit offers", () => {
+    // `alibaba/qwen-plus-character-ja` declares an 8,192-token context and a 512-token output
+    // limit. At 7,169 estimated input the requested 512 still fits (7,681 of 8,192), but the
+    // 512-token minimum margin computes a 511-token clamp. Failing the request on the unrelated
+    // 1,024 floor would refuse a viable request on a threshold this model can never reach.
+    const model = createWindowModel({ context: 8_192, output: 512 })
+    expect(ProviderTransform.clampOutputTokens({ model, requested: 512, inputTokens: 7_169 })).toBe(512)
+
+    // The guard still fires when even the model's own reservation cannot fit.
+    expect(() => ProviderTransform.clampOutputTokens({ model, requested: 512, inputTokens: 8_000 })).toThrow(
+      ProviderTransform.OutputTokenBudgetError,
+    )
+  })
+
   test("does not clamp a window too small to hold even a floor-sized completion", () => {
     // A declared window this small is a placeholder or a test fixture, not a real limit. Failing
     // the request client-side on numbers we do not believe would be worse than letting the
@@ -4811,6 +4825,25 @@ describe("ProviderTransform.clampOutputTokens", () => {
     expect(ProviderTransform.effectiveContext(model, {})).toBe(200_000)
     expect(ProviderTransform.effectiveContext(model, { "anthropic-beta": "context-1m-2025-08-07" })).toBe(1_000_000)
 
+    // Both request paths spread `model.headers` under the chat.headers result, so the flag counts
+    // from either source, and HTTP header names are case-insensitive.
+    const betaModel = createWindowModel({ context: 200_000, output: 16_384 })
+    betaModel.headers = { "anthropic-beta": "context-1m-2025-08-07" }
+    expect(ProviderTransform.effectiveContext(betaModel)).toBe(1_000_000)
+    expect(ProviderTransform.effectiveContext(betaModel, {})).toBe(1_000_000)
+    expect(ProviderTransform.effectiveContext(model, { "Anthropic-Beta": "context-1m-2025-08-07" })).toBe(1_000_000)
+    // A different beta flag must not widen the window.
+    expect(ProviderTransform.effectiveContext(model, { "anthropic-beta": "interleaved-thinking-2025-05-14" })).toBe(
+      200_000,
+    )
+
+    // The GitLab loader never routes the flag through model.headers or the chat.headers hook — it
+    // sits in provider.options.aiGatewayHeaders and the SDK sends it directly.
+    const gitlabOptions = { aiGatewayHeaders: { "anthropic-beta": "context-1m-2025-08-07" } }
+    expect(ProviderTransform.effectiveContext(model, {}, gitlabOptions)).toBe(1_000_000)
+    expect(ProviderTransform.effectiveContext(model, {}, { aiGatewayHeaders: {} })).toBe(200_000)
+    expect(ProviderTransform.effectiveContext(model, {}, {})).toBe(200_000)
+
     // Without the widened window this 300K prompt would be refused client-side.
     expect(() => ProviderTransform.clampOutputTokens({ model, requested: 16_384, inputTokens: 300_000 })).toThrow(
       ProviderTransform.OutputTokenBudgetError,
@@ -4846,9 +4879,35 @@ describe("ProviderTransform.clampOutputTokens", () => {
     // The original object is not mutated.
     expect(options.anthropic.thinking.budgetTokens).toBe(16_000)
 
-    // A budget that already fits is left exactly as it was.
+    // A budget that already fits is left exactly as it was — the same object, not a copy.
     const small = { google: { thinkingConfig: { thinkingBudget: 512 } } }
     expect(ProviderTransform.clampReasoningBudget(small, 16_384)).toBe(small)
+    // So are options with no reasoning configured at all, which is the common case.
+    const none = { openai: { reasoningEffort: "high" } }
+    expect(ProviderTransform.clampReasoningBudget(none, 16_384)).toBe(none)
+  })
+
+  test("lowering a reasoning budget preserves values a JSON round-trip would lose", () => {
+    // The options object is rebuilt field by field rather than cloned through JSON, which would
+    // drop `undefined` and function values and throw outright on a BigInt.
+    const noop = () => {}
+    const options = {
+      anthropic: { thinking: { type: "enabled", budgetTokens: 31_999 } },
+      keepUndefined: undefined,
+      keepFunction: noop,
+      keepBigInt: 10n,
+      nested: [{ thinkingBudget: 31_999 }, { untouched: "value" }],
+    }
+    const adjusted = ProviderTransform.clampReasoningBudget(options, 8_192)
+
+    expect(adjusted.anthropic.thinking.budgetTokens).toBe(8_192 - ProviderTransform.OUTPUT_TOKEN_FLOOR)
+    expect(adjusted.nested[0].thinkingBudget).toBe(8_192 - ProviderTransform.OUTPUT_TOKEN_FLOOR)
+    expect(adjusted.nested[1].untouched).toBe("value")
+    expect("keepUndefined" in adjusted).toBe(true)
+    expect(adjusted.keepFunction).toBe(noop)
+    expect(adjusted.keepBigInt).toBe(10n)
+    // The caller's object is untouched.
+    expect(options.anthropic.thinking.budgetTokens).toBe(31_999)
   })
 
   test("reads the configured reasoning budget out of nested provider options", () => {
@@ -4868,26 +4927,58 @@ describe("ProviderTransform.estimateInputTokens", () => {
     // A ~1 MiB screenshot arrives as a base64 payload on the model message. Counted as text it
     // reads as hundreds of thousands of tokens and would refuse a request the provider accepts,
     // so media is stripped first — the same trade-off Compaction.estimate makes.
+    // Each stripped payload is charged a flat allowance rather than nothing, so the estimate lands
+    // in the low thousands instead of the ~270,000 a raw serialization would produce.
     const image = "A".repeat(1_000_000)
     const withMedia = [{ role: "user", content: [{ type: "image", image }] }]
-    const withoutMedia = [{ role: "user", content: [{ type: "image", image: "" }] }]
-    expect(ProviderTransform.estimateInputTokens([], withMedia)).toBeLessThan(100)
-    expect(ProviderTransform.estimateInputTokens([], withMedia)).toBeCloseTo(
-      ProviderTransform.estimateInputTokens([], withoutMedia),
-      -1,
-    )
+    expect(ProviderTransform.estimateInputTokens([], withMedia)).toBeLessThan(2_000)
+    expect(ProviderTransform.estimateInputTokens([], withMedia)).toBeGreaterThan(1_000)
 
     // File parts and data: URLs go the same way, as do raw byte arrays.
     const file = [
       { role: "user", content: [{ type: "file", mediaType: "application/pdf", data: "B".repeat(500_000) }] },
     ]
-    expect(ProviderTransform.estimateInputTokens([], file)).toBeLessThan(100)
+    expect(ProviderTransform.estimateInputTokens([], file)).toBeLessThan(2_000)
     const dataUrl = [
       { role: "user", content: [{ type: "image", url: `data:image/png;base64,${"C".repeat(500_000)}` }] },
     ]
-    expect(ProviderTransform.estimateInputTokens([], dataUrl)).toBeLessThan(100)
+    expect(ProviderTransform.estimateInputTokens([], dataUrl)).toBeLessThan(2_000)
     const bytes = [{ role: "user", content: [{ type: "image", image: new Uint8Array(200_000) }] }]
-    expect(ProviderTransform.estimateInputTokens([], bytes)).toBeLessThan(100)
+    expect(ProviderTransform.estimateInputTokens([], bytes)).toBeLessThan(2_000)
+
+    // Several attachments cost several allowances, so a near-window multimodal request is not
+    // waved through as though the media were free.
+    const many = [
+      {
+        role: "user",
+        content: [
+          { type: "image", image },
+          { type: "image", image },
+          { type: "image", image },
+        ],
+      },
+    ]
+    expect(ProviderTransform.estimateInputTokens([], many)).toBeGreaterThan(
+      ProviderTransform.estimateInputTokens([], withMedia) * 2,
+    )
+  })
+
+  test("only strips fields that belong to an actual media part", () => {
+    // A tool argument named `data` or `image` is ordinary textual JSON that the provider bills as
+    // text. Stripping it on the key name alone would drop it from the estimate and leave the
+    // reservation unclamped on exactly the large-argument requests that need clamping.
+    const payload = "x".repeat(40_000)
+    const toolArgs = [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolName: "ingest", input: { data: payload, image: payload } }],
+      },
+    ]
+    expect(ProviderTransform.estimateInputTokens([], toolArgs)).toBeGreaterThan(15_000)
+
+    // The same field names on a real media part are still stripped.
+    const mediaPart = [{ role: "user", content: [{ type: "image", image: payload }] }]
+    expect(ProviderTransform.estimateInputTokens([], mediaPart)).toBeLessThan(2_000)
   })
 
   test("still counts ordinary message text", () => {

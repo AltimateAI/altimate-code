@@ -224,7 +224,7 @@ export namespace LLM {
     const maxOutputTokens = ProviderTransform.clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,
-      context: ProviderTransform.effectiveContext(input.model, headers),
+      context: ProviderTransform.effectiveContext(input.model, headers, provider.options),
       reasoningBudget,
       inputTokens: () => ProviderTransform.estimateInputTokens(systemParts, input.messages, tools),
     })

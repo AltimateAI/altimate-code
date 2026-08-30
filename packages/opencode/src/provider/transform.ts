@@ -1347,28 +1347,56 @@ export namespace ProviderTransform {
   // marker before estimating — the same trade-off `Compaction.estimate` makes via `stripMedia`.
   const MEDIA_PLACEHOLDER = "[media]"
 
-  function stringifyWithoutMedia(value: unknown): string {
-    return JSON.stringify(value, (key, val) => {
-      if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) return MEDIA_PLACEHOLDER
+  // A stripped attachment is not free — the provider still bills the decoded media. Anthropic
+  // charges roughly `width * height / 750` tokens and caps a full-size image near 1,600, so each
+  // stripped payload is charged this flat allowance rather than nothing. Deliberately an
+  // over-estimate: under-counting here would let a near-window multimodal request through.
+  const MEDIA_TOKEN_ALLOWANCE = 1_600
+
+  /**
+   * Serialize for estimation with encoded media replaced by a marker, and report how many
+   * payloads were replaced so the caller can charge them an allowance.
+   *
+   * Only fields on an actual media part are stripped. A tool argument that happens to be named
+   * `data` or `image` is ordinary textual JSON that the provider bills as text, so a key-name
+   * check alone would silently drop it from the estimate.
+   */
+  function stringifyWithoutMedia(value: unknown): { text: string; media: number } {
+    let media = 0
+    // `this` is the object holding `key`, which is how a media part is told apart from an
+    // ordinary field that happens to share its name.
+    const text = JSON.stringify(value, function (this: { type?: unknown } | undefined, key: string, val: unknown) {
+      if (ArrayBuffer.isView(val) || val instanceof ArrayBuffer) {
+        media++
+        return MEDIA_PLACEHOLDER
+      }
       if (typeof val !== "string") return val
-      if (key === "data" || key === "image") return MEDIA_PLACEHOLDER
-      if (key === "url" && val.startsWith("data:")) return MEDIA_PLACEHOLDER
+      const type = this?.type
+      if (type !== "image" && type !== "file") return val
+      if (key === "data" || key === "image" || (key === "url" && val.startsWith("data:"))) {
+        media++
+        return MEDIA_PLACEHOLDER
+      }
       return val
     })
+    return { text, media }
   }
 
   /**
    * Rough token count for the prompt about to be sent, used only for the clamp decision.
    *
-   * Counts the system text, the messages with media stripped, and the tool definitions — tools
-   * are sent with the request and providers bill them as prompt tokens, so leaving them out
-   * would under-count exactly the tool-heavy sessions most likely to overflow.
+   * Counts the system text, the messages with media stripped but charged a flat allowance, and
+   * the tool definitions — tools are sent with the request and providers bill them as prompt
+   * tokens, so leaving them out would under-count exactly the tool-heavy sessions most likely to
+   * overflow.
    */
   export function estimateInputTokens(system: string[], messages: unknown[], tools?: unknown): number {
+    const stripped = stringifyWithoutMedia(messages)
     return (
       Token.estimate(system.join("\n")) +
-      Token.estimate(stringifyWithoutMedia(messages)) +
-      (tools ? Token.estimate(stringifyWithoutMedia(tools)) : 0)
+      Token.estimate(stripped.text) +
+      stripped.media * MEDIA_TOKEN_ALLOWANCE +
+      (tools ? Token.estimate(stringifyWithoutMedia(tools).text) : 0)
     )
   }
 
@@ -1379,10 +1407,28 @@ export namespace ProviderTransform {
    * the GitLab AI-gateway loader always sends `anthropic-beta: context-1m-2025-08-07` while its
    * catalog entries still declare 200K. Clamping against the catalog number there would shrink
    * or refuse prompts the provider route accepts.
+   *
+   * Three sources can carry the flag and all are checked: `model.headers` and the `chat.headers`
+   * hook result, which both request paths spread into the outgoing headers, and the GitLab
+   * loader's `provider.options.aiGatewayHeaders`, which the SDK sends without ever passing
+   * through either. Header names are matched case-insensitively because HTTP header names are.
    */
-  export function effectiveContext(model: Provider.Model, headers?: Record<string, string>): number {
+  export function effectiveContext(
+    model: Provider.Model,
+    headers?: Record<string, string>,
+    providerOptions?: Record<string, any>,
+  ): number {
     const context = model.limit.context
-    if (headers?.["anthropic-beta"]?.includes("context-1m-2025-08-07")) return Math.max(context, 1_000_000)
+    const sources = [model.headers, headers, providerOptions?.["aiGatewayHeaders"]]
+    for (const source of sources) {
+      if (!source || typeof source !== "object") continue
+      for (const [name, value] of Object.entries(source)) {
+        if (name.toLowerCase() !== "anthropic-beta") continue
+        if (typeof value === "string" && value.includes("context-1m-2025-08-07")) {
+          return Math.max(context, 1_000_000)
+        }
+      }
+    }
     return context
   }
 
@@ -1408,20 +1454,27 @@ export namespace ProviderTransform {
    * `max_tokens`, and this repository configures fixed 16,000/31,999-token budgets, so clamping
    * `maxOutputTokens` on its own can turn one provider 400 into another.
    */
+  function lowerReasoningBudgets(value: any, ceiling: number): any {
+    if (Array.isArray(value)) return value.map((item) => lowerReasoningBudgets(item, ceiling))
+    if (typeof value !== "object" || value === null) return value
+    const next: Record<string, unknown> = {}
+    for (const [key, val] of Object.entries(value)) {
+      const isBudget = key === "budgetTokens" || key === "thinkingBudget"
+      next[key] = isBudget && typeof val === "number" && val > ceiling ? ceiling : lowerReasoningBudgets(val, ceiling)
+    }
+    return next
+  }
+
   export function clampReasoningBudget<T>(options: T, maxOutputTokens: number | undefined): T {
     if (maxOutputTokens === undefined) return options
     const ceiling = maxOutputTokens - OUTPUT_TOKEN_FLOOR
     if (ceiling < MIN_REASONING_BUDGET) return options
-
-    let changed = false
-    const next = JSON.parse(JSON.stringify(options ?? null), (key, val) => {
-      if ((key === "budgetTokens" || key === "thinkingBudget") && typeof val === "number" && val > ceiling) {
-        changed = true
-        return ceiling
-      }
-      return val
-    })
-    return changed ? next : options
+    // Cheap read-only walk first, so the common case — no reasoning configured, or a budget that
+    // already fits — returns the caller's own object without copying anything.
+    if (configuredReasoningBudget(options) <= ceiling) return options
+    // Rebuilt rather than JSON round-tripped: a clone through JSON silently drops `undefined` and
+    // non-JSON values out of the provider options and throws outright on a BigInt.
+    return lowerReasoningBudgets(options, ceiling)
   }
 
   /**
@@ -1449,13 +1502,13 @@ export namespace ProviderTransform {
     if (requested === undefined) return undefined
 
     // A configured reasoning budget has to fit under the clamped value alongside a real answer.
-    const floor =
+    const baseFloor =
       input.reasoningBudget && input.reasoningBudget > 0
         ? OUTPUT_TOKEN_FLOOR + MIN_REASONING_BUDGET
         : OUTPUT_TOKEN_FLOOR
 
     const context = input.context ?? input.model.limit.context
-    if (!context || context <= floor) return requested
+    if (!context || context <= baseFloor) return requested
 
     const inputTokens = typeof input.inputTokens === "function" ? input.inputTokens() : input.inputTokens
     if (inputTokens <= 0) return requested
@@ -1467,8 +1520,18 @@ export namespace ProviderTransform {
     const margin = Math.max(CLAMP_MARGIN_MIN, Math.ceil(inputTokens * CLAMP_MARGIN_FRACTION))
     if (inputTokens + requested + margin <= context) return requested
 
+    // Never demand more headroom than the model itself offers. Some catalog entries cap output
+    // below the floor (`alibaba/qwen-plus-character-ja` declares 8,192 context / 512 output), and
+    // failing those requests on a threshold the model can never reach would be wrong.
+    const floor = Math.min(baseFloor, requested)
+
     const clamped = context - inputTokens - margin
     if (clamped < floor) {
+      // Honouring the margin would force a hard client-side failure. If the request still fits the
+      // window without it, prefer sending a marginal request over refusing a viable one — the
+      // provider stays the authority on its own tokenizer.
+      const withoutMargin = context - inputTokens
+      if (withoutMargin >= floor) return Math.min(requested, withoutMargin)
       throw new OutputTokenBudgetError({
         modelID: input.model.id,
         providerID: input.model.providerID,

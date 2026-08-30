@@ -178,7 +178,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const clampedMaxOutputTokens = ProviderTransform.clampOutputTokens({
     model: input.model,
     requested: params.maxOutputTokens,
-    context: ProviderTransform.effectiveContext(input.model, headers),
+    context: ProviderTransform.effectiveContext(input.model, headers, input.provider.options),
     reasoningBudget: ProviderTransform.configuredReasoningBudget(params.options),
     inputTokens: () => ProviderTransform.estimateInputTokens(system, input.messages, tools),
   })
