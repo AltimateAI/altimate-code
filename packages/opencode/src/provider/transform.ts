@@ -334,9 +334,10 @@ export namespace ProviderTransform {
 
         // Check for empty base64 image data
         if (part.type === "image") {
-          const imageStr = part.image.toString()
-          if (imageStr.startsWith("data:")) {
-            const match = imageStr.match(/^data:([^;]+);base64,(.*)$/)
+          // altimate_change start — support every valid image payload form and case
+          const imageStr = typeof part.image === "string" ? part.image : undefined
+          if (imageStr && /^data:/i.test(imageStr)) {
+            const match = imageStr.match(/^data:([^;]+);base64,(.*)$/i)
             if (match && (!match[2] || match[2].length === 0)) {
               return {
                 type: "text" as const,
@@ -344,11 +345,14 @@ export namespace ProviderTransform {
               }
             }
           }
+          // altimate_change end
         }
 
-        const mime = part.type === "image" ? part.image.toString().split(";")[0].replace("data:", "") : part.mediaType
+        // altimate_change start — classify semantic images independently of their payload representation
         const filename = part.type === "file" ? part.filename : undefined
-        const modality = mimeToModality(mime)
+        const modality =
+          part.type === "image" ? "image" : mimeToModality(part.mediaType.split(";", 1)[0]!.trim().toLowerCase())
+        // altimate_change end
         if (!modality) return part
         if (model.capabilities.input[modality]) return part
 
@@ -362,6 +366,12 @@ export namespace ProviderTransform {
       return { ...msg, content: filtered }
     })
   }
+
+  // altimate_change start — expose the pure media projection used before input-budget estimation
+  export function messagesForInputEstimate(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+    return unsupportedParts(msgs, model)
+  }
+  // altimate_change end
 
   // altimate_change start — shared providerOptions transform used before request signing
   function mapProviderOptions(

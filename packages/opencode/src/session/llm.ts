@@ -236,7 +236,7 @@ export namespace LLM {
       inputTokens: () =>
         estimateInputTokens({
           system,
-          messages: input.messages,
+          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
           tools,
           instructions: params.options.instructions,
         }),

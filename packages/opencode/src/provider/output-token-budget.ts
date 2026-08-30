@@ -13,10 +13,23 @@ const CLAMP_MARGIN_MIN = 512
 const ESTIMATE_CHUNK_SIZE = 400
 const MEDIA_TOKEN_ALLOWANCE = 2_048
 const MIN_REASONING_BUDGET = 1_024
-const MEDIA_DATA_URL = /^data:(?:image\/|audio\/|video\/|application\/pdf(?:;|,))[^,]*,/i
 const EMOJI = /\p{Extended_Pictographic}/u
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
 const CONTEXT_WINDOW_BETAS = new Map([["context-1m-2025-08-07", 1_000_000]])
+const MEDIA_PART_TYPES = new Set([
+  "image",
+  "file",
+  "media",
+  "audio",
+  "video",
+  "file-data",
+  "file-url",
+  "file-id",
+  "image-data",
+  "image-url",
+  "image-file-id",
+])
+const MEDIA_PAYLOAD_KEYS = new Set(["data", "image", "file", "audio", "video", "url", "fileId"])
 
 type JsonRecord = Record<string, unknown>
 
@@ -121,41 +134,50 @@ function estimateTextTokens(input: string): number {
   return total
 }
 
-/** Detect message containers whose data/image fields carry media rather than prompt text. */
-function isMediaContainer(value: unknown): boolean {
-  if (!isRecord(value)) return false
-  if (value.type === "Buffer") return true
-  if (["image", "audio", "video", "file"].includes(String(value.type))) return true
-  const mediaType = value.mediaType ?? value.mimeType
-  return typeof mediaType === "string" && /^(?:image|audio|video)\//.test(mediaType)
+/** Mark only actual ModelMessage content parts whose payload is provider media. */
+function messageMediaContainers(messages: readonly unknown[]): WeakSet<object> {
+  const result = new WeakSet<object>()
+  const visited = new WeakSet<object>()
+
+  const visitContent = (content: unknown) => {
+    if (!Array.isArray(content) || visited.has(content)) return
+    visited.add(content)
+    for (const part of content) {
+      if (!isRecord(part)) continue
+      if (MEDIA_PART_TYPES.has(String(part.type))) result.add(part)
+
+      // Tool-result media is nested in the AI SDK's typed content output.
+      if (part.type !== "tool-result" || !isRecord(part.output)) continue
+      if (part.output.type === "content") visitContent(part.output.value)
+    }
+  }
+
+  for (const message of messages) {
+    if (isRecord(message)) visitContent(message.content)
+  }
+  return result
 }
 
-/** Serialize request structures without expanding encoded media bytes into fake text tokens. */
-function serializeForEstimate(value: unknown): { readonly text: string; readonly mediaParts: number } {
+/** Serialize request structures without expanding semantic media payloads into fake text tokens. */
+function serializeForEstimate(
+  value: unknown,
+  mediaContainers?: WeakSet<object>,
+): { readonly text: string; readonly mediaParts: number } {
   let mediaParts = 0
   const ancestors: object[] = []
   const text =
     JSON.stringify(value, function (key, child) {
       while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop()
 
-      const mediaField = ["data", "image", "audio", "video", "file"].includes(key) && isMediaContainer(this)
+      const mediaField =
+        typeof this === "object" && this !== null && mediaContainers?.has(this) && MEDIA_PAYLOAD_KEYS.has(key)
       if (mediaField && child !== undefined && child !== null) {
-        mediaParts++
         return "[media omitted]"
       }
-      if (typeof child === "string") {
-        if (MEDIA_DATA_URL.test(child)) {
-          mediaParts++
-          return "[encoded media omitted]"
-        }
-        return child
-      }
       if (typeof child === "object" && child !== null) {
-        if (ArrayBuffer.isView(child) || child instanceof ArrayBuffer) {
-          mediaParts++
-          return "[binary media omitted]"
-        }
         if (ancestors.includes(child)) return "[circular value omitted]"
+        // Count transport occurrences, not object identities: JSON duplicates shared aliases.
+        if (mediaContainers?.has(child)) mediaParts++
         ancestors.push(child)
       }
       return child
@@ -207,10 +229,12 @@ export function estimateInputTokens(input: {
   const system = input.system.join("\n")
   let total = estimateTextTokens(system)
 
-  for (const value of [input.messages, input.tools]) {
-    if (value === undefined) continue
-    const serialized = serializeForEstimate(value)
-    total += estimateTextTokens(serialized.text) + serialized.mediaParts * MEDIA_TOKEN_ALLOWANCE
+  const messages = serializeForEstimate(input.messages, messageMediaContainers(input.messages))
+  total += estimateTextTokens(messages.text) + messages.mediaParts * MEDIA_TOKEN_ALLOWANCE
+
+  if (input.tools !== undefined) {
+    const tools = serializeForEstimate(input.tools)
+    total += estimateTextTokens(tools.text)
   }
 
   if (input.instructions !== undefined && input.instructions !== system) {

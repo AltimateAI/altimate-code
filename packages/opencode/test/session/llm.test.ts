@@ -770,4 +770,96 @@ describe("session.llm.stream", () => {
       },
     })
   }, 30_000)
+
+  test("normalizes unsupported media before the Google stream budget is enforced", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "google"
+    const modelID = "gemini-2.5-flash"
+    const fixture = await loadFixture(providerID, modelID)
+    const pathSuffix = `/v1beta/models/${fixture.model.id}:streamGenerateContent`
+    const request = waitRequest(
+      pathSuffix,
+      createEventResponse([
+        {
+          candidates: [{ content: { parts: [{ text: "Hello" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+        },
+      ]),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            enabled_providers: [providerID],
+            provider: {
+              [providerID]: {
+                options: { apiKey: "test-google-key", baseURL: `${server.url.origin}/v1beta` },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const textOnly = {
+          ...resolved,
+          capabilities: {
+            ...resolved.capabilities,
+            input: { ...resolved.capabilities.input, image: false },
+          },
+          limit: { ...resolved.limit, context: 65_536, output: 16_384 },
+        }
+        const sessionID = SessionID.make("session-budget-unsupported-media")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user_budget_unsupported_media"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make(providerID), modelID: textOnly.id },
+        } satisfies MessageV2.User
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: textOnly,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [
+            {
+              role: "user",
+              content: Array.from({ length: 64 }, () => ({
+                type: "image" as const,
+                image: "data:image/png;base64,AQ==",
+              })),
+            },
+          ],
+          tools: {},
+        })
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        const config = capture.body.generationConfig as { maxOutputTokens?: number } | undefined
+        expect(config?.maxOutputTokens).toBe(16_384)
+        expect(JSON.stringify(capture.body.contents)).toContain("Cannot read image")
+      },
+    })
+  }, 30_000)
 })

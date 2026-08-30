@@ -4824,6 +4824,61 @@ describe("output token budget", () => {
     expect(estimated).toBeLessThan(10_000)
   })
 
+  test("counts data-URL-shaped text in every textual request field", () => {
+    const prefixes = [
+      "data:image/png;base64,",
+      "data:audio/wav;base64,",
+      "data:video/mp4;base64,",
+      "data:application/pdf;base64,",
+    ]
+    for (const prefix of prefixes) {
+      const text = prefix + "漢".repeat(70_000)
+      expect(
+        estimateInputTokens({
+          system: [],
+          messages: [{ role: "user", content: [{ type: "text", text }] }],
+        }),
+      ).toBeGreaterThan(70_000)
+    }
+
+    const text = prefixes[0] + "漢".repeat(70_000)
+    const estimates = [
+      estimateInputTokens({ system: [], messages: [{ role: "user", content: text }] }),
+      estimateInputTokens({ system: [], messages: [], instructions: text }),
+      estimateInputTokens({
+        system: [],
+        messages: [],
+        tools: { inspect: { description: text, inputSchema: { type: "object" } } },
+      }),
+      estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool-call", toolCallId: "call-1", toolName: "inspect", input: { type: "file", data: text } },
+            ],
+          },
+        ],
+      }),
+      estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image", image: "data:image/png;base64,AQ==", filename: text }],
+          },
+        ],
+      }),
+    ]
+    for (const estimated of estimates) expect(estimated).toBeGreaterThan(70_000)
+
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    expect(() => clampOutputTokens({ model, requested: 16_384, inputTokens: estimates[0] })).toThrow(
+      OutputTokenBudgetError,
+    )
+  })
+
   test("charges the same fixed allowance for URL-backed media", () => {
     const base = estimateInputTokens({ system: [], messages: [{ role: "user", content: "show this" }] })
     const estimated = estimateInputTokens({
@@ -4837,6 +4892,148 @@ describe("output token budget", () => {
     })
     expect(estimated).toBeGreaterThan(base + 2_000)
     expect(estimated).toBeLessThan(base + 3_000)
+  })
+
+  test("keeps binary image and PDF tool-result payloads on the fixed media allowance", () => {
+    const binaryImage = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", image: new Uint8Array(1_048_576) }],
+        },
+      ],
+    })
+    const pdfToolResult = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "read",
+              output: {
+                type: "content",
+                value: [{ type: "media", mediaType: "application/pdf", data: "A".repeat(1_048_576) }],
+              },
+            },
+          ],
+        },
+      ],
+    })
+    for (const estimated of [binaryImage, pdfToolResult]) {
+      expect(estimated).toBeGreaterThan(2_000)
+      expect(estimated).toBeLessThan(10_000)
+    }
+  })
+
+  test("counts every AI SDK v6 tool-result media variant once per transport occurrence", () => {
+    const payload = "A".repeat(1_048_576)
+    const variants = [
+      { type: "media" as const, mediaType: "application/pdf", data: payload },
+      { type: "file-data" as const, mediaType: "application/pdf", data: payload },
+      { type: "file-url" as const, url: `https://example.invalid/${payload}` },
+      { type: "file-id" as const, fileId: { openai: payload } },
+      { type: "image-data" as const, mediaType: "image/png", data: payload },
+      { type: "image-url" as const, url: `https://example.invalid/${payload}` },
+      { type: "image-file-id" as const, fileId: { openai: payload } },
+    ]
+
+    for (const variant of variants) {
+      const estimated = estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call-1",
+                toolName: "read",
+                output: { type: "content", value: [variant] },
+              },
+            ],
+          },
+        ],
+      })
+      expect(estimated).toBeGreaterThan(2_000)
+      expect(estimated).toBeLessThan(10_000)
+    }
+
+    const shared = { type: "image-data" as const, mediaType: "image/png", data: "AQ==" }
+    const repeated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "read",
+              output: { type: "content", value: Array.from({ length: 64 }, () => shared) },
+            },
+          ],
+        },
+      ],
+    })
+    expect(repeated).toBeGreaterThan(64 * 2_000)
+  })
+
+  test("projects unsupported media before estimation without discounting supported media", () => {
+    const unsupported = createWindowModel({ context: 65_536, output: 16_384 })
+    const messages = [
+      {
+        role: "user",
+        content: Array.from({ length: 64 }, () => ({
+          type: "image" as const,
+          image: "data:image/png;base64,AQ==",
+        })),
+      },
+    ] satisfies ModelMessage[]
+
+    const projected = ProviderTransform.messagesForInputEstimate(messages, unsupported)
+    expect((messages[0].content[0] as { type: string }).type).toBe("image")
+    expect((projected[0]!.content[0] as { type: string }).type).toBe("text")
+    const projectedEstimate = estimateInputTokens({ system: [], messages: projected })
+    expect(projectedEstimate).toBeLessThan(10_000)
+    expect(clampOutputTokens({ model: unsupported, requested: 16_384, inputTokens: projectedEstimate })).toBe(16_384)
+
+    const supported = {
+      ...unsupported,
+      capabilities: {
+        ...unsupported.capabilities,
+        input: { ...unsupported.capabilities.input, image: true },
+      },
+    }
+    const preserved = ProviderTransform.messagesForInputEstimate(messages, supported)
+    expect((preserved[0]!.content[0] as { type: string }).type).toBe("image")
+    expect(estimateInputTokens({ system: [], messages: preserved })).toBeGreaterThan(64 * 2_000)
+  })
+
+  test("projects every valid unsupported image payload and case-normalized file media type", () => {
+    const unsupported = createWindowModel({ context: 65_536, output: 16_384 })
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "image" as const, image: new URL("https://example.invalid/image.png") },
+          { type: "image" as const, image: "AQ==" },
+          { type: "image" as const, image: new Uint8Array([1]) },
+          { type: "image" as const, image: new Uint8Array([1]).buffer },
+          { type: "image" as const, image: "DATA:IMAGE/PNG;BASE64,AQ==" },
+          { type: "file" as const, data: "AQ==", mediaType: "IMAGE/PNG" },
+          { type: "file" as const, data: "AQ==", mediaType: "APPLICATION/PDF; VERSION=1.7" },
+        ],
+      },
+    ] satisfies ModelMessage[]
+
+    const projected = ProviderTransform.messagesForInputEstimate(messages, unsupported)
+    expect((projected[0]!.content as Array<{ type: string }>).every((part) => part.type === "text")).toBeTrue()
+    expect(estimateInputTokens({ system: [], messages: projected })).toBeLessThan(10_000)
+    expect((messages[0].content as Array<{ type: string }>).every((part) => part.type !== "text")).toBeTrue()
   })
 
   test("counts repeated shared tool objects while terminating true cycles", () => {
@@ -4923,6 +5120,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
       readonly tools?: Record<string, Tool>
       readonly agentOptions?: Record<string, unknown>
       readonly outputTokenMax?: number
+      readonly messages?: ModelMessage[]
     } = {},
   ) =>
     Effect.runPromise(
@@ -4945,7 +5143,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
           prompt: systemPrompt,
         } as any,
         system: [],
-        messages,
+        messages: overrides.messages ?? messages,
         tools: overrides.tools ?? {},
         provider: { id: "openai-compatible", options: {} } as any,
         auth: undefined,
@@ -4985,6 +5183,21 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
 
   test("a small system prompt keeps the full model reservation", async () => {
     const result = await run("You are a helpful assistant.")
+    expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("unsupported media is normalized before the request-builder estimate", async () => {
+    const result = await run("You are a helpful assistant.", {
+      messages: [
+        {
+          role: "user",
+          content: Array.from({ length: 64 }, () => ({
+            type: "image" as const,
+            image: "data:image/png;base64,AQ==",
+          })),
+        },
+      ],
+    })
     expect(result.params.maxOutputTokens).toBe(16_384)
   })
 

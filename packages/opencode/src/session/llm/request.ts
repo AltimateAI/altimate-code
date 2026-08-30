@@ -188,7 +188,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     inputTokens: () =>
       estimateInputTokens({
         system,
-        messages: input.messages,
+        messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
         tools: sortedTools,
         instructions: params.options.instructions,
       }),
