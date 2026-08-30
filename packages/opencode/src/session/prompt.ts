@@ -176,6 +176,9 @@ export namespace SessionPrompt {
         string,
         {
           abort: AbortController
+          // altimate_change start — prevent idle listeners attaching to a closing prompt generation
+          closing?: boolean
+          // altimate_change end
           callbacks: {
             resolve(input: MessageV2.WithParts): void
             reject(reason?: any): void
@@ -347,7 +350,9 @@ export namespace SessionPrompt {
 
   function start(sessionID: SessionID) {
     const s = state()
-    if (s[sessionID]) return
+    // altimate_change start — replace closing prompt generations instead of reusing their callbacks
+    if (s[sessionID] && !s[sessionID].closing) return
+    // altimate_change end
     const controller = new AbortController()
     s[sessionID] = {
       abort: controller,
@@ -359,6 +364,9 @@ export namespace SessionPrompt {
   function resume(sessionID: SessionID) {
     const s = state()
     if (!s[sessionID]) return
+    // altimate_change start — resume with a fresh generation once cleanup has begun
+    if (s[sessionID].closing) return start(sessionID)
+    // altimate_change end
 
     return s[sessionID].abort.signal
   }
@@ -396,16 +404,29 @@ export namespace SessionPrompt {
       })
     }
 
-    // altimate_change start — cancel() became async (SessionStatus.set is async); use `await using` for async dispose.
-    // Always finish at idle after cancellation cleanup. Processor errors already
-    // publish error-before-idle themselves, but failures outside the processor
-    // (notably the compaction circuit breaker) previously skipped the normal
-    // idle transition and left every client waiting forever.
+    // altimate_change start — generation-scoped cleanup owns the fallback idle.
+    // Remove this exact loop generation from the registry before publishing
+    // idle, so an event consumer can safely start the next prompt immediately.
+    // Processor errors may already have published error -> idle; in that case
+    // SessionStatus is already idle and cleanup must not publish a stale second
+    // idle into the next generation. Failures outside the processor (notably
+    // the compaction circuit breaker) still get the missing idle transition.
     await using _ = defer(async () => {
-      await cancel(sessionID)
-      await SessionStatus.set(sessionID, { type: "idle" }).catch((error) => {
-        log.warn("failed to restore idle status during prompt-loop cleanup", { sessionID, error })
-      })
+      const s = state()
+      const match = s[sessionID]
+      if (!match || match.abort.signal !== abort) return
+      // Keep a replaceable tombstone while publishing idle. start() may replace
+      // it immediately when an idle listener begins the next generation, but
+      // will not attach that new prompt to callbacks from this finished loop.
+      match.closing = true
+      match.abort.abort()
+      const status = await SessionStatus.get(sessionID)
+      if (s[sessionID] === match && status.type !== "idle") {
+        await SessionStatus.set(sessionID, { type: "idle" }).catch((error) => {
+          log.warn("failed to restore idle status during prompt-loop cleanup", { sessionID, error })
+        })
+      }
+      if (s[sessionID] === match) delete s[sessionID]
     })
     // altimate_change end
     // A directive is valid only for this active generation. If the loop stops,
@@ -1621,10 +1642,9 @@ export namespace SessionPrompt {
       }
       continue
     }
-    // altimate_change start — set idle on normal loop exit; abort path is handled by processor catch block
-    if (!abort.aborted) {
-      await SessionStatus.set(sessionID, { type: "idle" })
-    }
+    // altimate_change start — the generation-scoped disposer publishes the
+    // sole normal idle transition after removing this loop from state. Abort
+    // and processor-error paths may already be idle; the disposer detects that.
     // altimate_change end
     SessionCompaction.prune({ sessionID })
     // altimate_change start — session end telemetry

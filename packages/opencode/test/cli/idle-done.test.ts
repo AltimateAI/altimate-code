@@ -28,6 +28,15 @@ function bashPart(messageID: string, command: string, exit: number): IdleDone.Pa
     state: { status: "completed", input: { command }, metadata: { exit } },
   }
 }
+function failedBashPart(messageID: string, command: string): IdleDone.PartSlice {
+  return {
+    id: pid(),
+    messageID,
+    type: "tool",
+    tool: "bash",
+    state: { status: "error", input: { command } },
+  }
+}
 function editPart(messageID: string): IdleDone.PartSlice {
   return { id: pid(), messageID, type: "tool", tool: "edit", state: { status: "completed", input: {} } }
 }
@@ -243,6 +252,22 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("FOO=1 mv a b")).toBe(true)
   })
 
+  // altimate_change start — review regression: find's action predicates can
+  // mutate even though its ordinary traversal forms are read-only.
+  test("mutating find actions are classified conservatively", () => {
+    for (const cmd of [
+      "find . -delete",
+      "find src -name '*.tmp' -exec rm {} \\;",
+      "find src -execdir sh -c 'touch generated' \\;",
+      "find . -ok rm {} \\;",
+      "find . -fprintf files.txt '%p\\n'",
+    ]) {
+      expect(IdleDone.isMutatingCommand(cmd)).toBe(true)
+    }
+    expect(IdleDone.isMutatingCommand("find src -type f -name '*.ts' -print")).toBe(false)
+  })
+  // altimate_change end
+
   test("plain read-only commands are not mutating", () => {
     for (const cmd of ["ls -la", "cat file.txt", "grep -r pattern .", "git status", "sed s/a/b/ f.txt"]) {
       expect(IdleDone.isMutatingCommand(cmd)).toBe(false)
@@ -408,6 +433,24 @@ describe("IdleDone hard preconditions", () => {
     const snap = d.snapshot()
     expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
   })
+
+  // altimate_change start — review regression: a command may change files and
+  // then report tool status=error; its mutation still invalidates the verify.
+  test("(i) a failed bash command that may have mutated invalidates the earlier verify", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "make check", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(failedBashPart("m_failed_delete", "rm generated.ts && false"))
+    d.observePart(stepFinish("m_failed_delete"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    expect(d.snapshot().last_mutation_seq).toBeGreaterThan(d.snapshot().last_verify_seq)
+  })
+  // altimate_change end
 
   test("(ii) a configured verify command that redirects its output is still the verification", () => {
     const opts: IdleDone.Options = { ...OPTS, verifyCommand: "make check" }

@@ -696,7 +696,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // requireBusyFirst: the challenge-phase loop ignores idle events until the
       // challenge turn has actually started (a straggler idle from the abort
       // would otherwise end the phase before the challenge prompt begins).
-      async function loop(stream: typeof events.stream, options?: { requireBusyFirst?: boolean }) {
+      async function loop(
+        stream: typeof events.stream,
+        options?: { requireBusyFirst?: boolean; suppressInterruptedPromptAbort?: boolean },
+      ) {
         let sawBusy = false
         // altimate_change end
         const toggles = new Map<string, boolean>()
@@ -861,7 +864,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change start — the idle-done challenge is delivered
             // by aborting the in-flight prompt; that harness-initiated abort is not
             // a run error — don't display it or fold it into the error record.
-            if (idleDone.challengeIssued && props.error.name === "MessageAbortedError") continue
+            if (
+              options?.suppressInterruptedPromptAbort &&
+              idleDone.challengeIssued &&
+              props.error.name === "MessageAbortedError"
+            ) {
+              continue
+            }
             // altimate_change end
             // altimate_change start — serialize the real error name/message/status
             // (never a bare name, "[object Object]", or a literal {}); feed the
@@ -1045,10 +1054,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Start event listener before sending the prompt so no events are missed
       // altimate_change start — pass the stream explicitly (see loop signature)
       let eventLoopFailure: unknown
-      const loopPromise = loop(events.stream).catch((e) => {
+      const loopPromise = loop(events.stream, { suppressInterruptedPromptAbort: true }).catch((e) => {
         eventLoopFailure = e
         accounting.onSessionError("EventStreamError", e instanceof Error ? e.message : String(e))
         console.error(e)
+        // The session.prompt/session.command POST is synchronous and may still
+        // be waiting on a hung generation. It shares this signal, so losing SSE
+        // releases both sides of the run instead of waiting forever in send().
+        eventAbort.abort()
       })
       // altimate_change end
 
@@ -1086,25 +1099,31 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const sendMessageID = MessageID.ascending()
       const send = () => {
         if (args.command)
-          return sdk.session.command({
+          return sdk.session.command(
+            {
+              sessionID,
+              messageID: sendMessageID,
+              agent,
+              model: args.model,
+              command: args.command,
+              arguments: message,
+              variant: args.variant,
+            },
+            { signal: eventAbort.signal },
+          )
+        const model = args.model ? Provider.parseModel(args.model) : undefined
+        return sdk.session.prompt(
+          {
             sessionID,
             messageID: sendMessageID,
             agent,
-            model: args.model,
-            command: args.command,
-            arguments: message,
+            model,
             variant: args.variant,
-          })
-        const model = args.model ? Provider.parseModel(args.model) : undefined
-        return sdk.session.prompt({
-          sessionID,
-          messageID: sendMessageID,
-          agent,
-          model,
-          variant: args.variant,
-          parts: [...files, { type: "text", text: message }],
-          ...(audienceSystem ? { system: audienceSystem } : {}),
-        })
+            parts: [...files, { type: "text", text: message }],
+            ...(audienceSystem ? { system: audienceSystem } : {}),
+          },
+          { signal: eventAbort.signal },
+        )
       }
       /** Did the server persist this attempt's user message?
        *  Three-valued ON PURPOSE — a retry may only proceed on definitive
@@ -1133,6 +1152,93 @@ You are speaking to a non-technical business executive. Follow these rules stric
         response?: Response
         data?: { info?: { finish?: string; error?: { name?: unknown; data?: unknown } } }
       }
+      // altimate_change start — run a synthetic follow-up over one bounded,
+      // shared request/SSE lifetime. This is used for both the confirm-DONE
+      // challenge and the single continuation turn when that challenge is
+      // declined. A stream failure aborts the synchronous POST; a POST failure
+      // aborts the stream. Stable message IDs preserve retry idempotency.
+      const runSyntheticTurn = async (
+        text: string,
+        kind: "challenge" | "continuation",
+      ): Promise<SendResult | undefined> => {
+        const turnAbort = new AbortController()
+        const eventErrorName = kind === "challenge" ? "ChallengeEventStreamError" : "ContinuationEventStreamError"
+        const sendErrorName = kind === "challenge" ? "IdleDoneChallengeFailed" : "IdleDoneContinuationFailed"
+        const humanName = kind === "challenge" ? "idle-done challenge" : "idle-done continuation"
+        const eventName = kind === "challenge" ? "idle_done_challenge_failed" : "idle_done_continuation_failed"
+        const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
+          accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
+          return undefined
+        })
+        if (!turnEvents) return undefined
+
+        let sendFailed!: () => void
+        const sendFailure = new Promise<void>((resolveFailure) => {
+          sendFailed = resolveFailure
+        })
+        let streamFailed = false
+        const messageID = MessageID.ascending()
+        const promptPromise = (async (): Promise<SendResult | undefined> => {
+          // The previous turn may have published idle just before releasing its
+          // session lock. Retry that narrow race, but only after definitive
+          // proof this exact message was not persisted.
+          for (let attempt = 0; ; attempt++) {
+            const res = (await sdk.session
+              .prompt(
+                {
+                  sessionID,
+                  messageID,
+                  agent,
+                  model: args.model ? Provider.parseModel(args.model) : undefined,
+                  variant: args.variant,
+                  ...(audienceSystem ? { system: audienceSystem } : {}),
+                  // Synthetic harness text must never replace the authoritative
+                  // original task pin when this session is resumed.
+                  parts: [{ type: "text", text, synthetic: true }],
+                },
+                { signal: turnAbort.signal },
+              )
+              .catch((e) => ({ error: e }) as SendResult)) as SendResult
+            if (!res?.error) return res
+            const status = res.response?.status
+            const detail = RunAccounting.serializeSessionError(res.error)
+            const retryable =
+              status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
+            if (!retryable) throw new Error(`${humanName} prompt failed: ${detail}`)
+
+            const acceptance = await acceptanceState(messageID)
+            if (acceptance === "accepted") return undefined
+            if (acceptance === "unknown") {
+              throw new Error(
+                `${humanName} failed and acceptance could not be determined; ` +
+                  `not retrying to avoid duplication — ${detail}`,
+              )
+            }
+            if (attempt >= 8) {
+              emit(eventName, { error: detail })
+              throw new Error(`${humanName} prompt failed: ${detail}`)
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+          }
+        })()
+        promptPromise.catch(() => sendFailed())
+        await Promise.race([
+          loop(turnEvents.stream, { requireBusyFirst: true }).catch((e) => {
+            streamFailed = true
+            accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
+            console.error(e)
+            turnAbort.abort()
+          }),
+          sendFailure,
+        ])
+        const result = await promptPromise.catch((e) => {
+          if (!streamFailed) accounting.onSessionError(sendErrorName, e instanceof Error ? e.message : String(e))
+          return undefined
+        })
+        turnAbort.abort()
+        return result
+      }
+      // altimate_change end
       let sendResult: SendResult | undefined
       let sendFailure: unknown
       for (let sendAttempt = 0; ; sendAttempt++) {
@@ -1226,110 +1332,49 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // absorbed by the interrupted prompt's own abort suppression.
         accounting.onIdleDoneChallengeReplySent()
         // altimate_change end
-        // Dedicated abort for the challenge subscription so a failed challenge
-        // send can cancel the event-stream loop deterministically (the SSE
-        // generator exits cleanly on abort; the loop's for-await then drains).
-        const challengeAbort = new AbortController()
-        const challengeEvents = await sdk.event.subscribe(undefined, { signal: challengeAbort.signal })
         NudgeArbiter.register(sessionID, {
           source: "termination_challenge",
           kind: "confirm_done",
           text: SessionTermination.CONFIRM_DONE_CHALLENGE,
         })
         const challengeDirective = NudgeArbiter.take(sessionID)
-        let challengeSendFailed!: () => void
-        const challengeFailure = new Promise<void>((resolveFailure) => {
-          challengeSendFailed = resolveFailure
-        })
-        const challengeMessageID = MessageID.ascending()
-        const challengePromise = (async (): Promise<SendResult | undefined> => {
-          // The abort releases the session lock asynchronously — retry briefly
-          // while the server still reports the session busy. Bounded so a
-          // persistent failure surfaces instead of hanging the run.
-          for (let challengeAttempt = 0; ; challengeAttempt++) {
-            const res = (await sdk.session
-              .prompt(
-                {
-                  sessionID,
-                  messageID: challengeMessageID,
-                  agent,
-                  model: args.model ? Provider.parseModel(args.model) : undefined,
-                  variant: args.variant,
-                  // altimate_change start — upstream_fix: forward the same audience
-                  // directive as the original turns; otherwise a continuing
-                  // challenge (model says what remains and keeps working) can drop
-                  // back to technical output under --audience executive.
-                  ...(audienceSystem ? { system: audienceSystem } : {}),
-                  // altimate_change end
-                  // Internal challenge text must never become the authoritative
-                  // resumed-session task pin.
-                  parts: [
-                    {
-                      type: "text",
-                      text: challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE,
-                      synthetic: true,
-                    },
-                  ],
-                },
-                {
-                  // Share the subscription lifetime with the synchronous POST.
-                  // If the challenge event stream fails, aborting challengeAbort
-                  // must also release this otherwise-unbounded request before we
-                  // await challengePromise below.
-                  signal: challengeAbort.signal,
-                },
-              )
-              .catch((e) => ({ error: e }) as SendResult)) as SendResult
-            if (!res?.error) return res
-            const status = res.response?.status
-            const detail = RunAccounting.serializeSessionError(res.error)
-            const retryable =
-              status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
-            if (!retryable) throw new Error(`idle-done challenge prompt failed: ${detail}`)
-
-            // As with the original task, retry only after definitive proof the
-            // server did not persist this exact challenge message.
-            const acceptance = await acceptanceState(challengeMessageID)
-            if (acceptance === "accepted") return undefined
-            if (acceptance === "unknown") {
-              throw new Error(
-                `idle-done challenge failed and acceptance could not be determined; not retrying to avoid duplication — ${detail}`,
-              )
-            }
-            if (challengeAttempt >= 8) {
-              emit("idle_done_challenge_failed", { error: detail })
-              throw new Error(`idle-done challenge prompt failed: ${detail}`)
-            }
-            await new Promise((resolve) => setTimeout(resolve, 250 * (challengeAttempt + 1)))
-          }
-        })()
-        challengePromise.catch(() => challengeSendFailed())
-        await Promise.race([
-          loop(challengeEvents.stream, { requireBusyFirst: true }).catch((e) => {
-            accounting.onSessionError("ChallengeEventStreamError", e instanceof Error ? e.message : String(e))
-            console.error(e)
-            challengeAbort.abort()
-          }),
-          challengeFailure,
-        ])
-        // A failed challenge send must never be swallowed: the completion
-        // confirmation did not happen, so the run cannot report success (rc 0)
-        // — record it as a fatal harness error (why_harness_stopped=error) and
-        // cancel the still-pending event subscription so nothing keeps
-        // listening on a session whose confirmation path is dead.
-        const challengeResult = await challengePromise.catch((e) => {
-          accounting.onSessionError("IdleDoneChallengeFailed", e instanceof Error ? e.message : String(e))
-          return undefined
-        })
-        // altimate_change start — upstream_fix: abort was only reached on the
-        // rejection path — the success path (and a `loop()` rejection racing
-        // ahead of it) left this event subscription open indefinitely.
-        // AbortController.abort() is idempotent, so calling it unconditionally
-        // here is safe even after the failure-path abort above.
-        challengeAbort.abort()
-        // altimate_change end
+        const challengeResult = await runSyntheticTurn(
+          challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE,
+          "challenge",
+        )
         accounting.onPromptResult(challengeResult?.data?.info)
+        const challengeConfirmed = accounting.termination().done_reason === "idle_heuristic"
         accounting.onIdleDoneChallengeCompleted()
+
+        // A model may follow the challenge's "state what remains and continue"
+        // branch with a normal text-only stop. That has already returned from
+        // SessionPrompt.loop, so enqueue one explicit continuation turn instead
+        // of silently finalizing the run at rc 0 with done_reason=none.
+        if (!accounting.fatal && !challengeConfirmed) {
+          NudgeArbiter.register(sessionID, {
+            source: "termination_challenge",
+            kind: "continue_after_decline",
+            text: SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE,
+          })
+          const continuationDirective = NudgeArbiter.take(sessionID)
+          if (!emit("idle_done_continuation", {})) {
+            UI.println(
+              UI.Style.TEXT_WARNING_BOLD + "!",
+              UI.Style.TEXT_NORMAL + " idle-done: completion was not confirmed — continuing the remaining work",
+            )
+          }
+          const continuationResult = await runSyntheticTurn(
+            continuationDirective?.text ?? SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE,
+            "continuation",
+          )
+          accounting.onPromptResult(continuationResult?.data?.info)
+          if (!accounting.fatal && accounting.termination().done_reason === "none") {
+            accounting.onSessionError(
+              "IdleDoneContinuationUnconfirmed",
+              "the continuation ended without an explicit DONE confirmation",
+            )
+          }
+        }
       }
       // altimate_change end
 

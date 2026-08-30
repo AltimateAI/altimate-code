@@ -19,9 +19,9 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   // altimate_change start — V2 parity for the fork compaction keys (estimator
   // safety margin, state ledger/summary carry, task pin). Same names as V1 so
   // ConfigMigrateV1 can carry them through without renames.
-  // Accept finite numeric configuration here and clamp at the one runtime
-  // boundary (SessionCompaction.contextSafetyFraction). Rejecting the value at
-  // document decode drops the entire config instead of safely clamping it.
+  // Reject NaN and infinities at document decode; finite out-of-range values
+  // are clamped at the one runtime boundary
+  // (SessionCompaction.contextSafetyFraction).
   context_safety_fraction: Schema.Number.check(Schema.isFinite()).pipe(Schema.optional),
   state_ledger: Schema.Boolean.pipe(Schema.optional),
   ledger_max_tokens: NonNegativeInt.pipe(Schema.optional),

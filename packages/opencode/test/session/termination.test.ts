@@ -173,6 +173,13 @@ describe("SessionTermination directive texts (/c/d wording contracts)", () => {
     expect(challenge).toContain("state specifically what remains")
   })
 
+  test("the declined-challenge continuation requires work now and an eventual DONE", () => {
+    const continuation = SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE
+    expect(continuation).toContain("Continue working now")
+    expect(continuation).toContain(SessionTermination.DONE_TOKEN)
+    expect(continuation).toContain("do not stop merely to describe")
+  })
+
   test("the overflow notice is mechanism-accurate: no media-attachment blame", () => {
     expect(SessionTermination.OVERFLOW_NOTICE).not.toContain("media")
     expect(SessionTermination.OVERFLOW_NOTICE).toContain("context limit")
@@ -182,6 +189,7 @@ describe("SessionTermination directive texts (/c/d wording contracts)", () => {
     for (const text of [
       SessionTermination.COMPLETION_NUDGE,
       SessionTermination.CONFIRM_DONE_CHALLENGE,
+      SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE,
       SessionTermination.OVERFLOW_NOTICE,
     ]) {
       expect(text.toLowerCase()).not.toContain("dbt")

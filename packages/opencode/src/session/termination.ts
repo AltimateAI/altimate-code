@@ -127,6 +127,17 @@ export namespace SessionTermination {
     `${DONE_TOKEN} alone on the final line. Otherwise, state specifically what remains and continue working on it.`
 
   /**
+   * Follow-up used only when the model declines the completion challenge but
+   * ends that reply instead of actually continuing. A fresh synthetic turn is
+   * required because a normal text-only `stop` has already returned from the
+   * server-side prompt loop.
+   */
+  export const CONTINUE_AFTER_DECLINED_CHALLENGE =
+    "The completion check was not confirmed. Continue working now on the specific remaining steps you identified; " +
+    `do not stop merely to describe them. When the deliverable is complete and verified, end with ${DONE_TOKEN} ` +
+    "alone on the final line."
+
+  /**
    * Mechanism-accurate overflow notice. The previous text blamed "large
    * media attachments" — but the overflow flag is set whenever a request exceeded
    * the provider's context/size limit before any response was produced

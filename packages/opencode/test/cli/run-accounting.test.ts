@@ -460,3 +460,27 @@ describe("RunAccounting done_reason + idle-done bookkeeping", () => {
   })
   // altimate_change end
 })
+
+// altimate_change start — source-level lifecycle contracts for the run command.
+// The generated SDK and embedded server make these races expensive to induce in
+// a unit test; pin the critical signal/phase wiring alongside behavioral
+// accounting tests so a refactor cannot silently detach it.
+describe("run command request/stream lifecycle contracts", () => {
+  test("the initial synchronous request shares and is cancelled by the SSE lifetime", async () => {
+    const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
+    expect(source).toMatch(
+      /const loopPromise = loop\(events\.stream,[\s\S]*?\.catch\(\(e\) => \{[\s\S]*?eventAbort\.abort\(\)/,
+    )
+    expect(source).toMatch(/sdk\.session\.command\([\s\S]*?\{ signal: eventAbort\.signal \},\s*\)/)
+    expect(source).toMatch(/sdk\.session\.prompt\([\s\S]*?\{ signal: eventAbort\.signal \},\s*\)/)
+  })
+
+  test("abort suppression is initial-stream-only and a declined challenge enqueues continuation", async () => {
+    const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url).pathname).text()
+    expect(source).toContain("options?.suppressInterruptedPromptAbort")
+    expect(source).toContain('loop(events.stream, { suppressInterruptedPromptAbort: true })')
+    expect(source).toContain("SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE")
+    expect(source).toContain('"IdleDoneContinuationUnconfirmed"')
+  })
+})
+// altimate_change end

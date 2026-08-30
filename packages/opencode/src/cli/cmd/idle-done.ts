@@ -270,6 +270,16 @@ export namespace IdleDone {
         if (!sub || !GIT_READ_ONLY_SUBCOMMANDS.has(sub)) return true
         continue
       }
+      // `find` is normally a read, but action predicates can delete paths,
+      // execute arbitrary commands, or write listing output to a file. With
+      // snapshots disabled there is no later patch event to recover this
+      // mutation signal, so classify every write/exec action conservatively.
+      if (
+        head === "find" &&
+        tokens.slice(1).some((token) => /^-(?:delete|exec(?:dir)?|ok(?:dir)?|fprint(?:0|f)?|fls)$/.test(token))
+      ) {
+        return true
+      }
       if (head && MUTATING_HEADS.has(head)) return true
     }
     // altimate_change end
@@ -391,8 +401,16 @@ export namespace IdleDone {
     let consecutiveIdleTurns = 0
     let challengeIssued = false
 
-    function observeBash(part: PartSlice) {
-      const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
+    function observeBash(part: PartSlice, completed = true) {
+      const command = typeof part.state?.input?.["command"] === "string" ? part.state.input["command"] : ""
+      // A shell can mutate successfully and only then fail (`rm file && false`).
+      // Error-status tool parts therefore cannot be discarded before command
+      // inspection. They are never verification evidence, but known mutating
+      // forms still advance the watermark conservatively.
+      if (!completed) {
+        if (isMutatingCommand(command)) lastMutationSeq = seq
+        return
+      }
       const configuredPrefix = options.verifyCommand?.trim()
       let configuredTailMutates = false
       if (configuredPrefix && command.trimStart().startsWith(configuredPrefix)) {
@@ -446,9 +464,9 @@ export namespace IdleDone {
           if (status !== "completed" && status !== "error") return
           runningToolParts.delete(part.id)
           messageHadActivity.add(part.messageID)
-          if (status !== "completed") return
           if (part.tool && MUTATING_TOOLS.has(part.tool)) lastMutationSeq = seq
-          if (part.tool === "bash") observeBash(part)
+          if (part.tool === "bash") observeBash(part, status === "completed")
+          if (status !== "completed") return
           return
         }
         if (part.type === "step-finish") {
