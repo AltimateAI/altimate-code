@@ -38,6 +38,11 @@ const REQUIRED_CATALOG_PROVIDERS = ["anthropic", "openai", "google"]
 // OPENCODE_MODELS_URL / MODELS_DEV_API_JSON is legitimately allowed to be small.
 const MIN_CATALOG_PROVIDERS = 50
 const CATALOG_FETCH_TIMEOUT_MS = 60_000
+// The hard backstop must lose the race to `AbortSignal.timeout` in every case the
+// signal CAN handle, or it fires first and replaces the precise per-stage message
+// ("fetch failed", "body read failed") with its own generic one. The margin is
+// what makes it a backstop rather than the primary timeout.
+const CATALOG_HARD_DEADLINE_MS = CATALOG_FETCH_TIMEOUT_MS + 15_000
 
 /** Describe the first structural problem in a provider entry, or undefined when
  * it is well formed.
@@ -80,18 +85,25 @@ function providerEntryProblem(id: string, entry: unknown): string | undefined {
  * the build at parse time, but a JSON error body (`{"error": ...}`) is valid
  * TypeScript and would ship as a catalog with no providers in it. */
 async function fetchModelsCatalog(url: string): Promise<string> {
-  // Hard backstop. `AbortSignal.timeout` cannot cancel a blocked `getaddrinfo()`
-  // — documented in src/provider/models.ts (#1052 D14), where a sandboxed-network
-  // DNS blackhole outlived the abort signal. Without this, an unresolvable host
-  // hangs every matrix build until the workflow job timeout and the useful message
-  // is lost. Exit non-zero instead; never fall through to a stale catalog.
+  // Backstop for the case where the abort signal fires but the fetch promise never
+  // settles, so the `catch` below is never reached. `AbortSignal.timeout` cannot
+  // cancel a blocked `getaddrinfo()` — documented in src/provider/models.ts
+  // (#1052 D14), where a sandboxed-network DNS blackhole outlived the signal.
+  //
+  // HONEST LIMIT: this is a timer on the event loop, so it cannot preempt a
+  // genuinely blocked main thread either. If `getaddrinfo` blocks the loop
+  // outright, neither the signal nor this fires and the workflow `timeout-minutes`
+  // stays the real backstop. What this does cover is the more common shape — the
+  // loop still ticking while a request hangs unresolved — turning a silent
+  // full-length job timeout into a fast, labelled failure. Either way the build
+  // fails; it never falls through to a stale catalog.
   const deadline = setTimeout(() => {
     console.error(
-      `error: models.dev fetch from ${url} exceeded ${CATALOG_FETCH_TIMEOUT_MS}ms ` +
-        `(unresolvable host or blackholed network); failing the build`,
+      `error: models.dev fetch from ${url} did not settle within ${CATALOG_HARD_DEADLINE_MS}ms ` +
+        `(host unreachable or unresolvable); failing the build`,
     )
     process.exit(1)
-  }, CATALOG_FETCH_TIMEOUT_MS)
+  }, CATALOG_HARD_DEADLINE_MS)
   try {
     let res: Response
     try {
