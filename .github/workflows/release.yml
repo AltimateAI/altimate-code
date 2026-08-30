@@ -98,7 +98,12 @@ jobs:
           OPENCODE_CHANNEL: ${{ contains(github.ref_name, '-') && 'beta' || 'latest' }}
           OPENCODE_RELEASE: "1"
           GH_REPO: ${{ env.GH_REPO }}
-          MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
+          # altimate_change — MODELS_DEV_API_JSON is deliberately NOT set here.
+          # Pointing it at test/tool/fixtures/models-api.json (as ci.yml does, where
+          # a hermetic build is correct) made every shipped binary embed that fixture
+          # as its bundled models.dev catalog — newest entry 2026-03-30. Release
+          # builds fetch models.dev live, matching upstream's publish.yml. build.ts
+          # validates the payload and fails the build if it is unusable.
 
       # Smoke-test: verify the compiled binary actually starts.
       # Only possible for native linux-x64 builds on the ubuntu runner.
