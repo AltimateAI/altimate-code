@@ -18,9 +18,23 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   let connection: any
 
   // altimate_change start — improve DuckDB error messages
+  // Real DuckDB lock failures read "Could not set lock on file ... Conflicting
+  // lock is held", which contains "lock" but never "locked". Matching only
+  // "locked"/"DUCKDB_LOCKED" therefore missed every genuine lock collision, so
+  // the read-only retry never fired and concurrent readers just failed.
+  function isLockError(err: unknown): boolean {
+    const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+    return (
+      msg.includes("locked") ||
+      msg.includes("conflicting lock") ||
+      msg.includes("could not set lock") ||
+      msg.includes("sqlite_busy") ||
+      msg.includes("duckdb_locked")
+    )
+  }
+
   function wrapDuckDBError(err: Error): Error {
-    const msg = err.message || String(err)
-    if (msg.toLowerCase().includes("locked") || msg.includes("SQLITE_BUSY") || msg.includes("DUCKDB_LOCKED")) {
+    if (isLockError(err)) {
       return new Error(
         `Database "${dbPath}" is locked by another process. ` +
         `DuckDB does not support concurrent write access. ` +
@@ -109,10 +123,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (pendingOpen !== undefined) onOpen(pendingOpen)
         })
 
+      // altimate_change start — honour an explicit read-only connection.
+      // DuckDB takes an EXCLUSIVE file lock when opened read-write, so N
+      // concurrent readers of one .duckdb file leave N-1 of them failing to
+      // connect at all. Opening READ_ONLY up front is the only way several
+      // processes can share a file, and it is what a caller that declared
+      // `readonly` asked for. Relying on the lock-error retry below is not
+      // equivalent: it is best-effort string matching, and it wastes a full
+      // open attempt per connection.
+      const wantReadOnly = config.readonly === true && dbPath !== ":memory:"
       try {
-        db = await tryConnect()
+        db = await tryConnect(wantReadOnly ? "READ_ONLY" : undefined)
       } catch (err: any) {
-        if (err.message === "DUCKDB_LOCKED" && dbPath !== ":memory:") {
+        // altimate_change end
+        if (isLockError(err) && !wantReadOnly && dbPath !== ":memory:") {
           // Retry in read-only mode — allows concurrent reads
           try {
             db = await tryConnect("READ_ONLY")
