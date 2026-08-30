@@ -59,6 +59,15 @@ describe("normalizeArgs — shared (non-circular) references are not mislabeled 
     expect(result).toBe(JSON.stringify({ x: { a: 1 }, y: { a: 1 } }))
   })
 
+  test("preserves string whitespace while canonicalizing object key order", () => {
+    expect(SessionStarvation.normalizeArgs({ b: 1, a: "  x\n y  " })).toBe(
+      SessionStarvation.normalizeArgs({ a: "  x\n y  ", b: 1 }),
+    )
+    expect(SessionStarvation.normalizeArgs({ value: "a  b" })).not.toBe(
+      SessionStarvation.normalizeArgs({ value: "a b" }),
+    )
+  })
+
   test("a genuinely circular reference is still caught", () => {
     const circular: Record<string, unknown> = { a: 1 }
     circular.self = circular
@@ -313,7 +322,7 @@ describe("repeat_signature loop detection", () => {
     expect(third.repeatLoop).toBeUndefined()
   })
 
-  test("signature includes touched files and normalized args (order-insensitive, whitespace-insensitive)", () => {
+  test("signature includes touched files and normalized args (key-order-insensitive, string-whitespace-sensitive)", () => {
     const a = SessionStarvation.repeatSignature({
       tool: "edit",
       args: { filePath: "/a.sql", oldString: "select  1" },
@@ -326,7 +335,14 @@ describe("repeat_signature loop detection", () => {
       touchedFiles: ["/a.sql"],
       failureMessage: "not found",
     })
-    expect(a).toBe(b)
+    expect(a).not.toBe(b)
+    const reordered = SessionStarvation.repeatSignature({
+      tool: "edit",
+      args: { oldString: "select  1", filePath: "/a.sql" },
+      touchedFiles: ["/a.sql"],
+      failureMessage: "not  found",
+    })
+    expect(reordered).toBe(a)
     const c = SessionStarvation.repeatSignature({
       tool: "edit",
       args: { oldString: "select 1", filePath: "/a.sql" },
@@ -414,13 +430,14 @@ describe("doom-loop escalation ladder — re-keyed on (toolName + normalized arg
     expect(call.doomLoop).toBeUndefined()
   })
 
-  test("normalized-args keying: key order and whitespace do not defeat the counter", () => {
+  test("normalized-args keying canonicalizes key order but preserves meaningful whitespace", () => {
     const t = tracker({ doomLoopThreshold: 3 })
     t.onToolCall({ tool: "grep", input: { pattern: "foo", path: "/repo" } })
     t.onToolCall({ tool: "grep", input: { path: "/repo", pattern: "foo" } })
-    const call = t.onToolCall({ tool: "grep", input: { pattern: " foo ", path: "/repo" } })
-    expect(call.doomLoop).toBeDefined()
-    expect(call.doomLoop!.escalation).toBe("nudge")
+    const third = t.onToolCall({ tool: "grep", input: { pattern: "foo", path: "/repo" } })
+    expect(third.doomLoop?.escalation).toBe("nudge")
+    const distinct = t.onToolCall({ tool: "grep", input: { pattern: " foo ", path: "/repo" } })
+    expect(distinct.doomLoop).toBeUndefined()
   })
 
   test("polling patterns raise the threshold (multiplier), not an exemption", () => {
@@ -445,54 +462,47 @@ describe("doom-loop escalation ladder — re-keyed on (toolName + normalized arg
 })
 
 describe("armed gating logic (run-mode-only, exempt agents)", () => {
-  // Mirrors the gate expression in processor.ts:
-  //   sbExempt = exemptAgents.includes(agent) || assistantMessage.summary
-  //   sbArmed  = mode === "armed" && runMode && !sbExempt
-  //   starvation tracker is created only when mode !== "off" && !sbExempt
-  function exempt(resolved: SessionStarvation.ResolvedConfig, agent: string, summary: boolean) {
-    return resolved.exemptAgents.includes(agent) || summary
-  }
-  function armed(mode: SessionStarvation.Mode, runMode: boolean, agent: string, summary = false) {
-    const resolved = SessionStarvation.resolveConfig({ mode })
-    return mode === "armed" && runMode && !exempt(resolved, agent, summary)
-  }
-  /** Whether the per-session tracker is wired at all (and so can accumulate steps). */
-  function tracks(mode: SessionStarvation.Mode, agent: string, summary = false) {
-    const resolved = SessionStarvation.resolveConfig({ mode })
-    return mode !== "off" && !exempt(resolved, agent, summary)
+  // Exercise the exact gate consumed by processor.ts, not a test-only copy.
+  function gate(mode: SessionStarvation.Mode, runMode: boolean, agent: string, summary = false) {
+    return SessionStarvation.resolveGate({
+      config: SessionStarvation.resolveConfig({ mode }),
+      runMode,
+      agent,
+      summary,
+    })
   }
 
   test("annotate mode (the default) never arms — even in run mode", () => {
-    expect(armed("annotate", true, "build")).toBe(false)
+    expect(gate("annotate", true, "build").armed).toBe(false)
   })
   test("armed mode outside run mode (TUI/serve) never arms", () => {
-    expect(armed("armed", false, "build")).toBe(false)
+    expect(gate("armed", false, "build").armed).toBe(false)
   })
   test("armed + run mode arms for build agents", () => {
-    expect(armed("armed", true, "build")).toBe(true)
+    expect(gate("armed", true, "build").armed).toBe(true)
   })
   test("armed + run mode stays off for plan/review-class agents", () => {
-    expect(armed("armed", true, "plan")).toBe(false)
-    expect(armed("armed", true, "review")).toBe(false)
+    expect(gate("armed", true, "plan").armed).toBe(false)
+    expect(gate("armed", true, "review").armed).toBe(false)
   })
 
   // The compaction summarizer runs through the same processor under the session's
   // OWN id, so without an exemption its single mutation-free step would advance
   // the working agent's shared tracker.
   test("the compaction summarizer is exempt: no tracker is wired for a summary message", () => {
-    expect(tracks("annotate", "build", true)).toBe(false)
-    expect(tracks("armed", "build", true)).toBe(false)
+    expect(gate("annotate", true, "build", true).tracks).toBe(false)
+    expect(gate("armed", true, "build", true).tracks).toBe(false)
     // a normal working step on the same session still tracks
-    expect(tracks("annotate", "build", false)).toBe(true)
+    expect(gate("annotate", true, "build", false).tracks).toBe(true)
   })
 
   test("the compaction summarizer never arms, even in armed run mode", () => {
-    expect(armed("armed", true, "build", true)).toBe(false)
-    expect(armed("armed", true, "build", false)).toBe(true)
+    expect(gate("armed", true, "build", true).armed).toBe(false)
+    expect(gate("armed", true, "build", false).armed).toBe(true)
   })
 
   test("mode 'off' wires no tracker at all", () => {
-    expect(tracks("off", "build")).toBe(false)
+    expect(gate("off", true, "build").tracks).toBe(false)
   })
 })
 

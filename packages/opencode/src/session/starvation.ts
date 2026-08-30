@@ -116,6 +116,20 @@ export namespace SessionStarvation {
     }
   }
 
+  /** One production gate for tracker wiring and armed consequences. */
+  export function resolveGate(input: { config: ResolvedConfig; runMode: boolean; agent: string; summary: boolean }): {
+    exempt: boolean
+    tracks: boolean
+    armed: boolean
+  } {
+    const exempt = input.summary || input.config.exemptAgents.includes(input.agent)
+    return {
+      exempt,
+      tracks: input.config.mode !== "off" && !exempt,
+      armed: input.config.mode === "armed" && input.runMode && !exempt,
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Generic classifiers — NO vertical tokens (hard requirement: keep these domain-neutral).
   // ---------------------------------------------------------------------------
@@ -166,12 +180,14 @@ export namespace SessionStarvation {
     return false
   }
 
-  /** Deterministic, order-insensitive stringification of tool args. */
+  /** Deterministic, key-order-insensitive stringification of tool args. */
   export function normalizeArgs(input: unknown): string {
     const seen = new Set<unknown>()
     function norm(value: unknown): unknown {
       if (value === null || typeof value !== "object") {
-        if (typeof value === "string") return value.replace(/\s+/g, " ").trim()
+        // String whitespace is semantic for code, YAML, shell quoting, regexes,
+        // and exact edit replacements. Preserve it byte-for-byte so distinct
+        // repair attempts cannot be collapsed into one doom-loop key.
         return value
       }
       if (seen.has(value)) return "[circular]"

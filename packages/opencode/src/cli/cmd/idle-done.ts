@@ -33,8 +33,10 @@
 // Threshold rationale (config-exposed, not fitted to any one workload):
 //   minCompactions=2 — one compaction can be a single oversized tool output; two
 //     completed cycles with no progress in between is the churn signature.
-//   idleTurns=3 — kept small because each candidate turn here already passed the
-//     much stronger green-verify-after-last-write precondition.
+//   idleTurns=1 — a normal prompt loop exits on its first text-only `stop`, so a
+//     default above one made the fallback unreachable outside internal retry
+//     loops. The confirm-DONE challenge is itself the safety check; all stronger
+//     mutation, verification, compaction, and outstanding-work gates still apply.
 
 export namespace IdleDone {
   export interface Options {
@@ -59,7 +61,7 @@ export namespace IdleDone {
     return {
       enabled: enabledRaw !== "0" && enabledRaw !== "false",
       minCompactions: bound("ALTIMATE_IDLE_DONE_MIN_COMPACTIONS", 2),
-      idleTurns: bound("ALTIMATE_IDLE_DONE_IDLE_TURNS", 3),
+      idleTurns: bound("ALTIMATE_IDLE_DONE_IDLE_TURNS", 1),
       verifyCommand: env["ALTIMATE_RUN_VERIFY_COMMAND"]?.trim() || undefined,
     }
   }
@@ -257,6 +259,16 @@ export namespace IdleDone {
         .split(/\s+/)
         .filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
       const head = tokens[0]?.replace(/^\(+/, "")
+      // Git is a special command family: read-only subcommands are allowlisted
+      // above, while every other/unknown subcommand is conservatively treated
+      // as worktree-changing. This catches restore/checkout/switch/reset/clean
+      // when snapshots are unavailable and safely suppresses idle-done for
+      // ambiguous commands such as aliases.
+      if (head === "git") {
+        const sub = gitSubcommand(tokens)
+        if (!sub || !GIT_READ_ONLY_SUBCOMMANDS.has(sub)) return true
+        continue
+      }
       if (head && MUTATING_HEADS.has(head)) return true
     }
     // altimate_change end
@@ -380,8 +392,21 @@ export namespace IdleDone {
 
     function observeBash(part: PartSlice) {
       const command = typeof part.state?.input?.["command"] === "string" ? (part.state.input["command"] as string) : ""
-      const isCandidate = options.verifyCommand
-        ? command.trimStart().startsWith(options.verifyCommand) && !hasUnsafeVerificationControl(command)
+      const configuredPrefix = options.verifyCommand?.trim()
+      let configuredTailMutates = false
+      if (configuredPrefix && command.trimStart().startsWith(configuredPrefix)) {
+        // Trust the configured verifier itself (it may intentionally redirect
+        // output), but not extra chained work appended after that prefix. A
+        // green `npm test && rm generated.ts` verifies the pre-deletion state;
+        // the deletion must advance the mutation watermark instead.
+        const suffix = command.trimStart().slice(configuredPrefix.length)
+        const chained = suffix.indexOf("&&")
+        configuredTailMutates = chained >= 0 && isMutatingCommand(suffix.slice(chained + 2))
+      }
+      const isCandidate = configuredPrefix
+        ? command.trimStart().startsWith(configuredPrefix) &&
+          !hasUnsafeVerificationControl(command) &&
+          !configuredTailMutates
         : isVerificationCommand(command) && !isMutatingCommand(command)
       if (isCandidate) {
         const exit = part.state?.metadata?.["exit"]
@@ -389,6 +414,7 @@ export namespace IdleDone {
         lastVerifyGreen = exit === 0
         return
       }
+      if (configuredTailMutates) lastMutationSeq = seq
       // Not a verification. If it still wrote, advance the mutation watermark —
       // otherwise a stale earlier verify keeps satisfying precondition (i) even
       // though the session changed files after it. Checked after the candidate

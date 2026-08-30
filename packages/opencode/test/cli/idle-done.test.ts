@@ -58,11 +58,11 @@ function satisfied(options: IdleDone.Options = OPTS) {
 }
 
 describe("IdleDone.optionsFromEnv (config-exposed thresholds)", () => {
-  test("defaults: enabled, minCompactions=2, idleTurns=3, no verify command", () => {
+  test("defaults: enabled, minCompactions=2, idleTurns=1, no verify command", () => {
     expect(IdleDone.optionsFromEnv({})).toEqual({
       enabled: true,
       minCompactions: 2,
-      idleTurns: 3,
+      idleTurns: 1,
       verifyCommand: undefined,
     })
   })
@@ -83,7 +83,20 @@ describe("IdleDone.optionsFromEnv (config-exposed thresholds)", () => {
       ALTIMATE_IDLE_DONE_IDLE_TURNS: "-3",
     })
     expect(opts.minCompactions).toBe(2)
-    expect(opts.idleTurns).toBe(3)
+    expect(opts.idleTurns).toBe(1)
+  })
+
+  test("the default threshold is reachable before a normal prompt loop exits on its first stop", () => {
+    const options = IdleDone.optionsFromEnv({})
+    const d = IdleDone.create(options, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "make check", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    d.observePart(stepFinish("m_final"))
+    expect(d.shouldChallenge()).toBe(true)
   })
 })
 
@@ -145,6 +158,20 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
   test("mutating git subcommands are side-effecting", () => {
     expect(IdleDone.isReadOnlyCommand("git commit -m x")).toBe(false)
     expect(IdleDone.isReadOnlyCommand("git push")).toBe(false)
+  })
+
+  test("git worktree-changing subcommands are mutations when snapshots are unavailable", () => {
+    for (const command of [
+      "git restore src/app.ts",
+      "git checkout -- src/app.ts",
+      "git switch feature",
+      "git reset --hard HEAD~1",
+      "git clean -fd",
+    ]) {
+      expect(IdleDone.isMutatingCommand(command)).toBe(true)
+    }
+    expect(IdleDone.isMutatingCommand("git status")).toBe(false)
+    expect(IdleDone.isMutatingCommand("git diff --check")).toBe(false)
   })
 
   test("git global options are skipped before classifying the subcommand", () => {
@@ -363,6 +390,38 @@ describe("IdleDone hard preconditions", () => {
     d.observePart(stepFinish("cmp_2"))
     for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
     expect(d.shouldChallenge()).toBe(true)
+  })
+
+  test("(i)/(ii) work chained after a configured verifier is tracked as a later mutation", () => {
+    const opts: IdleDone.Options = { ...OPTS, verifyCommand: "npm test" }
+    const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify_then_delete", "npm test && rm generated.ts", 0))
+    d.observePart(stepFinish("m_verify_then_delete"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    const snap = d.snapshot()
+    expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
+    expect(snap.last_verify_green).toBe(false)
+  })
+
+  test("(i) git restore after a green verify advances the mutation watermark without a patch part", () => {
+    const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "make check", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(bashPart("m_restore", "git restore src/app.ts", 0))
+    d.observePart(stepFinish("m_restore"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+    expect(d.shouldChallenge()).toBe(false)
+    const snap = d.snapshot()
+    expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
   })
 
   test("(ii) a configured verifier cannot mask its failure with shell control flow", () => {

@@ -238,11 +238,14 @@ export namespace SessionProcessor {
         // mode). It can only produce a summary, so it is exempt from starvation
         // accounting entirely — the same reason it is excluded from directive
         // delivery below.
-        const sbSummarizer = input.assistantMessage.summary === true
-        const sbExempt = sbConfig.exemptAgents.includes(input.assistantMessage.agent) || sbSummarizer
-        const starvation =
-          sbConfig.mode === "off" || sbExempt ? undefined : SessionStarvation.forSession(input.sessionID, sbConfig)
-        const sbArmed = sbConfig.mode === "armed" && runMode && !sbExempt
+        const sbGate = SessionStarvation.resolveGate({
+          config: sbConfig,
+          runMode,
+          agent: input.assistantMessage.agent,
+          summary: input.assistantMessage.summary === true,
+        })
+        const starvation = sbGate.tracks ? SessionStarvation.forSession(input.sessionID, sbConfig) : undefined
+        const sbArmed = sbGate.armed
         const sbMode = sbConfig.mode === "armed" ? ("armed" as const) : ("annotate" as const)
         let starvationStop = false
         // altimate_change start — per-tool-result dispatch cap, resolved once
@@ -525,16 +528,29 @@ export namespace SessionProcessor {
                         if (sbArmed) {
                           if (wouldStop) {
                             starvationStop = true
+                            const stopMessage =
+                              `altimate-code: stopping — the same \`${value.toolName}\` call with identical ` +
+                              `arguments was repeated ${call.doomLoop.count} times despite a nudge and a ` +
+                              `forced status-check (doom-loop escalation ladder, run mode).`
+                            // A harness hard stop is a failed run, not an
+                            // ordinary model stop. Persist and publish the
+                            // error so RunAccounting emits rc=1 and
+                            // why_harness_stopped="error".
+                            input.assistantMessage.error = MessageV2.fromError(new Error(stopMessage), {
+                              providerID: input.model.providerID,
+                            })
+                            input.assistantMessage.finish = "error"
+                            await Bus.publish(Session.Event.Error, {
+                              sessionID: input.assistantMessage.sessionID,
+                              error: input.assistantMessage.error,
+                            })
                             await Session.updatePart({
                               id: PartID.ascending(),
                               messageID: input.assistantMessage.id,
                               sessionID: input.assistantMessage.sessionID,
                               type: "text",
                               synthetic: true,
-                              text:
-                                `altimate-code: stopping — the same \`${value.toolName}\` call with identical ` +
-                                `arguments was repeated ${call.doomLoop.count} times despite a nudge and a ` +
-                                `forced status-check (doom-loop escalation ladder, run mode).`,
+                              text: stopMessage,
                               time: { start: Date.now(), end: Date.now() },
                             })
                           } else {
@@ -1025,7 +1041,9 @@ export namespace SessionProcessor {
                   })
                   continue
               }
-              if (needsCompaction) break
+              // altimate_change start — an armed doom-loop stop must terminate the stream immediately
+              if (needsCompaction || starvationStop) break
+              // altimate_change end
             }
           } catch (e: any) {
             log.error("process", {
