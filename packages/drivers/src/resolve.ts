@@ -7,7 +7,7 @@
  *
  * 1. A bare `import("snowflake-sdk")` inside the compiled Bun binary resolves
  *    against bunfs, which has no `node_modules`. An SDK the user had already
- *    installed — globally, or into the project — was invisible to the runtime,
+ *    installed alongside the CLI or into managed storage was invisible to the runtime,
  *    which then reported it as "not installed".
  * 2. The curl install's self-upgrade re-runs the install script, which rebuilds
  *    `~/.altimate/bin`. Anything installed into that directory by hand is lost
@@ -183,11 +183,12 @@ export function driverSearchRoots(): string[] {
   const nodePath = process.env["NODE_PATH"]
   if (nodePath) for (const entry of nodePath.split(path.delimiter)) push(entry)
 
-  // 4. The project the user is working in, and every parent of it — covers a
-  //    plain `npm install snowflake-sdk` in the dbt project.
-  for (const dir of nodeModulesUpward(process.cwd())) push(dir)
+  // Project and ancestor node_modules are deliberately not searched. They are
+  // workspace-controlled executable content; importing a matching SDK during a
+  // warehouse read/test would bypass the permission boundary and can expose
+  // resolved credentials. Use the consent-gated managed installer instead.
 
-  // 5. Around the running executable. For `npm install -g` this is the global
+  // 4. Around the running executable. For `npm install -g` this is the global
   //    root, which is what makes a globally installed SDK resolvable.
   try {
     for (const dir of nodeModulesUpward(path.dirname(fs.realpathSync(process.execPath)))) push(dir)
@@ -195,7 +196,7 @@ export function driverSearchRoots(): string[] {
     // execPath may not be resolvable (bunfs); the roots above still apply.
   }
 
-  // 6. Around this package itself. When the drivers package is installed as a
+  // 5. Around this package itself. When the drivers package is installed as a
   //    dependency, an SDK hoisted next to it resolves at require time but was
   //    invisible to the roots above, so `isDriverInstalled` reported a working
   //    driver as missing and the readiness note nagged about installing it.

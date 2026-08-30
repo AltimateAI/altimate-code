@@ -180,6 +180,27 @@ describe("driverSearchRoots", () => {
 
     expect(roots.length).toBe(new Set(roots).size)
   })
+
+  test("does not trust project or ancestor node_modules implicitly", () => {
+    const ancestor = path.join(tmpRoot, "ancestor")
+    const workspace = path.join(ancestor, "workspace")
+    installFakePackage(ancestor, "altimate-hostile-ancestor-sdk", "module.exports = {}")
+    installFakePackage(workspace, "altimate-hostile-project-sdk", "module.exports = {}")
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "managed")
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(workspace)
+      const roots = driverSearchRoots()
+
+      expect(roots).not.toContain(path.join(workspace, "node_modules"))
+      expect(roots).not.toContain(path.join(ancestor, "node_modules"))
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
 })
 
 describe("resolveOptionalPackage", () => {
@@ -230,6 +251,65 @@ describe("loadOptionalDriver", () => {
     const mod: any = await loadOptionalDriver("postgres", "altimate-fake-sdk")
 
     expect(mod.marker ?? mod.default?.marker).toBe("resolved-from-disk")
+  })
+
+  test("does not import a package found only in project or ancestor roots", async () => {
+    const ancestor = path.join(tmpRoot, "ancestor")
+    const workspace = path.join(ancestor, "workspace")
+    const specifier = "altimate-hostile-project-sdk"
+    installFakePackage(ancestor, specifier, "module.exports = { marker: 'ancestor' }")
+    installFakePackage(workspace, specifier, "module.exports = { marker: 'project' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "managed")
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+    const attempts: string[] = []
+    const importer = async (spec: string) => {
+      attempts.push(spec)
+      throw Object.assign(new Error(`Cannot find package '${spec}'`), { code: "ERR_MODULE_NOT_FOUND" })
+    }
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(workspace)
+      await expect(loadOptionalDriver("postgres", specifier, importer)).rejects.toBeInstanceOf(DriverNotInstalledError)
+    } finally {
+      process.chdir(originalCwd)
+    }
+
+    expect(attempts).toEqual([specifier])
+    expect(attempts.some((attempt) => attempt.startsWith("file:"))).toBe(false)
+  })
+
+  test("prefers a managed SDK over an untrusted project copy", async () => {
+    const managed = path.join(tmpRoot, "managed")
+    const workspace = path.join(tmpRoot, "workspace")
+    const specifier = "altimate-managed-priority-sdk"
+    installFakePackage(managed, specifier, "module.exports = { marker: 'managed' }")
+    installFakePackage(workspace, specifier, "module.exports = { marker: 'project' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = managed
+    delete process.env["ALTIMATE_BIN_DIR"]
+    delete process.env["NODE_PATH"]
+
+    const originalCwd = process.cwd()
+    try {
+      process.chdir(workspace)
+      const mod: any = await loadOptionalDriver("postgres", specifier)
+      expect(mod.marker ?? mod.default?.marker).toBe("managed")
+    } finally {
+      process.chdir(originalCwd)
+    }
+  })
+
+  test("loads an SDK from an explicit NODE_PATH root", async () => {
+    const explicit = path.join(tmpRoot, "explicit")
+    const specifier = "altimate-explicit-node-path-sdk"
+    installFakePackage(explicit, specifier, "module.exports = { marker: 'node-path' }")
+    process.env["ALTIMATE_DRIVER_DIR"] = path.join(tmpRoot, "managed")
+    process.env["NODE_PATH"] = path.join(explicit, "node_modules")
+
+    const mod: any = await loadOptionalDriver("postgres", specifier)
+
+    expect(mod.marker ?? mod.default?.marker).toBe("node-path")
   })
 
   test("throws DriverNotInstalledError naming the searched roots", async () => {

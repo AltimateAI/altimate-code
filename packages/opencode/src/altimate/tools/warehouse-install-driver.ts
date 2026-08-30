@@ -1,4 +1,6 @@
 import z from "zod"
+import path from "node:path"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Tool } from "../../tool/tool"
 import {
   DRIVER_PACKAGES,
@@ -8,6 +10,7 @@ import {
   driverLabel,
   installOptionalDriver,
   isDriverInstalled,
+  npmInstallArgs,
   type DriverName,
 } from "@altimateai/drivers/resolve"
 
@@ -59,7 +62,7 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
   parameters: z.object({
     driver: z.enum(DRIVER_NAMES).describe("Warehouse type whose driver should be installed"),
   }),
-  async execute(args): Promise<InstallDriverResult> {
+  async execute(args, ctx): Promise<InstallDriverResult> {
     // The zod enum above guarantees one of the 12 driver names; the assertion
     // re-narrows it, since z.enum over a readonly tuple widens to string.
     const driver = args.driver as DriverName
@@ -80,8 +83,28 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
       }
     }
 
+    const packages = DRIVER_PACKAGES[driver].join(" ")
+    const externalPattern = FSUtil.normalizePathPattern(path.join(dir, "*"))
+    const installCommand = ["npm", ...npmInstallArgs(DRIVER_PACKAGES[driver])].join(" ")
+
+    // This tool bypasses the bash and edit tools, so it must broker the same
+    // permissions itself before npm (including lifecycle scripts) can run or
+    // the managed directory can be changed. Keep the command exact: callers
+    // choose only a driver enum, never shell text or package names.
+    await ctx.ask({
+      permission: "external_directory",
+      patterns: [externalPattern],
+      always: [externalPattern],
+      metadata: { driver, dir },
+    })
+    await ctx.ask({
+      permission: "bash",
+      patterns: [installCommand],
+      always: [installCommand],
+      metadata: { driver, dir, packages: DRIVER_PACKAGES[driver] },
+    })
+
     const result = await installOptionalDriver(driver, { force: resolves && !loads })
-    const packages = result.packages.join(" ")
 
     if (!result.installed) {
       return {
