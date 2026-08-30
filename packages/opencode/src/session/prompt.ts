@@ -1902,6 +1902,7 @@ export namespace SessionPrompt {
           // altimate_change start — disambiguate repeated concurrent tool-call ids
           const { ctx, execution } = context(item.id, args, options)
           // altimate_change end
+          // altimate_change start — release the execution identity on every exit path
           try {
             await Plugin.trigger(
               "tool.execute.before",
@@ -1948,6 +1949,7 @@ export namespace SessionPrompt {
           } finally {
             input.processor.finishToolExecution(execution)
           }
+          // altimate_change end
         },
       })
     }
@@ -1968,6 +1970,7 @@ export namespace SessionPrompt {
         // altimate_change start — disambiguate repeated concurrent tool-call ids
         const { ctx, execution } = context(key, args, opts)
         // altimate_change end
+        // altimate_change start — release the execution identity on every exit path
         try {
           await Plugin.trigger(
             "tool.execute.before",
@@ -2066,6 +2069,7 @@ export namespace SessionPrompt {
         } finally {
           input.processor.finishToolExecution(execution)
         }
+        // altimate_change end
       }
       tools[key] = item
     }
