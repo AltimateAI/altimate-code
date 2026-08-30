@@ -39,19 +39,37 @@ const REQUIRED_CATALOG_PROVIDERS = ["anthropic", "openai", "google"]
 const MIN_CATALOG_PROVIDERS = 50
 const CATALOG_FETCH_TIMEOUT_MS = 60_000
 
-/** True when `entry` is shaped like a models.dev provider entry.
+/** Describe the first structural problem in a provider entry, or undefined when
+ * it is well formed.
  *
- * Deliberately the same structural check the runtime uses (`isCatalogEntry` in
+ * The provider-level rules match the runtime's own predicate (`isCatalogEntry` in
  * src/provider/models-catalog.ts, which `Provider.state()` screens every entry
- * with), NOT the zod `Provider` schema: that schema requires an `options` record
- * real models.dev entries do not carry, and gating on it rejects every provider in
- * our own catalogs. See the note on `isCatalogEntry` for that history. */
-function isProviderEntry(entry: unknown): boolean {
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return false
-  if (!("id" in entry) || typeof entry.id !== "string") return false
-  if (!("models" in entry)) return false
+ * with). The per-model rules cover exactly the fields the runtime dereferences
+ * WITHOUT a guard: `Provider.fromModelsDevModel` reads `model.limit.context`
+ * directly while every neighbouring field uses `?.`/`??`, so a model record
+ * missing `limit` crashes provider initialisation on cold start instead of
+ * degrading. Catching it here turns that into a failed release build.
+ *
+ * Deliberately NOT the zod `Provider` schema, which requires an `options` record
+ * real models.dev entries do not carry and would reject valid live data — see the
+ * note on `isCatalogEntry` for that history. Verified against every model in the
+ * release fixture (4108), the committed snapshot (5299) and the live catalog
+ * (7487): zero failures. */
+function providerEntryProblem(id: string, entry: unknown): string | undefined {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return `${id} (not an object)`
+  if (!("id" in entry) || typeof entry.id !== "string") return `${id} (no string id)`
+  if (!("models" in entry)) return `${id} (no models)`
   const models = entry.models
-  return typeof models === "object" && models !== null && !Array.isArray(models)
+  if (typeof models !== "object" || models === null || Array.isArray(models)) return `${id} (models is not a map)`
+  for (const [modelId, model] of Object.entries(models)) {
+    const where = `${id}/${modelId}`
+    if (typeof model !== "object" || model === null || Array.isArray(model)) return `${where} (not an object)`
+    if (!("limit" in model)) return `${where} (no limit)`
+    const limit = model.limit
+    if (typeof limit !== "object" || limit === null || Array.isArray(limit)) return `${where} (limit is not an object)`
+    if (!("context" in limit) || typeof limit.context !== "number") return `${where} (limit.context is not a number)`
+  }
+  return undefined
 }
 
 /** Fetch the models.dev catalog, failing loudly rather than hanging or
@@ -123,11 +141,13 @@ function assertUsableCatalog(text: string, origin: string, strict: boolean): voi
     throw new Error(`models.dev catalog from ${origin} is not a provider object`)
   const catalog = new Map<string, unknown>(Object.entries(parsed))
   if (catalog.size === 0) throw new Error(`models.dev catalog from ${origin} is empty`)
-  const malformed = [...catalog.entries()].filter(([, entry]) => !isProviderEntry(entry)).map(([id]) => id)
-  if (malformed.length > 0)
+  const problems = [...catalog.entries()]
+    .map(([id, entry]) => providerEntryProblem(id, entry))
+    .filter((p): p is string => p !== undefined)
+  if (problems.length > 0)
     throw new Error(
-      `models.dev catalog from ${origin} has ${malformed.length} malformed provider entries: ` +
-        `${malformed.slice(0, 5).join(", ")}${malformed.length > 5 ? ", …" : ""}`,
+      `models.dev catalog from ${origin} has ${problems.length} malformed provider entries: ` +
+        `${problems.slice(0, 5).join(", ")}${problems.length > 5 ? ", …" : ""}`,
     )
   const modelCount = (id: string): number => {
     const entry = catalog.get(id)
