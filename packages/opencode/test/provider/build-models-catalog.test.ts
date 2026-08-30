@@ -8,6 +8,7 @@ type MutableCatalog = Record<
   string,
   {
     id: unknown
+    name?: unknown
     env?: unknown
     api?: unknown
     npm?: unknown
@@ -15,6 +16,12 @@ type MutableCatalog = Record<
       string,
       {
         id: unknown
+        name?: unknown
+        release_date?: unknown
+        attachment?: unknown
+        reasoning?: unknown
+        temperature?: unknown
+        tool_call?: unknown
         provider?: unknown
         limit: Record<string, unknown>
         modalities: Record<string, unknown>
@@ -27,12 +34,19 @@ function customCatalog(): MutableCatalog {
   return {
     acme: {
       id: "acme",
+      name: "Acme",
       env: ["ACME_API_KEY"],
       api: "https://api.example.com/v1",
       npm: "@ai-sdk/openai-compatible",
       models: {
         "acme-one": {
           id: "acme-one",
+          name: "Acme One",
+          release_date: "2026-01-01",
+          attachment: false,
+          reasoning: false,
+          temperature: true,
+          tool_call: true,
           limit: { context: 128_000, input: 120_000, output: 8_000 },
           modalities: { input: ["text"], output: ["text"] },
         },
@@ -50,9 +64,16 @@ function strictCatalog(): MutableCatalog {
           provider,
           {
             id: provider,
+            name: provider,
             models: {
               [model]: {
                 id: model,
+                name: model,
+                release_date: "2026-01-01",
+                attachment: false,
+                reasoning: false,
+                temperature: true,
+                tool_call: true,
                 limit: { context: 128_000, output: 8_000 },
                 modalities: {},
               },
@@ -88,6 +109,13 @@ describe("build models catalog validation", () => {
     expect(summary.requiredModelCounts.google).toBeGreaterThan(0)
   })
 
+  test("accepts an omitted temperature capability used by the live catalog", () => {
+    const catalog = customCatalog()
+    delete catalog.acme.models["acme-one"].temperature
+
+    expect(() => assertUsableCatalog(JSON.stringify(catalog), diagnosticOrigin, false)).not.toThrow()
+  })
+
   for (const [label, body, message] of [
     ["non-JSON", "<html>bad gateway</html>", "is not valid JSON"],
     ["an array", "[]", "is not a provider object"],
@@ -110,6 +138,11 @@ describe("build models catalog validation", () => {
       message: "acme (id does not match catalog key)",
     },
     {
+      label: "a provider without a string name",
+      mutate: (catalog) => (catalog.acme.name = 42),
+      message: "acme.name is not a non-empty string",
+    },
+    {
       label: "a model without a string ID",
       mutate: (catalog) => (catalog.acme.models["acme-one"].id = 42),
       message: "acme/acme-one (no non-empty string id)",
@@ -118,6 +151,36 @@ describe("build models catalog validation", () => {
       label: "a model ID that differs from its catalog key",
       mutate: (catalog) => (catalog.acme.models["acme-one"].id = "other"),
       message: "acme/acme-one (id does not match catalog key)",
+    },
+    {
+      label: "a model without a name",
+      mutate: (catalog) => delete catalog.acme.models["acme-one"].name,
+      message: "acme/acme-one.name is not a non-empty string",
+    },
+    {
+      label: "a model without a release date",
+      mutate: (catalog) => delete catalog.acme.models["acme-one"].release_date,
+      message: "acme/acme-one.release_date is not a non-empty string",
+    },
+    {
+      label: "a model without an attachment capability",
+      mutate: (catalog) => delete catalog.acme.models["acme-one"].attachment,
+      message: "acme/acme-one.attachment is not a boolean",
+    },
+    {
+      label: "a model without a reasoning capability",
+      mutate: (catalog) => delete catalog.acme.models["acme-one"].reasoning,
+      message: "acme/acme-one.reasoning is not a boolean",
+    },
+    {
+      label: "a model without a tool-call capability",
+      mutate: (catalog) => delete catalog.acme.models["acme-one"].tool_call,
+      message: "acme/acme-one.tool_call is not a boolean",
+    },
+    {
+      label: "a non-boolean temperature capability",
+      mutate: (catalog) => (catalog.acme.models["acme-one"].temperature = "yes"),
+      message: "acme/acme-one.temperature is not a boolean",
     },
     {
       label: "a non-array provider env",

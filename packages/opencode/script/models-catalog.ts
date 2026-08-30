@@ -18,6 +18,16 @@ function optionalStringProblem(value: unknown, where: string, allowEmpty = true)
   return undefined
 }
 
+function requiredStringProblem(value: unknown, where: string): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return `${where} is not a non-empty string`
+  return undefined
+}
+
+function requiredBooleanProblem(value: unknown, where: string): string | undefined {
+  if (typeof value !== "boolean") return `${where} is not a boolean`
+  return undefined
+}
+
 function stringArrayProblem(value: unknown, where: string): string | undefined {
   if (value === undefined || value === null) return undefined
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return `${where} is not a string array`
@@ -29,6 +39,9 @@ function providerEntryProblem(id: string, entry: unknown): string | undefined {
   if (!isRecord(entry)) return `${id} (not an object)`
   if (typeof entry.id !== "string" || entry.id.length === 0) return `${id} (no non-empty string id)`
   if (entry.id !== id) return `${id} (id does not match catalog key)`
+
+  const nameProblem = requiredStringProblem(entry.name, `${id}.name`)
+  if (nameProblem) return nameProblem
 
   const envProblem = stringArrayProblem(entry.env, `${id}.env`)
   if (envProblem) return envProblem
@@ -45,6 +58,22 @@ function providerEntryProblem(id: string, entry: unknown): string | undefined {
     if (!isRecord(model)) return `${where} (not an object)`
     if (typeof model.id !== "string" || model.id.length === 0) return `${where} (no non-empty string id)`
     if (model.id !== modelId) return `${where} (id does not match catalog key)`
+
+    for (const field of ["name", "release_date"] as const) {
+      const problem = requiredStringProblem(model[field], `${where}.${field}`)
+      if (problem) return problem
+    }
+    for (const field of ["attachment", "reasoning", "tool_call"] as const) {
+      const problem = requiredBooleanProblem(model[field], `${where}.${field}`)
+      if (problem) return problem
+    }
+    // models.dev currently omits `temperature` for some valid entries. Undefined
+    // is consumed as a falsey capability, but a present non-boolean still violates
+    // the runtime contract and must not be embedded.
+    if (model.temperature !== undefined) {
+      const temperatureProblem = requiredBooleanProblem(model.temperature, `${where}.temperature`)
+      if (temperatureProblem) return temperatureProblem
+    }
 
     if (model.provider !== undefined && model.provider !== null) {
       if (!isRecord(model.provider)) return `${where}.provider is not an object`
