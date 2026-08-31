@@ -470,8 +470,19 @@ describe("unresolvedEnvVars staleness", () => {
     )
   }
 
-  test("clears a variable that has since been set", async () => {
+  // Save and restore rather than blindly deleting: these mutate process-wide state, and a
+  // parallel `bun test` run must not observe a variable this file removed or left behind.
+  let previous: string | undefined
+  beforeEach(() => {
+    previous = process.env[VAR]
     delete process.env[VAR]
+  })
+  afterEach(() => {
+    if (previous === undefined) delete process.env[VAR]
+    else process.env[VAR] = previous
+  })
+
+  test("clears a variable that has since been set", async () => {
     await writeServer()
 
     await discoverExternalMcp(tempDir)
@@ -479,19 +490,14 @@ describe("unresolvedEnvVars staleness", () => {
 
     // The user sets the variable and discovery runs again (config reload / mcp_discover).
     process.env[VAR] = "now-set"
-    try {
-      await discoverExternalMcp(tempDir)
-      // Previously this still returned [VAR]: the record only ever unioned, and the recording
-      // site sits inside an `unresolvedNames.length > 0` guard, so a clean run never cleared it.
-      // `/mcps` kept telling the user to set a variable that already resolved.
-      expect(unresolvedEnvVars("stale")).toEqual([])
-    } finally {
-      delete process.env[VAR]
-    }
+    await discoverExternalMcp(tempDir)
+    // Previously this still returned [VAR]: the record only ever unioned, and the recording
+    // site sits inside an `unresolvedNames.length > 0` guard, so a clean run never cleared it.
+    // `/mcps` kept telling the user to set a variable that already resolved.
+    expect(unresolvedEnvVars("stale")).toEqual([])
   })
 
   test("still reports it while it is genuinely unset", async () => {
-    delete process.env[VAR]
     await writeServer()
     await discoverExternalMcp(tempDir)
     await discoverExternalMcp(tempDir)

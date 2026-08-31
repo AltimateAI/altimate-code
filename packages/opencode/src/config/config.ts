@@ -314,12 +314,15 @@ export const layer = Layer.effect(
 
     const loadConfig = Effect.fnUntraced(function* (
       text: string,
-      options: { path: string } | { dir: string; source: string },
+      options: ({ path: string } | { dir: string; source: string }) & { keepDiagnostics?: boolean },
       env?: Record<string, string>,
     ) {
       const source = "path" in options ? options.path : options.source
       // altimate_change start — upstream_fix (#701): clear before the load, union during it.
-      ConfigVariable.resetBlankedEnvVars(source)
+      // `keepDiagnostics` is for a caller that already reset this source and recorded against it:
+      // the well-known flow substitutes `remote_config.url` and its headers under the same source
+      // before handing the fetched body here, and resetting again threw those names away.
+      if (!options.keepDiagnostics) ConfigVariable.resetBlankedEnvVars(source)
       // altimate_change end
       const expanded = yield* Effect.promise(() =>
         ConfigVariable.substitute(
@@ -503,6 +506,10 @@ export const layer = Layer.effect(
               {
                 dir: path.dirname(source),
                 source,
+                // altimate_change start — upstream_fix (#701): keep the url/header blanks that
+                // substituteWellKnownRemoteConfig just recorded under this same source.
+                keepDiagnostics: true,
+                // altimate_change end
               },
               authEnv,
             )
