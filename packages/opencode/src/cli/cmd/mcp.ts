@@ -9,6 +9,10 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js"
 import * as prompts from "@clack/prompts"
 import { UI } from "../ui"
 import { MCP } from "../../mcp"
+// altimate_change start — upstream_fix (#701): env diagnostics surfaced by `mcp list`.
+import * as McpDiscover from "../../mcp/discover"
+import { ConfigVariable } from "../../config/variable"
+// altimate_change end
 import { McpAuth } from "../../mcp/auth"
 import { McpOAuthProvider } from "../../mcp/oauth-provider"
 import { Config } from "@/config/config"
@@ -167,11 +171,29 @@ export const McpListCommand = effectCmd({
         hint = "\n    " + status.error
       }
 
+      // altimate_change start — upstream_fix (#701): name variables that resolved to "".
+      // A blank `${SNOWFLAKE_PASSWORD}` often connects and only fails on first real use, so
+      // this is appended regardless of status rather than only on the failure branch.
+      const unresolved = McpDiscover.unresolvedEnvVars(name)
+      if (unresolved.length > 0) {
+        hint += "\n    unresolved env: " + unresolved.join(", ") + " (set or remove)"
+      }
+      // altimate_change end
+
       const typeHint = serverConfig.type === "remote" ? serverConfig.url : serverConfig.command.join(" ")
       prompts.log.info(
         `${statusIcon} ${name} ${UI.Style.TEXT_DIM}${statusText}${hint}\n    ${UI.Style.TEXT_DIM}${typeHint}`,
       )
     }
+
+    // altimate_change start — upstream_fix (#701): a missing `{env:VAR}` becomes "" and the config
+    // parses clean, so a blank credential reaches the server and fails much later with an error
+    // naming neither. Attribution to a single server is not available here (substitution runs on
+    // raw config text, before any structure exists), so this is reported against the file.
+    for (const { source, names } of ConfigVariable.blankedEnvVars()) {
+      prompts.log.warn(`${names.join(", ")} resolved to empty in ${source} (set or remove)`)
+    }
+    // altimate_change end
 
     prompts.outro(`${servers.length} server(s)`)
   }),

@@ -159,6 +159,10 @@ async function substituteWellKnownRemoteConfig(input: {
 }) {
   if (!isRecord(input.value) || typeof input.value.url !== "string") return undefined
 
+  // altimate_change start — upstream_fix (#701): the url and every header below publish under
+  // this same source, so clear once here and let those calls union into one record.
+  ConfigVariable.resetBlankedEnvVars(input.source)
+  // altimate_change end
   const url = await ConfigVariable.substitute({
     text: input.value.url,
     type: "virtual",
@@ -341,6 +345,14 @@ export const layer = Layer.effect(
 
     const loadFile = Effect.fnUntraced(function* (filepath: string, env?: Record<string, string>) {
       yield* Effect.logInfo("loading", { path: filepath })
+      // altimate_change start — upstream_fix (#701): substitution unions now, so whoever begins a
+      // load clears this source first. Before the empty-file return, not after: a config that is
+      // deleted or emptied must drop the names it recorded while it still had a `{env:VAR}`,
+      // otherwise `mcp list` warns about a variable that appears in no config at all.
+      // Deliberately NOT inside loadConfig — the well-known flow records url/header blanks under
+      // the same source before calling it, and a reset in there threw those names away.
+      ConfigVariable.resetBlankedEnvVars(filepath)
+      // altimate_change end
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
       return yield* loadConfig(text, { path: filepath }, env)
@@ -598,6 +610,9 @@ export const layer = Layer.effect(
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
+          // altimate_change start — upstream_fix (#701): clear before this load.
+          ConfigVariable.resetBlankedEnvVars(source)
+          // altimate_change end
           const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
             dir: ctx.directory,
             source,
@@ -625,6 +640,9 @@ export const layer = Layer.effect(
 
             if (Option.isSome(configOpt)) {
               const source = `${url}/api/config`
+              // altimate_change start — upstream_fix (#701): clear before this load.
+              ConfigVariable.resetBlankedEnvVars(source)
+              // altimate_change end
               const next = yield* loadConfig(JSON.stringify(configOpt.value), {
                 dir: path.dirname(source),
                 source,
@@ -671,6 +689,9 @@ export const layer = Layer.effect(
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
+          // altimate_change start — upstream_fix (#701): clear before this load.
+          ConfigVariable.resetBlankedEnvVars(managed.source)
+          // altimate_change end
           // altimate_change start — note a managed datamate key before merging
           const managedPrefs = yield* loadConfig(managed.text, {
             dir: path.dirname(managed.source),

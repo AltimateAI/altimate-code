@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises"
 import os, { tmpdir } from "os"
 import path from "path"
-import { discoverExternalMcp } from "../../src/mcp/discover"
+import { discoverExternalMcp, unresolvedEnvVars } from "../../src/mcp/discover"
 
 let tempDir: string
 let homeDir: string
@@ -482,3 +482,54 @@ describe("discoverExternalMcp", () => {
   })
   // altimate_change end
 })
+
+// altimate_change start — upstream_fix (#701): the record must not outlive the problem.
+describe("unresolvedEnvVars staleness", () => {
+  const VAR = "ALTIMATE_TEST_UNRESOLVED_VAR"
+
+  async function writeServer() {
+    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".vscode/mcp.json"),
+      JSON.stringify({
+        servers: { stale: { command: "node", env: { TOKEN: `{env:${VAR}}` } } },
+      }),
+    )
+  }
+
+  // Save and restore rather than blindly deleting: these mutate process-wide state, and a
+  // parallel `bun test` run must not observe a variable this file removed or left behind.
+  let previous: string | undefined
+  beforeEach(() => {
+    previous = process.env[VAR]
+    delete process.env[VAR]
+  })
+  afterEach(() => {
+    if (previous === undefined) delete process.env[VAR]
+    else process.env[VAR] = previous
+  })
+
+  test("clears a variable that has since been set", async () => {
+    await writeServer()
+
+    await discoverExternalMcp(tempDir)
+    expect(unresolvedEnvVars("stale")).toContain(VAR)
+
+    // The user sets the variable and discovery runs again (config reload / mcp_discover).
+    process.env[VAR] = "now-set"
+    await discoverExternalMcp(tempDir)
+    // Previously this still returned [VAR]: the record only ever unioned, and the recording
+    // site sits inside an `unresolvedNames.length > 0` guard, so a clean run never cleared it.
+    // `/mcps` kept telling the user to set a variable that already resolved.
+    expect(unresolvedEnvVars("stale")).toEqual([])
+  })
+
+  test("still reports it while it is genuinely unset", async () => {
+    await writeServer()
+    await discoverExternalMcp(tempDir)
+    await discoverExternalMcp(tempDir)
+    // The reset must not swallow a real, still-unresolved variable across runs.
+    expect(unresolvedEnvVars("stale")).toContain(VAR)
+  })
+})
+// altimate_change end

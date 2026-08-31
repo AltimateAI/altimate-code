@@ -143,6 +143,24 @@ export const Status = Schema.Union([
 ]).annotate({ identifier: "MCPStatus", discriminator: "status" })
 export type Status = Schema.Schema.Type<typeof Status>
 
+// altimate_change start — upstream_fix: do not swallow the connect error (#1121).
+// The failure path already carries the real message — `401 Unauthorized`, a transport
+// error, `Invalid MCP URL for "<key>"` — in `status.error`, but the warning logged only
+// `status.status`, which is the constant string "failed". An external user had to read
+// this source to find out why their server would not connect.
+//
+// Split out as a pure function so the payload is testable without standing up a
+// transport, and so a future edit cannot quietly drop the field again.
+export function unavailableLogFields(
+  key: string,
+  type: string,
+  status: Status,
+): { key: string; type: string; status: string; error?: string } {
+  const error = "error" in status && typeof status.error === "string" ? status.error : undefined
+  return error ? { key, type, status: status.status, error } : { key, type, status: status.status }
+}
+// altimate_change end
+
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
 const pendingOAuthTransports = new Map<string, TransportWithAuth>()
@@ -627,7 +645,9 @@ export const layer = Layer.effect(
 
         if (!mcpClient) {
           if (status.status !== "connected" && status.status !== "disabled") {
-            yield* Effect.logWarning("server unavailable", { key, type: mcp.type, status: status.status })
+            // altimate_change start — upstream_fix: include the real error (#1121).
+            yield* Effect.logWarning("server unavailable", unavailableLogFields(key, mcp.type, status))
+            // altimate_change end
           }
           return { status } satisfies CreateResult
         }
