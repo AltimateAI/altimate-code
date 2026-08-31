@@ -243,18 +243,9 @@ export namespace LLM {
 
     // altimate_change start — clamp after every context-affecting request field is finalized.
     // Tool schemas and provider instructions consume the shared context window, while encoded
-    // media bytes do not count as literal text. Providers that omit maxOutputTokens skip the
-    // estimator. Known context beta headers widen the catalog
+    // media bytes do not count as literal text. The estimator runs lazily so providers that omit
+    // maxOutputTokens pay no serialization cost. Known context beta headers widen the catalog
     // limit before the clamp. Fixed reasoning budgets are reconciled with the final reservation.
-    const inputTokens =
-      params.maxOutputTokens === undefined
-        ? 0
-        : await estimateInputTokens({
-            system,
-            messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
-            tools,
-            instructions: params.options.instructions,
-          })
     const maxOutputTokens = clampOutputTokens({
       model: input.model,
       requested: params.maxOutputTokens,
@@ -263,7 +254,13 @@ export namespace LLM {
         // Provider defaults are lower precedence than the exact case-normalized outgoing record.
         headerSources: [provider.options, requestHeaders],
       }),
-      inputTokens,
+      inputTokens: () =>
+        estimateInputTokens({
+          system,
+          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+          tools,
+          instructions: params.options.instructions,
+        }),
     })
     const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
     // altimate_change end
