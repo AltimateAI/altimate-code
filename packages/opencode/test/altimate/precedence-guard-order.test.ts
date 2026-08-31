@@ -21,6 +21,7 @@ import * as Registry from "../../src/altimate/native/connections/registry"
 import { check, precedenceInternals, refresh, resetForTests } from "../../src/altimate/workspace/precedence"
 
 const SESSION = SessionID.make("ses_guard_order")
+const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
 
 const ctx = {
@@ -62,6 +63,8 @@ afterEach(() => {
   Registry.reset()
   if (ORIGINAL_PILOT === undefined) delete process.env.ALTIMATE_WORKSPACE
   else process.env.ALTIMATE_WORKSPACE = ORIGINAL_PILOT
+  if (ORIGINAL_INTEGRATIONS === undefined) delete process.env.ALTIMATE_INTEGRATIONS
+  else process.env.ALTIMATE_INTEGRATIONS = ORIGINAL_INTEGRATIONS
 })
 
 describe("sql_execute — the hard deny outranks the redirect", () => {
@@ -193,6 +196,28 @@ describe("sql_explain — input validation outranks the redirect", () => {
   test("valid input on a shadowed connection is still redirected", async () => {
     const tool = await initTool(SqlExplainTool)
     const result: any = await tool.execute({ sql: "select 1", warehouse: "shadowed_snow" }, ctx)
+    expect(result.metadata.redirected).toBe(true)
+  })
+})
+
+describe("schema_inspect — input validation outranks the redirect", () => {
+  test("an empty table reports invalid input rather than redirecting", async () => {
+    const tool = await initTool(SchemaInspectTool)
+    const result: any = await tool.execute({ table: "   ", warehouse: "shadowed_snow" }, ctx)
+    expect(result.metadata.error_class).toBe("input_validation")
+    expect(result.metadata.redirected).toBeUndefined()
+  })
+
+  test("an empty warehouse string is invalid input, not the default target", async () => {
+    const tool = await initTool(SchemaInspectTool)
+    const result: any = await tool.execute({ table: "orders", warehouse: "   " }, ctx)
+    expect(result.metadata.error_class).toBe("input_validation")
+    expect(result.metadata.redirected).toBeUndefined()
+  })
+
+  test("valid input on a shadowed connection is still redirected", async () => {
+    const tool = await initTool(SchemaInspectTool)
+    const result: any = await tool.execute({ table: "orders", warehouse: "shadowed_snow" }, ctx)
     expect(result.metadata.redirected).toBe(true)
   })
 })

@@ -5,6 +5,7 @@ import type { SqlExplainResult } from "../native/types"
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
+import { validateWarehouseName } from "./input-validation"
 
 /**
  * Detect SQL input that cannot be meaningfully EXPLAIN'd.
@@ -48,31 +49,6 @@ function validateSqlInput(sql: unknown): string | null {
   return null
 }
 
-/**
- * Validate a warehouse name supplied by the caller.
- *
- * Empty strings and placeholder tokens slip through the optional-parameter
- * contract and produce unhelpful "Connection X not found" errors from the
- * Registry. Catch these here with a pointer to `warehouse_list`.
- */
-function validateWarehouseName(warehouse: string | undefined): string | null {
-  if (warehouse === undefined) return null
-  if (typeof warehouse !== "string") {
-    return "warehouse must be a string"
-  }
-  const trimmed = warehouse.trim()
-  if (trimmed.length === 0) {
-    return "warehouse is an empty string — omit the parameter to use the default warehouse, or pass a configured connection name"
-  }
-  if (/^[?$:@]/.test(trimmed)) {
-    return (
-      "warehouse name looks like an unsubstituted placeholder (" +
-      JSON.stringify(trimmed) +
-      "). Use `warehouse_list` to see configured warehouses."
-    )
-  }
-  return null
-}
 
 export const SqlExplainTool = Tool.define("sql_explain", {
   description:

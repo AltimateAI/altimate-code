@@ -6,6 +6,7 @@ import type { SchemaInspectResult } from "../native/types"
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
 import { isRecord, normalizeError } from "./response-normalization"
+import { validateTableName, validateWarehouseName } from "./input-validation"
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
@@ -18,6 +19,17 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     warehouse: z.string().optional().describe("Warehouse connection name"),
   }),
   async execute(args, ctx) {
+    // Pre-flight validation outranks the redirect, as it does for `sql_explain`: bad
+    // input is answered here rather than forwarded to the engine tool, and an empty
+    // warehouse string is never read as "the default" by the routing decision.
+    const inputError = validateTableName(args.table) ?? validateWarehouseName(args.warehouse)
+    if (inputError) {
+      return {
+        title: "Schema: INVALID INPUT",
+        metadata: { success: false, columnCount: 0, rowCount: undefined, error: inputError, error_class: "input_validation" },
+        output: `Invalid input: ${inputError}`,
+      }
+    }
     // altimate_change start — workspace precedence
     const precedence = await Precedence.check(ctx.sessionID, "schema_inspect", args.warehouse)
     if (precedence.redirect) return precedence.redirect

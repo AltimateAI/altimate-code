@@ -20,6 +20,7 @@ import {
   refresh,
   resetForTests,
   snapshotCurrent,
+  snapshotState,
   warehouseListNote,
   warehouseListNotes,
 } from "../../../src/altimate/workspace/precedence"
@@ -167,13 +168,30 @@ describe("attribution is grounded in the attach, not only the saved config", () 
     expect(verdict.precedence).toBe("undetermined")
   })
 
-  test("a throw inside the decision fails open with a stated reason", async () => {
+  test("a binding read that throws mid-decision fails open with that reason stated", async () => {
     // beforeEach's bindTo() gives an enabled snapshot; refresh first, then poison the
-    // binding read that check()'s re-link guard performs mid-decision.
+    // binding read that check()'s re-link guard performs mid-decision. The read is a
+    // recognised failure, so the reason is specific rather than the generic backstop.
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     precedenceInternals.binding = async () => {
       throw new Error("boom")
     }
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.notice).toContain("could not be read")
+    expect(verdict.precedence).toBe("undetermined")
+  })
+
+  test("an unforeseen throw inside the decision fails open with a stated reason", async () => {
+    // A corrupted snapshot stands in for any throw the decision did not anticipate:
+    // the stored map is replaced by one that throws on its first read.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const stored = forSession(SESSION)!
+    stored.shadowed = new Proxy(stored.shadowed, {
+      get() {
+        throw new Error("boom")
+      },
+    })
     const verdict = await check(SESSION, "sql_execute", "local_snow")
     expect(verdict.redirect).toBeUndefined()
     expect(verdict.notice).toContain("failed to compute")
@@ -1165,5 +1183,95 @@ describe("re-derivation", () => {
     expect(verdict.redirect).toBeUndefined()
     // ...and is explicit about it, rather than silently looking like "not served".
     expect(verdict.precedence).toBe("undetermined")
+  })
+})
+
+describe("materialisation is owned by the workspace engine, not by key shape", () => {
+  // `MCP.tools()` stamps every entry with its client. Another server named
+  // `datamate_snowflake` flattens to the very same keys; only the stamp tells them apart.
+  const stamped = (client: string) => Object.fromEntries(Object.keys(SNOWFLAKE_TOOLS).map((k) => [k, { client }]))
+
+  test("an engine-shaped key served by another MCP client confers nothing, and is reported once", async () => {
+    const warned: string[] = []
+    precedenceInternals.warn = (message, data) => {
+      warned.push(`${message} ${String(data.key)}`)
+    }
+    const p = await refresh(SESSION, stamped("datamate_snowflake"))
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("nothing-materialised")
+    expect((await check(SESSION, "sql_execute", "local_snow")).redirect).toBeUndefined()
+    const hits = () => warned.filter((w) => w.includes("datamate_snowflake_execute_database_query"))
+    expect(hits()).toHaveLength(1)
+    await refresh(SESSION, stamped("datamate_snowflake"))
+    expect(hits()).toHaveLength(1)
+  })
+
+  test("keys stamped with the workspace engine's own client count as before", async () => {
+    const p = await refresh(SESSION, stamped("datamate"))
+    expect(p.enabled).toBe(true)
+    expect((await check(SESSION, "sql_execute", "local_snow")).redirect?.metadata.redirect_to).toBe(
+      "datamate_snowflake_execute_database_query",
+    )
+  })
+})
+
+describe("an unreadable workspace link is unknown, not unbound", () => {
+  test("refresh settles binding-unreadable and check() says so in the result", async () => {
+    precedenceInternals.binding = async () => {
+      throw new Error("EBUSY")
+    }
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("binding-unreadable")
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("could not be read")
+    expect(inventoryLine(p)).toContain("could not be read")
+  })
+
+  test("a link that becomes unreadable mid-turn invalidates the snapshot for that reason, not as a re-link", async () => {
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    precedenceInternals.binding = async () => {
+      throw new Error("EBUSY")
+    }
+    expect(await snapshotState(forSession(SESSION)!)).toBe("unreadable")
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("could not be read")
+    expect(verdict.notice).not.toContain("re-linked")
+    expect((await warehouseListNotes(SESSION, [{ name: "local_snow", type: "snowflake" }] as never)).size).toBe(0)
+  })
+})
+
+describe("a derivation that throws fails open, and says so", () => {
+  test("refresh settles derive-failed and check() carries the reason", async () => {
+    precedenceInternals.attributedTo = async () => {
+      throw new Error("boom")
+    }
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(p.enabled).toBe(false)
+    expect(p.disabledReason).toBe("derive-failed")
+    const verdict = await check(SESSION, "sql_execute", "local_snow")
+    expect(verdict.redirect).toBeUndefined()
+    expect(verdict.precedence).toBe("undetermined")
+    expect(verdict.notice).toContain("could not be derived")
+    expect(inventoryLine(p)).toContain("could not be derived")
+  })
+})
+
+describe("drift is reported for every warehouse capability shape", () => {
+  test("an unknown integration that serves only explain or table stats is still reported once", async () => {
+    const warned: string[] = []
+    precedenceInternals.warn = (_message, data) => {
+      warned.push(String(data.key))
+    }
+    await refresh(SESSION, {
+      ...SNOWFLAKE_TOOLS,
+      datamate_redshift_get_query_explain_plan: {},
+      datamate_redshift_get_table_stats: {},
+    })
+    expect(warned.sort()).toEqual(["redshift_get_query_explain_plan", "redshift_get_table_stats"])
   })
 })

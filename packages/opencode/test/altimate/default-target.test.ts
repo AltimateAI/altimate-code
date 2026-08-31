@@ -168,12 +168,15 @@ describe("adapter creation stays single-flight across a reset", () => {
 
     gates[0]()
     await a
-    // B is still in flight; A's settle must not have released its slot.
+    // B is still in flight; A's settle must not have released its slot, nor written
+    // the cache B now owns.
     expect(dbtAdapterInternals.inflight()).toBe(true)
+    expect(dbtAdapterInternals.writes).toBe(0)
 
     gates[1]()
     await b
     expect(dbtAdapterInternals.inflight()).toBe(false)
+    expect(dbtAdapterInternals.writes).toBe(1)
   })
 })
 

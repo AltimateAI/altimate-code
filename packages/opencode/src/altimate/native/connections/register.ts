@@ -57,9 +57,11 @@ export const dbtAdapterInternals: {
   readConfig?: () => Promise<unknown>
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
   attempts: number
+  /** Cache writes since the last reset: only the attempt that owns the slot writes. */
+  writes: number
   /** Whether an attempt is currently in flight. */
   inflight: () => boolean
-} = { attempts: 0, inflight: () => dbtAdapterInflight !== undefined }
+} = { attempts: 0, writes: 0, inflight: () => dbtAdapterInflight !== undefined }
 
 /**
  * Resolve the dbt adapter for this project, or null when there is no usable dbt
@@ -73,6 +75,16 @@ async function ensureDbtAdapter(): Promise<any | null> {
   // lets a second attempt start, and the first one's settle must not clear the second's
   // slot — that would hand the next caller a third adapter behind the second's back.
   let mine: Promise<any | null> | undefined
+  // Likewise the cache: a superseded attempt returns its result to the callers that
+  // awaited it but must not publish it, or it would overwrite what the newer attempt
+  // stored. Every write goes through here.
+  const publish = (value: any | null): any | null => {
+    if (dbtAdapterInflight === mine) {
+      dbtAdapter = value
+      dbtAdapterInternals.writes += 1
+    }
+    return value
+  }
   mine = (async () => {
     dbtAdapterInternals.attempts += 1
     try {
@@ -83,10 +95,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
       const dbtConfig = dbtAdapterInternals.readConfig
         ? ((await dbtAdapterInternals.readConfig()) as Awaited<ReturnType<typeof readDbtConfig>>)
         : await readDbtConfig()
-      if (!dbtConfig) {
-        dbtAdapter = null
-        return null
-      }
+      if (!dbtConfig) return publish(null)
 
       // Check if dbt_project.yml exists
       const fs = await import("fs")
@@ -94,18 +103,15 @@ async function ensureDbtAdapter(): Promise<any | null> {
       if (
         !fs.existsSync(path.join(dbtConfig.projectRoot, "dbt_project.yml"))
       ) {
-        dbtAdapter = null
-        return null
+        return publish(null)
       }
 
       // Create the adapter
       const { create } = await import("../../../../../dbt-tools/src/adapter")
-      dbtAdapter = await create(dbtConfig)
-      return dbtAdapter
+      return publish(await create(dbtConfig))
     } catch {
       // dbt-tools not available or config invalid — fall back to native
-      dbtAdapter = null
-      return null
+      return publish(null)
     } finally {
       if (dbtAdapterInflight === mine) dbtAdapterInflight = undefined
     }
@@ -199,14 +205,16 @@ async function tryExecuteViaDbt(
   sql: string,
   limit?: number,
 ): Promise<SqlExecuteResult | null> {
-  // altimate_change start — share the single-flight creation path with resolveDefaultTarget
-  if (!(await ensureDbtAdapter())) return null
+  // altimate_change start — share the single-flight creation path with resolveDefaultTarget;
+  // execute on the adapter this call was handed, not on a global a reset may have moved.
+  const adapter = await ensureDbtAdapter()
+  if (!adapter) return null
   // altimate_change end
 
   try {
     const raw = limit
-      ? await dbtAdapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
-      : await dbtAdapter.immediatelyExecuteSQL(sql, "")
+      ? await adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
+      : await adapter.immediatelyExecuteSQL(sql, "")
 
     // QueryExecutionResult has: { columnNames, columnTypes, data, rawSql, compiledSql }
     // where data is Record<string, unknown>[] (array of row objects)
@@ -263,6 +271,7 @@ export function resetDbtAdapter(): void {
   // would still receive the previous adapter.
   dbtAdapterInflight = undefined
   dbtAdapterInternals.attempts = 0
+  dbtAdapterInternals.writes = 0
 }
 
 // ---------------------------------------------------------------------------

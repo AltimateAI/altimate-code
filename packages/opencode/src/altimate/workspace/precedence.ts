@@ -59,13 +59,14 @@ import { DATAMATE_KEY } from "../datamate-transport"
 import {
   attributableEngine,
   engineToolKeys,
+  foreignEngineKeys,
   isEnabled,
   pinnedWorkspace,
   settledOutcome,
   type EntryLike,
   type Outcome,
 } from "./engine-overlay"
-import { readLocalBinding } from "./state"
+import { readLocalBindingScopedStrict } from "./state"
 import { canonicalType } from "../native/connections/registry"
 import * as Registry from "../native/connections/registry"
 
@@ -124,7 +125,14 @@ export interface Precedence {
    * could not be attributed to the bound workspace. */
   enabled: boolean
   /** Why precedence is off, for the inventory line. Absent when enabled. */
-  disabledReason?: "pilot-off" | "escape-hatch" | "unbound" | "unattributed" | "nothing-materialised"
+  disabledReason?:
+    | "pilot-off"
+    | "escape-hatch"
+    | "unbound"
+    | "binding-unreadable"
+    | "unattributed"
+    | "derive-failed"
+    | "nothing-materialised"
   /** canonical driver type → capability → who serves it. */
   shadowed: Map<string, Map<Capability, ShadowEntry>>
   /** The caller's effective permission rules, captured when this was derived. A
@@ -250,11 +258,11 @@ const publishQueue = new Map<string, Promise<void>>()
  * silent, which the opening principle rules out. */
 const unrecognisedWarned = new Map<string, Set<string>>()
 
-const WAREHOUSE_EXECUTE_KEY = /^(.+?)_(execute_database_query|execute_sql)$/
+const WAREHOUSE_TOOL_KEY = /^(.+?)_(execute_database_query|execute_sql|get_query_explain_plan|get_table_stats)$/
 
 function warnUnrecognised(sessionID: string, present: Set<string>): void {
   for (const key of present) {
-    const match = WAREHOUSE_EXECUTE_KEY.exec(key)
+    const match = WAREHOUSE_TOOL_KEY.exec(key)
     if (!match || match[1] in INTEGRATION_TYPE) continue
     let seen = unrecognisedWarned.get(sessionID)
     if (!seen) {
@@ -263,8 +271,26 @@ function warnUnrecognised(sessionID: string, present: Set<string>): void {
     }
     if (seen.has(key)) continue
     seen.add(key)
-    const message = "the engine serves a warehouse execute tool this module does not know; it shadows nothing"
+    const message = "the engine serves a warehouse tool for an integration this module does not know; it shadows nothing"
     const data = { sessionID, key, integration: match[1] }
+    if (precedenceInternals.warn) precedenceInternals.warn(message, data)
+    else log.warn(message, data)
+  }
+}
+
+/** An engine-shaped key that another MCP client serves is not the engine's, whatever
+ * its name says; it confers no precedence, and the session hears about it once. */
+function warnForeign(sessionID: string, tools: Record<string, unknown>): void {
+  for (const key of foreignEngineKeys(tools)) {
+    let seen = unrecognisedWarned.get(sessionID)
+    if (!seen) {
+      seen = new Set()
+      unrecognisedWarned.set(sessionID, seen)
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    const message = "an MCP server other than the workspace engine serves an engine-shaped key; it confers no precedence"
+    const data = { sessionID, key, client: (tools[key] as { client?: unknown }).client }
     if (precedenceInternals.warn) precedenceInternals.warn(message, data)
     else log.warn(message, data)
   }
@@ -307,16 +333,29 @@ export function escapeHatchOn(): boolean {
   return CoreFlag.ALTIMATE_INTEGRATIONS_LOCAL
 }
 
-async function currentBinding(): Promise<{ datamateId: number; datamateName: string } | null> {
-  if (precedenceInternals.binding) return precedenceInternals.binding()
+/** What a read of the project's link established. `unreadable` is not `unbound`: the
+ * cache or credentials file is present and cannot be read, so whether the project is
+ * bound is unknown — the same distinction the attach draws with its strict reader. */
+type BindingRead =
+  | { kind: "bound"; datamateId: number; datamateName: string }
+  | { kind: "unbound" }
+  | { kind: "unreadable"; error: string }
+
+async function currentBinding(): Promise<BindingRead> {
   try {
+    if (precedenceInternals.binding) {
+      const seam = await precedenceInternals.binding()
+      return seam ? { kind: "bound", ...seam } : { kind: "unbound" }
+    }
     const directory = Instance.directory
-    if (!directory) return null
-    const binding = await readLocalBinding(directory)
-    return binding ? { datamateId: binding.datamateId, datamateName: binding.datamateName } : null
+    if (!directory) return { kind: "unbound" }
+    const { binding } = await readLocalBindingScopedStrict(directory)
+    return binding
+      ? { kind: "bound", datamateId: binding.datamateId, datamateName: binding.datamateName }
+      : { kind: "unbound" }
   } catch (err) {
-    log.warn("could not read local binding", { err: String(err) })
-    return null
+    log.warn("could not read the workspace link", { err: String(err) })
+    return { kind: "unreadable", error: String(err) }
   }
 }
 
@@ -372,7 +411,16 @@ export async function refresh(
   tools: Record<string, unknown>,
   ruleset?: PermissionNext.Ruleset,
 ): Promise<Precedence> {
-  const result = await derive(sessionID, tools)
+  // A derivation that throws must not cost the turn its tools: the resolver awaits this
+  // on every turn, so a failure here settles as "unknown" — local execution with a
+  // stated reason — rather than propagating.
+  let result: Precedence
+  try {
+    result = await derive(sessionID, tools)
+  } catch (err) {
+    log.warn("precedence could not be derived; running locally with a notice", { sessionID, err: String(err) })
+    result = EMPTY("derive-failed")
+  }
   if (ruleset) result.ruleset = ruleset
   remember(sessionID, result)
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
@@ -422,8 +470,12 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   if (!isEnabled()) return EMPTY("pilot-off")
   if (escapeHatchOn()) return EMPTY("escape-hatch")
 
-  const binding = await currentBinding()
-  if (!binding) return EMPTY("unbound")
+  const read = await currentBinding()
+  // An unreadable link is unknown, not opted out: it must reach the result as a stated
+  // reason (Claim 1), where a genuinely unbound project runs silently by design.
+  if (read.kind === "unreadable") return EMPTY("binding-unreadable")
+  if (read.kind === "unbound") return EMPTY("unbound")
+  const binding = read
   const workspaceName = binding.datamateName
 
   // Mechanism 1a — refuse to engage on an engine we cannot attribute to this binding.
@@ -446,6 +498,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
 
   // Mechanism 1 — what actually materialised, never what was declared.
   const present = engineToolKeys(tools)
+  warnForeign(sessionID, tools)
   if (present.size === 0) return EMPTY("nothing-materialised", workspaceName)
   warnUnrecognised(sessionID, present)
 
@@ -598,9 +651,17 @@ function redirectFor(
  * mid-session is supported, so a snapshot can name a workspace the project has since
  * left; anything about to act on or report from that snapshot asks this first. The
  * binding is a local cache read. */
+export type SnapshotState = "current" | "relinked" | "unreadable"
+
+export async function snapshotState(precedence: Precedence): Promise<SnapshotState> {
+  if (!precedence.workspaceId) return "current"
+  const read = await currentBinding()
+  if (read.kind === "unreadable") return "unreadable"
+  return read.kind === "bound" && read.datamateId === Number(precedence.workspaceId) ? "current" : "relinked"
+}
+
 export async function snapshotCurrent(precedence: Precedence): Promise<boolean> {
-  if (!precedence.workspaceId) return true
-  return (await currentBinding())?.datamateId === Number(precedence.workspaceId)
+  return (await snapshotState(precedence)) === "current"
 }
 
 /**
@@ -657,21 +718,48 @@ async function checkUnsafe(sessionID: string, capability: Capability, warehouse?
         precedence: "undetermined",
       }
     }
+    if (precedence.disabledReason === "binding-unreadable") {
+      return {
+        notice:
+          "Not routed through the bound workspace: the workspace link could not be read " +
+          "this turn, so no routing decision was available.",
+        precedence: "undetermined",
+      }
+    }
+    if (precedence.disabledReason === "derive-failed") {
+      return {
+        notice:
+          "Not routed through the bound workspace: the routing decision could not be derived " +
+          "this turn, so the call ran locally.",
+        precedence: "undetermined",
+      }
+    }
     return RUN
   }
 
+  const verdict = await decide(precedence, capability, warehouse)
+  if (!verdict.redirect) return verdict
+
   // A redirect naming a workspace the project has since left would send the call to
-  // that workspace's engine, with its credentials. This only runs on the path that is
-  // about to redirect.
-  if (!(await snapshotCurrent(precedence))) {
+  // that workspace's engine, with its credentials. Only a call about to be redirected
+  // pays for this read; a call that runs locally regardless does not.
+  const snapshot = await snapshotState(precedence)
+  if (snapshot !== "current") {
     return {
       notice:
-        `Not routed through workspace "${precedence.workspaceName}": the project was re-linked while ` +
-        `this call was in flight, so the routing decision no longer applies.`,
+        snapshot === "unreadable"
+          ? `Not routed through workspace "${precedence.workspaceName}": the workspace link could not be read ` +
+            `while this call was in flight, so the routing decision could not be confirmed.`
+          : `Not routed through workspace "${precedence.workspaceName}": the project was re-linked while ` +
+            `this call was in flight, so the routing decision no longer applies.`,
       precedence: "undetermined",
     }
   }
+  return verdict
+}
 
+/** The routing decision for an enabled snapshot, before the snapshot is re-validated. */
+async function decide(precedence: Precedence, capability: Capability, warehouse?: string): Promise<Verdict> {
   if (warehouse) {
     const type = canonicalType(Registry.getConfig(warehouse)?.type)
     if (!type) {
@@ -828,6 +916,10 @@ export function inventoryLine(precedence: Precedence): string {
           `Workspace integrations: shadowing off — the running engine could not be attributed to workspace ` +
           `"${precedence.workspaceName}". Local connections serve every warehouse.`
         )
+      case "binding-unreadable":
+        return "Workspace integrations: shadowing off — the workspace link could not be read. Local connections serve every warehouse."
+      case "derive-failed":
+        return "Workspace integrations: shadowing off — the routing decision could not be derived this turn. Local connections serve every warehouse."
       default:
         return ""
     }
