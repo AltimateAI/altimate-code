@@ -584,14 +584,14 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
           reason: "engine-missing",
           workspaceId: workspace.id,
           workspaceName: workspace.name,
-          declared: count ?? 0,
+          ...(count === undefined ? {} : { declared: count }),
           command: installCommand(),
         },
       )
       return
     }
     record(sessionID, refusal)
-    const declared = (await declaredFor(workspace))?.keys.length ?? 0
+    const declared = (await declaredFor(workspace))?.keys.length
     await announceRefusal(
       sessionID,
       refusal,
@@ -604,7 +604,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
         reason: "engine-too-old",
         workspaceId: workspace.id,
         workspaceName: workspace.name,
-        declared,
+        ...(declared === undefined ? {} : { declared }),
         found: refusal.found ?? "unknown",
         command: installCommand(),
       },

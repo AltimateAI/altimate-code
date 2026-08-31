@@ -178,7 +178,7 @@ describe("offer routing — engine missing", () => {
   test("singularises the tool count", async () => {
     const h = install({ headless: true, declaredKeys: ["dbt_build_model"] })
     await beforeTurn("s1")
-    expect(h.printed[0]).toContain("1 integration tool need")
+    expect(h.printed[0]).toContain("1 integration tool needs")
   })
   test("the offer is raised once per session per verdict, naming the session it is for", async () => {
     const h = install({})
@@ -250,6 +250,14 @@ describe("offer routing — engine too old", () => {
     await beforeTurn("child")
     await beforeTurn("parent")
     expect(h.printed).toHaveLength(1)
+  })
+  test("headless, an unknown declared count is not printed as 0", async () => {
+    const h = install({ headless: true })
+    syncInternals.declared = async () => null
+    await beforeTurn("s1")
+    expect(h.printed).toEqual([
+      `Workspace "analytics": its integration tools need the local engine, which is not installed. Install it with: ${installCommand()}`,
+    ])
   })
   test("headless, a count that arrives with a later session's catalog prints nothing more", async () => {
     // The declared lookup can fail for the parent session and recover for the

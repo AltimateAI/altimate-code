@@ -47,7 +47,10 @@ export type EngineOffer = {
   workspaceId: string
   workspaceName: string
   /** Declared, CLI-servable integration tools that are unavailable without it. */
-  declared: number
+  /** Declared integration tools — absent when the allowlist lookup failed or
+   * the API is not configured, so the text can drop the number rather than
+   * print 0. */
+  declared?: number
   /** Version found — only set for "engine-too-old". */
   found?: string
   /** The exact install/update command. */
@@ -85,12 +88,12 @@ export async function describeOffer(directory: string): Promise<EngineOffer | nu
   const bin = which(ENGINE_BINARY)
   const found = bin ? await versionOf(bin) : null
   if (bin && clearsFloor(found)) return null
-  const declared = (await declaredBounded(workspaceId))?.keys.length ?? 0
+  const declared = (await declaredBounded(workspaceId))?.keys.length
   return {
     reason: bin ? "engine-too-old" : "engine-missing",
     workspaceId,
     workspaceName: binding.datamateName,
-    declared,
+    ...(declared === undefined ? {} : { declared }),
     ...(bin ? { found: found ?? "unknown" } : {}),
     command: installCommand(),
   }
@@ -268,10 +271,17 @@ function offerInstall(offer: EngineOffer): boolean {
 
 /** One printed line for headless `run`. */
 export function describeOfferLine(offer: EngineOffer): string {
-  const tools = `${offer.declared} integration tool${offer.declared === 1 ? "" : "s"}`
+  const tools = toolsNeed(offer.declared)
   return offer.reason === "engine-too-old"
-    ? `Workspace "${offer.workspaceName}": ${tools} need ${ENGINE_BINARY} ${MIN_ENGINE_VERSION}+ (found ${offer.found ?? "unknown"}). Update with: ${offer.command}`
-    : `Workspace "${offer.workspaceName}": ${tools} need the local engine, which is not installed. Install it with: ${offer.command}`
+    ? `Workspace "${offer.workspaceName}": ${tools} ${ENGINE_BINARY} ${MIN_ENGINE_VERSION}+ (found ${offer.found ?? "unknown"}). Update with: ${offer.command}`
+    : `Workspace "${offer.workspaceName}": ${tools} the local engine, which is not installed. Install it with: ${offer.command}`
+}
+
+/** "N integration tools need" / "1 integration tool needs" / "its integration
+ * tools need" when the count is unknown. */
+export function toolsNeed(declared: number | undefined): string {
+  if (declared === undefined) return "its integration tools need"
+  return declared === 1 ? "1 integration tool needs" : `${declared} integration tools need`
 }
 
 /** Offer via the dialog surface when there is one; otherwise print (headless)

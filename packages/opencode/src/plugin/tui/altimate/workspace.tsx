@@ -1269,11 +1269,14 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const canInstall = () => props.nodeMajor !== null && props.nodeMajor >= MIN_NODE_MAJOR && props.hasNpm
 
   const title = () => {
-    const tools = `${props.offer.declared} integration tool${props.offer.declared === 1 ? "" : "s"}`
+    const n = props.offer.declared
+    const tools = n === undefined ? "its integration tools" : `${n} integration tool${n === 1 ? "" : "s"}`
     const head =
       props.offer.reason === "engine-too-old"
         ? `Workspace "${props.offer.workspaceName}" needs a newer local engine (found ${props.offer.found ?? "unknown"}) — ${tools} unavailable`
-        : `Workspace "${props.offer.workspaceName}" declares ${tools}, which need the local engine`
+        : n === undefined
+          ? `Workspace "${props.offer.workspaceName}" has integration tools that need the local engine`
+          : `Workspace "${props.offer.workspaceName}" declares ${tools}, which need${n === 1 ? "s" : ""} the local engine`
     const parts = [head, command()]
     if (!canInstall()) {
       parts.push(
