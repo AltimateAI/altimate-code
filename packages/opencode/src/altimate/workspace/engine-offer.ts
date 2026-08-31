@@ -46,10 +46,9 @@ export type EngineOffer = {
   /** Stable id — the 7-day "Not now" latch keys on this, not the name. */
   workspaceId: string
   workspaceName: string
-  /** Declared, CLI-servable integration tools that are unavailable without it. */
-  /** Declared integration tools — absent when the allowlist lookup failed or
-   * the API is not configured, so the text can drop the number rather than
-   * print 0. */
+  /** Declared, CLI-servable integration tools that are unavailable without
+   * it. Absent when the allowlist lookup failed or the API is not configured,
+   * so the text can drop the number rather than print 0. */
   declared?: number
   /** Version found — only set for "engine-too-old". */
   found?: string

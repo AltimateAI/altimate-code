@@ -47,14 +47,17 @@ export function which(cmd: string): string | null {
 }
 
 /** Identity of the file behind a PATH hit, cheap enough to ask every turn:
- * size and mtime of the target (symlinks followed, so an npm bin shim whose
- * package was reinstalled reads as changed). Null when it cannot be stat'ed;
+ * inode, size, mtime and ctime of the target (symlinks followed, so an npm
+ * bin shim whose package was reinstalled reads as changed). A replacement
+ * file has a new inode; a rewrite in place that keeps the length and restores
+ * the mtime still moves the ctime, which nothing in userland can set back —
+ * so an update cannot read as the same file. Null when it cannot be stat'ed;
  * with nothing to compare, the caller's memo falls back to its TTL. */
 export function fingerprint(bin: string): string | null {
   if (syncInternals.fingerprint) return syncInternals.fingerprint(bin)
   try {
     const stat = statSync(bin)
-    return `${stat.size}:${stat.mtimeMs}`
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
   } catch {
     return null
   }
