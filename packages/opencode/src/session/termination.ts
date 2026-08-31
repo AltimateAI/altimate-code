@@ -35,6 +35,24 @@ const CODE_FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/
 const HTML_BLOCK_TAG =
   /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i
 
+function isCompleteHtmlTag(line: string): boolean {
+  if (!/^<\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>)/.test(line)) return false
+  let quote: '"' | "'" | undefined
+  for (let i = 1; i < line.length; i++) {
+    const char = line[i]!
+    if (quote) {
+      if (char === quote) quote = undefined
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === ">") return /^[ \t]*$/.test(line.slice(i + 1))
+  }
+  return false
+}
+
 function isInsideHtmlBlock(lines: string[]): boolean {
   let close: string | RegExp | "blank" | undefined
   for (const line of lines) {
@@ -74,7 +92,7 @@ function isInsideHtmlBlock(lines: string[]): boolean {
       continue
     }
     const block = /^<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s|\/?>)/.exec(trimmed)
-    if ((block && HTML_BLOCK_TAG.test(block[1]!)) || /^<\/?[A-Za-z][^>]*>[ \t]*$/.test(trimmed)) {
+    if ((block && HTML_BLOCK_TAG.test(block[1]!)) || isCompleteHtmlTag(trimmed)) {
       close = "blank"
     }
   }

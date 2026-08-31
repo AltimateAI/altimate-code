@@ -291,6 +291,20 @@ describe("ToolResultCap.applyWithAttachments", () => {
       droppedAttachments: 0,
     })
   })
+
+  // altimate_change start — PR #1171 review: URL metadata cannot bound the
+  // provider-side context cost of media fetched from an external host.
+  test("drops externally hosted attachments whose provider cost cannot be measured", () => {
+    const attachments = [{ mime: "image/png", filename: "remote.png", url: "https://example.com/remote.png" }]
+    const result = ToolResultCap.applyWithAttachments("image result", attachments, 200)
+
+    expect(result.attachments).toEqual([])
+    expect(result.droppedAttachments).toBe(1)
+    expect(result.truncated).toBe(true)
+    expect(result.content).toContain("externally hosted attachments are treated as unmeasurable")
+    expect(Token.estimate(result.content)).toBeLessThanOrEqual(200)
+  })
+  // altimate_change end
 })
 
 describe("ToolResultCap.apply — Unicode chunk boundaries", () => {

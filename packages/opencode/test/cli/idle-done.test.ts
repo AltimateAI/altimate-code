@@ -266,6 +266,9 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("FOO=1 mv a b")).toBe(true)
     expect(IdleDone.isMutatingCommand("/bin/rm -rf build")).toBe(true)
     expect(IdleDone.isMutatingCommand("C:\\tools\\rm.exe generated.ts")).toBe(true)
+    // altimate_change start — PR #1171 review: Windows executable names are case-insensitive.
+    expect(IdleDone.isMutatingCommand("C:\\tools\\RM.EXE generated.ts")).toBe(true)
+    // altimate_change end
     expect(IdleDone.isReadOnlyCommand("/usr/bin/git status")).toBe(true)
     expect(IdleDone.isMutatingCommand("/usr/bin/git commit -m x")).toBe(true)
   })

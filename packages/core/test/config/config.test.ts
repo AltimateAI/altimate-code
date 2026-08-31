@@ -91,6 +91,28 @@ describe("Config", () => {
     }),
   )
 
+  // altimate_change start — PR #1171 review: mixed documents with explicit
+  // V2 keep/buffer fields must not lose them through the V1 decoder.
+  it.effect("prefers explicit v2 compaction fields when legacy keys remain beside them", () =>
+    Effect.sync(() => {
+      const mixed = {
+        compaction: {
+          keep: { tokens: 4_000, turns: 2 },
+          buffer: 8_000,
+          tail_turns: 99,
+          reserved: 16_000,
+        },
+      }
+
+      expect(ConfigMigrateV1.isV1(mixed)).toBe(false)
+      expect(Schema.decodeUnknownSync(Config.Info)(mixed).compaction).toMatchObject({
+        keep: { tokens: 4_000, turns: 2 },
+        buffer: 8_000,
+      })
+    }),
+  )
+  // altimate_change end
+
   // altimate_change start — V2 parity round-trip for the fork reliability keys
   // (dispatch cap, compaction safety fraction, task pin, state ledger,
   // starvation breaker). A V2 cutover must not silently drop these controls.

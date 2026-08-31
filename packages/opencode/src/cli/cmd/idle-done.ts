@@ -199,10 +199,15 @@ function executableName(value: string | undefined): string | undefined {
     .replace(/^\(+/, "")
     .replace(/^['"]|['"]$/g, "")
     .replaceAll("\\", "/")
-  return unquoted
-    .split("/")
-    .pop()
-    ?.replace(/\.exe$/i, "")
+  const executable = unquoted.split("/").pop()
+  if (!executable) return undefined
+  // altimate_change start — Windows executable names are case-insensitive.
+  // Limit case folding to the explicit .exe spelling so a case-sensitive Unix
+  // command named `CAT` is not silently treated as the read-only `cat` binary.
+  const windowsExecutable = /\.exe$/i.test(executable)
+  const normalized = executable.replace(/\.exe$/i, "")
+  return windowsExecutable ? normalized.toLowerCase() : normalized
+  // altimate_change end
 }
 
 /** True when every pipeline/statement head in the command is read-only. */

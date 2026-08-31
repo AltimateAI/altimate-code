@@ -189,15 +189,24 @@ export function applyWithAttachments<T extends { url: string; mime?: string; fil
     return { ...capped, attachments, droppedAttachments: 0 }
   }
 
-  const attachmentTokens = (attachment: T) =>
-    Token.estimate(`${attachment.mime ?? ""}\n${attachment.filename ?? ""}\n${attachment.url}`)
+  // Inline data has a concrete payload that the conservative text estimator
+  // can bound. An externally hosted attachment is only a short URL here, while
+  // the provider may fetch arbitrarily large media behind it; treating URL
+  // metadata as the media cost would let that path bypass the hard cap.
+  const attachmentTokens = (attachment: T): number | undefined => {
+    if (!attachment.url.startsWith("data:") || !attachment.url.includes(",")) return undefined
+    return Token.estimate(`${attachment.mime ?? ""}\n${attachment.filename ?? ""}\n${attachment.url}`)
+  }
   const costs = source.map(attachmentTokens)
-  if (Token.estimate(output) + costs.reduce((sum, value) => sum + value, 0) <= capTokens) {
+  if (
+    costs.every((cost) => cost !== undefined) &&
+    Token.estimate(output) + costs.reduce((sum, value) => sum + (value ?? 0), 0) <= capTokens
+  ) {
     return { content: output, attachments, truncated: false, droppedAttachments: 0 }
   }
 
   const notice = (count: number) =>
-    `[${count} oversized tool-result attachment${count === 1 ? " was" : "s were"} omitted before dispatch to stay within the per-result context budget.]`
+    `[${count} oversized tool-result attachment${count === 1 ? " was" : "s were"} omitted before dispatch to stay within the per-result context budget; externally hosted attachments are treated as unmeasurable.]`
   // Reserve the worst-case notice first, then keep attachments in source order
   // while they fit beside the original text. The final text is re-capped
   // against whatever the retained attachments consumed.
@@ -207,7 +216,7 @@ export function applyWithAttachments<T extends { url: string; mime?: string; fil
   let keptTokens = 0
   for (let i = 0; i < source.length; i++) {
     const cost = costs[i]!
-    if (cost > remaining) continue
+    if (cost === undefined || cost > remaining) continue
     kept.push(source[i]!)
     keptTokens += cost
     remaining -= cost

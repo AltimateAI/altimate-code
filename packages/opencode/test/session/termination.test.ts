@@ -243,6 +243,12 @@ describe("SessionTermination.isExplicitDone — fence-state conformance", () => 
     expect(SessionTermination.isExplicitDone(["<script>", "example", "</script>", "DONE"].join("\n"))).toBe(true)
   })
 
+  test("a quoted > does not end a complete HTML tag or expose a trailing DONE", () => {
+    expect(SessionTermination.isExplicitDone(['<widget title="1 > 0">', "example", "DONE"].join("\n"))).toBe(false)
+    expect(SessionTermination.isExplicitDone(["<widget title='1 > 0'>", "example", "DONE"].join("\n"))).toBe(false)
+    expect(SessionTermination.isExplicitDone(['<widget title="1 > 0">', "example", "", "DONE"].join("\n"))).toBe(true)
+  })
+
   test("HTML-looking text inside a closed code fence does not suppress a real DONE", () => {
     expect(SessionTermination.isExplicitDone(["```html", "<!--", "<div>", "```", "DONE"].join("\n"))).toBe(true)
   })

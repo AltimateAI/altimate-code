@@ -34,6 +34,10 @@ export function isV1(input: unknown) {
   if (Object.keys(input).some((key) => keys.has(key))) return true
   const compaction = (input as Record<string, unknown>).compaction
   if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction)) return false
+  // A document with an explicit V2 compaction shape stays V2 even when a
+  // stale legacy key remains beside it. Sending that mixed object through the
+  // V1 decoder drops keep/buffer before migrate() can see them.
+  if (["keep", "buffer"].some((key) => Object.prototype.hasOwnProperty.call(compaction, key))) return false
   // These nested V1 keys were renamed in V2. A config containing only shared
   // top-level fields plus one of them must still enter migration; otherwise
   // excess-property decoding silently drops the value and restores defaults.
