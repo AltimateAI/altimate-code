@@ -42,12 +42,59 @@ export namespace SessionCompaction {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   }
 
+  /**
+   * Redacts the string leaves of an argument value, preserving structure so a
+   * legitimate argument still renders. Non-strings cannot carry a secret in a
+   * form the pattern redactor recognizes and are left alone; a credential held
+   * under a sensitive KEY is handled by the caller instead.
+   */
+  // redactLedgerDetail cost grows super-linearly with input length (measured:
+  // 1 KB 2ms, 10 KB 77ms, 100 KB 6.2s), and tool output can be megabytes. Only
+  // 80 characters of the redacted text are ever retained, so redaction runs
+  // over a bounded window. A secret could in principle be cut at this boundary
+  // and stop matching, but a fragment from position ~1024 can only reach the
+  // first 80 characters if redaction collapsed nearly everything before it, in
+  // which case what shows is redaction markers. Redacting unbounded input
+  // instead hangs compaction outright, which is strictly worse.
+  const MASK_REDACT_WINDOW = 1024
+
+  function redactArgValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+    if (typeof value === "string") return redactLedgerDetail(value.slice(0, MASK_REDACT_WINDOW))
+    if (value && typeof value === "object") {
+      // Tool inputs are arbitrary and CAN be circular; walking one without this
+      // guard hangs compaction outright. Returning the value unchanged on a
+      // revisit preserves the pre-existing contract — JSON.stringify still
+      // throws on the cycle and the caller renders "[unserializable]".
+      if (seen.has(value as object)) return value
+      seen.add(value as object)
+      if (Array.isArray(value)) return value.map((v) => redactArgValue(v, seen))
+      const out: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = isSensitiveArgName(k) ? "<redacted>" : redactArgValue(v, seen)
+      }
+      return out
+    }
+    return value
+  }
+
   function truncateArgs(input: Record<string, any> | null | undefined, maxLen: number): string {
     if (!input || typeof input !== "object") return ""
     let str: string
     try {
       str = Object.entries(input)
-        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        // Redact the string LEAVES, not the joined text and not the JSON.
+        // redactLedgerDetail begins with Telemetry.maskString, which collapses
+        // any QUOTED string to "?" — so redacting JSON.stringify(v) would erase
+        // every argument, and redacting the joined `k: v` text would read each
+        // pair as an assignment shape and mask it wholesale. Redaction also
+        // precedes truncation: truncating first can cut a secret mid-token so
+        // it stops matching and then survives into the mask.
+        .map(([k, v]) =>
+          // A sensitive NAME marks its value as a credential whatever its
+          // shape, which value-level redaction alone cannot see: an opaque
+          // token such as { api_key: "sk-abc123" } matches no pattern.
+          isSensitiveArgName(k) ? `${k}: <redacted>` : `${k}: ${JSON.stringify(redactArgValue(v))}`,
+        )
         .join(", ")
     } catch {
       return "[unserializable]"
@@ -69,7 +116,12 @@ export namespace SessionCompaction {
         : {},
       80,
     )
-    const firstLine = output.split("\n")[0]?.slice(0, 80) || ""
+    // The mask REPLACES the cleared output and is replayed on every subsequent
+    // provider request, so anything retained here outlives the clear. Both the
+    // fingerprint and the serialized args go through the same redactor as the
+    // facts ledger; redaction precedes truncation for the reason noted above.
+    const firstLine =
+      redactLedgerDetail(output.slice(0, MASK_REDACT_WINDOW).split("\n")[0] ?? "").slice(0, 80) || ""
     const fingerprint = firstLine ? ` — "${firstLine}"` : ""
     return `[Tool output cleared — ${part.tool}(${args}) returned ${lines} lines, ${formatBytes(bytes)}${fingerprint}]`
   }
@@ -583,9 +635,16 @@ export namespace SessionCompaction {
    * and signed URL material; losing a diagnostic fragment is safer than
    * carrying a credential across compaction or provider changes.
    */
+  const SENSITIVE_NAME =
+    /(?:api[_-]?key|access[_-]?key|access[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|(?:^|[_-])(?:key|token|secret|password|passwd|credential|signature|authorization|cookie)(?:$|[_-]))/i
+
+  /** True when an argument NAME marks its value as a credential regardless of shape. */
+  export function isSensitiveArgName(name: string): boolean {
+    return SENSITIVE_NAME.test(name)
+  }
+
   export function redactLedgerDetail(value: string): string {
-    const sensitiveName =
-      /(?:api[_-]?key|access[_-]?key|access[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|(?:^|[_-])(?:key|token|secret|password|passwd|credential|signature|authorization|cookie)(?:$|[_-]))/i
+    const sensitiveName = SENSITIVE_NAME
     let masked = Telemetry.maskString(value)
 
     // `-u` is also a benign flag for commands such as `git push -u` and
