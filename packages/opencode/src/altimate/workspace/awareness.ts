@@ -86,7 +86,9 @@ const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> =
   "pilot-off": "",
   "escape-hatch": ESCAPE_HATCH_SECTION,
   unbound: "",
+  "binding-unreadable": "",
   unattributed: "",
+  "derive-failed": "",
   "nothing-materialised": "",
 }
 

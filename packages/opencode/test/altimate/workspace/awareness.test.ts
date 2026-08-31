@@ -169,7 +169,9 @@ describe("the regression guard", () => {
       "pilot-off": false,
       "escape-hatch": true,
       unbound: false,
+      "binding-unreadable": false,
       unattributed: false,
+      "derive-failed": false,
       "nothing-materialised": false,
     }
     for (const [reason, expected] of Object.entries(speaks)) {
