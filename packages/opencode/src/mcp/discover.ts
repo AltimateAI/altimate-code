@@ -165,7 +165,6 @@ export function resetConfigDrift() {
   _drift.clear()
 }
 // altimate_change end
-
 interface ExternalMcpSource {
   /** Relative path from base directory */
   file: string

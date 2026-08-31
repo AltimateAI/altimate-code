@@ -138,6 +138,12 @@ async function req<T>(
   opts: {
     body?: unknown
     query?: Record<string, string>
+    /** Cap the response body. Off by default because this helper is shared and
+     * some endpoints legitimately return large payloads (memory ``/list``
+     * embeds block content and is not capped server-side). Set it where the
+     * body size is attacker- or accident-controlled, as skill file downloads
+     * are. */
+    boundResponse?: boolean
     /** Override the base path prefix. Defaults to
      * ``/datamate-project-bindings`` (this module's namespace). Pass e.g.
      * ``/datamates`` to hit the sibling datamates_router through the same
@@ -176,7 +182,21 @@ async function req<T>(
     // swallows the AbortError from the timeout firing during the body read
     // and turns a stalled response into a false "empty body". Rejection
     // rethrows into the outer catch and is classified there. (cubic round 3.)
-    text = await res.text()
+    // Bound the body before buffering it. `res.text()` reads to completion, so
+    // a response far larger than advertised is an out-of-memory crash before
+    // any size check downstream can reject it. Content-Length is a hint, not a
+    // guarantee, so the stream is also cut off at the cap.
+    if (opts.boundResponse) {
+      const declared = Number(res.headers.get("content-length") ?? Number.NaN)
+      if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+        throw new WorkspaceApiError(
+          `Response from ${target} declares ${declared} bytes, over the ${MAX_RESPONSE_BYTES} limit`,
+        )
+      }
+      text = await readBounded(res, target)
+    } else {
+      text = await res.text()
+    }
   } catch (err) {
     // Distinguish "we hit our 15s abort" from "network stack failed" so the
     // caller can decide differently (retry, longer timeout, offline banner).
@@ -246,6 +266,51 @@ async function req<T>(
  * not duplicate any of it — see ./memory-api.ts, which drives
  * ``/datamates/memory/*`` through this exact path. Always pass an explicit
  * ``base``; the default is this module's own namespace. */
+/** Ceiling on a single response body, applied ONLY where a caller opts in.
+ *
+ * Nothing upstream bounds what a workspace can hold and the body is buffered
+ * whole, so an oversized response is a process crash rather than a failed
+ * request. But this helper is shared: memory `/list` embeds block content and is
+ * deliberately not capped server-side, so a blanket limit would fail requests
+ * that work today. Skill file downloads opt in; everything else is unchanged. */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+/** Read a response body, refusing to buffer past the cap. */
+async function readBounded(res: Response, target: string): Promise<string> {
+  // No stream to meter (a mocked or bodyless response): fall back to the
+  // unbounded read, then enforce the cap on what actually arrived so this
+  // branch cannot be used to bypass it.
+  if (!res.body) {
+    const whole = await res.text()
+    if (Buffer.byteLength(whole, "utf8") > MAX_RESPONSE_BYTES) {
+      throw new WorkspaceApiError(
+        `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
+      )
+    }
+    return whole
+  }
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > MAX_RESPONSE_BYTES) {
+        throw new WorkspaceApiError(
+          `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
+        )
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.cancel().catch(() => {})
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks))
+}
+
 export { req as altimateRequest }
 
 export namespace WorkspaceApi {

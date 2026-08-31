@@ -23,7 +23,8 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { MemoryBlock } from "@/memory/types"
 import { TRAINING_META_COMMENT } from "@/altimate/training/types"
-import { readLocalBinding, type CachedBinding } from "./state"
+// Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
+import { resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { WorkspaceApi } from "./api-client"
 import {
@@ -133,7 +134,12 @@ async function currentBinding(directory?: string): Promise<CachedBinding | null>
   directory = directory ?? currentDirectory() ?? undefined
   if (!directory) return null
   try {
-    return await readLocalBinding(directory)
+    // Server fallback, not just the local cache: that cache is written only by
+    // an explicit link, so a directory holding a repo that IS bound — a git
+    // worktree, a second clone, a teammate's checkout, a new machine — would
+    // mirror nothing at all, silently. See `resolveBinding` for why adopting a
+    // binding here does not also seed the workspace.
+    return await resolveProjectBinding(directory)
   } catch (err) {
     log.warn("could not resolve binding for memory mirror", { err: String(err) })
     return null

@@ -119,6 +119,13 @@ export interface Interface {
   readonly all: () => Effect.Effect<Info[]>
   readonly dirs: () => Effect.Effect<string[]>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+  // altimate_change start — drop the per-instance discovery/registry caches so
+  // the next read re-scans disk. Skills can appear mid-session: a workspace
+  // bind, or a poll that finds new bundles, writes them under the project
+  // config dir, and both caches below are otherwise populated once per instance
+  // and never refreshed.
+  readonly refresh: () => Effect.Effect<void>
+  // altimate_change end
 }
 
 const add = Effect.fnUntraced(function* (state: State, match: string, events: EventV2Bridge.Service["Service"]) {
@@ -379,7 +386,17 @@ export const layer = Layer.effect(
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
     })
 
-    return Service.of({ get, require, all, dirs, available })
+    // altimate_change start — see Interface.refresh. `discovered` and `state`
+    // are separate InstanceStates and `state` closes over the discovery result,
+    // so invalidating only `discovered` would leave a stale registry.
+    const refresh = Effect.fn("Skill.refresh")(function* () {
+      yield* InstanceState.invalidate(discovered)
+      yield* InstanceState.invalidate(state)
+    })
+
+    // altimate_change: `refresh` added to the upstream service surface
+    return Service.of({ get, require, all, dirs, available, refresh })
+    // altimate_change end
   }),
 )
 
@@ -394,6 +411,12 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 ))
 // altimate_change end
 
+// altimate_change start — see the call sites inside `fmt`.
+function neutralizeListingWrapper(text: string): string {
+  return text.replace(/<(\/?)(available_skills|skill|name|description|location)\b/gi, "&lt;$1$2")
+}
+// altimate_change end
+
 export function fmt(list: Info[], opts: { verbose: boolean }) {
   const described = list.filter((skill) => skill.description !== undefined)
   if (described.length === 0) return "No skills are currently available."
@@ -404,8 +427,19 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
         .toSorted((a, b) => a.name.localeCompare(b.name))
         .flatMap((skill) => [
           "  <skill>",
-          `    <name>${skill.name}</name>`,
-          `    <description>${skill.description}</description>`,
+          // altimate_change start — neutralise the listing's own wrapper tags.
+          // `name` and `description` come from bundle frontmatter, and a bound
+          // workspace syncs those from a remote server, so both are attacker
+          // controlled by anyone who can upload a skill. This path is the more
+          // exposed of the two: an auto-loaded body needs `alwaysApply`, whereas
+          // EVERY synced skill's description lands here in EVERY session. A
+          // description ending `</description></skill></available_skills>` would
+          // otherwise close the listing and continue as unwrapped system-prompt
+          // text. Deliberately not a full XML escape — descriptions legitimately
+          // contain code and angle brackets. (review)
+          `    <name>${neutralizeListingWrapper(skill.name)}</name>`,
+          `    <description>${neutralizeListingWrapper(skill.description ?? "")}</description>`,
+          // altimate_change end
           `    <location>${pathToFileURL(skill.location).href}</location>`,
           "  </skill>",
         ]),
@@ -443,6 +477,14 @@ export async function get(name: string) {
 }
 export async function available(agent?: Agent.Info) {
   return runSkill((svc) => svc.available(agent))
+}
+// Imperative wrapper for the same reason as the three above: the workspace
+// skill sync is plain async code running under the instance ALS, which
+// `attach()` propagates into this runtime. No marker of its own — this is
+// already inside the block opened above, and nesting them makes marker
+// coverage harder to account for. (bot review)
+export async function refresh() {
+  return runSkill((svc) => svc.refresh())
 }
 // altimate_change end
 
