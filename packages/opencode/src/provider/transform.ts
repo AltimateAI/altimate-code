@@ -367,9 +367,27 @@ export namespace ProviderTransform {
     })
   }
 
-  // altimate_change start — expose the pure media projection used before input-budget estimation
+  // altimate_change start — expose the pure request projection used before input-budget estimation
   export function messagesForInputEstimate(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
-    return unsupportedParts(msgs, model)
+    const projected = unsupportedParts(msgs, model)
+    const mistral =
+      model.providerID === "mistral" ||
+      model.api.id.toLowerCase().includes("mistral") ||
+      model.api.id.toLowerCase().includes("devstral")
+    if (!mistral) return projected
+
+    // normalizeMessages inserts this bridge before transport because Mistral rejects a tool
+    // message followed directly by a user message. Estimate the same synthetic messages without
+    // mutating the history that the real transform will process later.
+    const result: ModelMessage[] = []
+    for (let index = 0; index < projected.length; index++) {
+      const message = projected[index]
+      result.push(message)
+      if (message.role === "tool" && projected[index + 1]?.role === "user") {
+        result.push({ role: "assistant", content: [{ type: "text", text: "Done." }] })
+      }
+    }
+    return result
   }
   // altimate_change end
 

@@ -210,7 +210,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     }),
     inputTokens: () =>
       estimateInputTokens({
-        system,
+        // OAuth carries this prompt in instructions; workflows deliberately omit it. Count the
+        // generated system prompt only when this request prepends it to the outgoing messages.
+        system: isOpenaiOauth || input.isWorkflow ? [] : system,
         messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
         tools: sortedTools,
         instructions: params.options.instructions,

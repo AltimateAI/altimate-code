@@ -5162,6 +5162,27 @@ describe("output token budget", () => {
     expect((messages[0].content as Array<{ type: string }>).every((part) => part.type !== "text")).toBeTrue()
   })
 
+  test("projects Mistral's synthetic tool-to-user bridge before estimation", () => {
+    const model = {
+      ...createWindowModel({ context: 65_536, output: 16_384 }),
+      providerID: "mistral",
+      api: { id: "mistral-large", url: "https://example.invalid/v1", npm: "@ai-sdk/mistral" },
+    }
+    const messages = Array.from({ length: 64 }, (_, index) => [
+      { role: "tool" as const, content: [] },
+      { role: "user" as const, content: `continue ${index}` },
+    ]).flat() as ModelMessage[]
+
+    const projected = ProviderTransform.messagesForInputEstimate(messages, model)
+    const normalized = ProviderTransform.message(structuredClone(messages), model, {})
+
+    expect(projected).toEqual(normalized)
+    expect(projected).toHaveLength(messages.length + 64)
+    expect(estimateInputTokens({ system: [], messages: projected })).toBeGreaterThan(
+      estimateInputTokens({ system: [], messages }) + 1_000,
+    )
+  })
+
   test("counts repeated shared tool objects while terminating true cycles", () => {
     const sharedTool = tool({
       description: "shared schema documentation ".repeat(1_200),
@@ -5306,6 +5327,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
       readonly providerOptions?: Record<string, unknown>
       readonly modelHeaders?: Record<string, string>
       readonly chatHeaders?: Record<string, string>
+      readonly isWorkflow?: boolean
     } = {},
   ) =>
     Effect.runPromise(
@@ -5349,7 +5371,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
           init: () => Effect.void,
         } as any,
         flags: { outputTokenMax: 32_000, client: "test" } as any,
-        isWorkflow: false,
+        isWorkflow: overrides.isWorkflow ?? false,
       }),
     )
 
@@ -5374,6 +5396,12 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
 
   test("a small system prompt keeps the full model reservation", async () => {
     const result = await run("You are a helpful assistant.")
+    expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("does not budget a generated system prompt omitted from workflow requests", async () => {
+    const result = await run(largePrompt, { isWorkflow: true })
+    expect(result.messages).toEqual(messages)
     expect(result.params.maxOutputTokens).toBe(16_384)
   })
 
