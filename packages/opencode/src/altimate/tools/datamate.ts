@@ -13,6 +13,8 @@ import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
+// altimate_change - workspace mode owns the datamate key
+import { managedWorkspaceLoaded } from "../workspace/engine-overlay"
 
 const log = Log.create({ service: "datamate" })
 
@@ -138,22 +140,35 @@ async function handleList() {
 
 async function handleListIntegrations() {
   try {
-    const integrations = await AltimateApi.listIntegrations()
+    const catalog = await AltimateApi.listIntegrations()
+    // altimate_change start — extension-type integrations are RPC into a live VS
+    // Code host and cannot work from the CLI. Hide them from this surface (the
+    // workspace UI still offers them) and say how many were hidden.
+    const integrations = catalog.filter((i) => i.type !== "extension")
+    const hidden = catalog.length - integrations.length
+    const omitted =
+      hidden > 0
+        ? `${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they require a live VS Code bridge and are not available from the CLI.`
+        : ""
     if (integrations.length === 0) {
       return {
-        title: "Integrations: none found",
-        metadata: { count: 0 },
-        output: "No integrations available.",
+        title: hidden > 0 ? `Integrations: none available on the CLI (${hidden} hidden)` : "Integrations: none found",
+        metadata: { count: 0, hidden },
+        output: omitted ? `No integrations available. ${omitted}` : "No integrations available.",
       }
     }
+    // altimate_change end
     const lines = ["ID | Name | Tools", "---|------|------"]
     for (const i of integrations) {
       const tools = i.tools?.map((t) => t.key).join(", ") ?? "none"
       lines.push(`${i.id} | ${i.name} | ${tools}`)
     }
+    // altimate_change start
+    if (omitted) lines.push("", `(${omitted})`)
+    // altimate_change end
     return {
       title: `Integrations: ${integrations.length} available`,
-      metadata: { count: integrations.length },
+      metadata: { count: integrations.length, hidden },
       output: lines.join("\n"),
     }
   } catch (e) {
@@ -176,10 +191,31 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
     }
   }
   try {
-    const datamate = await AltimateApi.getDatamate(args.datamate_id)
     // readDatamateTransportFromIde returns the exact command from the IDE config so we
     // reuse the same process the extension already manages, not a second one.
     const transport = await readDatamateTransportFromIde(projectRoot())
+
+    // altimate_change start — in workspace mode the shared `datamate` key is the
+    // bound workspace's own engine, derived at config load. The add goes under
+    // that key on two routes — an IDE transport, or an explicit `name` of
+    // "datamate" — and both are refused, with the reason, before anything is
+    // looked up: the refusal must not depend on the API being reachable.
+    // Standalone `datamate-<name>` entries are a different key and stay the user's.
+    const wantsManagedKey = transport !== null || args.name === DATAMATE_KEY
+    const managed = wantsManagedKey ? await managedWorkspaceLoaded() : null
+    if (managed) {
+      return {
+        title: `Datamate add: '${DATAMATE_KEY}' is managed by workspace "${managed.name}"`,
+        metadata: { serverName: DATAMATE_KEY, managedBy: managed.id, datamateId: args.datamate_id },
+        output:
+          `This project is linked to workspace "${managed.name}", whose integrations are served by the ` +
+          `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Adding datamate '${args.datamate_id}' ` +
+          `there is not applied. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage that entry by hand.`,
+      }
+    }
+    // altimate_change end
+
+    const datamate = await AltimateApi.getDatamate(args.datamate_id)
 
     if (transport !== null) {
       log.info("handleAdd: IDE transport detected, entering single-gateway mode", {
@@ -325,6 +361,23 @@ async function handleCreate(args: {
     }
   }
   try {
+    // altimate_change start — with an IDE transport the add that follows would go
+    // under the shared `datamate` key; in workspace mode that add is refused, so
+    // refuse here before creating an API datamate nothing would connect to.
+    if ((await readDatamateTransportFromIde(projectRoot())) !== null) {
+      const managedKey = await managedWorkspaceLoaded()
+      if (managedKey) {
+        return {
+          title: `Datamate create: '${DATAMATE_KEY}' is managed by workspace "${managedKey.name}"`,
+          metadata: { serverName: DATAMATE_KEY, managedBy: managedKey.id },
+          output:
+            `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
+            `workspace's own engine under the '${DATAMATE_KEY}' MCP server. Creating datamate '${args.name}' ` +
+            `here would not connect it. Unlink the project, or run without ALTIMATE_WORKSPACE, first.`,
+        }
+      }
+    }
+    // altimate_change end
     const integrations = args.integration_ids
       ? await AltimateApi.resolveIntegrations(args.integration_ids)
       : undefined
@@ -487,6 +540,22 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
     }
   }
   try {
+    // altimate_change start — the workspace-managed `datamate` key is not the
+    // user's to remove either: it would stop the engine under a turn and delete
+    // the entry that unlinking hands back. Standalone `datamate-<name>` entries
+    // are unaffected.
+    const managedKey = args.server_name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
+    if (managedKey) {
+      return {
+        title: `Datamate remove: '${DATAMATE_KEY}' is managed by workspace "${managedKey.name}"`,
+        metadata: { serverName: DATAMATE_KEY, managedBy: managedKey.id },
+        output:
+          `This project is linked to workspace "${managedKey.name}", whose integrations are served by the ` +
+          `workspace's own engine under the '${DATAMATE_KEY}' MCP server. It is not removed. Unlink the project, ` +
+          `or run without ALTIMATE_WORKSPACE, to manage that entry by hand.`,
+      }
+    }
+    // altimate_change end
     // Fully remove from runtime state (disconnect + purge from MCP list)
     // altimate_change start — MCP.remove (was disconnect): delete the status entry + publish
     // ToolsChanged so the removed server's tools stop being offered without a restart.

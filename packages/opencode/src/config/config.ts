@@ -33,6 +33,9 @@ import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigManaged } from "./managed"
+// altimate_change start — the workspace engine overlay yields to managed config for this key
+import { DATAMATE_KEY } from "../altimate/datamate-transport"
+// altimate_change end
 import { ConfigParse } from "./parse"
 import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
@@ -657,6 +660,9 @@ export const layer = Layer.effect(
           )
         }
 
+        // altimate_change start — whether organisation-managed config sets the datamate MCP key
+        let managedOwnsDatamate = false
+        // altimate_change end
         const managedDir = ConfigManaged.managedConfigDir()
         if (existsSync(managedDir)) {
           // altimate_change start - support altimate-code.json config filename
@@ -670,7 +676,11 @@ export const layer = Layer.effect(
           ]) {
             // altimate_change end
             const source = path.join(managedDir, file)
-            yield* merge(source, yield* loadFile(source), "global")
+            // altimate_change start — note a managed datamate key before merging
+            const managedFile = yield* loadFile(source)
+            if (managedFile?.mcp && DATAMATE_KEY in managedFile.mcp) managedOwnsDatamate = true
+            yield* merge(source, managedFile, "global")
+            // altimate_change end
           }
         }
 
@@ -680,13 +690,14 @@ export const layer = Layer.effect(
           // altimate_change start — upstream_fix (#701): clear before this load.
           ConfigVariable.resetBlankedEnvVars(managed.source)
           // altimate_change end
-          result = mergeConfigConcatArrays(
-            result,
-            yield* loadConfig(managed.text, {
-              dir: path.dirname(managed.source),
-              source: managed.source,
-            }),
-          )
+          // altimate_change start — note a managed datamate key before merging
+          const managedPrefs = yield* loadConfig(managed.text, {
+            dir: path.dirname(managed.source),
+            source: managed.source,
+          })
+          if (managedPrefs.mcp && DATAMATE_KEY in managedPrefs.mcp) managedOwnsDatamate = true
+          result = mergeConfigConcatArrays(result, managedPrefs)
+          // altimate_change end
         }
 
         for (const [name, mode] of Object.entries(result.mode ?? {})) {
@@ -768,6 +779,19 @@ export const layer = Layer.effect(
             }
             setDiscoveryResult(added, sources)
           }
+        }
+        // altimate_change end
+
+        // altimate_change start — workspace engine overlay. When the pilot is on and
+        // this directory is bound to a workspace, the `datamate` MCP entry is the
+        // workspace's pinned local engine — derived here, after discovery, so it has
+        // the last word over IDE-written, hosted and stale entries, and never written
+        // to any file. See altimate/workspace/engine-overlay.ts.
+        if (Flag.ALTIMATE_WORKSPACE) {
+          const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
+          yield* Effect.promise(() =>
+            overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),
+          )
         }
         // altimate_change end
 

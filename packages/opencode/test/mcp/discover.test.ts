@@ -454,6 +454,33 @@ describe("discoverExternalMcp", () => {
   // NOTE: env-var interpolation in discover only applies to `env` and `headers`
   // fields (see resolveServerEnvVars in discover.ts), NOT to `command` args.
   // Tests for command-level interpolation were removed as invalid.
+
+  // altimate_change start — the `**/mcp.json` scan is now pruned during traversal
+  // instead of filtered afterwards. Pin that the exclusion still holds and that
+  // real project files are still discovered.
+  test("mcp.json inside dependency and build trees is not discovered", async () => {
+    await mkdir(path.join(tempDir, "node_modules/some-pkg/.vscode"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, "node_modules/some-pkg/.vscode/mcp.json"),
+      JSON.stringify({ servers: { vendored: { command: "should-not-appear" } } }),
+    )
+    await mkdir(path.join(tempDir, "dist"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, "dist/mcp.json"),
+      JSON.stringify({ servers: { built: { command: "should-not-appear" } } }),
+    )
+    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".vscode/mcp.json"),
+      JSON.stringify({ servers: { real: { command: "real-cmd" } } }),
+    )
+
+    const { servers: result } = await discoverExternalMcp(tempDir)
+    expect(result["vendored"]).toBeUndefined()
+    expect(result["built"]).toBeUndefined()
+    expect(result["real"]).toMatchObject({ type: "local", command: ["real-cmd"] })
+  })
+  // altimate_change end
 })
 
 // altimate_change start — upstream_fix (#701): the record must not outlive the problem.

@@ -4,6 +4,7 @@
 
 import * as fs from "fs"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 /**
  * Run `fn` with stdout/stderr writes swallowed for the (synchronous) duration of
@@ -52,14 +53,8 @@ export function suppressSnowflakeLogging(snowflake: any): void {
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let snowflake: any
-  try {
-    snowflake = await import("snowflake-sdk")
-    snowflake = snowflake.default || snowflake
-  } catch {
-    throw new Error(
-      "Snowflake driver not installed. Run: npm install snowflake-sdk",
-    )
-  }
+  snowflake = await loadOptionalDriver("snowflake", "snowflake-sdk")
+  snowflake = snowflake.default || snowflake
 
   // Suppress snowflake-sdk's Winston console logging as early as possible — it
   // writes JSON log lines into the interactive TUI output and corrupts the

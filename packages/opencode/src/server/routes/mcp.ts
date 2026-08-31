@@ -2,6 +2,10 @@ import { Hono } from "hono"
 import { describeRoute, validator, resolver } from "hono-openapi"
 import z from "zod"
 import { MCP } from "../../mcp"
+// altimate_change start — workspace mode owns the datamate key
+import { DATAMATE_KEY } from "../../altimate/datamate-transport"
+import { managedWorkspaceLoaded } from "../../altimate/workspace/engine-overlay"
+// altimate_change end
 // altimate_change start — Config.Mcp + MCP.Status migrated to Effect Schema in v1.17.9; convert to zod for HTTP schemas
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { zod } from "@/util/effect-zod"
@@ -59,6 +63,15 @@ export const McpRoutes = lazy(() =>
       ),
       async (c) => {
         const { name, config } = c.req.valid("json")
+        // altimate_change start — workspace mode owns the `datamate` key
+        const managed = name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
+        if (managed) {
+          return c.json(
+            { error: `MCP server "${name}" is managed by workspace "${managed.name}" in this project` },
+            400,
+          )
+        }
+        // altimate_change end
         const result = await MCP.add(name, config)
         return c.json(result.status)
       },
@@ -202,6 +215,15 @@ export const McpRoutes = lazy(() =>
       validator("param", z.object({ name: z.string() })),
       async (c) => {
         const { name } = c.req.valid("param")
+        // altimate_change start — the workspace-managed key is not restarted or persisted from here
+        const managed = name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
+        if (managed) {
+          return c.json(
+            { error: `MCP server "${name}" is managed by workspace "${managed.name}" in this project` },
+            409,
+          )
+        }
+        // altimate_change end
         await MCP.connect(name)
         return c.json(true)
       },
@@ -225,6 +247,15 @@ export const McpRoutes = lazy(() =>
       validator("param", z.object({ name: z.string() })),
       async (c) => {
         const { name } = c.req.valid("param")
+        // altimate_change start — the workspace-managed key is not closed or persisted from here
+        const managed = name === DATAMATE_KEY ? await managedWorkspaceLoaded() : null
+        if (managed) {
+          return c.json(
+            { error: `MCP server "${name}" is managed by workspace "${managed.name}" in this project` },
+            409,
+          )
+        }
+        // altimate_change end
         await MCP.disconnect(name)
         return c.json(true)
       },

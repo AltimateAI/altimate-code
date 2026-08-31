@@ -145,9 +145,15 @@ A single `first_launch` event is sent containing only:
 
 - The installed version (e.g., "0.5.9")
 - Whether this is a fresh install or upgrade (boolean)
+- Which installer was used (`curl`, `powershell`, `npm`, `vscode-extension`, `local`, or `unknown` — what every upgrade from a version predating this field reports)
 - Your anonymous machine ID (random UUID)
 
 No code, queries, file paths, or personal information is included. This event helps us understand adoption and is fully opt-out-able.
+
+The install scripts (`altimate.sh/install`, `install.ps1`), the npm postinstall, and the VS Code extension's installer send nothing themselves and contact no telemetry endpoint. They only record the version and installer name to a local file that the CLI reads on its next run, so the opt-out above decides whether anything is ever transmitted.
+
+!!! warning "One caveat on the config-file opt-out"
+    The environment variables (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`) are always honoured. The `telemetry.disabled` **config key** is read during telemetry startup, which can run before the CLI's config is resolvable — and in that case startup currently proceeds with telemetry enabled. A user who has opted out via the config key alone may therefore still have this event transmitted. Use an environment variable if you need a guarantee.
 
 ## What happens when I authenticate via a well-known URL?
 
