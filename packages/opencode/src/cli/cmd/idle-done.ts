@@ -258,7 +258,11 @@ export namespace IdleDone {
     // redirect is the safe direction here: it only makes idle-done fire less.
     if (/>>?\s*(?!&)/.test(command)) return true
     // In-place editors: the head is on the read-only list, the `-i` flag writes.
-    if (/\b(?:sed|perl|ruby)\b[^|;&]*\s-[A-Za-z]*i\b/.test(command)) return true
+    // GNU sed documents the flag as `-i[SUFFIX], --in-place[=SUFFIX]`, so the
+    // long spelling edits files just as the short one does; matching only the
+    // short form left `sed --in-place s/x/y/ file` classified as read-only and
+    // a stale green verification could still satisfy the idle-done gate.
+    if (/\b(?:sed|perl|ruby)\b[^|;&]*(?:\s-[A-Za-z]*i\b|\s--in-place\b)/.test(command)) return true
     for (const statement of command.split(/&&|\|\||[;|\n]/)) {
       const tokens = statement
         .trim()

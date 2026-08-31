@@ -264,3 +264,70 @@ describe("ToolResultCap.capInterruptedMetadata", () => {
     expect(metadata.output).not.toBe(giant)
   })
 })
+
+describe("ToolResultCap.apply — Unicode chunk boundaries", () => {
+  // Long single lines are chunked at a fixed 2,000-code-unit stride before the
+  // truncation machinery runs. `slice` counts UTF-16 code units, so a non-BMP
+  // character straddling that stride was split into a high surrogate ending one
+  // chunk and a low surrogate starting the next. `assemble` rejoins chunks with
+  // "\n", so when BOTH halves survived into the preview the pair came back as
+  // two lone surrogates separated by a newline — the replayed diagnostic held
+  // replacement characters instead of the original text.
+  //
+  // Iterating with the spread operator yields a well-formed pair as a single
+  // two-code-unit string, so length is what distinguishes a LONE surrogate
+  // from an intact astral character.
+  const isLoneSurrogate = (ch: string) => {
+    if (ch.length !== 1) return false
+    const code = ch.charCodeAt(0)
+    return code >= 0xd800 && code <= 0xdfff
+  }
+  // A lone surrogate is not encodable, so a UTF-8 round trip replaces it. Both
+  // checks are kept: the first localizes the defect, the second is what a
+  // consumer actually observes once the result is serialized to the provider.
+  const isCorrupt = (s: string) =>
+    [...s].some(isLoneSurrogate) || Buffer.from(s, "utf-8").toString("utf-8") !== s
+
+  // These three (padding, cap) pairs are not illustrative — each was observed
+  // to produce a corrupted result against the pre-fix chunker. They are the
+  // regression's minimal witnesses: the emoji sits astride the 2,000-unit
+  // stride and the cap is wide enough for both halves to survive truncation.
+  const WITNESSES: Array<{ pad: number; cap: number }> = [
+    { pad: 1_999, cap: 2_100 },
+    { pad: 5_999, cap: 3_100 },
+    { pad: 5_999, cap: 3_200 },
+  ]
+
+  test("keeps astral characters intact across a chunk boundary", () => {
+    for (const { pad, cap } of WITNESSES) {
+      const line = "a".repeat(pad) + "🙂" + "b".repeat(6_000)
+      const result = ToolResultCap.apply(line, cap)
+      // Guards the witness itself: if this stopped truncating, the case would
+      // pass vacuously and stop covering the chunker at all.
+      expect(result.truncated).toBe(true)
+      expect(isCorrupt(result.content)).toBe(false)
+    }
+  })
+
+  test("keeps astral characters intact across a sweep of caps", () => {
+    // Widen beyond the witnesses so a future change to the stride, the head
+    // ratio, or the byte budget cannot quietly reopen the defect at a cap that
+    // happens not to be pinned above.
+    for (const pad of [1_999, 3_999, 5_999]) {
+      const line = "a".repeat(pad) + "🙂" + "b".repeat(6_000)
+      for (let cap = 100; cap <= 6_000; cap += 100) {
+        expect(isCorrupt(ToolResultCap.apply(line, cap).content)).toBe(false)
+      }
+    }
+  })
+
+  test("still truncates and terminates on an all-astral line", () => {
+    // Guards the advance path: every boundary is a surrogate pair here, so a
+    // back-off that failed to advance would hang instead of truncating.
+    const line = "🙂".repeat(10_000)
+    const result = ToolResultCap.apply(line, 120)
+    expect(result.truncated).toBe(true)
+    expect(isCorrupt(result.content)).toBe(false)
+    expect(Token.estimate(result.content)).toBeLessThanOrEqual(120)
+  })
+})

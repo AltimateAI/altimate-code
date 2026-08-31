@@ -220,6 +220,20 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("perl -i -pe 's/a/b/' f.txt")).toBe(true)
   })
 
+  // GNU sed documents `-i[SUFFIX], --in-place[=SUFFIX]`. Only the short form
+  // was recognized, so the long spelling mutated the worktree while leaving the
+  // mutation watermark stale — a prior green verify then satisfied the gate.
+  test("long-form in-place editor flags are mutating", () => {
+    for (const cmd of ["sed --in-place s/a/b/ f.txt", "sed --in-place=.bak s/a/b/ f.txt"]) {
+      expect(IdleDone.isReadOnlyCommand(cmd)).toBe(true)
+      expect(IdleDone.isMutatingCommand(cmd)).toBe(true)
+    }
+    // Also caught in a tail statement, where the verifier command is the head.
+    expect(IdleDone.isMutatingCommand("npm test && sed --in-place s/a/b/ f.txt")).toBe(true)
+    // A read-only sed without any in-place flag stays read-only.
+    expect(IdleDone.isMutatingCommand("sed -n 1,10p f.txt")).toBe(false)
+  })
+
   test("output redirection is mutating; fd duplication is not", () => {
     expect(IdleDone.isMutatingCommand("cat a.txt > b.txt")).toBe(true)
     expect(IdleDone.isMutatingCommand("echo hi >> log.txt")).toBe(true)

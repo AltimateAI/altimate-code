@@ -608,8 +608,17 @@ export namespace SessionCompaction {
         // Attached values are valid only for short `-u` (`-ualice:pass`).
         if (flag.toLowerCase() === "--user" && separator === undefined) return match
         const rawValue = (separatedValue ?? attachedValue ?? "").replace(/^["']|["']$/g, "")
-        const curlContext = /(?:^|[\s/])curl(?=\s|$)/i.test(shellSegmentBefore(whole, offset + lead.length))
-        const credentialShaped = /^[^:/\s]+:[^/\s]+$/.test(rawValue)
+        // Windows invokes curl as `curl.exe`, and either platform may reach it
+        // through a path such as /usr/bin/curl or a Windows System32 path.
+        // Missing those spellings left `-u user password` unredacted.
+        const curlContext = /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(
+          shellSegmentBefore(whole, offset + lead.length),
+        )
+        // Require an alphabetic character before the colon so that genuinely
+        // non-credential `x:y` literals survive outside a curl context — most
+        // importantly `docker run --user 1000:1000`, whose UID:GID is exactly
+        // the kind of task detail the ledger exists to preserve.
+        const credentialShaped = /^(?=[^:/\s]*[A-Za-z])[^:/\s]+:[^/\s]+$/.test(rawValue)
         if (!curlContext && !credentialShaped) return match
         return `${lead}${flag}${separator ?? ""}<redacted>`
       },

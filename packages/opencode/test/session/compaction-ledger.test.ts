@@ -396,6 +396,48 @@ describe("SessionCompaction.renderLedger", () => {
     }
     expect(SessionCompaction.redactLedgerDetail("curl -u alice https://example.com")).not.toContain("alice")
   })
+
+  test("recognizes curl through .exe and path spellings", () => {
+    // A bare `-u user password` is only redacted because the shell segment is
+    // recognized as curl. `curl.exe` (Windows) and path-qualified spellings
+    // previously missed that check and leaked the credential into the ledger.
+    for (const command of [
+      "curl.exe -u alice dummy-password https://example.com",
+      "CURL.EXE -u alice dummy-password https://example.com",
+      "/usr/bin/curl -u alice dummy-password https://example.com",
+      "/usr/local/bin/curl.exe -u alice dummy-password https://example.com",
+    ]) {
+      const detail = SessionCompaction.redactLedgerDetail(command)
+      expect(detail).not.toContain("alice")
+    }
+
+    // The suffix must be the whole executable name, not a prefix match: a
+    // command merely starting with "curl" is not curl.
+    expect(SessionCompaction.redactLedgerDetail("curlywurly -u alice script.py")).toBe(
+      "curlywurly -u alice script.py",
+    )
+  })
+
+  test("keeps non-credential colon-shaped values outside a curl context", () => {
+    // `1000:1000` has no alphabetic character before the colon, so it is a
+    // UID:GID pair rather than user:password and must survive in the ledger.
+    for (const command of [
+      "docker run --user 1000:1000 alpine",
+      "docker run -u 1000:1000 alpine",
+      "podman run --user=0:0 alpine",
+    ]) {
+      expect(SessionCompaction.redactLedgerDetail(command)).toBe(command)
+    }
+
+    // A genuinely credential-shaped value is still redacted outside curl.
+    const credential = SessionCompaction.redactLedgerDetail("tool --user alice:dummy-password")
+    expect(credential).not.toContain("dummy-password")
+    expect(credential).not.toContain("alice")
+
+    // ...and inside a curl context the numeric shape is still redacted,
+    // because curl's own `-u` is unambiguously authentication.
+    expect(SessionCompaction.redactLedgerDetail("curl -u 1000:1000 https://example.com")).not.toContain("1000:1000")
+  })
 })
 
 // ─── 5b: extractAccomplished / corroborateCarry / renderCarryAnchors ────────

@@ -118,7 +118,24 @@ export namespace ToolResultCap {
         lines.push(line)
         continue
       }
-      for (let i = 0; i < line.length; i += LINE_CHUNK_CHARS) lines.push(line.slice(i, i + LINE_CHUNK_CHARS))
+      // Chunk on code-point boundaries. `slice` counts UTF-16 code units, so a
+      // fixed stride can land between the high and low halves of an astral
+      // character (emoji, CJK ext, ...). The truncation machinery may then keep
+      // one half, and the replayed diagnostic carries a lone surrogate instead
+      // of the original text.
+      for (let i = 0; i < line.length; ) {
+        let end = Math.min(i + LINE_CHUNK_CHARS, line.length)
+        if (end < line.length) {
+          const code = line.charCodeAt(end - 1)
+          // High surrogate at the boundary: its pair starts here, so end the
+          // chunk before it and let the next chunk carry the whole character.
+          if (code >= 0xd800 && code <= 0xdbff) end -= 1
+        }
+        // Defensive: never fail to advance, whatever LINE_CHUNK_CHARS becomes.
+        if (end <= i) end = Math.min(i + 2, line.length)
+        lines.push(line.slice(i, end))
+        i = end
+      }
     }
     const totalBytes = Buffer.byteLength(output, "utf-8")
     // altimate_change start — outcome-accurate hint (see `opts.outcome`).
