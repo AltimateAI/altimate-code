@@ -124,6 +124,26 @@ export const McpCommand = cmd({
   async handler() {},
 })
 
+// altimate_change start — upstream_fix (#878/#701): config-level diagnostics, shared by every
+// exit of `mcp list` / `mcp status` so a config with nothing listable still reports them.
+function reportConfigDiagnostics() {
+  // Discovery is first-source-wins, so a server already in altimate-code.json is skipped and a
+  // changed .vscode/mcp.json is never mentioned. The configured value still wins; this only
+  // says the two disagree and which file to look at.
+  for (const { server, source, fields } of McpDiscover.configDrift()) {
+    prompts.log.warn(`${server} differs from ${source}: ${fields.join(", ")} (config wins)`)
+  }
+
+  // A missing `{env:VAR}` becomes "" and the config parses clean, so a blank credential reaches
+  // the server and fails much later with an error naming neither. Attribution to a single server
+  // is not available here (substitution runs on raw config text, before any structure exists),
+  // so this is reported against the file.
+  for (const { source, names } of ConfigVariable.blankedEnvVars()) {
+    prompts.log.warn(`${names.join(", ")} resolved to empty in ${source} (set or remove)`)
+  }
+}
+// altimate_change end
+
 export const McpListCommand = effectCmd({
   command: "list",
   aliases: ["ls"],
@@ -137,6 +157,11 @@ export const McpListCommand = effectCmd({
 
     if (servers.length === 0) {
       prompts.log.warn("No MCP servers configured")
+      // altimate_change start — upstream_fix (#878): drift and blank-variable warnings are about
+      // the config, not about any one server, so they must survive the nothing-to-list exit. An
+      // enabled-only override for a discovered server leaves this list empty while drift exists.
+      reportConfigDiagnostics()
+      // altimate_change end
       // altimate_change start — branding regression
       prompts.outro("Add servers with: altimate mcp add")
       // altimate_change end
@@ -191,21 +216,7 @@ export const McpListCommand = effectCmd({
       )
     }
 
-    // altimate_change start — upstream_fix (#878): discovery is first-source-wins, so a server
-    // already in altimate-code.json is skipped and a changed .vscode/mcp.json is never mentioned.
-    // The configured value still wins; this only says the two disagree and where to look.
-    for (const { server, source, fields } of McpDiscover.configDrift()) {
-      prompts.log.warn(`${server} differs from ${source}: ${fields.join(", ")} (config wins)`)
-    }
-
-    // upstream_fix (#701): a missing `{env:VAR}` becomes "" and the config parses clean, so a
-    // blank credential reaches the server and fails much later with an error naming neither.
-    // Attribution to a single server is not available here (substitution runs on raw config
-    // text, before any structure exists), so this is reported against the file.
-    for (const { source, names } of ConfigVariable.blankedEnvVars()) {
-      prompts.log.warn(`${names.join(", ")} resolved to empty in ${source} (set or remove)`)
-    }
-    // altimate_change end
+    reportConfigDiagnostics()
 
     prompts.outro(`${servers.length} server(s)`)
   }),
@@ -520,7 +531,8 @@ export const McpAddCommand = effectCmd({
       // altimate_change start — non-interactive mode: upstream v1.17 form (--url or command after --)
       // plus the fork's explicit --type/--command form.
       const passthrough = Array.isArray(args["--"]) ? args["--"] : []
-      const inferredType = args.type ?? (args.url ? "remote" : passthrough.length > 0 || args.command ? "local" : undefined)
+      const inferredType =
+        args.type ?? (args.url ? "remote" : passthrough.length > 0 || args.command ? "local" : undefined)
       if (args.name && inferredType) {
         if (!args.name.trim()) {
           console.error("MCP server name cannot be empty")

@@ -156,6 +156,10 @@ async function substituteWellKnownRemoteConfig(input: {
 }) {
   if (!isRecord(input.value) || typeof input.value.url !== "string") return undefined
 
+  // altimate_change start — upstream_fix (#701): the url and every header below publish under
+  // this same source, so clear once here and let those calls union into one record.
+  ConfigVariable.resetBlankedEnvVars(input.source)
+  // altimate_change end
   const url = await ConfigVariable.substitute({
     text: input.value.url,
     type: "virtual",
@@ -314,6 +318,9 @@ export const layer = Layer.effect(
       env?: Record<string, string>,
     ) {
       const source = "path" in options ? options.path : options.source
+      // altimate_change start — upstream_fix (#701): clear before the load, union during it.
+      ConfigVariable.resetBlankedEnvVars(source)
+      // altimate_change end
       const expanded = yield* Effect.promise(() =>
         ConfigVariable.substitute(
           "path" in options
@@ -724,7 +731,8 @@ export const layer = Layer.effect(
         const autoMcpDiscovery = (result.experimental as { auto_mcp_discovery?: boolean } | undefined)
           ?.auto_mcp_discovery
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
-          const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift } = yield* Effect.promise(
+          const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift, discoveredSource } =
+            yield* Effect.promise(
             () => import("../mcp/discover"),
           )
           const { servers: externalMcp, sources } = yield* Effect.promise(() => discoverExternalMcp(ctx.directory))
@@ -739,7 +747,11 @@ export const layer = Layer.effect(
                 // altimate_change — upstream_fix (#878): the user's config still wins, but the
                 // difference is recorded so a surface can report it rather than silently skipping.
                 const configured = (result.mcp as Record<string, any>)[name]
-                setConfigDrift(name, sources.join(", "), driftFields(server as Record<string, any>, configured))
+                setConfigDrift(
+                  name,
+                  discoveredSource(name) ?? sources.join(", "),
+                  driftFields(server as Record<string, any>, configured),
+                )
               }
             }
             setDiscoveryResult(added, sources)

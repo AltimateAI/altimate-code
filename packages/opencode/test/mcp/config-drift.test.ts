@@ -51,3 +51,38 @@ describe("configDrift record", () => {
   })
 })
 // altimate_change end
+
+// altimate_change start — upstream_fix (#878): findings from PR review.
+describe("driftFields — false positives and lost detail", () => {
+  test("ignores updatedAt, the datamate sync bookkeeping field", () => {
+    // normalizeMcpConfig preserves updatedAt on the configured entry and discovery never
+    // produces one, so this compared a string against undefined and reported drift on every
+    // `mcp list` for any datamate-synced server.
+    expect(driftFields({ command: ["a"] }, { command: ["a"], updatedAt: "2026-08-28T00:00:00Z" })).toEqual([])
+  })
+
+  test("does not report key order as a difference", () => {
+    const discovered = { oauth: { clientId: "x", scope: "y" } }
+    const configured = { oauth: { scope: "y", clientId: "x" } }
+    expect(driftFields(discovered, configured)).toEqual([])
+  })
+
+  test("names the inner key when only one side has the block", () => {
+    // Previously required both sides to be objects, so a server that gained an environment
+    // wholesale reported the bare word "environment" and lost the key that actually differs.
+    expect(driftFields({ environment: { PORT: "1" } }, {})).toEqual(["environment.PORT"])
+    expect(driftFields({}, { environment: { PORT: "1" } })).toEqual(["environment.PORT"])
+  })
+
+  test("still reports an empty block against a missing one", () => {
+    // No inner key exists to name, so the top-level field is the only honest answer.
+    expect(driftFields({ environment: {} }, {})).toEqual(["environment"])
+  })
+
+  test("still reports a genuine difference", () => {
+    // The guard against false positives must not silence real drift.
+    expect(driftFields({ environment: { PORT: "1" } }, { environment: { PORT: "2" } })).toEqual(["environment.PORT"])
+    expect(driftFields({ command: ["a"] }, { command: ["b"] })).toEqual(["command"])
+  })
+})
+// altimate_change end

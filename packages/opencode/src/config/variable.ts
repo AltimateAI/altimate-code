@@ -36,6 +36,11 @@ type SubstituteInput = ParseSource & {
 // newest parse of a file replaces its entry so a fixed variable stops being reported.
 const _blankedEnv = new Map<string, Set<string>>()
 
+/** Drop `src`'s record so a load starts clean; substitution then unions within that load. */
+export function resetBlankedEnvVars(src: string) {
+  _blankedEnv.delete(src)
+}
+
 /** Variable names that silently became "" during config substitution, grouped by config source. */
 export function blankedEnvVars(): { source: string; names: string[] }[] {
   return [..._blankedEnv.entries()]
@@ -85,8 +90,15 @@ export async function substitute(input: SubstituteInput) {
   // altimate_change end
 
   // altimate_change start — upstream_fix (#701): publish after the whole text is scanned.
-  if (blanked.size > 0) _blankedEnv.set(source(input), blanked)
-  else _blankedEnv.delete(source(input))
+  // Union, not replace: one source is substituted more than once — a remote config resolves
+  // its `url` and then each header separately, all under the same source. Replacing meant a
+  // later clean call erased the names an earlier call had found, so `mcp list` silently
+  // omitted a blank credential. Clearing is `resetBlankedEnvVars`, called per load below.
+  if (blanked.size > 0) {
+    const existing = _blankedEnv.get(source(input))
+    if (existing) for (const name of blanked) existing.add(name)
+    else _blankedEnv.set(source(input), blanked)
+  }
   // altimate_change end
 
   const fileMatches = Array.from(text.matchAll(/\{file:[^}]+\}/g))
