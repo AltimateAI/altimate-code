@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `aab3dac85008fd9a21919741021d3be3848cefbe`
+- Final code candidate: `56dbc7e9b1f81fa226821754bf44005d8d08715b`
 - Scan mode: chained immutable branch-diff reviews
 - Final coverage: complete
 - Findings remaining on the final candidate: **0**
@@ -34,8 +34,9 @@ The review used immutable ranges so every material repair was independently reco
 | Final request-shape fixes    | `5e04c7885d..c78e1a61b6`                           | Complete coverage; **0 findings**                            |
 | Instruction occurrence fix   | `c78e1a61b6..071f4dc782`                           | Complete coverage; **0 findings**                            |
 | Final edge-case hardening    | `a279303720..aab3dac850`                           | Complete coverage; **0 findings**                            |
+| Small-limit margin fix       | `e3ca59741a..56dbc7e9b1`                           | Complete coverage; **0 findings**                            |
 
-The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, and `19f139b0-8c4c-48cc-adca-a60d41920664`. Their authoritative results contain no deferred work, no open question, and zero findings.
+The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, and `5111b689-e4ad-4243-a7cb-86845b30ca6d`. Their authoritative results contain no deferred work, no open question, and zero findings.
 
 ## Findings discovered and resolved
 
@@ -61,6 +62,10 @@ The final policy removes the 100-page claim instead of replacing it with a large
 
 The final supplemental review found that an empty base64 image represented as a `URL` object could escape unsupported-media projection, and that positive context windows at or below 1,024 tokens were treated as placeholder metadata. The final candidate inspects `URL.href` using the same data-URL rule as strings and enforces every positive context limit. Absent and non-positive context metadata still bypasses lazily, so estimates are not evaluated when no credible limit exists.
 
+### 5. Small authoritative limits retain usable capacity
+
+A follow-up review correctly found that enforcing every positive limit with an unconditional 512-token minimum margin would consume an entire 512-token window. The final candidate retains the 512-token minimum for normal windows but caps that minimum at 2% of each smaller authoritative limit, never below one token. Context and dedicated input ceilings receive separate margins. This preserves local enforcement without rejecting every otherwise valid request on small models.
+
 ## Final trust and data flow
 
 Both production request paths use the same sequence:
@@ -77,7 +82,7 @@ Codebase graph tracing found exactly two production callers of the centralized c
 
 ## Verification
 
-- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **417 passed, 11 skipped, 1 existing todo, 0 failed**.
+- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **418 passed, 11 skipped, 1 existing todo, 0 failed**.
 - Repository typecheck: **13/13 tasks successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
