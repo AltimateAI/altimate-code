@@ -536,6 +536,57 @@ describe("IdleDone hard preconditions", () => {
     expect(d.snapshot().last_mutation_seq).toBeGreaterThan(d.snapshot().last_verify_seq)
   })
 
+  // The ATTACHED form above (`make check$(...)`) was already rejected, but only
+  // incidentally: `$` is not an accepted prefix boundary, so configuredMatches
+  // was false. With a SPACE the boundary check passes, the substitution runs as
+  // an argument to the trusted verifier, and neither the `&&` tail scan nor
+  // hasUnsafeVerificationControl (which looks only for `;`, `|`, `&`, newline)
+  // sees it — so a mutating run counted as green verification of the worktree
+  // it had just changed.
+  test("(i)/(ii) a space-separated substitution after a configured verifier is a mutation", () => {
+    for (const command of [
+      "npm test $(rm report.csv)",
+      "npm test `rm report.csv`",
+      "npm test <(rm report.csv)",
+      "npm test --reporter >(rm report.csv)",
+    ]) {
+      const opts: IdleDone.Options = { ...OPTS, verifyCommand: "npm test" }
+      const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+      d.observePart(editPart("m_work"))
+      d.observePart(stepFinish("m_work"))
+      d.observePart(bashPart("m_verify", "npm test", 0))
+      d.observePart(stepFinish("m_verify"))
+      d.observePart(bashPart("m_substitute", command, 0))
+      d.observePart(stepFinish("m_substitute"))
+      d.observePart(stepFinish("cmp_1"))
+      d.observePart(stepFinish("cmp_2"))
+      for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+
+      expect(d.shouldChallenge()).toBe(false)
+      const snap = d.snapshot()
+      expect(snap.last_mutation_seq).toBeGreaterThan(snap.last_verify_seq)
+    }
+  })
+
+  // The configured verifier itself is trusted, substitution included — only the
+  // appended suffix is scanned. Without this the fix would disqualify every run
+  // of a verifier whose own configured command uses a substitution.
+  test("(ii) a substitution INSIDE the configured verifier still verifies", () => {
+    const opts: IdleDone.Options = { ...OPTS, verifyCommand: "npm test --seed $(cat seed.txt)" }
+    const d = IdleDone.create(opts, deps(["cmp_1", "cmp_2"]))
+    d.observePart(editPart("m_work"))
+    d.observePart(stepFinish("m_work"))
+    d.observePart(bashPart("m_verify", "npm test --seed $(cat seed.txt)", 0))
+    d.observePart(stepFinish("m_verify"))
+    d.observePart(stepFinish("cmp_1"))
+    d.observePart(stepFinish("cmp_2"))
+    for (const m of ["m_idle1", "m_idle2", "m_idle3"]) d.observePart(stepFinish(m))
+
+    const snap = d.snapshot()
+    expect(snap.last_verify_seq).toBeGreaterThan(snap.last_mutation_seq)
+    expect(snap.last_verify_green).toBe(true)
+  })
+
   test("(i) git restore after a green verify advances the mutation watermark without a patch part", () => {
     const d = IdleDone.create(OPTS, deps(["cmp_1", "cmp_2"]))
     d.observePart(editPart("m_work"))

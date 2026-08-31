@@ -241,13 +241,17 @@ export namespace IdleDone {
     "tee",
   ])
 
+  // Command/process substitutions can execute arbitrary writes before the
+  // visible command reports its status (`make check$(rm generated.ts)`). We
+  // cannot safely parse their nested shell here, so both the mutation
+  // classifier and the configured-verifier gate treat one as disqualifying.
+  const SUBSTITUTION = /\$\(|`|[<>]\(/
+
   /** True when the command writes to the filesystem through a head, flag, or redirection. */
   export function isMutatingCommand(command: string): boolean {
-    // Command/process substitutions can execute arbitrary writes before the
-    // visible command reports its status (`make check$(rm generated.ts)`). We
-    // cannot safely parse their nested shell here, so invalidate earlier
-    // verification evidence conservatively whenever one is present.
-    if (/\$\(|`|[<>]\(/.test(command)) return true
+    // Invalidate earlier verification evidence conservatively whenever a
+    // command/process substitution is present.
+    if (SUBSTITUTION.test(command)) return true
     // altimate_change start — Output redirection to a file. Only fd DUPLICATION
     // (`2>&1`, `>&2`) is excluded, and duplication is identified by the `&`
     // that FOLLOWS the operator. The previous lookbehind also rejected a `>`
@@ -436,6 +440,15 @@ export namespace IdleDone {
         const suffix = trimmedCommand.slice(configuredPrefix.length)
         const chained = suffix.indexOf("&&")
         configuredTailMutates = chained >= 0 && isMutatingCommand(suffix.slice(chained + 2))
+        // A substitution needs no chaining operator to run: in
+        // `npm test $(rm report.csv)` the removal executes as an ARGUMENT to the
+        // trusted verifier, so the `&&` scan above never sees it and the run
+        // counted as green verification of a worktree it had just mutated.
+        // hasUnsafeVerificationControl does not cover this either — it only
+        // looks for `;`, `|`, `&` and newlines, none of which appear here.
+        // Only the suffix is scanned, so a configured verifier that itself uses
+        // a substitution stays trusted; appended ones do not.
+        if (!configuredTailMutates && SUBSTITUTION.test(suffix)) configuredTailMutates = true
       }
       const isCandidate = configuredPrefix
         ? configuredMatches && !hasUnsafeVerificationControl(command) && !configuredTailMutates
