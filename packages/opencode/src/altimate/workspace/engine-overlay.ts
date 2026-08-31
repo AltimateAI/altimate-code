@@ -66,7 +66,7 @@ export const MAX_TRACKED_SESSIONS = 256
  * cost a process spawn on every turn while still being noticed once installed. */
 export const FAILED_PROBE_TTL_MS = 30_000
 /** A failed allowlist lookup is retried at most this often. */
-const DECLARED_RETRY_MS = 60_000
+export const DECLARED_RETRY_MS = 60_000
 
 // ── the engine on PATH ──────────────────────────────────────────────────────
 
@@ -711,9 +711,13 @@ export async function announceRefusal(
   if (isHeadless()) {
     // A headless `run` is one process with one stderr, whatever sessions it
     // creates along the way (a sub-agent's session settles the same verdict
-    // and would print the same line). One line per verdict per process.
-    if (headlessPrinted.has(signature)) return
-    headlessPrinted.add(signature)
+    // and would print the same line). One line per verdict per process — and
+    // the declared count is not part of the verdict: a lookup that fails for
+    // one session and recovers for the next changes the number in the line,
+    // not what the line has to say.
+    const line = `${outcome.kind}:${detail}:${toast.title}`
+    if (headlessPrinted.has(line)) return
+    headlessPrinted.add(line)
   }
   if (offering) {
     await offerOrNotify(offer, toast, sessionID)

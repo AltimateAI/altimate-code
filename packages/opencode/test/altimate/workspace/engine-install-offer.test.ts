@@ -15,6 +15,7 @@ import {
   runInstall,
   installSpec,
   nodeMajor,
+  DECLARED_RETRY_MS,
   resetForTests,
   settledOutcome,
   syncInternals,
@@ -248,6 +249,22 @@ describe("offer routing — engine too old", () => {
     await beforeTurn("parent")
     await beforeTurn("child")
     await beforeTurn("parent")
+    expect(h.printed).toHaveLength(1)
+  })
+  test("headless, a count that arrives with a later session's catalog prints nothing more", async () => {
+    // The declared lookup can fail for the parent session and recover for the
+    // task tool's child session once the retry window has passed. The verdict
+    // is unchanged — only the number in the line — so the process still
+    // prints once.
+    const h = install({ headless: true })
+    let clock = 1_000_000
+    syncInternals.now = () => clock
+    syncInternals.declared = async () => null
+    await beforeTurn("parent")
+    expect(h.printed).toHaveLength(1)
+    clock += DECLARED_RETRY_MS + 1
+    syncInternals.declared = async () => ({ keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] })
+    await beforeTurn("child")
     expect(h.printed).toHaveLength(1)
   })
   test("a broken engine reports 'unknown' rather than a version", async () => {
