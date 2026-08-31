@@ -65,11 +65,11 @@ export namespace SessionCompaction {
       // guard hangs compaction outright. Returning the value unchanged on a
       // revisit preserves the pre-existing contract — JSON.stringify still
       // throws on the cycle and the caller renders "[unserializable]".
-      if (seen.has(value as object)) return value
-      seen.add(value as object)
+      if (seen.has(value)) return value
+      seen.add(value)
       if (Array.isArray(value)) return value.map((v) => redactArgValue(v, seen))
       const out: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      for (const [k, v] of Object.entries(value)) {
         out[k] = isSensitiveArgName(k) ? "<redacted>" : redactArgValue(v, seen)
       }
       return out
