@@ -124,6 +124,15 @@ function managedRoot(directory: string): string {
  * stays in the name so the cross-PROCESS liveness guard still works. */
 const REALM_ID = Math.random().toString(36).slice(2, 8)
 
+/** How long a sibling realm's staging tree is presumed live.
+ *
+ * Sparing every same-pid tree that is not ours protects a concurrent thread,
+ * but a worker killed mid-sync leaves one behind that no later realm would ever
+ * collect — permanent disk garbage. A sync takes seconds, so a tree untouched
+ * for this long belongs to a thread that died rather than one in flight.
+ * (review) */
+const STAGING_LEASE_MS = 30 * 60 * 1000
+
 const STORE_KEY = Symbol.for("altimate.workspace.skill-sync.store")
 
 interface SyncStore {
@@ -467,7 +476,19 @@ async function sweepStaging(directory: string): Promise<void> {
     // this realm's own tree is swept: a sibling thread's staging is in flight,
     // and deleting it makes that thread publish a tree missing everything
     // written so far, under a manifest that claims the files.
-    if (owner && owner === String(process.pid) && !mine) continue
+    if (owner && owner === String(process.pid) && !mine) {
+      // A sibling realm's tree — but only while it still looks live. Past the
+      // lease it belongs to a thread that died mid-sync, and no other realm
+      // would ever collect it.
+      let age = 0
+      try {
+        age = Date.now() - (await fs.stat(path.join(dir, entry))).mtimeMs
+      } catch {
+        continue // vanished under us; nothing to collect
+      }
+      if (age < STAGING_LEASE_MS) continue
+      log.info("collecting a staging tree left by a terminated worker", { entry, ageMs: age })
+    }
     if (owner && owner !== String(process.pid) && processAlive(Number(owner))) continue
     const target = path.join(dir, entry)
     try {
@@ -695,6 +716,13 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     await fs.mkdir(path.join(canon, STAGING_DIR), { recursive: true })
     await fs.writeFile(path.join(canon, STAGING_DIR, ".gitignore"), "*\n").catch(() => {})
     await fs.rm(staging, { recursive: true, force: true })
+    // Created up front rather than as a side effect of the first file write.
+    // With every skill failing nothing was written, so the later `.gitignore`
+    // write failed with ENOENT and the outer catch abandoned the snapshot — the
+    // right outcome reached by accident, which left the explicit "nothing
+    // survived" guard below unreachable and one refactor away from silently
+    // publishing an empty tree. (review)
+    await fs.mkdir(staging, { recursive: true })
     const next: Manifest = {
       version: 1,
       tenant: creds.altimateInstanceName,
@@ -711,10 +739,20 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
         // out of the whole loop, so one bad file cost the workspace EVERY skill,
         // on every client, re-attempted every poll forever. The blast radius of a
         // bad bundle is now that bundle. (review)
+        // Validated BEFORE the try, not inside it. The catch below builds
+        // filesystem paths from this id, and `path.join(staging, "..")` is the
+        // staging PARENT — a recursive delete there takes every sibling
+        // thread's in-flight and retired tree with it. Throwing into the catch
+        // for an unsafe id put a remote string back into a recursive delete,
+        // which is the exact thing `safePathComponent` exists to prevent.
+        // (review)
+        if (!safePathComponent(summary.publicId)) {
+          skipped += 1
+          failed = true
+          log.warn("skipping a workspace skill with an unusable id", { skill: summary.publicId })
+          continue
+        }
         try {
-          if (!safePathComponent(summary.publicId)) {
-            throw new WorkspaceApiError(`unusable skill id in the workspace listing: ${summary.publicId}`)
-          }
           const detail = await altimateRequest<unknown>(
             "GET",
             `/${encodeURIComponent(summary.publicId)}`,
@@ -765,12 +803,16 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
             await fs.writeFile(dest, bytes)
             recorded[file.path] = file.size
           }
-          next.skills[summary.publicId] = { updatedAt: summary.updatedAt, files: recorded }
           totalFiles += skillFiles
           totalBytes += skillBytes
           next.skills[summary.publicId] = { updatedAt: summary.updatedAt, files: recorded }
         } catch (err) {
           skipped += 1
+          // Keeps the run out of the poll window. A partial snapshot that
+          // stamped `lastSyncedAt` would leave the failed skill unretried for a
+          // full interval, which is the opposite of what a failure should
+          // cause — the same rule the whole-run failure path follows. (review)
+          failed = true
           // A skill that synced before keeps its previous copy rather than
           // disappearing over a transient failure — the same "error is never
           // emptiness" rule the rest of this file follows, applied per skill.

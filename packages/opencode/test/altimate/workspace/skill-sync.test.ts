@@ -682,10 +682,17 @@ describe("workspace skill sync", () => {
     // Skipping per skill must not become a way to publish an empty snapshot:
     // that is indistinguishable from a broken server and would delete skills
     // the user still has.
+    //
+    // The failing skill must have NO prior copy, or the carry-forward path
+    // repopulates the manifest and the abandon guard is never reached — the
+    // first version of this test made exactly that mistake and passed with the
+    // guard deleted. (review)
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
 
-    serve({ "pub-1": { "SKILL.md": "two" } }, "2026-03-03T00:00:00Z")
+    // A different skill entirely: nothing on disk to fall back to.
+    serve({ "pub-new": { "SKILL.md": "never arrives" } }, "2026-03-03T00:00:00Z")
     const inner = globalThis.fetch
     globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
       if (String(input).includes("/files/")) throw new Error("all downloads fail")
@@ -693,8 +700,11 @@ describe("workspace skill sync", () => {
     }) as unknown as typeof fetch
     await syncSkills(project)
 
-    // Carried forward, not deleted, and not replaced by an empty tree.
+    // The previous snapshot stands; nothing was published in its place.
     expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("one")
+    expect(existsSync(path.join(project, MANAGED, "pub-new"))).toBe(false)
+    const m = JSON.parse(readFileSync(path.join(project, MANAGED, ".manifest.json"), "utf8"))
+    expect(Object.keys(m.skills)).toEqual(["pub-1"])
   })
 
   test("a sibling realm's staging directory is not swept", async () => {
