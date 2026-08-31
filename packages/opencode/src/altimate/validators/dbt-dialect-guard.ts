@@ -41,6 +41,8 @@ import {
   maskSqlStringLiterals,
   maskJinjaExpressions,
   stripJinjaIfBlocks,
+  resolveDbtSourcePaths,
+  sanitizeForPrompt,
 } from "./validator-utils"
 
 /** Env flag that forces the lint on for a project with no guards yet. */
@@ -101,8 +103,15 @@ const TARGET_TYPE_CONDITION_RE = /target\.type/i
  * branch as `{% elif target.type == 'bigquery' %}`, and refusing to recognise
  * it left such a project's edited models unchecked. `stripJinjaIfBlocks`
  * blanks a chain whose own `elif` carries the guard, so the two stay in step.
+ *
+ * The tag body is `(?:[^%]|%(?!\}))*`, not `[^%]*`, for the reason already
+ * fixed in `ownBranchMatches` and `JINJA_IF_OPENER_SOURCE`: a Jinja modulo
+ * ahead of the guard (`{% if n % 2 == 0 and target.type == 'snowflake' %}`)
+ * stops `[^%]*` dead, the project's only guard goes unrecognised, `appliesTo`
+ * returns false, and every unguarded dialect call in the session is waved
+ * through by a validator that silently switched itself off.
  */
-const TARGET_TYPE_GUARD_PROBE_RE = /\{%-?\s*(?:el)?if\b[^%]*target\.type/i
+const TARGET_TYPE_GUARD_PROBE_RE = /\{%-?\s*(?:el)?if\b(?:[^%]|%(?!\}))*target\.type/i
 
 /** Depth limit mirroring the other project scans in this lane. */
 const SCAN_MAX_DEPTH = 8
@@ -115,9 +124,14 @@ interface Finding {
 }
 
 /**
- * True when the project already guards on `target.type` anywhere under
- * `models/` or `macros/` — the evidence that this project prescribes the
- * convention this lint enforces.
+ * True when the project already guards on `target.type` anywhere under the
+ * project's configured model or macro paths — the evidence that this project
+ * prescribes the convention this lint enforces.
+ *
+ * Driven off `resolveDbtSourcePaths` rather than a hard-coded `models`/`macros`
+ * pair, matching the touched-model scan. A project on `model-paths: ['transform']`
+ * whose guards live only there found no convention, so `appliesTo` returned
+ * false and its edited models were never checked at all.
  */
 async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
   async function scan(dir: string, depth: number): Promise<boolean> {
@@ -156,8 +170,9 @@ async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
     }
     return false
   }
-  for (const dir of ["models", "macros"]) {
-    if (await scan(join(dbtRoot, dir), 0)) return true
+  const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
+  for (const dir of [...sourcePaths.models, ...sourcePaths.macros]) {
+    if (await scan(dir, 0)) return true
   }
   return false
 }
@@ -253,7 +268,7 @@ export const DbtDialectGuardValidator: Validator = {
     }
     const hintLines: string[] = []
     for (const [model, list] of byModel) {
-      hintLines.push(`Model \`${model}\`:`)
+      hintLines.push(`Model \`${sanitizeForPrompt(model, 80)}\`:`)
       for (const f of list) hintLines.push(`  • ${f.function} — ${f.dialects} only`)
     }
     hintLines.push("")
@@ -269,7 +284,9 @@ export const DbtDialectGuardValidator: Validator = {
 
     return {
       ok: false,
-      reason: `${findings.length} unguarded warehouse-specific construct(s) in ${byModel.size} model(s) you edited: ${Array.from(byModel.keys()).join(", ")}.`,
+      // Repository-derived model names reach a synthetic `role: "user"` turn
+      // through dispatch; sanitized as in `dbt-build-green`.
+      reason: `${findings.length} unguarded warehouse-specific construct(s) in ${byModel.size} model(s) you edited: ${Array.from(byModel.keys()).map((m) => sanitizeForPrompt(m, 80)).join(", ")}.`,
       fixHint: hintLines.join("\n"),
       details,
     }

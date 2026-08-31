@@ -360,3 +360,157 @@ number worth carrying: the two subprocess validators run one `altimate-dbt`
 child per touched model at concurrency 4 with a 60 s per-child timeout, across
 an initial dispatch plus up to three retries — roughly `480 × ceil(M/4)` seconds
 worst case, about 3 h 20 m at 100 touched models.
+
+---
+
+## Second review sweep (2026-08-31) — closed in this pass
+
+Each has a regression test in `test/altimate/validators/review-sweep-2.test.ts`
+that fails against the pre-fix source.
+
+- **Seed and snapshot builds read as "nothing built".** Narrowing
+  `MODEL_EXECUTING_DBT_COMMANDS` to `{run, build}` was right for
+  `dbt-build-green` — a `dbt seed` says nothing about whether an edited model
+  compiles — but `dbt-nothing-built` reused the same predicate to answer a
+  different question. A successful `dbt seed` of exactly the required name then
+  read as no build at all, and the gate blocked a session that had delivered
+  what it was asked for. Split into `runResultsProducedNodes`. The two must not
+  be collapsed again: model *coverage* and *deliverable* evidence are different
+  claims.
+- **`data/` was a default seed path.** dbt's default is `seeds/` alone;
+  `data-paths` is only the pre-1.0 spelling. Listing `data/` unconditionally
+  made `data/orders.csv` read as a produced, authored node in a project where
+  dbt will never load it, so both contract gates could accept a required
+  `orders` deliverable with nothing built. The legacy key is still honoured when
+  the project actually sets it.
+- **A contradictory source config granted an exemption.** A model whose live
+  config states both `enabled=false` and `enabled=true` satisfied
+  `sourceExemptsFromRunResults`, which drops it out of scope entirely — so even
+  a fresh `error` row for it was filed as out-of-scope and the build gate
+  reported green having checked nothing. Each axis now requires that the source
+  does not also declare its opposite.
+- **The dead-`if` strip blanked live `else` arms.** `stripInactiveJinja` blanked
+  a `{% if false %}` chain through its `{% endif %}`, taking real `config()` in
+  the `{% elif %}` / `{% else %}` arms with it — an ephemeral or disabled model
+  lost its exemption and the build gate demanded a `run_results` row dbt never
+  writes. Only the constant-false arm is blanked now, depth-counted so a nested
+  `if` inside it cannot steal the outer `else`.
+- **The dialect-guard convention probe still carried `[^%]*`.** The modulo fix
+  applied to `ownBranchMatches` and `JINJA_IF_OPENER_SOURCE` never reached
+  `TARGET_TYPE_GUARD_PROBE_RE`, so `{% if n % 2 == 0 and target.type == … %}`
+  left the project's only guard unrecognised, `appliesTo` returned false, and
+  the validator silently switched itself off for the whole session.
+- **The convention probe scanned hard-coded `models/` and `macros/`.** A project
+  on `model-paths: ['transform']` or `macro-paths: ['jinja']` found no
+  convention and disabled the lint, even though the touched-model scan already
+  honours custom paths. Driven off `resolveDbtSourcePaths` now, matching it.
+- **The incremental predicate started at a subquery's `where`.** A clause
+  keyword anywhere in the arm outranked a leading `and`/`or`, so
+  `and ts > … (select max(ts) from {{ this }} where ok)` sliced from the *inner*
+  `where` and never examined the outer high-water-mark comparison. A guard body
+  that opens with a conjunction is now taken whole; the clause tier still
+  applies to arms that merely project a boolean, which is what motivated it.
+- **`{% if not is_incremental() %}` was read as the incremental arm.** A clock in
+  that full-refresh branch was reported as blocking non-determinism on a correct
+  model. Negated arms are now skipped — see the still-open item below for why
+  they are not swapped for their complement.
+- **Project-level YAML keys were matched at any indentation.** `target-path` and
+  every key `readDbtProjectPathList` reads also matched a same-named key nested
+  under `vars:`, sending the artifact search and every path-based scan at a
+  directory the project never configured — which blocks a genuinely green build.
+  Both are anchored at column 0 now.
+- **A workspace-level required file failed the inverse gate.** With the dbt
+  project nested below the workspace, `dbt-deliverable-names` resolved
+  `reports/output.yml` from either root and `dbt-nothing-built` checked only
+  below `dbtRoot`, so a correct session passed one contract gate and was blocked
+  forever by the other. Both check both roots now.
+- **Build staleness was dated from the model's DDL, not build completion.**
+  `Math.min(fresh.mtimeMs, ddlMtime)` always resolved to the DDL, because a
+  model with a status row was covered by that artifact's own invocation and dbt
+  writes per-model DDL as it walks the DAG. The 60 s tolerance therefore started
+  ticking at compile time, and a tidy-up edit seconds after a long green build
+  read as stale. `fresh.mtimeMs` is correct when a status row exists; DDL mtime
+  remains correct for the DDL-only case.
+- **`update` / `modify` / `change` did not state a contract.** The most ordinary
+  phrasing for work on an existing relation ("Update the model `orders`") named
+  its deliverable literally and yielded nothing, so both contract gates went
+  inapplicable and a zero-write session finished clean. Added with the same
+  bounded inflections the other modification verbs use.
+- **An unreadable `ALTIMATE_VALIDATORS_TASK_FILE` erased the contract.** A stale
+  or misspelled pin returned no task document at all rather than falling back to
+  discovery, and all three contract gates skipped in silence. A readable pin is
+  still exclusive.
+- **Repository text reached the retry prompt unsanitised.** The consensus pass
+  routed `dbt-build-green`'s untrusted values through `sanitizeForPrompt` but
+  left the same exposure in three places: `dbt-nothing-built` interpolated
+  `expectation.taskFile` and the parsed deliverable list into `reason` and
+  `fixHint`, and `dbt-incremental-config` and `dbt-dialect-guard` interpolated
+  repository-derived model names. All build the same synthetic `role: "user"`
+  turn, so a name or filename carrying a newline breaks out of the sentence it
+  is quoted in and lands at instruction position. All now sanitized.
+- **The inverse gate misdescribed an unrelated build.** A session that built
+  something other than the named deliverables was told it "produced no fresh
+  successful build artifact", which is simply false. It now branches on
+  `freshRun`.
+
+## Second review sweep — open, NOT addressed in this pass
+
+### 19. Both contract gates read the task document from the mutable worktree
+
+`dbt-deliverable-names` and `dbt-nothing-built` each call `readContract` /
+`artifactExpectation` at completion time, against the live filesystem. A session
+that deletes, renames or rewrites `TASK.md` so it no longer parses a contract
+makes both gates return `appliesTo === false`, and can then terminate having
+produced nothing — every remaining gate sees zero touched models.
+
+Why deferred: the honest fix is to capture the contract at session start, or to
+read it from harness state the agent cannot write. Neither exists in this lane;
+`ValidatorContext` carries `sessionStartMs` and nothing else. The available
+half-measure — block when a task-document candidate path was written during the
+session — cannot tell a deletion from a file that never existed, and fires on
+the entirely normal case of a task that asks for the document itself to be
+updated. That converts a false negative into a blocking false positive, which is
+worse than the gap. Same missing infrastructure as items 4 and 8: a
+session-scoped artifact store.
+
+### 20. The dialect guard's applicability is decided from the mutated filesystem
+
+`projectPrescribesGuards` runs at completion time. A session that removes the
+project's only `target.type` guard and leaves an unguarded `iff()` observes no
+remaining convention, so the validator makes itself inapplicable — silently
+accepting exactly the portability regression it exists to catch.
+
+Why deferred: same as item 19. Applicability has to be determined from
+pre-session project state, and there is nowhere to record it.
+
+### 21. Prose mining still over-extracts in two shapes
+
+Both are instances of item 13, restated with the specific shapes reviewers
+found, so a later pass does not have to re-derive them:
+
+- `requirementHead` returns text from the start of the line, so code spans
+  *before* the requirement verb are collected. "Using the source `raw_orders`,
+  create the model `fct_orders`" demands `raw_orders` as a model, and no action
+  the agent can take satisfies it. Slicing from the verb instead trades this for
+  a passive-voice miss ("The `fct_orders` model must be created"), which is the
+  safer direction but is a behaviour change to the extractor, not a repair.
+- A `## Required deliverables` section collects every code span under it, so
+  `- Model \`fct_orders\` with unique key \`order_id\`` makes `order_id` a
+  required model. The qualifier narrowing that fixed this for prose requirement
+  lines has no equivalent for section entries, which are structurally a list
+  rather than a sentence.
+
+The recorded direction of travel for item 13 is an explicit structured contract
+with ambiguous prose yielding inconclusive, rather than a further round of
+heuristics on top of these. Patching either shape in isolation keeps the
+extractor on the treadmill this entry exists to get it off.
+
+### 22. `{% if not is_incremental() %}` arms are skipped, not complemented
+
+The negated form no longer produces a false positive on the full-refresh arm,
+but the *real* incremental arm — the `{% else %}` — is still not inspected, so a
+non-deterministic predicate there is missed. Identifying it means evaluating the
+complement of an arbitrary Jinja condition across `elif` chains, which is the
+same branch-semantics feature items 10 and 14 need, with the same property: a
+half-implementation turns this miss into a blocking false positive on correct
+models.

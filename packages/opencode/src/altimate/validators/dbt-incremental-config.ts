@@ -42,6 +42,7 @@ import {
   extractJinjaIfBlocks,
   jinjaIfBranchHead,
   dbtConfigArgs,
+  sanitizeForPrompt,
 } from "./validator-utils"
 
 /** In-model incremental materialisation. */
@@ -92,6 +93,36 @@ const IS_INCREMENTAL_CONDITION_RE = /(?<![\w.])is_incremental\s*\(\s*\)/i
  */
 const CLAUSE_START_RE = /\b(?:where|on|having|qualify)\b/i
 const CONJUNCTION_START_RE = /\b(?:and|or)\b/i
+/**
+ * A guard body that OPENS with `and` / `or` is the fragment idiom: the whole
+ * arm is the predicate, appended to a `where` outside the block.
+ *
+ * Checked before `CLAUSE_START_RE`, because a clause keyword can sit inside a
+ * nested subquery further along the same fragment
+ * (`and ts > (select max(ts) from {{ this }} where ok)`). Slicing from that
+ * inner `where` drops the outer high-water-mark comparison, and a clock in it
+ * is never seen — the gate passes having examined the wrong half of the
+ * predicate. Anchoring keeps the narrowing that motivated the clause tier: an
+ * arm that merely PROJECTS `(is_active and random() > 0.5)` does not open with
+ * a conjunction, so it still starts at its real `where`.
+ */
+const LEADING_CONJUNCTION_RE = /^\s*(?:and|or)\b/i
+/**
+ * `is_incremental()` negated inside the arm's own condition.
+ *
+ * `{% if not is_incremental() %}` is the valid inverse spelling, and its first
+ * arm is the FULL-REFRESH branch. Reading it as the incremental predicate
+ * reports a clock that belongs to the initial load as a blocking
+ * non-determinism, which rejects a correct model.
+ *
+ * Such an arm is skipped rather than swapped for its complement: identifying
+ * the real incremental branch means evaluating the complement of an arbitrary
+ * Jinja condition across `elif` chains, and getting that half-right would turn
+ * this miss into a new blocking false positive. Skipping leaves the inverse
+ * form unchecked — the same under-fire the gate already has for a model with
+ * no guard at all — and takes the false positive away.
+ */
+const NEGATED_IS_INCREMENTAL_RE = /\bnot\s+(?<![\w.])is_incremental\s*\(\s*\)/i
 /**
  * Clock and randomness constructs whose value changes between otherwise
  * identical runs.
@@ -168,7 +199,12 @@ interface Finding {
 function incrementalPredicates(sql: string): string {
   const parts: string[] = []
   for (const block of extractJinjaIfBlocks(sql, IS_INCREMENTAL_CONDITION_RE)) {
+    if (NEGATED_IS_INCREMENTAL_RE.test(block.opener)) continue
     const incrementalArm = jinjaIfBranchHead(block.body)
+    if (LEADING_CONJUNCTION_RE.test(incrementalArm)) {
+      parts.push(incrementalArm)
+      continue
+    }
     const predicateAt =
       CLAUSE_START_RE.exec(incrementalArm) ?? CONJUNCTION_START_RE.exec(incrementalArm)
     if (predicateAt) parts.push(incrementalArm.slice(predicateAt.index))
@@ -339,7 +375,7 @@ export const DbtIncrementalConfigValidator: Validator = {
     }
     const hintLines: string[] = []
     for (const [model, list] of byModel) {
-      hintLines.push(`Model \`${model}\`:`)
+      hintLines.push(`Model \`${sanitizeForPrompt(model, 80)}\`:`)
       for (const f of list) hintLines.push(`  • ${f.detail}`)
     }
     hintLines.push("")
@@ -358,7 +394,10 @@ export const DbtIncrementalConfigValidator: Validator = {
 
     return {
       ok: false,
-      reason: `${findings.length} incremental-configuration inconsistency(ies) in ${byModel.size} model(s) you edited: ${Array.from(byModel.keys()).join(", ")}.`,
+      // Model names come from repository filenames and reach a synthetic
+      // `role: "user"` turn through dispatch, so they are sanitized exactly as
+      // `dbt-build-green` sanitizes node names and artifact paths.
+      reason: `${findings.length} incremental-configuration inconsistency(ies) in ${byModel.size} model(s) you edited: ${Array.from(byModel.keys()).map((m) => sanitizeForPrompt(m, 80)).join(", ")}.`,
       fixHint: hintLines.join("\n"),
       details,
     }

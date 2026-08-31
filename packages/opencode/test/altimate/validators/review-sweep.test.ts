@@ -769,13 +769,20 @@ describe("a lowercase task filename stays reachable on a case-sensitive volume",
   })
 
   test("one file reachable under two spellings is reported once", async () => {
-    // On APFS/NTFS `TASK.md` and `task.md` are the same file; dedup is by
-    // resolved identity, so it appears once rather than twice.
+    // Both spellings are written on purpose. Writing only `TASK.md` left this
+    // assertion trivially true on a case-sensitive volume — one candidate, one
+    // element, `realpath` dedup never exercised, so a regression in it could
+    // not fail CI. With both written: on APFS/NTFS they are ONE file that must
+    // be reported once (dedup by resolved identity); on ext4 they are two
+    // distinct files that must both stay reachable. The same assertion covers
+    // each, and it is now non-trivial on both.
     await makeProject("review-sweep-case-")
     await fs.writeFile(join(dir, "TASK.md"), "Create the model `fct_orders`.\n")
+    await fs.writeFile(join(dir, "task.md"), "Create the model `fct_orders`.\n")
     const found = await findTaskInstructionFiles(dir, null)
-    const bases = found.map((f) => f.path.toLowerCase())
-    expect(new Set(bases).size).toBe(bases.length)
+    expect(found.length).toBeGreaterThan(0)
+    const identities = await Promise.all(found.map((f) => fs.realpath(f.path)))
+    expect(new Set(identities).size).toBe(identities.length)
   })
 })
 

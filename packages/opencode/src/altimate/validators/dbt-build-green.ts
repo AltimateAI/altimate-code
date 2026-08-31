@@ -311,13 +311,18 @@ export const DbtBuildGreenValidator: Validator = {
     // is the DDL's own mtime — `run_results.json` is rewritten by a later
     // `dbt test`, and dating the build from it would forgive every edit made
     // between the build and the test.
+    //
+    // A model that HAS a status row was covered by this artifact's own
+    // invocation, and `run_results.json` is written when that invocation
+    // finishes — so `fresh.mtimeMs` is the build-completion time. The DDL
+    // under `<target>/run/` is written per model as the build walks the DAG,
+    // which for a long build is minutes earlier. `Math.min` of the two always
+    // picked the DDL, so the 60 s tolerance started ticking at compile time
+    // and a tidy-up edit seconds after a long green build read as stale and
+    // blocked the session. The DDL's own mtime remains the right answer for
+    // the `status === null` case, where the DDL is the only evidence there is.
     const builtAtFor = (s: ModelBuildState): number | undefined => {
-      const ddlMtime = executed.get(s.name)
-      return s.status !== null
-        ? ddlMtime !== undefined
-          ? Math.min(fresh.mtimeMs, ddlMtime)
-          : fresh.mtimeMs
-        : ddlMtime
+      return s.status !== null ? fresh.mtimeMs : executed.get(s.name)
     }
     const staleBuild = states.filter((s) => {
       const builtAt = builtAtFor(s)

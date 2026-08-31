@@ -441,7 +441,11 @@ export async function findTaskInstructionFiles(
   if (explicit && explicit.trim().length > 0) {
     const p = isAbsolutePath(explicit) ? explicit : join(cwd, explicit)
     const found = await readTaskFile(p)
-    return found ? [found] : []
+    // Exclusive only while the pinned file is READABLE. A stale or misspelled
+    // override would otherwise return no contract at all, and all three
+    // contract-driven gates skip in silence — the exact failure this lane
+    // exists to remove. An unreadable pin falls through to auto-discovery.
+    if (found) return [found]
   }
   const roots = [cwd, join(cwd, ".altimate")]
   if (dbtRoot && dbtRoot !== cwd) roots.push(dbtRoot)
@@ -555,9 +559,17 @@ const CODE_SPAN_RE = /`([^`\n]+)`/g
  * "Implement the missing …" does. The modification verbs are spelled with
  * explicit inflections rather than a `\w*` tail so that `add` cannot match
  * `address` and `fix` cannot match `fixture`.
+ *
+ * `update`, `modify` and `change` are the ordinary way a task asks for work on
+ * an existing relation ("Update the model `orders` so it …"). Without them the
+ * document names its deliverable literally and yet yields no contract, so both
+ * contract gates go inapplicable and a zero-write session finishes clean —
+ * precisely the blind spot this lane exists to close. They are bounded the same
+ * way: `chang(e|es|ed|ing)` cannot reach `changelog`, and `updat(e|es|ed|ing)`
+ * cannot reach a longer word.
  */
 const REQUIREMENT_VERB_RE =
-  /\b(?:(?:creat|build|produc|implement|deliver|materiali[sz]|generat|writ|deploy)\w*|add(?:s|ed|ing)?|renam(?:e|es|ed|ing)|convert(?:s|ed|ing)?|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?)\b/i
+  /\b(?:(?:creat|build|produc|implement|deliver|materiali[sz]|generat|writ|deploy)\w*|add(?:s|ed|ing)?|renam(?:e|es|ed|ing)|convert(?:s|ed|ing)?|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|updat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|chang(?:e|es|ed|ing))\b/i
 /** Noun that makes the requirement about a data artifact. */
 const DELIVERABLE_NOUN_RE =
   /\b(?:model|models|table|tables|view|views|seed|seeds|snapshot|snapshots|mart|marts|file|files)\b/i
@@ -751,7 +763,13 @@ export async function resolveDbtTargetPath(dbtRoot: string): Promise<string> {
     // Quoted forms are matched before the bare form: a Jinja value carries
     // its own quotes (`"{{ env_var('DIR') }}"`), so a bare-value pattern that
     // stops at the first quote truncates it.
-    const m = /^\s*target-path\s*:\s*(?:"([^"\n]*)"|'([^'\n]*)'|([^#\n]*?))\s*(?:#.*)?$/m.exec(yml)
+    // Anchored at column 0. `target-path` is a project-level key, and a
+    // leading `\s*` also selects a same-named key nested under `vars:` or
+    // `models:`. The validators would then look for `run_results.json` under
+    // that unrelated value, find nothing, and block a genuinely green build.
+    const m = /^target-path[ \t]*:[ \t]*(?:"([^"\n]*)"|'([^'\n]*)'|([^#\n]*?))[ \t]*(?:#.*)?$/m.exec(
+      yml,
+    )
     const raw = m ? (m[1] ?? m[2] ?? m[3] ?? "") : ""
     if (raw.trim().length > 0) {
       const value = resolveJinjaPathValue(raw.trim())
@@ -831,14 +849,19 @@ export function readDbtProjectPathList(yml: string, key: string): string[] | nul
   // `[ \t]*` rather than `\s*`: `\s` matches newlines, so around the colon it
   // reaches into the next line and captures the first item of a block
   // sequence as if it were an inline scalar.
-  const line = new RegExp(`^([ \\t]*)${escaped}[ \\t]*:[ \\t]*(.*)$`, "m").exec(yml)
+  // Anchored at column 0: every key this reads (`model-paths`, `seed-paths`,
+  // `macro-paths`, `packages-install-path`, …) is a project-level key. An
+  // indentation-insensitive match also selects a same-named key nested under
+  // `vars:` or a per-model config block, which would send every path-based
+  // check in the lane at a directory the project never configured.
+  const line = new RegExp(`^${escaped}[ \\t]*:[ \\t]*(.*)$`, "m").exec(yml)
   if (!line) return null
-  const indent = (line[1] ?? "").length
+  const indent = 0
   // Strip a trailing comment, and a comment that is the whole value. Without
   // the second case `model-paths:  # TODO` parses as a directory literally
   // named "# TODO", and the project's real models become invisible to every
   // gate instead of falling back to dbt's default.
-  const rest = (line[2] ?? "")
+  const rest = (line[1] ?? "")
     .replace(/\s+#.*$/, "")
     .replace(/^#.*$/, "")
     .trim()
@@ -917,7 +940,13 @@ export async function resolveDbtSourcePaths(dbtRoot: string): Promise<DbtSourceP
     // `data-paths` / `source-paths` are the pre-1.0 spellings; a project still
     // carrying them would otherwise read as unconfigured.
     models: pick("model-paths", "source-paths", ["models"]),
-    seeds: pick("seed-paths", "data-paths", ["seeds", "data"]),
+    // `seeds` alone is dbt's default. `data/` is only the pre-1.0 spelling's
+    // *configured* value, never an additional default: adding it unconditionally
+    // makes `data/orders.csv` read as a produced, authored node in a project
+    // where dbt will never load it, so both contract gates can accept a
+    // required `orders` deliverable with nothing built. `data-paths` is still
+    // honoured through `legacyKey` when the project actually sets it.
+    seeds: pick("seed-paths", "data-paths", ["seeds"]),
     snapshots: pick("snapshot-paths", null, ["snapshots"]),
     analyses: pick("analysis-paths", null, ["analyses"]),
     macros: pick("macro-paths", null, ["macros"]),
@@ -1073,6 +1102,27 @@ export function runResultsCarriesNoBuildEvidence(command: string | null): boolea
   return NON_EXECUTING_DBT_COMMANDS.has(command)
 }
 
+/**
+ * True when `command` executed something in the warehouse, so its rows are
+ * evidence that the nodes they name were *produced* — of whatever type.
+ *
+ * Distinct from `runResultsExecutedModels` on purpose, and the two must not be
+ * collapsed again. Model *coverage* can only be spoken for by a command that
+ * runs model SQL (`run`, `build`), because a `dbt seed` says nothing about
+ * whether an edited model compiles. But *deliverable* evidence is broader: a
+ * task can require a seed or a snapshot, and `dbt seed` genuinely builds it.
+ * Using the model-coverage predicate for both made a successful `dbt seed` of
+ * exactly the required name read as "nothing was built", so `dbt-nothing-built`
+ * blocked a session that had delivered the thing it was asked for.
+ *
+ * Row-level filtering still applies at the call site: a `dbt test` artifact
+ * reaches here as executing, but carries only `test.` rows, which no caller
+ * counts as a buildable node.
+ */
+export function runResultsProducedNodes(command: string | null): boolean {
+  return !runResultsCarriesNoBuildEvidence(command)
+}
+
 /** dbt statuses that mean the node built cleanly. `warn` is not a failure. */
 const OK_RUN_STATUSES = new Set(["success", "pass", "warn"])
 
@@ -1223,9 +1273,47 @@ export function stripInactiveJinja(sql: string): string {
     deadIf.lastIndex = 0
     const m = deadIf.exec(out)
     if (!m) return out
-    const end = jinjaBlockEnd(out, m.index)
-    out = out.slice(0, m.index) + blank(out.slice(m.index, end)) + out.slice(end)
+    const chainEnd = jinjaBlockEnd(out, m.index)
+    // Only the `{% if false %}` ARM is dead. Its `{% elif %}` / `{% else %}`
+    // arms are branches dbt does evaluate, and blanking through `{% endif %}`
+    // drops real `config()` written there — an ephemeral or disabled model
+    // then loses its exemption and the build gate demands a `run_results` row
+    // dbt is never going to write. Blank to the next same-depth arm instead,
+    // falling back to the whole chain when there is no other arm.
+    const armEnd = nextJinjaArmStart(out, m.index + m[0].length, chainEnd) ?? chainEnd
+    out = out.slice(0, m.index) + blank(out.slice(m.index, armEnd)) + out.slice(armEnd)
   }
+}
+
+/**
+ * Offset of the next `{% elif %}` / `{% else %}` that belongs to the chain
+ * opened just before `from`, or null when the chain has no further arm.
+ *
+ * Depth-counted so an inner `{% if %}…{% else %}…{% endif %}` nested in the
+ * dead arm is skipped rather than mistaken for the outer chain's else.
+ */
+function nextJinjaArmStart(sql: string, from: number, chainEnd: number): number | null {
+  // Modulo-safe tag body, matching `ownBranchMatches` / `jinjaIfBranchHead`:
+  // `[^%]*` stops dead on `{% if n % 2 == 0 %}` and loses an arm.
+  const tag = /\{%-?\s*(if|elif|else|endif)\b(?:[^%]|%(?!\}))*%\}/gi
+  tag.lastIndex = from
+  let depth = 0
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(sql)) !== null) {
+    if (m.index >= chainEnd) return null
+    const kind = m[1]?.toLowerCase()
+    if (kind === "if") {
+      depth++
+      continue
+    }
+    if (kind === "endif") {
+      if (depth === 0) return null
+      depth--
+      continue
+    }
+    if (depth === 0) return m.index
+  }
+  return null
 }
 /** `materialized='ephemeral'` in an in-model `config()` call. */
 const EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"]ephemeral['"]/i
@@ -1323,7 +1411,16 @@ function scanBalancedConfigArgs(sql: string, start: number): { text: string; end
  */
 export function sourceExemptsFromRunResults(sql: string): boolean {
   const args = dbtConfigArgs(stripSqlComments(sql))
-  return EPHEMERAL_CONFIG_RE.test(args) || DISABLED_CONFIG_RE.test(args)
+  // Per axis, and only when the source does not also declare the opposite.
+  // A model whose live config states both (`{% if target.name == 'prod' %}
+  // {{ config(enabled=false) }}{% else %}{{ config(enabled=true) }}{% endif %}`)
+  // is not evidence of an exemption — and honouring it drops the model out of
+  // scope entirely, so even a fresh `error` row for it is filed as
+  // out-of-scope and the build gate reports green having checked nothing.
+  // An unresolved contradiction requires coverage instead of granting silence.
+  const ephemeral = EPHEMERAL_CONFIG_RE.test(args) && !NON_EPHEMERAL_CONFIG_RE.test(args)
+  const disabled = DISABLED_CONFIG_RE.test(args) && !ENABLED_CONFIG_RE.test(args)
+  return ephemeral || disabled
 }
 
 /**

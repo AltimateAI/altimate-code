@@ -36,8 +36,9 @@ import {
   readRunResults,
   isFailedRunStatus,
   resolveDbtSourcePaths,
-  runResultsExecutedModels,
+  runResultsProducedNodes,
   collectProducedNodeNames,
+  sanitizeForPrompt,
   type RequiredDeliverables,
 } from "./validator-utils"
 
@@ -224,8 +225,14 @@ export const DbtNothingBuiltValidator: Validator = {
     const runResults = await readRunResults(dbtRoot)
     // A `dbt compile` artifact records every model as `success` without
     // building anything, so it is not evidence a deliverable was produced.
+    //
+    // `runResultsProducedNodes`, not `runResultsExecutedModels`: this gate
+    // asks whether a DELIVERABLE was produced, and a task can require a seed
+    // or a snapshot. The model-coverage predicate denies `seed`/`snapshot`/
+    // `clone` — correct for `dbt-build-green`, wrong here, where it made a
+    // successful `dbt seed` of the required name read as nothing built.
     const runResultsAreABuild =
-      runResults !== null && runResultsExecutedModels(runResults.command)
+      runResults !== null && runResultsProducedNodes(runResults.command)
     const builtNodeNames = new Set<string>()
     if (runResults !== null && runResultsAreABuild && runResults.mtimeMs >= ctx.sessionStartMs) {
       for (const r of runResults.results) {
@@ -266,13 +273,25 @@ export const DbtNothingBuiltValidator: Validator = {
         matchedFiles.push(file)
         continue
       }
-      // Same existence escape hatch as for named models.
-      try {
-        const stat = await fs.stat(join(dbtRoot, file))
-        if (stat.isFile()) matchedFiles.push(file)
-      } catch {
-        // absent — not delivered
+      // Same existence escape hatch as for named models, and resolved from
+      // both roots exactly as `dbt-deliverable-names` does. With the dbt
+      // project nested below the workspace, a required `reports/output.yml`
+      // written at the workspace root satisfies that gate and failed this one,
+      // so a correct session was blocked by one of two gates that are supposed
+      // to agree on what "delivered" means.
+      let found = false
+      for (const root of new Set([dbtRoot, ctx.workingDirectory])) {
+        try {
+          const stat = await fs.stat(join(root, file))
+          if (stat.isFile()) {
+            found = true
+            break
+          }
+        } catch {
+          // absent under this root — keep looking
+        }
       }
+      if (found) matchedFiles.push(file)
     }
     const matchedDeliverables = hasNamedDeliverables
       ? [
@@ -310,13 +329,29 @@ export const DbtNothingBuiltValidator: Validator = {
     if (satisfied) return { ok: true, details }
 
     const named = namedModels
-    const namedText = named.length > 0 ? `: ${named.join(", ")}` : ""
+    // Every value below is repository-controlled — a deliverable name parsed
+    // out of a task document, and the task document's own path — and `reason`
+    // / `fixHint` are concatenated by dispatch into a synthetic `role: "user"`
+    // turn that the next tool-capable turn reads. Interpolated verbatim, a
+    // name or filename carrying a newline breaks out of the sentence it is
+    // quoted in and lands at instruction position. `dbt-build-green` already
+    // routes every untrusted string through `sanitizeForPrompt`; this gate
+    // builds the same kind of turn and must do the same.
+    const safeNames = named.map((n) => sanitizeForPrompt(n, 80))
+    const safeTaskFile = sanitizeForPrompt(expectation.taskFile ?? "", 160)
+    const namedText = safeNames.length > 0 ? `: ${safeNames.join(", ")}` : ""
     const wroteSomethingElse = hasNamedDeliverables && authored
     const reason =
       expectation.kind === "task-file"
         ? wroteSomethingElse
-          ? `The task document at ${expectation.taskFile} names required deliverables${namedText}, and this session wrote project files but none of them is any of those deliverables. The named work was not done.`
-          : `The task document at ${expectation.taskFile} names required deliverables${namedText}, but this session wrote no project files and produced no fresh successful build artifact. Nothing was built, so the task is not done.`
+          ? `The task document at ${safeTaskFile} names required deliverables${namedText}, and this session wrote project files but none of them is any of those deliverables. The named work was not done.`
+          : freshRun
+            ? // Evidence exists, it just is not about the named deliverables.
+              // Reporting "no fresh build artifact" here is simply false, and
+              // a retry prompt that misdescribes the workspace teaches the
+              // agent to distrust the gate.
+              `The task document at ${safeTaskFile} names required deliverables${namedText}, but this session built other deliverables and none of them matched those names. The named work was not done.`
+            : `The task document at ${safeTaskFile} names required deliverables${namedText}, but this session wrote no project files and produced no fresh successful build artifact. Nothing was built, so the task is not done.`
         : `This session wrote no project files and produced no fresh successful build artifact, but the workspace is configured to require artifacts. Nothing was built, so the task is not done.`
 
     return {
@@ -325,8 +360,8 @@ export const DbtNothingBuiltValidator: Validator = {
       fixHint:
         [
           "Do the work before declaring done:",
-          named.length > 0
-            ? `  • Create each required deliverable under \`models/\` using the literal name given: ${named.join(", ")}.`
+          safeNames.length > 0
+            ? `  • Create each required deliverable under \`models/\` using the literal name given: ${safeNames.join(", ")}.`
             : "  • Create the model files the task asks for under `models/`.",
           "  • Build them (`dbt build` / `dbt run`) so a successful `run_results.json` exists.",
           "  • If you believe the work is already present, re-read the task document and name the file you produced for each deliverable.",
