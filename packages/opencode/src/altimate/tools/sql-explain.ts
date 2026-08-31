@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExplainResult } from "../native/types"
+import { maskLiteralsAndComments } from "./sql-text-mask"
 
 /**
  * Detect SQL input that cannot be meaningfully EXPLAIN'd.
@@ -71,6 +72,49 @@ function validateWarehouseName(warehouse: string | undefined): string | null {
   return null
 }
 
+/**
+ * Guard EXPLAIN ANALYZE — on PostgreSQL, MySQL, DuckDB, and Trino it actually
+ * executes the statement. A DML statement under `analyze: true` would mutate
+ * data while bypassing the `sql_execute_write` permission, so analyze mode is
+ * restricted to plain read-only statements. String literals and comments are
+ * stripped before keyword matching; false positives just fall back to the
+ * estimated plan (`analyze: false`), which is always safe.
+ *
+ * Returns an error string, or `null` when the SQL is safe to analyze.
+ */
+function validateAnalyzeSafety(sql: string, analyze: boolean | undefined): string | null {
+  if (!analyze) return null
+  const blocked =
+    "analyze:true runs EXPLAIN ANALYZE, which actually executes the statement — it is only allowed for a single plain SELECT query. " +
+    "Re-run with analyze:false for an estimated plan."
+  const masked = maskLiteralsAndComments(sql)
+  if (masked === null) return blocked
+  const stripped = masked.trim()
+  // Exactly one executable statement: any semicolon other than a trailing one
+  // means a multi-statement payload.
+  if (stripped.replace(/;\s*$/, "").includes(";")) return blocked
+  const readOnlyStart = /^(select|with|show|describe|desc|values|table)\b/i.test(stripped)
+  // Data-modifying CTEs (`WITH x AS (...) INSERT INTO ...`) and similar mean a
+  // read-only prefix is not enough — reject write keywords anywhere.
+  // `into` covers PostgreSQL `SELECT ... INTO new_table`, which creates a table
+  // despite starting as a SELECT. `nextval`/`setval` are sequence-mutating
+  // functions that hide inside a read-shaped SELECT.
+  // A keyword immediately followed by `(` is the read-only FUNCTION form
+  // (REPLACE(str,..), COPY(x)) — statement forms (CALL proc(..), COPY table,
+  // INSERT INTO ..) never abut `(` — so it is exempted to avoid blocking
+  // legitimate analysis. This guard is best-effort against write STATEMENTS;
+  // arbitrary side-effecting UDFs cannot be proven safe from text alone.
+  const alwaysWrite =
+    /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into|nextval|setval)\b/i
+  // No separate check for the statement forms of REPLACE/COPY/CALL/SET: a single
+  // statement (multi-statement already rejected above) that begins with one of
+  // them fails readOnlyStart, and one beginning with a read keyword cannot ALSO
+  // be their statement form — so `!readOnlyStart` covers them. Scanning the
+  // whole body would wrongly block a read projecting a column named `set`.
+  if (!readOnlyStart || alwaysWrite.test(stripped)) return blocked
+  return null
+}
+
 export const SqlExplainTool = Tool.define("sql_explain", {
   description:
     "Run EXPLAIN on a SQL query to get the execution plan. Shows how the database engine will process the query — useful for diagnosing slow queries, identifying full table scans, and understanding join strategies. Requires a warehouse connection. IMPORTANT: inline all values into the SQL text — parameterized queries with `?`, `:name`, or `$1` placeholders are not supported.",
@@ -92,7 +136,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         "Run EXPLAIN ANALYZE (actually executes the query, slower but more accurate). Not supported by Snowflake.",
       ),
   }),
-  async execute(args, _ctx) {
+  async execute(args, ctx) {
     // Pre-flight validation — reject bad input before hitting the warehouse
     // so we return an actionable message instead of a verbatim DB error.
     const sqlError = validateSqlInput(args.sql)
@@ -121,6 +165,58 @@ export const SqlExplainTool = Tool.define("sql_explain", {
           error_class: "input_validation",
         },
         output: `Invalid input: ${warehouseError}`,
+      }
+    }
+    const analyzeError = validateAnalyzeSafety(args.sql, args.analyze)
+    if (analyzeError) {
+      return {
+        title: "Explain: ANALYZE BLOCKED",
+        metadata: {
+          success: false,
+          analyzed: false,
+          warehouse_type: "unknown",
+          error: analyzeError,
+          error_class: "analyze_safety",
+        },
+        output: `Blocked: ${analyzeError}`,
+      }
+    }
+    // The lexer guard above is text-level hygiene, but text analysis cannot
+    // prove a SELECT side-effect-free (dblink_exec, arbitrary UDFs). EXPLAIN
+    // ANALYZE executes the statement, so it additionally requires the
+    // sql_execute_write permission: agents that deny warehouse writes
+    // (analyst/reviewer/dbt-optimizer) cannot run it at all, and write-capable
+    // agents prompt per their config.
+    if (args.analyze) {
+      try {
+        await (ctx as any).ask({
+          permission: "sql_execute_write",
+          patterns: [args.sql],
+          // No "always" grant: approving one EXPLAIN ANALYZE must not silently
+          // authorize arbitrary future warehouse writes in the session, since
+          // sql_execute_write is shared with the real write path.
+          always: [],
+          metadata: { reason: "EXPLAIN ANALYZE executes the statement on the warehouse" },
+        })
+      } catch (e) {
+        // Config-level denial gets a friendly fallback result; an interactive
+        // user REJECTION (or correction) must propagate so the session keeps
+        // its blocked-tool semantics instead of reading like a soft failure.
+        const name = e instanceof Error ? e.constructor.name : ""
+        if (name === "RejectedError" || name === "CorrectedError") throw e
+        const denied =
+          "EXPLAIN ANALYZE executes the statement, which requires the sql_execute_write permission — denied for this agent. Re-run with analyze:false for an estimated plan."
+        return {
+          title: "Explain: ANALYZE BLOCKED",
+          metadata: {
+            success: false,
+            analyzed: false,
+            warehouse_type: "unknown",
+            error: denied,
+            error_class: "analyze_safety",
+          },
+          output: `Blocked: ${denied}`,
+        }
       }
     }
 
@@ -169,6 +265,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
 export const _sqlExplainInternal = {
   validateSqlInput,
   validateWarehouseName,
+  validateAnalyzeSafety,
 }
 
 function formatPlan(result: SqlExplainResult): string {

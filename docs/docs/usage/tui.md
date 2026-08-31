@@ -70,7 +70,7 @@ Switch between agents during a conversation:
 - Press leader key + `a` to see all agents
 - Use `/agent <name>` to switch directly
 - Built-in agents: `general`, `plan`, `build`, `explore`
-- Data engineering agents: `builder`, `analyst`, `plan`
+- Data engineering agents: `builder`, `analyst`, `reviewer`, `dbt-optimizer`, `plan`
 
 ## Diff Display
 

@@ -136,7 +136,16 @@ export namespace PermissionNext {
       const s = await state()
       const { ruleset, ...request } = input
       for (const pattern of request.patterns ?? []) {
-        const rule = evaluate(request.permission, pattern, ruleset, s.approved)
+        // altimate_change start — stored "always" approvals must never override a
+        // configured DENY. Approvals are appended after the ruleset and evaluation
+        // is last-match-wins, so a grant stored under one agent (e.g. builder
+        // approving a SQL write "always") would silently defeat another agent's
+        // non-overridable deny (dbt-optimizer's sql_execute_write) after a
+        // session switch. Configured rules decide deny FIRST; approvals only
+        // upgrade ask -> allow.
+        const configured = evaluate(request.permission, pattern, ruleset)
+        const rule = configured.action === "deny" ? configured : evaluate(request.permission, pattern, ruleset, s.approved)
+        // altimate_change end
         log.info("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
           Telemetry.track({
@@ -259,7 +268,9 @@ export namespace PermissionNext {
     return match ?? { action: "ask", permission, pattern: "*" }
   }
 
-  const EDIT_TOOLS = ["edit", "write", "patch", "multiedit"]
+  // Keep in sync with Permission.disabled (index.ts) — apply_patch is the
+  // GPT-model edit tool and must remap to the `edit` permission.
+  const EDIT_TOOLS = ["edit", "write", "apply_patch", "patch", "multiedit"]
 
   export function disabled(tools: string[], ruleset: Ruleset): Set<string> {
     const result = new Set<string>()

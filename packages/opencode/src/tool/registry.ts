@@ -18,6 +18,9 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import type { Agent } from "../agent/agent"
+// altimate_change start — Permission.disabled for permission-aware tool exposure
+import * as Permission from "../permission"
+// altimate_change end
 import { Tool } from "./tool"
 import { Instance } from "../project/instance"
 // altimate_change start — restore Instance ALS for the Effect Service facade
@@ -540,6 +543,28 @@ export namespace ToolRegistry {
     // altimate_change end
     const result = await Promise.all(
       tools
+        // altimate_change start — permission-aware exposure. Built-in registry
+        // tools are executed WITHOUT a generic tool-name permission gate (only
+        // the MCP loop asks per tool id), so an agent's `"*": "deny"` allowlist
+        // would otherwise not stop a denied built-in from being invoked.
+        // Permission.disabled is the house semantics: edit/write/apply_patch
+        // remap to the "edit" permission, and a tool is dropped only when the
+        // LAST matching rule (last-match-wins) is a wildcard-pattern deny —
+        // pattern-specific allows (analyst's `bash: {"ls *": "allow"}`) keep
+        // the tool exposed and defer to its own finer-grained asks.
+        .filter((t) => {
+          if (!agent?.permission?.length) return true
+          // The `invalid` tool is internal repair machinery, not a capability:
+          // session/llm.ts renames unknown/malformed tool calls to it so the
+          // model receives a structured validation error. Filtering it under a
+          // deny-by-default agent would turn every repaired call into a hard
+          // failure that can end the turn. The exemption applies ONLY to the
+          // builtin definition — a plugin/custom tool registered under the
+          // same id stays subject to the agent's permission filter.
+          if (t.id === "invalid" && t.registrySource !== "external") return true
+          return !Permission.disabled([t.id], agent.permission).has(t.id)
+        })
+        // altimate_change end
         .filter((t) => {
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {

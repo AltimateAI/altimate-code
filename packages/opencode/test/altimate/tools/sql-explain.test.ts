@@ -116,6 +116,122 @@ describe("validateSqlInput", () => {
   })
 })
 
+describe("validateAnalyzeSafety", () => {
+  const { validateAnalyzeSafety } = toolInternals
+
+  test("analyze:false is always allowed", () => {
+    expect(validateAnalyzeSafety("DELETE FROM users", false)).toBeNull()
+    expect(validateAnalyzeSafety("DELETE FROM users", undefined)).toBeNull()
+  })
+
+  test("analyze:true allows a plain SELECT", () => {
+    expect(validateAnalyzeSafety("SELECT id FROM users WHERE id = 42", true)).toBeNull()
+  })
+
+  test("analyze:true allows a read-only CTE", () => {
+    expect(validateAnalyzeSafety("WITH x AS (SELECT 1 AS a) SELECT a FROM x", true)).toBeNull()
+  })
+
+  test("analyze:true blocks DML", () => {
+    expect(validateAnalyzeSafety("DELETE FROM users WHERE id = 1", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("UPDATE users SET name = 'x'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("INSERT INTO t SELECT * FROM s", true)).not.toBeNull()
+  })
+
+  test("analyze:true blocks a data-modifying CTE", () => {
+    expect(validateAnalyzeSafety("WITH moved AS (DELETE FROM t RETURNING *) SELECT * FROM moved", true)).not.toBeNull()
+  })
+
+  test("analyze:true blocks SELECT INTO (write-capable SELECT)", () => {
+    expect(validateAnalyzeSafety("SELECT * INTO new_table FROM users", true)).not.toBeNull()
+  })
+
+  test("analyze:true blocks DDL", () => {
+    expect(validateAnalyzeSafety("DROP TABLE users", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("CREATE TABLE t AS SELECT 1", true)).not.toBeNull()
+  })
+
+  test("write keywords inside string literals do not block a SELECT", () => {
+    expect(validateAnalyzeSafety("SELECT * FROM audit WHERE action = 'delete'", true)).toBeNull()
+  })
+
+  test("comment markers inside string literals cannot smuggle a DELETE (strip-order bypass)", () => {
+    // Comments-first stripping would swallow the DELETE between the quoted
+    // markers; strings must be masked first.
+    expect(validateAnalyzeSafety("SELECT '/*'; DELETE FROM t; SELECT '*/'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety('SELECT "/*"; DELETE FROM t; SELECT "*/"', true)).not.toBeNull()
+  })
+
+  test("multi-statement payloads are rejected, trailing semicolon is fine", () => {
+    expect(validateAnalyzeSafety("SELECT 1; SELECT 2", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT id FROM users;", true)).toBeNull()
+  })
+
+  test("dollar-quotes are lexed, not bypassable — including digit tags", () => {
+    // Content inside dollar-quotes is masked; the smuggled DELETE is caught by
+    // the multi-statement check regardless.
+    expect(validateAnalyzeSafety("SELECT $$/*$$; DELETE FROM t; SELECT $$*/$$", true)).not.toBeNull()
+    // Digit-bearing tags follow identifier rules and must be recognized too.
+    expect(validateAnalyzeSafety("SELECT $tag1$/*$tag1$; DELETE FROM t; SELECT $tag1$*/$tag1$", true)).not.toBeNull()
+    // A benign dollar-quoted literal in a single SELECT is fine.
+    expect(validateAnalyzeSafety("SELECT $tag$hello world$tag$", true)).toBeNull()
+    // Unterminated dollar-quote fails closed.
+    expect(validateAnalyzeSafety("SELECT $$never closed", true)).not.toBeNull()
+  })
+
+  test("quotes inside comments cannot swallow real code (inverse strip-order bypass)", () => {
+    // With regex masking, strings-first turns /*'*/ ... /*'*/ into one giant
+    // "string literal" that swallows the DELETE. The lexer consumes the comment
+    // first at its position, so the DELETE stays visible and is blocked.
+    expect(validateAnalyzeSafety("SELECT /*'*/ ; DELETE FROM t /*'*/", true)).not.toBeNull()
+    // Benign apostrophe inside a comment does not block a single SELECT.
+    expect(validateAnalyzeSafety("SELECT id FROM t /* don't scan much */", true)).toBeNull()
+  })
+
+  test("line comment containing a quote does not hide following statements", () => {
+    expect(validateAnalyzeSafety("SELECT '--'; DELETE FROM users", true)).not.toBeNull()
+  })
+
+  test("PostgreSQL E-string escapes cannot mask DML (backslash fails closed)", () => {
+    // PG parses E'\'' as a literal containing a quote, ending the string where
+    // this lexer's ''-pair rule would CONTINUE — which would mask the DELETE
+    // as string content. Backslash in a literal must therefore reject analyze.
+    expect(validateAnalyzeSafety("SELECT E'\\''; DELETE FROM t; SELECT ''", true)).not.toBeNull()
+    // Benign backslash-bearing literals are also rejected — safe direction,
+    // the caller falls back to the estimated plan.
+    expect(validateAnalyzeSafety("SELECT 'C:\\path\\file' FROM t", true)).not.toBeNull()
+  })
+
+  test("unterminated string or block comment fails closed", () => {
+    expect(validateAnalyzeSafety("SELECT 'unterminated", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT 1 /* unterminated", true)).not.toBeNull()
+  })
+
+  test("read-only function forms of dual-use keywords are allowed", () => {
+    expect(validateAnalyzeSafety("SELECT REPLACE(name, 'a', 'b') FROM t", true)).toBeNull()
+    expect(validateAnalyzeSafety("SELECT replace (name, 'a', 'b') FROM t", true)).toBeNull()
+  })
+
+  test("statement forms of dual-use keywords stay blocked", () => {
+    expect(validateAnalyzeSafety("CALL my_proc(1)", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("COPY t FROM 's3://bucket'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SET search_path TO public", true)).not.toBeNull()
+  })
+
+  test("sequence-mutating functions are blocked even in function form", () => {
+    expect(validateAnalyzeSafety("SELECT nextval('public.id_seq')", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SELECT setval('public.id_seq', 100)", true)).not.toBeNull()
+  })
+
+  test("write keywords inside comments do not block a SELECT", () => {
+    expect(validateAnalyzeSafety("SELECT id FROM t -- drop old rows later", true)).toBeNull()
+  })
+
+  test("column names containing write keywords do not block (word boundaries)", () => {
+    expect(validateAnalyzeSafety("SELECT updated_at, is_deleted FROM t", true)).toBeNull()
+  })
+})
+
 describe("validateWarehouseName", () => {
   const { validateWarehouseName } = toolInternals
 
@@ -485,5 +601,55 @@ describe("SqlExplainTool.execute", () => {
     expect(result.metadata.success).toBe(false)
     expect(result.title).toContain("ERROR")
     expect(String(result.output)).toContain("dispatcher exploded")
+  })
+
+  test("analyze:true requires the sql_execute_write permission — denied agents are blocked", async () => {
+    // A write-denied agent (analyst/reviewer/dbt-optimizer) rejects the ask;
+    // the tool must block BEFORE the dispatcher executes anything. Text-level
+    // lexing cannot prove a SELECT side-effect-free (dblink_exec, UDFs), so
+    // the permission gate is the enforced boundary.
+    const spy = spyOn(Dispatcher, "call")
+    const denyCtx = {
+      ...ctx,
+      ask: async (req: any) => {
+        expect(req.permission).toBe("sql_execute_write")
+        throw new Error("denied")
+      },
+    }
+    const tool = await initTool(SqlExplainTool)
+    const result = await tool.execute({ sql: "SELECT dblink_exec('c', 'x') FROM t", analyze: true }, denyCtx as any)
+    expect(result.title).toContain("ANALYZE BLOCKED")
+    expect(String(result.output)).toContain("sql_execute_write")
+    expect(spy).not.toHaveBeenCalled()
+    spy.mockRestore()
+  })
+
+  test("analyze:true proceeds when the sql_execute_write ask is approved", async () => {
+    mockDispatcher({ success: true, analyzed: true, warehouse_type: "postgres", plan_text: "Seq Scan" })
+    const asks: any[] = []
+    const allowCtx = {
+      ...ctx,
+      ask: async (req: any) => {
+        asks.push(req)
+      },
+    }
+    const tool = await initTool(SqlExplainTool)
+    const result = await tool.execute({ sql: "SELECT id FROM users", analyze: true }, allowCtx as any)
+    expect(asks.some((a) => a.permission === "sql_execute_write")).toBe(true)
+    expect(result.metadata.success).toBe(true)
+    expect(result.metadata.analyzed).toBe(true)
+  })
+})
+
+describe("round-13: analyze guard does not false-positive dual-use column names", () => {
+  const { validateAnalyzeSafety } = toolInternals
+  test("a SELECT projecting columns named set/replace/copy/call is allowed", () => {
+    expect(validateAnalyzeSafety("SELECT set, replace, copy, call FROM options", true)).toBeNull()
+    expect(validateAnalyzeSafety("WITH x AS (SELECT set FROM t) SELECT * FROM x", true)).toBeNull()
+  })
+  test("statement forms still blocked (they never start with a read keyword)", () => {
+    expect(validateAnalyzeSafety("CALL my_proc(1)", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("COPY t FROM 's3://b'", true)).not.toBeNull()
+    expect(validateAnalyzeSafety("SET search_path TO public", true)).not.toBeNull()
   })
 })

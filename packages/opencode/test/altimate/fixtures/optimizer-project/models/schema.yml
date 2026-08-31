@@ -1,0 +1,30 @@
+version: 2
+
+models:
+  - name: stg_events
+    description: Staging pass-through for raw events.
+    columns:
+      - name: event_id
+        description: Unique event identifier.
+        tests:
+          - not_null
+          - unique
+      - name: loaded_at
+        description: Warehouse load timestamp (monotonically increasing).
+
+  - name: fct_events_daily
+    description: Daily event rollup.
+
+  - name: rpt_us
+    description: US revenue report.
+
+  - name: rpt_eu
+    description: EU revenue report.
+
+  - name: rpt_apac
+    description: APAC revenue report.
+
+  - name: legacy_events_backup
+    description: One-off backup of events taken during the 2025 migration.
+
+  - name: dim_customers

@@ -61,6 +61,12 @@ export const TrainingSaveTool = Tool.define("training_save", {
       .describe("Source file references backing this training"),
   }),
   async execute(args, ctx) {
+    // Training writes persistent memory that outlives the session and is NOT
+    // covered by the edit permission — and built-in tools get no generic
+    // tool-name gate at execution, so the permission is asked HERE. Kept
+    // OUTSIDE the try so RejectedError/CorrectedError/DeniedError propagate
+    // with the framework's blocked-call semantics (mirrors sql-execute).
+    await (ctx as any).ask({ permission: "training_save", patterns: ["*"], always: ["*"], metadata: {} })
     try {
       const scopeForCount = args.scope === "global" ? "global" : "project"
 

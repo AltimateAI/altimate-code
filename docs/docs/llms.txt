@@ -13,7 +13,7 @@
 
 ## Data Engineering
 
-- [Agent Modes](https://help.altimate.ai/code/data-engineering/agent-modes/): 3 specialized agents (Builder, Analyst, Plan), each with scoped permissions and purpose-built tool access. Builder has full read/write; Analyst is read-only; Plan drafts a step-by-step plan before any changes.
+- [Agent Modes](https://help.altimate.ai/code/data-engineering/agent-modes/): 5 specialized agents (Builder, Analyst, Reviewer, dbt-Optimizer, Plan), each with scoped permissions and purpose-built tool access. Builder has full read/write; Analyst has read-only enforced; Reviewer produces signed dbt PR verdicts; dbt-Optimizer scans dbt projects for fixable issues with cost/impact evidence.
 - [Training Overview](https://help.altimate.ai/code/data-engineering/training/): How to teach altimate project-specific patterns, naming conventions, and corrections that persist across sessions and team members.
 - [Team Deployment](https://help.altimate.ai/code/data-engineering/training/team-deployment/): How to commit training to git so your entire team inherits SQL conventions automatically.
 - [SQL Tools](https://help.altimate.ai/code/data-engineering/tools/sql-tools/): 9 SQL analysis tools with 19 anti-pattern rules. 100% F1 accuracy on 1,077 benchmark queries.

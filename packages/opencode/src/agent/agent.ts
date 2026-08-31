@@ -21,6 +21,7 @@ import PROMPT_TITLE from "./prompt/title.txt"
 import PROMPT_BUILDER from "../altimate/prompts/builder.txt"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
+import PROMPT_OPTIMIZER from "../altimate/prompts/dbt-optimizer.txt"
 // altimate_change end
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -220,7 +221,7 @@ export const layer = Layer.effect(
         // altimate_change end
 
         const agents: Record<string, Info> = {
-          // altimate_change start - 3 modes: builder, analyst, plan (replaces upstream single "build" agent)
+          // altimate_change start - 4 modes: builder, analyst, reviewer, dbt-optimizer (replaces upstream single "build" agent)
           builder: {
             name: "builder",
             description: "Create and modify dbt models, SQL, and data pipelines. Full read/write access.",
@@ -373,6 +374,95 @@ export const layer = Layer.effect(
               }),
               safetyDenials,
               // altimate_change end
+            ),
+            mode: "primary",
+            native: true,
+          },
+          // dbt-optimizer agent: dbt project optimization — scan (read-only allowlist),
+          // propose candidates, apply user-selected fixes (edit/bash prompt), report impact.
+          "dbt-optimizer": {
+            name: "dbt-optimizer",
+            description:
+              "Scan a dbt project for fixable issues — performance, materialization, repeated logic, missing tests/docs — and propose targeted fixes with cost and impact reporting. File edits and shell commands prompt for approval by default (explicit user config can relax them); the direct SQL write tool is denied non-overridably, and dbt builds run only as user-approved shell commands (the agent confirms a dev target before building).",
+            prompt: PROMPT_OPTIMIZER,
+            options: {},
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                // Read-only project access (scan phase)
+                read: "allow",
+                grep: "allow",
+                glob: "allow",
+                list: "allow",
+                question: "allow",
+                tool_lookup: "allow",
+                todowrite: "allow",
+                todoread: "allow",
+                webfetch: "allow",
+                websearch: "allow",
+                // Scans routinely need paths outside the worktree (e.g. dbt profiles,
+                // package dirs); "ask" instead of hard-failing on the "*" deny.
+                external_directory: readonlyExternalDirectory,
+                // SQL analysis + verified rewrites
+                sql_execute: "allow",
+                sql_analyze: "allow",
+                sql_optimize: "allow",
+                sql_explain: "allow",
+                sql_diff: "allow",
+                sql_format: "allow",
+                sql_fix: "allow",
+                altimate_core_validate: "allow",
+                altimate_core_check: "allow",
+                altimate_core_grade: "allow",
+                altimate_core_rewrite: "allow",
+                altimate_core_equivalence: "allow",
+                altimate_core_compare: "allow",
+                altimate_core_column_lineage: "allow",
+                altimate_core_parse_dbt: "allow",
+                altimate_core_testgen: "allow",
+                // dbt project structure + blast radius
+                dbt_manifest: "allow",
+                dbt_lineage: "allow",
+                dbt_unit_test_gen: "allow",
+                impact_analysis: "allow",
+                lineage_check: "allow",
+                schema_inspect: "allow",
+                schema_search: "allow",
+                // schema_index crawls the warehouse and REWRITES the persistent
+                // global schema cache (~/.altimate-code/schema-cache.db) — a
+                // mutation the read-only scan must not run unprompted.
+                schema_index: "ask",
+                schema_cache_status: "allow",
+                warehouse_list: "allow",
+                warehouse_test: "allow",
+                // Cost evidence
+                finops_query_history: "allow",
+                finops_analyze_credits: "allow",
+                finops_expensive_queries: "allow",
+                finops_warehouse_advice: "allow",
+                finops_unused_resources: "allow",
+                // Fix phase: every file change and shell command prompts for approval
+                edit: "ask",
+                bash: "ask",
+                // Warehouse writes never
+                sql_execute_write: "deny",
+                // Training: list freely, but mutations prompt — training writes
+                // persistent memory outside the edit permission, so an injected
+                // instruction in scanned SQL/YAML must not be able to silently
+                // poison future sessions during the read-only scan.
+                training_save: "ask",
+                training_list: "allow",
+                training_remove: "ask",
+              }),
+              // Merge user config, THEN re-apply the warehouse-write invariant so a
+              // permissive global config (e.g. `"*": "allow"`) can't turn the scan
+              // into a silent writer, THEN safetyDenials LAST so DDL denies always win.
+              user,
+              Permission.fromConfig({
+                sql_execute_write: "deny",
+              }),
+              safetyDenials,
             ),
             mode: "primary",
             native: true,
@@ -547,6 +637,18 @@ export const layer = Layer.effect(
             Permission.fromConfig(value.permission ?? {}),
             safetyDenials,
           )
+          // Evaluation is last-match-wins, so a per-agent `permission` override
+          // (merged just above) would outrank the invariants baked into the native
+          // definitions. Re-apply the optimizer's warehouse-write deny here so
+          // `agent."dbt-optimizer".permission.sql_execute_write: "allow"` cannot turn
+          // the scan into a warehouse writer.
+          if (key === "dbt-optimizer" && item.native) {
+            item.permission = Permission.merge(
+              item.permission,
+              Permission.fromConfig({ sql_execute_write: "deny" }),
+              safetyDenials,
+            )
+          }
           // altimate_change end
         }
 

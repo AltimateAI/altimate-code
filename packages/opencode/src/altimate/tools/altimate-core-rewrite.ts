@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import type { LegacyResult } from "../tool-zod-compat"
 import { Dispatcher } from "../native"
+import { guardSchemaPath, isPermissionError } from "./schema-path-guard"
 
 export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
   description:
@@ -17,9 +18,18 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
       .describe(
         "If true, verify each rewrite is semantically equivalent to the original before recommending it (requires a schema).",
       ),
+    dialect: z
+      .string()
+      .optional()
+      .describe(
+        "SQL dialect hint for the equivalence verification (e.g. snowflake, bigquery) — dialect-specific syntax is otherwise undecidable",
+      ),
   }),
-  async execute(args): Promise<LegacyResult> {
+  async execute(args, ctx): Promise<LegacyResult> {
     try {
+      // Gate the schema file path once; the gated resolved path then flows to
+      // both the rewrite call and the equivalence sub-calls in verifyRewrites.
+      args = { ...args, schema_path: await guardSchemaPath(ctx, args.schema_path) }
       const result = (await Dispatcher.call("altimate_core.rewrite", {
         sql: args.sql,
         schema_path: args.schema_path ?? "",
@@ -53,6 +63,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
         output: formatRewrite(data),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Rewrite: ERROR",
@@ -72,7 +83,7 @@ export const AltimateCoreRewriteTool = Tool.define("altimate_core_rewrite", {
  * apply without changing results.
  */
 async function verifyRewrites(
-  args: { sql: string; schema_path?: string; schema_context?: Record<string, any> },
+  args: { sql: string; schema_path?: string; schema_context?: Record<string, any>; dialect?: string },
   data: Record<string, any>,
 ) {
   const hasSchema = !!(args.schema_path || (args.schema_context && Object.keys(args.schema_context).length > 0))
@@ -121,9 +132,16 @@ async function verifyRewrites(
         sql2: c.sql,
         schema_path: args.schema_path ?? "",
         schema_context: args.schema_context,
+        dialect: args.dialect,
       })) as { error?: string; data?: Record<string, any> } | null
       const ed = (eq?.data ?? {}) as Record<string, any>
-      if (ed.equivalent === true) {
+      // The gate requires BOTH `equivalent === true` AND `decidable === true`.
+      // The engine can return { equivalent: true, decidable: false } when its
+      // heuristic comparator could not actually decide — that is an unproven
+      // rewrite, and reporting it as verified would be a false safety claim.
+      // `decidable` is a required field since altimate-core@0.5.1, so a missing
+      // value means a malformed response and also fails closed.
+      if (ed.equivalent === true && ed.decidable === true) {
         verified.push({ sql: c.sql, rule: c.rule, confidence: ed.confidence })
       } else {
         // Derive a specific reason. The gate stays strict (only `=== true` verifies);
@@ -132,6 +150,12 @@ async function verifyRewrites(
         let reason: string
         if (eq?.error ?? ed.error) {
           reason = String(eq?.error ?? ed.error)
+        } else if (ed.decidable === false) {
+          // Abstention is independent of the `equivalent` value — a parse or
+          // planning failure must read UNDECIDABLE, not "not proven".
+          reason = "equivalence undecidable — the engine could not prove the rewrite; validate with a data-diff"
+        } else if (ed.equivalent === true && ed.decidable !== true) {
+          reason = "missing or invalid 'decidable' field in equivalence response"
         } else if (!("equivalent" in ed)) {
           reason = "missing 'equivalent' field in equivalence response"
         } else if (typeof ed.equivalent !== "boolean") {
@@ -148,6 +172,7 @@ async function verifyRewrites(
         unverified.push({ sql: c.sql, rule: c.rule, reason })
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       unverified.push({ sql: c.sql, rule: c.rule, reason: `equivalence check failed: ${msg}` })
     }

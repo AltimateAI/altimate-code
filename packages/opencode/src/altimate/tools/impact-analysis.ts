@@ -5,6 +5,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { Telemetry } from "../telemetry"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
@@ -31,8 +32,12 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
   }),
   async execute(args, ctx) {
     try {
+      // Manifest paths outside the project require the external_directory gate,
+      // same as the other dbt readers. Relative paths resolve against the
+      // PROJECT directory (mirrors read.ts), and the gated path is what's read.
+      const manifestPath = (await guardExternalFile(ctx, args.manifest_path)) ?? args.manifest_path
       // Step 1: Parse the dbt manifest to get the full DAG
-      const manifest = await Dispatcher.call("dbt.manifest", { path: args.manifest_path })
+      const manifest = await Dispatcher.call("dbt.manifest", { path: manifestPath })
 
       if (!manifest.models || manifest.models.length === 0) {
         return {
@@ -42,12 +47,15 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
         }
       }
 
-      // Step 2: Find the target model and its downstream dependents
-      const targetModel = manifest.models.find(
-        (m: { name: string }) => m.name === args.model || m.name.endsWith(`.${args.model}`),
+      // Step 2: Find the target model(s). Computed ONCE — the not-found check
+      // and the affected-id set both derive from this list, so the matching
+      // rule cannot silently drift between them.
+      const targetMatches = manifest.models.filter(
+        (m: { name: string; unique_id?: string }) =>
+          m.name === args.model || m.name.endsWith(`.${args.model}`) || m.unique_id === args.model,
       )
 
-      if (!targetModel) {
+      if (targetMatches.length === 0) {
         const available = manifest.models
           .slice(0, 10)
           .map((m: { name: string }) => m.name)
@@ -70,11 +78,13 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       const direct = downstream.filter((d) => d.depth === 1)
       const transitive = downstream.filter((d) => d.depth > 1)
 
-      // Step 4: Count only tests that reference the target model or its downstream models
-      const affectedModelIds = new Set([
-        targetModel.unique_id,
-        ...downstream.map((d) => modelsByName.get(d.name)?.unique_id).filter(Boolean),
-      ])
+      // Step 4: Count only tests that reference the target model(s) or their
+      // downstream models. Use the unique_ids CARRIED BY the traversal — a
+      // name-keyed map would overwrite package-qualified models sharing a name
+      // and silently drop the overwritten branch's tests. All same-named
+      // targets count (the traversal seeded all of them).
+      const targetIds = targetMatches.map((m: { unique_id?: string }) => m.unique_id).filter(Boolean)
+      const affectedModelIds = new Set([...targetIds, ...downstream.map((d) => d.unique_id).filter(Boolean)])
       const affectedTests = (manifest.tests ?? []).filter((t) =>
         t.depends_on?.some((dep) => affectedModelIds.has(dep)),
       )
@@ -103,6 +113,14 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       }
 
       // Step 6: Format the impact report
+      // Column-level tracing here is BEST-EFFORT: it runs lineage on a
+      // synthetic `SELECT *` without manifest-compiled downstream SQL, so it
+      // cannot authoritatively identify affected downstream columns. Say so —
+      // silently presenting the model-level DAG as the column's blast radius
+      // would overstate the evidence. dbt_lineage is the authoritative tool.
+      const columnCaveat = args.column
+        ? "\n\nNote: column-level impact is best-effort (no compiled downstream SQL inspected). For authoritative column tracing, use `dbt_lineage` with the manifest."
+        : ""
       const output = formatImpactReport({
         model: args.model,
         column: args.column,
@@ -142,9 +160,10 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           has_schema: false,
           ...(findings.length > 0 && { findings }),
         },
-        output,
+        output: output + columnCaveat,
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Impact: ERROR",
@@ -157,6 +176,10 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
 
 export interface DownstreamModel {
   name: string
+  /** dbt unique_id when the manifest provides one — callers must use this,
+   *  not `name`, when collecting affected resources (names can collide across
+   *  packages). */
+  unique_id?: string
   depth: number
   materialized?: string
   path: string[]
@@ -164,30 +187,55 @@ export interface DownstreamModel {
 
 export function findDownstream(
   targetName: string,
-  models: Array<{ name: string; depends_on: string[]; materialized?: string }>,
+  models: Array<{ name: string; depends_on: string[]; materialized?: string; unique_id?: string }>,
 ): DownstreamModel[] {
+  // Traverse by dbt unique_id so package-qualified models sharing a `name`
+  // (model.pkg_a.orders vs model.pkg_b.orders) are never conflated — names are
+  // resolved only for display. Models without a unique_id (minimal fixtures,
+  // older manifests) fall back to name-suffix matching for their edges.
+  const uid = (m: { name: string; unique_id?: string }) => m.unique_id ?? `name:${m.name}`
   const results: DownstreamModel[] = []
-  const visited = new Set<string>()
 
-  function walk(name: string, depth: number, path: string[]) {
+  const dependsOn = (model: { depends_on: string[] }, parent: { name: string; unique_id?: string }) =>
+    model.depends_on.some((d) =>
+      parent.unique_id ? d === parent.unique_id : d.split(".").pop() === parent.name,
+    )
+
+  // Entry by name (the tool's public argument) or exact unique_id; multiple
+  // same-named targets ALL seed the traversal (full blast radius for a bare
+  // name; scoped when a unique_id is given).
+  const targets = models.filter((m) => m.name === targetName || m.unique_id === targetName)
+  const seeds: Array<{ name: string; unique_id?: string }> = targets.length ? targets : [{ name: targetName }]
+
+  // BFS from all seeds simultaneously so `depth` is the SHORTEST distance from
+  // any seed — a DFS with a shared visited set would label a direct dependent
+  // "transitive" whenever an earlier seed reached it first via a longer path,
+  // with results depending on manifest order.
+  const visited = new Set<string>(seeds.map(uid))
+  const paths = new Map<string, string[]>(seeds.map((s) => [uid(s), [targetName]]))
+  let frontier = seeds
+  let depth = 1
+  while (frontier.length > 0) {
+    const next: Array<{ name: string; unique_id?: string; depends_on: string[]; materialized?: string }> = []
     for (const model of models) {
-      if (visited.has(model.name)) continue
-      const deps = model.depends_on.map((d) => d.split(".").pop())
-      if (deps.includes(name)) {
-        visited.add(model.name)
-        const newPath = [...path, model.name]
-        results.push({
-          name: model.name,
-          depth,
-          materialized: model.materialized,
-          path: newPath,
-        })
-        walk(model.name, depth + 1, newPath)
-      }
+      if (visited.has(uid(model))) continue
+      const parent = frontier.find((p) => dependsOn(model, p))
+      if (!parent) continue
+      visited.add(uid(model))
+      const newPath = [...(paths.get(uid(parent)) ?? [targetName]), model.name]
+      paths.set(uid(model), newPath)
+      results.push({
+        name: model.name,
+        unique_id: model.unique_id,
+        depth,
+        materialized: model.materialized,
+        path: newPath,
+      })
+      next.push(model)
     }
+    frontier = next
+    depth++
   }
-
-  walk(targetName, 1, [targetName])
   return results
 }
 

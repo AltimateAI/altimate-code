@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { DbtLineageResult } from "../native/types"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
@@ -13,8 +14,13 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
   }),
   async execute(args, ctx) {
     try {
+      // Manifest paths outside the project require the external_directory gate,
+      // same as file reads — no silent cross-project lineage extraction. Relative
+      // paths resolve against the PROJECT directory (mirrors read.ts), and the
+      // SAME resolved path is what gets read.
+      const resolved = (await guardExternalFile(ctx, args.manifest_path)) ?? args.manifest_path
       const result = await Dispatcher.call("dbt.lineage", {
-        manifest_path: args.manifest_path,
+        manifest_path: resolved,
         model: args.model,
         dialect: args.dialect,
       })
@@ -30,6 +36,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         output: formatDbtLineage(result),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "dbt Lineage: ERROR",

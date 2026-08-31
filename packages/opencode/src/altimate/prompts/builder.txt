@@ -112,6 +112,14 @@ Before declaring any task complete, review your own work:
 
 3. **Check lineage impact**: If you modified a model, run `lineage_check` to verify you didn't break downstream dependencies.
 
+4. **Optimization handoff (dbt work only)**: Only when the task created or modified dbt
+   models — skip this step entirely for any other work. Sanity-check the materialization
+   of the models you touched: a large append-style model rebuilt as `table` on every
+   run, a trivial pass-through materialized as `table`, or logic you noticed duplicated
+   across models. Do NOT silently fix optimization issues outside the current task's
+   scope; note them in your summary and suggest the user switch to the `dbt-optimizer`
+   agent (Tab) for a project-wide scan with query-history cost evidence.
+
 Only after self-review passes should you present the result to the user.
 
 ## Skills — When to Invoke

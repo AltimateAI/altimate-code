@@ -69,12 +69,32 @@ describe("verified-optimize — gate logic (mocked engine)", () => {
   beforeEach(() => Dispatcher.reset())
 
   test("proven-equivalent rewrite is VERIFIED", async () => {
-    mockRewriteAndEquivalence(REWRITE, { equivalent: true, confidence: 1 })
+    mockRewriteAndEquivalence(REWRITE, { equivalent: true, decidable: true, confidence: 1 })
     const r = await runTool({ sql: ORIGINAL, schema_context: SCHEMA })
     expect(r.metadata.verified_count).toBe(1)
     expect(r.metadata.unverified_count).toBe(0)
     expect(String(r.output)).toContain("VERIFIED-EQUIVALENT")
     expect(String(r.output)).toContain(REWRITE)
+  })
+
+  test("equivalent:true with decidable:false is UNVERIFIED (undecidable is not proof)", async () => {
+    mockRewriteAndEquivalence(REWRITE, { equivalent: true, decidable: false, confidence: 0.9 })
+    const r = await runTool({ sql: ORIGINAL, schema_context: SCHEMA })
+    expect(r.metadata.verified_count).toBe(0)
+    expect(r.metadata.unverified_count).toBe(1)
+    expect(String(r.output)).toContain("undecidable")
+  })
+
+  test("equivalent:false with decidable:false also reads undecidable — abstention is not refutation", async () => {
+    mockRewriteAndEquivalence(REWRITE, {
+      equivalent: false,
+      decidable: false,
+      differences: [{ description: "parse failed" }],
+    })
+    const r = await runTool({ sql: ORIGINAL, schema_context: SCHEMA })
+    expect(r.metadata.verified_count).toBe(0)
+    expect(r.metadata.unverified_count).toBe(1)
+    expect(String(r.output)).toContain("undecidable")
   })
 
   test("not-equivalent rewrite is UNVERIFIED with a reason", async () => {
@@ -150,7 +170,7 @@ describe("verified-optimize — gate logic (mocked engine)", () => {
       success: true,
       data: { suggestions: [{ rewritten_sql: rwA }, { rewritten_sql: rwB }] },
     }))
-    Dispatcher.register("altimate_core.equivalence" as any, async () => ({ success: true, data: { equivalent: true } }))
+    Dispatcher.register("altimate_core.equivalence" as any, async () => ({ success: true, data: { equivalent: true, decidable: true } }))
     const r = await runTool({ sql: "SELECT id FROM t", schema_context: SCHEMA })
     // Both candidates survive dedup and get verified (2, not 1).
     expect(r.metadata.verified_count).toBe(2)
@@ -164,7 +184,7 @@ describe("verified-optimize — gate logic (mocked engine)", () => {
         suggestions: [{ rewritten_sql: REWRITE }, { rewritten_sql: "  " + REWRITE + "  " }],
       },
     }))
-    Dispatcher.register("altimate_core.equivalence" as any, async () => ({ success: true, data: { equivalent: true } }))
+    Dispatcher.register("altimate_core.equivalence" as any, async () => ({ success: true, data: { equivalent: true, decidable: true } }))
     const r = await runTool({ sql: ORIGINAL, schema_context: SCHEMA })
     expect(r.metadata.verified_count).toBe(1) // not 3
   })
@@ -177,7 +197,7 @@ describe("verified-optimize — gate logic (mocked engine)", () => {
     }))
     Dispatcher.register("altimate_core.equivalence" as any, async (p: any) => ({
       success: true,
-      data: { equivalent: p.sql2 === REWRITE }, // only the first is equivalent
+      data: { equivalent: p.sql2 === REWRITE, decidable: true }, // only the first is equivalent
     }))
     const r = await runTool({ sql: ORIGINAL, schema_context: SCHEMA })
     expect(r.metadata.verified_count).toBe(1)
@@ -194,7 +214,7 @@ describe("verified-optimize — gate logic (mocked engine)", () => {
     let callCount = 0
     Dispatcher.register("altimate_core.equivalence" as any, async () => {
       callCount++
-      if (callCount === 1) return { success: true, data: { equivalent: true } }
+      if (callCount === 1) return { success: true, data: { equivalent: true, decidable: true } }
       if (callCount === 2) throw new Error("equiv boom")
       return { success: true, data: { equivalent: false } }
     })

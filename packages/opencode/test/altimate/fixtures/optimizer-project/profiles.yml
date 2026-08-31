@@ -1,0 +1,6 @@
+optimizer_fixture:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: optimizer_fixture.duckdb

@@ -4,6 +4,8 @@
 // Handles CTEs, string literals, procedural blocks, all dialects correctly.
 // Falls back to regex-based heuristics if the napi binary fails to load.
 
+import { maskLiteralsAndComments } from "./sql-text-mask"
+
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
 let extractMetadata: ((sql: string) => any) | null = null
@@ -37,26 +39,89 @@ const HARD_DENY_PATTERN =
  * Handles multi-statement SQL by splitting on semicolons and checking each statement.
  */
 function classifyFallback(sql: string): { queryType: "read" | "write"; blocked: boolean } {
-  const cleaned = sql
-    .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
-    .replace(/--[^\n]*/g, "")          // line comments
+  // Use the single-pass lexer, NOT ordered regexes: comments-first stripping
+  // is bypassable via comment markers inside string literals (e.g.
+  // `SELECT '--' LIMIT 1; DELETE FROM users` would reduce to `SELECT '`).
+  // Unlexable SQL fails closed as a write.
+  const cleaned = maskLiteralsAndComments(sql)
+  if (cleaned === null) return { queryType: "write", blocked: false }
   const statements = cleaned.split(";").map(s => s.trim()).filter(Boolean)
   if (statements.length === 0) return { queryType: "read", blocked: false }
+  // A read-shaped PREFIX is not proof: `WITH x AS (SELECT 1) DELETE FROM u`
+  // and `EXPLAIN ANALYZE DELETE FROM u` start like reads but execute writes
+  // (and PostgreSQL EXPLAIN ANALYZE always executes). Any write keyword in the
+  // masked statement body forces "write" — the safe direction is a prompt.
+  const WRITE_KEYWORD =
+    /\b(insert|update|delete|merge|truncate|drop|alter|create|grant|revoke|vacuum|into)\b/i
+  // NOTE: statement-form writes like REPLACE INTO / COPY / CALL / SET need no
+  // separate check — statements are trimmed, so anything starting with them
+  // already fails READ_PATTERN below and classifies as write, while the same
+  // words as columns (`SELECT set FROM t`) sit behind a read prefix.
   let queryType: "read" | "write" = "read"
   let blocked = false
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
-    if (!READ_PATTERN.test(stmt)) queryType = "write"
+    if (!READ_PATTERN.test(stmt) || WRITE_KEYWORD.test(stmt)) queryType = "write"
   }
   return { queryType, blocked }
+}
+
+/**
+ * Side-effecting functions that mutate warehouse state from inside a
+ * read-shaped SELECT. AST statement categories cannot see these — a
+ * `SELECT dblink_exec(...)` or `SELECT nextval(...)` parses as a read — so
+ * they are matched against MASKED SQL (string literals and comments removed
+ * by a single-pass lexer) and escalate the classification to "write", routing
+ * the statement through the sql_execute_write permission.
+ *
+ * Masking first is load-bearing in both directions: a block comment wedged
+ * between the function name and the open paren collapses so the call is
+ * still detected, and the names appearing inside string literals or comments
+ * no longer false-positive. Word boundary + `(` keeps column names like
+ * `nextval_cache` unaffected. An unlexable statement (unterminated construct,
+ * backslash-escape ambiguity) fails closed as a write.
+ */
+const SIDE_EFFECT_FUNCTIONS =
+  /\b(nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)\s*\(/i
+
+// Quoted-identifier call form: `SELECT "lo_import"('/tmp/x')` (or the
+// `backtick`/[bracket] dialect variants) is a valid invocation. Checked
+// against the identifier-PRESERVING mask (comments and string literals
+// removed, quoted-identifier content kept): raw-SQL matching would miss a
+// comment wedged between the quote and the paren (`"lo_import"/**/(...)`),
+// while the default mask blanks the name entirely. On the preserved-id mask
+// the wedge collapses to whitespace and the delimited name survives.
+const QUOTED_SIDE_EFFECT =
+  /["`[](nextval|setval|dblink_exec|dblink|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|lo_unlink|pg_reload_conf|pg_rotate_logfile)["`\]]\s*\(/i
+
+function hasSideEffectFunction(sql: string): boolean {
+  const masked = maskLiteralsAndComments(sql)
+  if (masked === null) return true
+  if (SIDE_EFFECT_FUNCTIONS.test(masked)) return true
+  const maskedWithIds = maskLiteralsAndComments(sql, { preserveQuotedIdentifiers: true })
+  if (maskedWithIds === null) return true
+  return QUOTED_SIDE_EFFECT.test(maskedWithIds)
+}
+
+/**
+ * Normalize CR / CRLF to LF before any classification. The AST engine and the
+ * fallback both treat `--` comments as running to the next LF; a CR-only line
+ * ending would otherwise let a comment visually "end" while the classifier
+ * still considers everything after it commented out — hiding a following
+ * statement from write detection.
+ */
+function normalizeNewlines(sql: string): string {
+  return sql.replace(/\r\n?/g, "\n")
 }
 
 /**
  * Classify a SQL string as "read" or "write" using AST parsing.
  * If ANY statement is a write, returns "write".
  */
-export function classify(sql: string): "read" | "write" {
-  if (!sql || typeof sql !== "string") return "read"
+export function classify(rawSql: string): "read" | "write" {
+  if (!rawSql || typeof rawSql !== "string") return "read"
+  const sql = normalizeNewlines(rawSql)
+  if (hasSideEffectFunction(sql)) return "write"
   if (!getStatementTypes) return classifyFallback(sql).queryType
   try {
     const result = getStatementTypes(sql)
@@ -79,12 +144,17 @@ export function classifyMulti(sql: string): "read" | "write" {
  * Single-pass: classify and check for hard-denied statement types.
  * Returns both the overall query type and whether a hard-deny pattern was found.
  */
-export function classifyAndCheck(sql: string): { queryType: "read" | "write"; blocked: boolean } {
-  if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
-  if (!getStatementTypes) return classifyFallback(sql)
+export function classifyAndCheck(rawSql: string): { queryType: "read" | "write"; blocked: boolean } {
+  if (!rawSql || typeof rawSql !== "string") return { queryType: "read", blocked: false }
+  const sql = normalizeNewlines(rawSql)
+  const sideEffect = hasSideEffectFunction(sql)
+  if (!getStatementTypes) {
+    const fb = classifyFallback(sql)
+    return sideEffect ? { ...fb, queryType: "write" } : fb
+  }
   try {
     const result = getStatementTypes(sql)
-    if (!result?.statements?.length) return { queryType: "read", blocked: false }
+    if (!result?.statements?.length) return { queryType: sideEffect ? "write" : "read", blocked: false }
 
     const blocked = result.statements.some(
       (s: { statement_type: string }) =>
@@ -92,10 +162,12 @@ export function classifyAndCheck(sql: string): { queryType: "read" | "write"; bl
     )
 
     const categories = result.categories ?? []
-    const queryType = categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
+    const queryType =
+      sideEffect || categories.some((c: string) => !READ_CATEGORIES.has(c)) ? "write" : "read"
     return { queryType: queryType as "read" | "write", blocked }
   } catch {
-    return classifyFallback(sql)
+    const fb = classifyFallback(sql)
+    return sideEffect ? { ...fb, queryType: "write" } : fb
   }
 }
 

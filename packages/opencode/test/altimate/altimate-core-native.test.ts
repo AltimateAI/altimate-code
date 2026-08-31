@@ -914,4 +914,26 @@ describe("core 0.5.1 dialect forwarding + decidable", () => {
     expect(typeof noDialect.diff).toBe("string")
     expect(typeof snowflake.diff).toBe("string")
   })
+
+  test("sql.diff: single insertion at top counts as ONE changed line (LCS, not index-aligned)", async () => {
+    const base = ["select", "  a,", "  b,", "  c", "from t", "where a > 1", "order by a"].join("\n")
+    const withHeader = "-- header comment\n" + base
+    const r = (await Dispatcher.call("sql.diff", { original: base, modified: withHeader } as any)) as any
+    expect(r.success).toBe(true)
+    const changed = r.diff.split("\n").filter((l: string) => /^[+-]/.test(l))
+    expect(changed).toEqual(["+ -- header comment"])
+  })
+
+  test("sql.diff: equivalence failure does not erase the text diff", async () => {
+    // A schema shape the resolver/engine chokes on must downgrade equivalence
+    // to not-assessed while the independently-computable text diff survives.
+    const r = (await Dispatcher.call("sql.diff", {
+      original: "select 1",
+      modified: "select 2",
+      schema_context: { "": null },
+    } as any)) as any
+    expect(r.success).toBe(true)
+    expect(r.diff.length).toBeGreaterThan(0)
+    expect(r.equivalence_assessed === true && r.decidable === true).toBe(false)
+  })
 })

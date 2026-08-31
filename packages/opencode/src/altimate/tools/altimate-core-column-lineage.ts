@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardSchemaPath, isPermissionError } from "./schema-path-guard"
 import { isRecord, normalizeError } from "./response-normalization"
 
 export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_lineage", {
@@ -17,7 +18,7 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
       const rawResult = (await Dispatcher.call("altimate_core.column_lineage", {
         sql: args.sql,
         dialect: args.dialect ?? "",
-        schema_path: args.schema_path ?? "",
+        schema_path: (await guardSchemaPath(ctx, args.schema_path)) ?? "",
         schema_context: args.schema_context,
       })) as unknown
       if (!isRecord(rawResult)) {
@@ -36,6 +37,7 @@ export const AltimateCoreColumnLineageTool = Tool.define("altimate_core_column_l
         output: isFailure ? `Failed: ${failureMessage}` : formatColumnLineage(data),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return columnLineageError(msg)
     }

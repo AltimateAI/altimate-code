@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { DbtManifestResult } from "../native/types"
 
 export const DbtManifestTool = Tool.define("dbt_manifest", {
@@ -11,7 +12,13 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
   }),
   async execute(args, ctx) {
     try {
-      const result = await Dispatcher.call("dbt.manifest", { path: args.path })
+      // A manifest path outside the project must go through the same
+      // external_directory permission gate as file reads — otherwise this tool
+      // silently reads sibling/private projects' model inventories. Relative
+      // paths resolve against the PROJECT directory (mirrors read.ts), not the
+      // process cwd, and the SAME resolved path is what gets read.
+      const resolved = (await guardExternalFile(ctx, args.path)) ?? args.path
+      const result = await Dispatcher.call("dbt.manifest", { path: resolved })
 
       return {
         title: `Manifest: ${result.model_count ?? 0} models, ${result.source_count ?? 0} sources`,
@@ -26,6 +33,7 @@ export const DbtManifestTool = Tool.define("dbt_manifest", {
         output: formatManifest(result),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Manifest: ERROR",

@@ -4,7 +4,7 @@
  *
  * Setup mirrors test/agent/agent.test.ts (the supported way to boot the Agent
  * Effect service in tests). We assert:
- *  - the 4 fork agent modes (builder/analyst/plan/reviewer) are registered;
+ *  - the 5 fork agent modes (builder/analyst/plan/reviewer/optimizer) are registered;
  *  - the `build` -> `builder` back-compat alias resolves;
  *  - destructive DDL is DENIED and cannot be overridden by a user wildcard
  *    allow (the non-overridable safetyDenials merged last, last-match-wins);
@@ -54,13 +54,24 @@ afterEach(async () => {
   await disposeAllInstances()
 })
 
-it.instance("registers the 4 fork agent modes", () =>
+it.instance("registers the 5 fork agent modes", () =>
   Effect.gen(function* () {
     const names = (yield* load((svc) => svc.list())).map((a) => a.name)
     expect(names).toContain("builder")
     expect(names).toContain("analyst")
     expect(names).toContain("plan")
     expect(names).toContain("reviewer")
+    expect(names).toContain("dbt-optimizer")
+  }),
+)
+
+it.instance("optimizer denies warehouse writes and destructive DDL", () =>
+  Effect.gen(function* () {
+    const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+    expect(optimizer).toBeDefined()
+    expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+    expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+    expect(evalPerm(optimizer, "edit")).toBe("ask")
   }),
 )
 

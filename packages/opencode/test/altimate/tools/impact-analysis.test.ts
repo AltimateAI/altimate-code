@@ -69,10 +69,10 @@ describe("findDownstream: DAG traversal", () => {
     ]
     // This assertion exists only to document current behavior, not to endorse it.
     // Self-referencing dbt models are invalid and cannot compile, so this edge case
-    // is not reachable in practice. The visited set prevents infinite recursion.
+    // is not reachable in practice. The entry model is pre-visited, so a model is
+    // never reported as its own downstream, and recursion cannot loop.
     const result = findDownstream("stg_orders", models)
-    expect(result).toHaveLength(1)
-    expect(result[0].name).toBe("stg_orders")
+    expect(result).toHaveLength(0)
   })
 
   test("parses qualified names (strips prefix before last dot)", () => {
@@ -201,5 +201,111 @@ describe("formatImpactReport", () => {
     expect(report).toContain("Transitive Dependents (1)")
     expect(report).toContain("report [table] (via: stg_orders \u2192 fct_orders \u2192 report)")
     expect(report).toContain("Blast radius: 2/50 models (4.0%)")
+  })
+})
+
+
+describe("findDownstream: unique_id traversal (package-qualified name collisions)", () => {
+  test("same-named models in different packages are not conflated", () => {
+    const models = [
+      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+      { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
+      { name: "rpt_a", unique_id: "model.pkg_a.rpt_a", depends_on: ["model.pkg_a.orders"] },
+      { name: "rpt_b", unique_id: "model.pkg_b.rpt_b", depends_on: ["model.pkg_b.orders"] },
+    ]
+    // Entry by unique_id: only the pkg_a branch is affected.
+    const a = findDownstream("model.pkg_a.orders", models)
+    expect(a.map((m) => m.name)).toEqual(["rpt_a"])
+    // Entry by bare name seeds BOTH same-named targets — full blast radius.
+    const both = findDownstream("orders", models)
+    expect(both.map((m) => m.name).sort()).toEqual(["rpt_a", "rpt_b"])
+  })
+
+  test("models without unique_id fall back to name-suffix matching", () => {
+    const models = [
+      { name: "stg", depends_on: [] },
+      { name: "mart", depends_on: ["model.proj.stg"] },
+    ]
+    expect(findDownstream("stg", models).map((m) => m.name)).toEqual(["mart"])
+  })
+})
+
+describe("findDownstream: BFS depth semantics (multi-seed)", () => {
+  test("shortest distance from ANY seed wins — direct dependents are never labeled transitive", () => {
+    // X depends directly on the pkg_b seed AND transitively on the pkg_a seed.
+    // A DFS with shared visited could reach X first via the long pkg_a chain
+    // (depth 2) depending on manifest order; BFS must report depth 1.
+    const models = [
+      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+      { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
+      { name: "mid", unique_id: "model.pkg_a.mid", depends_on: ["model.pkg_a.orders"] },
+      { name: "x", unique_id: "model.pkg_a.x", depends_on: ["model.pkg_a.mid", "model.pkg_b.orders"] },
+    ]
+    const result = findDownstream("orders", models)
+    const x = result.find((m) => m.name === "x")
+    expect(x?.depth).toBe(1)
+  })
+
+  test("results carry unique_id for collision-safe downstream accounting", () => {
+    const models = [
+      { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+      { name: "rpt", unique_id: "model.pkg_a.rpt", depends_on: ["model.pkg_a.orders"] },
+    ]
+    const result = findDownstream("orders", models)
+    expect(result[0].unique_id).toBe("model.pkg_a.rpt")
+  })
+})
+
+// Tool-level regression: the round-13 fix was in the tool's targetMatches, not
+// in findDownstream (which already matched unique_id). A dedicated test guards
+// the tool path so a revert of `m.unique_id === args.model` is caught here.
+import { initTool } from "../tool-fixture"
+import * as Dispatcher from "../../../src/altimate/native/dispatcher"
+import { Instance } from "../../../src/project/instance"
+import { tmpdir } from "../../fixture/fixture"
+import { ImpactAnalysisTool } from "../../../src/altimate/tools/impact-analysis"
+import { SessionID, MessageID } from "../../../src/session/schema"
+
+describe("ImpactAnalysisTool: unique_id model arg reaches traversal", () => {
+  const ctx = {
+    sessionID: SessionID.make("ses_test"),
+    messageID: MessageID.make("msg_test"),
+    callID: "call_test",
+    agent: "test",
+    abort: AbortSignal.any([]),
+    messages: [],
+    metadata: () => {},
+    ask: async () => {},
+  } as any
+
+  test("passing a package-qualified unique_id is not MODEL NOT FOUND", async () => {
+    Dispatcher.reset()
+    Dispatcher.register("dbt.manifest" as any, async () => ({
+      model_count: 4,
+      models: [
+        { name: "orders", unique_id: "model.pkg_a.orders", depends_on: [] },
+        { name: "orders", unique_id: "model.pkg_b.orders", depends_on: [] },
+        { name: "rpt_a", unique_id: "model.pkg_a.rpt_a", depends_on: ["model.pkg_a.orders"] },
+        { name: "rpt_b", unique_id: "model.pkg_b.rpt_b", depends_on: ["model.pkg_b.orders"] },
+      ],
+      tests: [],
+    }))
+    try {
+      await using tmp = await tmpdir()
+      await Instance.provide({
+        directory: tmp.path,
+        fn: async () => {
+          const tool = await initTool(ImpactAnalysisTool)
+          const result = await tool.execute(
+            { model: "model.pkg_a.orders", change_type: "modify", manifest_path: "target/manifest.json" } as any,
+            ctx,
+          )
+          expect(result.title).not.toContain("MODEL NOT FOUND")
+          expect(result.metadata.success).toBe(true)
+        },
+      })
+    } finally {
+      Dispatcher.reset()
+    }
   })
 })

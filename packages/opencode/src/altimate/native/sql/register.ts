@@ -355,34 +355,106 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.diff", async (params) => {
     try {
-      const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
-
       const sqlA = params.original ?? params.sql_a
       const sqlB = params.modified ?? params.sql_b
 
-      // `|| undefined`: coerce a default empty-string dialect to "no hint" — the
-      // engine throws on an unknown dialect "".
-      const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema, params.dialect || undefined) : null
-      const compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
-
-      // Simple line-based diff
+      // LCS-based line diff: index-aligned comparison reports every line after
+      // a single top-of-file insertion as a replacement, inflating the change
+      // count from 1 to the file length. DP is O(n*m); beyond the cap fall
+      // back to index alignment (SQL models are far below it in practice).
       const linesA = sqlA.split("\n")
       const linesB = sqlB.split("\n")
+      const contextLines = Math.max(0, Math.floor(Number(params.context_lines ?? 3) || 0))
       const diffLines: string[] = []
-      const maxLen = Math.max(linesA.length, linesB.length)
-      for (let i = 0; i < maxLen; i++) {
-        const a = linesA[i] ?? ""
-        const b = linesB[i] ?? ""
-        if (a !== b) {
-          if (a) diffLines.push(`- ${a}`)
-          if (b) diffLines.push(`+ ${b}`)
+      if (linesA.length * linesB.length <= 1_000_000) {
+        const n = linesA.length
+        const m = linesB.length
+        const lcs: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0))
+        for (let i = n - 1; i >= 0; i--)
+          for (let j = m - 1; j >= 0; j--)
+            lcs[i][j] = linesA[i] === linesB[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1])
+        // Op stream from LCS backtrack, then emit hunks including up to
+        // `context_lines` unchanged lines (prefixed "  ") around each change
+        // run so changes in long/repetitive SQL are locatable.
+        const ops: Array<{ tag: " " | "-" | "+"; line: string }> = []
+        let i = 0
+        let j = 0
+        while (i < n && j < m) {
+          if (linesA[i] === linesB[j]) {
+            ops.push({ tag: " ", line: linesA[i++] })
+            j++
+          } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+            ops.push({ tag: "-", line: linesA[i++] })
+          } else {
+            ops.push({ tag: "+", line: linesB[j++] })
+          }
         }
+        while (i < n) ops.push({ tag: "-", line: linesA[i++] })
+        while (j < m) ops.push({ tag: "+", line: linesB[j++] })
+
+        // Difference-array marking: O(ops) regardless of context size — a
+        // per-change rescan would go quadratic for large context_lines.
+        const delta = new Array(ops.length + 1).fill(0)
+        for (let k = 0; k < ops.length; k++) {
+          if (ops[k].tag === " ") continue
+          delta[Math.max(0, k - contextLines)]++
+          delta[Math.min(ops.length, k + contextLines + 1)]--
+        }
+        const keep = new Array(ops.length).fill(false)
+        let acc = 0
+        for (let k = 0; k < ops.length; k++) {
+          acc += delta[k]
+          keep[k] = acc > 0
+        }
+        let lastKept = -2
+        for (let k = 0; k < ops.length; k++) {
+          if (!keep[k]) continue
+          if (k > lastKept + 1 && diffLines.length > 0) diffLines.push("...")
+          diffLines.push(ops[k].tag === " " ? `  ${ops[k].line}` : `${ops[k].tag} ${ops[k].line}`)
+          lastKept = k
+        }
+      } else {
+        // Oversized for exact LCS — index-aligned comparison inflates change
+        // counts (a top insertion reads as a full-file replacement), so the
+        // output is explicitly marked approximate.
+        diffLines.push("(approximate diff: input too large for exact line matching; context lines unavailable)")
+        const maxLen = Math.max(linesA.length, linesB.length)
+        for (let i = 0; i < maxLen; i++) {
+          const a = linesA[i] ?? ""
+          const b = linesB[i] ?? ""
+          if (a !== b) {
+            if (a) diffLines.push(`- ${a}`)
+            if (b) diffLines.push(`+ ${b}`)
+          }
+        }
+      }
+
+      // Equivalence is checked in its OWN try/catch: a schema-resolution or
+      // engine failure must not erase the text diff, which is independently
+      // computable — it just downgrades the result to "not assessed".
+      let compare: Record<string, any> | null = null
+      try {
+        const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
+        // `|| undefined`: coerce a default empty-string dialect to "no hint" — the
+        // engine throws on an unknown dialect "".
+        const compareRaw = schema ? await core.checkEquivalence(sqlA, sqlB, schema, params.dialect || undefined) : null
+        compare = compareRaw ? JSON.parse(JSON.stringify(compareRaw)) : null
+      } catch {
+        compare = null
       }
 
       return {
         success: true,
         diff: diffLines.join("\n"),
+        // `equivalence_assessed` reflects whether the check actually RAN — i.e.
+        // the schema resolved, not merely that a schema_context object was
+        // passed. Callers must not present `equivalent: false` as "not proven"
+        // when the check never executed.
+        equivalence_assessed: compare !== null,
         equivalent: compare?.equivalent ?? false,
+        // The engine abstains with decidable:false; propagate it so callers can
+        // distinguish "proven" from "engine could not decide".
+        decidable: compare?.decidable ?? false,
         equivalence_confidence: compare?.confidence ?? 0,
         differences: compare?.differences ?? [],
       }
@@ -390,7 +462,9 @@ export function registerAllSql(): void {
       return {
         success: false,
         diff: "",
+        equivalence_assessed: false,
         equivalent: false,
+        decidable: false,
         equivalence_confidence: 0,
         differences: [],
         error: String(e),

@@ -2,6 +2,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import { guardExternalFile, isPermissionError } from "./schema-path-guard"
 import type { DbtUnitTestGenResult } from "../native/types"
 
 export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
@@ -25,8 +26,12 @@ export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
   }),
   async execute(args, ctx) {
     try {
+      // Manifest paths outside the project require the external_directory gate,
+      // same as file reads. Relative paths resolve against the PROJECT directory
+      // (mirrors read.ts), and the SAME resolved path is what gets read.
+      const resolved = (await guardExternalFile(ctx, args.manifest_path)) ?? args.manifest_path
       const result = await Dispatcher.call("dbt.unit_test_gen", {
-        manifest_path: args.manifest_path,
+        manifest_path: resolved,
         model: args.model,
         dialect: args.dialect,
         max_scenarios: args.max_scenarios,
@@ -59,6 +64,7 @@ export const DbtUnitTestGenTool = Tool.define("dbt_unit_test_gen", {
         output: formatOutput(result),
       }
     } catch (e) {
+      if (isPermissionError(e)) throw e
       const msg = e instanceof Error ? e.message : String(e)
       return {
         title: "Unit Test Gen: ERROR",

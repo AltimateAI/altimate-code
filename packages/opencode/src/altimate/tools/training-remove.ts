@@ -26,6 +26,11 @@ export const TrainingRemoveTool = Tool.define("training_remove", {
       .describe("Which scope to remove from"),
   }),
   async execute(args, ctx) {
+    // Deleting persistent training must prompt — built-in tools get no generic
+    // tool-name gate at execution. Kept OUTSIDE the try so rejection/denial
+    // propagates with the framework's blocked-call semantics (mirrors
+    // sql-execute).
+    await (ctx as any).ask({ permission: "training_remove", patterns: ["*"], always: ["*"], metadata: {} })
     try {
       // Get the entry first so we can show what was removed
       const entry = await TrainingStore.get(args.scope, args.kind, args.name)

@@ -53,9 +53,10 @@ it.instance("returns default native agents when no config", () =>
   Effect.gen(function* () {
     const agents = yield* load((svc) => svc.list())
     const names = agents.map((a) => a.name)
-    // altimate fork replaces upstream single "build" agent with builder/analyst/reviewer
+    // altimate fork replaces upstream single "build" agent with builder/analyst/reviewer/optimizer
     expect(names).toContain("builder")
     expect(names).toContain("analyst")
+    expect(names).toContain("dbt-optimizer")
     expect(names).toContain("plan")
     expect(names).toContain("general")
     expect(names).toContain("explore")
@@ -103,6 +104,142 @@ it.instance("reviewer agent is read-only but usable outside the project (#978)",
   }),
 )
 
+it.instance("optimizer agent scans read-only and prompts on writes", () =>
+  Effect.gen(function* () {
+    const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+    expect(optimizer).toBeDefined()
+    expect(optimizer?.mode).toBe("primary")
+    expect(optimizer?.native).toBe(true)
+    // Scan phase: read-only project + analysis tools allowed
+    expect(evalPerm(optimizer, "read")).toBe("allow")
+    expect(evalPerm(optimizer, "grep")).toBe("allow")
+    expect(evalPerm(optimizer, "glob")).toBe("allow")
+    expect(evalPerm(optimizer, "sql_analyze")).toBe("allow")
+    expect(evalPerm(optimizer, "finops_expensive_queries")).toBe("allow")
+    expect(evalPerm(optimizer, "dbt_manifest")).toBe("allow")
+    expect(evalPerm(optimizer, "altimate_core_equivalence")).toBe("allow")
+    // Paths outside the project prompt instead of hard-failing on the "*" deny
+    expect(Permission.evaluate("external_directory", "/some/sibling/repo", optimizer!.permission).action).toBe("ask")
+    // Fix phase: every file change and shell command prompts
+    expect(evalPerm(optimizer, "edit")).toBe("ask")
+    expect(Permission.evaluate("bash", "git checkout -b fix/foo", optimizer!.permission).action).toBe("ask")
+    // Warehouse writes and destructive DDL are denied outright
+    expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+    expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+    // Unknown tools fall through to the "*" deny
+    expect(evalPerm(optimizer, "some_unknown_tool")).toBe("deny")
+  }),
+)
+
+it.instance(
+  "optimizer sql_execute_write deny survives a permissive user config",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // The user's global "*": "allow" opens up edit/bash, but the warehouse-write
+      // invariant is re-applied after the user config merge and must hold.
+      expect(evalPerm(optimizer, "edit")).toBe("allow")
+      expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+      expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+    }),
+  {
+    config: {
+      permission: { "*": "allow" },
+    },
+  },
+)
+
+it.instance(
+  "optimizer sql_execute_write deny survives a PER-AGENT permission override",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // agent."dbt-optimizer".permission is merged after the native definition
+      // (last-match-wins), so the warehouse-write invariant must be re-applied
+      // after per-agent overrides too — not just after global cfg.permission.
+      expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+      // The rest of the per-agent override still applies
+      expect(evalPerm(optimizer, "edit")).toBe("allow")
+    }),
+  {
+    config: {
+      agent: {
+        "dbt-optimizer": {
+          permission: { sql_execute_write: "allow", edit: "allow" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "dbt-optimizer bash boundary: user bash overrides relax builds, never DDL or SQL writes",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // DOCUMENTED BOUNDARY: `bash` is "ask" by default; a user who explicitly
+      // sets bash overrides accepts that dbt builds (which mutate a dev target)
+      // run without a prompt. That is the user's choice — but the invariants
+      // hold regardless: destructive DDL through bash stays denied, and the
+      // direct SQL write tool stays denied.
+      expect(
+        Permission.evaluate("bash", "altimate-dbt build --model fct_orders", optimizer!.permission).action,
+      ).toBe("allow")
+      expect(Permission.evaluate("bash", "DROP DATABASE prod", optimizer!.permission).action).toBe("deny")
+      expect(evalPerm(optimizer, "sql_execute_write")).toBe("deny")
+    }),
+  {
+    config: {
+      permission: { bash: "allow" },
+      agent: {
+        "dbt-optimizer": { permission: { bash: "allow" } },
+      },
+    },
+  },
+)
+
+it.instance(
+  "dbt-optimizer tool exposure: denied mutators disabled, edit-mapped and pattern-scoped tools kept",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      // Registry exposure uses Permission.disabled (last-match-wins + the
+      // edit/write/apply_patch -> "edit" remap). The defaults' leading
+      // "*": "allow" must NOT keep denied mutators exposed, and the edit
+      // remap must NOT drop the write tool despite the "*" deny.
+      const disabled = Permission.disabled(
+        ["warehouse_remove", "warehouse_add", "task", "write", "apply_patch", "edit", "read", "bash", "sql_analyze"],
+        optimizer!.permission,
+      )
+      expect(disabled.has("warehouse_remove")).toBe(true)
+      expect(disabled.has("warehouse_add")).toBe(true)
+      expect(disabled.has("task")).toBe(true)
+      expect(disabled.has("write")).toBe(false)
+      expect(disabled.has("apply_patch")).toBe(false)
+      expect(disabled.has("edit")).toBe(false)
+      expect(disabled.has("read")).toBe(false)
+      expect(disabled.has("bash")).toBe(false)
+      expect(disabled.has("sql_analyze")).toBe(false)
+    }),
+)
+
+it.instance(
+  "analyst tool exposure: pattern-scoped bash stays exposed, write tools disabled",
+  () =>
+    Effect.gen(function* () {
+      const analyst = yield* load((svc) => svc.get("analyst"))
+      const disabled = Permission.disabled(["bash", "write", "edit", "warehouse_remove", "sql_execute"], analyst!.permission)
+      // bash has pattern-specific allows ("ls *", ...) — its last matching
+      // rule is not a wildcard deny, so the tool remains exposed and its own
+      // per-command asks govern.
+      expect(disabled.has("bash")).toBe(false)
+      expect(disabled.has("write")).toBe(true)
+      expect(disabled.has("edit")).toBe(true)
+      expect(disabled.has("warehouse_remove")).toBe(true)
+      expect(disabled.has("sql_execute")).toBe(false)
+    }),
+)
+
 it.instance("sensitive_write guard actually fires (not neutralized by *: allow)", () =>
   Effect.gen(function* () {
     // The #209 sensitive-write guard asks for the "sensitive_write" permission. It must NOT
@@ -114,6 +251,8 @@ it.instance("sensitive_write guard actually fires (not neutralized by *: allow)"
     expect(evalPerm(analyst, "sensitive_write")).toBe("deny")
     const reviewer = yield* load((svc) => svc.get("reviewer"))
     expect(evalPerm(reviewer, "sensitive_write")).toBe("deny")
+    const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+    expect(evalPerm(optimizer, "sensitive_write")).toBe("deny")
   }),
 )
 
@@ -780,7 +919,7 @@ it.instance(
   () =>
     Effect.gen(function* () {
       const agent = yield* load((svc) => svc.defaultAgent())
-      // altimate fork: builder/analyst/reviewer are the primary agents before plan;
+      // altimate fork: builder/analyst/reviewer/optimizer are the primary agents before plan;
       // disabling them all leaves plan as the next visible primary agent
       expect(agent).toBe("plan")
     }),
@@ -790,6 +929,7 @@ it.instance(
         builder: { disable: true },
         analyst: { disable: true },
         reviewer: { disable: true },
+        "dbt-optimizer": { disable: true },
       },
     },
   },
@@ -800,13 +940,44 @@ it.instance(
   () => expectDefaultAgentError("no primary visible agent found"),
   {
     config: {
-      // altimate fork: builder/analyst/reviewer/plan are all primary agents
+      // altimate fork: builder/analyst/reviewer/optimizer/plan are all primary agents
       agent: {
         builder: { disable: true },
         analyst: { disable: true },
         reviewer: { disable: true },
+        "dbt-optimizer": { disable: true },
         plan: { disable: true },
       },
     },
   },
+)
+
+it.instance(
+  "dbt-optimizer: session-grant deny-reapply keeps allowlist reachable, immutable denies hold",
+  () =>
+    Effect.gen(function* () {
+      const optimizer = yield* load((svc) => svc.get("dbt-optimizer"))
+      const session = Permission.fromConfig({ sql_execute_write: "allow", read: "deny" })
+      const runtime = Permission.merge(
+        optimizer!.permission,
+        session,
+        optimizer!.permission.filter(
+          (r) =>
+            r.action === "deny" &&
+            r.permission !== "*" &&
+            Permission.evaluate(r.permission, r.pattern, optimizer!.permission).action === "deny",
+        ),
+      )
+      // These three EXERCISE the re-apply mechanism (they change if it regresses):
+      //  - grep stays allow: the catch-all `"*": "deny"` must NOT be re-appended.
+      //  - question stays allow: a default deny the agent overrode must NOT be
+      //    resurrected (effective-deny filter) — the round-15 fix.
+      //  - sql_execute_write stays deny: the immutable deny beats the session allow.
+      expect(Permission.evaluate("grep", "*", runtime).action).toBe("allow")
+      expect(Permission.evaluate("question", "*", runtime).action).toBe("allow")
+      expect(Permission.evaluate("sql_execute_write", "*", runtime).action).toBe("deny")
+      // These two are documentation (deny lives in agent perm / session already):
+      expect(Permission.evaluate("read", "*", runtime).action).toBe("deny")
+      expect(Permission.evaluate("bash", "DROP DATABASE prod", runtime).action).toBe("deny")
+    }),
 )

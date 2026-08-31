@@ -293,3 +293,102 @@ describe("computeSqlFingerprint", () => {
     expect(result === null || typeof result === "object").toBe(true)
   })
 })
+
+describe("side-effecting function escalation (masked)", () => {
+  test("read-shaped SELECT calling a side-effecting function classifies as write", () => {
+    expect(classify("SELECT nextval('public.id_seq')")).toBe("write")
+    expect(classify("SELECT dblink_exec('conn', 'DELETE FROM users')")).toBe("write")
+    expect(classify("SELECT pg_terminate_backend(123)")).toBe("write")
+  })
+
+  test("a block comment between function name and paren cannot hide the call", () => {
+    expect(classify("SELECT dblink_exec/**/('conn', 'DELETE FROM users')")).toBe("write")
+    expect(classify("SELECT nextval /* gap */ ('public.id_seq')")).toBe("write")
+  })
+
+  test("function names inside string literals or comments do NOT escalate", () => {
+    expect(classify("SELECT * FROM audit WHERE note = 'called dblink_exec(x)'")).toBe("read")
+    expect(classify("SELECT id FROM t -- uses nextval(seq) upstream")).toBe("read")
+  })
+
+  test("column names containing the function name do NOT escalate", () => {
+    expect(classify("SELECT nextval_cache FROM t")).toBe("read")
+  })
+
+  test("unlexable SQL fails closed as write", () => {
+    expect(classify("SELECT 'unterminated")).toBe("write")
+  })
+
+  test("classifyAndCheck escalates side-effecting reads too", () => {
+    expect(classifyAndCheck("SELECT setval('s', 10)").queryType).toBe("write")
+    expect(classifyAndCheck("SELECT id FROM users").queryType).toBe("read")
+  })
+})
+
+describe("mask edge cases (round-7 review)", () => {
+  test("CR-only line endings do not extend a line comment over later statements", () => {
+    expect(classify("SELECT 1; -- note\rDELETE FROM users")).toBe("write")
+    expect(classifyAndCheck("SELECT 1; -- note\rDELETE FROM users").queryType).toBe("write")
+  })
+
+  test("dollar signs inside identifiers are not dollar-quote openers", () => {
+    expect(classify("SELECT foo$bar$ FROM t")).toBe("read")
+    expect(classify("SELECT col FROM tbl$x WHERE id = 1")).toBe("read")
+  })
+
+  test("comment markers inside strings cannot hide writes from the fallback classifier", () => {
+    // classifyFallback path: masked lexing means the '--' literal cannot
+    // swallow the DELETE.
+    expect(classifyAndCheck("SELECT '--' LIMIT 1; DELETE FROM users").queryType).toBe("write")
+  })
+
+  test("large-object mutators escalate to write", () => {
+    expect(classify("SELECT lo_import('/etc/passwd')")).toBe("write")
+    expect(classify("SELECT lo_unlink(12345)")).toBe("write")
+  })
+})
+
+describe("quoted-identifier side-effect calls", () => {
+  test("double-quoted function identifiers cannot bypass write escalation", () => {
+    expect(classify('SELECT "lo_import"(\'/tmp/x\')')).toBe("write")
+    expect(classify('SELECT "nextval" (\'public.id_seq\')')).toBe("write")
+  })
+
+  test("quoted identifiers that are not side-effect calls stay reads", () => {
+    expect(classify('SELECT "nextval_cache" FROM t')).toBe("read")
+    expect(classify('SELECT "order" FROM t')).toBe("read")
+  })
+})
+
+describe("round-9 review hardening", () => {
+  test("comment wedged between quoted function name and paren cannot bypass", () => {
+    expect(classify(`SELECT "dblink_exec" /*x*/ ('conn','DELETE')`)).toBe("write")
+    expect(classify(`SELECT "lo_import" /**/ ('/tmp/x')`)).toBe("write")
+  })
+
+  test("bracket-quoted identifiers cannot smuggle line comments (SQL Server)", () => {
+    expect(classifyAndCheck("SELECT 1 AS [--]; DELETE FROM users").queryType).toBe("write")
+  })
+
+  test("backtick-quoted side-effect calls escalate (MySQL)", () => {
+    expect(classify("SELECT `dblink_exec`('conn','x')")).toBe("write")
+  })
+
+  test("quoted non-call identifiers still classify as reads", () => {
+    expect(classify('SELECT "nextval_cache", [order] FROM t')).toBe("read")
+  })
+})
+
+describe("round-10 review hardening", () => {
+  test("side-effecting calls inside array subscripts are detected (bracket content preserved)", () => {
+    expect(classify("SELECT arr[nextval('s')] FROM t")).toBe("write")
+  })
+
+  test("bracket identifiers still cannot smuggle comments, and content is scan-visible", () => {
+    expect(classifyAndCheck("SELECT 1 AS [--]; DELETE FROM users").queryType).toBe("write")
+  })
+
+  test("unquoted read identifiers named set/replace/copy stay reads (anchored statement form)", () => {
+    expect(classify("SELECT set, replace, copy FROM options")).toBe("read")
+  })
+})

@@ -1,16 +1,18 @@
 ---
-title: "Agent Modes — Builder, Analyst, and Plan"
-description: "Altimate Code offers three agent modes: Builder (full tool access), Analyst (read-only), and Plan (planning only)."
+title: "Agent Modes — Builder, Analyst, Reviewer, dbt-Optimizer, and Plan"
+description: "Altimate Code offers five agent modes: Builder (full tool access), Analyst (read-only), Reviewer (signed dbt PR verdicts), dbt-Optimizer (dbt project optimization), and Plan (planning only)."
 ---
 
 # Agent Modes
 
-altimate runs in one of three specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
+altimate runs in one of five specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
 
 | Mode | Access | Purpose |
 |---|---|---|
 | **Builder** | Read/Write | Create and modify data pipelines |
 | **Analyst** | Read-only | Safe exploration and cost analysis |
+| **Reviewer** | Read-only | dbt PR review with a signed, engine-backed verdict — see [dbt PR Review](../usage/dbt-pr-review.md) |
+| **dbt-Optimizer** | Read + approval-gated writes | Scan a dbt project for fixable issues, propose fixes with cost/impact evidence |
 | **Plan** | Minimal | Planning only, no edits or execution |
 
 ## Builder
@@ -196,15 +198,76 @@ Plan: [expands into a full detailed plan]
 
 ---
 
+## dbt-Optimizer
+
+**Scans a dbt project for concrete, fixable issues and proposes targeted fixes with cost and impact reporting.**
+
+```bash
+altimate --agent dbt-optimizer
+```
+
+The optimizer works in four explicit phases and never skips ahead:
+
+1. **Scan (read-only)** — detects issues across six lanes: materialization & incremental processing (with a named strategy — `merge`, `delete+insert`, `insert_overwrite`, `microbatch` — and verified preconditions), warehouse physical design (clustering/partitioning/sort keys, proposed only with query-history evidence), SQL anti-patterns, DAG economics (fan-out views, duplicate scans, dead models), run-level orchestration (Slim CI, threads, full-refresh overuse), and tests/docs/storage. The scan produces a numbered **candidate list** — every candidate carries evidence, an impact estimate, and a confidence level, ranked by expected ROI. It then stops and asks which candidates to fix.
+2. **Fix** — applies only the candidates you select, one focused change each. Every SQL rewrite is verified with the equivalence engine; an undecidable result is reported as *unproven* with a data-diff recommendation, never as safe.
+3. **Impact report** — the combined effect of the batch, with cost estimates only where query-history evidence supports them ("not estimable" is a valid answer).
+4. **Pull request** — on request, a branch + PR whose body is the impact report.
+
+### Example: Scan a project
+
+```text
+You: Scan this dbt project for optimization candidates
+
+dbt-Optimizer: Building the evidence base (manifest + query history)...
+
+Candidates, ranked by expected ROI:
+
+1. [materialization] fct_events — full-rebuild table over append-only data
+   Evidence: rebuilt 24×/day scanning 2.1B rows; event_id key + loaded_at cursor present
+   Impact: compute cost (est. from last 30 days of query history)
+   Fix: incremental with merge strategy on event_id, 3-day lookback
+   Confidence: medium (validate first run against a full-refresh baseline)
+
+2. [dag] legacy_events_backup — dead model, no downstream consumers
+   Evidence: no model, exposure, or selector references it; rebuilt daily
+   Impact: compute + storage    Fix: quarantine, confirm with owner, then remove
+   Confidence: high (report), deletion is propose-only
+
+3. [testing] dim_customers — primary key untested
+   Evidence: no tests in schema.yml; customer_id is a merge key downstream
+   Impact: correctness    Fix: add not_null + unique tests
+   Confidence: high
+
+Which candidates should I fix?
+```
+
+### Permissions
+
+- File edits and shell commands **prompt for approval** by default.
+- The direct SQL write tool (`sql_execute_write`) is **denied non-overridably** — no global or per-agent config can enable it.
+- dbt builds mutate the warehouse, so they run only as user-approved shell commands, model-by-model (`altimate-dbt compile --model` / `build --model`); a full project build requires explicit approval. The agent is instructed to confirm the active target is a dev/CI target before building, but the runtime does not validate the target — review the command's target before approving, and keep production credentials out of your default target.
+- Destructive DDL (`DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE`) stays hard-blocked like every agent.
+
+### Coming from builder
+
+Builder's self-review points you here: when it notices optimizer-shaped issues during dbt work (wrong materialization, duplicated logic), it flags them and suggests switching to dbt-Optimizer for the project-wide, cost-evidenced scan instead of fixing them silently out of scope.
+
+---
+
 ## SQL Write Access Control
 
 All SQL queries are classified before execution using AST-based parsing:
 
-| Query Type | Builder | Analyst |
-|-----------|---------|---------|
-| `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` | Allowed | Allowed |
-| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied |
-| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked |
+| Query Type | Builder | Analyst | Reviewer | dbt-Optimizer |
+|-----------|---------|---------|----------|---------------|
+| `SELECT` | Allowed | Allowed | — | Allowed |
+| `SHOW`, `DESCRIBE`, `EXPLAIN` (classified ambiguous) | Prompts for approval | Denied | — | Denied — use `schema_inspect` / `sql_explain` instead |
+| `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER` | Prompts for approval | Denied | — | Denied (non-overridable) |
+| `DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` | Blocked (cannot override) | Blocked | — | Blocked |
+
+The classifier treats only plain `SELECT` as a proven read; `SHOW`/`DESCRIBE`/`EXPLAIN` fall into the ambiguous category and follow the write column. Use the dedicated read tools (`schema_inspect` for structure, `sql_explain` for plans) instead.
+
+The Reviewer has no direct SQL execution tools at all — it works through the `dbt_pr_review` verdict engine and read-only analysis tools; see [dbt PR Review](../usage/dbt-pr-review.md).
 
 The classifier detects write operations including: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `COPY INTO`, `CALL`, `EXEC`, `EXECUTE IMMEDIATE`, `BEGIN`, `DECLARE`, `REPLACE`, `UPSERT`, `RENAME`.
 
