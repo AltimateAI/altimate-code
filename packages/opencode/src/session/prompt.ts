@@ -1462,9 +1462,11 @@ export namespace SessionPrompt {
       // and the user saw a literal DONE on every final answer. Scoped to run
       // mode AND to builder, which reproduces the previous run-mode behaviour
       // exactly — builder was the only agent prompt that carried it.
-      if (process.env["ALTIMATE_CODE_HEADLESS"] === "1" && agent.name === "builder") {
-        system.push(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
-      }
+      const completionInstruction = SessionTermination.completionInstruction({
+        runMode: Flag.ALTIMATE_RUN_MODE,
+        agent: agent.name,
+      })
+      if (completionInstruction) system.push(completionInstruction)
       // altimate_change end
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
@@ -1953,7 +1955,11 @@ export namespace SessionPrompt {
     // altimate_change end
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
-      const queued = state()[sessionID]?.callbacks ?? []
+      // Resolve only callers queued on THIS loop generation. A cancelled loop
+      // may finish unwinding after a replacement generation has already begun;
+      // looking callbacks up through mutable global state would resolve the
+      // replacement's queue with this stale result.
+      const queued = generation?.callbacks.splice(0) ?? []
       for (const q of queued) {
         q.resolve(item)
       }
@@ -2945,9 +2951,23 @@ export namespace SessionPrompt {
   }): string | undefined {
     const source = selectPinSource(input.history, input.runMode)
     if (!source) return undefined
+    return taskPinFromSource({
+      source,
+      visible: input.visible,
+      capTokens: input.capTokens,
+      cardCapTokens: input.cardCapTokens,
+    })
+  }
+
+  function taskPinFromSource(input: {
+    source: { id: MessageID; text: string }
+    visible: MessageV2.WithParts[]
+    capTokens: number
+    cardCapTokens: number
+  }): string | undefined {
     // Skip while the source message is still in visible context verbatim — the
     // pin exists to survive compaction, not to duplicate live messages.
-    if (input.visible.some((m) => m.info.id === source.id)) return undefined
+    if (input.visible.some((m) => m.info.id === input.source.id)) return undefined
     // altimate_change start — the wrapper counts against the cap. The framing
     // below was previously added AFTER buildPinnedTask had spent the whole
     // budget, so the rendered reminder exceeded the advertised hard cap and ate
@@ -2955,12 +2975,27 @@ export namespace SessionPrompt {
     // >=2k slack < compaction threshold) depends on. Budget the body against
     // cap minus the framing, and keep at least a token of body budget so a
     // tight configured cap degrades to a small pin rather than none.
-    const bodyCap = SessionCompaction.taskPinBodyBudget(input.capTokens)
-    if (bodyCap <= 0) return undefined
-    const body = buildPinnedTask({ text: source.text, capTokens: bodyCap, cardCapTokens: input.cardCapTokens })
+    let bodyCap = SessionCompaction.taskPinBodyBudget(input.capTokens)
     // altimate_change end
-    if (!body) return undefined
-    return SessionCompaction.renderTaskPin(body)
+    while (bodyCap > 0) {
+      const body = buildPinnedTask({
+        text: input.source.text,
+        capTokens: bodyCap,
+        cardCapTokens: Math.min(input.cardCapTokens, bodyCap),
+      })
+      if (!body) return undefined
+      const rendered = SessionCompaction.renderTaskPin(body)
+      const estimated = Token.estimate(rendered)
+      if (estimated <= input.capTokens) return rendered
+      // Token.estimate chooses its ratio from the COMPLETE text, so the empty
+      // frame estimate is not additive. Shrink against the actual rendered
+      // reminder until its hard cap is true under the final classification.
+      const over = estimated - input.capTokens
+      const next = Math.min(bodyCap - 1, bodyCap - over, Math.floor(bodyCap * 0.85))
+      if (next >= bodyCap) return undefined
+      bodyCap = Math.max(0, next)
+    }
+    return undefined
   }
 
   /**
@@ -2981,6 +3016,42 @@ export namespace SessionPrompt {
     if (env["ALTIMATE_RUN_RESUMED"] === "1") return false
     if (env["ALTIMATE_RUN_MODE"]?.trim()) return Flag.parseRunModeValue(env["ALTIMATE_RUN_MODE"])
     return env["ALTIMATE_NON_INTERACTIVE"] === "1"
+  }
+
+  const runPinSourceCache = Instance.state(() => new Map<SessionID, { id: MessageID; text: string }>())
+  const RUN_PIN_CACHE_MAX = 128
+
+  function rememberRunPinSource(sessionID: SessionID, source: { id: MessageID; text: string }) {
+    const cache = runPinSourceCache()
+    cache.delete(sessionID)
+    cache.set(sessionID, source)
+    if (cache.size <= RUN_PIN_CACHE_MAX) return
+    const oldest = cache.keys().next().value
+    if (oldest !== undefined) cache.delete(oldest)
+  }
+
+  function pinSourceFromStream(sessionID: SessionID, runMode: boolean) {
+    if (runMode) {
+      const cached = runPinSourceCache().get(sessionID)
+      if (cached) {
+        rememberRunPinSource(sessionID, cached)
+        return cached
+      }
+    }
+
+    let oldest: { id: MessageID; text: string } | undefined
+    // stream() is newest-first. Interactive selection can stop at the first
+    // substantive user message. Fresh run mode needs the oldest source once;
+    // cache that result so later compacted turns do not repeatedly scan all
+    // persisted history.
+    for (const message of MessageV2.stream(sessionID)) {
+      const candidate = selectPinSource([message], runMode)
+      if (!candidate) continue
+      if (!runMode) return candidate
+      oldest = candidate
+    }
+    if (runMode && oldest) rememberRunPinSource(sessionID, oldest)
+    return oldest
   }
 
   // Compaction-gated entry point used by insertReminders: fires only when the
@@ -3004,14 +3075,12 @@ export namespace SessionPrompt {
       if (!SessionCompaction.pinEnabled(cfg)) return undefined
       const cap = SessionCompaction.pinBudget({ cfg, model: input.model, sessionID: input.session.id })
       if (cap <= 0) return undefined
-      // Full chronological history — the pinned source was dropped from the
-      // compaction-filtered view, which is exactly why it must be re-read here.
-      const history = [...MessageV2.stream(input.session.id)].reverse()
       const runMode = resolvePinRunMode()
-      return taskPinText({
-        history,
+      const source = pinSourceFromStream(input.session.id, runMode)
+      if (!source) return undefined
+      return taskPinFromSource({
+        source,
         visible: input.visible,
-        runMode,
         capTokens: cap,
         cardCapTokens: SessionCompaction.pinCardBudget(cfg),
       })

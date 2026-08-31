@@ -264,6 +264,10 @@ describe("IdleDone.isReadOnlyCommand (generic classifier, .ii)", () => {
     expect(IdleDone.isMutatingCommand("ls && rm -rf build")).toBe(true)
     expect(IdleDone.isMutatingCommand("mkdir -p out")).toBe(true)
     expect(IdleDone.isMutatingCommand("FOO=1 mv a b")).toBe(true)
+    expect(IdleDone.isMutatingCommand("/bin/rm -rf build")).toBe(true)
+    expect(IdleDone.isMutatingCommand("C:\\tools\\rm.exe generated.ts")).toBe(true)
+    expect(IdleDone.isReadOnlyCommand("/usr/bin/git status")).toBe(true)
+    expect(IdleDone.isMutatingCommand("/usr/bin/git commit -m x")).toBe(true)
   })
 
   test("command and process substitutions fail closed as mutations", () => {

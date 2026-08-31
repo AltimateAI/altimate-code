@@ -174,6 +174,56 @@ export function apply(
 }
 
 /**
+ * Enforce the same dispatch budget across text and tool-result attachments.
+ * Media cannot be byte-sliced without corrupting it, so oversized attachments
+ * are omitted whole and the persisted text records that omission.
+ */
+export function applyWithAttachments<T extends { url: string; mime?: string; filename?: string }>(
+  output: string,
+  attachments: T[] | undefined,
+  capTokens: number,
+): { content: string; attachments: T[] | undefined; truncated: boolean; droppedAttachments: number } {
+  const source = attachments ?? []
+  if (capTokens <= 0 || source.length === 0) {
+    const capped = apply(output, capTokens)
+    return { ...capped, attachments, droppedAttachments: 0 }
+  }
+
+  const attachmentTokens = (attachment: T) =>
+    Token.estimate(`${attachment.mime ?? ""}\n${attachment.filename ?? ""}\n${attachment.url}`)
+  const costs = source.map(attachmentTokens)
+  if (Token.estimate(output) + costs.reduce((sum, value) => sum + value, 0) <= capTokens) {
+    return { content: output, attachments, truncated: false, droppedAttachments: 0 }
+  }
+
+  const notice = (count: number) =>
+    `[${count} oversized tool-result attachment${count === 1 ? " was" : "s were"} omitted before dispatch to stay within the per-result context budget.]`
+  // Reserve the worst-case notice first, then keep attachments in source order
+  // while they fit beside the original text. The final text is re-capped
+  // against whatever the retained attachments consumed.
+  const reserve = Token.estimate(notice(source.length))
+  let remaining = Math.max(0, capTokens - Math.min(Token.estimate(output), capTokens) - reserve)
+  const kept: T[] = []
+  let keptTokens = 0
+  for (let i = 0; i < source.length; i++) {
+    const cost = costs[i]!
+    if (cost > remaining) continue
+    kept.push(source[i]!)
+    keptTokens += cost
+    remaining -= cost
+  }
+  const droppedAttachments = source.length - kept.length
+  const textCap = Math.max(1, capTokens - keptTokens)
+  const capped = apply(`${output}\n\n${notice(droppedAttachments)}`, textCap)
+  return {
+    content: capped.content,
+    attachments: attachments === undefined ? undefined : kept,
+    truncated: true,
+    droppedAttachments,
+  }
+}
+
+/**
  * Preserve an interrupted tool's diagnostic metadata without letting partial
  * stdout/stderr bypass the same dispatch cap enforced for settled results.
  */

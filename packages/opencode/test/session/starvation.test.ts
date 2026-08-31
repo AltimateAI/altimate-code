@@ -451,6 +451,16 @@ describe("doom-loop escalation ladder — re-keyed on (toolName + normalized arg
     expect(firstRung).toBe(15) // 3 * 5, not 3 — and a ceiling still exists
   })
 
+  test("polling tool identities receive the same raised threshold", () => {
+    const t = tracker({ doomLoopThreshold: 3, pollingThresholdMultiplier: 5 })
+    let firstRung: number | undefined
+    for (let i = 1; i <= 20; i++) {
+      const call = t.onToolCall({ tool: "job_status", input: { jobID: "job-1" } })
+      if (call.doomLoop && firstRung === undefined) firstRung = i
+    }
+    expect(firstRung).toBe(15)
+  })
+
   test("directive text at every rung carries the DONE alternative", () => {
     const t = tracker({ doomLoopThreshold: 3 })
     const input = { command: "make check" }
@@ -559,6 +569,23 @@ describe("session-scoped tracker store", () => {
       expect(out.starvation).toBeDefined()
     } finally {
       SessionStarvation.clear("ses_store_1")
+    }
+  })
+
+  test("a changed resolved config replaces stale per-session tracker state", () => {
+    const sessionID = "ses_store_config_refresh"
+    const firstConfig = SessionStarvation.resolveConfig({ doom_loop_threshold: 3 })
+    const secondConfig = SessionStarvation.resolveConfig({ doom_loop_threshold: 7 })
+    SessionStarvation.clear(sessionID)
+    try {
+      const first = SessionStarvation.forSession(sessionID, firstConfig)
+      first.onToolCall({ tool: "read", input: { filePath: "a.ts" } })
+      const second = SessionStarvation.forSession(sessionID, secondConfig)
+      expect(second).not.toBe(first)
+      expect(second.config.doomLoopThreshold).toBe(7)
+      expect(second.stats().toolCalls).toBe(0)
+    } finally {
+      SessionStarvation.clear(sessionID)
     }
   })
 })

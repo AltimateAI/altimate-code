@@ -30,7 +30,15 @@ const keys = new Set([
 
 export function isV1(input: unknown) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return false
-  return Object.keys(input).some((key) => keys.has(key))
+  if (Object.keys(input).some((key) => keys.has(key))) return true
+  const compaction = (input as Record<string, unknown>).compaction
+  if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction)) return false
+  // These nested V1 keys were renamed in V2. A config containing only shared
+  // top-level fields plus one of them must still enter migration; otherwise
+  // excess-property decoding silently drops the value and restores defaults.
+  return ["tail_turns", "preserve_recent_tokens", "reserved"].some((key) =>
+    Object.prototype.hasOwnProperty.call(compaction, key),
+  )
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {

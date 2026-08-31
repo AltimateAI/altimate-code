@@ -71,8 +71,12 @@ describe("Config", () => {
       expect(ConfigMigrateV1.isV1({ snapshot: false })).toBe(true)
       expect(ConfigMigrateV1.isV1({ snapshot: false, agents: {} })).toBe(true)
       expect(ConfigMigrateV1.isV1({ reference: {} })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { tail_turns: 2 } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { preserve_recent_tokens: 4_000 } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { reserved: 8_000 } })).toBe(true)
       expect(ConfigMigrateV1.isV1({ shell: "/bin/zsh", model: "anthropic/claude" })).toBe(false)
       expect(ConfigMigrateV1.isV1({ references: {} })).toBe(false)
+      expect(ConfigMigrateV1.isV1({ compaction: { keep: { turns: 2 }, buffer: 8_000 } })).toBe(false)
     }),
   )
 

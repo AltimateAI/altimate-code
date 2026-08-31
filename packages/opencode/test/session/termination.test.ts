@@ -230,16 +230,42 @@ describe("SessionTermination.isExplicitDone — fence-state conformance", () => 
   test("a closing fence may not carry an info string", () => {
     expect(SessionTermination.isExplicitDone(["```sh", "x", "```sh", "DONE"].join("\n"))).toBe(false)
   })
+
+  test("an unclosed HTML comment cannot turn example content into completion", () => {
+    expect(SessionTermination.isExplicitDone(["<!-- expected final marker:", "DONE"].join("\n"))).toBe(false)
+    expect(SessionTermination.isExplicitDone(["<!-- note -->", "", "DONE"].join("\n"))).toBe(true)
+  })
+
+  test("a DONE line inside an active CommonMark HTML block is rejected", () => {
+    expect(SessionTermination.isExplicitDone(["<div>", "example", "DONE"].join("\n"))).toBe(false)
+    expect(SessionTermination.isExplicitDone(["<div>", "example", "", "DONE"].join("\n"))).toBe(true)
+    expect(SessionTermination.isExplicitDone(["<script>", "example", "DONE"].join("\n"))).toBe(false)
+    expect(SessionTermination.isExplicitDone(["<script>", "example", "</script>", "DONE"].join("\n"))).toBe(true)
+  })
+
+  test("HTML-looking text inside a closed code fence does not suppress a real DONE", () => {
+    expect(SessionTermination.isExplicitDone(["```html", "<!--", "<div>", "```", "DONE"].join("\n"))).toBe(true)
+  })
 })
 describe("builder completion contract", () => {
   // The instruction still reaches an ordinary non-compacted RUN — the wording is
   // unchanged, it simply moved out of the static prompt file so that it is
   // injected per-run rather than shipped to every surface.
-  test("ordinary non-compacted runs are instructed to emit the trailing DONE token", () => {
-    expect(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION).toContain("literal token `DONE` on its own")
-    expect(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION).toContain(
-      "Do not emit `DONE` while work or verification remains",
+  test("only a run-mode builder receives the trailing DONE contract", () => {
+    const instruction = SessionTermination.completionInstruction({ runMode: true, agent: "builder" })
+    expect(instruction).toContain("literal token `DONE` on its own")
+    expect(instruction).toContain("Do not emit `DONE` while work or verification remains")
+    expect(SessionTermination.completionInstruction({ runMode: false, agent: "builder" })).toBeUndefined()
+    expect(SessionTermination.completionInstruction({ runMode: true, agent: "plan" })).toBeUndefined()
+  })
+
+  test("prompt assembly wires the contract to the run-mode flag", async () => {
+    const prompt = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
+    expect(prompt).toMatch(
+      /SessionTermination\.completionInstruction\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*agent: agent\.name,\s*\}\)/,
     )
+    expect(prompt).toMatch(/if \(completionInstruction\) system\.push\(completionInstruction\)/)
+    expect(prompt).not.toMatch(/ALTIMATE_CODE_HEADLESS[^\n]*RUN_MODE_COMPLETION_INSTRUCTION/)
   })
 
   // builder is a PRIMARY agent, so anything in its prompt file also governs

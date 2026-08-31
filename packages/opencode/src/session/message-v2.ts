@@ -807,7 +807,10 @@ export namespace MessageV2 {
             // Computing the sanitized id ONCE per tool part and using it for every
             // rendered half guarantees the tool-call and its paired tool-result emit
             // identical toolCallId values, so provider pairing validation cannot 400.
-            const replayCallID = sanitizeToolCallID(part.callID)
+            // Legacy transcripts can contain the SAME malformed raw id on
+            // multiple tool parts. Salt with the persisted part id so each
+            // pair remains stable but distinct during replay.
+            const replayCallID = sanitizeToolCallID(part.callID, part.id)
             // altimate_change end
             if (part.state.status === "completed") {
               // altimate_change start — toolOutputMaxChars truncates long tool output for compaction

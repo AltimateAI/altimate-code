@@ -265,6 +265,34 @@ describe("ToolResultCap.capInterruptedMetadata", () => {
   })
 })
 
+describe("ToolResultCap.applyWithAttachments", () => {
+  test("drops oversized media whole and keeps the combined dispatch under cap", () => {
+    const attachments = [
+      { mime: "image/png", filename: "small.png", url: "data:image/png;base64,Zm9v" },
+      { mime: "image/png", filename: "huge.png", url: `data:image/png;base64,${"A".repeat(100_000)}` },
+    ]
+    const result = ToolResultCap.applyWithAttachments("image results", attachments, 200)
+    expect(result.droppedAttachments).toBe(1)
+    expect(result.attachments).toEqual([attachments[0]])
+    expect(result.content).toContain("1 oversized tool-result attachment was omitted")
+    const total =
+      Token.estimate(result.content) +
+      result.attachments!.reduce((sum, item) => sum + Token.estimate(`${item.mime}\n${item.filename}\n${item.url}`), 0)
+    expect(total).toBeLessThanOrEqual(200)
+  })
+
+  test("preserves ordinary attachments byte-for-byte when the combined result fits", () => {
+    const attachments = [{ mime: "image/png", filename: "small.png", url: "data:image/png;base64,Zm9v" }]
+    const result = ToolResultCap.applyWithAttachments("ok", attachments, 200)
+    expect(result).toEqual({
+      content: "ok",
+      attachments,
+      truncated: false,
+      droppedAttachments: 0,
+    })
+  })
+})
+
 describe("ToolResultCap.apply — Unicode chunk boundaries", () => {
   // Long single lines are chunked at a fixed 2,000-code-unit stride before the
   // truncation machinery runs. `slice` counts UTF-16 code units, so a non-BMP

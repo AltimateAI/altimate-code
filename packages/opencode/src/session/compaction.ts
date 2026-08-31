@@ -30,6 +30,7 @@ import { SystemPrompt } from "./system"
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
+import path from "node:path"
 // altimate_change end
 
 export namespace SessionCompaction {
@@ -62,17 +63,21 @@ export namespace SessionCompaction {
     if (typeof value === "string") return redactLedgerDetail(value.slice(0, MASK_REDACT_WINDOW))
     if (value && typeof value === "object") {
       // Tool inputs are arbitrary and CAN be circular; walking one without this
-      // guard hangs compaction outright. Returning the value unchanged on a
-      // revisit preserves the pre-existing contract — JSON.stringify still
-      // throws on the cycle and the caller renders "[unserializable]".
+      // guard hangs compaction outright. Track only the active recursion path:
+      // a shared (non-circular) object must be redacted independently at every
+      // alias, never returned raw on its second appearance.
       if (seen.has(value)) return value
       seen.add(value)
-      if (Array.isArray(value)) return value.map((v) => redactArgValue(v, seen))
-      const out: Record<string, unknown> = {}
-      for (const [k, v] of Object.entries(value)) {
-        out[k] = isSensitiveArgName(k) ? "<redacted>" : redactArgValue(v, seen)
+      try {
+        if (Array.isArray(value)) return value.map((v) => redactArgValue(v, seen))
+        const out: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(value)) {
+          out[k] = isSensitiveArgName(k) ? "<redacted>" : redactArgValue(v, seen)
+        }
+        return out
+      } finally {
+        seen.delete(value)
       }
-      return out
     }
     return value
   }
@@ -120,8 +125,7 @@ export namespace SessionCompaction {
     // provider request, so anything retained here outlives the clear. Both the
     // fingerprint and the serialized args go through the same redactor as the
     // facts ledger; redaction precedes truncation for the reason noted above.
-    const firstLine =
-      redactLedgerDetail(output.slice(0, MASK_REDACT_WINDOW).split("\n")[0] ?? "").slice(0, 80) || ""
+    const firstLine = redactLedgerDetail(output.slice(0, MASK_REDACT_WINDOW).split("\n")[0] ?? "").slice(0, 80) || ""
     const fingerprint = firstLine ? ` — "${firstLine}"` : ""
     return `[Tool output cleared — ${part.tool}(${args}) returned ${lines} lines, ${formatBytes(bytes)}${fingerprint}]`
   }
@@ -289,7 +293,11 @@ export namespace SessionCompaction {
     const headroom = Math.max(input.cfg.compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= headroom) return 0
-    const threshold = overflowThreshold({ base, headroom, fraction: 1 })
+    const threshold = overflowThreshold({
+      base,
+      headroom,
+      fraction: contextSafetyFraction(input.cfg),
+    })
     return Math.min(configured, Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION)))
   }
 
@@ -310,7 +318,11 @@ export namespace SessionCompaction {
     const triggerHeadroom = Math.max(input.cfg.compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= triggerHeadroom) return candidate // compaction disabled entirely; no trigger to protect
-    const threshold = overflowThreshold({ base, headroom: triggerHeadroom, fraction: 1 })
+    const threshold = overflowThreshold({
+      base,
+      headroom: triggerHeadroom,
+      fraction: contextSafetyFraction(input.cfg),
+    })
     // altimate_change start — reserve the ledger budget only when a ledger or
     // carry can actually be emitted. With both features off the reservation was
     // still taken out of the tail budget, and a large `ledger_max_tokens` could
@@ -653,7 +665,7 @@ export namespace SessionCompaction {
     // `--user` follows the same rule so task literals are not discarded merely
     // because an unrelated CLI chose that option name.
     masked = masked.replace(
-      /(^|\s)(--user|-u)(?:(=|\s+)("[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))/gi,
+      /(^|\s)(--user|-u)(?:(=|\s+)("[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))(?:(\s+)("[^"]*"|'[^']*'|[^\s,;]+))?/gi,
       (
         match,
         lead: string,
@@ -661,6 +673,8 @@ export namespace SessionCompaction {
         separator: string | undefined,
         separatedValue: string | undefined,
         attachedValue: string | undefined,
+        followingSeparator: string | undefined,
+        followingValue: string | undefined,
         offset: number,
         whole: string,
       ) => {
@@ -669,13 +683,8 @@ export namespace SessionCompaction {
         const rawValue = (separatedValue ?? attachedValue ?? "").replace(/^["']|["']$/g, "")
         // Windows invokes curl as `curl.exe`, and either platform may reach it
         // through a path such as /usr/bin/curl or a Windows System32 path.
-        // Missing those spellings left the `-u` VALUE unredacted. Note this
-        // redacts the value attached to the flag only; a password passed as a
-        // separate following token is not covered here (see the open review
-        // thread on this line) and is not specific to the .exe spelling.
-        const curlContext = /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(
-          shellSegmentBefore(whole, offset + lead.length),
-        )
+        // Missing those spellings left the `-u` VALUE unredacted.
+        const curlContext = /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(shellSegmentBefore(whole, offset + lead.length))
         // Outside a curl context a colon-shaped value is treated as
         // user:password. The ONE exemption is an explicitly recognized
         // all-numeric UID:GID pair (`docker run --user 1000:1000`), which is a
@@ -687,7 +696,23 @@ export namespace SessionCompaction {
         const uidGidPair = /^\d+:\d+$/.test(rawValue)
         const credentialShaped = colonShaped && !uidGidPair
         if (!curlContext && !credentialShaped) return match
-        return `${lead}${flag}${separator ?? ""}<redacted>`
+        const rawFollowing = (followingValue ?? "").replace(/^["']|["']$/g, "")
+        // curl accepts credentials as one `user:password` argument. Be
+        // fail-safe for the common malformed two-token spelling (`-u user
+        // password`) too, but preserve a following option or URL operand so a
+        // normal `-u user https://host` invocation keeps its useful endpoint.
+        const redactFollowing =
+          curlContext &&
+          !colonShaped &&
+          rawFollowing.length > 0 &&
+          !rawFollowing.startsWith("-") &&
+          !URL.canParse(rawFollowing)
+        return (
+          `${lead}${flag}${separator ?? ""}<redacted>` +
+          (followingValue === undefined
+            ? ""
+            : `${followingSeparator ?? ""}${redactFollowing ? "<redacted>" : followingValue}`)
+        )
       },
     )
 
@@ -775,7 +800,12 @@ export namespace SessionCompaction {
   }
   // altimate_change end
 
-  export function buildLedger(messages: MessageV2.WithParts[]): Ledger {
+  function ledgerPathKey(value: string, root?: string): string {
+    const normalized = path.normalize(value)
+    return (root ? path.resolve(root, normalized) : normalized).replaceAll("\\", "/")
+  }
+
+  export function buildLedger(messages: MessageV2.WithParts[], root?: string): Ledger {
     const writes = new Map<string, LedgerWrite>()
     const calls: LedgerCall[] = []
     let sawBash = false
@@ -793,7 +823,8 @@ export namespace SessionCompaction {
         if (LEDGER_WRITE_TOOLS.has(part.tool)) {
           const filePath = typeof state.input?.filePath === "string" ? state.input.filePath : undefined
           // mtime = tool-event completion time, NOT an fs.stat — corroborated facts only.
-          if (filePath) writes.set(filePath, { path: filePath, mtime: state.time.end, tool: part.tool })
+          if (filePath)
+            writes.set(ledgerPathKey(filePath, root), { path: filePath, mtime: state.time.end, tool: part.tool })
         }
         if (part.tool === "apply_patch") {
           const files = Array.isArray(metadata.files) ? metadata.files : []
@@ -802,16 +833,20 @@ export namespace SessionCompaction {
             // A delete wrote nothing — recording it would advertise a file that
             // no longer exists as freshly written.
             if (f?.type === "delete") {
-              if (source) writes.delete(source)
+              if (source) writes.delete(ledgerPathKey(source, root))
               continue
             }
             // On a move, `filePath` is the SOURCE and `movePath` is where the
             // content actually landed; the ledger must name the destination or
             // it sends the continuing agent back to the path that was removed.
-            if (typeof f?.movePath === "string" && source) writes.delete(source)
+            if (typeof f?.movePath === "string" && source) writes.delete(ledgerPathKey(source, root))
             const target = typeof f?.movePath === "string" ? f.movePath : f?.filePath
             if (typeof target === "string")
-              writes.set(target, { path: target, mtime: state.time.end, tool: "apply_patch" })
+              writes.set(ledgerPathKey(target, root), {
+                path: target,
+                mtime: state.time.end,
+                tool: "apply_patch",
+              })
           }
         }
       }
@@ -927,7 +962,9 @@ export namespace SessionCompaction {
   }
 
   function itemCorroborated(text: string, ledger: Ledger): boolean {
-    for (const raw of artifactTokens(text)) {
+    const artifacts = artifactTokens(text)
+    if (!artifacts.length) return false
+    return artifacts.every((raw) => {
       // altimate_change start — a summary commonly writes a path as `./src/foo.ts`.
       // The leading `./` made the token look directory-qualified while matching
       // no ledger path, so a genuinely written artifact stayed unverified.
@@ -942,8 +979,8 @@ export namespace SessionCompaction {
         if (w.path === token || w.path.endsWith("/" + token)) return true
         if (base && w.path.split("/").pop() === base) return true
       }
-    }
-    return false
+      return false
+    })
   }
 
   /**
@@ -1281,7 +1318,7 @@ export namespace SessionCompaction {
     // failure falls back to the filtered view rather than losing the ledger.
     const ledger: Ledger =
       ledgerEnabled || carryEnabled
-        ? buildLedger(input.unfilteredMessages ?? ledgerHistory(input.sessionID, input.messages))
+        ? buildLedger(input.unfilteredMessages ?? ledgerHistory(input.sessionID, input.messages), Instance.directory)
         : { writes: [], calls: [], sawBash: false }
     // altimate_change end
     const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages

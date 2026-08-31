@@ -32,6 +32,55 @@ export const DONE_TOKEN = "DONE"
 // Case-sensitive so prose "done" never counts.
 const CODE_FENCE_PATTERN = /^ {0,3}(`{3,}|~{3,})/
 
+const HTML_BLOCK_TAG =
+  /^(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)$/i
+
+function isInsideHtmlBlock(lines: string[]): boolean {
+  let close: string | RegExp | "blank" | undefined
+  for (const line of lines) {
+    if (close === "blank") {
+      if (line.trim() === "") close = undefined
+      continue
+    }
+    if (typeof close === "string") {
+      if (line.includes(close)) close = undefined
+      continue
+    }
+    if (close instanceof RegExp) {
+      if (close.test(line)) close = undefined
+      continue
+    }
+
+    const trimmed = line.replace(/^ {0,3}/, "")
+    const marker = (
+      [
+        ["<!--", "-->"],
+        ["<?", "?>"],
+        ["<![CDATA[", "]]>"],
+      ] as const
+    ).find(([open]) => trimmed.startsWith(open))
+    if (marker) {
+      if (!trimmed.slice(marker[0].length).includes(marker[1])) close = marker[1]
+      continue
+    }
+    if (/^<![A-Z]/.test(trimmed)) {
+      if (!trimmed.includes(">")) close = ">"
+      continue
+    }
+    const rawTag = /^<(script|pre|style|textarea)(?:\s|>)/i.exec(trimmed)?.[1]
+    if (rawTag) {
+      const end = new RegExp(`</${rawTag}\\s*>`, "i")
+      if (!end.test(trimmed)) close = end
+      continue
+    }
+    const block = /^<\/?([A-Za-z][A-Za-z0-9-]*)(?:\s|\/?>)/.exec(trimmed)
+    if ((block && HTML_BLOCK_TAG.test(block[1]!)) || /^<\/?[A-Za-z][^>]*>[ \t]*$/.test(trimmed)) {
+      close = "blank"
+    }
+  }
+  return close !== undefined
+}
+
 /** True when the text ends with an explicit completion assertion (see module header). */
 export function isExplicitDone(text: string): boolean {
   // Normalize line endings FIRST. On CRLF input the interior lines keep a
@@ -54,24 +103,34 @@ export function isExplicitDone(text: string): boolean {
   // never a valid closer — treating it as one would let a still-open fence's
   // interior DONE terminate the run.
   let open: { char: string; length: number } | undefined
+  const outsideFence: string[] = []
   for (let i = 0; i < lines.length - 1; i++) {
-    const match = CODE_FENCE_PATTERN.exec(lines[i]!)
-    if (!match) continue
+    const line = lines[i]!
+    const match = CODE_FENCE_PATTERN.exec(line)
+    if (!match) {
+      outsideFence.push(open ? "" : line)
+      continue
+    }
     const marker = match[1]!
-    const rest = lines[i]!.slice(match[0]!.length)
+    const rest = line.slice(match[0]!.length)
     if (!open) {
       // CommonMark: a backtick fence's info string may not contain a
       // backtick. Such a line is ordinary paragraph text, so treating it as
       // an opener would make a later backtick run look like its closer and
       // expose the interior — including a demonstration DONE — as an
       // assertion.
-      if (marker[0] === "`" && rest.includes("`")) continue
+      if (marker[0] === "`" && rest.includes("`")) {
+        outsideFence.push(line)
+        continue
+      }
       open = { char: marker[0]!, length: marker.length }
     } else if (marker[0] === open.char && marker.length >= open.length && /^[ \t]*$/.test(rest)) {
       open = undefined
     }
+    outsideFence.push("")
   }
-  return open === undefined
+  if (open) return false
+  return !isInsideHtmlBlock(outsideFence)
 }
 
 /**
@@ -113,6 +172,11 @@ export const RUN_MODE_COMPLETION_INSTRUCTION =
   "**Signal completion explicitly**: only after every requirement above is satisfied, end your final " +
   `response with the literal token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` ` +
   "while work or verification remains."
+
+/** The sole gate for injecting the completion-token contract into a prompt. */
+export function completionInstruction(input: { runMode: boolean; agent: string }): string | undefined {
+  return input.runMode && input.agent === "builder" ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
+}
 
 /**
  * Three-option completion-aware post-compaction nudge. Replaces the

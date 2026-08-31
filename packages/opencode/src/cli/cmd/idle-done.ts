@@ -193,6 +193,18 @@ function gitSubcommand(tokens: string[]): string | undefined {
   return undefined
 }
 
+function executableName(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const unquoted = value
+    .replace(/^\(+/, "")
+    .replace(/^['"]|['"]$/g, "")
+    .replaceAll("\\", "/")
+  return unquoted
+    .split("/")
+    .pop()
+    ?.replace(/\.exe$/i, "")
+}
+
 /** True when every pipeline/statement head in the command is read-only. */
 export function isReadOnlyCommand(command: string): boolean {
   const statements = command
@@ -203,7 +215,7 @@ export function isReadOnlyCommand(command: string): boolean {
   for (const statement of statements) {
     // Skip leading VAR=value assignments and common wrappers.
     const tokens = statement.split(/\s+/).filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
-    const head = tokens[0]?.replace(/^\(+/, "")
+    const head = executableName(tokens[0])
     if (!head) continue
     if (head === "git") {
       const sub = gitSubcommand(tokens)
@@ -271,7 +283,7 @@ export function isMutatingCommand(command: string): boolean {
       .trim()
       .split(/\s+/)
       .filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
-    const head = tokens[0]?.replace(/^\(+/, "")
+    const head = executableName(tokens[0])
     // Git is a special command family: read-only subcommands are allowlisted
     // above, while every other/unknown subcommand is conservatively treated
     // as worktree-changing. This catches restore/checkout/switch/reset/clean

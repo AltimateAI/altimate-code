@@ -58,7 +58,7 @@ describe("SessionCompaction.createObservationMask", () => {
     expect(mask).toContain("bash(")
     expect(mask).toContain('command: "git status"')
     expect(mask).toContain("3 lines")
-    expect(mask).toContain("— \"On branch main\"")
+    expect(mask).toContain('— "On branch main"')
     // Byte size should be present
     expect(mask).toMatch(/\d+ B/)
   })
@@ -93,7 +93,7 @@ describe("SessionCompaction.createObservationMask", () => {
     const mask = SessionCompaction.createObservationMask(part)
 
     expect(mask).toContain("100 lines")
-    expect(mask).toContain("— \"line 1\"")
+    expect(mask).toContain('— "line 1"')
   })
 
   test("truncates long args with ellipsis", () => {
@@ -152,7 +152,7 @@ describe("SessionCompaction.createObservationMask", () => {
     const mask = SessionCompaction.createObservationMask(part)
 
     expect(mask).toContain("12 B")
-    expect(mask).toContain("— \"你好世界\"")
+    expect(mask).toContain('— "你好世界"')
   })
 
   test("fingerprint is capped at 80 characters", () => {
@@ -199,6 +199,15 @@ describe("SessionCompaction.createObservationMask redaction", () => {
       makeCompletedPart({ tool: "fetch", input: { headers: { authorization: "Bearer dummy-jwt" } }, output: "ok" }),
     )
     expect(nested).not.toContain("dummy-jwt")
+  })
+
+  test("redacts every alias of a shared nested argument object", () => {
+    const shared = { authorization: "Bearer shared-secret-value", label: "ordinary" }
+    const mask = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "fetch", input: { first: shared, second: shared }, output: "ok" }),
+    )
+    expect(mask).not.toContain("shared-secret-value")
+    expect(mask).toContain("ordinary")
   })
 
   test("redacts secrets carried in the first output line", () => {

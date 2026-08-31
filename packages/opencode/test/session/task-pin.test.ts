@@ -197,6 +197,19 @@ describe("taskPinText — compaction-gated assembly", () => {
     }
   })
 
+  test("a code-heavy task is rechecked after framing changes the estimator ratio", () => {
+    const source = userMsg(`Implement the exact object shape ${"{}".repeat(380)} without changing other behavior.`)
+    const pin = SessionPrompt.taskPinText({
+      history: [source],
+      visible: [],
+      runMode: true,
+      capTokens: 200,
+      cardCapTokens: 80,
+    })
+    expect(pin).toBeDefined()
+    expect(Token.estimate(pin!)).toBeLessThanOrEqual(200)
+  })
+
   test("a cap smaller than the framing itself yields no pin rather than an over-budget one", () => {
     const { history, summary, cont } = historyWithRedirect()
     const pin = SessionPrompt.taskPinText({

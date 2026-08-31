@@ -262,10 +262,34 @@ describe("malformed-id round-trip: ingest → persist → replay", () => {
     const { callIDs, resultIDs } = pairIDs(replayed)
     expect(callIDs).toHaveLength(1)
     expect(resultIDs).toHaveLength(1)
-    const expected = MessageV2.sanitizeToolCallID(12345)
+    const expected = MessageV2.sanitizeToolCallID(12345, PartID.make("prt_a1"))
     expect(callIDs[0]).toBe(expected)
     expect(resultIDs[0]).toBe(expected)
     expect(typeof callIDs[0]).toBe("string")
+  })
+
+  test("duplicate malformed persisted ids replay as distinct, correctly paired ids", async () => {
+    const assistant = assistantToolMsg("m-assistant", 0) as any
+    assistant.parts.push({
+      ...assistant.parts[0],
+      id: PartID.make("prt_a2"),
+      callID: 0,
+      tool: "read",
+      state: { ...assistant.parts[0].state, input: { filePath: "a.ts" }, title: "Read" },
+    })
+
+    const replayed = await MessageV2.toModelMessages(
+      [userMsg("m-user"), assistant] as unknown as MessageV2.WithParts[],
+      model,
+    )
+    const { callIDs, resultIDs } = pairIDs(replayed)
+    expect(callIDs).toEqual(resultIDs)
+    expect(callIDs).toHaveLength(2)
+    expect(new Set(callIDs).size).toBe(2)
+    expect(callIDs).toEqual([
+      MessageV2.sanitizeToolCallID(0, PartID.make("prt_a1")),
+      MessageV2.sanitizeToolCallID(0, PartID.make("prt_a2")),
+    ])
   })
 
   test("ingestion and replay halves produce identical output for the same raw id", () => {

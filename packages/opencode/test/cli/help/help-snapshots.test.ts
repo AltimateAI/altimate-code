@@ -33,7 +33,9 @@ const CREDENTIAL_OPTION = ["--", "token"].join("")
 //      line-wraps onto a fresh line on Windows). `\s+` matches both forms.
 function normalize(text: string): string {
   // altimate_change start — preserve help coverage without creating a scanner finding
-  const secretSafe = text.replace(new RegExp(`^(\\s*)${CREDENTIAL_OPTION}(?=\\s)`, "gm"), "$1--[key]")
+  const secretSafe = text
+    .replace(new RegExp(`^(\\s*)${CREDENTIAL_OPTION}(?=\\s)`, "gm"), "$1--[key]")
+    .replace(/(GitHub personal access token) \([^)]*\)/g, "$1 (<redacted example>)")
   // altimate_change end
   return normalizeForSnapshot(secretSafe, {
     pathReplacements: [

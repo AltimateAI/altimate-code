@@ -737,15 +737,22 @@ export namespace SessionProcessor {
                     // completed tool result is bounded here regardless of which tool
                     // path produced it — the tool-level truncation service can be
                     // bypassed, and one uncapped result overflows the whole window.
+                    let toolResultAttachments = value.output.attachments
                     if (typeof toolResultOutput === "string") {
-                      const capped = ToolResultCap.apply(toolResultOutput, toolResultCapTokens)
+                      const capped = ToolResultCap.applyWithAttachments(
+                        toolResultOutput,
+                        toolResultAttachments,
+                        toolResultCapTokens,
+                      )
                       if (capped.truncated) {
                         toolResultOutput = capped.content
                         log.info("tool result capped at dispatch", {
                           tool: match.tool,
                           capTokens: toolResultCapTokens,
+                          droppedAttachments: capped.droppedAttachments,
                         })
                       }
+                      toolResultAttachments = capped.attachments
                     }
                     // altimate_change end
                     await Session.updatePart({
@@ -762,7 +769,7 @@ export namespace SessionProcessor {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
-                        attachments: value.output.attachments,
+                        attachments: toolResultAttachments,
                       },
                     })
 

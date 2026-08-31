@@ -218,6 +218,28 @@ describe("SessionCompaction.buildLedger", () => {
     expect(SessionCompaction.buildLedger(messages).writes.map((w) => w.path)).toEqual(["/repo/new.py"])
   })
 
+  test("absolute apply_patch metadata invalidates earlier relative write paths", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "src/old.ts" }, end: 5000 }),
+        toolPart({ tool: "write", input: { filePath: "src/gone.ts" }, end: 5001 }),
+      ]),
+      assistantMsg([
+        toolPart({
+          tool: "apply_patch",
+          metadata: {
+            files: [
+              { filePath: "/repo/src/old.ts", movePath: "/repo/src/new.ts", type: "update" },
+              { filePath: "/repo/src/gone.ts", type: "delete" },
+            ],
+          },
+          end: 7000,
+        }),
+      ]),
+    ]
+    expect(SessionCompaction.buildLedger(messages, "/repo").writes.map((w) => w.path)).toEqual(["/repo/src/new.ts"])
+  })
+
   test("pending and running parts are ignored (facts only)", () => {
     const messages = [
       assistantMsg([
@@ -409,13 +431,12 @@ describe("SessionCompaction.renderLedger", () => {
     ]) {
       const detail = SessionCompaction.redactLedgerDetail(command)
       expect(detail).not.toContain("alice")
+      expect(detail).not.toContain("dummy-password")
     }
 
     // The suffix must be the whole executable name, not a prefix match: a
     // command merely starting with "curl" is not curl.
-    expect(SessionCompaction.redactLedgerDetail("curlywurly -u alice script.py")).toBe(
-      "curlywurly -u alice script.py",
-    )
+    expect(SessionCompaction.redactLedgerDetail("curlywurly -u alice script.py")).toBe("curlywurly -u alice script.py")
   })
 
   test("keeps non-credential colon-shaped values outside a curl context", () => {
@@ -533,6 +554,14 @@ describe("SessionCompaction.corroborateCarry", () => {
   test("a bare filename still matches the write's basename", () => {
     const out = SessionCompaction.corroborateCarry([{ text: "created orders.sql" }], ledger)
     expect(out[0]!.status).toBe("verified")
+  })
+
+  test("every artifact in a multi-file claim must be corroborated", () => {
+    const out = SessionCompaction.corroborateCarry(
+      [{ text: "created models/orders.sql and reports/missing.csv" }],
+      ledger,
+    )
+    expect(out[0]!.status).toBe("claimed, unverified")
   })
 
   test("commands alone never corroborate an artifact, even with exit zero", () => {

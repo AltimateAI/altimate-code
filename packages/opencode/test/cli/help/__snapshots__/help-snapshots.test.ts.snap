@@ -787,7 +787,7 @@ Options:
                       engine serve the types it provides; 'local' keeps every connection on the
                       local drivers                         [string] [choices: "workspace", "local"]
       --event         GitHub mock event to run the agent for                                [string]
-      --[key]         GitHub personal access token (github_pat_********)                    [string]"
+      --[key]         GitHub personal access token (<redacted example>)                    [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode db path --help 1`] = `

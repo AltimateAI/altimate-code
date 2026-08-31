@@ -631,7 +631,11 @@ describe("small-window retained-content clamp", () => {
     const maxOutput = model.limit.output ?? 4096
     const headroom = Math.max(cfg.compaction?.reserved ?? 20_000, maxOutput)
     const base = model.limit.input ?? model.limit.context
-    return SessionCompaction.overflowThreshold({ base, headroom, fraction: 1 })
+    return SessionCompaction.overflowThreshold({
+      base,
+      headroom,
+      fraction: SessionCompaction.contextSafetyFraction(cfg),
+    })
   }
 
   test("32K model: tail + ledger can never alone reach the overflow trigger", () => {
@@ -639,7 +643,7 @@ describe("small-window retained-content clamp", () => {
     const cfg = {} as any
     const budget = SessionCompaction.preserveRecentBudget({ cfg, model })
     const trigger = threshold(model)
-    expect(trigger).toBe(12_768)
+    expect(trigger).toBe(4_000)
     expect(budget + SessionCompaction.LEDGER_MAX_TOKENS).toBeLessThanOrEqual(Math.floor(trigger / 2))
     expect(budget).toBeGreaterThan(0)
   })
@@ -689,6 +693,22 @@ describe("small-window retained-content clamp", () => {
     const tail = SessionCompaction.preserveRecentBudget({ cfg, model })
     expect(ledger).toBe(retainCeiling)
     expect(tail + ledger).toBeLessThanOrEqual(retainCeiling)
+  })
+
+  test("a low estimator safety fraction also constrains configured retained budgets", () => {
+    const model = createModel({ context: 100_000, output: 20_000 })
+    const cfg = {
+      compaction: {
+        context_safety_fraction: 0.1,
+        ledger_max_tokens: 40_000,
+        preserve_recent_tokens: 40_000,
+      },
+    } as any
+    const retainCeiling = Math.floor(threshold(model, cfg) / 2)
+    const ledger = SessionCompaction.effectiveLedgerBudget({ cfg, model })
+    const tail = SessionCompaction.preserveRecentBudget({ cfg, model })
+    expect(retainCeiling).toBe(2_000)
+    expect(ledger + tail).toBeLessThanOrEqual(retainCeiling)
   })
   // altimate_change end
 })
