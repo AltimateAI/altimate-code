@@ -1,0 +1,88 @@
+# PR 1196 Security Review
+
+- Repository: `AltimateAI/altimate-code`
+- Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
+- Review dates: 2026-08-30 through 2026-08-31
+- Final code candidate: `908be9cabb2b552c56cbd86537fbccb86ea5e0b2`
+- Scan mode: chained immutable branch-diff reviews
+- Final coverage: complete
+- Findings remaining on the final candidate: **0**
+
+## Outcome
+
+The final candidate removes local PDF parsing entirely. PDF media now uses a deliberately crude, parser-free estimate:
+
+```text
+max(32,768 tokens, decoded inline payload bytes)
+```
+
+Remote URLs and provider file IDs receive the fixed 32,768-token allowance. The estimate is monotonic in locally observable payload size, ignores untrusted page metadata, and does not decompress or traverse PDF structure. The configured provider remains authoritative for exact tokenization and for unusually compact or dense documents.
+
+This is the selected product boundary, not an attempt at exact PDF accounting. A compact or dense PDF can still be underestimated locally and rejected by the provider. That residual is an acknowledged reliability limitation; it is not a local parser, authorization, confidentiality, integrity, or shared-service vulnerability.
+
+## Scan chain
+
+The review used immutable ranges so every material repair was independently reconciled.
+
+| Stage                        | Immutable range/candidate                          | Result                                                       |
+| ---------------------------- | -------------------------------------------------- | ------------------------------------------------------------ |
+| Initial PR review            | current `main` through remote PR head `9039a178c0` | Complete coverage; no remaining finding in that candidate    |
+| Media hardening supplement   | `9039a178c0..e37b7a974d`                           | One validated Low finding: raw PDF page-marker amplification |
+| Marker fix                   | `ac7346e767`                                       | Removed lexical page-marker trust                            |
+| Structural parser experiment | `ac7346e767..858c7b1dab`                           | Two validated Low findings; experiment rejected              |
+| Parser-free remediation      | `858c7b1dab..908be9cabb`                           | Complete coverage; **0 findings**                            |
+
+The final remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. Its authoritative result contains six reviewed surfaces, no deferred work, no open question, and zero findings.
+
+## Findings discovered and resolved
+
+### 1. Raw page markers could poison local admission
+
+An intermediate estimator scanned PDF bytes for lexical `/Type /Pages /Count` text. A marker in a comment, literal string, stream, or unreachable object could therefore inflate the local estimate and reject a valid user turn before transport.
+
+The fix removed page-marker scanning. Regression tests cover comment, string, stream, and unreachable-object variants across string, base64/data URL, `Uint8Array`, and `ArrayBuffer` payload shapes.
+
+### 2. In-process parsing could amplify compressed object streams
+
+The structural-parser experiment passed attacker-influenced PDF bytes to `pdf-lib` inside the synchronous request path. A bounded reproduction used a 51,430-byte PDF whose unreachable compressed object stream expanded to 50 MiB while loading and increased process RSS by roughly 88 MiB. The byte gate limited compressed input, not decompressed output, traversal work, or memory.
+
+The final candidate removes `pdf-lib`, `PDFDocument.load`, all structural page traversal, and the parser's transitive lockfile entries. Graph-augmented source search found no remaining runtime parser reference.
+
+### 3. The parser policy still disagreed with supported long-context requests
+
+The experiment coupled a 100-page fallback to a 500 KB parser ceiling. A valid 600-page PDF on a 1M-context request could sit just above that byte ceiling, receive only a byte-sized estimate, and preserve a large output reservation. Structural parsing therefore did not make the local estimate authoritative; it merely added a new resource boundary.
+
+The final policy removes the 100-page claim instead of replacing it with a larger parser. Exact page expansion is explicitly delegated to the provider.
+
+## Final trust and data flow
+
+Both production request paths use the same sequence:
+
+1. Finalize messages, tools, provider instructions, headers, and plugin-selected output reservation.
+2. If no output reservation or credible limit exists, return without serializing the prompt.
+3. Lazily estimate text, schemas, semantic media allowances, and decoded inline payload size.
+4. Enforce a dedicated input limit when declared.
+5. Clamp the output reservation against the shared context window with a safety margin.
+6. Reconcile fixed reasoning budgets with the final reservation.
+7. Send through the AI SDK or native transport.
+
+Codebase graph tracing found exactly two production callers of the centralized clamp: `session/llm.ts` and `session/llm/request.ts`.
+
+## Verification
+
+- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **413 passed, 11 skipped, 1 existing todo, 0 failed**.
+- Repository typecheck: **13/13 tasks successful**.
+- Strict changed-file marker validation: passed.
+- Required-marker inventory: **35/35**.
+- Frozen lockfile install: **1,295 installs across 1,390 packages, no changes**.
+- Targeted oxlint: **0 errors**; warnings remain repository debt.
+- Prettier: all changed files pass except `provider/provider.ts` and `provider/transform.ts`; both fail identically at `origin/main`, so no unrelated whole-file rewrite was introduced.
+- `git diff --check origin/main...HEAD`: passed.
+- Final Codex Security remediation scan: complete, **0 findings**.
+
+## Operational caveats
+
+- TAC advisory was attempted once earlier in the PR workflow and was unavailable; it was not retried.
+- No live provider request or full interactive UI replay was performed.
+- Provider-side rejection remains possible for compact or unusually dense PDFs because the local estimate is intentionally crude.
+- The remote PR still needs the final commits pushed, current review threads reconciled, and fresh CI/bot results before a merge recommendation.
