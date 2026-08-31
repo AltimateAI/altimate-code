@@ -35,6 +35,29 @@ let storePath = ""
   // creates `lockedPath` itself, so the only writer is the foreign process.
   let lockedPath = ""
 
+// A liveness probe whose correct answer cannot be produced without a working
+// engine actually computing it.
+//
+// Every other assertion in this file can be satisfied by a connection that is
+// not really there. A row count can legitimately be zero, and an absent error
+// string can mean the error was swallowed rather than that none occurred — which
+// is live on `main` today: `register.ts`'s `sql.execute` catches everything and
+// returns `{ row_count: 0, error }` instead of throwing, and `formatResult`
+// renders "(0 rows)" without ever reading `error`. So "(0 rows)" and "the driver
+// is dead" are indistinguishable to anything downstream.
+//
+// `md5()` is not. A dead connection cannot return one row, and a live one cannot
+// return the right digest without hashing the input. This is not a hypothetical
+// safeguard: during the driver A/B for this PR, two binaries looked clean across
+// transcripts, traces and 563 lines of debug output — zero ENOENT, zero fault
+// lines — while failing to load the driver at all. This probe is what caught it.
+//
+// The digest is computed independently (`hashlib.md5`, cross-checked against
+// `md5(1)`), never by asking DuckDB — deriving it from the system under test
+// would make the assertion circular and prove nothing.
+const LIVENESS_NONCE = "altimate-duckdb-open-e2e-liveness-2026-08-30"
+const LIVENESS_MD5 = "517f58256b5ba4642643b3e884d91d15"
+
 /** Run `fn` and return the error message it threw, or "" if it succeeded. */
 async function messageFrom(fn: () => Promise<unknown>): Promise<string> {
   try {
@@ -55,10 +78,12 @@ describe("DuckDB driver: opening a real store", () => {
     await c.connect()
     await c.execute("CREATE TABLE t AS SELECT 1 AS a, 'x' AS b")
     const probe = await c.execute("SELECT count(*) AS n FROM t")
+    const liveness = await c.execute(`SELECT md5('${LIVENESS_NONCE}') AS h`)
     await c.close()
     // Refuse to run against anything but the real thing. A fake driver would
-    // pass most assertions below while proving nothing.
-    if (Number(probe.rows?.[0]?.[0]) !== 1) {
+    // pass most assertions below while proving nothing. The digest is the half
+    // of this gate that a stub cannot satisfy by returning a plausible shape.
+    if (Number(probe.rows?.[0]?.[0]) !== 1 || String(liveness.rows?.[0]?.[0]) !== LIVENESS_MD5) {
       throw new Error(
         "ALTIMATE_DUCKDB_E2E=1 but the DuckDB driver is not the real one — " +
           "either the native binding is missing, or another test file has replaced " +
@@ -82,6 +107,20 @@ describe("DuckDB driver: opening a real store", () => {
       expect(Number(r.rows[0][0])).toBe(1)
       await c.close()
     }
+  })
+
+  ddbTest("the opened store is a live engine, not a connection that merely looks open", async () => {
+    // The assertion above this one passes on a dead connection: `(0 rows)` and
+    // "the driver never loaded" are the same observation. This one cannot.
+    const c = await connect({ type: "duckdb", path: storePath })
+    await c.connect()
+    const r = await c.execute(`SELECT md5('${LIVENESS_NONCE}') AS h`)
+    // Exactly one row: a swallowed failure surfaces as zero rows, and zero rows
+    // is the shape that reads as success everywhere downstream.
+    expect(r.rows.length).toBe(1)
+    // And the right answer, which requires actually computing it.
+    expect(String(r.rows[0][0])).toBe(LIVENESS_MD5)
+    await c.close()
   })
 
   ddbTest("opens the same store from many connectors at once", async () => {
