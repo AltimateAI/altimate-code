@@ -285,8 +285,10 @@ describe("ToolResultCap.apply — Unicode chunk boundaries", () => {
   // A lone surrogate is not encodable, so a UTF-8 round trip replaces it. Both
   // checks are kept: the first localizes the defect, the second is what a
   // consumer actually observes once the result is serialized to the provider.
+  // Array.from iterates by code point, which is exactly what is wanted here:
+  // it keeps a well-formed pair together so only a LONE half stands out.
   const isCorrupt = (s: string) =>
-    [...s].some(isLoneSurrogate) || Buffer.from(s, "utf-8").toString("utf-8") !== s
+    Array.from(s).some(isLoneSurrogate) || Buffer.from(s, "utf-8").toString("utf-8") !== s
 
   // These three (padding, cap) pairs are not illustrative — each was observed
   // to produce a corrupted result against the pre-fix chunker. They are the
