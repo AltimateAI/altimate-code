@@ -216,7 +216,9 @@ export const McpListCommand = effectCmd({
       )
     }
 
+    // altimate_change start — upstream_fix (#878/#701): config-level diagnostics.
     reportConfigDiagnostics()
+    // altimate_change end
 
     prompts.outro(`${servers.length} server(s)`)
   }),
