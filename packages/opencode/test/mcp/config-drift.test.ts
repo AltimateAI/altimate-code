@@ -1,6 +1,6 @@
 // altimate_change start — upstream_fix (#878): discovery skipped already-configured servers
 // without a word, so a changed .vscode/mcp.json never surfaced. These pin what counts as drift.
-import { describe, expect, test, beforeEach } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach } from "bun:test"
 import { driftFields, setConfigDrift, configDrift, resetConfigDrift } from "../../src/mcp/discover"
 
 describe("driftFields", () => {
@@ -37,6 +37,9 @@ describe("configDrift record", () => {
   // The record is per project now, so every call names the directory it belongs to.
   const PROJECT = "/tmp/project-a"
   beforeEach(() => resetConfigDrift())
+  // `_drift` is module-level: the cross-project cases below deliberately leave OTHER populated,
+  // so clear everything afterwards rather than letting the next test in this worker observe it.
+  afterEach(() => resetConfigDrift())
 
   test("records only servers that actually differ", () => {
     setConfigDrift("datamate", ".vscode/mcp.json", ["environment.ALTIMATE_EXTENSION_RPC"], PROJECT)

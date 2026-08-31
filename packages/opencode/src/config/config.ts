@@ -156,12 +156,16 @@ async function substituteWellKnownRemoteConfig(input: {
   dir: string
   source: string
   env: Record<string, string>
+  // altimate_change start — upstream_fix (#701): the project this load belongs to, so the
+  // blanked-variable record can be attributed to it rather than guessed from the path.
+  projectDir: string
+  // altimate_change end
 }) {
   if (!isRecord(input.value) || typeof input.value.url !== "string") return undefined
 
   // altimate_change start — upstream_fix (#701): the url and every header below publish under
   // this same source, so clear once here and let those calls union into one record.
-  ConfigVariable.resetBlankedEnvVars(input.source)
+  ConfigVariable.resetBlankedEnvVars(input.source, input.projectDir)
   // altimate_change end
   const url = await ConfigVariable.substitute({
     text: input.value.url,
@@ -345,14 +349,6 @@ export const layer = Layer.effect(
 
     const loadFile = Effect.fnUntraced(function* (filepath: string, env?: Record<string, string>) {
       yield* Effect.logInfo("loading", { path: filepath })
-      // altimate_change start — upstream_fix (#701): substitution unions now, so whoever begins a
-      // load clears this source first. Before the empty-file return, not after: a config that is
-      // deleted or emptied must drop the names it recorded while it still had a `{env:VAR}`,
-      // otherwise `mcp list` warns about a variable that appears in no config at all.
-      // Deliberately NOT inside loadConfig — the well-known flow records url/header blanks under
-      // the same source before calling it, and a reset in there threw those names away.
-      ConfigVariable.resetBlankedEnvVars(filepath)
-      // altimate_change end
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
       return yield* loadConfig(text, { path: filepath }, env)
@@ -372,6 +368,13 @@ export const layer = Layer.effect(
             .pipe(Effect.catch(() => Effect.void))
         }
       }
+      // altimate_change start — upstream_fix (#701): declare ownership before each load, so a
+      // diagnostic can be attributed to a project or to every project. Clearing here also means a
+      // config that is deleted or emptied drops what it recorded while it still had a `{env:VAR}`.
+      for (const f of ["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"]) {
+        ConfigVariable.resetBlankedEnvVars(path.join(Global.Path.config, f), ConfigVariable.SHARED_CONFIG)
+      }
+      // altimate_change end
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json"), env))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"), env))
@@ -488,6 +491,9 @@ export const layer = Layer.effect(
                 dir: url,
                 source: wellknownURL,
                 env: authEnv,
+                // altimate_change start — upstream_fix (#701): attribute this load to the project.
+                projectDir: ctx.directory,
+                // altimate_change end
               }),
             )
             const fetchedConfig = remote
@@ -523,12 +529,18 @@ export const layer = Layer.effect(
         yield* merge(Global.Path.config, global, "global")
 
         if (Flag.OPENCODE_CONFIG) {
+          // altimate_change start — upstream_fix (#701): a process-wide config every instance loads.
+          ConfigVariable.resetBlankedEnvVars(Flag.OPENCODE_CONFIG, ConfigVariable.SHARED_CONFIG)
+          // altimate_change end
           yield* merge(Flag.OPENCODE_CONFIG, yield* loadFile(Flag.OPENCODE_CONFIG, authEnv))
           yield* Effect.logDebug("loaded custom config", { path: Flag.OPENCODE_CONFIG })
         }
 
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
           for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+            // altimate_change start — upstream_fix (#701): this file belongs to this project.
+            ConfigVariable.resetBlankedEnvVars(file, ctx.directory)
+            // altimate_change end
             yield* merge(file, yield* loadFile(file, authEnv), "local")
           }
         }
@@ -561,6 +573,9 @@ export const layer = Layer.effect(
               // altimate_change end
               const source = path.join(dir, file)
               yield* Effect.logDebug(`loading config from ${source}`)
+              // altimate_change start — upstream_fix (#701): loaded for this instance.
+              ConfigVariable.resetBlankedEnvVars(source, ctx.directory)
+              // altimate_change end
               yield* merge(source, yield* loadFile(source, authEnv))
               result.agent ??= {}
               result.mode ??= {}
@@ -611,7 +626,7 @@ export const layer = Layer.effect(
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
           // altimate_change start — upstream_fix (#701): clear before this load.
-          ConfigVariable.resetBlankedEnvVars(source)
+          ConfigVariable.resetBlankedEnvVars(source, ctx.directory)
           // altimate_change end
           const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
             dir: ctx.directory,
@@ -641,7 +656,7 @@ export const layer = Layer.effect(
             if (Option.isSome(configOpt)) {
               const source = `${url}/api/config`
               // altimate_change start — upstream_fix (#701): clear before this load.
-              ConfigVariable.resetBlankedEnvVars(source)
+              ConfigVariable.resetBlankedEnvVars(source, ctx.directory)
               // altimate_change end
               const next = yield* loadConfig(JSON.stringify(configOpt.value), {
                 dir: path.dirname(source),
@@ -679,6 +694,9 @@ export const layer = Layer.effect(
             // altimate_change end
             const source = path.join(managedDir, file)
             // altimate_change start — note a managed datamate key before merging
+            // altimate_change start — upstream_fix (#701): MDM-deployed, machine-wide.
+            ConfigVariable.resetBlankedEnvVars(source, ConfigVariable.SHARED_CONFIG)
+            // altimate_change end
             const managedFile = yield* loadFile(source)
             if (managedFile?.mcp && DATAMATE_KEY in managedFile.mcp) managedOwnsDatamate = true
             yield* merge(source, managedFile, "global")
@@ -690,7 +708,7 @@ export const layer = Layer.effect(
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
           // altimate_change start — upstream_fix (#701): clear before this load.
-          ConfigVariable.resetBlankedEnvVars(managed.source)
+          ConfigVariable.resetBlankedEnvVars(managed.source, ConfigVariable.SHARED_CONFIG)
           // altimate_change end
           // altimate_change start — note a managed datamate key before merging
           const managedPrefs = yield* loadConfig(managed.text, {

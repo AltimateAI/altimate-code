@@ -82,9 +82,14 @@ export function unresolvedEnvVars(server: string, projectDir: string): string[] 
   return [...(_unresolvedEnv.get(projectDir)?.get(server) ?? [])].sort()
 }
 
-/** Drop this project's records. Called once per `discoverExternalMcp`. */
+/**
+ * Drop this project's records. Called once per `discoverExternalMcp`.
+ *
+ * Deletes the bucket rather than clearing it: a long-lived server visits many directories, and
+ * keeping an empty Map per directory it has ever served is a slow leak with no cleanup path.
+ */
 function resetUnresolvedEnv(projectDir: string) {
-  _unresolvedEnv.get(projectDir)?.clear()
+  _unresolvedEnv.delete(projectDir)
 }
 // altimate_change end
 
@@ -177,7 +182,7 @@ export function discoveredSource(server: string, projectDir: string): string | u
 /** Test seam — clears one project's drift, or every project's when no directory is given. */
 export function resetConfigDrift(projectDir?: string) {
   if (projectDir === undefined) _drift.clear()
-  else _drift.get(projectDir)?.clear()
+  else _drift.delete(projectDir)
 }
 // altimate_change end
 interface ExternalMcpSource {
@@ -457,7 +462,7 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   // difference, otherwise left a stale entry and `mcp status` reported a mismatch that no
   // longer existed. The setConfigDrift calls after this run repopulate it.
   resetConfigDrift(projectDir)
-  _discoveredSource.get(projectDir)?.clear()
+  _discoveredSource.delete(projectDir)
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()
