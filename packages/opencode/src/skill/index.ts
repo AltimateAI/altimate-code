@@ -411,6 +411,12 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 ))
 // altimate_change end
 
+// altimate_change start — see the call sites inside `fmt`.
+function neutralizeListingWrapper(text: string): string {
+  return text.replace(/<(\/?)(available_skills|skill|name|description|location)\b/gi, "&lt;$1$2")
+}
+// altimate_change end
+
 export function fmt(list: Info[], opts: { verbose: boolean }) {
   const described = list.filter((skill) => skill.description !== undefined)
   if (described.length === 0) return "No skills are currently available."
@@ -421,8 +427,19 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
         .toSorted((a, b) => a.name.localeCompare(b.name))
         .flatMap((skill) => [
           "  <skill>",
-          `    <name>${skill.name}</name>`,
-          `    <description>${skill.description}</description>`,
+          // altimate_change start — neutralise the listing's own wrapper tags.
+          // `name` and `description` come from bundle frontmatter, and a bound
+          // workspace syncs those from a remote server, so both are attacker
+          // controlled by anyone who can upload a skill. This path is the more
+          // exposed of the two: an auto-loaded body needs `alwaysApply`, whereas
+          // EVERY synced skill's description lands here in EVERY session. A
+          // description ending `</description></skill></available_skills>` would
+          // otherwise close the listing and continue as unwrapped system-prompt
+          // text. Deliberately not a full XML escape — descriptions legitimately
+          // contain code and angle brackets. (review)
+          `    <name>${neutralizeListingWrapper(skill.name)}</name>`,
+          `    <description>${neutralizeListingWrapper(skill.description ?? "")}</description>`,
+          // altimate_change end
           `    <location>${pathToFileURL(skill.location).href}</location>`,
           "  </skill>",
         ]),

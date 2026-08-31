@@ -627,6 +627,91 @@ describe("workspace skill sync", () => {
     await running
   })
 
+  test("one unverifiable bundle file costs that skill, not the whole workspace", async () => {
+    // The real backend serves bundle files as `raw.decode("utf-8",
+    // errors="replace")` while reporting the RAW byte count as `size`, and it
+    // puts no content-type restriction on anything but SKILL.md. So a legal
+    // bundle holding a PNG can never round-trip, and the length check below can
+    // never be satisfied for it. Previously that threw out of the whole loop:
+    // one binary file meant the workspace published NO skills, for everyone,
+    // retried every poll forever.
+    serve({
+      "pub-good": { "SKILL.md": "fine" },
+      "pub-binary": { "SKILL.md": "also fine", "references/logo.png": "xx" },
+    })
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes("pub-binary") && url.includes("logo.png")) {
+        // What `errors="replace"` produces: content whose re-encoded length can
+        // never equal the stored size the inventory declared.
+        return json({ path: "references/logo.png", content: "\ufffd\ufffd" })
+      }
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+
+    await syncSkills(project)
+
+    expect(existsSync(skillFile("pub-good", "SKILL.md"))).toBe(true)
+    expect(existsSync(path.join(project, MANAGED, "pub-binary"))).toBe(false)
+    const m = JSON.parse(readFileSync(path.join(project, MANAGED, ".manifest.json"), "utf8"))
+    expect(Object.keys(m.skills)).toEqual(["pub-good"])
+  })
+
+  test("a skill that fails after syncing keeps its previous copy", async () => {
+    // A transient failure must not delete a skill the user already has — the
+    // same "error is never emptiness" rule the snapshot follows, per skill.
+    serve({ "pub-1": { "SKILL.md": "original" }, "pub-2": { "SKILL.md": "two" } })
+    await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("original")
+
+    serve({ "pub-1": { "SKILL.md": "updated" }, "pub-2": { "SKILL.md": "two" } }, "2026-02-02T00:00:00Z")
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes("pub-1") && url.includes("/files/")) throw new Error("network blip")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("original")
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+  })
+
+  test("every skill failing abandons the snapshot rather than publishing nothing", async () => {
+    // Skipping per skill must not become a way to publish an empty snapshot:
+    // that is indistinguishable from a broken server and would delete skills
+    // the user still has.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    serve({ "pub-1": { "SKILL.md": "two" } }, "2026-03-03T00:00:00Z")
+    const inner = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/files/")) throw new Error("all downloads fail")
+      return inner(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    // Carried forward, not deleted, and not replaced by an empty tree.
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("one")
+  })
+
+  test("a sibling realm's staging directory is not swept", async () => {
+    // A bind and a turn run on different threads of one process: same pid,
+    // separate module state. Sweeping anything carrying our pid would delete a
+    // sibling thread's in-flight tree and publish a snapshot missing whatever it
+    // had written.
+    const siblings = path.join(project, ".altimate-code", "skill-staging", `pending-${process.pid}-zzzzzz`)
+    mkdirSync(siblings, { recursive: true })
+    writeFileSync(path.join(siblings, "in-flight.txt"), "another thread is writing here")
+
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    expect(existsSync(path.join(siblings, "in-flight.txt"))).toBe(true)
+  })
+
   test("the published snapshot ignores itself in git", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)

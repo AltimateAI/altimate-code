@@ -149,7 +149,12 @@ export namespace SessionPrompt {
   // The trace span is a sibling of the root (tracing.ts:1009 assigns
   // parentSpanId to rootSpanId), not a nested child — good enough for
   // waterfall correlation via timestamps, and no schema change is required.
-  async function traceSpan<T>(name: string, fn: () => Promise<T>, input?: unknown, sessionID?: SessionID): Promise<T> {
+  async function traceSpan<T>(
+    name: string,
+    fn: () => Promise<T>,
+    input?: unknown,
+    sessionID?: SessionID,
+  ): Promise<T> {
     const startTime = Date.now()
     if (sessionID) void SessionStatus.publishPhase(sessionID, name, true)
     try {
@@ -667,12 +672,10 @@ export namespace SessionPrompt {
       // into the next loop instead of terminating the session.
       const lastAssistantHasToolParts =
         lastAssistant !== undefined &&
-        (msgs
-          .find((msg) => msg.info.id === lastAssistant.id)
-          ?.parts.some((part) => {
-            if (part.type !== "tool") return false
-            return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
-          }) ??
+        (msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts.some((part) => {
+          if (part.type !== "tool") return false
+          return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
+        }) ??
           false)
       if (
         lastAssistant?.finish &&
@@ -1517,13 +1520,7 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({
-                  kind: "dispatch_enter",
-                  sessionID,
-                  step,
-                  cwd: vCtx.workingDirectory,
-                  sessionStartMs: vCtx.sessionStartMs,
-                }),
+                JSON.stringify({ kind: "dispatch_enter", sessionID, step, cwd: vCtx.workingDirectory, sessionStartMs: vCtx.sessionStartMs }),
             )
           }
           const checks = await ValidatorRegistry.runAll(vCtx)
@@ -1626,12 +1623,7 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({
-                  kind: "dispatch_error",
-                  sessionID,
-                  step,
-                  error: e instanceof Error ? e.message : String(e),
-                }),
+                JSON.stringify({ kind: "dispatch_error", sessionID, step, error: e instanceof Error ? e.message : String(e) }),
             )
           }
         }
@@ -2998,28 +2990,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       ): Promise<MessageV2.WithParts> {
         const now = Date.now()
         const assistantMsg: MessageV2.Assistant = {
-          id: MessageID.ascending(),
-          role: "assistant",
-          sessionID: input.sessionID,
-          parentID,
-          modelID: model.modelID,
-          providerID: model.providerID,
-          mode: "builder",
-          agent: "builder",
+          id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
+          parentID, modelID: model.modelID, providerID: model.providerID,
+          mode: "builder", agent: "builder",
           path: { cwd: Instance.directory, root: Instance.worktree },
-          cost: 0,
-          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          finish: "stop",
-          time: { created: now, completed: now },
+          cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          finish: "stop", time: { created: now, completed: now },
         }
         await Session.updateMessage(assistantMsg)
         const textPart: MessageV2.TextPart = {
-          id: PartID.ascending(),
-          sessionID: input.sessionID,
-          messageID: assistantMsg.id,
-          type: "text",
-          text: responseText,
-          time: { start: now, end: now },
+          id: PartID.ascending(), sessionID: input.sessionID, messageID: assistantMsg.id,
+          type: "text", text: responseText, time: { start: now, end: now },
         }
         await Session.updatePart(textPart)
         AppRuntime.runPromise(
@@ -3073,7 +3054,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (!cfg.mcp?.[name]) {
           const known = Object.keys(cfg.mcp ?? {})
           const suffix = known.length ? ` Known servers: ${known.join(", ")}.` : ""
-          return respond(userMsg.info.id, `MCP server **${name}** not found in config.${suffix}`, model)
+          return respond(
+            userMsg.info.id,
+            `MCP server **${name}** not found in config.${suffix}`,
+            model,
+          )
         }
 
         let responseText: string
@@ -3086,7 +3071,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             responseText = `MCP server **${name}** enabled. Status: connected.`
           } else {
             const errSuffix = entry?.status === "failed" ? " — " + entry.error : ""
-            responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
+          responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
           }
         } else {
           await MCP.disconnect(name)

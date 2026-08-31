@@ -20,9 +20,14 @@
 // That is a real consequence worth stating plainly: anyone who can upload a
 // skill to a workspace can put standing instructions into the prompts of every
 // member bound to it. The backend has no activation field, so this can only
-// arrive through the uploaded SKILL.md. Whether workspace skills should be
-// allowed to auto-activate is a product decision, not one this module should
-// make silently by stripping frontmatter an author wrote.
+// arrive through the uploaded SKILL.md.
+//
+// This was raised in review as needing an explicit product decision rather than
+// a source comment, and it has one: auto-activation is APPROVED FOR THE PILOT,
+// so synced bundles keep `alwaysApply`/`applyPaths` and this module does not
+// strip frontmatter an author wrote. The exposure is therefore accepted, not
+// overlooked, and is bounded by who can upload to a workspace — revisit it if
+// upload rights widen beyond the pilot's members.
 //
 // Server contract (app/api/datamates/custom_skills.py, mounted at ``/skills``):
 //   GET ""                       -> Page[CustomSkillSummary]  (paginated)
@@ -109,6 +114,16 @@ function managedRoot(directory: string): string {
  * Note this only reaches copies sharing a realm. Threads do NOT share
  * `globalThis`, so anything a bind must hand to a later turn goes through disk
  * instead — see `snapshotFingerprint`. */
+/** Distinguishes the copies of this module that share a process.
+ *
+ * Staging directories are named `<kind>-<pid>-<realm>`. The pid alone is not
+ * enough: a bind and a turn run on different threads, which share a pid but not
+ * this module's state, so both would compute the same path — and `sweepStaging`
+ * deliberately does NOT spare its own pid, so each would delete the other's
+ * half-written tree and publish a mix of the two under one manifest. The pid
+ * stays in the name so the cross-PROCESS liveness guard still works. */
+const REALM_ID = Math.random().toString(36).slice(2, 8)
+
 const STORE_KEY = Symbol.for("altimate.workspace.skill-sync.store")
 
 interface SyncStore {
@@ -445,7 +460,14 @@ async function sweepStaging(directory: string): Promise<void> {
     // Leave another process's work alone. These are named `<kind>-<pid>`, and
     // deleting a live owner's staging makes it publish a snapshot missing every
     // file written before the sweep, with a manifest that claims them.
-    const owner = /-(\d+)$/.exec(entry)?.[1]
+    // `<kind>-<pid>` (older trees) or `<kind>-<pid>-<realm>` (current).
+    const owner = /-(\d+)(?:-[a-z0-9]+)?$/.exec(entry)?.[1]
+    const mine = entry.endsWith(`-${process.pid}-${REALM_ID}`)
+    // Another live process's tree is never touched. Within THIS process only
+    // this realm's own tree is swept: a sibling thread's staging is in flight,
+    // and deleting it makes that thread publish a tree missing everything
+    // written so far, under a manifest that claims the files.
+    if (owner && owner === String(process.pid) && !mine) continue
     if (owner && owner !== String(process.pid) && processAlive(Number(owner))) continue
     const target = path.join(dir, entry)
     try {
@@ -669,7 +691,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     // `{skill,skills}/**/SKILL.md` from the config dir — a staging tree that
     // lived beside `_workspace` would be scanned, so a half-downloaded snapshot
     // (or one abandoned by a SIGKILL) would be loaded as real skills.
-    const staging = path.join(canon, STAGING_DIR, `pending-${process.pid}`)
+    const staging = path.join(canon, STAGING_DIR, `pending-${process.pid}-${REALM_ID}`)
     await fs.mkdir(path.join(canon, STAGING_DIR), { recursive: true })
     await fs.writeFile(path.join(canon, STAGING_DIR, ".gitignore"), "*\n").catch(() => {})
     await fs.rm(staging, { recursive: true, force: true })
@@ -683,57 +705,106 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
     try {
       let totalFiles = 0
       let totalBytes = 0
+      let skipped = 0
       for (const summary of remote) {
-        if (!safePathComponent(summary.publicId)) {
-          throw new WorkspaceApiError(`unusable skill id in the workspace listing: ${summary.publicId}`)
-        }
-        const detail = await altimateRequest<unknown>(
-          "GET",
-          `/${encodeURIComponent(summary.publicId)}`,
-          { base: SKILLS_BASE },
-        )
-        const files = parseDetailFiles(detail)
-        if (!files) throw new WorkspaceApiError(`unrecognised detail for ${summary.publicId}`)
-        const recorded: Record<string, number> = {}
-        for (const file of files) {
-          totalFiles += 1
-          totalBytes += file.size
-          if (totalFiles > MAX_TOTAL_FILES || totalBytes > MAX_TOTAL_BYTES) {
-            throw new WorkspaceApiError(
-              `workspace skill bundle exceeds the client limit (${totalFiles} files, ${totalBytes} bytes)`,
-            )
+        // Per skill, not per snapshot. A single unusable bundle previously threw
+        // out of the whole loop, so one bad file cost the workspace EVERY skill,
+        // on every client, re-attempted every poll forever. The blast radius of a
+        // bad bundle is now that bundle. (review)
+        try {
+          if (!safePathComponent(summary.publicId)) {
+            throw new WorkspaceApiError(`unusable skill id in the workspace listing: ${summary.publicId}`)
           }
-          const encoded = file.path.split("/").map(encodeURIComponent).join("/")
-          // The file endpoint answers with ``{path, content}`` JSON, not the raw
-          // object — the server decodes the bundle file and hands back a string.
-          const body = await altimateRequest<unknown>(
+          const detail = await altimateRequest<unknown>(
             "GET",
-            `/${encodeURIComponent(summary.publicId)}/files/${encoded}`,
-            // Bounded: this is the one response whose size is set by remote
-            // bundle content rather than by our own query.
-            { base: SKILLS_BASE, boundResponse: true },
+            `/${encodeURIComponent(summary.publicId)}`,
+            { base: SKILLS_BASE },
           )
-          const content = parseFileContent(body, file.path)
-          if (content === null) {
-            throw new WorkspaceApiError(`unrecognised file body for ${summary.publicId}/${file.path}`)
-          }
-          // No checksum exists in the API, so length is the only integrity check
-          // available. `size` is the stored object's byte count, so the
-          // comparison has to be on UTF-8 bytes rather than string length — the
-          // two differ for any non-ASCII skill. It still catches a truncated
-          // download, which is what would otherwise publish half a skill.
-          const bytes = Buffer.from(content, "utf8")
-          if (bytes.byteLength !== file.size) {
+          const files = parseDetailFiles(detail)
+          if (!files) throw new WorkspaceApiError(`unrecognised detail for ${summary.publicId}`)
+          // Decided BEFORE downloading, and against this skill's declared size,
+          // so a workspace that is legal server-side (10MB per bundle) but over
+          // the client ceiling loses the bundles that do not fit rather than all
+          // of them. (review)
+          const skillFiles = files.length
+          const skillBytes = files.reduce((n, f) => n + f.size, 0)
+          if (totalFiles + skillFiles > MAX_TOTAL_FILES || totalBytes + skillBytes > MAX_TOTAL_BYTES) {
             throw new WorkspaceApiError(
-              `size mismatch for ${summary.publicId}/${file.path}: expected ${file.size}, got ${bytes.byteLength}`,
+              `would exceed the client snapshot limit (${totalFiles + skillFiles} files, ${totalBytes + skillBytes} bytes)`,
             )
           }
-          const dest = path.join(staging, summary.publicId, file.path)
-          await fs.mkdir(path.dirname(dest), { recursive: true })
-          await fs.writeFile(dest, bytes)
-          recorded[file.path] = file.size
+          const recorded: Record<string, number> = {}
+          for (const file of files) {
+            const encoded = file.path.split("/").map(encodeURIComponent).join("/")
+            // The file endpoint answers with ``{path, content}`` JSON, not the raw
+            // object — the server decodes the bundle file and hands back a string.
+            const body = await altimateRequest<unknown>(
+              "GET",
+              `/${encodeURIComponent(summary.publicId)}/files/${encoded}`,
+              // Bounded: this is the one response whose size is set by remote
+              // bundle content rather than by our own query.
+              { base: SKILLS_BASE, boundResponse: true },
+            )
+            const content = parseFileContent(body, file.path)
+            if (content === null) {
+              throw new WorkspaceApiError(`unrecognised file body for ${summary.publicId}/${file.path}`)
+            }
+            // No checksum exists in the API, so length is the only integrity check
+            // available. `size` is the stored object's byte count, so the
+            // comparison has to be on UTF-8 bytes rather than string length — the
+            // two differ for any non-ASCII skill. It still catches a truncated
+            // download, which is what would otherwise publish half a skill.
+            const bytes = Buffer.from(content, "utf8")
+            if (bytes.byteLength !== file.size) {
+              throw new WorkspaceApiError(
+                `size mismatch for ${summary.publicId}/${file.path}: expected ${file.size}, got ${bytes.byteLength}`,
+              )
+            }
+            const dest = path.join(staging, summary.publicId, file.path)
+            await fs.mkdir(path.dirname(dest), { recursive: true })
+            await fs.writeFile(dest, bytes)
+            recorded[file.path] = file.size
+          }
+          next.skills[summary.publicId] = { updatedAt: summary.updatedAt, files: recorded }
+          totalFiles += skillFiles
+          totalBytes += skillBytes
+          next.skills[summary.publicId] = { updatedAt: summary.updatedAt, files: recorded }
+        } catch (err) {
+          skipped += 1
+          // A skill that synced before keeps its previous copy rather than
+          // disappearing over a transient failure — the same "error is never
+          // emptiness" rule the rest of this file follows, applied per skill.
+          const prior = manifest?.skills[summary.publicId]
+          const priorDir = path.join(root, summary.publicId)
+          let carried = false
+          if (prior) {
+            try {
+              await fs.rm(path.join(staging, summary.publicId), { recursive: true, force: true })
+              await fs.cp(priorDir, path.join(staging, summary.publicId), { recursive: true })
+              next.skills[summary.publicId] = prior
+              carried = true
+            } catch {
+              carried = false
+            }
+          }
+          if (!carried) {
+            await fs.rm(path.join(staging, summary.publicId), { recursive: true, force: true }).catch(() => {})
+          }
+          log.warn("skipping a workspace skill; the rest of the snapshot still publishes", {
+            skill: summary.publicId,
+            carriedPrevious: carried,
+            err: String(err),
+          })
         }
-        next.skills[summary.publicId] = { updatedAt: summary.updatedAt, files: recorded }
+      }
+      if (remote.length > 0 && Object.keys(next.skills).length === 0) {
+        // Nothing survived. That is indistinguishable from a broken server, and
+        // publishing an empty snapshot here would delete skills the user still
+        // has a right to. Abandon and keep what is on disk.
+        throw new WorkspaceApiError(`every workspace skill failed to sync (${skipped} of ${remote.length})`)
+      }
+      if (skipped > 0) {
+        log.warn("published a partial workspace snapshot", { skipped, published: Object.keys(next.skills).length })
       }
       // Manifest goes inside the staged tree so files and manifest commit
       // together — a snapshot is never live without the record of what it is.
@@ -749,7 +820,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
       // inside it sees the skills vanish. The retired tree is removed only
       // after the new one is in place.
       await fs.mkdir(path.dirname(root), { recursive: true })
-      const retired = path.join(canon, STAGING_DIR, `retired-${process.pid}`)
+      const retired = path.join(canon, STAGING_DIR, `retired-${process.pid}-${REALM_ID}`)
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
       let hadPrevious = true
       try {
