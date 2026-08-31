@@ -52,9 +52,26 @@ function resolveServerEnvVars(
 /** Server name -> variable names that resolved to "" during discovery. */
 const _unresolvedEnv = new Map<string, Set<string>>()
 
-/** Variable names that silently became "" for `server`, newest discovery wins. */
+/**
+ * Variable names that silently became "" for `server`, from the most recent discovery.
+ *
+ * The record is cleared at the start of every `discoverExternalMcp` run and then unioned
+ * within that run, because one server is resolved twice — once for `headers` and once for
+ * `environment`. Without the reset the map only ever grew: a server whose `{env:VAR}` had
+ * since been fixed kept its old entry (the recording site below is inside an
+ * `unresolvedNames.length > 0` guard, so a clean run never touched it), and `/mcps` went on
+ * telling the user to set a variable that already resolved.
+ *
+ * Only the latest run's servers are present, so a daemon that discovers for a second project
+ * replaces the first project's entries rather than mixing the two under a shared server name.
+ */
 export function unresolvedEnvVars(server: string): string[] {
   return [...(_unresolvedEnv.get(server) ?? [])].sort()
+}
+
+/** Drop the previous run's records. Called once per `discoverExternalMcp`. */
+function resetUnresolvedEnv() {
+  _unresolvedEnv.clear()
 }
 // altimate_change end
 
@@ -321,6 +338,8 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   sources: string[]
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
+  // Start from a clean slate so a variable fixed since the last run stops being reported.
+  resetUnresolvedEnv()
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()

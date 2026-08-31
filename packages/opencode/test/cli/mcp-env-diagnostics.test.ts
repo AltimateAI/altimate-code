@@ -87,6 +87,11 @@ describe("altimate-code mcp list — env diagnostics", () => {
         const out = output(["mcp", "list"])
         expect(out, out).toContain("broken")
         expect(out, out).not.toContain("Unknown argument")
+        // The point of this PR is that the *reason* reaches the user, not just the name. The
+        // command above is a nonexistent binary, so the listing has to carry the failure —
+        // without this the test passed even with `status.error` dropped from the payload,
+        // which is the exact regression it is named after.
+        expect(out.toLowerCase(), out).toMatch(/failed|enoent|no such file|spawn/)
       }),
     SUBPROCESS_TIMEOUT_MS,
   )

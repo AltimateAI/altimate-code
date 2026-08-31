@@ -156,6 +156,10 @@ async function substituteWellKnownRemoteConfig(input: {
 }) {
   if (!isRecord(input.value) || typeof input.value.url !== "string") return undefined
 
+  // altimate_change start — upstream_fix (#701): the url and every header below publish under
+  // this same source, so clear once here and let those calls union into one record.
+  ConfigVariable.resetBlankedEnvVars(input.source)
+  // altimate_change end
   const url = await ConfigVariable.substitute({
     text: input.value.url,
     type: "virtual",
@@ -314,6 +318,9 @@ export const layer = Layer.effect(
       env?: Record<string, string>,
     ) {
       const source = "path" in options ? options.path : options.source
+      // altimate_change start — upstream_fix (#701): clear before the load, union during it.
+      ConfigVariable.resetBlankedEnvVars(source)
+      // altimate_change end
       const expanded = yield* Effect.promise(() =>
         ConfigVariable.substitute(
           "path" in options

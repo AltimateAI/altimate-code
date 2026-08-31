@@ -42,9 +42,12 @@ describe("formatMcpStatusForDisplay — unresolved env vars", () => {
   })
 
   test("says nothing extra when everything resolved", () => {
-    expect(SessionPrompt.formatMcpStatusForDisplay("ok", { status: "connected" }, [])).toBe(
-      SessionPrompt.formatMcpStatusForDisplay("ok", { status: "connected" }),
-    )
+    // Asserted against a literal, not against the same call with the argument omitted: that
+    // defaults to [] too, so both sides were byte-identical and the test passed even when the
+    // function appended an "unresolved: ..." suffix it should not have.
+    const out = SessionPrompt.formatMcpStatusForDisplay("ok", { status: "connected" }, [])
+    expect(out).not.toContain("unresolved")
+    expect(out).toBe(SessionPrompt.formatMcpStatusForDisplay("ok", { status: "connected" }))
   })
 })
 // altimate_change end
