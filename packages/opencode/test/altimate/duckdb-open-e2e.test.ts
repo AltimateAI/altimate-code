@@ -113,14 +113,22 @@ describe("DuckDB driver: opening a real store", () => {
     // The assertion above this one passes on a dead connection: `(0 rows)` and
     // "the driver never loaded" are the same observation. This one cannot.
     const c = await connect({ type: "duckdb", path: storePath })
-    await c.connect()
-    const r = await c.execute(`SELECT md5('${LIVENESS_NONCE}') AS h`)
+    // close() in a finally, not after the assertions: this opens `storePath`
+    // read-write, and DuckDB's lock is per-process, so a handle leaked by a
+    // failing assertion would make every later test in this file fail with a
+    // lock conflict instead of the real cause.
+    let rows: unknown[][]
+    try {
+      await c.connect()
+      rows = (await c.execute(`SELECT md5('${LIVENESS_NONCE}') AS h`)).rows
+    } finally {
+      await c.close()
+    }
     // Exactly one row: a swallowed failure surfaces as zero rows, and zero rows
     // is the shape that reads as success everywhere downstream.
-    expect(r.rows.length).toBe(1)
+    expect(rows.length).toBe(1)
     // And the right answer, which requires actually computing it.
-    expect(String(r.rows[0][0])).toBe(LIVENESS_MD5)
-    await c.close()
+    expect(String(rows[0][0])).toBe(LIVENESS_MD5)
   })
 
   ddbTest("opens the same store from many connectors at once", async () => {

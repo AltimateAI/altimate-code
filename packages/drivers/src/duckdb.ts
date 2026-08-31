@@ -74,8 +74,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
     return (
       msg.includes("locked") ||
-      msg.includes("conflicting lock") ||
-      msg.includes("could not set lock") ||
+      // Both halves, not either. "could not set lock" on its own also covers
+      // non-contention failures — an unsupported filesystem lock, a permissions
+      // problem — and matching it alone would wrap those as "locked by another
+      // process", fabricating a wrapper that Registry.categorizeConnectionError
+      // then trusts as a recoverable `store_locked`. That would send the reader
+      // hunting for a process to close while hiding the real filesystem fault.
+      // Registry's raw matcher already requires both; these must agree.
+      (msg.includes("could not set lock") && msg.includes("conflicting lock")) ||
       msg.includes("sqlite_busy")
     )
   }

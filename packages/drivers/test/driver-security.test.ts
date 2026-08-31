@@ -189,6 +189,50 @@ describe("DuckDB driver", () => {
       await connector.close()
     })
 
+    test("does not claim a non-contention lock failure as a foreign lock", async () => {
+      // "Could not set lock" without "Conflicting lock" is a filesystem fault,
+      // not contention. Wrapping it as "locked by another process" would send
+      // the reader after a process to close and hide the real cause — and the
+      // registry would trust that fabricated wrapper as recoverable.
+      let attempts = 0
+      mock.module("duckdb", () => ({
+        default: {
+          Database: class {
+            constructor(_path: string, optsOrCb: any, cb?: (err: Error | null) => void) {
+              attempts++
+              setTimeout(
+                () =>
+                  openCallback(optsOrCb, cb)(
+                    new Error('IO Error: Could not set lock on file "/tmp/test.duckdb": Operation not supported'),
+                  ),
+                0,
+              )
+            }
+            connect() {
+              return {}
+            }
+            close(cb: any) {
+              if (cb) cb(null)
+            }
+          },
+        },
+      }))
+
+      const { connect } = await import("../src/duckdb")
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb" })
+
+      try {
+        await connector.connect()
+        expect.unreachable("Should have thrown")
+      } catch (e: any) {
+        expect(e.message).toContain("Operation not supported")
+        expect(e.message).not.toContain("locked by another process")
+      }
+
+      // And it is not treated as contention, so no read-only retry is spent.
+      expect(attempts).toBe(1)
+    })
+
     test("retries with READ_ONLY when the first open fails with DuckDB's real lock text", async () => {
       // The other retry test drives a fabricated "DUCKDB_LOCKED: file is locked"
       // string, which the driver's original `.includes("locked")` check already
