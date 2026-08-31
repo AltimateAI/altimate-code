@@ -452,8 +452,11 @@ export async function refresh(
       // A session evicted while its line was in flight must not be written back:
       // eviction only ever walks `bySession`, so an entry recreated here after the
       // session left it could never be reclaimed, and the map would grow with the
-      // lifetime session count rather than staying bounded.
-      if (delivered && bySession.has(sessionID)) announced.set(sessionID, attempt)
+      // lifetime session count rather than staying bounded. Nor may it write over a
+      // session recreated in the meantime — only the snapshot this attempt was
+      // published for may record it, or a stale completion could retain or repeat
+      // an obsolete line over the newer publication.
+      if (delivered && bySession.get(sessionID) === result) announced.set(sessionID, attempt)
     })
     publishQueue.set(sessionID, queued)
     void queued

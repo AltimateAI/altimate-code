@@ -295,6 +295,33 @@ describe("the per-session caches are bounded", () => {
     expect(said).toHaveLength(1)
     expect(announcedSessionCount()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
   })
+
+  test("a line delivered after its session was evicted and recreated does not overwrite the new record", async () => {
+    // Eviction drops the session's publish chain, so a session recreated before its
+    // old line lands has a second publication running unchained. If the stale
+    // completion arrives last it must not become the session's record: the next
+    // refresh would then repeat the newer line as if it had never been said.
+    const settle: Array<() => void> = []
+    precedenceInternals.announce = () => new Promise<void>((resolve) => settle.push(resolve))
+    await refresh("ses_recreated", SNOWFLAKE_TOOLS)
+    for (let i = 0; i < MAX_TRACKED_SESSIONS + 5; i++) {
+      await refresh(`ses_flood2_${i}`, {})
+    }
+    expect(forSession("ses_recreated")).toBeUndefined()
+    await refresh("ses_recreated", BIGQUERY_TOOLS)
+    expect(settle).toHaveLength(2)
+
+    settle[1]()
+    await tick()
+    settle[0]()
+    await tick()
+
+    const said: string[] = []
+    precedenceInternals.announce = async (line) => void said.push(line)
+    await refresh("ses_recreated", BIGQUERY_TOOLS)
+    await tick()
+    expect(said).toEqual([])
+  })
 })
 
 describe("mechanism 1a — attributed to the bound workspace", () => {
