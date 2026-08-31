@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `071f4dc782e70bb4a0f63397902a4285d0156903`
+- Final code candidate: `aab3dac85008fd9a21919741021d3be3848cefbe`
 - Scan mode: chained immutable branch-diff reviews
 - Final coverage: complete
 - Findings remaining on the final candidate: **0**
@@ -33,8 +33,9 @@ The review used immutable ranges so every material repair was independently reco
 | Parser-free remediation      | `858c7b1dab..908be9cabb`                           | Complete coverage; **0 findings**                            |
 | Final request-shape fixes    | `5e04c7885d..c78e1a61b6`                           | Complete coverage; **0 findings**                            |
 | Instruction occurrence fix   | `c78e1a61b6..071f4dc782`                           | Complete coverage; **0 findings**                            |
+| Final edge-case hardening    | `a279303720..aab3dac850`                           | Complete coverage; **0 findings**                            |
 
-The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6` and `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`. Their authoritative results contain no deferred work, no open question, and zero findings.
+The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, and `19f139b0-8c4c-48cc-adca-a60d41920664`. Their authoritative results contain no deferred work, no open question, and zero findings.
 
 ## Findings discovered and resolved
 
@@ -56,6 +57,10 @@ The experiment coupled a 100-page fallback to a 500 KB parser ceiling. A valid 6
 
 The final policy removes the 100-page claim instead of replacing it with a larger parser. Exact page expansion is explicitly delegated to the provider.
 
+### 4. Final boundary cases were made conservative
+
+The final supplemental review found that an empty base64 image represented as a `URL` object could escape unsupported-media projection, and that positive context windows at or below 1,024 tokens were treated as placeholder metadata. The final candidate inspects `URL.href` using the same data-URL rule as strings and enforces every positive context limit. Absent and non-positive context metadata still bypasses lazily, so estimates are not evaluated when no credible limit exists.
+
 ## Final trust and data flow
 
 Both production request paths use the same sequence:
@@ -72,7 +77,7 @@ Codebase graph tracing found exactly two production callers of the centralized c
 
 ## Verification
 
-- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **416 passed, 11 skipped, 1 existing todo, 0 failed**.
+- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **417 passed, 11 skipped, 1 existing todo, 0 failed**.
 - Repository typecheck: **13/13 tasks successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
