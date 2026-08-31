@@ -335,7 +335,8 @@ export namespace ProviderTransform {
         // Check for empty base64 image data
         if (part.type === "image") {
           // altimate_change start — support every valid image payload form and case
-          const imageStr = typeof part.image === "string" ? part.image : undefined
+          const imageStr =
+            typeof part.image === "string" ? part.image : part.image instanceof URL ? part.image.href : undefined
           if (imageStr && /^data:/i.test(imageStr)) {
             const match = imageStr.match(/^data:([^;]+);base64,(.*)$/i)
             if (match && (!match[2] || match[2].length === 0)) {

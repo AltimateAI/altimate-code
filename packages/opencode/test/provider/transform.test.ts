@@ -1937,6 +1937,22 @@ describe("ProviderTransform.message - empty image handling", () => {
     })
   })
 
+  test("should replace an empty base64 image wrapped in a URL object", () => {
+    const msgs = [
+      {
+        role: "user",
+        content: [{ type: "image", image: new URL("data:image/png;base64,") }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, mockModel, {})
+
+    expect(result[0].content[0]).toEqual({
+      type: "text",
+      text: "ERROR: Image file is empty or corrupted. Please provide a valid image.",
+    })
+  })
+
   test("should keep valid base64 images unchanged", () => {
     const validBase64 =
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -4773,12 +4789,9 @@ describe("output token budget", () => {
     expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 8_000 })).toThrow(OutputTokenBudgetError)
   })
 
-  test("does not clamp a window too small to hold even a floor-sized completion", () => {
-    // A declared window this small is a placeholder or a test fixture, not a real limit. Failing
-    // the request client-side on numbers we do not believe would be worse than letting the
-    // provider answer, so the guard stays out of the way.
-    const model = createWindowModel({ context: 20, output: 10 })
-    expect(clampOutputTokens({ model, requested: 10, inputTokens: 11 })).toBe(10)
+  test("enforces real context windows at or below the default output floor", () => {
+    const model = createWindowModel({ context: 512, output: 512 })
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 1 })).toThrow(OutputTokenBudgetError)
   })
 
   test("passes an omitted reservation through untouched", () => {

@@ -359,7 +359,7 @@ export function clampOutputTokens(input: {
 
   const context = input.context ?? input.model.limit.context
   const inputLimit = input.model.limit.input
-  if ((!context || context <= OUTPUT_TOKEN_FLOOR) && (!inputLimit || inputLimit <= 0)) return requested
+  if ((!context || context <= 0) && (!inputLimit || inputLimit <= 0)) return requested
 
   const inputTokens = resolveInputTokens(input.inputTokens)
   if (!Number.isFinite(inputTokens) || inputTokens <= 0) return requested
@@ -374,7 +374,7 @@ export function clampOutputTokens(input: {
       margin,
     })
   }
-  if (!context || context <= OUTPUT_TOKEN_FLOOR) return requested
+  if (!context || context <= 0) return requested
   if (inputTokens + requested + margin <= context) return requested
 
   // Do not reject a model for failing to reach a floor above its own reservation.
