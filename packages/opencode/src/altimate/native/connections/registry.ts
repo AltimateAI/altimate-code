@@ -133,6 +133,29 @@ const DRIVER_MAP: Record<string, string> = {
   trino: "@altimateai/drivers/trino",
 }
 
+// altimate_change start — canonical driver identity for workspace precedence.
+/**
+ * Collapse a `config.type` onto the canonical name of the driver that serves it, so
+ * callers reasoning about "which database is this really" cannot be fooled by an
+ * alias: `postgresql` and `postgres` are one driver, as are `mariadb`/`mysql`,
+ * `mssql`/`fabric`/`sqlserver`, and `mongo`/`mongodb`.
+ *
+ * Derived by inverting `DRIVER_MAP` rather than restating it, so a type added there
+ * cannot silently desync from everything keyed on driver identity. Returns null for a
+ * type no driver serves.
+ *
+ * `redshift` maps to its own driver and therefore stays distinct from `postgres`: a
+ * different service with different credentials and endpoints, where Postgres
+ * wire-compatibility is an implementation detail rather than an identity.
+ */
+export function canonicalType(type: string | undefined | null): string | null {
+  if (!type) return null
+  const driverPath = DRIVER_MAP[type.toLowerCase()]
+  if (!driverPath) return null
+  return driverPath.slice(driverPath.lastIndexOf("/") + 1)
+}
+// altimate_change end
+
 async function createConnector(name: string, config: ConnectionConfig): Promise<Connector> {
   const driverPath = DRIVER_MAP[config.type.toLowerCase()]
   if (!driverPath) {

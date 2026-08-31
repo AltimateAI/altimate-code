@@ -137,10 +137,27 @@ export function clearsFloor(version: string | null): boolean {
 /** Strip the server prefix from the engine tools present in the catalog. */
 export function engineToolKeys(tools: Record<string, unknown>): Set<string> {
   const out = new Set<string>()
-  for (const key of Object.keys(tools)) {
-    if (key.startsWith(TOOL_PREFIX)) out.add(key.slice(TOOL_PREFIX.length))
+  for (const [key, value] of Object.entries(tools)) {
+    if (!key.startsWith(TOOL_PREFIX) || servedByForeignClient(value)) continue
+    out.add(key.slice(TOOL_PREFIX.length))
   }
   return out
+}
+
+/** Engine-shaped keys another MCP client owns: worth a warning, never precedence. */
+export function foreignEngineKeys(tools: Record<string, unknown>): string[] {
+  return Object.entries(tools)
+    .filter(([key, value]) => key.startsWith(TOOL_PREFIX) && servedByForeignClient(value))
+    .map(([key]) => key)
+}
+
+/** `MCP.tools()` stamps every entry with the client that served it. A foreign server
+ * named e.g. `datamate_snowflake` flattens to the same `datamate_*` shape as the
+ * engine's own tools, and only the stamp tells them apart. An entry without a stamp
+ * (a synthetic map) is taken by prefix. */
+function servedByForeignClient(value: unknown): boolean {
+  const client = (value as { client?: unknown } | null)?.client
+  return typeof client === "string" && client !== DATAMATE_KEY
 }
 
 /** The entry's full argv, flattening both config shapes. */
