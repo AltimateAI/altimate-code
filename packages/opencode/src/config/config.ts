@@ -345,14 +345,16 @@ export const layer = Layer.effect(
 
     const loadFile = Effect.fnUntraced(function* (filepath: string, env?: Record<string, string>) {
       yield* Effect.logInfo("loading", { path: filepath })
-      const text = yield* readConfigFile(filepath)
-      if (!text) return {} as Info
-      // altimate_change start — upstream_fix (#701): substitution unions now, so whoever
-      // begins a load clears this source first. Deliberately NOT inside loadConfig: the
-      // well-known flow records url/header blanks under the same source before calling it,
-      // and a reset in there threw those names away.
+      // altimate_change start — upstream_fix (#701): substitution unions now, so whoever begins a
+      // load clears this source first. Before the empty-file return, not after: a config that is
+      // deleted or emptied must drop the names it recorded while it still had a `{env:VAR}`,
+      // otherwise `mcp list` warns about a variable that appears in no config at all.
+      // Deliberately NOT inside loadConfig — the well-known flow records url/header blanks under
+      // the same source before calling it, and a reset in there threw those names away.
       ConfigVariable.resetBlankedEnvVars(filepath)
       // altimate_change end
+      const text = yield* readConfigFile(filepath)
+      if (!text) return {} as Info
       return yield* loadConfig(text, { path: filepath }, env)
     })
 
