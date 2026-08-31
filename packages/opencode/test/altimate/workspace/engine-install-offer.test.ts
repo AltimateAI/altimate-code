@@ -236,9 +236,17 @@ describe("offer routing — engine missing", () => {
     // a different workspace with the same name is a different verdict.
     const h = install({ headless: true })
     await beforeTurn("s1")
-    syncInternals.instanceDirectory = () => "/tmp/analytics-2"
-    syncInternals.resolveBinding = async () => ({ ...binding, datamateId: 43, projectPath: "/tmp/analytics-2" })
+    // A second directory in the same process, bound to a namesake workspace:
+    // its overlay is derived at its own config load, as the first one's was.
+    const DIR2 = "/tmp/analytics-2"
+    syncInternals.instanceDirectory = () => DIR2
+    syncInternals.resolveBinding = async () => ({ ...binding, datamateId: 43, projectPath: DIR2 })
+    const { overlay } = await import("../../../src/altimate/workspace/engine-overlay")
+    const config2: { mcp?: Record<string, unknown> } = { mcp: {} }
+    await overlay(DIR2, config2)
+    syncInternals.config = { invalidate: async () => {}, get: async () => config2 }
     await beforeTurn("s2")
+    expect(settledOutcome("s2")).toEqual({ kind: "engine-missing", declared: 2 })
     expect(h.printed).toHaveLength(2)
   })
 })
