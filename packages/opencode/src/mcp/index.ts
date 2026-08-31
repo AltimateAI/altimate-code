@@ -951,6 +951,11 @@ export const layer = Layer.effect(
       yield* closeClient(s, name)
       delete s.clients[name]
       delete s.status[name]
+      // "Removed" means the runtime forgets it. `s.config` is what `getMcpConfig`
+      // prefers over the file, so a retained entry has `status()` synthesising
+      // "disabled" for the rest of the process and `connect` re-spawning the
+      // removed configuration instead of what the file now says.
+      delete s.config[name]
       yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
     })
     // altimate_change end

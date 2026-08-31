@@ -4,16 +4,45 @@ import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { McpServerNotFoundError } from "../errors"
 import { AddPayload, AuthCallbackPayload, StatusMap, UnsupportedOAuthError } from "../groups/mcp"
+// altimate_change start — workspace mode owns the datamate key
+import { InstanceState } from "@/effect/instance-state"
+import { Config } from "@/config/config"
+import { DATAMATE_KEY } from "@/altimate/datamate-transport"
+import { managedWorkspace } from "@/altimate/workspace/engine-overlay"
+import { McpServerManagedError } from "../groups/mcp"
+// altimate_change end
 
 export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handlers) =>
   Effect.gen(function* () {
     const mcp = yield* MCP.Service
+    // altimate_change start — config is loaded before the managed-key check
+    const configSvc = yield* Config.Service
+    // altimate_change end
 
     const status = Effect.fn("McpHttpApi.status")(function* () {
       return yield* mcp.status()
     })
 
     const add = Effect.fn("McpHttpApi.add")(function* (ctx: { payload: typeof AddPayload.Type }) {
+      // altimate_change start — in workspace mode the `datamate` key is the bound
+      // workspace's own engine, derived at config load; adding over it would replace
+      // the engine underneath a turn. Refuse and say why.
+      if (ctx.payload.name === DATAMATE_KEY) {
+        // The overlay runs inside config load; on a fresh instance this can be
+        // the first request, so load before asking who owns the key.
+        yield* configSvc.get()
+        const managed = managedWorkspace(yield* InstanceState.directory)
+        if (managed) {
+          yield* Effect.logWarning("mcp add refused: key is managed by a workspace", {
+            name: DATAMATE_KEY,
+            workspace: managed.id,
+          })
+          return yield* new McpServerManagedError({
+            error: `MCP server "${DATAMATE_KEY}" is managed by workspace "${managed.name}" in this project`,
+          })
+        }
+      }
+      // altimate_change end
       const result = (yield* mcp.add(ctx.payload.name, ctx.payload.config)).status
       return yield* Schema.decodeUnknownEffect(StatusMap)(
         "status" in result ? { [ctx.payload.name]: result } : result,
@@ -72,7 +101,28 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
       return { success: true as const }
     })
 
+    // altimate_change start — connect/disconnect persist `enabled` for the key and
+    // restart or close its client: neither may touch the workspace-managed
+    // `datamate`, which is derived per process and never written to a file.
+    const refuseManaged = Effect.fn("McpHttpApi.refuseManaged")(function* (name: string) {
+      if (name !== DATAMATE_KEY) return
+      yield* configSvc.get()
+      const managed = managedWorkspace(yield* InstanceState.directory)
+      if (!managed) return
+      yield* Effect.logWarning("mcp connect/disconnect refused: key is managed by a workspace", {
+        name: DATAMATE_KEY,
+        workspace: managed.id,
+      })
+      return yield* new McpServerManagedError({
+        error: `MCP server "${DATAMATE_KEY}" is managed by workspace "${managed.name}" in this project`,
+      })
+    })
+    // altimate_change end
+
     const connect = Effect.fn("McpHttpApi.connect")(function* (ctx: { params: { name: string } }) {
+      // altimate_change start
+      yield* refuseManaged(ctx.params.name)
+      // altimate_change end
       yield* mcp
         .connect(ctx.params.name)
         .pipe(
@@ -86,6 +136,9 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     })
 
     const disconnect = Effect.fn("McpHttpApi.disconnect")(function* (ctx: { params: { name: string } }) {
+      // altimate_change start
+      yield* refuseManaged(ctx.params.name)
+      // altimate_change end
       yield* mcp
         .disconnect(ctx.params.name)
         .pipe(
