@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `b7cfd659fac99f533d44fff506977a98e28af437`
+- Final code candidate: `d13f784786d03908b0147ac93c9ca7effdd19e78`
 - Scan mode: chained immutable branch-diff reviews
 - Final coverage: complete
 - Findings remaining on the final candidate: **0**
@@ -36,8 +36,9 @@ The review used immutable ranges so every material repair was independently reco
 | Final edge-case hardening    | `a279303720..aab3dac850`                           | Complete coverage; **0 findings**                            |
 | Small-limit margin fix       | `e3ca59741a..56dbc7e9b1`                           | Complete coverage; **0 findings**                            |
 | Final fixture compatibility  | `d663c49b74..b7cfd659fa`                           | Test-only; no production attack-surface change               |
+| System-message framing fix   | `cedd33a866..d13f784786`                           | Complete coverage; **0 findings**                            |
 
-The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, and `5111b689-e4ad-4243-a7cb-86845b30ca6d`. Their authoritative results contain no deferred work, no open question, and zero findings.
+The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, `5111b689-e4ad-4243-a7cb-86845b30ca6d`, and `33ec5c89-fce8-434d-b8a6-2baba941ff27`. Their authoritative results contain no deferred work, no open question, and zero findings.
 
 ## Findings discovered and resolved
 
@@ -69,13 +70,19 @@ A follow-up review correctly found that enforcing every positive limit with an u
 
 The subsequent branch-head delta changes only an artificial processor test context from 20 to 20,000 tokens. That value exactly equals the existing default compaction headroom and preserves the fixture's intended guard path; the separate production admission regressions continue to exercise 1-, 512-, and 1,024-token contexts.
 
+### 6. System-message framing matches the request transport
+
+A final bot review found that the estimator joined separately transmitted system strings with newlines. Both applicable request paths instead lower each entry to its own `{ role: "system", content }` record, so a plugin emitting many short entries could omit substantial role/content and JSON framing from the estimate.
+
+The final candidate serializes the exact framed array before token estimation. Empty arrays still contribute zero, and OAuth/workflow paths still pass an empty system array while counting their provider instructions separately. A 2,000-entry regression fails under the old flattening and confirms linear, bounded execution under the corrected shape. The exact production delta was sealed as a complete zero-finding security scan.
+
 ## Final trust and data flow
 
 Both production request paths use the same sequence:
 
 1. Finalize messages, tools, provider instructions, headers, and plugin-selected output reservation.
 2. If no output reservation or credible limit exists, return without serializing the prompt.
-3. Lazily estimate text, schemas, semantic media allowances, decoded inline payload size, and every system/instruction wire occurrence.
+3. Lazily estimate text, schemas, semantic media allowances, decoded inline payload size, each separately framed system entry, and every provider-instruction wire occurrence.
 4. Enforce a dedicated input limit when declared.
 5. Clamp the output reservation against the shared context window with a safety margin.
 6. Reconcile fixed reasoning budgets with the final reservation.
@@ -85,7 +92,7 @@ Codebase graph tracing found exactly two production callers of the centralized c
 
 ## Verification
 
-- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **427 passed, 11 skipped, 7 existing todos, 0 failed**.
+- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **428 passed, 11 skipped, 7 existing todos, 0 failed**.
 - Repository typecheck: **13/13 tasks successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
@@ -93,7 +100,7 @@ Codebase graph tracing found exactly two production callers of the centralized c
 - Targeted oxlint: **0 errors**; warnings remain repository debt.
 - Prettier: all changed files pass except `provider/provider.ts` and `provider/transform.ts`; both fail identically at `origin/main`, so no unrelated whole-file rewrite was introduced.
 - `git diff --check origin/main...HEAD`: passed.
-- Final request-shape Codex Security scans: complete coverage, **0 findings**.
+- Final request-shape Codex Security scans, including `cedd33a866..d13f784786`: complete coverage, **0 findings**.
 
 ## Operational caveats
 
