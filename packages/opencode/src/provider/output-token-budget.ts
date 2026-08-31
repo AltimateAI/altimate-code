@@ -335,7 +335,7 @@ export function estimateInputTokens(input: {
     total += estimateTextTokens(tools.text)
   }
 
-  if (input.instructions !== undefined && input.instructions !== system) {
+  if (input.instructions !== undefined) {
     const serialized = serializeForEstimate(input.instructions)
     total += estimateTextTokens(serialized.text) + serialized.mediaTokens
   }

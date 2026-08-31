@@ -4819,6 +4819,14 @@ describe("output token budget", () => {
     expect(complete).toBeGreaterThan(base + 1_000)
   })
 
+  test("counts identical system and instructions as separate wire occurrences", () => {
+    const prompt = "same provider instruction ".repeat(1_000)
+    const systemOnly = estimateInputTokens({ system: [prompt], messages: [] })
+    const both = estimateInputTokens({ system: [prompt], messages: [], instructions: prompt })
+
+    expect(both).toBeGreaterThan(systemOnly * 1.8)
+  })
+
   test("does not tokenize encoded media bytes as literal prompt text", () => {
     const estimated = estimateInputTokens({
       system: [],

@@ -529,7 +529,7 @@ describe("E2E: chat.params maxOutputTokens hook (cycle 6)", () => {
     // altimate_change start — the plugin result is now clamped before streamText receives it
     expect(content).toMatch(/requested:\s*params\.maxOutputTokens/)
     expect(content).toMatch(/const maxOutputTokens = clampOutputTokens/)
-    expect(content).toMatch(/return streamText\([\s\S]*?maxOutputTokens,/)
+    expect(content).toMatch(/return streamText\([\s\S]*?(?<![.\w])maxOutputTokens,/)
     // altimate_change end
   })
 
