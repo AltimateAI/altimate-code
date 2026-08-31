@@ -1,7 +1,7 @@
 // Fork-only helpers for the `run` command:
 //   - honest turn accounting: compaction-machinery steps must not consume the
 //     --max-turns budget. `step-start` parts carry only messageID/sessionID, so
-//     the owning message's agent is resolved via a lookup populated from
+//     the owning message's summary flag is resolved via a lookup populated from
 //     `message.updated` events (the assistant message row is persisted — and its
 //     event published — before its first step-start part streams).
 //   - dual-attribution termination logging: every run records TWO independent
@@ -55,7 +55,7 @@ export function createRecoverableOverflowTraceErrors() {
 // challenge, so instruction and detection can never drift apart.
 
 export function create() {
-  const agents = new Map<string, string>()
+  const summaryMessages = new Set<string>()
   let turnCount = 0
   let lastFinishReason: string | undefined
   // altimate_change start — upstream_fix: onText and onStepFinish are
@@ -96,13 +96,14 @@ export function create() {
   // altimate_change end
 
   function isCompactionStep(messageID: string) {
-    return agents.get(messageID) === "compaction"
+    return summaryMessages.has(messageID)
   }
 
   return {
-    /** Record an assistant message's agent so later part events can be attributed. */
-    onAssistantMessage(info: { id: string; agent?: string }) {
-      agents.set(info.id, info.agent ?? "")
+    /** Record whether an assistant message is actual compaction machinery. */
+    onAssistantMessage(info: { id: string; agent?: string; summary?: boolean }) {
+      if (info.summary === true) summaryMessages.add(info.id)
+      else summaryMessages.delete(info.id)
     },
     isCompactionStep,
     /**

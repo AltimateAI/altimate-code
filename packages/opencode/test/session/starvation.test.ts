@@ -81,9 +81,15 @@ describe("config defaults (annotate-only ships by default)", () => {
     expect(cfg.mode).toBe("annotate")
   })
 
-  test("plan/review agents are exempt by default", () => {
+  test("plan and both review agent spellings are exempt by default", () => {
     expect(cfg.exemptAgents).toContain("plan")
     expect(cfg.exemptAgents).toContain("review")
+    expect(cfg.exemptAgents).toContain("reviewer")
+    expect(SessionStarvation.resolveGate({ config: cfg, runMode: true, agent: "reviewer", summary: false })).toEqual({
+      exempt: true,
+      tracks: false,
+      armed: false,
+    })
   })
 
   test("thresholds are config-exposed and overridable", () => {

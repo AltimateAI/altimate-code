@@ -86,9 +86,7 @@ function strength(kind: string): number {
 export function register(sessionID: string, directive: Directive, generation?: Generation): void {
   const entry = bucket(sessionID, generation)
   if (!entry) return
-  const existing = entry.directives.findIndex(
-    (d) => d.source === directive.source && d.kind === directive.kind,
-  )
+  const existing = entry.directives.findIndex((d) => d.source === directive.source && d.kind === directive.kind)
   if (existing >= 0) entry.directives[existing] = directive
   else entry.directives.push(directive)
 }
@@ -97,6 +95,18 @@ export function register(sessionID: string, directive: Directive, generation?: G
 /** Pending directives (test/telemetry visibility only). */
 export function pending(sessionID: string): readonly Directive[] {
   return pendingBySession.get(sessionID)?.directives ?? []
+}
+
+/** Drop one detector's stale candidates without consuming directives from
+ *  other sources. A mode/exemption change can disarm starvation between the
+ *  registration step and delivery, while termination or budget directives
+ *  for that same turn remain valid. */
+export function discardSource(sessionID: string, source: Source, generation?: Generation): void {
+  const entry = pendingBySession.get(sessionID)
+  if (!entry || (generation !== undefined && entry.generation !== generation)) return
+  entry.directives = entry.directives.filter((directive) => directive.source !== source)
+  if (entry.directives.length === 0 && entry.generation === undefined) pendingBySession.delete(sessionID)
+  else store(sessionID, entry)
 }
 
 /** Return the single highest-precedence directive and clear ALL pending

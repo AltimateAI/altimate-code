@@ -74,7 +74,9 @@ export const DEFAULTS: ResolvedConfig = {
   doomLoopThreshold: 3,
   pollingThresholdMultiplier: 5,
   pollingPattern: "\\b(sleep|watch|status)\\b",
-  exemptAgents: ["plan", "review"],
+  // `reviewer` is the built-in read-only agent. Keep `review` for existing
+  // user-defined configs and older clients that used that spelling.
+  exemptAgents: ["plan", "review", "reviewer"],
   // Generated/regenerating artifacts: re-reading these is expected to see new
   // content on every build, so unchanged-read annotation must not fire.
   generatedPathPatterns: [

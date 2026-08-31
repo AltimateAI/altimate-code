@@ -338,6 +338,13 @@ export namespace SessionProcessor {
         })
         const starvation = sbGate.tracks ? SessionStarvation.forSession(input.sessionID, sbConfig) : undefined
         const sbArmed = sbGate.armed
+        // A directive may have been registered on the previous step while the
+        // breaker was armed. If this working turn is now off, annotate-only, or
+        // agent-exempt, discard only that stale source; compaction summaries
+        // intentionally leave all pending directives for the next working turn.
+        if (!input.assistantMessage.summary && !sbArmed) {
+          NudgeArbiter.discardSource(input.sessionID, "starvation_breaker", input.nudgeGeneration)
+        }
         const sbMode = sbConfig.mode === "armed" ? ("armed" as const) : ("annotate" as const)
         let starvationStop = false
         // altimate_change start — per-tool-result dispatch cap, resolved once

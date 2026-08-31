@@ -305,17 +305,24 @@ export namespace SessionCompaction {
     const context = input.model.limit.context
     if (context === 0) return 0
 
+    // Accept the V2 retained-tail name directly as well as the legacy V1 field.
+    // The main config path currently migrates V1, but callers supplying an
+    // already-V2 object must not silently lose keep.tokens.
+    const compaction = input.cfg.compaction as
+      | (NonNullable<ConfigInfo["compaction"]> & { keep?: { tokens?: number } })
+      | undefined
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
-    const reserved = input.cfg.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, maxOutput)
+    const reserved = compaction?.reserved ?? Math.min(COMPACTION_BUFFER, maxOutput)
     const usable = input.model.limit.input
       ? Math.max(0, input.model.limit.input - reserved)
       : Math.max(0, context - maxOutput)
     const candidate =
-      input.cfg.compaction?.preserve_recent_tokens ??
+      compaction?.keep?.tokens ??
+      compaction?.preserve_recent_tokens ??
       Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable * 0.25)))
     // Clamp (applies to explicit config too — the no-churn invariant is
     // unconditional): tail budget + ledger budget <= fraction of the trigger.
-    const triggerHeadroom = Math.max(input.cfg.compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
+    const triggerHeadroom = Math.max(compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= triggerHeadroom) return candidate // compaction disabled entirely; no trigger to protect
     const threshold = overflowThreshold({
@@ -958,7 +965,17 @@ export namespace SessionCompaction {
 
   /** Path-like tokens (contain a dot or slash) — the artifact names a claim can be checked against. */
   function artifactTokens(text: string): string[] {
-    return (text.match(/[A-Za-z0-9_@-]*[./][A-Za-z0-9_./-]+/g) ?? []).filter((t) => t.length >= 3 && /[A-Za-z]/.test(t))
+    // URLs and release identifiers are context, not filesystem evidence. If a
+    // verified claim also mentions its docs URL or runtime version, treating
+    // those tokens as artifacts makes the all-artifacts check demote the claim.
+    const scrubbed = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>{}[\]"'`]+/gi, " ")
+    return (scrubbed.match(/[A-Za-z0-9_@-]*[./][A-Za-z0-9_./-]+/g) ?? []).filter(
+      (token) =>
+        token.length >= 3 &&
+        /[A-Za-z]/.test(token) &&
+        !/^v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$/i.test(token) &&
+        !/@v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$/i.test(token),
+    )
   }
 
   function itemCorroborated(text: string, ledger: Ledger): boolean {

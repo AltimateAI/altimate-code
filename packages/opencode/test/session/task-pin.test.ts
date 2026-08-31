@@ -256,6 +256,19 @@ describe("buildPinnedTask — verbatim under cap, head+tail + contract card over
     expect(out!).toContain("final_output.csv")
   })
 
+  test("truncation boundaries never split Unicode surrogate pairs", () => {
+    const text = "😀".repeat(2_000)
+    const corrupt = (value: string) => new TextDecoder().decode(new TextEncoder().encode(value)) !== value
+
+    // Exercise both the head+tail path and the tiny-budget prefix fallback.
+    for (const capTokens of [100, 40]) {
+      const out = SessionPrompt.buildPinnedTask({ text, capTokens, cardCapTokens: 0 })
+      expect(out).toBeDefined()
+      expect(Token.estimate(out!)).toBeLessThanOrEqual(capTokens)
+      expect(corrupt(out!)).toBe(false)
+    }
+  })
+
   test("contract card entries are verbatim substrings of the task — never paraphrased", () => {
     const card = SessionPrompt.extractContractCard(longTask, 500)
     expect(card).not.toBe("")

@@ -663,6 +663,12 @@ describe("small-window retained-content clamp", () => {
     expect(budget).toBe(8_000)
   })
 
+  test("an already-V2 keep.tokens value configures the retained tail budget", () => {
+    const model = createModel({ context: 200_000, output: 32_000 })
+    const cfg = { compaction: { keep: { tokens: 3_500 } } } as any
+    expect(SessionCompaction.preserveRecentBudget({ cfg, model })).toBe(3_500)
+  })
+
   // altimate_change start — PR #1171 review: the ledger reservation was taken out
   // of the tail budget even with both ledger and carry disabled, so a large
   // ledger_max_tokens could starve the retained tail for text never rendered.

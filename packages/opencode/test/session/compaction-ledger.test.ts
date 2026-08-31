@@ -564,6 +564,26 @@ describe("SessionCompaction.corroborateCarry", () => {
     expect(out[0]!.status).toBe("claimed, unverified")
   })
 
+  test("URLs and version identifiers do not demote an otherwise corroborated artifact", () => {
+    const out = SessionCompaction.corroborateCarry(
+      [
+        {
+          text: "created models/orders.sql for v2.1.0; docs at https://docs.example.com/releases/v2.1.0",
+        },
+      ],
+      ledger,
+    )
+    expect(out[0]!.status).toBe("verified")
+  })
+
+  test("filtering URL and version noise does not corroborate a missing real artifact", () => {
+    const out = SessionCompaction.corroborateCarry(
+      [{ text: "created reports/missing.csv for package@2.1.0; see https://example.com/changelog" }],
+      ledger,
+    )
+    expect(out[0]!.status).toBe("claimed, unverified")
+  })
+
   test("commands alone never corroborate an artifact, even with exit zero", () => {
     const out = SessionCompaction.corroborateCarry(
       [{ text: "exported report.csv" }, { text: "validated broken_thing.json" }],

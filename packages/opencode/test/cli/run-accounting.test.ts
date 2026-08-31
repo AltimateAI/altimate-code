@@ -33,12 +33,19 @@ describe("RunAccounting turn accounting", () => {
   test("excludes compaction-machinery steps from turnCount", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })
-    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction" })
+    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
     expect(acc.onStepStart("msg_work")).toBe(true)
     expect(acc.onStepStart("msg_compact")).toBe(false)
     expect(acc.onStepStart("msg_compact")).toBe(false)
     expect(acc.onStepStart("msg_work")).toBe(true)
     expect(acc.turnCount).toBe(2)
+  })
+
+  test("an explicitly selected agent named compaction still consumes the turn budget", () => {
+    const acc = RunAccounting.create()
+    acc.onAssistantMessage({ id: "msg_user_agent", agent: "compaction", summary: false })
+    expect(acc.onStepStart("msg_user_agent")).toBe(true)
+    expect(acc.turnCount).toBe(1)
   })
 
   test("a step whose owning message is unknown is counted (conservative default)", () => {
@@ -50,7 +57,7 @@ describe("RunAccounting turn accounting", () => {
   test("compaction steps do not perturb termination attribution", () => {
     const acc = RunAccounting.create()
     acc.onAssistantMessage({ id: "msg_work", agent: "build" })
-    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction" })
+    acc.onAssistantMessage({ id: "msg_compact", agent: "compaction", summary: true })
     acc.onStepFinish("msg_work", "stop")
     // compaction machinery finishing later must not overwrite the model's reason
     acc.onStepFinish("msg_compact", "tool-calls")

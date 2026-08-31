@@ -107,6 +107,23 @@ describe("NudgeArbiter one-directive-per-turn contract", () => {
     expect(NudgeArbiter.pending(SID)).toHaveLength(0)
   })
 
+  test("discardSource removes stale starvation while preserving other sources", () => {
+    const generation = NudgeArbiter.begin(SID)
+    NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "stale" }, generation)
+    NudgeArbiter.register(
+      SID,
+      { source: "termination_challenge", kind: "completion_nudge", text: "still valid" },
+      generation,
+    )
+
+    NudgeArbiter.discardSource(SID, "starvation_breaker", generation)
+
+    expect(NudgeArbiter.pending(SID)).toEqual([
+      { source: "termination_challenge", kind: "completion_nudge", text: "still valid" },
+    ])
+    expect(NudgeArbiter.take(SID, generation)?.text).toBe("still valid")
+  })
+
   test("stale callbacks cannot register or clear a newer loop generation", () => {
     const oldGeneration = NudgeArbiter.begin(SID)
     NudgeArbiter.register(SID, { source: "starvation_breaker", kind: "starvation", text: "old" }, oldGeneration)

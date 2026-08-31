@@ -2908,6 +2908,10 @@ export namespace SessionPrompt {
     if (input.capTokens <= 0) return undefined
     const text = input.text
     if (Token.estimate(text) <= input.capTokens) return text
+    // Slice by Unicode code points, not UTF-16 code units. Either head/tail
+    // boundary can otherwise bisect a surrogate pair and persist invalid text
+    // in the pinned task.
+    const characters = Array.from(text)
     // Over cap: middle truncation alone deletes exactly the mid-prompt facts
     // the evidence shows decaying — pair verbatim head+tail with the card.
     const cardCap = Math.min(input.cardCapTokens, Math.floor(input.capTokens / 2))
@@ -2921,7 +2925,11 @@ export namespace SessionPrompt {
     let charBudget = Math.floor(bodyBudget * 3.7)
     while (charBudget >= 100) {
       const half = Math.floor(charBudget / 2)
-      const candidate = text.slice(0, half) + marker + text.slice(text.length - half) + (card ? "\n\n" + card : "")
+      const candidate =
+        characters.slice(0, half).join("") +
+        marker +
+        characters.slice(characters.length - half).join("") +
+        (card ? "\n\n" + card : "")
       if (Token.estimate(candidate) <= input.capTokens) return candidate
       charBudget = Math.floor(charBudget * 0.85)
     }
@@ -2929,9 +2937,9 @@ export namespace SessionPrompt {
     // A positive body budget must always be renderable; otherwise compaction
     // could omit the task from its summary while the corresponding pin silently
     // disappears. Fall back to the longest verbatim prefix that fits.
-    let prefixLength = Math.min(text.length, Math.max(1, Math.ceil(input.capTokens * 4)))
+    let prefixLength = Math.min(characters.length, Math.max(1, Math.ceil(input.capTokens * 4)))
     while (prefixLength > 0) {
-      const prefix = text.slice(0, prefixLength)
+      const prefix = characters.slice(0, prefixLength).join("")
       if (Token.estimate(prefix) <= input.capTokens) return prefix
       prefixLength = Math.floor(prefixLength * 0.75)
     }
