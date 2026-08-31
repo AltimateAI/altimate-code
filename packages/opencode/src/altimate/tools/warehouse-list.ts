@@ -24,13 +24,10 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       // altimate_change start — workspace precedence.
       // Annotated here, in this tool's own markdown, rather than on WarehouseInfo:
       // that struct is shared by every consumer of `warehouse.list`, and a field
-      // added there would surface far beyond this listing.
-      const precedence = Precedence.forSession(ctx.sessionID)
-      const notes = new Map<string, string>()
-      for (const wh of warehouses) {
-        const note = Precedence.warehouseListNote(precedence, wh.type)
-        if (note) notes.set(wh.name, note)
-      }
+      // added there would surface far beyond this listing. The notes re-validate the
+      // snapshot against the current binding the way the query tools do, so a
+      // re-linked project is not told its rows are served by the old workspace.
+      const notes = await Precedence.warehouseListNotes(ctx.sessionID, warehouses)
       const shadowedCount = notes.size
 
       const lines: string[] = shadowedCount

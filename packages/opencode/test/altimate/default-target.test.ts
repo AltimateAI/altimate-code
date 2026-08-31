@@ -11,11 +11,22 @@
 // through to the registry — which is exactly the behaviour to pin down, because the
 // registry branch is what decides the default for the majority of users.
 //
+// What this suite does NOT reach: the dbt branch of `resolveDefaultTarget` —
+// `adapterTypeFromManifest`, the `getAdapterType?.()` / "unknown" coalescing and the
+// construction of `{ source: "dbt", type, fallback }`. Every assertion below that
+// tolerates a `dbt` source is written for a run inside a dbt project and takes its
+// registry arm here. Treat that branch as unexercised by CI, not as covered.
+//
 // Concurrency contract matches dispatcher.test.ts: the connection registry is a
 // process-wide singleton mutated here via `setConfigs`/`reset`, which is safe under
 // bun's default sequential file execution.
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { registerAll, resolveDefaultTarget, resetDbtAdapter } from "../../src/altimate/native/connections/register"
+import {
+  dbtAdapterInternals,
+  registerAll,
+  resolveDefaultTarget,
+  resetDbtAdapter,
+} from "../../src/altimate/native/connections/register"
 import { Dispatcher } from "../../src/altimate/native"
 import * as Registry from "../../src/altimate/native/connections/registry"
 
@@ -34,8 +45,11 @@ beforeEach(() => {
 
 afterEach(() => {
   resetDbtAdapter()
+  delete dbtAdapterInternals.readConfig
   Registry.reset()
 })
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 describe("resolveDefaultTarget — registry branch", () => {
   test("reports the first configured connection, which is what the handlers use", async () => {
@@ -75,6 +89,7 @@ describe("resolveDefaultTarget — the dbt fallback is reported, not hidden", ()
     Registry.setConfigs({ first: { type: "snowflake", account: "a" } as never })
     const target = await resolveDefaultTarget("sql.execute")
     if (target.source === "dbt") {
+      // Not taken in this suite (no dbt project) — kept for a run inside one.
       expect(target.fallback).toEqual({ type: "snowflake", name: "first" })
     } else {
       // No dbt project here, so this resolves to the registry directly — same target.
@@ -85,6 +100,7 @@ describe("resolveDefaultTarget — the dbt fallback is reported, not hidden", ()
   test("no fallback is reported when the registry is empty", async () => {
     Registry.setConfigs({})
     const target = await resolveDefaultTarget("sql.execute")
+    // The `dbt` arm is not taken in this suite (no dbt project).
     if (target.source === "dbt") expect(target.fallback).toBeUndefined()
     else expect(target.source).toBe("none")
   })
@@ -114,6 +130,11 @@ describe("resolveDefaultTarget — per-operation resolution", () => {
     for (const target of results) {
       expect(target).toMatchObject({ source: "registry", name: "only" })
     }
+    // Only `sql.execute` consults dbt, and the negative answer is cached: one attempt
+    // across the three ops, and none on a second pass.
+    expect(dbtAdapterInternals.attempts).toBe(1)
+    await resolveDefaultTarget("sql.execute")
+    expect(dbtAdapterInternals.attempts).toBe(1)
   })
 
   test("concurrent execute resolutions share one adapter attempt", async () => {
@@ -123,6 +144,36 @@ describe("resolveDefaultTarget — per-operation resolution", () => {
     Registry.setConfigs({ only: { type: "snowflake", account: "a" } as never })
     const [a, b] = await Promise.all([resolveDefaultTarget("sql.execute"), resolveDefaultTarget("sql.execute")])
     expect(a).toEqual(b)
+    expect(dbtAdapterInternals.attempts).toBe(1)
+  })
+})
+
+describe("adapter creation stays single-flight across a reset", () => {
+  test("a stale attempt settling does not release the slot a newer attempt owns", async () => {
+    // The `finally` used to clear the in-flight slot unconditionally. Reset while attempt
+    // A is in flight, start B, and A's settle then cleared B's slot — the next caller
+    // built a third adapter behind B's back. The slot is released only by its owner.
+    const gates: Array<() => void> = []
+    dbtAdapterInternals.readConfig = () => new Promise((resolve) => gates.push(() => resolve(null)))
+    Registry.setConfigs({ only: { type: "duckdb", path: ":memory:" } as never })
+
+    const a = resolveDefaultTarget("sql.execute")
+    await tick()
+    expect(gates).toHaveLength(1)
+    resetDbtAdapter()
+    const b = resolveDefaultTarget("sql.execute")
+    await tick()
+    expect(gates).toHaveLength(2)
+    expect(dbtAdapterInternals.inflight()).toBe(true)
+
+    gates[0]()
+    await a
+    // B is still in flight; A's settle must not have released its slot.
+    expect(dbtAdapterInternals.inflight()).toBe(true)
+
+    gates[1]()
+    await b
+    expect(dbtAdapterInternals.inflight()).toBe(false)
   })
 })
 

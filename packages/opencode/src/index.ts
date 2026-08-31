@@ -116,7 +116,9 @@ let cli = yargs(args)
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
-    // altimate_change start - workspace precedence escape hatch
+    // altimate_change start - workspace precedence escape hatch. Process-wide, not
+    // per session: an env var inherited by child processes, and under `serve` it
+    // covers every session that process hosts.
     if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
     // altimate_change end
 

@@ -25,6 +25,14 @@
 //  4. Redirect. A shadowed call returns a result naming the exact engine key. Nothing
 //     executes and there is no fallback.
 //
+// AUDIT BOUNDARY. Precedence covers the three native tools above — `sql_execute`,
+// `sql_explain`, `schema_inspect` — and annotates `warehouse_list`. Other native
+// surfaces that run SQL on a local connection (the PII detector, schema tags,
+// data-diff, schema-sync, the FinOps modules) are NOT gated: the engine serves no
+// equivalent capability to redirect them to, so they keep running locally and
+// unaudited even for a warehouse type the engine serves. A known limit, stated here
+// rather than left implied.
+//
 // SERVER-SIDE ONLY. The TUI plugin runtime loads plugins in a separate module realm
 // in the same process: an import from there is a different instance, sharing neither
 // module state nor `globalThis`. Importing this module from a plugin would typecheck,
@@ -89,7 +97,7 @@ function engineToolFor(capability: Capability, integration: string): string {
 /** Engine integration id → canonical local driver type. The id is the engine's name
  * for the integration (`postgresql`); the driver type is what local connections carry
  * (`postgres`). Only warehouse integrations appear here. */
-const INTEGRATION_TYPE: Record<string, string> = {
+export const INTEGRATION_TYPE: Readonly<Record<string, string>> = {
   snowflake: "snowflake",
   bigquery: "bigquery",
   postgresql: "postgres",
@@ -144,6 +152,8 @@ export const precedenceInternals: {
   attributedTo?: () => Promise<string | null>
   attachOutcome?: () => Promise<Outcome | undefined>
   announce?: (line: string) => Promise<void>
+  /** Where the module's warnings go, so tests can observe them; production logs. */
+  warn?: (message: string, data: Record<string, unknown>) => void
   /** The config read and invalidation behind the real `attributedTo`, so its refusal
    * paths can be exercised without replacing the whole attribution. */
   config?: {
@@ -169,6 +179,7 @@ function remember(sessionID: string, value: Precedence): void {
     announced.delete(oldest.value)
     publishing.delete(oldest.value)
     publishQueue.delete(oldest.value)
+    unrecognisedWarned.delete(oldest.value)
   }
 }
 
@@ -232,6 +243,33 @@ const publishing = new Map<string, { line: string; routed: boolean }>()
  * while the newer one is recorded as the session's state. */
 const publishQueue = new Map<string, Promise<void>>()
 
+/** Engine keys shaped like a warehouse execute tool that match no integration this
+ * module knows, already reported per session. `INTEGRATION_TYPE` and `engineToolFor`
+ * are hand-maintained: a new engine integration, or a renamed execute tool, would
+ * otherwise materialise and shadow nothing with no trace anywhere — fail-safe, but
+ * silent, which the opening principle rules out. */
+const unrecognisedWarned = new Map<string, Set<string>>()
+
+const WAREHOUSE_EXECUTE_KEY = /^(.+?)_(execute_database_query|execute_sql)$/
+
+function warnUnrecognised(sessionID: string, present: Set<string>): void {
+  for (const key of present) {
+    const match = WAREHOUSE_EXECUTE_KEY.exec(key)
+    if (!match || match[1] in INTEGRATION_TYPE) continue
+    let seen = unrecognisedWarned.get(sessionID)
+    if (!seen) {
+      seen = new Set()
+      unrecognisedWarned.set(sessionID, seen)
+    }
+    if (seen.has(key)) continue
+    seen.add(key)
+    const message = "the engine serves a warehouse execute tool this module does not know; it shadows nothing"
+    const data = { sessionID, key, integration: match[1] }
+    if (precedenceInternals.warn) precedenceInternals.warn(message, data)
+    else log.warn(message, data)
+  }
+}
+
 /** Said when routing stops entirely, which `inventoryLine` renders as an empty string
  * because there is nothing left to enumerate. Silence is the wrong answer only here:
  * the session was previously told its calls were routed. */
@@ -263,7 +301,8 @@ async function announce(line: string): Promise<boolean> {
 }
 
 /** Mechanism 6 — the escape hatch. `--integrations=local` (or the env var) turns
- * shadowing off for the whole session. */
+ * shadowing off for the whole process — it is `process.env.ALTIMATE_INTEGRATIONS`,
+ * inherited by child processes, and under `serve` it covers every session. */
 export function escapeHatchOn(): boolean {
   return CoreFlag.ALTIMATE_INTEGRATIONS_LOCAL
 }
@@ -408,6 +447,7 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   // Mechanism 1 — what actually materialised, never what was declared.
   const present = engineToolKeys(tools)
   if (present.size === 0) return EMPTY("nothing-materialised", workspaceName)
+  warnUnrecognised(sessionID, present)
 
   // Mechanism 2 — capability by capability, only where the key is really there.
   const shadowed = new Map<string, Map<Capability, ShadowEntry>>()
@@ -457,6 +497,8 @@ export function resetForTests(): void {
   delete precedenceInternals.attributedTo
   delete precedenceInternals.attachOutcome
   delete precedenceInternals.config
+  delete precedenceInternals.warn
+  unrecognisedWarned.clear()
 }
 
 export interface RedirectResult {
@@ -535,19 +577,30 @@ function redirectFor(
         ...(viaDbtFallback ? { via: "dbt-fallback" } : {}),
       },
       output: viaDbtFallback
-        ? `Not run locally. This call names no warehouse, so it resolves through the dbt project — and if dbt ` +
-          `returns nothing it falls back to the local connection \`${connection}\`, which workspace ` +
-          `"${workspaceName}" serves through its integration engine. Whether it lands on dbt or on that ` +
-          `connection is only known once it runs, so it is not run.\n\n` +
-          `Call \`${entry.modelKey}\` instead. If you meant the dbt path specifically, either name the ` +
-          `warehouse you want (\`warehouse=${connection}\` routes to the engine; any unserved connection runs ` +
-          `locally), or restart with \`--integrations=local\` to keep every connection on the local drivers.`
+        ? `Not run locally. This call names no warehouse, so it would try the dbt project first and, if dbt ` +
+          `yields nothing, fall back to the local connection \`${connection}\` — a connection workspace ` +
+          `"${workspaceName}" serves through its integration engine. Which of the two it lands on is only ` +
+          `known once it runs, so it is not run.\n\n` +
+          `Call \`${entry.modelKey}\` to run it through the workspace. The dbt path cannot be chosen from ` +
+          `this tool: a \`warehouse=\` argument names a local connection, never the dbt profile. To run on ` +
+          `dbt, restart with \`--integrations=local\`, which keeps every connection on the local drivers ` +
+          `(dbt included) for the whole process.`
         : `Not run locally. Workspace "${workspaceName}" serves ${entry.integration} through its integration engine, ` +
           `so this connection is served by \`${entry.modelKey}\`.\n\n` +
           `Call \`${entry.modelKey}\` instead. ` +
-          `To use the local connection for this session, restart with \`--integrations=local\`.`,
+          `To keep every connection on the local drivers, restart with \`--integrations=local\` (it applies ` +
+          `to the whole process).`,
     },
   }
+}
+
+/** Does the project still bind the workspace this snapshot was derived for? Re-linking
+ * mid-session is supported, so a snapshot can name a workspace the project has since
+ * left; anything about to act on or report from that snapshot asks this first. The
+ * binding is a local cache read. */
+export async function snapshotCurrent(precedence: Precedence): Promise<boolean> {
+  if (!precedence.workspaceId) return true
+  return (await currentBinding())?.datamateId === Number(precedence.workspaceId)
 }
 
 /**
@@ -607,11 +660,10 @@ async function checkUnsafe(sessionID: string, capability: Capability, warehouse?
     return RUN
   }
 
-  // Re-linking mid-session is supported, so this snapshot can name a workspace the
-  // project has since left — and a redirect naming it would send the call to that
-  // workspace's engine, with its credentials. The binding is a local cache read, and
-  // this only runs on the path that is about to redirect.
-  if (precedence.workspaceId && (await currentBinding())?.datamateId !== Number(precedence.workspaceId)) {
+  // A redirect naming a workspace the project has since left would send the call to
+  // that workspace's engine, with its credentials. This only runs on the path that is
+  // about to redirect.
+  if (!(await snapshotCurrent(precedence))) {
     return {
       notice:
         `Not routed through workspace "${precedence.workspaceName}": the project was re-linked while ` +
@@ -820,4 +872,26 @@ export function warehouseListNote(precedence: Precedence | undefined, warehouseT
   return (
     `${served.join("/")} via workspace ${precedence.workspaceName}` + (local.length ? `; ${local.join("/")} local` : "")
   )
+}
+
+/**
+ * The notes `warehouse_list` prints, keyed by connection name. Reads the session's
+ * snapshot and, like `check()`, first asks whether that snapshot is still about the
+ * bound workspace: after a mid-turn re-link the listing must stop claiming rows are
+ * served by a workspace the project has left, exactly as the query tools stop
+ * redirecting to it. A snapshot that no longer applies yields no notes at all.
+ */
+export async function warehouseListNotes(
+  sessionID: string,
+  warehouses: ReadonlyArray<{ name: string; type: string }>,
+): Promise<Map<string, string>> {
+  const notes = new Map<string, string>()
+  const precedence = bySession.get(sessionID)
+  if (!precedence?.enabled) return notes
+  if (!(await snapshotCurrent(precedence))) return notes
+  for (const wh of warehouses) {
+    const note = warehouseListNote(precedence, wh.type)
+    if (note) notes.set(wh.name, note)
+  }
+  return notes
 }

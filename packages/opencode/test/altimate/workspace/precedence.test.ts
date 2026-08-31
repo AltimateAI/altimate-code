@@ -6,6 +6,7 @@
 // booting an instance, reading config, or touching MCP state.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  INTEGRATION_TYPE,
   MAX_TRACKED_SESSIONS,
   check,
   decideForTarget,
@@ -18,7 +19,9 @@ import {
   precedenceInternals,
   refresh,
   resetForTests,
+  snapshotCurrent,
   warehouseListNote,
+  warehouseListNotes,
 } from "../../../src/altimate/workspace/precedence"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { canonicalType } from "../../../src/altimate/native/connections/registry"
@@ -376,9 +379,11 @@ describe("resetForTests", () => {
   test("releases every seam, so one test's overrides cannot leak into the next", () => {
     precedenceInternals.attachOutcome = async () => undefined
     precedenceInternals.config = { get: async () => ({}), invalidate: async () => {} }
+    precedenceInternals.warn = () => {}
     resetForTests()
     expect(precedenceInternals.attachOutcome).toBeUndefined()
     expect(precedenceInternals.config).toBeUndefined()
+    expect(precedenceInternals.warn).toBeUndefined()
   })
 })
 
@@ -405,6 +410,39 @@ describe("mechanism 2 — capability-scoped, not type-scoped", () => {
   test("databricks execute is named by its own convention", async () => {
     const precedence = await refresh(SESSION, { datamate_databricks_execute_sql: {} })
     expect(precedence.shadowed.get("databricks")?.get("sql_execute")?.modelKey).toBe("datamate_databricks_execute_sql")
+  })
+
+  test("a databricks connection redirects execute to that tool, and nothing else", async () => {
+    Registry.setConfigs({ dbx_conn: { type: "databricks", host: "h" } as never })
+    await refresh(SESSION, { datamate_databricks_execute_sql: {} })
+    const execute = await check(SESSION, "sql_execute", "dbx_conn")
+    expect(execute.redirect?.metadata.redirect_to).toBe("datamate_databricks_execute_sql")
+    // Execute-only: explain and inspect keep running locally, and silently, because
+    // that is a considered "not served", not an unknown.
+    expect(await check(SESSION, "sql_explain", "dbx_conn")).toEqual({})
+    expect(await check(SESSION, "schema_inspect", "dbx_conn")).toEqual({})
+  })
+
+  test("every integration this module knows maps onto a canonical local driver type", () => {
+    // `INTEGRATION_TYPE` is hand-maintained against `DRIVER_MAP`; a value that does not
+    // canonicalise to itself could never match a local connection and would shadow
+    // nothing without anyone noticing.
+    for (const [integration, type] of Object.entries(INTEGRATION_TYPE)) {
+      expect({ integration, canonical: canonicalType(type) }).toEqual({ integration, canonical: type })
+    }
+  })
+
+  test("an execute tool from an integration this module does not know is reported once and shadows nothing", async () => {
+    const warned: Array<Record<string, unknown>> = []
+    precedenceInternals.warn = (_message, data) => void warned.push(data)
+    const tools = { ...SNOWFLAKE_TOOLS, datamate_redshift_execute_database_query: {} }
+    const precedence = await refresh(SESSION, tools)
+    expect(precedence.shadowed.has("redshift")).toBe(false)
+    expect((await check(SESSION, "sql_execute", "rs_conn")).redirect).toBeUndefined()
+    expect(warned).toEqual([{ sessionID: SESSION, key: "redshift_execute_database_query", integration: "redshift" }])
+    // Re-derived every turn, reported once.
+    await refresh(SESSION, tools)
+    expect(warned).toHaveLength(1)
   })
 
   test("a type with no materialised integration is untouched", async () => {
@@ -874,6 +912,24 @@ describe("a snapshot must not outlive the binding that justified it", () => {
     expect((await check(SESSION, "sql_execute", "local_snow")).redirect).toBeDefined()
   })
 
+  test("warehouse_list stops claiming rows are served once the project is re-linked", async () => {
+    // The listing reads the same snapshot the query tools do, so it must re-validate it
+    // the same way: a row still marked "via workspace" after a re-link claims a routing
+    // the next call will refuse.
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const rows = [
+      { name: "local_snow", type: "snowflake" },
+      { name: "local_duck", type: "duckdb" },
+    ]
+    expect([...(await warehouseListNotes(SESSION, rows)).keys()]).toEqual(["local_snow"])
+
+    precedenceInternals.binding = async () => ({ datamateId: 77, datamateName: "somewhere-else" })
+    expect(await snapshotCurrent(forSession(SESSION)!)).toBe(false)
+    // Listing and call agree: neither claims the old workspace.
+    expect((await warehouseListNotes(SESSION, rows)).size).toBe(0)
+    expect((await check(SESSION, "sql_execute", "local_snow")).notice).toContain("re-linked")
+  })
+
   test("a session whose snapshot was evicted says so rather than running silently", async () => {
     // Eviction can drop an entry between tool resolution and the call. Returning a
     // bare "run" there is indistinguishable from a considered "not served", so a
@@ -959,7 +1015,7 @@ describe("default-target decisions — branch order", () => {
 })
 
 describe("mechanism 6 — the escape hatch", () => {
-  test("--integrations=local turns shadowing off for the session", async () => {
+  test("--integrations=local turns shadowing off for the whole process", async () => {
     process.env.ALTIMATE_INTEGRATIONS = "local"
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.enabled).toBe(false)

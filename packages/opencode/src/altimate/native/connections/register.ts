@@ -51,6 +51,16 @@ let dbtAdapter: any | null | undefined = undefined
 // becomes valid mid-session is still not retried.
 let dbtAdapterInflight: Promise<any | null> | undefined
 
+/** Test seams for the single-flight. Production leaves `readConfig` unset. */
+export const dbtAdapterInternals: {
+  /** Replaces the dbt config read, so a test can hold an attempt open. */
+  readConfig?: () => Promise<unknown>
+  /** Adapter creation attempts since the last reset — what single-flight bounds. */
+  attempts: number
+  /** Whether an attempt is currently in flight. */
+  inflight: () => boolean
+} = { attempts: 0, inflight: () => dbtAdapterInflight !== undefined }
+
 /**
  * Resolve the dbt adapter for this project, or null when there is no usable dbt
  * project. Idempotent, single-flight, and permanently negative once it has failed.
@@ -59,13 +69,20 @@ async function ensureDbtAdapter(): Promise<any | null> {
   if (dbtAdapter !== undefined) return dbtAdapter
   if (dbtAdapterInflight) return dbtAdapterInflight
 
-  dbtAdapterInflight = (async () => {
+  // The slot is released only by the attempt that owns it: `resetDbtAdapter()` mid-flight
+  // lets a second attempt start, and the first one's settle must not clear the second's
+  // slot — that would hand the next caller a third adapter behind the second's back.
+  let mine: Promise<any | null> | undefined
+  mine = (async () => {
+    dbtAdapterInternals.attempts += 1
     try {
       // Check if dbt config exists
       const { read: readDbtConfig } = await import(
         "../../../../../dbt-tools/src/config"
       )
-      const dbtConfig = await readDbtConfig()
+      const dbtConfig = dbtAdapterInternals.readConfig
+        ? ((await dbtAdapterInternals.readConfig()) as Awaited<ReturnType<typeof readDbtConfig>>)
+        : await readDbtConfig()
       if (!dbtConfig) {
         dbtAdapter = null
         return null
@@ -90,10 +107,11 @@ async function ensureDbtAdapter(): Promise<any | null> {
       dbtAdapter = null
       return null
     } finally {
-      dbtAdapterInflight = undefined
+      if (dbtAdapterInflight === mine) dbtAdapterInflight = undefined
     }
   })()
-  return dbtAdapterInflight
+  dbtAdapterInflight = mine
+  return mine
 }
 
 /** Where a `warehouse`-less call would actually go. */
@@ -244,6 +262,7 @@ export function resetDbtAdapter(): void {
   // altimate_change — drop any in-flight creation too, or a test that resets mid-flight
   // would still receive the previous adapter.
   dbtAdapterInflight = undefined
+  dbtAdapterInternals.attempts = 0
 }
 
 // ---------------------------------------------------------------------------
