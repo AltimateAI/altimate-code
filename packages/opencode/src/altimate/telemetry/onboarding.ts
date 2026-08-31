@@ -50,6 +50,8 @@ type OnboardingEventInput = Extract<
       | "provider_selected"
       | "big_pickle_confirm_shown"
       | "big_pickle_choice"
+      | "local_model_info_shown"
+      | "local_model_choice"
       | "gateway_device_code_issued"
       | "gateway_auth_completed"
       | "gateway_auth_failed"
@@ -127,6 +129,14 @@ export async function emit(event: EmitInput, sessionID?: string): Promise<void> 
   try {
     const stage = STAGE_FOR_EVENT[event.type]
     if (stage) advance(stage)
+    // upstream_fix: the local-model interstitial has no gateway/auth follow-up —
+    // the picker cannot run the multi-minute `altimate local` setup itself, so
+    // "acknowledge" hands the user a command and the dialog closes. Without this,
+    // a user who acknowledges and quits to run it separately is reported as
+    // ABANDONED at `model_picker`, as if they never made a choice — the same
+    // false-abandonment `provider_selected` guards against above, applied to the
+    // one curated row that never reaches the gateway/auth stages.
+    if (event.type === "local_model_choice" && event.choice === "acknowledge") advance("provider_setup")
     if (event.type === "onboarding_completed") completed = true
 
     // Resolve the ambient session BEFORE the await: a setContext() landing during init() would

@@ -35,6 +35,7 @@ altimate --agent analyst
 | `mcp`       | Model Context Protocol tools   |
 | `acp`       | Agent Communication Protocol   |
 | `models`    | List available models          |
+| `local`     | Set up and manage the certified local model server ([Local Mode](local.md)) |
 | `stats`     | Usage statistics               |
 | `export`    | Export session data            |
 | `import`    | Import session data            |

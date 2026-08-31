@@ -49,6 +49,24 @@ export namespace Retrieval {
     return process.env["ALTIMATE_TOOL_RETRIEVAL"] === "1"
   }
 
+  /**
+   * Compact a multi-sentence description to its first sentence (capped), for
+   * token-diet listings (e.g. the skills block on small-context local models).
+   * Items stay discoverable by name; the full description loads on invocation.
+   */
+  export function compactDescription(text: string | undefined, max = 160): string {
+    if (!text) return ""
+    const normalized = text.replace(/\s+/g, " ").trim()
+    // A terminator only ends the first sentence when followed by whitespace-then-
+    // uppercase (a new sentence starting) or the end of the string. This avoids
+    // mis-cutting on abbreviations ("e.g. run the linter") and decimals ("v2.0
+    // models"), which a bare "terminator followed by whitespace" test would stop
+    // at prematurely.
+    const sentence = normalized.match(/^.*?[.!?](?=\s+[A-Z]|\s*$)/)?.[0] ?? normalized
+    if (sentence.length <= max) return sentence
+    return sentence.slice(0, max - 1).trimEnd() + "…"
+  }
+
   function score(query: string, t: Tool): number {
     // Tokenize on alphanumerics + underscore so digits survive (e.g. "v2", "s3")
     // and hyphenated names split into matchable parts (e.g. "dbt-schema-verify").

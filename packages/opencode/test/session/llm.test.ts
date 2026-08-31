@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
-import type { ModelMessage } from "ai"
+import type { ModelMessage, Tool } from "ai"
 import { LLM } from "../../src/session/llm"
 import { Global } from "../../src/global"
 import { Instance } from "../../src/project/instance"
@@ -80,6 +80,52 @@ describe("session.llm.toolNamesFromMessages", () => {
       },
     ] as ModelMessage[]
     expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
+  })
+})
+
+// Harness plan W1.6 / item 3: stub injection must be skipped entirely when the call
+// exposes zero real tools (e.g. the compaction summarizer) — the provider-compat
+// fallback path for toolChoice "none".
+describe("session.llm.addHistoricalToolStubs", () => {
+  test("skips stub injection entirely when there are zero real tools", () => {
+    const tools: Record<string, Tool> = {}
+    const result = LLM.addHistoricalToolStubs(tools, new Set(["bash", "read"]))
+    expect(result).toBe(tools)
+    expect(Object.keys(tools)).toEqual([])
+  })
+
+  test("injects stubs for referenced tools missing from a non-empty tool set", () => {
+    const real = { description: "real bash" } as Tool
+    const tools: Record<string, Tool> = { bash: real }
+    LLM.addHistoricalToolStubs(tools, new Set(["bash", "old_mcp_tool"]))
+    expect(Object.keys(tools).sort()).toEqual(["bash", "old_mcp_tool"])
+    // Existing real tools are never overwritten.
+    expect(tools.bash).toBe(real)
+    expect(tools.old_mcp_tool.description).toContain("[Historical]")
+  })
+
+  test("is a no-op when every referenced tool already has a definition", () => {
+    const real = { description: "real bash" } as Tool
+    const tools: Record<string, Tool> = { bash: real }
+    LLM.addHistoricalToolStubs(tools, new Set(["bash"]))
+    expect(Object.keys(tools)).toEqual(["bash"])
+    expect(tools.bash).toBe(real)
+  })
+
+  test("treats a tool set containing only the SDK fallback 'invalid' tool as empty", () => {
+    const invalid = { description: "fallback for malformed tool calls" } as Tool
+    const tools: Record<string, Tool> = { invalid }
+    const result = LLM.addHistoricalToolStubs(tools, new Set(["old_mcp_tool"]))
+    expect(result).toBe(tools)
+    expect(Object.keys(tools)).toEqual(["invalid"])
+  })
+
+  test("still injects stubs for referenced tools when real tools sit alongside 'invalid'", () => {
+    const real = { description: "real bash" } as Tool
+    const invalid = { description: "fallback" } as Tool
+    const tools: Record<string, Tool> = { bash: real, invalid }
+    LLM.addHistoricalToolStubs(tools, new Set(["bash", "old_mcp_tool"]))
+    expect(Object.keys(tools).sort()).toEqual(["bash", "invalid", "old_mcp_tool"])
   })
 })
 

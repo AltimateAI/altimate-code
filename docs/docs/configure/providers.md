@@ -233,6 +233,20 @@ Run local models through [LM Studio](https://lmstudio.ai)'s OpenAI-compatible se
 !!! note
     If you changed LM Studio's default port, update the `baseURL` accordingly. No real API key is needed — the `"lm-studio"` placeholder satisfies the SDK requirement.
 
+## Altimate Local (Managed)
+
+Unlike Ollama or LM Studio above, `altimate local` does the setup for you: hardware detection, verified model download, certification, and config wiring, all in one command.
+
+```bash
+altimate local
+```
+
+This detects your hardware, downloads a SHA-256-verified model and pinned `llama.cpp` runtime, certifies the endpoint (tool-call, reasoning, and long-context probes), and writes the `local` provider block into your config for you — endpoint, model entry, and context limits included. Your default model becomes `local/qwen3.8-27b` if you haven't set one. There is nothing to paste by hand: re-running `altimate local` refreshes the wiring, and `altimate local models` lists the registry.
+
+No API key needed, and the server binds `127.0.0.1` only. `altimate local` also adds `ask` permission rules for the web tools (`websearch`, `webfetch`, `codesearch`), so a local-first session reaches the internet only with your approval.
+
+See [Local Mode](../usage/local.md) for the full command reference, supported hardware, and trust model.
+
 ## OpenRouter
 
 ```json

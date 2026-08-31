@@ -35,11 +35,11 @@ const ALL_PROVIDER_IDS = ["altimate-backend", "anthropic", "openai", "google", "
 async function mountPicker(
   trigger?: PickerTrigger,
   availableProviders: string[] = ALL_PROVIDER_IDS,
-  { firstRun = true }: { firstRun?: boolean } = {},
+  { firstRun = true, interstitial = false }: { firstRun?: boolean; interstitial?: boolean } = {},
 ) {
   const [
     { DialogProvider },
-    { DialogModelWelcome },
+    { DialogModelWelcome, DialogLocalModelInfo },
     { OnboardingTelemetryProvider },
     { ArgsProvider },
     { KVProvider },
@@ -115,7 +115,7 @@ async function mountPicker(
                             {/* above DialogProvider, mirroring app.tsx */}
                             <OnboardingTelemetryProvider track={(e) => { events.push(e) }}>
                               <DialogProvider>
-                                <DialogModelWelcome trigger={trigger} />
+                                {interstitial ? <DialogLocalModelInfo /> : <DialogModelWelcome trigger={trigger} />}
                               </DialogProvider>
                             </OnboardingTelemetryProvider>
                           </LocalProvider>
@@ -247,6 +247,59 @@ test("a row for a provider the server filtered out does not brick the dialog", a
     expect(picker.events.filter((e) => e.name === "provider_selected")[0]).toMatchObject({
       searchAll: true,
     })
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("the Local model row opens the interstitial and records the pick", async () => {
+  const picker = await mountPicker("first_run")
+  try {
+    await wait(() => picker.events.length > 0)
+    // Index 5 is the Local model row (0-4 are providers, 6 is search).
+    for (let i = 0; i < 5; i++) picker.app.mockInput.pressArrow("down")
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.events.some((e) => e.name === "local_model_info_shown"))
+
+    // The row is identified like any provider pick in the funnel.
+    await wait(() => picker.events.some((e) => e.name === "provider_selected"))
+    expect(picker.events.filter((e) => e.name === "provider_selected")[0]).toMatchObject({ providerID: "local" })
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+// The interstitial mounts directly here: the picker harness above renders the welcome
+// dialog outside the DialogProvider outlet, so after dialog.replace() BOTH keyboard
+// handlers stay live and the welcome's stopPropagation eats Enter — an artifact of the
+// harness, not the app, where replace() unmounts the welcome.
+test("Local model interstitial: Enter records the acknowledge choice", async () => {
+  const picker = await mountPicker(undefined, ALL_PROVIDER_IDS, { interstitial: true })
+  try {
+    await wait(() => picker.events.some((e) => e.name === "local_model_info_shown"))
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.events.some((e) => e.name === "local_model_choice"))
+
+    const choices = picker.events.filter((e) => e.name === "local_model_choice")
+    expect(choices).toHaveLength(1)
+    expect(choices[0]).toMatchObject({ choice: "acknowledge" })
+  } finally {
+    await picker.cleanup()
+  }
+})
+
+test("Local model interstitial: backing out returns to the picker with its own trigger", async () => {
+  const picker = await mountPicker(undefined, ALL_PROVIDER_IDS, { interstitial: true })
+  try {
+    await wait(() => picker.events.some((e) => e.name === "local_model_info_shown"))
+    picker.app.mockInput.pressArrow("down")
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.events.some((e) => e.name === "local_model_choice"))
+
+    expect(picker.events.filter((e) => e.name === "local_model_choice")[0]).toMatchObject({ choice: "back" })
+    await wait(() =>
+      picker.events.some((e) => e.name === "model_picker_shown" && (e as any).trigger === "local_model_back"),
+    )
   } finally {
     await picker.cleanup()
   }

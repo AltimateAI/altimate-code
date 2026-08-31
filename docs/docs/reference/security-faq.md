@@ -13,7 +13,7 @@ Answers to the most common security questions about running Altimate Code in you
 
 Altimate Code sends prompts and context to the LLM provider you configure (Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, etc.). **You choose the provider.** No data is sent anywhere else except optional [telemetry](#what-telemetry-is-collected), which contains no code, queries, or credentials.
 
-If you use a self-hosted or VPC-deployed model (e.g., AWS Bedrock, Azure OpenAI), your data never leaves your cloud account.
+If you use a self-hosted or VPC-deployed model (e.g., AWS Bedrock, Azure OpenAI), your data never leaves your cloud account. With [Local Mode](../usage/local.md), inference runs on your own hardware entirely, and web tools ask before anything leaves the machine.
 
 ## Can the AI read my database credentials?
 
@@ -99,7 +99,15 @@ No other outbound connections are made. See the [Network reference](network.md) 
 
 ## Can I run Altimate Code without internet access?
 
-Yes, with constraints. You need:
+Yes. The fastest path is [Local Mode](../usage/local.md):
+
+```bash
+altimate local
+```
+
+One command replaces the manual recipe below — it detects your hardware, downloads a SHA-256-verified model and runtime, certifies the endpoint, and wires your config. After the one-time model download, no outbound LLM traffic leaves your machine.
+
+If you're bringing your own runtime instead (a self-hosted model or a provider reachable only from your network), you need:
 
 1. **A locally accessible LLM**, either a self-hosted model or a provider reachable from your network
 2. **Model catalog disabled** by setting `ALTIMATE_CLI_DISABLE_MODELS_FETCH=true` or providing a local models file

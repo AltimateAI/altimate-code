@@ -21,7 +21,7 @@ export type OnboardingTelemetryEvent =
       name: "model_picker_shown"
       /** The picker also opens from /connect, from declining Big Pickle, and from the prompt
        *  gate — without this the event reads as a first-run impression every time. */
-      trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+      trigger: "first_run" | "connect_command" | "big_pickle_back" | "local_model_back" | "prompt_gate"
     }
   | {
       name: "provider_selected"
@@ -36,6 +36,8 @@ export type OnboardingTelemetryEvent =
     }
   | { name: "big_pickle_confirm_shown"; origin: "welcome" | "model" }
   | { name: "big_pickle_choice"; choice: "accept" | "cancel" }
+  | { name: "local_model_info_shown" }
+  | { name: "local_model_choice"; choice: "acknowledge" | "back" | "cancel" }
   | { name: "scan_gate_shown" }
   | { name: "scan_gate_choice"; choice: "scan" | "skip" | "dismissed" }
   | { name: "onboarding_completed" }

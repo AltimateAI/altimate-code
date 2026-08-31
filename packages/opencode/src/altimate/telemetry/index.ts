@@ -208,6 +208,13 @@ export namespace Telemetry {
         attempt: number
       }
     | {
+        type: "compaction_head_truncated"
+        timestamp: number
+        session_id: string
+        dropped_messages: number
+        kept_messages: number
+      }
+    | {
         type: "tool_outputs_pruned"
         timestamp: number
         session_id: string
@@ -795,7 +802,7 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         /** the picker mounts from several paths — without this the event over-counts first runs */
-        trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+        trigger: "first_run" | "connect_command" | "big_pickle_back" | "local_model_back" | "prompt_gate"
       }
     | {
         type: "provider_selected"
@@ -804,7 +811,19 @@ export namespace Telemetry {
         /** `search_all` means the user opened the full catalogue; the provider they then chose
          *  arrives as a second event with `via_search`. `other` is any provider outside the
          *  curated five. */
-        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all" | "other"
+        // altimate_change start — upstream_fix: "local" is a real classifyProvider() output (see
+        // CURATED_PROVIDER_ENUM below), but was missing from this union so the TUI's `as` cast at
+        // the emit site let it through untyped, silently defeating consumers that switch on this type.
+        provider:
+          | "altimate_gateway"
+          | "anthropic"
+          | "openai"
+          | "google"
+          | "big_pickle"
+          | "local"
+          | "search_all"
+          | "other"
+        // altimate_change end
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */
@@ -824,6 +843,18 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         choice: "accept" | "cancel"
+      }
+    | {
+        type: "local_model_info_shown"
+        timestamp: number
+        session_id: string
+      }
+    | {
+        type: "local_model_choice"
+        timestamp: number
+        session_id: string
+        /** acknowledge = user will run `altimate local`; back = returned to the picker. */
+        choice: "acknowledge" | "back" | "cancel"
       }
     | {
         type: "gateway_device_code_issued"
@@ -1026,6 +1057,11 @@ export namespace Telemetry {
     anthropic: "anthropic",
     openai: "openai",
     google: "google",
+    // upstream_fix: the welcome picker's "Local model" row uses providerID
+    // "local" (see altimate-onboarding.tsx) — without this entry it fell through
+    // to `other` with the id stripped, indistinguishable from any unrecognized
+    // provider in the funnel.
+    local: "local",
   })
 
   /** Classify a provider id for `provider_selected`. Returns the enum value plus the raw id when

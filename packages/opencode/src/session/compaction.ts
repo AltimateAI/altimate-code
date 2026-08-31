@@ -16,6 +16,10 @@ import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — summarizer-integrity error (harness plan W1.6 / item 3)
+import { NamedError } from "@opencode-ai/util/error"
+import type { LLM } from "./llm"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade for the upstream runtime
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -94,6 +98,45 @@ export namespace SessionCompaction {
     const base = input.model.limit.input ?? context
     if (base <= headroom) return false
     return count >= base - headroom
+  }
+  // altimate_change end
+
+  // altimate_change start — proactive overflow tail estimator: the usage recorded
+  // on lastFinished is from the LAST assistant turn; tool results appended since
+  // then are not counted, and one oversized output can jump the session past the
+  // window between checks — a common failure mode on small-context models. Exported (not
+  // an inline IIFE in the prompt loop) so it's unit-testable on its own.
+  export function uncountedTailTokens(input: { messages: MessageV2.WithParts[]; lastFinishedId?: MessageID }) {
+    if (!input.lastFinishedId) return 0
+    const index = input.messages.findIndex((m) => m.info.id === input.lastFinishedId)
+    if (index < 0) return 0
+    let tokens = 0
+    // altimate_change start — count completed tool output living ON lastFinished itself.
+    // The usage snapshot on lastFinished is taken when its LLM call's finish-step fires,
+    // which happens once that step's own tool calls have already been executed and their
+    // results written onto this SAME message (see processor.ts "tool-result" case, which
+    // runs before "finish-step" within a step). That usage reflects only the model's own
+    // input/output tokens — a tool's own output size is never sent back to the provider
+    // within that step, so it's never part of the recorded count. Slicing strictly AFTER
+    // lastFinishedId (the pre-existing behavior below) misses this entirely: a large tool
+    // result can sit uncounted on lastFinished until the NEXT overflow check, one full
+    // turn late. Text/reasoning parts on lastFinished are excluded — those WERE generated
+    // by this step and are already inside its recorded output tokens.
+    const lastFinishedMessage = input.messages[index]!
+    for (const part of lastFinishedMessage.parts) {
+      if (part.type === "tool" && part.state?.status === "completed") tokens += Token.estimate(part.state.output ?? "")
+    }
+    // altimate_change end
+    for (const m of input.messages.slice(index + 1)) {
+      for (const part of m.parts) {
+        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+        if (part.type === "tool" && part.state?.status === "completed") tokens += Token.estimate(part.state.output ?? "")
+      }
+    }
+    // 0.8: same safety margin fitHead applies to its budget — Token.estimate can
+    // undercount dense code/JSON tool output, so inflate the tail estimate before
+    // it feeds the overflow threshold check.
+    return Math.ceil(tokens / 0.8)
   }
   // altimate_change end
 
@@ -202,6 +245,57 @@ export namespace SessionCompaction {
     }
     return undefined
   }
+
+  // altimate_change start — head-truncation fallback for un-compactable sessions
+  // A session can overflow so far past the window (huge tool result landing in
+  // one turn) that the summarization request itself no longer fits, which used
+  // to terminate the session with "too large to compact". Summarizing a
+  // truncated head is lossy; killing the session loses everything.
+  export async function fitHead(input: { head: MessageV2.WithParts[]; model: Provider.Model }) {
+    const context = input.model.limit.context
+    if (context === 0) return { head: input.head, dropped: 0 }
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const base = input.model.limit.input ?? context
+    // 0.8: Token.estimate undercounts dense code/tool output on some tokenizers.
+    const budget = Math.floor(Math.max(0, base - maxOutput - 2_000) * 0.8)
+    // altimate_change start — upstream_fix: a non-positive budget means the model's
+    // context can't fit any head alongside its own output reservation — returning
+    // `input.head` unchanged here (the original guard) reproduces the exact overflow
+    // fitHead exists to recover from. An empty head is safe for the same reason the
+    // shrink loop below treats one as safe: the caller always appends its own
+    // trailing user prompt after `head`.
+    if (budget <= 0) return { head: [], dropped: input.head.length }
+    // altimate_change end
+    let head = input.head
+    let dropped = 0
+    // altimate_change start — upstream_fix: keep shrinking down to (and including)
+    // an empty head. The original guard was `head.length > 1`, which stops the loop
+    // the moment one message remains WITHOUT re-checking whether that single message
+    // still exceeds budget (a lone assistant message with an oversized tool result
+    // can itself blow the window) — the fallback then silently returns an oversized
+    // head, defeating its own purpose. Dropping to an empty head is safe: the caller
+    // always appends its own trailing user prompt after `head` (see the summarizer
+    // call site), so an empty head still produces a valid, non-empty request.
+    while (head.length > 0 && (await estimate({ messages: head, model: input.model })) > budget) {
+      const step = Math.max(1, Math.floor(head.length / 8))
+      // Round the cut forward to the next turn boundary: a head that starts
+      // mid-turn (assistant/tool messages with no leading user turn) is
+      // rejected by providers with a 400, defeating the fallback entirely.
+      let cut = step
+      while (cut < head.length && head[cut]!.info.role !== "user") cut++
+      // No user boundary exists anywhere in the remainder — reverting to the
+      // raw `step` offset would still start the head mid-turn, the exact 400
+      // this rounding exists to prevent. Drop the whole remaining head
+      // instead: safe for the same reason the empty-head case above is safe
+      // (the caller always appends its own trailing user prompt).
+      if (cut >= head.length) cut = head.length
+      head = head.slice(cut)
+      dropped += cut
+    }
+    // altimate_change end
+    return { head, dropped }
+  }
+  // altimate_change end
 
   async function select(input: { messages: MessageV2.WithParts[]; cfg: ConfigInfo; model: Provider.Model }) {
     const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
@@ -492,16 +586,43 @@ When constructing the summary, try to stick to this template:
 ---`
 
     const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
-    const result = await processor.process({
+    // altimate_change start — summarizer integrity (harness plan W1.6 / item 3):
+    // hoist the summarizer input so a failed attempt can be retried with identical
+    // input, and pass an explicit toolChoice "none". Previously toolChoice was
+    // undefined, which the AI SDK defaults to "auto" — models could spend the
+    // summary step on a tool call and commit a summary with no text.
+    const summarizerInput: LLM.StreamInput = {
       user: userMessage,
       agent,
       abort: input.abort,
       sessionID: input.sessionID,
       tools: {},
       system: [],
+      toolChoice: "none" as const,
       messages: [
-        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail
-        ...(await MessageV2.toModelMessages(selected.head, model, { stripMedia: true })),
+        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail;
+        // trim the head from the front when even the summarization request cannot fit the window
+        ...(await MessageV2.toModelMessages(
+          await (async () => {
+            const fitted = await fitHead({ head: selected.head, model })
+            if (fitted.dropped > 0) {
+              log.warn("compaction head truncated to fit window", {
+                dropped: fitted.dropped,
+                kept: fitted.head.length,
+              })
+              Telemetry.track({
+                type: "compaction_head_truncated",
+                timestamp: Date.now(),
+                session_id: input.sessionID,
+                dropped_messages: fitted.dropped,
+                kept_messages: fitted.head.length,
+              })
+            }
+            return fitted.head
+          })(),
+          model,
+          { stripMedia: true },
+        )),
         // altimate_change end
         {
           role: "user",
@@ -514,7 +635,29 @@ When constructing the summary, try to stick to this template:
         },
       ],
       model,
-    })
+    }
+    // A "continue" result was previously committed regardless of whether the
+    // summary step produced any text — an empty summary erases history (the
+    // post-compaction amnesia signature). Guard the commit: retry ONCE with
+    // identical input, then mark the summary message as errored and stop.
+    const summaryHasText = () =>
+      MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).parts.some(
+        (part) => part.type === "text" && part.text.trim().length > 0,
+      )
+    let result = await processor.process(summarizerInput)
+    if (result === "continue" && !summaryHasText()) {
+      log.warn("compaction summary empty, retrying once", { sessionID: input.sessionID })
+      result = await processor.process(summarizerInput)
+      if (result === "continue" && !summaryHasText()) {
+        processor.message.error = new NamedError.Unknown({
+          message: "Compaction summarizer produced no summary text after retry",
+        }).toObject()
+        processor.message.finish = "error"
+        await Session.updateMessage(processor.message)
+        result = "stop"
+      }
+    }
+    // altimate_change end
 
     if (result === "compact") {
       processor.message.error = new MessageV2.ContextOverflowError({
@@ -565,6 +708,16 @@ When constructing the summary, try to stick to this template:
           })
         }
       } else {
+        // altimate_change start — harness plan W1.5 / item 12: the continue message
+        // carries the original format/tools/system/variant, exactly as the replay
+        // branch above copies them from the original user message. Dropping them made
+        // the first auto-compaction silently reset the session's tool allowlist,
+        // custom system prompt, output format, and variant. The compaction marker
+        // (this branch's userMessage) never carries these fields, so source them from
+        // the most recent real (non-compaction) user message; no-op when never set.
+        const original = messages.findLast(
+          (m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"),
+        )?.info as MessageV2.User | undefined
         const continueMsg = await Session.updateMessage({
           id: MessageID.ascending(),
           role: "user",
@@ -572,7 +725,12 @@ When constructing the summary, try to stick to this template:
           time: { created: Date.now() },
           agent: userMessage.agent,
           model: userMessage.model,
+          format: original?.format ?? userMessage.format,
+          tools: original?.tools ?? userMessage.tools,
+          system: original?.system ?? userMessage.system,
+          variant: original?.variant ?? userMessage.variant,
         })
+        // altimate_change end
         const text =
           (input.overflow
             ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"

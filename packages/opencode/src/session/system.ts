@@ -24,6 +24,7 @@ import { Skill } from "@/skill"
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
+import { Retrieval } from "@/tool/retrieval"
 // altimate_change start — Effect Service facade for SystemPrompt.skills (see bottom of namespace)
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -169,7 +170,18 @@ export namespace SystemPrompt {
       "Use the skill tool to load a skill when a task matches its description.",
       // the agents seem to ingest the information about skills a bit better if we present a more verbose
       // version of them here and a less verbose version in tool description, rather than vice versa.
-      Skill.fmt(filtered, { verbose: true }),
+      //
+      // Token diet (local models): under ALTIMATE_TOOL_RETRIEVAL the listing keeps
+      // every skill name but compacts each description to its first sentence —
+      // multi-paragraph descriptions across dozens of installed skills otherwise
+      // dominate the first-turn prefill on small-context local models. Invoking a
+      // skill still loads its full body.
+      Retrieval.enabled()
+        ? Skill.fmt(
+            filtered.map((skill) => ({ ...skill, description: Retrieval.compactDescription(skill.description) })),
+            { verbose: false },
+          )
+        : Skill.fmt(filtered, { verbose: true }),
     )
     return parts.join("\n")
   }

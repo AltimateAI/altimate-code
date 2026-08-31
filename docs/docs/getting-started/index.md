@@ -53,7 +53,7 @@ npm install -g altimate-code
 
 ### [Bring Your Own LLM](/configure/providers/)
 
-Works with Anthropic, OpenAI, Google, AWS Bedrock, Azure, Ollama, and 10+ more providers. Swap models without swapping your harness. No vendor lock-in.
+Works with Anthropic, OpenAI, Google, AWS Bedrock, Azure, Ollama, and 10+ more providers — or run fully local with `altimate local`, no API key. Swap models without swapping your harness. No vendor lock-in.
 
 </div>
 </div>

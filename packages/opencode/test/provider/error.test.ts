@@ -139,6 +139,17 @@ describe("ProviderError.parseAPICallError: overflow detection", () => {
     expect(result.type).toBe("context_overflow")
   })
 
+  test("detects SGLang 'exceeds the model's maximum context' pattern", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "local" as any,
+      error: makeAPICallError({
+        message: "Bad Request: Requested token count exceeds the model's maximum context length of 65536 tokens",
+        statusCode: 400,
+      }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+
   test("detects 'exceeds the context window' pattern (OpenAI)", () => {
     const result = ProviderError.parseAPICallError({
       providerID: "openai" as any,

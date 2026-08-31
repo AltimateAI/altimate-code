@@ -46,6 +46,9 @@ altimate needs outbound HTTPS access to:
 | Your warehouse endpoints | Database connections |
 | `eastus-8.in.applicationinsights.azure.com` | Telemetry (Azure Application Insights) |
 
+!!! note "Local Mode"
+    `altimate local` needs outbound access only for the one-time model and runtime download (Hugging Face and GitHub). After setup, LLM traffic is loopback-only (`127.0.0.1`) — no outbound calls for inference. Egress-guarded web tools (`websearch`, `webfetch`, `codesearch`) still reach the internet, but only with your per-step approval. See [Local Mode](../usage/local.md).
+
 ### Disable Model Fetching
 
 If `models.dev` is unreachable:

@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "models": [
+    {
+      "id": "qwen3.8-27b",
+      "name": "Qwen3.8-27B",
+      "hf_repo": "unsloth/Qwen3.8-27B-GGUF",
+      "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+      "llama_cpp_ref": "b10516",
+      "tiers": [
+        {
+          "name": "laptop-24gb",
+          "min_vram_gb": 20,
+          "engine": "llama.cpp",
+          "quant": "UD-Q4_K_M",
+          "file": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+          "sha256": "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
+          "ctx": 65536,
+          "parallel": 1,
+          "kv": "f16",
+          "mtp": {
+            "file": "MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+            "sha256": "50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e",
+            "draft_max": 2
+          },
+          "flags": [
+            "--jinja",
+            "-fa",
+            "on",
+            "--cache-reuse",
+            "256",
+            "--temp",
+            "1.0",
+            "--top-p",
+            "0.95",
+            "--top-k",
+            "20",
+            "--min-p",
+            "0.0"
+          ],
+          "agent": {
+            "tool_retrieval": true,
+            "reasoning_effort": "medium",
+            "temperature": 1.0
+          }
+        },
+        {
+          "name": "mac-64gb-unified",
+          "min_vram_gb": 64,
+          "engine": "llama.cpp",
+          "quant": "UD-Q4_K_M",
+          "file": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+          "sha256": "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
+          "ctx": 131072,
+          "parallel": 1,
+          "kv": "f16",
+          "mtp": {
+            "file": "MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+            "sha256": "50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e",
+            "draft_max": 2
+          },
+          "flags": [
+            "--jinja",
+            "-fa",
+            "on",
+            "--cache-reuse",
+            "256",
+            "--temp",
+            "1.0",
+            "--top-p",
+            "0.95",
+            "--top-k",
+            "20",
+            "--min-p",
+            "0.0"
+          ],
+          "agent": {
+            "tool_retrieval": true,
+            "reasoning_effort": "medium",
+            "temperature": 1.0
+          }
+        },
+        {
+          "name": "datacenter-80gb",
+          "min_vram_gb": 80,
+          "engine": "vllm",
+          "quant": "BF16-or-FP8",
+          "guidance": "The datacenter vLLM tier is not installed by Phase 1. Use the published FP8/vLLM deployment guide."
+        },
+        {
+          "name": "gpu-24gb-discrete",
+          "min_vram_gb": 22,
+          "engine": "llama.cpp",
+          "quant": "UD-Q4_K_M",
+          "file": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+          "sha256": "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
+          "ctx": 49152,
+          "parallel": 1,
+          "kv": "f16",
+          "mtp": {
+            "file": "MTP/mtp-Qwen3.8-27B-Q4_0.gguf",
+            "sha256": "50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e",
+            "draft_max": 2
+          },
+          "flags": [
+            "--jinja",
+            "-fa",
+            "on",
+            "--cache-reuse",
+            "256",
+            "--temp",
+            "1.0",
+            "--top-p",
+            "0.95",
+            "--top-k",
+            "20",
+            "--min-p",
+            "0.0"
+          ],
+          "agent": {
+            "tool_retrieval": true,
+            "reasoning_effort": "medium",
+            "temperature": 1.0
+          },
+          "notes": "Discrete 24GB GPUs (RTX 3090/4090-class, Vulkan build): weights+KV must fit VRAM alone, so context is capped at 49K. Unified-memory laptops use laptop-24gb instead."
+        },
+        {
+          "name": "dgx-spark-128gb",
+          "min_vram_gb": 100,
+          "engine": "docker-sglang",
+          "quant": "NVFP4",
+          "image": "lmsysorg/sglang:qwen38-27b",
+          "image_digest": "sha256:febfb971c7352570fc445c466ebd6ffc9d896024958e544a60f2137fd85856b1",
+          "model_hf": "Inferact/Qwen3.8-27B-NVFP4",
+          "ctx": 131072,
+          "container_port": 30000,
+          "server_args": [
+            "--reasoning-parser",
+            "qwen3",
+            "--tool-call-parser",
+            "qwen3_coder",
+            "--speculative-algorithm",
+            "EAGLE",
+            "--speculative-num-steps",
+            "3",
+            "--speculative-eagle-topk",
+            "1",
+            "--speculative-num-draft-tokens",
+            "4"
+          ],
+          "agent": {
+            "tool_retrieval": false,
+            "reasoning_effort": "medium",
+            "temperature": 1.0
+          },
+          "guidance": "DGX Spark (GB10) managed setup runs SGLang NVFP4 + EAGLE in the pinned official container (~4x llama.cpp on this hardware). Requires Docker with nvidia-container-toolkit. Manual fallback: docker run --gpus all --ipc=host -p 8095:30000 -v $HOME/.cache/huggingface:/root/.cache/huggingface lmsysorg/sglang:qwen38-27b python3 -m sglang.launch_server --model-path Inferact/Qwen3.8-27B-NVFP4 --served-model-name qwen3.8-27b --tp 1 --context-length 131072 --reasoning-parser qwen3 --tool-call-parser qwen3_coder --speculative-algorithm EAGLE --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --host 0.0.0.0 --port 30000",
+          "model_revision": "6128240ebaf4eaa7bad2b3d1c72c37d677c5f462"
+        }
+      ]
+    }
+  ]
+}

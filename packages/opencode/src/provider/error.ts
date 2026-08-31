@@ -40,6 +40,11 @@ export namespace ProviderError {
     /greater than the context length/i, // LM Studio
     /context window exceeds limit/i, // MiniMax
     /exceeded model token limit/i, // Kimi For Coding, Moonshot
+    // altimate_change start — upstream_fix: SGLang phrasing is unmatched by
+    // every pattern above, so its 400 bypassed overflow recovery and killed
+    // the session instead of triggering auto-compaction.
+    /exceeds the model's maximum context/i, // SGLang
+    // altimate_change end
     /context[_ ]length[_ ]exceeded/i, // Generic fallback
     /request entity too large/i, // HTTP 413
     /the request was too long/i, // Azure OpenAI

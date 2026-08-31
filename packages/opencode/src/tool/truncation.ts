@@ -7,10 +7,14 @@ import { Scheduler } from "../scheduler"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { ToolID } from "./schema"
+// altimate_change start — W1.7: shared truncation algorithm (see truncate-core.ts
+// header) so this twin and tool/truncate.ts's Effect Service can't drift.
+import { TruncateCore } from "./truncate-core"
+// altimate_change end
 
 export namespace Truncate {
-  export const MAX_LINES = 2000
-  export const MAX_BYTES = 50 * 1024
+  export const MAX_LINES = TruncateCore.MAX_LINES
+  export const MAX_BYTES = TruncateCore.MAX_BYTES
   export const DIR = path.join(Global.Path.data, "tool-output")
   export const GLOB = path.join(DIR, "*")
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
@@ -18,11 +22,7 @@ export namespace Truncate {
 
   export type Result = { content: string; truncated: false } | { content: string; truncated: true; outputPath: string }
 
-  export interface Options {
-    maxLines?: number
-    maxBytes?: number
-    direction?: "head" | "tail"
-  }
+  export type Options = TruncateCore.Options
 
   export function init() {
     Scheduler.register({
@@ -60,47 +60,21 @@ export namespace Truncate {
     return rule.action !== "deny"
   }
 
+  // altimate_change start — W1.7: default direction "middle" (head+tail,
+  // tail-weighted elision) via the shared truncate-core.ts algorithm.
   export async function output(text: string, options: Options = {}, agent?: Agent.Info): Promise<Result> {
     const maxLines = options.maxLines ?? MAX_LINES
     const maxBytes = options.maxBytes ?? MAX_BYTES
-    const direction = options.direction ?? "head"
+    const direction = options.direction ?? TruncateCore.DEFAULT_DIRECTION
+    const headRatio = options.headRatio ?? TruncateCore.DEFAULT_HEAD_RATIO
     const lines = text.split("\n")
     const totalBytes = Buffer.byteLength(text, "utf-8")
 
-    if (lines.length <= maxLines && totalBytes <= maxBytes) {
+    if (TruncateCore.fits(lines, totalBytes, maxLines, maxBytes)) {
       return { content: text, truncated: false }
     }
 
-    const out: string[] = []
-    let i = 0
-    let bytes = 0
-    let hitBytes = false
-
-    if (direction === "head") {
-      for (i = 0; i < lines.length && i < maxLines; i++) {
-        const size = Buffer.byteLength(lines[i], "utf-8") + (i > 0 ? 1 : 0)
-        if (bytes + size > maxBytes) {
-          hitBytes = true
-          break
-        }
-        out.push(lines[i])
-        bytes += size
-      }
-    } else {
-      for (i = lines.length - 1; i >= 0 && out.length < maxLines; i--) {
-        const size = Buffer.byteLength(lines[i], "utf-8") + (out.length > 0 ? 1 : 0)
-        if (bytes + size > maxBytes) {
-          hitBytes = true
-          break
-        }
-        out.unshift(lines[i])
-        bytes += size
-      }
-    }
-
-    const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
-    const unit = hitBytes ? "bytes" : "lines"
-    const preview = out.join("\n")
+    const preview = TruncateCore.preview(lines, totalBytes, { maxLines, maxBytes, direction, headRatio })
 
     const id = ToolID.ascending()
     const filepath = path.join(DIR, id)
@@ -109,11 +83,8 @@ export namespace Truncate {
     const hint = hasTaskTool(agent)
       ? `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
       : `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
-    const message =
-      direction === "head"
-        ? `${preview}\n\n...${removed} ${unit} truncated...\n\n${hint}`
-        : `...${removed} ${unit} truncated...\n\n${hint}\n\n${preview}`
 
-    return { content: message, truncated: true, outputPath: filepath }
+    return { content: TruncateCore.assemble(preview, hint, direction), truncated: true, outputPath: filepath }
   }
+  // altimate_change end
 }

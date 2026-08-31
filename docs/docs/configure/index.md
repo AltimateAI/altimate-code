@@ -33,7 +33,7 @@ Set up your warehouses, LLM providers, and preferences. For agents, tools, skill
 
     Connect to 35+ LLM providers — Anthropic, OpenAI, Bedrock, Ollama, and more. Configure API keys and model selection.
 
-    [:octicons-arrow-right-24: Providers](providers.md) · [:octicons-arrow-right-24: Models](models.md)
+    [:octicons-arrow-right-24: Providers](providers.md) · [:octicons-arrow-right-24: Models](models.md) · [:octicons-arrow-right-24: Local Mode](../usage/local.md)
 
 -   :material-puzzle:{ .lg .middle } **MCPs & ACPs**
 
