@@ -527,6 +527,25 @@ describe("the dbt-fallback redirect explains itself", () => {
     expect(verdict.redirect!.output).toContain("--integrations=local")
     expect(verdict.redirect!.metadata.via).toBeUndefined()
   })
+
+  test("the dbt-fallback branch says what the call would do, and that dbt cannot be chosen here", async () => {
+    // Reaching this branch through check() needs a dbt project; the pure decision
+    // function reaches it directly. The wording matters because the fallback is not
+    // the served target — it is where the call would land if dbt yields nothing.
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const v = decideForTarget(p, "sql_execute", {
+      source: "dbt",
+      type: undefined,
+      fallback: { type: "snowflake", name: "local_snow" },
+    })
+    expect(v.redirect!.metadata.via).toBe("dbt-fallback")
+    const out = v.redirect!.output
+    expect(out).toContain("try the dbt project first")
+    expect(out).toContain("fall back to the local connection `local_snow`")
+    expect(out).toContain("The dbt path cannot be chosen from this tool")
+    expect(out).toContain("--integrations=local")
+    expect(out).not.toContain("this connection is served by")
+  })
 })
 
 describe("a redirect the caller cannot follow is not a redirect", () => {
