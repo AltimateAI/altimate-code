@@ -1,9 +1,11 @@
 // altimate_change - new file
 //
-// Pre-flight input checks shared by the warehouse tools. They run BEFORE workspace
-// precedence is consulted: a redirect must never forward malformed input to the
-// engine tool, and an empty or placeholder warehouse name must not be read as
-// "use the default" by the routing decision.
+// Pre-flight input checks shared by `sql_explain` and `schema_inspect`. They run
+// BEFORE workspace precedence is consulted there: a redirect must never forward
+// malformed input to the engine tool, and an empty or placeholder warehouse name
+// must not be read as "use the default" by the routing decision. `sql_execute` has
+// its own guard order (hard deny, write prompt, then precedence) and does not use
+// these; its warehouse resolution is unchanged.
 
 /** Warehouse names that models produce by mistake: empty strings and unsubstituted
  * placeholders. Both would otherwise fall through to unhelpful registry errors. */
