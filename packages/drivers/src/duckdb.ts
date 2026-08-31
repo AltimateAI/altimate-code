@@ -3,15 +3,12 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let duckdb: any
-  try {
-    duckdb = await import("duckdb")
-    duckdb = duckdb.default || duckdb
-  } catch {
-    throw new Error("DuckDB driver not installed. Run: npm install duckdb")
-  }
+  duckdb = await loadOptionalDriver("duckdb", "duckdb")
+  duckdb = duckdb.default || duckdb
 
   const dbPath = (config.path as string) ?? ":memory:"
   let db: any

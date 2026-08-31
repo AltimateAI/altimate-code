@@ -3,15 +3,12 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mysql: any
-  try {
-    mysql = await import("mysql2/promise")
-    mysql = mysql.default || mysql
-  } catch {
-    throw new Error("MySQL driver not installed. Run: npm install mysql2")
-  }
+  mysql = await loadOptionalDriver("mysql", "mysql2/promise")
+  mysql = mysql.default || mysql
 
   let pool: any
 

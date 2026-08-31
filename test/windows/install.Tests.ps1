@@ -1,10 +1,18 @@
 # Pester behavioral tests for install.ps1 (the Windows standalone installer).
 #
-# These run the real script as a subprocess on Windows PowerShell so they
-# exercise actual behavior - not just substring matching. They deliberately
-# stop the script early (via -Help or an unknown -Version) so no 268 MB binary
-# is ever downloaded, while still covering the risky branches: argument
-# parsing, the WOW64 architecture fix, and unknown-version rejection.
+# Two layers, because no single one reaches everything:
+#
+# 1. SUBPROCESS tests run the real script and exercise actual behavior - not just
+#    substring matching. They deliberately stop it early (via -Help or an unknown
+#    -Version) so no 268 MB binary is ever downloaded, covering argument parsing,
+#    the WOW64 architecture fix, and unknown-version rejection. Because they stop
+#    early they never reach anything past version resolution.
+#
+# 2. AST-EXTRACTED tests parse install.ps1, pull a single function out of the tree
+#    and dot-source it, so code the subprocess tests can never reach is still
+#    executed. Used for Test-Checksum and Write-InstallMarker. These must set
+#    $ErrorActionPreference = "Stop" themselves to match the installer's own
+#    semantics - see the note in the Write-InstallMarker BeforeAll.
 #
 # Run locally on Windows:  Invoke-Pester ./test/windows/install.Tests.ps1
 # CI runs this on windows-latest (see .github/workflows/ci.yml).
@@ -182,5 +190,133 @@ Describe "install.ps1 Test-Checksum" {
     $script:FakeContent = [System.Text.Encoding]::UTF8.GetBytes((("0" * 64) + "  $name`n"))
     { Test-Checksum -Path $tmp -Name $name -ChecksumsUrl "https://x/checksums.txt" } | Should -Throw
     Remove-Item $tmp -Force
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Write-InstallMarker (install telemetry — AI-8448)
+# ---------------------------------------------------------------------------
+# The subprocess tests above stop the installer via -Help / unknown -Version, so
+# they never reach the marker block. It is AST-extracted and executed here instead,
+# the same way Test-Checksum is, against a temp profile. This is the only runtime
+# coverage the PowerShell writer has.
+Describe "install.ps1 Write-InstallMarker" {
+  BeforeAll {
+    $src = Get-Content -Raw $script:InstallScript
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tokens, [ref]$errors)
+    $def = $ast.Find({
+      param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Write-InstallMarker"
+    }, $true)
+    if (-not $def) { throw "Write-InstallMarker not found in install.ps1" }
+    . ([ScriptBlock]::Create($def.Extent.Text))
+
+    # MUST match the installer's own error semantics. install.ps1:28 sets
+    # $ErrorActionPreference = "Stop" at script scope, and that is the entire reason
+    # Write-InstallMarker needs its try/catch: under "Stop" a failing cmdlet is
+    # TERMINATING. Dot-sourcing the function out of the AST lands it in a session
+    # where pwsh's default "Continue" applies, under which a New-Item failure merely
+    # writes to the error stream — so "Should -Not -Throw" would pass with the
+    # try/catch deleted, and the test could not fail.
+    $ErrorActionPreference = "Stop"
+    $script:ErrorActionPreference = "Stop"
+
+    # Mirrors welcome.ts::getDataDir(): $XDG_DATA_HOME, else <home>/.local/share.
+    function Get-MarkerDir {
+      param([string]$Root)
+      [IO.Path]::Combine($Root, "altimate-code")
+    }
+  }
+
+  BeforeEach {
+    $script:Sandbox = Join-Path ([IO.Path]::GetTempPath()) ("marker-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $script:Sandbox | Out-Null
+    $script:OldXdg = $env:XDG_DATA_HOME
+    $script:OldProfile = $env:USERPROFILE
+  }
+
+  AfterEach {
+    $env:XDG_DATA_HOME = $script:OldXdg
+    $env:USERPROFILE = $script:OldProfile
+    Remove-Item -Recurse -Force $script:Sandbox -ErrorAction SilentlyContinue
+  }
+
+  It "writes both marker files with byte-exact content and no BOM" {
+    $env:XDG_DATA_HOME = $script:Sandbox
+    Write-InstallMarker -Version "1.2.3"
+
+    $dir = Get-MarkerDir $script:Sandbox
+    # Byte-level: a BOM would make install_method fail the CLI's allowlist match.
+    $verBytes = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, ".installed-version"))
+    $srcBytes = [IO.File]::ReadAllBytes([IO.Path]::Combine($dir, ".install-source"))
+    [System.Text.Encoding]::ASCII.GetString($verBytes) | Should -BeExactly "1.2.3"
+    [System.Text.Encoding]::ASCII.GetString($srcBytes) | Should -BeExactly "powershell"
+    $verBytes[0] | Should -Not -Be 0xEF
+    $srcBytes[0] | Should -Not -Be 0xEF
+  }
+
+  It "strips a leading v and falls back to 'unknown' for an unresolved version" {
+    $env:XDG_DATA_HOME = $script:Sandbox
+    Write-InstallMarker -Version "v9.9.9"
+    $dir = Get-MarkerDir $script:Sandbox
+    Get-Content -Raw ([IO.Path]::Combine($dir, ".installed-version")) | Should -BeExactly "9.9.9"
+
+    # Empty version must NOT produce an empty marker — the CLI deletes those unread.
+    Write-InstallMarker -Version ""
+    Get-Content -Raw ([IO.Path]::Combine($dir, ".installed-version")) | Should -BeExactly "unknown"
+  }
+
+  It "falls back to <USERPROFILE>/.local/share when XDG_DATA_HOME is unset" {
+    $env:XDG_DATA_HOME = ""
+    $env:USERPROFILE = $script:Sandbox
+    Write-InstallMarker -Version "1.0.0"
+    $dir = [IO.Path]::Combine($script:Sandbox, ".local", "share", "altimate-code")
+    Test-Path ([IO.Path]::Combine($dir, ".installed-version")) | Should -BeTrue
+  }
+
+  It "does not throw when USERPROFILE is empty and XDG_DATA_HOME is unset" {
+    # The regression guard for path computation inside the try. With
+    # $ErrorActionPreference = "Stop", computing this outside the try raised a
+    # terminating error that aborted the installer AFTER the binary was placed but
+    # BEFORE the PATH write - leaving an installed binary that is not on PATH.
+    #
+    # Runs inside the sandbox via Push-Location. [IO.Path]::Combine("", ".local",
+    # "share") does NOT throw - it returns the RELATIVE path ".local\share" - so the
+    # marker is created under the current working directory. Without Push-Location
+    # that is the git checkout root, and every CI run would litter it.
+    $env:XDG_DATA_HOME = ""
+    $env:USERPROFILE = ""
+    Push-Location $script:Sandbox
+    try {
+      { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+      # Documents where an empty profile actually lands: relative to cwd, not $HOME.
+      Test-Path ([IO.Path]::Combine(".local", "share", "altimate-code", ".installed-version")) |
+        Should -BeTrue
+    } finally {
+      Pop-Location
+    }
+  }
+
+  It "does not throw when the data dir cannot be created, and writes no marker" {
+    # Runs under $ErrorActionPreference = "Stop" (set in BeforeAll), so New-Item's
+    # failure here is terminating and the try/catch is what makes this pass. Deleting
+    # the try/catch must fail this case — that is what makes it a real guard.
+    $blocker = Join-Path $script:Sandbox "blocker"
+    Set-Content -Path $blocker -Value "x" -NoNewline
+    $env:XDG_DATA_HOME = [IO.Path]::Combine($blocker, "nested")
+
+    { Write-InstallMarker -Version "1.0.0" } | Should -Not -Throw
+
+    # Proves the fixture actually hit the intended failure path rather than quietly
+    # succeeding somewhere else: no marker may exist under the blocked root.
+    Test-Path ([IO.Path]::Combine($blocker, "nested", "altimate-code", ".installed-version")) |
+      Should -BeFalse
+  }
+
+  It "runs under the installer's Stop semantics" {
+    # Guards the BeforeAll above: if this drifts back to "Continue", the two
+    # "does not throw" cases silently stop being able to fail.
+    $ErrorActionPreference | Should -Be "Stop"
   }
 }

@@ -107,6 +107,44 @@ describe("postinstall.mjs", () => {
     const markerPath = path.join(dataDir, "altimate-code", ".installed-version")
     expect(fs.existsSync(markerPath)).toBe(true)
     expect(fs.readFileSync(markerPath, "utf-8")).toBe("2.5.0")
+    // altimate_change — the curl and PowerShell installers write the same marker, so
+    // first_launch can only separate npm volume from theirs via this companion file.
+    const sourcePath = path.join(dataDir, "altimate-code", ".install-source")
+    expect(fs.readFileSync(sourcePath, "utf-8")).toBe("npm")
+  })
+
+  // altimate_change — publish order, asserted on real output rather than source text.
+  // `.installed-version` is the CLI's trigger: it returns early unless that file
+  // exists, then consumes `.install-source`. Writing the trigger first leaves two
+  // windows — a reader in between reports install_method "unknown", and because
+  // writeFileSync truncates first, a reader can observe an EMPTY `.installed-version`
+  // and delete it unread, losing the install. npm is the only channel that was
+  // counted before this feature, so order matters most here.
+  test("writes the companion before the trigger", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+
+    createMainPackageDir(dir, { version: "3.1.0" })
+    createBinaryPackage(dir)
+
+    const dataDir = path.join(dir, "xdg-data")
+    expect(runPostinstall(dir, { XDG_DATA_HOME: dataDir }).exitCode).toBe(0)
+
+    const markerDir = path.join(dataDir, "altimate-code")
+    const source = fs.statSync(path.join(markerDir, ".install-source")).mtimeMs
+    const trigger = fs.statSync(path.join(markerDir, ".installed-version")).mtimeMs
+    // mtime resolution can tie on fast filesystems; the trigger must never be older.
+    expect(trigger).toBeGreaterThanOrEqual(source)
+
+    // Source-level guard, since equal mtimes make the check above weak on its own.
+    const src = fs.readFileSync(POSTINSTALL_SCRIPT, "utf-8")
+    expect(src.indexOf('".install-source"')).toBeLessThan(src.indexOf('".installed-version"'))
+
+    // Trigger is published via temp+rename, so no temp file may survive. A plain
+    // truncating write would let a reader observe an empty trigger and delete it
+    // unread, losing the install.
+    expect(src).toMatch(/renameSync/)
+    expect(fs.readdirSync(markerDir).sort()).toEqual([".install-source", ".installed-version"])
   })
 
   test("upgrade marker strips v prefix from version", () => {

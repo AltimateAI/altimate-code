@@ -160,12 +160,20 @@ describe("PR #893 datamate IDE transport selection", () => {
     })
   })
 
-  test("ignores vendored datamate mcp.json entries during transport selection", async () => {
+  test("ignores dependency and generated datamate configs before transport selection", async () => {
     await using project = await tmpdir()
     await writeJson(path.join(project.path, "node_modules/pkg/mcp.json"), {
       servers: { datamate: { url: "https://vendored.example.com/sse" } },
     })
-    await writeJson(path.join(project.path, ".vscode/mcp.json"), {
+    await writeJson(path.join(project.path, "build/mcp.json"), {
+      servers: { datamate: { url: "https://build-output.example.com/sse" } },
+    })
+    await writeJson(path.join(project.path, "dist/mcp.json"), {
+      servers: { datamate: { url: "https://dist-output.example.com/sse" } },
+    })
+    // Keep the authored config lexically last: without the broad exclusion,
+    // build/mcp.json would win the deterministic sorted-first selection.
+    await writeJson(path.join(project.path, "z-authored/mcp.json"), {
       servers: { datamate: { command: "datamate", args: ["start-stdio"] } },
     })
 
