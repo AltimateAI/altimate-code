@@ -3,10 +3,10 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `908be9cabb2b552c56cbd86537fbccb86ea5e0b2`
+- Final code candidate: `071f4dc782e70bb4a0f63397902a4285d0156903`
 - Mode: full Council review plus final independent remediation pass
 - Local verdict: **PASS**
-- Remote status: final commits still need to be pushed and fresh CI/bot review must finish
+- Remote gate: the final candidate must be pushed and fresh CI/bot review must finish
 
 ## Decision
 
@@ -20,7 +20,7 @@ PDF accounting is intentionally approximate. The user selected a parser-free pol
 PDF allowance = max(32,768, decoded inline payload bytes)
 ```
 
-Remote URLs and provider file IDs receive the fixed allowance. Exact page expansion and tokenization remain provider-authoritative. The Council did not require exact PDF parsing because adding a parser would create a new document-processing/resource boundary without making provider token accounting exact.
+Remote references and provider file IDs receive the fixed allowance when the part is identifiable as a PDF. An untyped provider file ID cannot be classified locally and receives the generic 16,384-token file allowance instead. Exact page expansion and tokenization remain provider-authoritative. The Council did not require exact PDF parsing because adding a parser would create a new document-processing/resource boundary without making provider token accounting exact.
 
 ## Original Council gate
 
@@ -44,7 +44,11 @@ Post-Council review found and repaired:
 - small-model output floors above the model's own reservation;
 - safety-margin loss near the context boundary;
 - non-JSON provider-option loss during reasoning reconciliation;
-- raw PDF page-marker trust.
+- raw PDF page-marker trust;
+- provider-normalized Mistral/Devstral bridge messages missing from the estimate;
+- generated system prompts counted even when workflows omit them or OAuth routes them through instructions;
+- identical system and instruction values being deduplicated despite occupying two wire fields; and
+- a static bridge assertion that could match the unclamped property-access form.
 
 Each repair was centralized in the shared output-budget module or the existing pure media projection, then exercised through both request boundaries.
 
@@ -61,40 +65,45 @@ Batching the same parser would not remove its decompression/traversal boundary. 
 
 ## Final independent remediation review
 
-Two independent live Council seats re-reviewed exact head `908be9cabb` after the parser removal.
+Two independent live Council seats re-reviewed the request-shape correction at `c78e1a61b6`, then received the final `c78e1a61b6..071f4dc782` delta after fresh bot findings. The final delta makes the estimator more conservative and does not change PDF behavior.
 
 ### Feynman seat — PASS
 
-- Verified exact final head.
+- Verified exact final code head `071f4dc782`.
 - Confirmed `pdf-lib`, async parsing, page regex/policy, and transitive lock entries are absent.
 - Confirmed lazy estimation is not evaluated when `maxOutputTokens` is omitted.
-- Confirmed both request boundaries clamp after headers, tools, instructions, and media projection are finalized.
-- Re-ran provider, native, stream, typecheck, diff, and strict marker checks successfully.
+- Confirmed Mistral/Devstral projection matches the transport normalizer without mutating history.
+- Confirmed workflow/OAuth prompt routing matches the fields actually sent.
+- Confirmed identical system/instruction values are counted as two wire occurrences while omitted system fields remain excluded.
+- Confirmed the tightened bridge regex rejects `params.maxOutputTokens` and accepts the clamped shorthand.
+- Re-ran provider, typecheck, diff, and bridge checks successfully.
 
 ### Musashi seat — PASS
 
-- Confirmed the parser experiment is cleanly reverted.
-- Confirmed the final code differs from the last pre-parser safe candidate only in the explicit parser-free comment and test naming.
-- Confirmed synchronous lazy estimation and parity across both callers.
-- Confirmed dependency cleanup, focused tests, typecheck, and diff checks pass.
+- Verified exact final code head `071f4dc782`.
+- Confirmed the parser experiment remains cleanly reverted and no PDF dependency returned.
+- Confirmed synchronous lazy estimation, linear Mistral projection, and parity across both callers.
+- Confirmed identical wire fields are counted separately while OAuth/workflow omissions are not double-counted.
+- Confirmed the fixed-width bridge lookbehind runs correctly under Bun.
+- Confirmed focused tests, typecheck, and diff checks pass.
 
 ### Degraded seat
 
 The original chairman seat was rejected twice by the service safety filter because its retained conversation context included the earlier parser stress case. It produced no contrary code finding on the final head. The thread limit prevented replacing that retained seat with a new fourth thread.
 
-Consensus therefore rests on two independent live PASS votes, the primary review, the complete changed-file inspection, and a sealed zero-finding Codex Security remediation scan. The degraded seat is disclosed rather than silently counted as agreement.
+Consensus therefore rests on two independent live PASS votes on exact final code head `071f4dc782`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans. The degraded seat is disclosed rather than silently counted as agreement.
 
 ## Final verification
 
-- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **413 passed, 11 skipped, 1 existing todo, 0 failed**.
+- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **416 passed, 11 skipped, 1 existing todo, 0 failed**.
 - Repository typecheck: **13/13 successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
 - Frozen lockfile install: **1,295 installs across 1,390 packages, no changes**.
-- Targeted oxlint: **212 warnings, 0 errors**.
+- Targeted oxlint on the final supplemental files: **161 warnings, 0 errors**; warnings are existing repository debt.
 - Prettier: all changed files pass except `provider/provider.ts` and `provider/transform.ts`; both fail identically on `origin/main`.
 - `git diff --check origin/main...HEAD`: passed.
-- Final Codex Security remediation scan: complete coverage, **0 findings**.
+- Final request-shape Codex Security scans `1dcbce9e-587e-4495-94ff-6d3291e5e1d6` and `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`: complete coverage, **0 findings**.
 
 ## Residual limitations
 
