@@ -519,9 +519,50 @@ function entryFromManifest(pkgDir: string, specifier: string, pkg: string): stri
  * under concurrency, so it would corrupt resolution for unrelated work
  * non-deterministically — worse than the fault it patches.
  */
+/**
+ * Run `fn` with this process's command line hidden from it.
+ *
+ * `@mapbox/node-pre-gyp`, which packages several native drivers, resolves a
+ * module's manifest by parsing the **host application's** `process.argv` —
+ * `find()` passes `argv: process.argv` into its own `Run`, `nopt`
+ * abbreviation-matches whatever it sees against node-pre-gyp's option list, and
+ * `node-pre-gyp.js:164` then does:
+ *
+ *     package_json_path = path.join(this.opts.directory, package_json_path)
+ *
+ * `path.join`, not `path.resolve`, so an absolute manifest path is **not**
+ * discarded. Our `--dir` abbreviates to node-pre-gyp's `--directory`, so
+ * `altimate-code run --dir <project>` made the driver look for its manifest at
+ * `<project>` + the manifest's own absolute path, and the load failed with an
+ * ENOENT naming a path that had never existed.
+ *
+ * Nothing about that is specific to us, to DuckDB, or to a compiled binary: any
+ * CLI that embeds a node-pre-gyp-packaged module and accepts a flag
+ * abbreviating to `--directory` is exposed. Reported upstream; this keeps our
+ * users working in the meantime.
+ *
+ * **Why swapping a global here is safe when `process.chdir()` would not be.**
+ * `fn` is a synchronous `require`. JavaScript is single-threaded and there is
+ * no `await` between the swap and the restore, so no other task can run while
+ * the command line is hidden and no concurrent load can observe it. The same
+ * trick around an awaited dynamic `import()` would be a genuine hazard, and is
+ * deliberately not done below.
+ */
+function withNeutralArgv<T>(fn: () => T): T {
+  const saved = process.argv
+  // Keep argv[0] and argv[1] — the executable and the entry script. nopt only
+  // parses what follows, and node-pre-gyp expects those two to be present.
+  process.argv = saved.slice(0, 2)
+  try {
+    return fn()
+  } finally {
+    process.argv = saved
+  }
+}
+
 function requireFromLocation(resolved: string): unknown {
   const requireFrom = createRequire(pathToFileURL(resolved).href)
-  return requireFrom(resolved)
+  return withNeutralArgv(() => requireFrom(resolved))
 }
 
 /** True when a require failed only because the target is an ES module. */
