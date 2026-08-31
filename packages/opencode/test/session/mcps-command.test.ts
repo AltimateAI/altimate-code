@@ -51,3 +51,36 @@ describe("formatMcpStatusForDisplay — unresolved env vars", () => {
   })
 })
 // altimate_change end
+
+// altimate_change start — upstream_fix (#701): `/mcps` must not show less than `mcp list`.
+describe("/mcps file-scoped blank variables", () => {
+  test("renders one line per config source", () => {
+    // A server templated as `"url": "https://{env:MY_HOST}/mcp"` records against the config file,
+    // not the server, so it never reached `/mcps` through unresolvedEnvVars.
+    const out = SessionPrompt.formatBlankedEnvForDisplay([
+      { source: "/home/u/.config/altimate-code/altimate-code.json", names: ["MY_HOST"] },
+    ])
+    expect(out).toContain("MY_HOST")
+    expect(out).toContain("/home/u/.config/altimate-code/altimate-code.json")
+    expect(out).toContain("set or remove")
+  })
+
+  test("names every variable in a source, not just the first", () => {
+    const out = SessionPrompt.formatBlankedEnvForDisplay([{ source: "cfg.json", names: ["A", "B"] }])
+    expect(out).toContain("A")
+    expect(out).toContain("B")
+  })
+
+  test("one line per source", () => {
+    const out = SessionPrompt.formatBlankedEnvForDisplay([
+      { source: "a.json", names: ["A"] },
+      { source: "b.json", names: ["B"] },
+    ])
+    expect(out.split("\n")).toHaveLength(2)
+  })
+
+  test("empty when nothing blanked, so the table gains no trailing noise", () => {
+    expect(SessionPrompt.formatBlankedEnvForDisplay([])).toBe("")
+  })
+})
+// altimate_change end
