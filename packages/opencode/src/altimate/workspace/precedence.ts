@@ -153,6 +153,12 @@ const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Preced
 /** Per-session precedence, refreshed once per turn by the tool resolver and read
  * (never recomputed) by tool bodies mid-turn. */
 const bySession = new Map<string, Precedence>()
+/** One token per session incarnation: set when a session is first remembered or
+ * recreated after eviction, dropped with it. A delivery records against the
+ * incarnation it was published for, so ordinary refreshes (which replace the
+ * snapshot but not the session) still count, while a stale completion for a
+ * session evicted and recreated mid-flight does not. */
+const incarnations = new Map<string, object>()
 
 /** Test seam. Production leaves every field unset. */
 export const precedenceInternals: {
@@ -178,6 +184,7 @@ export const precedenceInternals: {
 export const MAX_TRACKED_SESSIONS = 256
 
 function remember(sessionID: string, value: Precedence): void {
+  if (!bySession.has(sessionID)) incarnations.set(sessionID, {})
   bySession.delete(sessionID)
   bySession.set(sessionID, value)
   while (bySession.size > MAX_TRACKED_SESSIONS) {
@@ -187,6 +194,7 @@ function remember(sessionID: string, value: Precedence): void {
     announced.delete(oldest.value)
     publishing.delete(oldest.value)
     publishQueue.delete(oldest.value)
+    incarnations.delete(oldest.value)
     unrecognisedWarned.delete(oldest.value)
   }
 }
@@ -445,6 +453,7 @@ export async function refresh(
     // Nothing reaches `announced` until the line actually arrives, so a failure leaves
     // the session's known state untouched and the next turn retries.
     const attempt = { line, routed }
+    const incarnation = incarnations.get(sessionID)
     publishing.set(sessionID, attempt)
     const queued = (publishQueue.get(sessionID) ?? Promise.resolve()).then(async () => {
       const delivered = await announce(line)
@@ -453,10 +462,10 @@ export async function refresh(
       // eviction only ever walks `bySession`, so an entry recreated here after the
       // session left it could never be reclaimed, and the map would grow with the
       // lifetime session count rather than staying bounded. Nor may it write over a
-      // session recreated in the meantime — only the snapshot this attempt was
-      // published for may record it, or a stale completion could retain or repeat
-      // an obsolete line over the newer publication.
-      if (delivered && bySession.get(sessionID) === result) announced.set(sessionID, attempt)
+      // session recreated in the meantime. The check is on the session incarnation,
+      // not the snapshot: a later refresh in the same session replaces the snapshot
+      // while this line is still the one being said for it.
+      if (delivered && incarnations.get(sessionID) === incarnation) announced.set(sessionID, attempt)
     })
     publishQueue.set(sessionID, queued)
     void queued
@@ -545,6 +554,7 @@ export function announcedSessionCount(): number {
 
 export function resetForTests(): void {
   bySession.clear()
+  incarnations.clear()
   announced.clear()
   publishing.clear()
   publishQueue.clear()

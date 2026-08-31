@@ -296,6 +296,25 @@ describe("the per-session caches are bounded", () => {
     expect(announcedSessionCount()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
   })
 
+  test("two refreshes sharing one in-flight delivery record it once, not never", async () => {
+    // A multi-step turn refreshes per step. The second refresh replaces the snapshot
+    // but starts no new delivery (the line is already being said); when that delivery
+    // lands it must still be recorded, or the next turn repeats the same line.
+    const settle: Array<() => void> = []
+    precedenceInternals.announce = () => new Promise<void>((resolve) => settle.push(resolve))
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(settle).toHaveLength(1)
+    settle[0]()
+    await tick()
+
+    const said: string[] = []
+    precedenceInternals.announce = async (line) => void said.push(line)
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    await tick()
+    expect(said).toEqual([])
+  })
+
   test("a line delivered after its session was evicted and recreated does not overwrite the new record", async () => {
     // Eviction drops the session's publish chain, so a session recreated before its
     // old line lands has a second publication running unchained. If the stale
