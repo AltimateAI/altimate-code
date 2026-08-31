@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `56dbc7e9b1f81fa226821754bf44005d8d08715b`
+- Final code candidate: `b7cfd659fac99f533d44fff506977a98e28af437`
 - Mode: full Council review plus final independent remediation pass
 - Local verdict: **PASS**
 - Remote gate: the final candidate must be pushed and fresh CI/bot review must finish
@@ -68,11 +68,11 @@ Batching the same parser would not remove its decompression/traversal boundary. 
 
 ## Final independent remediation review
 
-Two independent live Council seats re-reviewed the request-shape correction at `c78e1a61b6`, then reviewed all follow-up deltas through exact final head `56dbc7e9b1`. The final delta scales the safety margin against each authoritative small limit while retaining the 512-token minimum for normal windows. It does not change PDF behavior.
+Two independent live Council seats re-reviewed the request-shape correction at `c78e1a61b6`, then reviewed all production deltas through `56dbc7e9b1` and the final test-fixture delta through exact branch head `b7cfd659fa`. The final production delta scales the safety margin against each authoritative small limit while retaining the 512-token minimum for normal windows. The branch-head delta only updates a processor test's artificial context window to remain compatible with that production enforcement. Neither changes PDF behavior.
 
 ### Feynman seat — PASS
 
-- Verified exact final code head `56dbc7e9b1`.
+- Verified exact final production code head `56dbc7e9b1` and test-only branch head `b7cfd659fa`.
 - Confirmed `pdf-lib`, async parsing, page regex/policy, and transitive lock entries are absent.
 - Confirmed lazy estimation is not evaluated when `maxOutputTokens` is omitted.
 - Confirmed Mistral/Devstral projection matches the transport normalizer without mutating history.
@@ -85,11 +85,12 @@ Two independent live Council seats re-reviewed the request-shape correction at `
 - Confirmed the exact 8,192-token context boundary: input 7,516 fits with output 512 and margin 164, while input 7,517 is rejected.
 - Confirmed a one-token input/output request fits a 512-token context, while reserving the full 512-token output does not.
 - Confirmed a 512-token dedicated input ceiling accepts input 501 with margin 11 and rejects input 502.
+- Confirmed the processor fixture now uses context 20,000, exactly its default compaction headroom, while the former context 20 still raises `OutputTokenBudgetError`.
 - Re-ran provider, typecheck, diff, and bridge checks successfully.
 
 ### Musashi seat — PASS
 
-- Verified exact final code head `56dbc7e9b1`.
+- Verified exact final production code head `56dbc7e9b1` and test-only branch head `b7cfd659fa`.
 - Confirmed the parser experiment remains cleanly reverted and no PDF dependency returned.
 - Confirmed synchronous lazy estimation, linear Mistral projection, and parity across both callers.
 - Confirmed identical wire fields are counted separately while OAuth/workflow omissions are not double-counted.
@@ -99,17 +100,18 @@ Two independent live Council seats re-reviewed the request-shape correction at `
 - Confirmed the exact 8,192-token context boundary: input 7,516 plus output 512 plus margin 164 fits, while one additional input token is rejected.
 - Confirmed the exact 512-token input-limit boundary: input 501 plus margin 11 fits, while input 502 is rejected.
 - Confirmed context and dedicated input limits receive independent margins while normal-window behavior remains unchanged.
+- Confirmed the final branch delta changes only the processor fixture and comment, preserves the intended `base <= headroom` compaction guard, and does not mask the separate small-context admission regressions.
 - Confirmed focused tests, typecheck, and diff checks pass.
 
 ### Degraded seat
 
 The original chairman seat was rejected twice by the service safety filter because its retained conversation context included the earlier parser stress case. It produced no contrary code finding on the final head. The thread limit prevented replacing that retained seat with a new fourth thread.
 
-Consensus therefore rests on two independent live PASS votes on exact final code head `56dbc7e9b1`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans. The degraded seat is disclosed rather than silently counted as agreement.
+Consensus therefore rests on two independent live PASS votes on exact final branch head `b7cfd659fa`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans through the final production change. The degraded seat is disclosed rather than silently counted as agreement.
 
 ## Final verification
 
-- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **418 passed, 11 skipped, 1 existing todo, 0 failed**.
+- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **427 passed, 11 skipped, 7 existing todos, 0 failed**.
 - Repository typecheck: **13/13 successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.

@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `56dbc7e9b1f81fa226821754bf44005d8d08715b`
+- Final code candidate: `b7cfd659fac99f533d44fff506977a98e28af437`
 - Scan mode: chained immutable branch-diff reviews
 - Final coverage: complete
 - Findings remaining on the final candidate: **0**
@@ -35,6 +35,7 @@ The review used immutable ranges so every material repair was independently reco
 | Instruction occurrence fix   | `c78e1a61b6..071f4dc782`                           | Complete coverage; **0 findings**                            |
 | Final edge-case hardening    | `a279303720..aab3dac850`                           | Complete coverage; **0 findings**                            |
 | Small-limit margin fix       | `e3ca59741a..56dbc7e9b1`                           | Complete coverage; **0 findings**                            |
+| Final fixture compatibility  | `d663c49b74..b7cfd659fa`                           | Test-only; no production attack-surface change               |
 
 The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, and `5111b689-e4ad-4243-a7cb-86845b30ca6d`. Their authoritative results contain no deferred work, no open question, and zero findings.
 
@@ -66,6 +67,8 @@ The final supplemental review found that an empty base64 image represented as a 
 
 A follow-up review correctly found that enforcing every positive limit with an unconditional 512-token minimum margin would consume an entire 512-token window. The final candidate retains the 512-token minimum for normal windows but caps that minimum at 2% of each smaller authoritative limit, never below one token. Context and dedicated input ceilings receive separate margins. This preserves local enforcement without rejecting every otherwise valid request on small models.
 
+The subsequent branch-head delta changes only an artificial processor test context from 20 to 20,000 tokens. That value exactly equals the existing default compaction headroom and preserves the fixture's intended guard path; the separate production admission regressions continue to exercise 1-, 512-, and 1,024-token contexts.
+
 ## Final trust and data flow
 
 Both production request paths use the same sequence:
@@ -82,7 +85,7 @@ Codebase graph tracing found exactly two production callers of the centralized c
 
 ## Verification
 
-- Focused provider, AI-SDK stream, native request, and upstream bridge suites: **418 passed, 11 skipped, 1 existing todo, 0 failed**.
+- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **427 passed, 11 skipped, 7 existing todos, 0 failed**.
 - Repository typecheck: **13/13 tasks successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
