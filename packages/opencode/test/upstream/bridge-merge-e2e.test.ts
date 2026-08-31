@@ -378,9 +378,7 @@ describe("E2E: OAuth callback XSS prevention (cycle 1 + 2)", () => {
     // util (src/util/html.ts); oauth-callback.ts now imports it. Accept either an
     // inline `function escapeHtml` (legacy) or the shared-util import — the XSS
     // property below is what actually matters and is asserted unchanged.
-    expect(content).toMatch(
-      /function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/,
-    )
+    expect(content).toMatch(/function escapeHtml|import\s*\{\s*escapeHtml\s*\}\s*from\s*["']@\/util\/html["']/)
     // Every ${error} or ${error_description} interpolation must go through escapeHtml
     const errorInterps = content.match(/\$\{(error[A-Za-z_]*?)\}/g) ?? []
     for (const interp of errorInterps) {
@@ -687,9 +685,26 @@ describe("E2E: SessionStatus.set async drift fixed (cycle 4)", () => {
     expect(content).toMatch(/export\s+async\s+function\s+cancel\s*\(/)
   })
 
-  test("SessionPrompt.prompt uses `await using` for cancel disposer", async () => {
+  test("SessionPrompt.cancel makes an aborted generation replaceable before aborting it", () => {
     const content = readFileSync(path.join(srcDir, "session", "prompt.ts"), "utf-8")
-    expect(content).toMatch(/await\s+using\s+_\s*=\s*defer\(\s*\(\s*\)\s*=>\s*cancel\s*\(/)
+    const cancel = content.match(/export async function cancel\(sessionID:[\s\S]*?^  \}/m)?.[0]
+    expect(cancel).toBeDefined()
+    expect(cancel!.indexOf("match.closing = true")).toBeGreaterThan(-1)
+    expect(cancel!.indexOf("match.closing = true")).toBeLessThan(cancel!.indexOf("match.abort.abort()"))
+  })
+
+  test("SessionPrompt.loop scopes fallback idle restoration to its own generation", async () => {
+    const content = readFileSync(path.join(srcDir, "session", "prompt.ts"), "utf-8")
+    // Capture only the disposer body: the closing `    })` indentation anchors
+    // the match before later bootstrap/normal-loop idle sites can satisfy it.
+    const disposer = content.match(/^    await using _ = defer\(async \(\) => \{\n([\s\S]*?)^    \}\)$/m)?.[1]
+    expect(disposer).toBeDefined()
+    expect(disposer).toMatch(/match\.abort\.signal\s*!==\s*abort/)
+    expect(disposer).toMatch(/match\.closing\s*=\s*true/)
+    expect(disposer).toMatch(
+      /await\s+SessionStatus\.get\(sessionID\)[\s\S]*?s\[sessionID\]\s*===\s*match[\s\S]*?status\.type\s*!==\s*"idle"[\s\S]*?await\s+SessionStatus\.set\(sessionID,\s*\{\s*type:\s*"idle"\s*\}\)/,
+    )
+    expect(disposer).toMatch(/s\[sessionID\]\s*===\s*match\)\s*delete\s+s\[sessionID\]/)
   })
 })
 

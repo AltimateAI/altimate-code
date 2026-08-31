@@ -73,21 +73,21 @@ describe("opencode run (non-interactive subprocess)", () => {
     30_000,
   )
 
-  // Locks in the current behavior: when the LLM stream errors mid-response
-  // (the prompt was accepted, then the upstream provider failed), opencode
-  // emits a session.error event and the process exits 0 today.
-  //
-  // This is debatable — a future cleanup might flip it to exit 1. If you're
-  // changing this expectation, do it deliberately and say so in the PR.
+  // (harness-improvement plan): a run that ends with an unrecovered session
+  // error is a fatal abort and must exit nonzero — an honest rc is the contract
+  // automation needs. This deliberately flips the previous "exits 0 today"
+  // contract lock-in (its comment asked for exactly this kind of deliberate
+  // change). Recoverable errors (context overflow handled by auto-compaction)
+  // still exit 0; see RunAccounting.onSessionError.
   cliIt.concurrent(
-    "mid-stream LLM error still exits 0 today (contract lock-in)",
+    "mid-stream LLM error exits nonzero (honest rc on fatal abort)",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
         yield* llm.fail("upstream provider exploded mid-stream")
         // bunRun: the compiled binary hangs handling a mid-stream stream error in the isolated test env
-        // (never exits); `bun run src` exits 0 in ~1s. See cliCommand in test/lib/cli-process.ts.
+        // (never exits); `bun run src` exits promptly. See cliCommand in test/lib/cli-process.ts.
         const result = yield* opencode.run("trigger midstream error", { timeoutMs: 30_000, bunRun: true })
-        expect(result.exitCode).toBe(0)
+        expect(result.exitCode).toBe(1)
       }),
     60_000,
   )

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
-import type { ModelMessage } from "ai"
+import type { ModelMessage, Tool } from "ai"
 import { LLM } from "../../src/session/llm"
 import { Global } from "../../src/global"
 import { Instance } from "../../src/project/instance"
@@ -80,6 +80,45 @@ describe("session.llm.toolNamesFromMessages", () => {
       },
     ] as ModelMessage[]
     expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
+  })
+})
+
+// Harness reliability / item 3: stub injection must be skipped entirely when the call
+// exposes zero real tools AND uses the explicit toolChoice "none" no-tool-call
+// contract (e.g. the compaction summarizer) — the provider-compat fallback path.
+// A normal turn that happens to have zero real tools (allowlist/permissions
+// stripped everything) must still get historical stubs so referenced tool_use
+// blocks in history don't trip provider validation.
+describe("session.llm.addHistoricalToolStubs", () => {
+  test("skips stub injection when there are zero real tools AND toolChoice is none", () => {
+    const tools: Record<string, Tool> = {}
+    const result = LLM.addHistoricalToolStubs(tools, new Set(["bash", "read"]), "none")
+    expect(result).toBe(tools)
+    expect(Object.keys(tools)).toEqual([])
+  })
+
+  test("still injects stubs for zero real tools when toolChoice is not none", () => {
+    const tools: Record<string, Tool> = {}
+    LLM.addHistoricalToolStubs(tools, new Set(["bash", "read"]))
+    expect(Object.keys(tools).sort()).toEqual(["bash", "read"])
+  })
+
+  test("injects stubs for referenced tools missing from a non-empty tool set", () => {
+    const real = { description: "real bash" } as Tool
+    const tools: Record<string, Tool> = { bash: real }
+    LLM.addHistoricalToolStubs(tools, new Set(["bash", "old_mcp_tool"]))
+    expect(Object.keys(tools).sort()).toEqual(["bash", "old_mcp_tool"])
+    // Existing real tools are never overwritten.
+    expect(tools.bash).toBe(real)
+    expect(tools.old_mcp_tool.description).toContain("[Historical]")
+  })
+
+  test("is a no-op when every referenced tool already has a definition", () => {
+    const real = { description: "real bash" } as Tool
+    const tools: Record<string, Tool> = { bash: real }
+    LLM.addHistoricalToolStubs(tools, new Set(["bash"]))
+    expect(Object.keys(tools)).toEqual(["bash"])
+    expect(tools.bash).toBe(real)
   })
 })
 
