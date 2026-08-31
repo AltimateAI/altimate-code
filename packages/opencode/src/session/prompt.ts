@@ -36,6 +36,9 @@ import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
 // altimate_change — upstream_fix (#701): unresolved-env record for the /mcps view.
 import * as McpDiscover from "../mcp/discover"
+// altimate_change start — upstream_fix (#701): file-scoped blank-variable diagnostics.
+import { ConfigVariable } from "../config/variable"
+// altimate_change end
 import { ToolRegistry } from "../tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "../lsp"
@@ -2896,6 +2899,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   // altimate_change start — shared text formatter for /mcps runtime status (#972)
   /** @internal Exported for tests. */
+  // altimate_change start — upstream_fix (#701): exported so the wording is testable without
+  // standing up a session; `/mcps` is otherwise only reachable through the whole handler.
+  /** File-scoped blank-variable lines for `/mcps`, empty string when there are none. */
+  export function formatBlankedEnvForDisplay(entries: { source: string; names: string[] }[]): string {
+    return entries
+      .map(({ source, names }) => "- `" + names.join(", ") + "` resolved to empty in `" + source + "` (set or remove)")
+      .join("\n")
+  }
+  // altimate_change end
+
   export function formatMcpStatusForDisplay(name: string, status: MCP.Status, unresolvedEnv: string[] = []) {
     const icon = status.status === "connected" ? "\u2713" : "\u25cb"
     // upstream_fix (#701): a server whose `${VAR}` did not resolve launched with that value
@@ -2968,9 +2981,15 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s, McpDiscover.unresolvedEnvVars(srv)) + " |",
           )
           .join("\n")
-        const responseText = rows
-          ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
-          : "No MCP servers configured."
+        // altimate_change start — upstream_fix (#701): `/mcps` showed only the per-server
+        // unresolved variables from discovery, while `mcp list` also reported file-scoped blanks.
+        // A server templated as `"url": "https://{env:MY_HOST}/mcp"` records against the config
+        // file rather than the server, so it appeared in the CLI and not here — in the session
+        // view, which is where someone is when a server will not connect.
+        const blanked = formatBlankedEnvForDisplay(ConfigVariable.blankedEnvVars())
+        const table = rows ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows : "No MCP servers configured."
+        const responseText = blanked ? table + "\n\n" + blanked : table
+        // altimate_change end
 
         return respond(userMsg.info.id, responseText, model)
       }
