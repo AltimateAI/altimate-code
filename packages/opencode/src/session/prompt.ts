@@ -1,4 +1,5 @@
 import path from "path"
+import { existsSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -40,6 +41,9 @@ import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
 import { FileTime } from "../file/time"
 import { Flag } from "../flag/flag"
+// altimate_change — sync flag read, so the workspace-skill hook below can cost
+// literally nothing (not even an await) for users who never opted in.
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
 import { Command } from "../command"
@@ -99,6 +103,39 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
+
+  // altimate_change start — how long a turn will wait for the workspace skill
+  // sync before proceeding without it. See the block in `prompt`.
+  const WORKSPACE_SKILL_WAIT_MS = 2000
+
+  /** Drop the caches in front of the synced skill files, if a sync moved them.
+   * Shared by both branches of the block in `prompt`: opting out removes a
+   * snapshot and needs the registry refreshed exactly as adding one does. */
+  async function refreshSkillRegistry(dir: string): Promise<void> {
+    const skillSync = await import("../altimate/workspace/skill-sync")
+    if (!skillSync.registryStale(dir)) return
+    // Marked BEFORE the work, not after: a refresh that throws must not be
+    // retried on every subsequent turn forever, and the next real snapshot
+    // change re-arms this anyway.
+    skillSync.markRegistryApplied(dir)
+    const { Skill } = await import("../skill")
+    // Both drops go through the in-context services rather than the imperative
+    // facades. Discovery re-derives its roots from `Config.directories()`, which
+    // walks up looking for `.altimate-code/`; on a project that has never synced,
+    // that directory does not exist at boot, so the list holds a miss that only
+    // an invalidate reaching *this* instance can clear. Invalidating through the
+    // facade leaves it, and the refreshed registry then rescans the same empty
+    // root set — the skills stay invisible for the rest of the session.
+    await AppRuntime.runPromise(
+      Effect.gen(function* () {
+        const config = yield* Config.Service
+        const skill = yield* Skill.Service
+        yield* config.invalidate()
+        yield* skill.refresh()
+      }),
+    )
+  }
+  // altimate_change end
 
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
   // user-facing phase label.
@@ -276,6 +313,76 @@ export namespace SessionPrompt {
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
 
+    // altimate_change start — make the bound workspace's custom skills visible
+    // before the agent is resolved. `createUserMessage` -> `Agent.get` ->
+    // `Skill.dirs()` is what first materialises the skill registry, so acting
+    // here lands the skills on this turn rather than the next one.
+    //
+    // The flag is read SYNCHRONOUSLY and the opt-out path is deliberately not
+    // awaited. An `await` here — even a zero-cost one — inserts an event-loop
+    // tick before `createUserMessage`, which reorders this turn against a
+    // forked `prompt.loop` fiber. That is not theoretical: it made
+    // "running subtask preserves metadata after tool-call transition" fail
+    // roughly two runs in three, while passing on main. A feature nobody
+    // enabled must not perturb the turn at all.
+    //
+    // Opting out still has to take effect, since discovery loads whatever is on
+    // disk without consulting the flag. The gate is a synchronous `existsSync`,
+    // not a detached cleanup: a run with the flag ON leaves a snapshot behind,
+    // and turning the flag off does not delete it, so a later opted-out turn
+    // CAN find one. Detaching the purge let `createUserMessage` materialise
+    // those stale skills first, which put `alwaysApply` instructions into a
+    // turn the operator had disabled the feature for. Awaiting only when a
+    // snapshot is actually there keeps the tick off the path that regressed —
+    // a user who never opted in has no directory, so this costs one `stat` and
+    // does not even load the sync module.
+    if (!CoreFlag.ALTIMATE_WORKSPACE) {
+      const dir = Instance.directory
+      // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
+      // rather than imported so the opted-out path stays free of that module.
+      if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) {
+        try {
+          const m = await import("../altimate/workspace/skill-sync")
+          if ((await m.syncSkills(dir)).changed) await refreshSkillRegistry(dir)
+        } catch (err) {
+          log.warn("workspace skill opt-out cleanup failed", { err: String(err) })
+        }
+      }
+    } else {
+      try {
+        const skillSync = await import("../altimate/workspace/skill-sync")
+        const dir = Instance.directory
+        const refreshRegistry = () => refreshSkillRegistry(dir)
+
+        // A sync that ran elsewhere — a bind, most commonly — changes the
+        // snapshot with no instance context to refresh from. Pick that up before
+        // deciding whether this turn needs to poll at all.
+        await refreshRegistry()
+
+        if (!(await skillSync.recentlySynced(dir))) {
+          const applied = skillSync.syncSkills(dir).then(refreshRegistry)
+          applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
+          // Timer cleared when the sync wins the race: an armed timer keeps the
+          // event loop alive, so a short-lived `run` would linger for the rest
+          // of the bound, once per turn.
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            await Promise.race([
+              applied,
+              new Promise((r) => {
+                timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
+              }),
+            ])
+          } finally {
+            if (timer) clearTimeout(timer)
+          }
+        }
+      } catch (err) {
+        log.warn("workspace skill sync failed", { err: String(err) })
+      }
+    }
+    // altimate_change end
+
     const message = await createUserMessage(input)
     await Session.touch(input.sessionID)
 
@@ -444,12 +551,7 @@ export namespace SessionPrompt {
     let session: Awaited<ReturnType<typeof Session.get>>
     let altCfg: Awaited<ReturnType<typeof Config.get>>
     try {
-      session = await traceSpan(
-        "bootstrap.session-get",
-        () => Session.get(sessionID),
-        { sessionID },
-        sessionID,
-      )
+      session = await traceSpan("bootstrap.session-get", () => Session.get(sessionID), { sessionID }, sessionID)
       // altimate_change start - detect environment fingerprint at session start
       altCfg = await traceSpan("bootstrap.config-get", () => Config.get(), undefined, sessionID)
       if (altCfg.experimental?.env_fingerprint_skill_selection === true) {
@@ -622,9 +724,7 @@ export namespace SessionPrompt {
       // TODO: centralize "invoke tool" logic
       if (task?.type === "subtask") {
         // altimate_change start — v1.17.9: TaskTool is an Effect of Info; init() yields the executable def
-        const taskTool = await AppRuntime.runPromise(
-          Effect.flatMap(TaskTool, (info) => info.init()),
-        )
+        const taskTool = await AppRuntime.runPromise(Effect.flatMap(TaskTool, (info) => info.init()))
         // altimate_change end
         const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
         const assistantMessage = (await Session.updateMessage({
@@ -858,9 +958,7 @@ export namespace SessionPrompt {
         model,
       })
       msgs = reminderResult.messages
-      const hoistedReminders = isAnthropicLikeModel(model)
-        ? []
-        : reminderResult.trustedReminderParts.map((p) => p.text)
+      const hoistedReminders = isAnthropicLikeModel(model) ? [] : reminderResult.trustedReminderParts.map((p) => p.text)
       // altimate_change end
 
       // altimate_change start — plan refinement detection and telemetry
@@ -2907,7 +3005,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     // altimate_change start — /mcps enable/disable: direct handler bypasses LLM
     if (input.command === "mcps") {
-
       // Helper: build and persist an assistant reply for a command shortcut.
       async function respond(
         parentID: MessageID,
