@@ -324,8 +324,11 @@ export function estimateInputTokens(input: {
   readonly tools?: Readonly<Record<string, unknown>>
   readonly instructions?: unknown
 }): number {
-  const system = input.system.join("\n")
-  let total = estimateTextTokens(system)
+  let total = 0
+  if (input.system.length > 0) {
+    const system = serializeForEstimate(input.system.map((content) => ({ role: "system", content })))
+    total += estimateTextTokens(system.text)
+  }
 
   const messages = serializeForEstimate(input.messages, messageMediaAllowances(input.messages))
   total += estimateTextTokens(messages.text) + messages.mediaTokens

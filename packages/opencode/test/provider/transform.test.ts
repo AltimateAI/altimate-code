@@ -4847,6 +4847,14 @@ describe("output token budget", () => {
     expect(both).toBeGreaterThan(systemOnly * 1.8)
   })
 
+  test("counts framing for every separately transmitted system message", () => {
+    const entries = Array.from({ length: 2_000 }, () => "x")
+    const flattened = estimateInputTokens({ system: [entries.join("\n")], messages: [] })
+    const framed = estimateInputTokens({ system: entries, messages: [] })
+
+    expect(framed).toBeGreaterThan(flattened + entries.length)
+  })
+
   test("does not tokenize encoded media bytes as literal prompt text", () => {
     const estimated = estimateInputTokens({
       system: [],
