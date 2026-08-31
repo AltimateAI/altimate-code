@@ -1953,6 +1953,7 @@ export namespace SessionPrompt {
     }
     await Telemetry.shutdown()
     // altimate_change end
+    // altimate_change start — resolve callbacks from this prompt generation only
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
       // Resolve only callers queued on THIS loop generation. A cancelled loop
@@ -1965,6 +1966,7 @@ export namespace SessionPrompt {
       }
       return item
     }
+    // altimate_change end
     throw new Error("Impossible")
   })
 

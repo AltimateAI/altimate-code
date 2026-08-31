@@ -769,7 +769,9 @@ export namespace SessionProcessor {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
+                        // altimate_change start — persist only dispatch-capped attachments
                         attachments: toolResultAttachments,
+                        // altimate_change end
                       },
                     })
 

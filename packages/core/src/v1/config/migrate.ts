@@ -30,6 +30,7 @@ const keys = new Set([
 
 export function isV1(input: unknown) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return false
+  // altimate_change start — detect renamed nested V1 compaction keys
   if (Object.keys(input).some((key) => keys.has(key))) return true
   const compaction = (input as Record<string, unknown>).compaction
   if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction)) return false
@@ -39,6 +40,7 @@ export function isV1(input: unknown) {
   return ["tail_turns", "preserve_recent_tokens", "reserved"].some((key) =>
     Object.prototype.hasOwnProperty.call(compaction, key),
   )
+  // altimate_change end
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {
