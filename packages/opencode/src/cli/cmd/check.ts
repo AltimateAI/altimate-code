@@ -462,8 +462,11 @@ export const CheckCommand = cmd({
     let files: string[] = args.files ?? []
     if (files.length === 0) {
       console.error("No files specified, searching for **/*.{sql,ddl} in current directory...")
-      const sqls = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true })
-      const ddls = await Glob.scan("**/*.ddl", { cwd: process.cwd(), absolute: true })
+      // Prune dependency stores without hiding authored SQL merely because a
+      // project uses a directory name such as build/, out/, or target/.
+      const ignore = [...Glob.DEPENDENCY_IGNORE]
+      const sqls = await Glob.scan("**/*.sql", { cwd: process.cwd(), absolute: true, ignore })
+      const ddls = await Glob.scan("**/*.ddl", { cwd: process.cwd(), absolute: true, ignore })
       files = [...new Set([...sqls, ...ddls])]
     } else {
       // Expand globs in positional args

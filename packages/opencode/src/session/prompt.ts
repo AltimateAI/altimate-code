@@ -1,5 +1,6 @@
 import path from "path"
 import { Token } from "@/util/token"
+import { existsSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -28,17 +29,30 @@ import { MemoryPrompt } from "../memory/prompt"
 import { UNIFIED_INJECTION_BUDGET } from "../memory/types"
 // altimate_change - workspace memory read path
 import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
+// altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
+import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
+import { DATAMATE_KEY } from "../altimate/datamate-transport"
+import * as Precedence from "../altimate/workspace/precedence"
+// altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
+// altimate_change — upstream_fix (#701): unresolved-env record for the /mcps view.
+import * as McpDiscover from "../mcp/discover"
+// altimate_change start — upstream_fix (#701): file-scoped blank-variable diagnostics.
+import { ConfigVariable } from "../config/variable"
+// altimate_change end
 import { ToolRegistry } from "../tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
 import { FileTime } from "../file/time"
 import { Flag } from "../flag/flag"
+// altimate_change — sync flag read, so the workspace-skill hook below can cost
+// literally nothing (not even an await) for users who never opted in.
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
 import { Command } from "../command"
@@ -98,6 +112,39 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
+
+  // altimate_change start — how long a turn will wait for the workspace skill
+  // sync before proceeding without it. See the block in `prompt`.
+  const WORKSPACE_SKILL_WAIT_MS = 2000
+
+  /** Drop the caches in front of the synced skill files, if a sync moved them.
+   * Shared by both branches of the block in `prompt`: opting out removes a
+   * snapshot and needs the registry refreshed exactly as adding one does. */
+  async function refreshSkillRegistry(dir: string): Promise<void> {
+    const skillSync = await import("../altimate/workspace/skill-sync")
+    if (!skillSync.registryStale(dir)) return
+    // Marked BEFORE the work, not after: a refresh that throws must not be
+    // retried on every subsequent turn forever, and the next real snapshot
+    // change re-arms this anyway.
+    skillSync.markRegistryApplied(dir)
+    const { Skill } = await import("../skill")
+    // Both drops go through the in-context services rather than the imperative
+    // facades. Discovery re-derives its roots from `Config.directories()`, which
+    // walks up looking for `.altimate-code/`; on a project that has never synced,
+    // that directory does not exist at boot, so the list holds a miss that only
+    // an invalidate reaching *this* instance can clear. Invalidating through the
+    // facade leaves it, and the refreshed registry then rescans the same empty
+    // root set — the skills stay invisible for the rest of the session.
+    await AppRuntime.runPromise(
+      Effect.gen(function* () {
+        const config = yield* Config.Service
+        const skill = yield* Skill.Service
+        yield* config.invalidate()
+        yield* skill.refresh()
+      }),
+    )
+  }
+  // altimate_change end
 
   // altimate_change start — testable validator completion gate shared by the dispatch path
   /** @internal Pure completion-gate predicate used by focused regression tests. */
@@ -295,6 +342,76 @@ export namespace SessionPrompt {
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
 
+    // altimate_change start — make the bound workspace's custom skills visible
+    // before the agent is resolved. `createUserMessage` -> `Agent.get` ->
+    // `Skill.dirs()` is what first materialises the skill registry, so acting
+    // here lands the skills on this turn rather than the next one.
+    //
+    // The flag is read SYNCHRONOUSLY and the opt-out path is deliberately not
+    // awaited. An `await` here — even a zero-cost one — inserts an event-loop
+    // tick before `createUserMessage`, which reorders this turn against a
+    // forked `prompt.loop` fiber. That is not theoretical: it made
+    // "running subtask preserves metadata after tool-call transition" fail
+    // roughly two runs in three, while passing on main. A feature nobody
+    // enabled must not perturb the turn at all.
+    //
+    // Opting out still has to take effect, since discovery loads whatever is on
+    // disk without consulting the flag. The gate is a synchronous `existsSync`,
+    // not a detached cleanup: a run with the flag ON leaves a snapshot behind,
+    // and turning the flag off does not delete it, so a later opted-out turn
+    // CAN find one. Detaching the purge let `createUserMessage` materialise
+    // those stale skills first, which put `alwaysApply` instructions into a
+    // turn the operator had disabled the feature for. Awaiting only when a
+    // snapshot is actually there keeps the tick off the path that regressed —
+    // a user who never opted in has no directory, so this costs one `stat` and
+    // does not even load the sync module.
+    if (!CoreFlag.ALTIMATE_WORKSPACE) {
+      const dir = Instance.directory
+      // Mirrors `MANAGED_DIR` in ./altimate/workspace/skill-sync. Inlined
+      // rather than imported so the opted-out path stays free of that module.
+      if (existsSync(path.join(dir, ".altimate-code", "skill", "_workspace"))) {
+        try {
+          const m = await import("../altimate/workspace/skill-sync")
+          if ((await m.syncSkills(dir)).changed) await refreshSkillRegistry(dir)
+        } catch (err) {
+          log.warn("workspace skill opt-out cleanup failed", { err: String(err) })
+        }
+      }
+    } else {
+      try {
+        const skillSync = await import("../altimate/workspace/skill-sync")
+        const dir = Instance.directory
+        const refreshRegistry = () => refreshSkillRegistry(dir)
+
+        // A sync that ran elsewhere — a bind, most commonly — changes the
+        // snapshot with no instance context to refresh from. Pick that up before
+        // deciding whether this turn needs to poll at all.
+        await refreshRegistry()
+
+        if (!(await skillSync.recentlySynced(dir))) {
+          const applied = skillSync.syncSkills(dir).then(refreshRegistry)
+          applied.catch((err) => log.warn("workspace skill sync failed", { err: String(err) }))
+          // Timer cleared when the sync wins the race: an armed timer keeps the
+          // event loop alive, so a short-lived `run` would linger for the rest
+          // of the bound, once per turn.
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            await Promise.race([
+              applied,
+              new Promise((r) => {
+                timer = setTimeout(r, WORKSPACE_SKILL_WAIT_MS)
+              }),
+            ])
+          } finally {
+            if (timer) clearTimeout(timer)
+          }
+        }
+      } catch (err) {
+        log.warn("workspace skill sync failed", { err: String(err) })
+      }
+    }
+    // altimate_change end
+
     const message = await createUserMessage(input)
     await Session.touch(input.sessionID)
 
@@ -485,6 +602,11 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    // altimate_change start — first tool catalog of this loop. `step` counts loop
+    // iterations, and an iteration can `continue` before cataloguing (pending
+    // compaction, context overflow), so "step === 1" is not "first catalog".
+    let catalogued = false
+    // altimate_change end
     // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
     // single "bootstrap" span right before the first processor.process call so
     // the pre-first-generation region has a visible parent duration in traces.
@@ -1134,21 +1256,35 @@ export namespace SessionPrompt {
       // cost etc.). Distinct span name per phase so telemetry doesn't
       // double-count non-bootstrap turns under "bootstrap.*", and the TUI
       // falls back to the safe "Thinking..." label on later turns.
-      const tools = await traceSpan(
-        step === 1 ? "bootstrap.resolve-tools" : "turn.resolve-tools",
-        () =>
-          resolveTools({
-            agent,
-            session,
-            model,
-            tools: lastUser.tools,
-            processor,
-            bypassAgentCheck,
-            messages: msgs,
-          }),
-        { step, agent: agent.name },
-        sessionID,
-      )
+      const catalog = () =>
+        traceSpan(
+          step === 1 ? "bootstrap.resolve-tools" : "turn.resolve-tools",
+          () =>
+            resolveTools({
+              agent,
+              session,
+              model,
+              tools: lastUser.tools,
+              processor,
+              bypassAgentCheck,
+              messages: msgs,
+            }),
+          { step, agent: agent.name },
+          sessionID,
+        )
+      // Workspace engine turn boundary, on the turn's FIRST catalog (not its first
+      // loop iteration — a compaction can run before any catalog): reconcile the
+      // bound workspace's engine (re-link, one retry on a failed handshake), settle
+      // this session's outcome, announce it once per verdict — then catalog the
+      // tools under the same per-directory lock, so another session's boundary
+      // cannot replace the engine between this reconcile and this snapshot. The
+      // cold engine boot happens inside MCP's own bootstrap, bounded by its
+      // per-server timeout. Later catalogs keep the engine tools this turn started
+      // with.
+      const firstCatalog = !catalogued
+      catalogued = true
+      const tools = firstCatalog ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
+      WorkspaceEngine.pinTurnTools(sessionID, firstCatalog, tools)
       // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -1887,6 +2023,20 @@ export namespace SessionPrompt {
     }
     // altimate_change end
 
+    // altimate_change start — workspace precedence.
+    // Derived once per turn from the LIVE tool map rather than cached at attach:
+    // precedence is a pure function of the materialised set, and `MCP.tools()` is
+    // cache-invalidated by the `tools/list_changed` notification, so re-deriving here
+    // is what keeps precedence correct when an engine's tool set changes under us.
+    // Resolved before the loops below because both sides' descriptions depend on it.
+    const mcpTools = await MCP.tools()
+    const precedence = await Precedence.refresh(
+      input.session.id,
+      mcpTools,
+      PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+    )
+    // altimate_change end
+
     for (const item of await ToolRegistry.tools(
       { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
@@ -1896,7 +2046,9 @@ export namespace SessionPrompt {
       // altimate_change end
       tools[item.id] = tool({
         id: item.id as any,
-        description: item.description,
+        // altimate_change start — name the workspace on the native side too
+        description: Precedence.describeNativeTool(item.id, item.description, precedence),
+        // altimate_change end
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           // altimate_change start — disambiguate repeated concurrent tool-call ids
@@ -1956,8 +2108,11 @@ export namespace SessionPrompt {
 
     // altimate_change start — split the original client name off the model-facing tool object so
     // it's used only for source classification and never leaks into the schema sent to the model.
-    for (const [key, entry] of Object.entries(await MCP.tools())) {
+    for (const [key, entry] of Object.entries(mcpTools)) {
       const { client: clientName, ...item } = entry
+      // altimate_change start — mark the engine tools that now serve a shadowed capability
+      item.description = Precedence.describeEngineTool(key, item.description ?? "", precedence)
+      // altimate_change end
       // altimate_change end
       const execute = item.execute
       if (!execute) continue
@@ -3372,11 +3527,41 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   // altimate_change start — shared text formatter for /mcps runtime status (#972)
   /** @internal Exported for tests. */
-  export function formatMcpStatusForDisplay(name: string, status: MCP.Status) {
+  // altimate_change start — upstream_fix (#878): `/mcps` reported neither drift nor file-scoped
+  // blanks, so the session view consistently showed less than `mcp list` for the same problem.
+  /** Config-drift lines for `/mcps`, empty string when nothing has drifted. */
+  export function formatConfigDriftForDisplay(entries: { server: string; source: string; fields: string[] }[]): string {
+    return entries
+      .map(
+        ({ server, source, fields }) =>
+          "- `" + server + "` differs from `" + source + "`: " + fields.join(", ") + " (config wins)",
+      )
+      .join("\n")
+  }
+  // altimate_change end
+  // altimate_change start — upstream_fix (#701): exported so the wording is testable without
+  // standing up a session; `/mcps` is otherwise only reachable through the whole handler.
+  /** File-scoped blank-variable lines for `/mcps`, empty string when there are none. */
+  export function formatBlankedEnvForDisplay(entries: { source: string; names: string[] }[]): string {
+    return entries
+      .map(({ source, names }) => "- `" + names.join(", ") + "` resolved to empty in `" + source + "` (set or remove)")
+      .join("\n")
+  }
+  // altimate_change end
+
+  export function formatMcpStatusForDisplay(name: string, status: MCP.Status, unresolvedEnv: string[] = []) {
     const icon = status.status === "connected" ? "\u2713" : "\u25cb"
-    if (status.status === "failed") return icon + " " + status.status + " (" + status.error + ")"
-    if (status.status === "needs_auth") return icon + " Needs authentication (run: altimate mcp auth " + name + ")"
-    return icon + " " + status.status
+    // upstream_fix (#701): a server whose `${VAR}` did not resolve launched with that value
+    // blank — most often a password. It then fails with a downstream error naming neither the
+    // variable nor the config file, and the only trace is a log line nobody opens. Say it here,
+    // where the user is already looking, and say it even when the server appears connected: a
+    // blank credential often connects and fails on first use.
+    const blanks =
+      unresolvedEnv.length > 0 ? " \u2014 unresolved: " + unresolvedEnv.join(", ") + " (set or remove)" : ""
+    if (status.status === "failed") return icon + " " + status.status + " (" + status.error + ")" + blanks
+    if (status.status === "needs_auth")
+      return icon + " Needs authentication (run: altimate mcp auth " + name + ")" + blanks
+    return icon + " " + status.status + blanks
   }
   // altimate_change end
 
@@ -3441,11 +3626,21 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const model = await lastModel(input.sessionID)
         const statusMap = await MCP.status()
         const rows = Object.entries(statusMap)
-          .map(([srv, s]) => "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s) + " |")
+          .map(
+            ([srv, s]) =>
+              "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s, McpDiscover.unresolvedEnvVars(srv)) + " |",
+          )
           .join("\n")
-        const responseText = rows
-          ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows
-          : "No MCP servers configured."
+        // altimate_change start — upstream_fix (#701): `/mcps` showed only the per-server
+        // unresolved variables from discovery, while `mcp list` also reported file-scoped blanks.
+        // A server templated as `"url": "https://{env:MY_HOST}/mcp"` records against the config
+        // file rather than the server, so it appeared in the CLI and not here — in the session
+        // view, which is where someone is when a server will not connect.
+        const blanked = formatBlankedEnvForDisplay(ConfigVariable.blankedEnvVars())
+        const drift = formatConfigDriftForDisplay(McpDiscover.configDrift())
+        const table = rows ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows : "No MCP servers configured."
+        const responseText = [table, drift, blanked].filter(Boolean).join("\n\n")
+        // altimate_change end
 
         return respond(userMsg.info.id, responseText, model)
       }
@@ -3462,6 +3657,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
 
         const model = await lastModel(input.sessionID)
+        // The workspace-managed `datamate` key is derived per process: this
+        // command must not close or restart that engine, nor persist `enabled`
+        // for it. Asked before the config check — a refused engine has no
+        // config entry at all, and "not found" would be the wrong answer.
+        const managed = name === DATAMATE_KEY ? await WorkspaceEngine.managedWorkspaceLoaded() : null
+        if (managed) {
+          return respond(
+            userMsg.info.id,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage it by hand.`,
+            model,
+          )
+        }
         // MCP.connect/disconnect on an unknown name logs and returns silently, so
         // validate against config first and give the user a clear signal on a typo.
         const cfg = await Config.get()

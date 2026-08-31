@@ -4,6 +4,9 @@ import { pathToFileURL } from "url"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { Flag } from "../../flag/flag"
+// altimate_change start — workspace feature gate (see the flush after loopPromise)
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { bootstrap } from "../bootstrap"
 import { EOL } from "os"
 import { Filesystem } from "../../util/filesystem"
@@ -392,6 +395,11 @@ export const RunCommand = cmd({
     // altimate_change end
   },
   handler: async (args) => {
+    // altimate_change start — mark the headless surface. Nothing here can render a
+    // toast, so workspace engine refusals degrade to one stderr line. An env var
+    // because it must be readable from every module realm.
+    process.env["ALTIMATE_CODE_HEADLESS"] = "1"
+    // altimate_change end
     // altimate_change start — validate --max-turns before anything runs. yargs
     // coerces a non-numeric value to NaN, which is falsy and SILENTLY disabled
     // the budget; a negative value is truthy and aborted the session on its
@@ -1395,6 +1403,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
             )
           }
         }
+      }
+      // altimate_change end
+
+      // altimate_change start — a cold workspace skill sync outlives a short
+      // turn, and this process exits the moment the turn ends. Without this the
+      // staged tree is discarded on exit and, since nothing was persisted, the
+      // next `run` starts cold and loses the same race — so such a project never
+      // received its skills at all. Imported lazily and only when the feature is
+      // on, so an opted-out run does not load the module.
+      if (CoreFlag.ALTIMATE_WORKSPACE) {
+        await import("../../altimate/workspace/skill-sync")
+          .then((m) => m.flushPendingSyncs())
+          .catch(() => {})
       }
       // altimate_change end
 

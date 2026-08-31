@@ -233,8 +233,11 @@ describe("workspace binding cache", () => {
     // (harness-bot #1116 comment 3840503346 hardened that gate.)
     let memPostSerial = 0
     globalThis.fetch = (async (_input?: unknown, _init?: unknown) => {
-      calls++
       const url = String(_input)
+      // Count memory traffic only. Skills re-sync on every bind by design, and
+      // a cached binding is revalidated against the server — neither is the
+      // memory seed this test is about.
+      if (!url.includes("/skills") && !url.includes("/datamate-project-bindings/by-")) calls++
       if (url.includes("/datamates/memory/") && !url.includes("/list")) {
         memPostSerial += 1
         return new Response(
@@ -249,6 +252,19 @@ describe("workspace binding cache", () => {
           status: 200,
           headers: { "Content-Type": "application/json" },
         })
+      }
+      // Answer binding lookups in the shape `lookupBinding` actually parses.
+      // Falling through to the `{datamates:[…]}` body below classified every
+      // revalidation as "unknown", which is neither memoized nor stamped — so
+      // the counter filter above was hiding a lookup that could never succeed
+      // and a fresh round trip on every bind. (bot review)
+      if (url.includes("/datamate-project-bindings/by-")) {
+        return new Response(
+          JSON.stringify({
+            binding: { datamate_id: 9, datamate_name: "Warm", repo_remote: null, project_path: proj },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
       }
       return new Response(JSON.stringify({ datamates: [{ id: 9, name: "Warm", memory_enabled: true }] }), {
         status: 200,
@@ -268,6 +284,61 @@ describe("workspace binding cache", () => {
       // A genuine rebind to another workspace must still seed.
       await recordApprovedBinding(proj, { ...binding, datamateId: 10 }, { awaitBackfill: true })
       expect(calls).toBeGreaterThan(afterFirst)
+    } finally {
+      globalThis.fetch = originalFetch
+      if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE
+      else process.env.ALTIMATE_WORKSPACE = ORIGINAL_FLAG
+    }
+  })
+
+  test("a warm bind still syncs skills even though the memory seed is skipped", async () => {
+    // The ``alreadySeeded`` marker is memory's one-shot gate. Skills have a
+    // different lifecycle — the workspace's bundles can change at any time — so
+    // the skill pull sits above that early return. Without it, every bind after
+    // the first would silently stop refreshing skills.
+    const ORIGINAL_FLAG = process.env.ALTIMATE_WORKSPACE
+    process.env.ALTIMATE_WORKSPACE = "1"
+    const proj = path.join(SANDBOX, "warm-skills-proj")
+    mkdirSync(proj, { recursive: true })
+    const binding = {
+      datamateId: 11,
+      datamateName: "WarmSkills",
+      repoRemote: null,
+      projectPath: proj,
+      linkedAt: 1,
+    }
+
+    let skillListCalls = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (_input?: unknown) => {
+      const url = String(_input)
+      if (url.includes("/skills")) {
+        skillListCalls++
+        return new Response(JSON.stringify({ items: [], total: 0, page: 1, size: 50, pages: 1 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      if (url.includes("/datamates/memory/") && !url.includes("/list")) {
+        return new Response(JSON.stringify({ result: { results: [{ id: "m1", event: "ADD" }] } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({ datamates: [{ id: 11, name: "WarmSkills", memory_enabled: true }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    }) as typeof fetch
+
+    try {
+      await recordApprovedBinding(proj, binding, { awaitBackfill: true })
+      const afterFirst = skillListCalls
+      expect(afterFirst).toBeGreaterThan(0)
+
+      // Same workspace, same project: memory will skip, skills must not.
+      await recordApprovedBinding(proj, { ...binding, linkedAt: 2 }, { awaitBackfill: true })
+      expect(skillListCalls).toBeGreaterThan(afterFirst)
     } finally {
       globalThis.fetch = originalFetch
       if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_WORKSPACE

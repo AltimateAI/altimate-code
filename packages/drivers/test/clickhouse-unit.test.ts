@@ -15,27 +15,32 @@ let mockCommandCalls: any[] = []
 let mockQueryCalls: any[] = []
 let mockQueryResult: any[] = []
 let mockCloseCalls = 0
+let mockClientConfigs: any[] = []
 
 function resetMocks() {
   mockCommandCalls = []
   mockQueryCalls = []
   mockQueryResult = []
   mockCloseCalls = 0
+  mockClientConfigs = []
 }
 
 mock.module("@clickhouse/client", () => ({
-  createClient: (_config: any) => ({
-    command: async (opts: any) => {
-      mockCommandCalls.push(opts)
-    },
-    query: async (opts: any) => {
-      mockQueryCalls.push(opts)
-      return { json: async () => mockQueryResult }
-    },
-    close: async () => {
-      mockCloseCalls++
-    },
-  }),
+  createClient: (config: any) => {
+    mockClientConfigs.push(config)
+    return {
+      command: async (opts: any) => {
+        mockCommandCalls.push(opts)
+      },
+      query: async (opts: any) => {
+        mockQueryCalls.push(opts)
+        return { json: async () => mockQueryResult }
+      },
+      close: async () => {
+        mockCloseCalls++
+      },
+    }
+  },
 }))
 
 // Import after mocking
@@ -48,6 +53,104 @@ describe("ClickHouse driver unit tests", () => {
     resetMocks()
     connector = await connect({ host: "localhost", port: 8123 })
     await connector.connect()
+  })
+
+  describe("TLS transport", () => {
+    test("keeps the plaintext default for a connection with no secure intent", () => {
+      expect(mockClientConfigs[0].url).toBe("http://localhost:8123")
+    })
+
+    test("tls defaults to HTTPS and the secure HTTP port", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", tls: true })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:8443")
+    })
+
+    test("ssl defaults to HTTPS and the secure HTTP port", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", ssl: true })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:8443")
+    })
+
+    test("an HTTPS protocol defaults to the secure HTTP port", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", protocol: "https" })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:8443")
+    })
+
+    test("preserves an explicit port for a secure connection", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", port: 9443, tls: true })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:9443")
+    })
+
+    test("accepts an integer port from serialized configuration", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", port: "9443", tls: true })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:9443")
+    })
+
+    for (const port of [0, -1, 1.5, 65536, "not-a-port", "", true] as const) {
+      test(`rejects invalid explicit port ${JSON.stringify(port)}`, async () => {
+        const invalid = await connect({ type: "clickhouse", host: "secure.example", port })
+
+        await expect(invalid.connect()).rejects.toThrow("ClickHouse port must be an integer between 1 and 65535")
+        expect(mockClientConfigs).toHaveLength(1)
+      })
+    }
+
+    test("rejects an explicit plaintext connection string when TLS is requested", async () => {
+      const insecure = await connect({
+        type: "clickhouse",
+        connection_string: "http://secure.example:8123",
+        tls: true,
+        user: "analyst",
+        password: "secret",
+      })
+
+      await expect(insecure.connect()).rejects.toThrow("connection_string is not https://")
+      expect(mockClientConfigs).toHaveLength(1)
+    })
+
+    test("rejects an explicit plaintext protocol when TLS is requested", async () => {
+      const insecure = await connect({ type: "clickhouse", host: "secure.example", protocol: "http", ssl: true })
+
+      await expect(insecure.connect()).rejects.toThrow("protocol is not https")
+      expect(mockClientConfigs).toHaveLength(1)
+    })
+
+    test("rejects a plaintext connection string when protocol declares HTTPS", async () => {
+      const insecure = await connect({
+        type: "clickhouse",
+        connection_string: "http://secure.example:8123",
+        protocol: "https",
+      })
+
+      await expect(insecure.connect()).rejects.toThrow("connection_string is not https://")
+      expect(mockClientConfigs).toHaveLength(1)
+    })
+
+    test("passes TLS certificates with an explicit HTTPS connection string", async () => {
+      const secure = await connect({
+        type: "clickhouse",
+        connection_string: "https://secure.example:9443",
+        tls: true,
+        tls_ca_cert: "ca",
+        tls_cert: "cert",
+        tls_key: "key",
+      })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1)).toMatchObject({
+        url: "https://secure.example:9443",
+        tls: { ca_cert: "ca", cert: "cert", key: "key" },
+      })
+    })
   })
 
   // --- DDL vs SELECT routing ---

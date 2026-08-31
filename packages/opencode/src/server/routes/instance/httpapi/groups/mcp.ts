@@ -28,6 +28,13 @@ export class UnsupportedOAuthError extends Schema.ErrorClass<UnsupportedOAuthErr
   { error: Schema.String },
   { httpApiStatus: 400 },
 ) {}
+// altimate_change start — workspace mode owns the `datamate` key; an add over it
+// is refused with a reason the SDK caller can show, not a bare 400.
+export class McpServerManagedError extends Schema.ErrorClass<McpServerManagedError>("McpServerManagedError")(
+  { error: Schema.String },
+  { httpApiStatus: 409 },
+) {}
+// altimate_change end
 
 export const McpPaths = {
   status: "/mcp",
@@ -56,7 +63,9 @@ export const McpApi = HttpApi.make("mcp")
           query: WorkspaceRoutingQuery,
           payload: AddPayload,
           success: described(StatusMap, "MCP server added successfully"),
-          error: HttpApiError.BadRequest,
+          // altimate_change start — the workspace-managed refusal is a declared error
+          error: [HttpApiError.BadRequest, McpServerManagedError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.add",
@@ -118,7 +127,9 @@ export const McpApi = HttpApi.make("mcp")
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "MCP server connected successfully"),
-          error: McpServerNotFoundError,
+          // altimate_change start — the workspace-managed key refuses connect/disconnect
+          error: [McpServerNotFoundError, McpServerManagedError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.connect",
@@ -129,7 +140,9 @@ export const McpApi = HttpApi.make("mcp")
           params: { name: Schema.String },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "MCP server disconnected successfully"),
-          error: McpServerNotFoundError,
+          // altimate_change start — the workspace-managed key refuses connect/disconnect
+          error: [McpServerNotFoundError, McpServerManagedError],
+          // altimate_change end
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "mcp.disconnect",

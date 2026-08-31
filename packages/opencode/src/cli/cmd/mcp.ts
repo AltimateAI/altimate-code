@@ -9,6 +9,10 @@ import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js"
 import * as prompts from "@clack/prompts"
 import { UI } from "../ui"
 import { MCP } from "../../mcp"
+// altimate_change start — upstream_fix: diagnostics surfaced by `mcp status` (#701, #878).
+import * as McpDiscover from "../../mcp/discover"
+import { ConfigVariable } from "../../config/variable"
+// altimate_change end
 import { McpAuth } from "../../mcp/auth"
 import { McpOAuthProvider } from "../../mcp/oauth-provider"
 import { Config } from "@/config/config"
@@ -104,6 +108,12 @@ export const McpCommand = cmd({
     yargs
       .command(McpAddCommand)
       .command(McpListCommand)
+      // altimate_change start — upstream_fix (#790): `status` is the name people reach for when a
+      // server will not connect, and it was the one name that did not exist. It shares the list
+      // handler rather than duplicating a view that already probes live and already prints the
+      // failure reason; a `list` alias would widen yargs' alias column and rewrap sibling rows.
+      .command({ ...McpListCommand, command: "status", aliases: [], describe: "show MCP server health" })
+      // altimate_change end
       .command(McpAuthCommand)
       .command(McpLogoutCommand)
       // altimate_change start — restore `mcp remove` removed during v1.4.0 bridge merge
@@ -113,6 +123,26 @@ export const McpCommand = cmd({
       .demandCommand(),
   async handler() {},
 })
+
+// altimate_change start — upstream_fix (#878/#701): config-level diagnostics, shared by every
+// exit of `mcp list` / `mcp status` so a config with nothing listable still reports them.
+function reportConfigDiagnostics() {
+  // Discovery is first-source-wins, so a server already in altimate-code.json is skipped and a
+  // changed .vscode/mcp.json is never mentioned. The configured value still wins; this only
+  // says the two disagree and which file to look at.
+  for (const { server, source, fields } of McpDiscover.configDrift()) {
+    prompts.log.warn(`${server} differs from ${source}: ${fields.join(", ")} (config wins)`)
+  }
+
+  // A missing `{env:VAR}` becomes "" and the config parses clean, so a blank credential reaches
+  // the server and fails much later with an error naming neither. Attribution to a single server
+  // is not available here (substitution runs on raw config text, before any structure exists),
+  // so this is reported against the file.
+  for (const { source, names } of ConfigVariable.blankedEnvVars()) {
+    prompts.log.warn(`${names.join(", ")} resolved to empty in ${source} (set or remove)`)
+  }
+}
+// altimate_change end
 
 export const McpListCommand = effectCmd({
   command: "list",
@@ -127,6 +157,11 @@ export const McpListCommand = effectCmd({
 
     if (servers.length === 0) {
       prompts.log.warn("No MCP servers configured")
+      // altimate_change start — upstream_fix (#878): drift and blank-variable warnings are about
+      // the config, not about any one server, so they must survive the nothing-to-list exit. An
+      // enabled-only override for a discovered server leaves this list empty while drift exists.
+      reportConfigDiagnostics()
+      // altimate_change end
       // altimate_change start — branding regression
       prompts.outro("Add servers with: altimate mcp add")
       // altimate_change end
@@ -167,11 +202,23 @@ export const McpListCommand = effectCmd({
         hint = "\n    " + status.error
       }
 
+      // altimate_change start — upstream_fix (#701): name variables that resolved to "".
+      // A blank `${SNOWFLAKE_PASSWORD}` often connects and only fails on first real use, so
+      // this is appended regardless of status rather than only on the failure branch.
+      const unresolved = McpDiscover.unresolvedEnvVars(name)
+      if (unresolved.length > 0) {
+        hint += "\n    unresolved env: " + unresolved.join(", ") + " (set or remove)"
+      }
+      // altimate_change end
       const typeHint = serverConfig.type === "remote" ? serverConfig.url : serverConfig.command.join(" ")
       prompts.log.info(
         `${statusIcon} ${name} ${UI.Style.TEXT_DIM}${statusText}${hint}\n    ${UI.Style.TEXT_DIM}${typeHint}`,
       )
     }
+
+    // altimate_change start — upstream_fix (#878/#701): config-level diagnostics.
+    reportConfigDiagnostics()
+    // altimate_change end
 
     prompts.outro(`${servers.length} server(s)`)
   }),
@@ -486,7 +533,8 @@ export const McpAddCommand = effectCmd({
       // altimate_change start — non-interactive mode: upstream v1.17 form (--url or command after --)
       // plus the fork's explicit --type/--command form.
       const passthrough = Array.isArray(args["--"]) ? args["--"] : []
-      const inferredType = args.type ?? (args.url ? "remote" : passthrough.length > 0 || args.command ? "local" : undefined)
+      const inferredType =
+        args.type ?? (args.url ? "remote" : passthrough.length > 0 || args.command ? "local" : undefined)
       if (args.name && inferredType) {
         if (!args.name.trim()) {
           console.error("MCP server name cannot be empty")

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
 import { mkdtemp, rm, mkdir, writeFile } from "fs/promises"
 import os, { tmpdir } from "os"
 import path from "path"
-import { discoverExternalMcp } from "../../src/mcp/discover"
+import { discoverExternalMcp, unresolvedEnvVars } from "../../src/mcp/discover"
 
 let tempDir: string
 let homeDir: string
@@ -454,4 +454,82 @@ describe("discoverExternalMcp", () => {
   // NOTE: env-var interpolation in discover only applies to `env` and `headers`
   // fields (see resolveServerEnvVars in discover.ts), NOT to `command` args.
   // Tests for command-level interpolation were removed as invalid.
+
+  // altimate_change start — the `**/mcp.json` scan is now pruned during traversal
+  // instead of filtered afterwards. Pin that the exclusion still holds and that
+  // real project files are still discovered.
+  test("mcp.json inside dependency and build trees is not discovered", async () => {
+    await mkdir(path.join(tempDir, "node_modules/some-pkg/.vscode"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, "node_modules/some-pkg/.vscode/mcp.json"),
+      JSON.stringify({ servers: { vendored: { command: "should-not-appear" } } }),
+    )
+    await mkdir(path.join(tempDir, "dist"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, "dist/mcp.json"),
+      JSON.stringify({ servers: { built: { command: "should-not-appear" } } }),
+    )
+    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".vscode/mcp.json"),
+      JSON.stringify({ servers: { real: { command: "real-cmd" } } }),
+    )
+
+    const { servers: result } = await discoverExternalMcp(tempDir)
+    expect(result["vendored"]).toBeUndefined()
+    expect(result["built"]).toBeUndefined()
+    expect(result["real"]).toMatchObject({ type: "local", command: ["real-cmd"] })
+  })
+  // altimate_change end
 })
+
+// altimate_change start — upstream_fix (#701): the record must not outlive the problem.
+describe("unresolvedEnvVars staleness", () => {
+  const VAR = "ALTIMATE_TEST_UNRESOLVED_VAR"
+
+  async function writeServer() {
+    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".vscode/mcp.json"),
+      JSON.stringify({
+        servers: { stale: { command: "node", env: { TOKEN: `{env:${VAR}}` } } },
+      }),
+    )
+  }
+
+  // Save and restore rather than blindly deleting: these mutate process-wide state, and a
+  // parallel `bun test` run must not observe a variable this file removed or left behind.
+  let previous: string | undefined
+  beforeEach(() => {
+    previous = process.env[VAR]
+    delete process.env[VAR]
+  })
+  afterEach(() => {
+    if (previous === undefined) delete process.env[VAR]
+    else process.env[VAR] = previous
+  })
+
+  test("clears a variable that has since been set", async () => {
+    await writeServer()
+
+    await discoverExternalMcp(tempDir)
+    expect(unresolvedEnvVars("stale")).toContain(VAR)
+
+    // The user sets the variable and discovery runs again (config reload / mcp_discover).
+    process.env[VAR] = "now-set"
+    await discoverExternalMcp(tempDir)
+    // Previously this still returned [VAR]: the record only ever unioned, and the recording
+    // site sits inside an `unresolvedNames.length > 0` guard, so a clean run never cleared it.
+    // `/mcps` kept telling the user to set a variable that already resolved.
+    expect(unresolvedEnvVars("stale")).toEqual([])
+  })
+
+  test("still reports it while it is genuinely unset", async () => {
+    await writeServer()
+    await discoverExternalMcp(tempDir)
+    await discoverExternalMcp(tempDir)
+    // The reset must not swallow a real, still-unresolved variable across runs.
+    expect(unresolvedEnvVars("stale")).toContain(VAR)
+  })
+})
+// altimate_change end

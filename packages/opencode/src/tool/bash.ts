@@ -200,6 +200,15 @@ export const BashTool = Tool.define("bash", async () => {
       // process.env spread above would silently disable that path in every
       // nested server invocation. See PR #937 review (Issue #3).
       delete mergedEnv["ALTIMATE_NON_INTERACTIVE"]
+      // Same reasoning for the headless marker: `run` sets it so the workspace
+      // engine's refusals degrade to a printed line, but a nested entrypoint
+      // launched from here may well have a TUI. Left in place, the child would
+      // inherit "headless" and print to stderr instead of showing its surface.
+      delete mergedEnv["ALTIMATE_CODE_HEADLESS"]
+      // And the serve marker: it names the extension's host process, where
+      // workspace mode is off. A terminal `altimate-code` started from here
+      // under that host is not the host, and would otherwise settle disabled.
+      delete mergedEnv["ALTIMATE_CODE_SERVE"]
       // altimate_change end
       // altimate_change start — strip the run-mode markers for the same reason.
       stripRunModeMarkers(mergedEnv)
