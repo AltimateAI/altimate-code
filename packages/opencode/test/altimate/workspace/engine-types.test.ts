@@ -16,6 +16,7 @@ import {
   describeRefusal,
   engineEntry,
   engineToolKeys,
+  foreignEngineKeys,
   installWouldHelp,
   pinnedWorkspace,
   type Outcome,
@@ -97,6 +98,17 @@ describe("engineToolKeys", () => {
       sql_execute: {},
     })
     expect([...keys].sort()).toEqual(["dbt_build_model", "snowflake_execute_database_query"])
+  })
+
+  test("an entry stamped with another client is not an engine tool; an unstamped one is taken by prefix", () => {
+    const tools = {
+      datamate_snowflake_execute_database_query: { client: "datamate_snowflake" },
+      datamate_dbt_build_model: { client: "datamate" },
+      datamate_legacy_tool: {},
+      other_tool: { client: "other" },
+    }
+    expect([...engineToolKeys(tools)].sort()).toEqual(["dbt_build_model", "legacy_tool"])
+    expect(foreignEngineKeys(tools)).toEqual(["datamate_snowflake_execute_database_query"])
   })
 })
 
