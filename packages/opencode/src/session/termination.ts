@@ -98,6 +98,24 @@ export namespace SessionTermination {
   }
 
   /**
+   * Run-mode completion instruction for the builder agent.
+   *
+   * This wording lived in `builder.txt`, but builder is a PRIMARY agent, so a
+   * static instruction there also governs interactive chat — where nothing
+   * interprets or strips the token and the user saw a literal `DONE` on every
+   * final answer, including mid-conversation on follow-ups. `isExplicitDone()`
+   * is only consumed by the run-mode accounting path.
+   *
+   * Injected only in run mode and only for builder, which is byte-identical to
+   * the previous run-mode behaviour: builder was the only prompt carrying it.
+   * Prompt-visible text — changes need extra review.
+   */
+  export const RUN_MODE_COMPLETION_INSTRUCTION =
+    "**Signal completion explicitly**: only after every requirement above is satisfied, end your final " +
+    `response with the literal token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` ` +
+    "while work or verification remains."
+
+  /**
    * Three-option completion-aware post-compaction nudge. Replaces the
    * two-option "Continue … or stop and ask for clarification" text, which gave a
    * finished session no way to terminate. Prompt-visible text — changes need

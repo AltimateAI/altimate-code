@@ -1456,6 +1456,16 @@ export namespace SessionPrompt {
         ...(await InstructionPrompt.system()),
         ...hoistedReminders,
       ]
+      // altimate_change start — run-mode-only completion instruction. This text
+      // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
+      // reached interactive chat, where nothing interprets or strips the token
+      // and the user saw a literal DONE on every final answer. Scoped to run
+      // mode AND to builder, which reproduces the previous run-mode behaviour
+      // exactly — builder was the only agent prompt that carried it.
+      if (process.env["ALTIMATE_CODE_HEADLESS"] === "1" && agent.name === "builder") {
+        system.push(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+      }
+      // altimate_change end
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)

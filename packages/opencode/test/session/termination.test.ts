@@ -231,11 +231,31 @@ describe("SessionTermination.isExplicitDone — fence-state conformance", () => 
     expect(SessionTermination.isExplicitDone(["```sh", "x", "```sh", "DONE"].join("\n"))).toBe(false)
   })
 })
-
 describe("builder completion contract", () => {
-  test("ordinary non-compacted runs are instructed to emit the trailing DONE token", async () => {
+  // The instruction still reaches an ordinary non-compacted RUN — the wording is
+  // unchanged, it simply moved out of the static prompt file so that it is
+  // injected per-run rather than shipped to every surface.
+  test("ordinary non-compacted runs are instructed to emit the trailing DONE token", () => {
+    expect(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION).toContain("literal token `DONE` on its own")
+    expect(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION).toContain(
+      "Do not emit `DONE` while work or verification remains",
+    )
+  })
+
+  // builder is a PRIMARY agent, so anything in its prompt file also governs
+  // interactive chat — where nothing interprets or strips the token and the user
+  // saw a literal DONE on every final answer, including mid-conversation on a
+  // follow-up. The instruction must therefore NOT be static in the prompt file.
+  test("the builder prompt file does not carry the token instruction", async () => {
     const prompt = await Bun.file(new URL("../../src/altimate/prompts/builder.txt", import.meta.url).pathname).text()
-    expect(prompt).toContain("literal token `DONE` on its own")
-    expect(prompt).toContain("Do not emit `DONE` while work or verification remains")
+    expect(prompt).not.toContain("literal token `DONE`")
+    expect(prompt).not.toContain("Do not emit `DONE`")
+  })
+
+  // The token itself is unchanged, so the detector that ends a run still pairs
+  // with the instruction that asks for it.
+  test("the injected instruction names the token the detector accepts", () => {
+    expect(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION).toContain(SessionTermination.DONE_TOKEN)
+    expect(SessionTermination.isExplicitDone(SessionTermination.DONE_TOKEN)).toBe(true)
   })
 })
