@@ -6,7 +6,7 @@ import path from "node:path"
 import { createRequire } from "node:module"
 import { pathToFileURL } from "node:url"
 
-import { driverSearchRoots, resolveOptionalPackage } from "../src/resolve"
+import { driverSearchRoots, loadOptionalDriver, resolveOptionalPackage } from "../src/resolve"
 
 // Specifiers that exist nowhere but the tree each test builds. Asking for a
 // real driver name would let the repo's own `packages/drivers/node_modules`
@@ -92,6 +92,35 @@ describe("resolution does not depend on the working directory", () => {
     // a known cause: anything but undefined means the lookup reached into the
     // working directory.
     expect(resolveOptionalPackage(CWD_ONLY, driverSearchRoots())).toBeUndefined()
+  })
+
+  test("loads from the package's own directory while cwd is somewhere else", async () => {
+    // Resolution being cwd-independent is not enough: the *load* consults the
+    // package manifest too, and in a compiled binary that lookup was observed
+    // resolving against the process working directory —
+    // `ENOENT ... open '<cwd>/usr/lib/.../duckdb/package.json'` for a file that
+    // exists at that path without the prefix. This pins the load itself.
+    //
+    // The fixture reports its own __dirname, so the assertion is about which
+    // directory the module was loaded from rather than merely that it loaded.
+    const pkgDir = path.join(nodeModules, FIXTURE)
+    fs.writeFileSync(path.join(pkgDir, "index.js"), "module.exports = { dir: __dirname }\n")
+
+    process.chdir(elsewhere)
+
+    // The only route to the fixture root is the path named in the ambient
+    // failure, which is how the real failure surfaces it.
+    const named = path.join(pkgDir, "package.json")
+    const ambient = Object.assign(new Error(`ENOENT: no such file or directory, open '${named}'`), {
+      code: "ENOENT",
+    })
+    const importer = async () => {
+      throw ambient
+    }
+
+    const loaded: any = await loadOptionalDriver("duckdb", FIXTURE, importer)
+    const mod = loaded?.default ?? loaded
+    expect(mod.dir).toBe(fs.realpathSync(pkgDir))
   })
 
   test("a chdir between resolve and re-resolve does not change the answer", () => {

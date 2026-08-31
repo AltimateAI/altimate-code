@@ -493,6 +493,60 @@ function entryFromManifest(pkgDir: string, specifier: string, pkg: string): stri
  *
  * @throws {DriverNotInstalledError} when the package is genuinely absent.
  */
+/**
+ * Load an already-resolved package from its own absolute location.
+ *
+ * `import(pathToFileURL(abs))` is not enough. The ESM loader reads the
+ * package's manifest to decide the module's type and exports, and in a compiled
+ * binary that lookup has been observed resolving against the *process working
+ * directory* rather than the module's own directory — measured twice
+ * independently, from a global install run under `--dir`:
+ *
+ *   ENOENT ... open '<cwd>/usr/lib/.../duckdb/package.json'
+ *
+ * while the file exists at that path without the `<cwd>` prefix. Supplying that
+ * concatenated path is sufficient to make the load succeed, and running with
+ * cwd `/` — which makes the concatenation a no-op — clears it too.
+ *
+ * A CommonJS require anchored at the resolved file makes every nested lookup,
+ * the manifest included, relative to the driver's own directory, so the working
+ * directory is never an input. The drivers we load this way are CommonJS; an
+ * ESM-only package still needs the loader, so that path remains as a fallback
+ * and is taken only for the error that specifically means "this is ESM".
+ *
+ * `process.chdir()` around the load would also neutralise the concatenation and
+ * is deliberately not used: it is global mutable state, and these loads happen
+ * under concurrency, so it would corrupt resolution for unrelated work
+ * non-deterministically — worse than the fault it patches.
+ */
+function requireFromLocation(resolved: string): unknown {
+  const requireFrom = createRequire(pathToFileURL(resolved).href)
+  return requireFrom(resolved)
+}
+
+/** True when a require failed only because the target is an ES module. */
+function isRequireOfEsm(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined
+  if (code === "ERR_REQUIRE_ESM") return true
+  const message = error instanceof Error ? error.message : String(error)
+  return /require\(\) of ES Module|Cannot use import statement outside a module|Unexpected token 'export'/i.test(message)
+}
+
+/**
+ * Load from `resolved`, preferring the cwd-independent path.
+ *
+ * The injected `importer` is still used for the ESM fallback so tests keep a
+ * seam over the loader.
+ */
+async function loadFromLocation(resolved: string, importer: (spec: string) => Promise<any>): Promise<any> {
+  try {
+    return requireFromLocation(resolved)
+  } catch (requireError) {
+    if (!isRequireOfEsm(requireError)) throw requireError
+    return await importer(pathToFileURL(resolved).href)
+  }
+}
+
 export async function loadOptionalDriver(
   driver: DriverName,
   specifier: string,
@@ -526,7 +580,7 @@ export async function loadOptionalDriver(
     }
 
     try {
-      return await importer(pathToFileURL(resolved).href)
+      return await loadFromLocation(resolved, importer)
     } catch (loadError) {
       // On disk but will not load — a half-installed copy, or a native addon
       // built for another platform. When an ambient copy was also broken,
@@ -650,7 +704,7 @@ export async function loadOptionalPackage(specifier: string): Promise<any | unde
       dedupeRoots([...driverSearchRoots(), ...searchRootsFromError(ambientError)]),
     )
     if (!resolved) return undefined
-    return await import(/* @vite-ignore */ pathToFileURL(resolved).href)
+    return await loadFromLocation(resolved, (spec) => import(/* @vite-ignore */ spec))
   }
 }
 
