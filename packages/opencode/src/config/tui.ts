@@ -104,6 +104,11 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
 
   const load = (text: string, configFilepath: string): Effect.Effect<Info> =>
     Effect.gen(function* () {
+      // altimate_change start — upstream_fix (#701): substitution unions now instead of
+      // replacing, so every caller clears first. Without this a `{env:VAR}` in tui.json that
+      // was later fixed kept being reported blank for the life of the process.
+      ConfigVariable.resetBlankedEnvVars(configFilepath)
+      // altimate_change end
       const expanded = yield* Effect.promise(() =>
         ConfigVariable.substitute({ text, type: "path", path: configFilepath, missing: "empty" }),
       )
