@@ -5035,7 +5035,7 @@ describe("output token budget", () => {
     expect(estimated).toBeGreaterThanOrEqual(150_000)
   })
 
-  test("uses a conservative fixed fallback for remote PDFs", () => {
+  test("uses a fixed parser-free fallback for remote PDFs", () => {
     const estimated = estimateInputTokens({
       system: [],
       messages: [

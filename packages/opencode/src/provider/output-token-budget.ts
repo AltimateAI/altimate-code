@@ -207,12 +207,13 @@ function inlinePayloadSize(payload: unknown): number | undefined {
   return Math.max(0, Math.floor((bodyLength * 3) / 4) - padding)
 }
 
-/** Combine fixed and monotonic byte-size evidence without trusting unparsed PDF metadata. */
+/** Apply a bounded, parser-free PDF heuristic without trusting document metadata. */
 function pdfTokenAllowance(payload: unknown): number {
   const bytes = inlinePayloadSize(payload) ?? 0
-  // Raw PDF bytes cannot authenticate page-tree metadata: comments, strings, streams, stale
-  // objects, and incremental revisions may all contain convincing but unreachable markers.
-  // One decoded byte per token plus the fixed floor stays conservative without amplification.
+  // Page expansion cannot be derived safely from raw bytes: lexical page markers are spoofable,
+  // while structural parsing adds decompression and traversal risks to the request path. Keep the
+  // local estimate best-effort and monotonic; the configured provider remains authoritative for
+  // unusually compact or dense documents.
   return Math.max(PDF_TOKEN_ALLOWANCE, bytes)
 }
 
