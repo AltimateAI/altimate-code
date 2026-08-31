@@ -314,16 +314,10 @@ export const layer = Layer.effect(
 
     const loadConfig = Effect.fnUntraced(function* (
       text: string,
-      options: ({ path: string } | { dir: string; source: string }) & { keepDiagnostics?: boolean },
+      options: { path: string } | { dir: string; source: string },
       env?: Record<string, string>,
     ) {
       const source = "path" in options ? options.path : options.source
-      // altimate_change start — upstream_fix (#701): clear before the load, union during it.
-      // `keepDiagnostics` is for a caller that already reset this source and recorded against it:
-      // the well-known flow substitutes `remote_config.url` and its headers under the same source
-      // before handing the fetched body here, and resetting again threw those names away.
-      if (!options.keepDiagnostics) ConfigVariable.resetBlankedEnvVars(source)
-      // altimate_change end
       const expanded = yield* Effect.promise(() =>
         ConfigVariable.substitute(
           "path" in options
@@ -350,6 +344,12 @@ export const layer = Layer.effect(
       yield* Effect.logInfo("loading", { path: filepath })
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
+      // altimate_change start — upstream_fix (#701): substitution unions now, so whoever
+      // begins a load clears this source first. Deliberately NOT inside loadConfig: the
+      // well-known flow records url/header blanks under the same source before calling it,
+      // and a reset in there threw those names away.
+      ConfigVariable.resetBlankedEnvVars(filepath)
+      // altimate_change end
       return yield* loadConfig(text, { path: filepath }, env)
     })
 
@@ -506,10 +506,6 @@ export const layer = Layer.effect(
               {
                 dir: path.dirname(source),
                 source,
-                // altimate_change start — upstream_fix (#701): keep the url/header blanks that
-                // substituteWellKnownRemoteConfig just recorded under this same source.
-                keepDiagnostics: true,
-                // altimate_change end
               },
               authEnv,
             )
@@ -609,6 +605,9 @@ export const layer = Layer.effect(
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
+          // altimate_change start — upstream_fix (#701): clear before this load.
+          ConfigVariable.resetBlankedEnvVars(source)
+          // altimate_change end
           const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
             dir: ctx.directory,
             source,
@@ -636,6 +635,9 @@ export const layer = Layer.effect(
 
             if (Option.isSome(configOpt)) {
               const source = `${url}/api/config`
+              // altimate_change start — upstream_fix (#701): clear before this load.
+              ConfigVariable.resetBlankedEnvVars(source)
+              // altimate_change end
               const next = yield* loadConfig(JSON.stringify(configOpt.value), {
                 dir: path.dirname(source),
                 source,
@@ -675,6 +677,9 @@ export const layer = Layer.effect(
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
+          // altimate_change start — upstream_fix (#701): clear before this load.
+          ConfigVariable.resetBlankedEnvVars(managed.source)
+          // altimate_change end
           result = mergeConfigConcatArrays(
             result,
             yield* loadConfig(managed.text, {
