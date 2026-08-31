@@ -610,15 +610,23 @@ export namespace SessionCompaction {
         const rawValue = (separatedValue ?? attachedValue ?? "").replace(/^["']|["']$/g, "")
         // Windows invokes curl as `curl.exe`, and either platform may reach it
         // through a path such as /usr/bin/curl or a Windows System32 path.
-        // Missing those spellings left `-u user password` unredacted.
+        // Missing those spellings left the `-u` VALUE unredacted. Note this
+        // redacts the value attached to the flag only; a password passed as a
+        // separate following token is not covered here (see the open review
+        // thread on this line) and is not specific to the .exe spelling.
         const curlContext = /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(
           shellSegmentBefore(whole, offset + lead.length),
         )
-        // Require an alphabetic character before the colon so that genuinely
-        // non-credential `x:y` literals survive outside a curl context — most
-        // importantly `docker run --user 1000:1000`, whose UID:GID is exactly
-        // the kind of task detail the ledger exists to preserve.
-        const credentialShaped = /^(?=[^:/\s]*[A-Za-z])[^:/\s]+:[^/\s]+$/.test(rawValue)
+        // Outside a curl context a colon-shaped value is treated as
+        // user:password. The ONE exemption is an explicitly recognized
+        // all-numeric UID:GID pair (`docker run --user 1000:1000`), which is a
+        // task detail the ledger exists to preserve. Exempting by "no
+        // alphabetic character before the colon" instead would be wrong in the
+        // leaking direction: a numeric username with a real password
+        // (`--user 1234:secret`) is a credential and must still redact.
+        const colonShaped = /^[^:/\s]+:[^/\s]+$/.test(rawValue)
+        const uidGidPair = /^\d+:\d+$/.test(rawValue)
+        const credentialShaped = colonShaped && !uidGidPair
         if (!curlContext && !credentialShaped) return match
         return `${lead}${flag}${separator ?? ""}<redacted>`
       },

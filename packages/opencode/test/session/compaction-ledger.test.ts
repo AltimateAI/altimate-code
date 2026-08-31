@@ -434,6 +434,13 @@ describe("SessionCompaction.renderLedger", () => {
     expect(credential).not.toContain("dummy-password")
     expect(credential).not.toContain("alice")
 
+    // A NUMERIC username with a real password is still a credential. Exempting
+    // by "no alphabetic character before the colon" would leak this, so the
+    // exemption is specifically an all-numeric UID:GID pair.
+    for (const command of ["tool --user 1234:dummy-password", "tool -u 007:dummy-password"]) {
+      expect(SessionCompaction.redactLedgerDetail(command)).not.toContain("dummy-password")
+    }
+
     // ...and inside a curl context the numeric shape is still redacted,
     // because curl's own `-u` is unambiguously authentication.
     expect(SessionCompaction.redactLedgerDetail("curl -u 1000:1000 https://example.com")).not.toContain("1000:1000")
