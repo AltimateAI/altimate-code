@@ -8,8 +8,10 @@ const SOURCE = "/virtual/blanked-env-test/config.json"
 const VAR = "ALTIMATE_TEST_BLANKED_VAR"
 const OTHER = "ALTIMATE_TEST_BLANKED_VAR_TWO"
 
+const PROJECT = "/virtual/blanked-env-test"
+
 function namesFor(source: string): string[] {
-  return ConfigVariable.blankedEnvVars().find((e) => e.source === source)?.names ?? []
+  return ConfigVariable.blankedEnvVars(PROJECT).find((e) => e.source === source)?.names ?? []
 }
 
 async function substitute(text: string) {
@@ -65,6 +67,40 @@ describe("blankedEnvVars", () => {
     await substitute(`{"token":"{env:${VAR}}"}`)
     ConfigVariable.resetBlankedEnvVars(SOURCE)
     expect(namesFor(SOURCE)).toEqual([])
+  })
+})
+// altimate_change end
+
+// altimate_change start — upstream_fix (#1211): one process serves several projects.
+describe("blankedEnvVars project scoping", () => {
+  const OTHER = "/virtual/some-other-project"
+
+  test("a config file under another project is not reported here", async () => {
+    // The server resolves an instance per request from `x-opencode-directory`, so two projects
+    // are live in one process. Project B's local config is B's session's business, not A's.
+    await ConfigVariable.substitute({
+      text: `{"token":"{env:${VAR}}"}`,
+      type: "virtual",
+      dir: OTHER,
+      source: OTHER + "/altimate-code.json",
+      env: {},
+    })
+    const sources = ConfigVariable.blankedEnvVars(PROJECT).map((e) => e.source)
+    expect(sources).not.toContain(OTHER + "/altimate-code.json")
+    // ...and it is still visible to the project it belongs to.
+    expect(ConfigVariable.blankedEnvVars(OTHER).map((e) => e.source)).toContain(OTHER + "/altimate-code.json")
+  })
+
+  test("a non-path source stays shared, since every instance loads it", async () => {
+    await ConfigVariable.substitute({
+      text: `{"token":"{env:${VAR}}"}`,
+      type: "virtual",
+      dir: "/virtual",
+      source: "OPENCODE_CONFIG_CONTENT",
+      env: {},
+    })
+    expect(ConfigVariable.blankedEnvVars(PROJECT).map((e) => e.source)).toContain("OPENCODE_CONFIG_CONTENT")
+    expect(ConfigVariable.blankedEnvVars(OTHER).map((e) => e.source)).toContain("OPENCODE_CONFIG_CONTENT")
   })
 })
 // altimate_change end

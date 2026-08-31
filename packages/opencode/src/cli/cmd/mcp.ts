@@ -18,6 +18,7 @@ import { McpOAuthProvider } from "../../mcp/oauth-provider"
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { InstanceRef } from "@/effect/instance-ref"
+import { Instance } from "@/project/instance"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import path from "path"
 import { Global } from "@opencode-ai/core/global"
@@ -126,11 +127,11 @@ export const McpCommand = cmd({
 
 // altimate_change start — upstream_fix (#878/#701): config-level diagnostics, shared by every
 // exit of `mcp list` / `mcp status` so a config with nothing listable still reports them.
-function reportConfigDiagnostics() {
+function reportConfigDiagnostics(projectDir: string) {
   // Discovery is first-source-wins, so a server already in altimate-code.json is skipped and a
   // changed .vscode/mcp.json is never mentioned. The configured value still wins; this only
   // says the two disagree and which file to look at.
-  for (const { server, source, fields } of McpDiscover.configDrift()) {
+  for (const { server, source, fields } of McpDiscover.configDrift(projectDir)) {
     prompts.log.warn(`${server} differs from ${source}: ${fields.join(", ")} (config wins)`)
   }
 
@@ -138,7 +139,7 @@ function reportConfigDiagnostics() {
   // the server and fails much later with an error naming neither. Attribution to a single server
   // is not available here (substitution runs on raw config text, before any structure exists),
   // so this is reported against the file.
-  for (const { source, names } of ConfigVariable.blankedEnvVars()) {
+  for (const { source, names } of ConfigVariable.blankedEnvVars(projectDir)) {
     prompts.log.warn(`${names.join(", ")} resolved to empty in ${source} (set or remove)`)
   }
 }
@@ -160,7 +161,7 @@ export const McpListCommand = effectCmd({
       // altimate_change start — upstream_fix (#878): drift and blank-variable warnings are about
       // the config, not about any one server, so they must survive the nothing-to-list exit. An
       // enabled-only override for a discovered server leaves this list empty while drift exists.
-      reportConfigDiagnostics()
+      reportConfigDiagnostics(Instance.directory)
       // altimate_change end
       // altimate_change start — branding regression
       prompts.outro("Add servers with: altimate mcp add")
@@ -205,7 +206,7 @@ export const McpListCommand = effectCmd({
       // altimate_change start — upstream_fix (#701): name variables that resolved to "".
       // A blank `${SNOWFLAKE_PASSWORD}` often connects and only fails on first real use, so
       // this is appended regardless of status rather than only on the failure branch.
-      const unresolved = McpDiscover.unresolvedEnvVars(name)
+      const unresolved = McpDiscover.unresolvedEnvVars(name, Instance.directory)
       if (unresolved.length > 0) {
         hint += "\n    unresolved env: " + unresolved.join(", ") + " (set or remove)"
       }
@@ -217,7 +218,7 @@ export const McpListCommand = effectCmd({
     }
 
     // altimate_change start — upstream_fix (#878/#701): config-level diagnostics.
-    reportConfigDiagnostics()
+    reportConfigDiagnostics(Instance.directory)
     // altimate_change end
 
     prompts.outro(`${servers.length} server(s)`)

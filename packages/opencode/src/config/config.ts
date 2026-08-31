@@ -774,8 +774,9 @@ export const layer = Layer.effect(
                 const configured = (result.mcp as Record<string, any>)[name]
                 setConfigDrift(
                   name,
-                  discoveredSource(name) ?? sources.join(", "),
+                  discoveredSource(name, ctx.directory) ?? sources.join(", "),
                   driftFields(server as Record<string, any>, configured),
+                  ctx.directory,
                 )
               }
             }

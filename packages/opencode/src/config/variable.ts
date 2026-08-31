@@ -6,6 +6,7 @@ import { Filesystem } from "@/util/filesystem"
 import { InvalidError } from "@opencode-ai/core/v1/config/error"
 // altimate_change start — upstream_fix: restore ${VAR}/${VAR:-default}/$${VAR} config interpolation
 import { ConfigPaths } from "@/config/paths"
+import { Global } from "@/global"
 // altimate_change end
 
 type ParseSource =
@@ -32,8 +33,11 @@ type SubstituteInput = ParseSource & {
 // An unresolved bare `${VAR}` is left LITERAL above on purpose, so it stays visible and is not
 // recorded here. `{env:VAR}` has no such deferral — it becomes "" and the config parses clean, so
 // a missing `{env:SNOWFLAKE_PASSWORD}` launches an MCP server with a blank credential and fails
-// later with an error naming neither the variable nor this file. Keyed by config source; the
-// newest parse of a file replaces its entry so a fixed variable stops being reported.
+// later with an error naming neither the variable nor this file.
+//
+// Keyed projectDir -> config source. One process serves several projects (the server resolves an
+// instance per request from `x-opencode-directory`), and a flat source-keyed map meant
+// `blankedEnvVars()` handed every session every other project's config files.
 const _blankedEnv = new Map<string, Set<string>>()
 
 /** Drop `src`'s record so a load starts clean; substitution then unions within that load. */
@@ -41,11 +45,34 @@ export function resetBlankedEnvVars(src: string) {
   _blankedEnv.delete(src)
 }
 
-/** Variable names that silently became "" during config substitution, grouped by config source. */
-export function blankedEnvVars(): { source: string; names: string[] }[] {
+/**
+ * Variable names that silently became "" during config substitution, grouped by config source.
+ *
+ * Scoped by path rather than by threading a project through `substitute`: a config file that
+ * lives under a *different* project belongs to that project's session, not this one. One process
+ * serves several projects (the server resolves an instance per request from
+ * `x-opencode-directory`), and an unfiltered record handed every session every other project's
+ * files. Sources that are not project-local — the global config dir, `OPENCODE_CONFIG_CONTENT`,
+ * a remote config URL — are shared by every instance and are always included.
+ */
+export function blankedEnvVars(projectDir: string): { source: string; names: string[] }[] {
   return [..._blankedEnv.entries()]
+    .filter(([src]) => !isForeignProjectPath(src, projectDir))
     .map(([src, names]) => ({ source: src, names: [...names].sort() }))
     .sort((a, b) => a.source.localeCompare(b.source))
+}
+
+/** True when `src` is an absolute path that sits outside `projectDir` and outside the config dir. */
+function isForeignProjectPath(src: string, projectDir: string): boolean {
+  if (!path.isAbsolute(src)) return false // OPENCODE_CONFIG_CONTENT, a URL — shared
+  const rel = path.relative(projectDir, src)
+  if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) return false // under this project
+  // The user-level config dir and the home directory are shared by every instance.
+  const shared = [Global.Path.config, os.homedir()].filter(Boolean) as string[]
+  return !shared.some((base) => {
+    const r = path.relative(base, src)
+    return r !== "" && !r.startsWith("..") && !path.isAbsolute(r)
+  })
 }
 // altimate_change end
 

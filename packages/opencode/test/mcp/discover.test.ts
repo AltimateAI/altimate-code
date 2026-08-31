@@ -513,7 +513,7 @@ describe("unresolvedEnvVars staleness", () => {
     await writeServer()
 
     await discoverExternalMcp(tempDir)
-    expect(unresolvedEnvVars("stale")).toContain(VAR)
+    expect(unresolvedEnvVars("stale", tempDir)).toContain(VAR)
 
     // The user sets the variable and discovery runs again (config reload / mcp_discover).
     process.env[VAR] = "now-set"
@@ -521,7 +521,7 @@ describe("unresolvedEnvVars staleness", () => {
     // Previously this still returned [VAR]: the record only ever unioned, and the recording
     // site sits inside an `unresolvedNames.length > 0` guard, so a clean run never cleared it.
     // `/mcps` kept telling the user to set a variable that already resolved.
-    expect(unresolvedEnvVars("stale")).toEqual([])
+    expect(unresolvedEnvVars("stale", tempDir)).toEqual([])
   })
 
   test("still reports it while it is genuinely unset", async () => {
@@ -529,7 +529,7 @@ describe("unresolvedEnvVars staleness", () => {
     await discoverExternalMcp(tempDir)
     await discoverExternalMcp(tempDir)
     // The reset must not swallow a real, still-unresolved variable across runs.
-    expect(unresolvedEnvVars("stale")).toContain(VAR)
+    expect(unresolvedEnvVars("stale", tempDir)).toContain(VAR)
   })
 })
 // altimate_change end
