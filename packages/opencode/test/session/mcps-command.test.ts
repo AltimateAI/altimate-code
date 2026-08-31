@@ -84,3 +84,30 @@ describe("/mcps file-scoped blank variables", () => {
   })
 })
 // altimate_change end
+
+// altimate_change start — upstream_fix (#878): drift belongs in the session view too.
+describe("/mcps config drift", () => {
+  test("names the server, the file, and the fields", () => {
+    const out = SessionPrompt.formatConfigDriftForDisplay([
+      { server: "datamate", source: ".vscode/mcp.json", fields: ["environment.ALTIMATE_EXTENSION_RPC"] },
+    ])
+    expect(out).toContain("datamate")
+    expect(out).toContain(".vscode/mcp.json")
+    expect(out).toContain("environment.ALTIMATE_EXTENSION_RPC")
+    // The user's config still wins; the message says so rather than implying an action was taken.
+    expect(out).toContain("config wins")
+  })
+
+  test("one line per drifted server", () => {
+    const out = SessionPrompt.formatConfigDriftForDisplay([
+      { server: "a", source: "x.json", fields: ["command"] },
+      { server: "b", source: "y.json", fields: ["command"] },
+    ])
+    expect(out.split("\n")).toHaveLength(2)
+  })
+
+  test("empty when nothing drifted", () => {
+    expect(SessionPrompt.formatConfigDriftForDisplay([])).toBe("")
+  })
+})
+// altimate_change end

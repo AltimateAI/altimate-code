@@ -2997,6 +2997,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   // altimate_change start — shared text formatter for /mcps runtime status (#972)
   /** @internal Exported for tests. */
+  // altimate_change start — upstream_fix (#878): `/mcps` reported neither drift nor file-scoped
+  // blanks, so the session view consistently showed less than `mcp list` for the same problem.
+  /** Config-drift lines for `/mcps`, empty string when nothing has drifted. */
+  export function formatConfigDriftForDisplay(entries: { server: string; source: string; fields: string[] }[]): string {
+    return entries
+      .map(
+        ({ server, source, fields }) =>
+          "- `" + server + "` differs from `" + source + "`: " + fields.join(", ") + " (config wins)",
+      )
+      .join("\n")
+  }
+  // altimate_change end
   // altimate_change start — upstream_fix (#701): exported so the wording is testable without
   // standing up a session; `/mcps` is otherwise only reachable through the whole handler.
   /** File-scoped blank-variable lines for `/mcps`, empty string when there are none. */
@@ -3084,8 +3096,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         // file rather than the server, so it appeared in the CLI and not here — in the session
         // view, which is where someone is when a server will not connect.
         const blanked = formatBlankedEnvForDisplay(ConfigVariable.blankedEnvVars())
+        const drift = formatConfigDriftForDisplay(McpDiscover.configDrift())
         const table = rows ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows : "No MCP servers configured."
-        const responseText = blanked ? table + "\n\n" + blanked : table
+        const responseText = [table, drift, blanked].filter(Boolean).join("\n\n")
         // altimate_change end
 
         return respond(userMsg.info.id, responseText, model)

@@ -75,6 +75,96 @@ function resetUnresolvedEnv() {
 }
 // altimate_change end
 
+// altimate_change start — upstream_fix (#878): report drift instead of silently skipping.
+// Discovery is first-source-wins, so a server already present in altimate-code.json is skipped
+// outright and a changed `.vscode/mcp.json` (a new ALTIMATE_EXTENSION_RPC port, a moved command)
+// is never mentioned. Overwriting the user's own config would be worse than the silence, so the
+// differing field names are recorded and a user surface reports them; the user decides.
+const _drift = new Map<string, { source: string; fields: string[] }>()
+
+/**
+ * Fields whose difference is expected and not worth reporting.
+ *
+ * `updatedAt` is the datamate sync change-signal: `normalizeMcpConfig` preserves it on the
+ * configured entry and discovery never produces one, so every comparison saw a value against
+ * `undefined` and reported drift on every `mcp list` for any datamate-synced server.
+ */
+const DRIFT_IGNORED = new Set(["enabled", "updatedAt"])
+
+/** Key order must not read as a difference — `{a,b}` and `{b,a}` are the same config. */
+function stableStringify(value: any): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value)
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]"
+  return (
+    "{" +
+    Object.keys(value)
+      .sort()
+      .map((k) => JSON.stringify(k) + ":" + stableStringify(value[k]))
+      .join(",") +
+    "}"
+  )
+}
+
+const isPlainObject = (v: any): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v)
+
+/**
+ * Field names that differ between a discovered server and the one already configured.
+ * Nested `environment`/`headers` differences are reported per key (`environment.FOO`) so the
+ * message names the thing to fix rather than just "environment".
+ */
+export function driftFields(discovered: Record<string, any>, configured: Record<string, any>): string[] {
+  const fields: string[] = []
+  for (const key of new Set([...Object.keys(discovered), ...Object.keys(configured)])) {
+    if (DRIFT_IGNORED.has(key)) continue
+    const a = discovered[key]
+    const b = configured[key]
+    // Nested when EITHER side has the block: requiring both meant a server that gained or lost
+    // an `environment` wholesale reported the bare word "environment" and lost the key names,
+    // which is the one thing this function exists to provide.
+    if ((key === "environment" || key === "headers") && (isPlainObject(a) || isPlainObject(b))) {
+      const left = isPlainObject(a) ? a : {}
+      const right = isPlainObject(b) ? b : {}
+      const inner = new Set([...Object.keys(left), ...Object.keys(right)])
+      // An empty block against a missing one has no key to name, so report it at the top level
+      // rather than saying nothing at all.
+      if (inner.size === 0) {
+        if (stableStringify(a) !== stableStringify(b)) fields.push(key)
+        continue
+      }
+      for (const name of inner) if (left[name] !== right[name]) fields.push(`${key}.${name}`)
+      continue
+    }
+    if (stableStringify(a) !== stableStringify(b)) fields.push(key)
+  }
+  return fields.sort()
+}
+
+/** Record that `server` is configured differently from what discovery found in `source`. */
+export function setConfigDrift(server: string, source: string, fields: string[]) {
+  if (fields.length > 0) _drift.set(server, { source, fields })
+  else _drift.delete(server)
+}
+
+/** Servers whose configured definition differs from the discovered one. */
+export function configDrift(): { server: string; source: string; fields: string[] }[] {
+  return [..._drift.entries()]
+    .map(([server, info]) => ({ server, ...info }))
+    .sort((a, b) => a.server.localeCompare(b.server))
+}
+
+/** Server name -> the file that actually defined it, for drift attribution. */
+const _discoveredSource = new Map<string, string>()
+
+/** The config file a discovered server came from, or undefined if it was not discovered. */
+export function discoveredSource(server: string): string | undefined {
+  return _discoveredSource.get(server)
+}
+
+/** Test seam — drift accumulates at module level. */
+export function resetConfigDrift() {
+  _drift.clear()
+}
+// altimate_change end
 interface ExternalMcpSource {
   /** Relative path from base directory */
   file: string
@@ -240,6 +330,10 @@ function addServersFromFile(
         ;(transformed as any).enabled = false
       }
       result[name] = transformed
+      // altimate_change start — upstream_fix (#878): attribute drift to the file that defined
+      // this server, not to every file that contributed something to the run.
+      _discoveredSource.set(name, sourceLabel)
+      // altimate_change end
       added++
     }
   }
@@ -340,6 +434,11 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   log.info("Discovering MCP servers from external AI tool configs...")
   // Start from a clean slate so a variable fixed since the last run stops being reported.
   resetUnresolvedEnv()
+  // Same for drift: a server removed from the external config, or a reload that resolved the
+  // difference, otherwise left a stale entry and `mcp status` reported a mismatch that no
+  // longer existed. The setConfigDrift calls after this run repopulate it.
+  resetConfigDrift()
+  _discoveredSource.clear()
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()

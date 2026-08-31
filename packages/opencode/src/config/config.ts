@@ -756,7 +756,10 @@ export const layer = Layer.effect(
         const autoMcpDiscovery = (result.experimental as { auto_mcp_discovery?: boolean } | undefined)
           ?.auto_mcp_discovery
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
-          const { discoverExternalMcp, setDiscoveryResult } = yield* Effect.promise(() => import("../mcp/discover"))
+          const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift, discoveredSource } =
+            yield* Effect.promise(
+            () => import("../mcp/discover"),
+          )
           const { servers: externalMcp, sources } = yield* Effect.promise(() => discoverExternalMcp(ctx.directory))
           if (Object.keys(externalMcp).length > 0) {
             result.mcp ??= {}
@@ -765,6 +768,15 @@ export const layer = Layer.effect(
               if (!(name in result.mcp)) {
                 ;(result.mcp as Record<string, any>)[name] = server
                 added.push(name)
+              } else {
+                // altimate_change — upstream_fix (#878): the user's config still wins, but the
+                // difference is recorded so a surface can report it rather than silently skipping.
+                const configured = (result.mcp as Record<string, any>)[name]
+                setConfigDrift(
+                  name,
+                  discoveredSource(name) ?? sources.join(", "),
+                  driftFields(server as Record<string, any>, configured),
+                )
               }
             }
             setDiscoveryResult(added, sources)
