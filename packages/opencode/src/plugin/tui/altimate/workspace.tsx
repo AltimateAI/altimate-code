@@ -1181,8 +1181,9 @@ function engineSkipKey(workspaceId: string, scope: LatchScope | null): string {
  * (`api.kv.ready`). A latch checked before that reads as absent, so an offer
  * raised on the first message after a restart would ignore a "Not now" that
  * is still in force. `ready` is a plain getter with nothing to await, so poll
- * it — bounded, and on timeout proceed as if hydrated rather than never
- * answer. Resolves to whether the store was ready. */
+ * it, bounded by `timeoutMs` (pass `Infinity` to hold until it flips — it
+ * does, on a failed read as well as a successful one). Resolves to whether
+ * the store was ready; the caller decides what a timeout means. */
 const KV_READY_TIMEOUT_MS = 3_000
 const KV_READY_POLL_MS = 25
 async function awaitKvReady(
@@ -1504,14 +1505,22 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
     if (engineOfferGeneration === generation) engineOfferVisible = false
   }
   try {
+    // An unhydrated store is not an absent latch: a "Not now" chosen before
+    // this restart is in the file still being read. Hold the offer until the
+    // read settles rather than open a dialog the latch may forbid — and rather
+    // than drop it, which would cost the session its offer (the attach only
+    // re-raises once the latch window has passed). The slot stays reserved
+    // meanwhile, and the offer is derived only afterwards so a long wait
+    // cannot leave it stale.
+    if (!(await awaitKvReady(api.kv))) {
+      log.warn("kv store not hydrated in time; holding the engine install offer until it is")
+      await awaitKvReady(api.kv, Number.POSITIVE_INFINITY)
+    }
     const offer = await describeOffer(api.state.path.directory)
     // Null means the situation resolved between the attach and this dialog — an
     // engine appeared, or the project is no longer bound. Say nothing.
     if (!offer) return release()
     const latchScope = await currentLatchScope()
-    if (!(await awaitKvReady(api.kv))) {
-      log.warn("kv store not hydrated in time; checking the engine install latch against what is loaded")
-    }
     if (isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
       log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
       return release()

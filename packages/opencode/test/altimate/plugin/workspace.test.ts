@@ -631,9 +631,30 @@ describe("engine install offer — kv hydration", () => {
     expect(await awaitKvReady({ ready: true }, 1_000, 5)).toBe(true)
     expect(Date.now() - t0).toBeLessThan(50)
   })
-  test("gives up after the timeout so a stuck read never blocks the offer", async () => {
+  test("reports a read that outlasts the wait, so the caller can hold the offer", async () => {
     const t0 = Date.now()
     expect(await awaitKvReady({ ready: false }, 40, 5)).toBe(false)
     expect(Date.now() - t0).toBeGreaterThanOrEqual(35)
+  })
+  // The offer holds past the warning with no deadline: an unhydrated store is
+  // not an absent latch, and the attach would not re-raise a dropped offer.
+  test("holds without a deadline until the store hydrates", async () => {
+    let ready = false
+    setTimeout(() => {
+      ready = true
+    }, 60)
+    const t0 = Date.now()
+    expect(
+      await awaitKvReady(
+        {
+          get ready() {
+            return ready
+          },
+        },
+        Number.POSITIVE_INFINITY,
+        5,
+      ),
+    ).toBe(true)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(50)
   })
 })
