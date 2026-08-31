@@ -4782,16 +4782,23 @@ describe("output token budget", () => {
 
   test("never demands more headroom than the model's own output reservation", () => {
     const model = createWindowModel({ context: 8_192, output: 512 })
-    expect(clampOutputTokens({ model, requested: 512, inputTokens: 7_168 })).toBe(512)
+    expect(clampOutputTokens({ model, requested: 512, inputTokens: 7_516 })).toBe(512)
     // One token more would require discarding the estimator margin. Refuse instead of sending an
     // exact-fill request that is likely to reproduce the provider context error.
-    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 7_169 })).toThrow(OutputTokenBudgetError)
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 7_517 })).toThrow(OutputTokenBudgetError)
     expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 8_000 })).toThrow(OutputTokenBudgetError)
   })
 
   test("enforces real context windows at or below the default output floor", () => {
     const model = createWindowModel({ context: 512, output: 512 })
+    expect(clampOutputTokens({ model, requested: 1, inputTokens: 1 })).toBe(1)
     expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 1 })).toThrow(OutputTokenBudgetError)
+  })
+
+  test("scales the safety margin for a small dedicated input ceiling", () => {
+    const model = createWindowModel({ context: 200_000, input: 512, output: 1 })
+    expect(clampOutputTokens({ model, requested: 1, inputTokens: 501 })).toBe(1)
+    expect(() => clampOutputTokens({ model, requested: 1, inputTokens: 502 })).toThrow(InputTokenBudgetError)
   })
 
   test("passes an omitted reservation through untouched", () => {

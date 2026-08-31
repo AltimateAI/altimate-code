@@ -347,6 +347,12 @@ function resolveInputTokens(value: number | (() => number)): number {
   return typeof value === "function" ? value() : value
 }
 
+/** Keep estimator drift proportional when a credible limit is smaller than the default margin. */
+function safetyMargin(inputTokens: number, limit: number): number {
+  const proportionalMinimum = Math.max(1, Math.ceil(limit * CLAMP_MARGIN_FRACTION))
+  return Math.max(Math.ceil(inputTokens * CLAMP_MARGIN_FRACTION), Math.min(CLAMP_MARGIN_MIN, proportionalMinimum))
+}
+
 /** Clamp a completion reservation so estimated input, margin, and output fit the effective window. */
 export function clampOutputTokens(input: {
   readonly model: Provider.Model
@@ -364,17 +370,20 @@ export function clampOutputTokens(input: {
   const inputTokens = resolveInputTokens(input.inputTokens)
   if (!Number.isFinite(inputTokens) || inputTokens <= 0) return requested
 
-  const margin = Math.max(CLAMP_MARGIN_MIN, Math.ceil(inputTokens * CLAMP_MARGIN_FRACTION))
-  if (inputLimit && inputLimit > 0 && inputTokens + margin > inputLimit) {
-    throw new InputTokenBudgetError({
-      modelID: input.model.id,
-      providerID: input.model.providerID,
-      inputTokens,
-      inputLimit,
-      margin,
-    })
+  if (inputLimit && inputLimit > 0) {
+    const margin = safetyMargin(inputTokens, inputLimit)
+    if (inputTokens + margin > inputLimit) {
+      throw new InputTokenBudgetError({
+        modelID: input.model.id,
+        providerID: input.model.providerID,
+        inputTokens,
+        inputLimit,
+        margin,
+      })
+    }
   }
   if (!context || context <= 0) return requested
+  const margin = safetyMargin(inputTokens, context)
   if (inputTokens + requested + margin <= context) return requested
 
   // Do not reject a model for failing to reach a floor above its own reservation.
