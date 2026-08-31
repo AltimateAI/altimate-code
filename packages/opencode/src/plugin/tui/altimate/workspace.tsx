@@ -1420,9 +1420,20 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
           if (installing) return
           installing = true
           void runInstall().catch((err) => {
-            setFailure(err instanceof Error ? err.message : String(err))
-            setPhase("failed")
+            const message = err instanceof Error ? err.message : String(err)
             installing = false
+            if (!mounted) {
+              // Same as a reported failure after dismissal: the rows are gone,
+              // so the error reaches the user as a toast or not at all.
+              props.api.ui.toast({
+                variant: "error",
+                message: `Workspace engine install failed: ${message}. Run: ${command()}`,
+                duration: 30_000,
+              })
+              return
+            }
+            setFailure(message)
+            setPhase("failed")
           })
           return
         }

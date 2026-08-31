@@ -251,6 +251,20 @@ describe("offer routing — engine too old", () => {
     await beforeTurn("parent")
     expect(h.printed).toHaveLength(1)
   })
+  test("a count that arrives on a later turn does not re-raise the offer in the session", async () => {
+    // Same verdict, better number: the dialog was already raised for it.
+    const h = install({ surface: true })
+    let clock = 1_000_000
+    syncInternals.now = () => clock
+    syncInternals.declared = async () => null
+    await beforeTurn("s1")
+    expect(h.offers).toHaveLength(1)
+    expect(h.offers[0]).not.toHaveProperty("declared")
+    clock += DECLARED_RETRY_MS + 1
+    syncInternals.declared = async () => ({ keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] })
+    await beforeTurn("s1")
+    expect(h.offers).toHaveLength(1)
+  })
   test("headless, an unknown declared count is not printed as 0", async () => {
     const h = install({ headless: true })
     syncInternals.declared = async () => null

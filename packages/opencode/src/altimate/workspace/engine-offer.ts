@@ -168,6 +168,9 @@ export function runInstall(
       // usually dies on SIGTERM, but a descendant that ignores it must still
       // get the SIGKILL, so the leader's exit does not cancel it.
       if (hard && !timedOut) clearTimeout(hard)
+      // A descendant that inherited stderr can hold the pipe open after npm
+      // exits; nothing more is read from it once the run has settled.
+      child.stderr?.destroy()
       resolve({ code, timedOut, stderr })
     }
     const killTree = (signal: NodeJS.Signals) => {

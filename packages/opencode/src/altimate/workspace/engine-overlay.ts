@@ -597,7 +597,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       refusal,
       {
         title: `Workspace "${workspace.name}": engine not usable`,
-        message: describeRefusal(refusal.found, workspace.name),
+        message: describeRefusal(refusal.found, workspace.name, installCommand()),
         variant: "warning",
       },
       {
@@ -696,8 +696,10 @@ export async function announceRefusal(
 ): Promise<void> {
   const rec = sessions.get(sessionID) ?? record(sessionID, outcome)
   const detail = "error" in outcome ? outcome.error : "found" in outcome ? String(outcome.found) : ""
-  const declared = "declared" in outcome ? String(outcome.declared ?? "?") : ""
-  const signature = `${outcome.kind}:${detail}:${declared}:${toast.title}`
+  // The declared count is not part of the verdict: a lookup that fails on one
+  // turn and recovers on the next changes the number in the text, not what
+  // the text has to say, so it must not re-announce (nor re-print).
+  const signature = `${outcome.kind}:${detail}:${toast.title}`
   const offering = !!offer && INSTALL_HELPS[outcome.kind]
   const at = now()
   let repeat = false
@@ -711,13 +713,9 @@ export async function announceRefusal(
   if (isHeadless()) {
     // A headless `run` is one process with one stderr, whatever sessions it
     // creates along the way (a sub-agent's session settles the same verdict
-    // and would print the same line). One line per verdict per process — and
-    // the declared count is not part of the verdict: a lookup that fails for
-    // one session and recovers for the next changes the number in the line,
-    // not what the line has to say.
-    const line = `${outcome.kind}:${detail}:${toast.title}`
-    if (headlessPrinted.has(line)) return
-    headlessPrinted.add(line)
+    // and would print the same line). One line per verdict per process.
+    if (headlessPrinted.has(signature)) return
+    headlessPrinted.add(signature)
   }
   if (offering) {
     await offerOrNotify(offer, toast, sessionID)
