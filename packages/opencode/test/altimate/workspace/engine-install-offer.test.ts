@@ -217,6 +217,30 @@ describe("offer routing — engine missing", () => {
     await beforeTurn("s1")
     expect(h.published).toBe(3)
   })
+  test("a count that arrives on a later turn does not re-raise the offer in the session", async () => {
+    // Same verdict, better number: the dialog was already raised for it.
+    const h = install({ surface: true })
+    let clock = 1_000_000
+    syncInternals.now = () => clock
+    syncInternals.declared = async () => null
+    await beforeTurn("s1")
+    expect(h.offers).toHaveLength(1)
+    expect(h.offers[0]).not.toHaveProperty("declared")
+    clock += DECLARED_RETRY_MS + 1
+    syncInternals.declared = async () => ({ keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] })
+    await beforeTurn("s1")
+    expect(h.offers).toHaveLength(1)
+  })
+  test("headless, two same-named workspaces in one process each print their line", async () => {
+    // The title names the workspace, not its id; a second directory bound to
+    // a different workspace with the same name is a different verdict.
+    const h = install({ headless: true })
+    await beforeTurn("s1")
+    syncInternals.instanceDirectory = () => "/tmp/analytics-2"
+    syncInternals.resolveBinding = async () => ({ ...binding, datamateId: 43, projectPath: "/tmp/analytics-2" })
+    await beforeTurn("s2")
+    expect(h.printed).toHaveLength(2)
+  })
 })
 
 describe("offer routing — engine too old", () => {
@@ -250,20 +274,6 @@ describe("offer routing — engine too old", () => {
     await beforeTurn("child")
     await beforeTurn("parent")
     expect(h.printed).toHaveLength(1)
-  })
-  test("a count that arrives on a later turn does not re-raise the offer in the session", async () => {
-    // Same verdict, better number: the dialog was already raised for it.
-    const h = install({ surface: true })
-    let clock = 1_000_000
-    syncInternals.now = () => clock
-    syncInternals.declared = async () => null
-    await beforeTurn("s1")
-    expect(h.offers).toHaveLength(1)
-    expect(h.offers[0]).not.toHaveProperty("declared")
-    clock += DECLARED_RETRY_MS + 1
-    syncInternals.declared = async () => ({ keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: [] })
-    await beforeTurn("s1")
-    expect(h.offers).toHaveLength(1)
   })
   test("headless, an unknown declared count is not printed as 0", async () => {
     const h = install({ headless: true })

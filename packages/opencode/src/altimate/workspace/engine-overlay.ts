@@ -698,8 +698,10 @@ export async function announceRefusal(
   const detail = "error" in outcome ? outcome.error : "found" in outcome ? String(outcome.found) : ""
   // The declared count is not part of the verdict: a lookup that fails on one
   // turn and recovers on the next changes the number in the text, not what
-  // the text has to say, so it must not re-announce (nor re-print).
-  const signature = `${outcome.kind}:${detail}:${toast.title}`
+  // the text has to say, so it must not re-announce (nor re-print). The
+  // workspace is: the title carries its name, and two workspaces can share
+  // one, so the id goes in as well.
+  const signature = `${outcome.kind}:${detail}:${toast.title}:${offer?.workspaceId ?? ""}`
   const offering = !!offer && INSTALL_HELPS[outcome.kind]
   const at = now()
   let repeat = false
