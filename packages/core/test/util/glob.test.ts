@@ -121,3 +121,43 @@ describe("Glob.DEFAULT_IGNORE", () => {
   })
 })
 // altimate_change end
+
+// altimate_change start — upstream_fix: `exists` must answer without walking the whole tree.
+describe("Glob.exists", () => {
+  test("agrees with scan() on whether anything matched", async () => {
+    for (const pattern of ["**/*.ts", "**/mcp.json", "**/nothing-matches-this.xyz"]) {
+      const scanned = await Glob.scan(pattern, { cwd: root, absolute: true })
+      const existed = await Glob.exists(pattern, { cwd: root, absolute: true })
+      expect(existed, `pattern ${pattern}`).toBe(scanned.length > 0)
+    }
+  })
+
+  test("honours the same options as scan", async () => {
+    // `include: "file"` must not report a directory match, or a skill whose applyPaths names
+    // a directory would auto-load on every project that happens to have one.
+    const dirOnly = await Glob.exists("src", { cwd: root, include: "file" })
+    const withDirs = await Glob.exists("src", { cwd: root, include: "all" })
+    expect(dirOnly).toBe(false)
+    expect(withDirs).toBe(true)
+  })
+
+  test("prunes with ignore, like scan", async () => {
+    // Own fixture: the shared `root` has matching files outside the ignored trees too, which
+    // would make this pass for the wrong reason.
+    const own = await mkdtemp(path.join(tmpdir(), "glob-exists-"))
+    try {
+      await mkdir(path.join(own, "node_modules", "pkg"), { recursive: true })
+      await writeFile(path.join(own, "node_modules", "pkg", "only-here.json"), "{}")
+
+      expect(await Glob.exists("**/only-here.json", { cwd: own })).toBe(true)
+      expect(await Glob.exists("**/only-here.json", { cwd: own, ignore: ["**/node_modules/**"] })).toBe(false)
+    } finally {
+      await rm(own, { recursive: true, force: true })
+    }
+  })
+
+  test("returns false for a directory that does not exist", async () => {
+    expect(await Glob.exists("**/*", { cwd: path.join(root, "no-such-dir") })).toBe(false)
+  })
+})
+// altimate_change end

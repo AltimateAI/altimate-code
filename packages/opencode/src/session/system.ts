@@ -246,16 +246,23 @@ export namespace SystemPrompt {
     // catches the file no matter how deep the user's cwd is.
     // Errors propagate to the caller's try/catch (collectAutoLoadedSkills)
     // so the warning log there actually fires.
+    // `Glob.exists` rather than `scan(...).length > 0`: this only needs to know whether any
+    // file matches, and `scan` walks the whole tree before the caller can look. That cost is
+    // paid once per `applyPaths` skill — two ship builtin — and the root is the worktree, which
+    // is `/` for a directory outside any git repo. Measured from such a directory, the two
+    // scans were ~45s of a ~51s startup, all of it before the first token.
     const root = Instance.worktree
     for (const g of globs) {
-      const matches = await Glob.scan(g, {
-        cwd: root,
-        absolute: true,
-        include: "file",
-        dot: false,
-        symlink: false,
-      })
-      if (matches.length > 0) return true
+      if (
+        await Glob.exists(g, {
+          cwd: root,
+          absolute: true,
+          include: "file",
+          dot: false,
+          symlink: false,
+        })
+      )
+        return true
     }
     return false
   }
