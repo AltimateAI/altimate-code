@@ -201,7 +201,17 @@ export function runInstall(
         finish(null)
       }, graceMs)
     }, timeoutMs)
-    child.once("exit", (code) => finish(code))
+    child.once("exit", (code) => {
+      finish(code)
+      // npm is done, but a descendant it forked may still be alive in the
+      // group (a lifecycle script's daemon). It is the install's straggler,
+      // not the user's: reap it — SIGTERM now, SIGKILL after the grace —
+      // without holding the result or this process for it.
+      if (!timedOut && grouped) {
+        killTree("SIGTERM")
+        setTimeout(() => killTree("SIGKILL"), graceMs).unref()
+      }
+    })
     child.once("error", (err) => {
       stderr = stderr || err.message
       finish(null)

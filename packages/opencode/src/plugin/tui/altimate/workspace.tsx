@@ -1540,7 +1540,7 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
       return release()
     }
     const major = await detectNodeMajor()
-  const hasNpm = npmAvailable()
+    const hasNpm = npmAvailable()
     api.ui.dialog.replace(() => (
       <EngineInstallOfferDialog
         api={api}

@@ -397,6 +397,22 @@ describe("install deadline", () => {
       .trim()
     expect(survivors).toBe("")
   })
+  test.skipIf(!posix)("a descendant that outlives a successful npm is reaped", async () => {
+    // npm done, exit 0 — but a lifecycle script left a daemon in the group. It
+    // is the install's straggler, not the user's: gone within the grace,
+    // without the run waiting for it.
+    const marker = `32.${process.pid}`
+    const t0 = Date.now()
+    const run = await runInstall(["sh", "-c", `(exec sleep ${marker}) & exit 0`], 4_000, 200)
+    expect(run.code).toBe(0)
+    expect(run.timedOut).toBe(false)
+    expect(Date.now() - t0).toBeLessThan(2_000)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const survivors = Bun.spawnSync(["pgrep", "-f", `sleep ${marker}`])
+      .stdout.toString()
+      .trim()
+    expect(survivors).toBe("")
+  })
   test("a timed-out run is reported as such, not as an npm failure", async () => {
     syncInternals.runInstall = async () => ({ code: null, timedOut: true, stderr: "" })
     const result = await installEngine()
