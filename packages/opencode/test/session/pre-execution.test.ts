@@ -40,9 +40,9 @@ describe("workspace classification", () => {
     expect(await SessionPreExecution.classifyWorkspace([cwd, root])).toBe("dbt")
   })
 
-  // The load-bearing case. `findDbtProjectRoot` returns null both for "no
-  // project here" and for "could not read this directory"; collapsing those
-  // would silently drop the protocol whenever the filesystem misbehaved.
+  // The load-bearing case. A scan that collapses "no project here" and "could
+  // not look here" into one answer silently drops the protocol whenever the
+  // filesystem misbehaves.
   test("a directory that does not exist is unknown, never non-dbt", async () => {
     const dir = await tmpdir()
     const missing = path.join(dir, "gone")
@@ -62,7 +62,7 @@ describe("workspace classification", () => {
     expect(await SessionPreExecution.classifyWorkspace([root])).toBe("unknown")
   })
 
-  test("an unreadable candidate does not license a non-dbt verdict from its partner", async () => {
+  test("a project on one candidate wins even when its partner is unreadable", async () => {
     const dir = await tmpdir()
     await fs.writeFile(path.join(dir, "dbt_project.yml"), "name: demo\n")
     expect(await SessionPreExecution.classifyWorkspace([path.join(dir, "nope"), dir])).toBe("dbt")
@@ -93,14 +93,48 @@ describe("workspace classification", () => {
     expect(await SessionPreExecution.classifyWorkspace([deep])).toBe("dbt")
   })
 
-  // The upward walk is bounded, so an unrelated deep tree does not scan to /.
-  test("the ancestor walk is bounded", async () => {
+  // The walk runs to the filesystem root rather than stopping at a depth
+  // limit. A limit would have to report "I stopped early" as unknown to stay
+  // honest, which on any deep tree switches the gate off entirely.
+  test("the ancestor walk is not depth-limited", async () => {
     const root = await tmpdir()
     await fs.writeFile(path.join(root, "dbt_project.yml"), "name: demo\n")
-    const parts = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
-    const deep = path.join(root, ...parts)
+    const deep = path.join(root, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
     await fs.mkdir(deep, { recursive: true })
-    expect(await SessionPreExecution.classifyWorkspace([deep])).toBe("non-dbt")
+    expect(await SessionPreExecution.classifyWorkspace([deep])).toBe("dbt")
+  })
+
+  // `path.resolve` is lexical. A symlinked cwd would walk the link's own
+  // parents and never see the project the session is actually inside.
+  test("a symlinked candidate is resolved before the walk", async () => {
+    const project = await tmpdir()
+    await fs.writeFile(path.join(project, "dbt_project.yml"), "name: demo\n")
+    const inner = path.join(project, "models")
+    await fs.mkdir(inner)
+    const elsewhere = await tmpdir()
+    const link = path.join(elsewhere, "ws")
+    await fs.symlink(inner, link, "dir")
+    expect(await SessionPreExecution.classifyWorkspace([link])).toBe("dbt")
+  })
+
+  // Filtering children on isDirectory() would skip symlinked directories, and
+  // a skipped entry is an unexamined one.
+  test("a symlinked child project is found", async () => {
+    const project = await tmpdir()
+    await fs.writeFile(path.join(project, "dbt_project.yml"), "name: demo\n")
+    const workspace = await tmpdir()
+    await fs.symlink(project, path.join(workspace, "warehouse"), "dir")
+    expect(await SessionPreExecution.classifyWorkspace([workspace])).toBe("dbt")
+  })
+
+  // One completely examined candidate settles it. Its ancestor walk already
+  // covers the worktree above it, so a partner that could not be read has
+  // nothing left to contribute — and vetoing on it would return unknown for
+  // every non-git project, where the worktree candidate is the filesystem root.
+  test("a complete candidate is not vetoed by an unreadable partner", async () => {
+    const dir = await tmpdir()
+    expect(await SessionPreExecution.classifyWorkspace([dir, path.join(dir, "gone")])).toBe("non-dbt")
+    expect(await SessionPreExecution.classifyWorkspace([dir, path.parse(dir).root])).toBe("non-dbt")
   })
 
   // The failure that matters most: a directory that stats fine but cannot be

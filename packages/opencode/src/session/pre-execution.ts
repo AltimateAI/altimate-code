@@ -49,14 +49,6 @@ const PROJECT_FILES = ["dbt_project.yml", "dbt_project.yaml"] as const
 const SKIP_DIRS = new Set(["node_modules", "target"])
 
 /**
- * How far up from a candidate directory to look for a project root. A session
- * is routinely started inside `models/` or `models/marts/` of a dbt project,
- * and on a non-git project the worktree is the same directory (or the
- * filesystem root), so the ancestor walk is the only thing that finds it.
- */
-const MAX_ANCESTOR_LEVELS = 8
-
-/**
  * The `errno` code of a filesystem rejection, when it carries one.
  *
  * `ENOENT` and `ENOTDIR` are real answers — nothing is there. Every other code,
@@ -79,9 +71,9 @@ function meansAbsent(err: unknown): boolean {
  *
  * `unknown` is a real, load-bearing state, not a placeholder: it is what we
  * report when the filesystem could not answer the question, and it keeps the
- * protocol. `findDbtProjectRoot` collapses "no project here" and "could not
- * read the directory" into the same `null`, so the readability check happens
- * here, before it is consulted.
+ * protocol. The existing `findDbtProjectRoot` helper cannot serve this gate
+ * directly because it collapses "no project here" and "could not look here"
+ * into the same `null`, and this gate turns a directive off on the difference.
  */
 export type WorkspaceShape = "dbt" | "non-dbt" | "unknown"
 
@@ -139,33 +131,49 @@ async function hasProjectFile(dir: string): Promise<boolean | undefined> {
  * one level below a candidate directory:
  *
  *   - **at** the candidate,
- *   - **above** it, walking up to `MAX_ANCESTOR_LEVELS` parents — a session
- *     started inside `models/` is still a dbt session, and on a non-git project
- *     the worktree candidate does not rescue that case,
+ *   - **above** it, every ancestor up to the filesystem root. A session is
+ *     routinely started inside `models/`, and on a non-git project the worktree
+ *     candidate is the same directory, so nothing else would find the project.
+ *     The walk is deliberately unbounded: a depth limit would have to report
+ *     "I stopped early" as `unknown` to stay honest, which on any deep tree
+ *     turns the gate off entirely. Two `stat` calls per level, in run mode
+ *     only, is not worth that.
  *   - **one level below** it, which is how benchmark and monorepo layouts nest
  *     a project (the same rule, and the same skip list, as
  *     `findDbtProjectRoot`).
  *
- * `non-dbt` requires at least one candidate the scan could examine COMPLETELY —
- * every ancestor probe answered, and the candidate's own children enumerated —
- * with no project found anywhere. Everything else is `unknown`: a candidate
- * that cannot be enumerated, a stat failing for any reason other than "not
- * there", the filesystem root (whose children are deliberately not scanned),
- * and an empty candidate list. The caller reads `unknown` as "keep the
- * protocol", so folding a filesystem failure into "no dbt project" would drop
- * it silently on a workspace nothing ever managed to look inside.
+ * A project found in an unrelated ancestor is a false positive that KEEPS the
+ * protocol, which is the safe direction.
+ *
+ * `non-dbt` requires at least one candidate the scan examined COMPLETELY — its
+ * symlinks resolved, every ancestor probe answered up to the root, and its own
+ * children enumerated and probed — with no project found. If no candidate
+ * managed that, the answer is `unknown`, which keeps the protocol. One complete
+ * answer is enough: the ancestor walk from that candidate already covers the
+ * worktree above it, so a partner candidate that could not be read has nothing
+ * left to contribute.
  */
 export async function classifyWorkspace(candidates: (string | undefined)[]): Promise<WorkspaceShape> {
   const dirs = [...new Set(candidates.filter((d): d is string => !!d))]
   let sawCompleteAnswer = false
-  let sawIncomplete = false
 
   for (const dir of dirs) {
     let complete = true
 
-    // At the candidate, then upwards.
-    let current = path.resolve(dir)
-    for (let level = 0; level <= MAX_ANCESTOR_LEVELS; level++) {
+    // Resolve symlinks first. `path.resolve` is lexical, so a symlinked cwd
+    // (`/tmp/ws` -> `/repo/models`) would walk `/tmp` and `/` and never see the
+    // project the session is actually inside.
+    let start: string
+    try {
+      start = await fs.realpath(dir)
+    } catch (err) {
+      if (!meansAbsent(err)) log.warn("candidate realpath failed", { dir, code: errnoCode(err) })
+      continue
+    }
+
+    // At the candidate, then upwards to the filesystem root.
+    let current = start
+    for (;;) {
       const found = await hasProjectFile(current)
       if (found === true) return "dbt"
       if (found === undefined) complete = false
@@ -178,25 +186,30 @@ export async function classifyWorkspace(candidates: (string | undefined)[]): Pro
     // directory to enumerate — a non-git project sets worktree to it, and
     // scanning its children is meaningless and can be slow or permission-denied
     // — so the root on its own never yields a complete answer.
-    if (path.resolve(dir) === path.parse(path.resolve(dir)).root) {
+    if (start === path.parse(start).root) {
       complete = false
     } else {
       let entries
       try {
-        entries = await fs.readdir(dir, { withFileTypes: true })
+        entries = await fs.readdir(start, { withFileTypes: true })
       } catch (err) {
-        if (!meansAbsent(err)) log.warn("workspace enumeration failed", { dir, code: errnoCode(err) })
+        if (!meansAbsent(err)) log.warn("workspace enumeration failed", { dir: start, code: errnoCode(err) })
         entries = undefined
       }
       if (entries === undefined) {
         complete = false
       } else {
+        // Probe everything that is not plainly a regular file. Filtering on
+        // `isDirectory()` would silently skip symlinked directories and any
+        // entry whose type the filesystem did not report, and a skipped entry
+        // is an unexamined one. `hasProjectFile` on a non-directory just gets
+        // ENOTDIR, which is a real "nothing there".
         const children = entries
-          .filter((e) => e.isDirectory() && !e.name.startsWith(".") && !SKIP_DIRS.has(e.name))
+          .filter((e) => !e.isFile() && !e.name.startsWith(".") && !SKIP_DIRS.has(e.name))
           // Deterministic order: fs.readdir's order varies across filesystems.
           .sort((a, b) => a.name.localeCompare(b.name))
         for (const child of children) {
-          const found = await hasProjectFile(path.join(dir, child.name))
+          const found = await hasProjectFile(path.join(start, child.name))
           if (found === true) return "dbt"
           if (found === undefined) complete = false
         }
@@ -204,10 +217,9 @@ export async function classifyWorkspace(candidates: (string | undefined)[]): Pro
     }
 
     if (complete) sawCompleteAnswer = true
-    else sawIncomplete = true
   }
 
-  return sawCompleteAnswer && !sawIncomplete ? "non-dbt" : "unknown"
+  return sawCompleteAnswer ? "non-dbt" : "unknown"
 }
 
 /**
