@@ -150,17 +150,21 @@ export interface Precedence {
   ruleset?: PermissionNext.Ruleset
 }
 
-/** The workspace name as model-visible text: control characters stripped, whitespace
- * collapsed onto one line, length bounded. Quoting is the caller's choice — the
- * system-prompt section JSON-quotes it as well — but nothing that passes through here
- * can start a new line, and so a new heading or role, in what the model reads. */
+/** The workspace name as model-visible text: control characters stripped (C0, DEL and
+ * the C1 range — NEL U+0085 is a line break that `\s` does not match), the Unicode
+ * line and paragraph separators too, whitespace collapsed onto one line, length
+ * bounded in code points so a cut never leaves a lone surrogate. Quoting is the
+ * caller's choice — the system-prompt section JSON-quotes it as well — but nothing
+ * that passes through here can start a new line, and so a new heading or role, in
+ * what the model reads. */
 export const MAX_WORKSPACE_NAME_CHARS = 80
 export function inertWorkspaceName(name: string): string {
   const cleaned = name
-    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-  return cleaned.length > MAX_WORKSPACE_NAME_CHARS ? cleaned.slice(0, MAX_WORKSPACE_NAME_CHARS - 1) + "…" : cleaned
+  const points = Array.from(cleaned)
+  return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
 }
 
 const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
