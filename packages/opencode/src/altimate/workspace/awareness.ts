@@ -64,34 +64,52 @@ const ESCAPE_HATCH_SECTION = [
     "are present in this catalog.",
 ].join("\n")
 
+/** Said when routing is off because the engine could not be verified — the binding
+ * unreadable, the engine not attributable to the bound workspace, or the derivation
+ * failed. `check()` fails open in those states and the engine's tools may still be in
+ * the catalog (under `unattributed` they may belong to a DIFFERENT workspace, which is
+ * why routing refused them), so the model is steered to the local tools the same way
+ * the hatch does. The workspace is not named: nothing here has verified it. */
+const UNVERIFIED_SECTION = [
+  HEADING,
+  "",
+  "Workspace routing is not active for this session: the bound workspace's engine could not " +
+    `be verified. Use the local warehouse tools (${ALL_LOCAL_TOOLS}) for every connection, even ` +
+    "if `datamate_*` tools are present in this catalog.",
+].join("\n")
+
+/** What a non-routing session is told, keyed on the union so a new `disabledReason`
+ * is a compile error here rather than silently rendering nothing. Silence is reserved
+ * for the states where there is nothing the model could misuse: the pilot off, no
+ * binding, or no engine tools materialised. Those keep the system prompt byte-identical
+ * to before this module existed. */
+const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> = {
+  "pilot-off": "",
+  "escape-hatch": ESCAPE_HATCH_SECTION,
+  unbound: "",
+  "binding-unreadable": UNVERIFIED_SECTION,
+  unattributed: UNVERIFIED_SECTION,
+  "derive-failed": UNVERIFIED_SECTION,
+  "nothing-materialised": "",
+}
+
 /**
  * Render the section, or "" when there is nothing to steer.
  *
  * Pure projection of the snapshot `Precedence.refresh` stored for this turn — the same
  * object the tool descriptions were built from and that `check()` will read mid-turn.
  * One snapshot, one truth: the section cannot advertise a routing the guard would not
- * perform.
+ * perform. (The exposed tool list is pinned to the turn's first catalog while this
+ * snapshot is refreshed per step, so on a later step the two can name different
+ * engine keys if another session replaced the engine mid-turn — the lease work that
+ * pins the raw tool map closes that, not this module.)
  *
  * Called once per STEP, not per turn: the prompt loop reassembles the system array on
  * every generation, so a 40-tool-call turn renders this 40 times. Kept cheap and
  * allocation-light for that reason, and deliberately not memoised — the snapshot is
- * re-derived per turn and a cached section outliving its snapshot would advertise
- * routing that no longer holds.
+ * refreshed per step, ahead of this render, and a cached section outliving its
+ * snapshot would advertise routing that no longer holds.
  */
-/** What a non-routing session is told, keyed on the union so a new `disabledReason`
- * is a compile error here rather than silently rendering nothing. Only the escape
- * hatch speaks: the others mean "no routing to describe", and the toast layer already
- * tells the human why. */
-const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> = {
-  "pilot-off": "",
-  "escape-hatch": ESCAPE_HATCH_SECTION,
-  unbound: "",
-  "binding-unreadable": "",
-  unattributed: "",
-  "derive-failed": "",
-  "nothing-materialised": "",
-}
-
 export function systemSection(precedence: Precedence | undefined): string {
   if (!precedence) return ""
   if (!precedence.enabled) return precedence.disabledReason ? DISABLED_COPY[precedence.disabledReason] : ""
@@ -99,6 +117,9 @@ export function systemSection(precedence: Precedence | undefined): string {
   const served = servedInventory(precedence)
   if (served.length === 0) return ""
 
+  // `type` is the canonical local driver type (`postgres`), not the user-facing
+  // connection name nor the engine's integration id (`postgresql`) — it is what the
+  // local connection registry carries, so it is what the model must match against.
   const typeLines = served.map(({ type, served: rows, local }) => {
     const servedPart = rows.map((r) => `${CAPABILITY_LABEL[r.capability]}: \`${r.modelKey}\``).join("; ")
     const localPart = local.length
@@ -108,36 +129,64 @@ export function systemSection(precedence: Precedence | undefined): string {
     return `- ${type} — ${servedPart}${localPart}`
   })
 
-  return assemble(precedence.workspaceName, typeLines)
+  return assemble(precedence.workspaceName, precedence.workspaceId, typeLines)
+}
+
+/** The workspace name is customer-authored and lands in the system prompt — the
+ * highest-trust surface there is. Emitted as inert data: control characters stripped,
+ * whitespace collapsed, length bounded, then JSON-quoted so quotes, newlines and
+ * Markdown cannot break out of the sentence. The numeric id, when known, is the
+ * stable identifier and is named alongside. */
+const MAX_NAME_CHARS = 80
+function workspaceLabel(name: string, id: string | undefined): string {
+  const cleaned = name
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  const bounded = cleaned.length > MAX_NAME_CHARS ? cleaned.slice(0, MAX_NAME_CHARS - 1) + "…" : cleaned
+  return id ? `${JSON.stringify(bounded)} (id ${id})` : JSON.stringify(bounded)
 }
 
 /** Build the section from its type lines, enforcing the char cap by dropping trailing
- * types rather than truncating mid-sentence. The converse paragraph is never dropped:
+ * types rather than truncating mid-sentence — down to none if a single line is
+ * oversized, so the ceiling is a real one. The converse paragraph is never dropped:
  * without it the section reads as "prefer the workspace for everything", which is the
- * over-steering failure this design most needs to avoid. */
-function assemble(workspaceName: string, typeLines: string[]): string {
+ * over-steering failure this design most needs to avoid. It changes shape when types
+ * were omitted, though: the omitted types ARE served, so forbidding `datamate_*` for
+ * "types not listed" would contradict the omission line — the partial list is said to
+ * be partial instead, and the prohibition is kept only for types the workspace does
+ * not serve. */
+function assemble(workspaceName: string, workspaceId: string | undefined, typeLines: string[]): string {
+  const label = workspaceLabel(workspaceName, workspaceId)
   const render = (lines: string[]) => {
     const omitted = typeLines.length - lines.length
+    const converse =
+      omitted > 0
+        ? `This list is partial: ${omitted} further connection type${omitted === 1 ? " is" : "s are"} served by this ` +
+          "workspace and omitted for length; for those, prefer the `datamate_*` tool for that type when one is in the " +
+          `catalog. Connection types this workspace does not serve use the local tools (${ALL_LOCAL_TOOLS}).`
+        : `Every other connection type uses the local tools (${ALL_LOCAL_TOOLS}). Do not use ` +
+          "`datamate_*` warehouse tools for connection types that are not listed above."
     return [
       HEADING,
       "",
-      `This project is bound to Altimate workspace "${workspaceName}". For the connection types ` +
-        "listed below the local tools will NOT execute — they return a redirect. Call the workspace " +
-        "tool directly:",
+      `This project is bound to Altimate workspace ${label}. For each connection type below, the ` +
+        "local tool for a capability that names a workspace tool will NOT execute — it returns a " +
+        "redirect. Call the named workspace tool directly; capabilities not named for a type stay on " +
+        "the local tools:",
       "",
       ...lines,
       ...(omitted > 0
         ? [`- …and ${omitted} further connection type${omitted === 1 ? "" : "s"} served by this workspace.`]
         : []),
       "",
-      `Every other connection type uses the local tools (${ALL_LOCAL_TOOLS}). Do not use ` +
-        "`datamate_*` warehouse tools for connection types that are not listed above.",
+      converse,
     ].join("\n")
   }
 
   let lines = typeLines
   let out = render(lines)
-  while (out.length > MAX_SECTION_CHARS && lines.length > 1) {
+  while (out.length > MAX_SECTION_CHARS && lines.length > 0) {
     lines = lines.slice(0, -1)
     out = render(lines)
   }
