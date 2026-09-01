@@ -46,15 +46,20 @@ import { describe, expect, test } from "bun:test"
 import { OAUTH_ALLOWED_MODELS, disallowedOAuthModelKeys, shouldAllowOAuthModel } from "../../src/plugin/codex"
 
 /** Verified HTTP 200 on a ChatGPT Pro subscription credential. */
-const VERIFIED_ACCEPTED = [
-  "gpt-5.3-codex-spark",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.5",
-  "gpt-5.6-luna",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-]
+const VERIFIED_ACCEPTED = ["gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]
+
+/** Retired from the ChatGPT-subscription picker on 2026-08-31T19:00:00Z.
+ *
+ * Both probed HTTP 200 before the deadline, so they are not in
+ * VERIFIED_REJECTED — they stopped being offered rather than being refused.
+ * Source: `openai/codex`'s shipped codex-rs/models-manager/models.json marks
+ * both `visibility: "hide"` with `upgrade.retirement_at: "2026-08-31T19:00:00Z"`.
+ * Replacements (gpt-5.4 -> gpt-5.6-terra, gpt-5.4-mini -> gpt-5.6-luna) are in
+ * VERIFIED_ACCEPTED above.
+ *
+ * These are still live API models, so models.dev keeps them and the catalog
+ * will not drop them for us — the allowlist is what has to. */
+const RETIRED_FROM_SUBSCRIPTION = ["gpt-5.4", "gpt-5.4-mini"]
 
 /** Verified HTTP 400 "not supported when using Codex with a ChatGPT account". */
 const VERIFIED_REJECTED = [
@@ -93,6 +98,23 @@ describe("OAUTH_ALLOWED_MODELS — verified subscription truth table", () => {
     // Trip-wire against speculative additions. To add an id here, probe it
     // against the live endpoint first and land it in VERIFIED_ACCEPTED too.
     expect([...OAUTH_ALLOWED_MODELS].sort()).toEqual([...VERIFIED_ACCEPTED].sort())
+  })
+
+  test("ids retired from the subscription picker are not offered", () => {
+    // gpt-5.4 / gpt-5.4-mini retired 2026-08-31T19:00:00Z. They remain live API
+    // models, so models.dev still lists them and the catalog will not remove
+    // them for us — if they were still allowlisted they would sit in the
+    // subscription picker and fail at request time.
+    for (const id of RETIRED_FROM_SUBSCRIPTION) {
+      expect(OAUTH_ALLOWED_MODELS.has(id)).toBe(false)
+      expect(shouldAllowOAuthModel(id)).toBe(false)
+    }
+  })
+
+  test("each retired id's documented replacement is offered", () => {
+    // The point of removing them is that users land somewhere that works.
+    expect(shouldAllowOAuthModel("gpt-5.6-terra")).toBe(true) // replaces gpt-5.4
+    expect(shouldAllowOAuthModel("gpt-5.6-luna")).toBe(true) // replaces gpt-5.4-mini
   })
 })
 
@@ -177,10 +199,11 @@ describe("disallowedOAuthModelKeys — what the loader actually deletes", () => 
     const models = {
       "gpt-5.6-sol": model(undefined),
       "gpt-5.6": model(undefined),
+      // gpt-5.4 is retired from the subscription picker, so it is deleted too.
       "gpt-5.4": { api: {} },
       "gpt-5.2": { api: {} },
     }
-    expect(disallowedOAuthModelKeys(models).sort()).toEqual(["gpt-5.2", "gpt-5.6"])
+    expect(disallowedOAuthModelKeys(models).sort()).toEqual(["gpt-5.2", "gpt-5.4", "gpt-5.6"])
   })
 
   test("the catalog set resolves identically whether matched by key or api.id", () => {
