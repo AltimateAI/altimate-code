@@ -4867,6 +4867,12 @@ describe("output token budget", () => {
 
     expect(estimate(dense)).toBeGreaterThan(8_000)
     expect(estimate(dense)).toBeGreaterThan(estimate(repetitive) * 3)
+
+    const shortDense = alphabet.slice(0, 32)
+    for (let padding = 0; padding < 400; padding++) {
+      const prefix = " ".repeat(padding)
+      expect(estimate(prefix + shortDense)).toBeGreaterThan(estimate(prefix + "x".repeat(32)) + 15)
+    }
   })
 
   test("does not tokenize encoded media bytes as literal prompt text", () => {

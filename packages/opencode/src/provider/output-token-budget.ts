@@ -19,8 +19,10 @@ const VIDEO_TOKEN_ALLOWANCE = 131_072
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
-const DENSE_ASCII_RUN = /[A-Za-z0-9+/_=-]{32,}/g
+const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
+const DENSE_ASCII_MIN_LENGTH = 32
 const DENSE_ASCII_MIN_UNIQUE = 6
+const DENSE_ASCII_EXTRA_FRACTION = 0.75
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
 const CONTEXT_WINDOW_BETAS = new Map([["context-1m-2025-08-07", 1_000_000]])
 const MEDIA_PART_TYPES = new Set([
@@ -145,17 +147,26 @@ export function mergeRequestHeaders(...sources: readonly unknown[]): Record<stri
   return result
 }
 
-/** Charge opaque ASCII runs conservatively without penalizing repetitive prose or padding. */
-function estimateAsciiTokens(input: string): number {
+/** Count opaque ASCII runs in one bounded-memory pass, including across estimator chunks. */
+function denseAsciiCharacters(input: string): number {
   let total = 0
-  let offset = 0
-  for (const match of input.matchAll(DENSE_ASCII_RUN)) {
-    const value = match[0]
-    if (new Set(value).size < DENSE_ASCII_MIN_UNIQUE) continue
-    total += Token.estimate(input.slice(offset, match.index)) + value.length
-    offset = match.index + value.length
+  let length = 0
+  const unique = new Set<string>()
+  const flush = () => {
+    if (length >= DENSE_ASCII_MIN_LENGTH && unique.size >= DENSE_ASCII_MIN_UNIQUE) total += length
+    length = 0
+    unique.clear()
   }
-  return total + Token.estimate(input.slice(offset))
+  for (const character of input) {
+    if (!DENSE_ASCII_CHARACTER.test(character)) {
+      flush()
+      continue
+    }
+    length++
+    if (unique.size < DENSE_ASCII_MIN_UNIQUE) unique.add(character)
+  }
+  flush()
+  return total
 }
 
 /** Estimate heterogeneous text in small chunks and conservatively count dense or non-ASCII text. */
@@ -174,10 +185,12 @@ function estimateTextTokens(input: string): number {
         if (EMOJI.test(character)) emoji++
       }
     }
-    const multilingualFloor = estimateAsciiTokens(ascii) + nonAscii + emoji
+    const multilingualFloor = Token.estimate(ascii) + nonAscii + emoji
     total += Math.max(Token.estimate(chunk), multilingualFloor)
   }
-  return total
+  // Token.estimate already charges at least one token per 3.7 characters. Adding three quarters
+  // of each dense run establishes a conservative one-token-per-character floor.
+  return total + Math.ceil(denseAsciiCharacters(input) * DENSE_ASCII_EXTRA_FRACTION)
 }
 
 /** Return the first transport payload carried by a semantic media part. */
