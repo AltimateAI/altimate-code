@@ -31,12 +31,48 @@
 // Directive text lives here (not at the call site) so any wording-change review
 // covers ONE file, mirroring session/termination.ts.
 
+import fs from "fs/promises"
 import path from "path"
-import { Filesystem } from "../util/filesystem"
-import { findDbtProjectRoot } from "../altimate/validators/validator-utils"
 import { Log } from "../util/log"
 
 const log = Log.create({ service: "pre-execution-scope" })
+
+/** Files that mark a directory as a dbt project root. */
+const PROJECT_FILES = ["dbt_project.yml", "dbt_project.yaml"] as const
+
+/**
+ * Subdirectories never considered candidates for a nested dbt project, mirroring
+ * `findDbtProjectRoot`'s skip list so a fixture project shipped inside
+ * `node_modules/foo/` or a compiled artifact in `target/` is not mistaken for
+ * the user's real project.
+ */
+const SKIP_DIRS = new Set(["node_modules", "target"])
+
+/**
+ * How far up from a candidate directory to look for a project root. A session
+ * is routinely started inside `models/` or `models/marts/` of a dbt project,
+ * and on a non-git project the worktree is the same directory (or the
+ * filesystem root), so the ancestor walk is the only thing that finds it.
+ */
+const MAX_ANCESTOR_LEVELS = 8
+
+/**
+ * The `errno` code of a filesystem rejection, when it carries one.
+ *
+ * `ENOENT` and `ENOTDIR` are real answers — nothing is there. Every other code,
+ * and an error carrying no code at all, means the question went unanswered.
+ */
+function errnoCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null || !("code" in err)) return undefined
+  const code = err.code
+  return typeof code === "string" ? code : undefined
+}
+
+/** True when a rejection means "nothing is there", rather than "could not tell". */
+function meansAbsent(err: unknown): boolean {
+  const code = errnoCode(err)
+  return code === "ENOENT" || code === "ENOTDIR"
+}
 
 /**
  * How a workspace classifies for the purpose of this gate.
@@ -75,34 +111,103 @@ export const PRE_EXECUTION_PROTOCOL = [
 ].join("\n")
 
 /**
- * Classify a workspace by the presence of a dbt project.
+ * Does `dir` itself contain a dbt project file?
  *
- * `dbt` requires an actual `dbt_project.yml` file at one of the candidate
- * directories or one level below it (`findDbtProjectRoot`'s existing rule —
- * benchmark and monorepo layouts nest the project one level deep).
- *
- * `non-dbt` is only reported when at least one candidate directory was
- * readable AND no project was found in any readable candidate. If no candidate
- * could be read, the answer is `unknown`, never `non-dbt`.
+ * Returns `undefined` — not `false` — when the filesystem could not answer.
+ * ENOENT and ENOTDIR are real answers ("nothing there"); anything else (EACCES,
+ * EIO, a transient network mount failure) is not, and must not be read as
+ * "no dbt project here".
  */
-export async function classifyWorkspace(candidates: (string | undefined)[]): Promise<WorkspaceShape> {
-  // A non-git project sets worktree to the filesystem root; scanning that is
-  // never meaningful and can be slow or permission-denied.
-  const dirs = [...new Set(candidates.filter((d): d is string => !!d && d !== path.parse(d).root))]
-  let sawReadableDir = false
-  for (const dir of dirs) {
-    if (!(await Filesystem.isDir(dir))) continue
-    sawReadableDir = true
+async function hasProjectFile(dir: string): Promise<boolean | undefined> {
+  let sawUnknown = false
+  for (const name of PROJECT_FILES) {
     try {
-      if (await findDbtProjectRoot(dir)) return "dbt"
+      if ((await fs.stat(path.join(dir, name))).isFile()) return true
     } catch (err) {
-      // findDbtProjectRoot already swallows its own errors; this is belt and
-      // braces so a future change there cannot turn a throw into a silent drop.
-      log.warn("dbt project scan failed", { dir, err })
-      return "unknown"
+      if (meansAbsent(err)) continue
+      log.warn("project-file probe failed", { dir, name, code: errnoCode(err) })
+      sawUnknown = true
     }
   }
-  return sawReadableDir ? "non-dbt" : "unknown"
+  return sawUnknown ? undefined : false
+}
+
+/**
+ * Classify a workspace by the presence of a dbt project.
+ *
+ * `dbt` requires an actual `dbt_project.yml` (or `.yaml`) FILE at, above, or
+ * one level below a candidate directory:
+ *
+ *   - **at** the candidate,
+ *   - **above** it, walking up to `MAX_ANCESTOR_LEVELS` parents — a session
+ *     started inside `models/` is still a dbt session, and on a non-git project
+ *     the worktree candidate does not rescue that case,
+ *   - **one level below** it, which is how benchmark and monorepo layouts nest
+ *     a project (the same rule, and the same skip list, as
+ *     `findDbtProjectRoot`).
+ *
+ * `non-dbt` requires at least one candidate the scan could examine COMPLETELY —
+ * every ancestor probe answered, and the candidate's own children enumerated —
+ * with no project found anywhere. Everything else is `unknown`: a candidate
+ * that cannot be enumerated, a stat failing for any reason other than "not
+ * there", the filesystem root (whose children are deliberately not scanned),
+ * and an empty candidate list. The caller reads `unknown` as "keep the
+ * protocol", so folding a filesystem failure into "no dbt project" would drop
+ * it silently on a workspace nothing ever managed to look inside.
+ */
+export async function classifyWorkspace(candidates: (string | undefined)[]): Promise<WorkspaceShape> {
+  const dirs = [...new Set(candidates.filter((d): d is string => !!d))]
+  let sawCompleteAnswer = false
+  let sawIncomplete = false
+
+  for (const dir of dirs) {
+    let complete = true
+
+    // At the candidate, then upwards.
+    let current = path.resolve(dir)
+    for (let level = 0; level <= MAX_ANCESTOR_LEVELS; level++) {
+      const found = await hasProjectFile(current)
+      if (found === true) return "dbt"
+      if (found === undefined) complete = false
+      const parent = path.dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+
+    // One level below. The filesystem root is a legitimate stop rather than a
+    // directory to enumerate — a non-git project sets worktree to it, and
+    // scanning its children is meaningless and can be slow or permission-denied
+    // — so the root on its own never yields a complete answer.
+    if (path.resolve(dir) === path.parse(path.resolve(dir)).root) {
+      complete = false
+    } else {
+      let entries
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true })
+      } catch (err) {
+        if (!meansAbsent(err)) log.warn("workspace enumeration failed", { dir, code: errnoCode(err) })
+        entries = undefined
+      }
+      if (entries === undefined) {
+        complete = false
+      } else {
+        const children = entries
+          .filter((e) => e.isDirectory() && !e.name.startsWith(".") && !SKIP_DIRS.has(e.name))
+          // Deterministic order: fs.readdir's order varies across filesystems.
+          .sort((a, b) => a.name.localeCompare(b.name))
+        for (const child of children) {
+          const found = await hasProjectFile(path.join(dir, child.name))
+          if (found === true) return "dbt"
+          if (found === undefined) complete = false
+        }
+      }
+    }
+
+    if (complete) sawCompleteAnswer = true
+    else sawIncomplete = true
+  }
+
+  return sawCompleteAnswer && !sawIncomplete ? "non-dbt" : "unknown"
 }
 
 /**

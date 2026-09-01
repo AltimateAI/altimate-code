@@ -15,9 +15,9 @@ describe("workspace classification", () => {
     expect(await SessionPreExecution.classifyWorkspace([dir])).toBe("dbt")
   })
 
-  // Benchmark and monorepo layouts nest the project one level down; the shared
-  // findDbtProjectRoot rule already covers that and this gate must inherit it,
-  // otherwise a real dbt task would be misread as question-answering.
+  // Benchmark and monorepo layouts nest the project one level down; this gate
+  // inherits `findDbtProjectRoot`'s rule and skip list, otherwise a real dbt
+  // task would be misread as question-answering.
   test("a dbt_project.yml one level down still classifies as dbt", async () => {
     const dir = await tmpdir()
     await fs.mkdir(path.join(dir, "warehouse"))
@@ -73,6 +73,58 @@ describe("workspace classification", () => {
     const dir = await tmpdir()
     await fs.mkdir(path.join(dir, "dbt_project.yml"))
     expect(await SessionPreExecution.classifyWorkspace([dir])).toBe("non-dbt")
+  })
+
+  test("dbt_project.yaml counts as well as .yml", async () => {
+    const dir = await tmpdir()
+    await fs.writeFile(path.join(dir, "dbt_project.yaml"), "name: demo\n")
+    expect(await SessionPreExecution.classifyWorkspace([dir])).toBe("dbt")
+  })
+
+  // Sessions are routinely started inside `models/` or deeper. On a non-git
+  // project the worktree candidate is the same directory, so the ancestor walk
+  // is the only thing that finds the project — without it a real dbt session
+  // classifies as non-dbt and loses the protocol.
+  test("a project above the candidate is found", async () => {
+    const root = await tmpdir()
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "name: demo\n")
+    const deep = path.join(root, "models", "marts", "finance")
+    await fs.mkdir(deep, { recursive: true })
+    expect(await SessionPreExecution.classifyWorkspace([deep])).toBe("dbt")
+  })
+
+  // The upward walk is bounded, so an unrelated deep tree does not scan to /.
+  test("the ancestor walk is bounded", async () => {
+    const root = await tmpdir()
+    await fs.writeFile(path.join(root, "dbt_project.yml"), "name: demo\n")
+    const parts = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    const deep = path.join(root, ...parts)
+    await fs.mkdir(deep, { recursive: true })
+    expect(await SessionPreExecution.classifyWorkspace([deep])).toBe("non-dbt")
+  })
+
+  // The failure that matters most: a directory that stats fine but cannot be
+  // enumerated. Collapsing that into "no dbt project" would drop the protocol
+  // on a workspace nobody ever looked inside.
+  test("a directory that cannot be enumerated is unknown, not non-dbt", async () => {
+    const dir = await tmpdir()
+    const locked = path.join(dir, "locked")
+    await fs.mkdir(locked)
+    await fs.chmod(locked, 0o000)
+    try {
+      // Running as root defeats the permission bit; the assertion is only
+      // meaningful when the mode actually blocks the read.
+      let enumerable = true
+      try {
+        await fs.readdir(locked)
+      } catch {
+        enumerable = false
+      }
+      if (enumerable) return
+      expect(await SessionPreExecution.classifyWorkspace([locked])).toBe("unknown")
+    } finally {
+      await fs.chmod(locked, 0o755)
+    }
   })
 })
 
@@ -179,5 +231,17 @@ describe("prompt text fidelity", () => {
       /SessionPreExecution\.preExecutionInstruction\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*agent: agent\.name,\s*directories: \[Instance\.directory, Instance\.worktree\],\s*\}\)/,
     )
     expect(prompt).toMatch(/if \(preExecutionInstruction\) system\.push\(preExecutionInstruction\)/)
+  })
+
+  // The completion instruction tells the model to signal DONE only once "every
+  // requirement above" is satisfied. A mandatory protocol pushed after it would
+  // sit outside that scope, so ordering here is behavioural, not cosmetic.
+  test("the protocol is pushed before the completion instruction", async () => {
+    const prompt = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
+    const protocolAt = prompt.indexOf("if (preExecutionInstruction) system.push(preExecutionInstruction)")
+    const completionAt = prompt.indexOf("if (completionInstruction) system.push(completionInstruction)")
+    expect(protocolAt).toBeGreaterThan(-1)
+    expect(completionAt).toBeGreaterThan(-1)
+    expect(protocolAt).toBeLessThan(completionAt)
   })
 })

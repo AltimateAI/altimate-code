@@ -1471,6 +1471,24 @@ export namespace SessionPrompt {
         ...(await InstructionPrompt.system()),
         ...hoistedReminders,
       ]
+      // altimate_change start — task-shape-scoped pre-execution protocol. Same
+      // shape as the completion instruction below and for the same reason: the
+      // text used to sit in builder.txt, and builder is a PRIMARY agent, so it
+      // reached every builder surface. A paired ablation measured it as pure
+      // overhead on headless question-answering (2,805 ritual tool calls → 0, no
+      // score effect) but says nothing about dbt work or interactive chat, so
+      // those keep it. See session/pre-execution.ts for the gate and the numbers.
+      //
+      // Injected BEFORE the completion instruction, which says to signal DONE
+      // only once "every requirement above" is satisfied. A mandatory protocol
+      // pushed after it would not be one of those requirements.
+      const preExecutionInstruction = await SessionPreExecution.preExecutionInstruction({
+        runMode: Flag.ALTIMATE_RUN_MODE,
+        agent: agent.name,
+        directories: [Instance.directory, Instance.worktree],
+      })
+      if (preExecutionInstruction) system.push(preExecutionInstruction)
+      // altimate_change end
       // altimate_change start — run-mode-only completion instruction. This text
       // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
       // reached interactive chat, where nothing interprets or strips the token
@@ -1482,20 +1500,6 @@ export namespace SessionPrompt {
         agent: agent.name,
       })
       if (completionInstruction) system.push(completionInstruction)
-      // altimate_change end
-      // altimate_change start — task-shape-scoped pre-execution protocol. Same
-      // shape as the completion instruction above and for the same reason: the
-      // text used to sit in builder.txt, and builder is a PRIMARY agent, so it
-      // reached every builder surface. A paired ablation measured it as pure
-      // overhead on headless question-answering (2,805 ritual tool calls → 0, no
-      // score effect) but says nothing about dbt work or interactive chat, so
-      // those keep it. See session/pre-execution.ts for the gate and the numbers.
-      const preExecutionInstruction = await SessionPreExecution.preExecutionInstruction({
-        runMode: Flag.ALTIMATE_RUN_MODE,
-        agent: agent.name,
-        directories: [Instance.directory, Instance.worktree],
-      })
-      if (preExecutionInstruction) system.push(preExecutionInstruction)
       // altimate_change end
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
