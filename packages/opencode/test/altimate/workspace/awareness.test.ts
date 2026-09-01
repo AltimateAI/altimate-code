@@ -377,7 +377,14 @@ describe("the regression guard", () => {
     precedenceInternals.attributedTo = async () => "999"
     expect(await silentOnUnbound()).toBe("unbound")
 
-    expect(systemSection(await refresh(SESSION, {}))).toBe("")
+    // An empty catalog too — and the reason is asserted, not just the silence,
+    // because the point is WHICH branch settles it: the link read short-circuits
+    // ahead of `engineToolKeys`, so this is still `unbound` rather than
+    // `nothing-materialised`. That reason's own silence is covered by "a
+    // declared-but-absent integration renders nothing" and by the table above.
+    const noTools = await refresh(SESSION, {})
+    expect(systemSection(noTools)).toBe("")
+    expect(noTools.disabledReason).toBe("unbound")
 
     delete process.env.ALTIMATE_WORKSPACE
     expect(await silentOnUnbound()).toBe("pilot-off")
