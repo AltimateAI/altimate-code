@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `d13f784786d03908b0147ac93c9ca7effdd19e78`
+- Final code candidate: `dc24ed05559d85a5a358d116e97b9b66d536cea4`
 - Mode: full Council review plus final independent remediation pass
 - Local verdict: **PASS**
 - Remote gate: the final candidate must be pushed and fresh CI/bot review must finish
@@ -50,11 +50,24 @@ Post-Council review found and repaired:
 - identical system and instruction values being deduplicated despite occupying two wire fields;
 - a static bridge assertion that could match the unclamped property-access form;
 - empty base64 image data wrapped in a `URL` object escaping unsupported-media projection;
-- positive sub-floor context windows being treated as placeholder metadata; and
-- the fixed 512-token safety margin consuming an entire small but valid context or input limit; and
+- positive sub-floor context windows being treated as placeholder metadata;
+- the fixed 512-token safety margin consuming an entire small but valid context or input limit;
 - separately transmitted system messages being flattened before estimation, omitting each entry's wire framing.
+- high-entropy ASCII being estimated like repetitive prose, which could leave too much output reserved for opaque identifiers or encoded text;
+- audio and video payloads being charged by decoded bytes rather than a semantic media allowance; and
+- a first-pass dense-text detector resetting at 400-character estimator boundaries, allowing short opaque runs to evade the conservative floor at particular alignments.
 
 Each repair was centralized in the shared output-budget module or the existing pure media projection, then exercised through both request boundaries.
+
+## Main reconciliation and final bot-comment repairs
+
+Current `main` (`7f07b7d3b6`) was merged into the PR branch in `b2c3a3480c`. The only textual conflict was the import in `packages/opencode/test/session/llm.test.ts`; the resolution preserves the PR's `jsonSchema` and `tool` runtime imports and `main`'s `Tool` type import. The focused file passes with 14 tests and 2 intentional skips.
+
+The two remaining bot comments were addressed in `e475a2d1df` and `dc24ed0555`:
+
+- Dense ASCII runs of at least 32 characters and six distinct opaque characters receive an added conservative floor. Detection is one forward pass with scalar counters and a `Set` capped at six entries, so it is linear time, constant auxiliary memory, and independent of the estimator's 400-character chunk boundaries.
+- Audio and video use fixed semantic allowances of 32,768 and 131,072 tokens respectively. Generic files still scale with decoded payload size, images retain the existing fixed allowance, and PDF remains parser-free at `max(32,768, decoded inline bytes)`.
+- A regression sweeps all 400 possible chunk alignments for a 32-character dense token. Both independent reviewers reproduced the same conservative delta at every offset.
 
 ## Why the PDF parser experiment was rejected
 
@@ -71,8 +84,11 @@ Batching the same parser would not remove its decompression/traversal boundary. 
 
 Two independent live Council seats re-reviewed the request-shape correction at `c78e1a61b6`, the small-limit production delta through `56dbc7e9b1`, the test-fixture correction through `b7cfd659fa`, and the final system-framing correction at exact production head `d13f784786`. The last correction serializes non-empty system entries as the same array of `{ role: "system", content }` records sent by both applicable request paths. Empty arrays remain free, while OAuth and workflow paths continue to omit generated-system framing. None of these changes alter PDF behavior.
 
+After reconciling `main`, the same two seats reviewed the exact final range `a0d7a4aed2..dc24ed0555`. Both returned **PASS**. Feynman independently measured a 1 MiB dense-text pass at roughly 38 ms and confirmed all 400 alignments. Musashi independently observed the same +24-token delta at every alignment and verified that equal-size generic/PDF payloads still scale by bytes while audio/video remain fixed at their semantic allowances.
+
 ### Feynman seat — PASS
 
+- Re-reviewed exact final head `dc24ed0555` after the `main` merge and final bot-comment repairs.
 - Verified exact final production code head `d13f784786`.
 - Confirmed `pdf-lib`, async parsing, page regex/policy, and transitive lock entries are absent.
 - Confirmed lazy estimation is not evaluated when `maxOutputTokens` is omitted.
@@ -93,6 +109,7 @@ Two independent live Council seats re-reviewed the request-shape correction at `
 
 ### Musashi seat — PASS
 
+- Re-reviewed exact final head `dc24ed0555` after the `main` merge and final bot-comment repairs.
 - Verified exact final production code head `d13f784786`.
 - Confirmed the parser experiment remains cleanly reverted and no PDF dependency returned.
 - Confirmed synchronous lazy estimation, linear Mistral projection, and parity across both callers.
@@ -112,19 +129,19 @@ Two independent live Council seats re-reviewed the request-shape correction at `
 
 The original chairman seat was rejected twice by the service safety filter because its retained conversation context included the earlier parser stress case. It produced no contrary code finding on the final head. The thread limit prevented replacing that retained seat with a new fourth thread.
 
-Consensus therefore rests on two independent live PASS votes on exact final production head `d13f784786`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans through the final production change. The degraded seat is disclosed rather than silently counted as agreement.
+Consensus therefore rests on two independent live PASS votes on exact final production head `dc24ed0555`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans through the final production change. The degraded seat is disclosed rather than silently counted as agreement.
 
 ## Final verification
 
-- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **428 passed, 11 skipped, 7 existing todos, 0 failed**.
+- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **435 passed, 11 skipped, 7 existing todos, 0 failed**.
 - Repository typecheck: **13/13 successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
 - Frozen lockfile install: **1,295 installs across 1,390 packages, no changes**.
-- Targeted oxlint on the final supplemental files: **173 warnings, 0 errors**; warnings are existing repository debt.
-- Prettier: all changed files pass except `provider/provider.ts` and `provider/transform.ts`; both fail identically on `origin/main`.
-- `git diff --check origin/main...HEAD`: passed.
-- Final request-shape and edge-case Codex Security scans `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, `5111b689-e4ad-4243-a7cb-86845b30ca6d`, and `33ec5c89-fce8-434d-b8a6-2baba941ff27`: complete coverage, **0 findings**.
+- Targeted oxlint on the final supplemental production and provider-test files: **161 warnings, 0 errors**; warnings are existing test-file debt.
+- Prettier: the final supplemental files and resolved `llm.test.ts` pass.
+- `git diff --check`: passed.
+- Post-main and final boundary-hardening Codex Security scans `86b98822-70df-446e-bd56-47d7169ef98a` and `37afdb50-204e-462a-85ab-7deeafdbb2ab`: complete coverage, **0 findings**. Earlier request-shape and edge-case scans remain sealed with zero findings.
 
 ## Residual limitations
 
@@ -142,7 +159,7 @@ The local recommendation is **merge after remote completion**, provided:
 3. fresh required CI and bot reviews are green; and
 4. no new critical finding appears on the pushed head.
 
-Do not merge merely on the strength of the stale green checks attached to `9039a178c0`.
+Do not merge merely on the strength of checks attached to an earlier head; fresh checks must complete on `dc24ed0555` after push.
 
 ## Execution reliability
 

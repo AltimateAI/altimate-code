@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `d13f784786d03908b0147ac93c9ca7effdd19e78`
+- Final code candidate: `dc24ed05559d85a5a358d116e97b9b66d536cea4`
 - Scan mode: chained immutable branch-diff reviews
 - Final coverage: complete
 - Findings remaining on the final candidate: **0**
@@ -37,8 +37,10 @@ The review used immutable ranges so every material repair was independently reco
 | Small-limit margin fix       | `e3ca59741a..56dbc7e9b1`                           | Complete coverage; **0 findings**                            |
 | Final fixture compatibility  | `d663c49b74..b7cfd659fa`                           | Test-only; no production attack-surface change               |
 | System-message framing fix   | `cedd33a866..d13f784786`                           | Complete coverage; **0 findings**                            |
+| Post-main estimator repairs  | `b2c3a3480c..e475a2d1df`                           | Complete coverage; **0 findings**                            |
+| Dense-boundary hardening     | `e475a2d1df..dc24ed0555`                           | Complete coverage; **0 findings**                            |
 
-The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, `5111b689-e4ad-4243-a7cb-86845b30ca6d`, and `33ec5c89-fce8-434d-b8a6-2baba941ff27`. Their authoritative results contain no deferred work, no open question, and zero findings.
+The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, `5111b689-e4ad-4243-a7cb-86845b30ca6d`, and `33ec5c89-fce8-434d-b8a6-2baba941ff27`. The post-main bot-comment repair and chunk-boundary hardening were sealed once each as `86b98822-70df-446e-bd56-47d7169ef98a` and `37afdb50-204e-462a-85ab-7deeafdbb2ab`. Their authoritative results contain no deferred work, no open question, and zero findings.
 
 ## Findings discovered and resolved
 
@@ -76,6 +78,14 @@ A final bot review found that the estimator joined separately transmitted system
 
 The final candidate serializes the exact framed array before token estimation. Empty arrays still contribute zero, and OAuth/workflow paths still pass an empty system array while counting their provider instructions separately. A 2,000-entry regression fails under the old flattening and confirms linear, bounded execution under the corrected shape. The exact production delta was sealed as a complete zero-finding security scan.
 
+### 7. Dense ASCII and semantic media accounting
+
+Final bot review identified two estimator mismatches. High-entropy ASCII was receiving the same low character-ratio floor as repetitive prose, while audio and video were charged according to decoded bytes even though provider accounting is duration/semantic based.
+
+Dense ASCII classification now makes one forward pass over the complete serialized text, preserving run state across the 400-character token-estimator chunks. It uses fixed counters and a unique-character `Set` capped at six entries. The final security review found no superlinear scan, unbounded allocation, backtracking, execution, logging, or chunk-boundary bypass. A regression exercises every possible chunk alignment.
+
+Audio and video now receive fixed conservative semantic allowances of 32,768 and 131,072 tokens. Generic files retain decoded-byte scaling, and PDF remains the selected parser-free `max(32,768, decoded inline bytes)` policy. This avoids treating a long recording's encoded byte count as if every byte were a model token while preserving conservative request admission.
+
 ## Final trust and data flow
 
 Both production request paths use the same sequence:
@@ -92,15 +102,15 @@ Codebase graph tracing found exactly two production callers of the centralized c
 
 ## Verification
 
-- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **428 passed, 11 skipped, 7 existing todos, 0 failed**.
+- Focused provider, AI-SDK stream, native request, processor, and upstream bridge suites: **435 passed, 11 skipped, 7 existing todos, 0 failed**.
 - Repository typecheck: **13/13 tasks successful**.
 - Strict changed-file marker validation: passed.
 - Required-marker inventory: **35/35**.
 - Frozen lockfile install: **1,295 installs across 1,390 packages, no changes**.
 - Targeted oxlint: **0 errors**; warnings remain repository debt.
-- Prettier: all changed files pass except `provider/provider.ts` and `provider/transform.ts`; both fail identically at `origin/main`, so no unrelated whole-file rewrite was introduced.
-- `git diff --check origin/main...HEAD`: passed.
-- Final request-shape Codex Security scans, including `cedd33a866..d13f784786`: complete coverage, **0 findings**.
+- Prettier: final supplemental files and the resolved merge-conflict test pass.
+- `git diff --check`: passed.
+- Final post-main scans through `dc24ed0555`: complete coverage, **0 findings**.
 
 ## Operational caveats
 
