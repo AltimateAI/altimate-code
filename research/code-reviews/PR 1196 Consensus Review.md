@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `dc24ed05559d85a5a358d116e97b9b66d536cea4`
+- Final code candidate: `856f428981ddc970880cb525e82aee4f974e5e5f`
 - Mode: full Council review plus final independent remediation pass
 - Local verdict: **PASS**
 - Remote gate: the final candidate must be pushed and fresh CI/bot review must finish
@@ -66,8 +66,10 @@ Current `main` (`7f07b7d3b6`) was merged into the PR branch in `b2c3a3480c`. The
 The two remaining bot comments were addressed in `e475a2d1df` and `dc24ed0555`:
 
 - Dense ASCII runs of at least 32 characters and six distinct opaque characters receive an added conservative floor. Detection is one forward pass with scalar counters and a `Set` capped at six entries, so it is linear time, constant auxiliary memory, and independent of the estimator's 400-character chunk boundaries.
-- Audio and video use fixed semantic allowances of 32,768 and 131,072 tokens respectively. Generic files still scale with decoded payload size, images retain the existing fixed allowance, and PDF remains parser-free at `max(32,768, decoded inline bytes)`.
+- Audio and video use the crude hybrid `max(8,192, ceil(decoded inline bytes / 64))`. Tiny and remote media remain usable on 16K contexts, while very large inline payloads grow monotonically instead of receiving an unbounded fixed estimate. Generic files still scale one-for-one with decoded payload size, images retain the existing fixed allowance, and PDF remains parser-free at `max(32,768, decoded inline bytes)`.
 - A regression sweeps all 400 possible chunk alignments for a 32-character dense token. Both independent reviewers reproduced the same conservative delta at every offset.
+
+After the first push, fresh Cubic and Codex reviews exposed opposing problems with the initial fixed media constants: 131,072 tokens rejected even tiny video on supported 16K/32K models, while any fixed constant could undercount arbitrarily large inline media. Commit `856f428981` replaces those constants with the hybrid above without parsing codecs, duration, frames, or PDF structure.
 
 ## Why the PDF parser experiment was rejected
 
@@ -84,11 +86,13 @@ Batching the same parser would not remove its decompression/traversal boundary. 
 
 Two independent live Council seats re-reviewed the request-shape correction at `c78e1a61b6`, the small-limit production delta through `56dbc7e9b1`, the test-fixture correction through `b7cfd659fa`, and the final system-framing correction at exact production head `d13f784786`. The last correction serializes non-empty system entries as the same array of `{ role: "system", content }` records sent by both applicable request paths. Empty arrays remain free, while OAuth and workflow paths continue to omit generated-system framing. None of these changes alter PDF behavior.
 
-After reconciling `main`, the same two seats reviewed the exact final range `a0d7a4aed2..dc24ed0555`. Both returned **PASS**. Feynman independently measured a 1 MiB dense-text pass at roughly 38 ms and confirmed all 400 alignments. Musashi independently observed the same +24-token delta at every alignment and verified that equal-size generic/PDF payloads still scale by bytes while audio/video remain fixed at their semantic allowances.
+After reconciling `main`, the same two seats reviewed the intermediate range `a0d7a4aed2..dc24ed0555`. Both returned **PASS**. Feynman independently measured a 1 MiB dense-text pass at roughly 38 ms and confirmed all 400 alignments. Musashi independently observed the same +24-token delta at every alignment and verified that equal-size generic/PDF payloads still scaled by bytes while audio/video used the intermediate fixed allowances.
+
+Both seats then reviewed `800e3b102f..856f428981` and returned **PASS** on the final hybrid media curve. They independently reproduced 8,221 tokens for tiny/remote media, 16,413 for 1 MiB, and 65,565 for 4 MiB; verified usable output remains on a 16K context; and confirmed bounded header inspection with no decoding, parsing, copying, dependency, or PDF/generic-file change. Both explicitly classified codec-dependent over/underestimation as the documented heuristic limitation rather than a blocker.
 
 ### Feynman seat — PASS
 
-- Re-reviewed exact final head `dc24ed0555` after the `main` merge and final bot-comment repairs.
+- Re-reviewed post-main head `dc24ed0555` and final media-calibration head `856f428981`.
 - Verified exact final production code head `d13f784786`.
 - Confirmed `pdf-lib`, async parsing, page regex/policy, and transitive lock entries are absent.
 - Confirmed lazy estimation is not evaluated when `maxOutputTokens` is omitted.
@@ -109,7 +113,7 @@ After reconciling `main`, the same two seats reviewed the exact final range `a0d
 
 ### Musashi seat — PASS
 
-- Re-reviewed exact final head `dc24ed0555` after the `main` merge and final bot-comment repairs.
+- Re-reviewed post-main head `dc24ed0555` and final media-calibration head `856f428981`.
 - Verified exact final production code head `d13f784786`.
 - Confirmed the parser experiment remains cleanly reverted and no PDF dependency returned.
 - Confirmed synchronous lazy estimation, linear Mistral projection, and parity across both callers.
@@ -129,7 +133,7 @@ After reconciling `main`, the same two seats reviewed the exact final range `a0d
 
 The original chairman seat was rejected twice by the service safety filter because its retained conversation context included the earlier parser stress case. It produced no contrary code finding on the final head. The thread limit prevented replacing that retained seat with a new fourth thread.
 
-Consensus therefore rests on two independent live PASS votes on exact final production head `dc24ed0555`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans through the final production change. The degraded seat is disclosed rather than silently counted as agreement.
+Consensus therefore rests on two independent live PASS votes on exact final production head `856f428981`, the primary review, the complete changed-file inspection, and sealed zero-finding Codex Security scans through the final production change. The degraded seat is disclosed rather than silently counted as agreement.
 
 ## Final verification
 
@@ -141,7 +145,7 @@ Consensus therefore rests on two independent live PASS votes on exact final prod
 - Targeted oxlint on the final supplemental production and provider-test files: **161 warnings, 0 errors**; warnings are existing test-file debt.
 - Prettier: the final supplemental files and resolved `llm.test.ts` pass.
 - `git diff --check`: passed.
-- Post-main and final boundary-hardening Codex Security scans `86b98822-70df-446e-bd56-47d7169ef98a` and `37afdb50-204e-462a-85ab-7deeafdbb2ab`: complete coverage, **0 findings**. Earlier request-shape and edge-case scans remain sealed with zero findings.
+- Post-main, dense-boundary, and final media-calibration Codex Security scans `86b98822-70df-446e-bd56-47d7169ef98a`, `37afdb50-204e-462a-85ab-7deeafdbb2ab`, and `5b969965-638d-42a6-bc38-d2f5d23b7dc2`: complete coverage, **0 findings**. Earlier request-shape and edge-case scans remain sealed with zero findings.
 
 ## Residual limitations
 
@@ -159,7 +163,7 @@ The local recommendation is **merge after remote completion**, provided:
 3. fresh required CI and bot reviews are green; and
 4. no new critical finding appears on the pushed head.
 
-Do not merge merely on the strength of checks attached to an earlier head; fresh checks must complete on `dc24ed0555` after push.
+Do not merge merely on the strength of checks attached to an earlier head; fresh checks must complete after the final documentation commit is pushed.
 
 ## Execution reliability
 

@@ -3,7 +3,7 @@
 - Repository: `AltimateAI/altimate-code`
 - Pull request: [#1196](https://github.com/AltimateAI/altimate-code/pull/1196)
 - Review dates: 2026-08-30 through 2026-08-31
-- Final code candidate: `dc24ed05559d85a5a358d116e97b9b66d536cea4`
+- Final code candidate: `856f428981ddc970880cb525e82aee4f974e5e5f`
 - Scan mode: chained immutable branch-diff reviews
 - Final coverage: complete
 - Findings remaining on the final candidate: **0**
@@ -39,8 +39,9 @@ The review used immutable ranges so every material repair was independently reco
 | System-message framing fix   | `cedd33a866..d13f784786`                           | Complete coverage; **0 findings**                            |
 | Post-main estimator repairs  | `b2c3a3480c..e475a2d1df`                           | Complete coverage; **0 findings**                            |
 | Dense-boundary hardening     | `e475a2d1df..dc24ed0555`                           | Complete coverage; **0 findings**                            |
+| Final media calibration      | `800e3b102f..856f428981`                           | Complete coverage; **0 findings**                            |
 
-The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, `5111b689-e4ad-4243-a7cb-86845b30ca6d`, and `33ec5c89-fce8-434d-b8a6-2baba941ff27`. The post-main bot-comment repair and chunk-boundary hardening were sealed once each as `86b98822-70df-446e-bd56-47d7169ef98a` and `37afdb50-204e-462a-85ab-7deeafdbb2ab`. Their authoritative results contain no deferred work, no open question, and zero findings.
+The parser-free remediation scan was sealed once as scan `80591880-0a17-454c-b312-92c32a38f5ff`. The final request-shape and edge-case scans were sealed once each as `1dcbce9e-587e-4495-94ff-6d3291e5e1d6`, `bfa1cc4a-7d87-463d-8fc9-822e1624f8b1`, `19f139b0-8c4c-48cc-adca-a60d41920664`, `5111b689-e4ad-4243-a7cb-86845b30ca6d`, and `33ec5c89-fce8-434d-b8a6-2baba941ff27`. The post-main bot-comment repair, chunk-boundary hardening, and final media calibration were sealed once each as `86b98822-70df-446e-bd56-47d7169ef98a`, `37afdb50-204e-462a-85ab-7deeafdbb2ab`, and `5b969965-638d-42a6-bc38-d2f5d23b7dc2`. Their authoritative results contain no deferred work, no open question, and zero findings.
 
 ## Findings discovered and resolved
 
@@ -84,7 +85,9 @@ Final bot review identified two estimator mismatches. High-entropy ASCII was rec
 
 Dense ASCII classification now makes one forward pass over the complete serialized text, preserving run state across the 400-character token-estimator chunks. It uses fixed counters and a unique-character `Set` capped at six entries. The final security review found no superlinear scan, unbounded allocation, backtracking, execution, logging, or chunk-boundary bypass. A regression exercises every possible chunk alignment.
 
-Audio and video now receive fixed conservative semantic allowances of 32,768 and 131,072 tokens. Generic files retain decoded-byte scaling, and PDF remains the selected parser-free `max(32,768, decoded inline bytes)` policy. This avoids treating a long recording's encoded byte count as if every byte were a model token while preserving conservative request admission.
+The first repair gave audio and video fixed semantic allowances of 32,768 and 131,072 tokens. Fresh review then found that 131,072 unconditionally rejects tiny video on supported 16K/32K contexts, while a constant can undercount arbitrarily large inline media.
+
+The final candidate uses `max(8,192, ceil(decoded inline bytes / 64))` for both modalities. Tiny and remote media therefore retain an 8,192-token baseline; a 16K context still leaves a usable clamped output budget. One MiB grows to roughly 16K tokens and four MiB to roughly 65K. The calculation reuses bounded payload-size inspection and introduces no decoding, codec/duration/frame parsing, traversal, proportional allocation, fetch, logging, or dependency. Generic files retain one-token-per-decoded-byte scaling, and PDF remains the selected parser-free `max(32,768, decoded inline bytes)` policy.
 
 ## Final trust and data flow
 
@@ -110,7 +113,7 @@ Codebase graph tracing found exactly two production callers of the centralized c
 - Targeted oxlint: **0 errors**; warnings remain repository debt.
 - Prettier: final supplemental files and the resolved merge-conflict test pass.
 - `git diff --check`: passed.
-- Final post-main scans through `dc24ed0555`: complete coverage, **0 findings**.
+- Final post-main scans through `856f428981`: complete coverage, **0 findings**.
 
 ## Operational caveats
 
