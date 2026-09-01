@@ -35,6 +35,7 @@ export const syncInternals: {
   runInstall?: (
     argv: string[],
     timeoutMs: number,
+    graceMs: number,
   ) => Promise<{ code: number | null; timedOut: boolean; stderr: string }>
   nodeMajor?: () => Promise<number | null>
   npmAvailable?: () => boolean

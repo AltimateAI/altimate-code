@@ -81,7 +81,12 @@ export function installCommand(): string {
 export async function describeOffer(directory: string): Promise<EngineOffer | null> {
   const binding = syncInternals.resolveBinding
     ? await syncInternals.resolveBinding(directory)
-    : await readLocalBinding(directory).catch(() => null)
+    : await readLocalBinding(directory).catch((err) => {
+        // Transiently unreadable is not unbound; the overlay tells them apart
+        // and this dialog says nothing either way — leave a trace.
+        log.info("engine offer: binding unreadable, nothing offered this turn", { directory, err: String(err) })
+        return null
+      })
   if (!binding) return null
   const workspaceId = String(binding.datamateId)
   const bin = which(ENGINE_BINARY)
@@ -138,7 +143,7 @@ export function runInstall(
   timeoutMs = INSTALL_TIMEOUT_MS,
   graceMs = INSTALL_KILL_GRACE_MS,
 ): Promise<InstallRun> {
-  if (syncInternals.runInstall) return syncInternals.runInstall(argv, timeoutMs)
+  if (syncInternals.runInstall) return syncInternals.runInstall(argv, timeoutMs, graceMs)
   return new Promise((resolve) => {
     const grouped = process.platform !== "win32"
     let child: ChildProcess
@@ -166,7 +171,6 @@ export function runInstall(
       // Past the deadline the escalation stays armed: npm (the group leader)
       // usually dies on SIGTERM, but a descendant that ignores it must still
       // get the SIGKILL, so the leader's exit does not cancel it.
-      if (hard && !timedOut) clearTimeout(hard)
       // A descendant that inherited stderr can hold the pipe open after npm
       // exits; nothing more is read from it once the run has settled.
       child.stderr?.destroy()
@@ -196,10 +200,11 @@ export function runInstall(
       killTree("SIGTERM")
       hard = setTimeout(() => {
         // The group outlives its leader while any member is alive, so this
-        // reaches survivors even after npm itself has exited.
+        // reaches survivors even after npm itself has exited. Unref'd: it must
+        // not keep the process alive once the run has already resolved.
         killTree("SIGKILL")
         finish(null)
-      }, graceMs)
+      }, graceMs).unref()
     }, timeoutMs)
     child.once("exit", (code) => {
       finish(code)
@@ -240,9 +245,14 @@ export async function installEngine(): Promise<InstallResult> {
     }
     const installedVersion = await versionOf(installedBin)
     if (!clearsFloor(installedVersion)) {
+      // The likeliest cause is not a bad install: an older engine earlier on
+      // PATH shadows the one npm just wrote.
       return {
         ok: false,
-        error: `npm installed it, but ${ENGINE_BINARY} on PATH reports ${installedVersion ?? "no version"}`,
+        error:
+          `npm installed it, but the ${ENGINE_BINARY} first on PATH (${installedBin}) reports ` +
+          `${installedVersion ?? "no version"} — an older install earlier on PATH is shadowing the new one; ` +
+          `remove it, or put npm's global bin directory ahead of it`,
       }
     }
     return { ok: true }

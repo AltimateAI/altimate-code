@@ -80,8 +80,8 @@ function now(): number {
 
 async function probeEngine(): Promise<Probe> {
   const at = now()
-  const bin = which(ENGINE_BINARY)
-  // A usable engine is remembered for the process. A missing one is asked
+  // A usable engine is remembered for the process — before the PATH scan, so
+  // the healthy path costs nothing per turn. A missing one is asked
   // about on every call — `which` is a PATH scan, no process spawn — so an
   // install made from the offer dialog (which runs in another module realm and
   // cannot reach this memo) is seen on the next turn. A too-old or broken one
@@ -89,8 +89,9 @@ async function probeEngine(): Promise<Probe> {
   // while the file on PATH is the same one: an update written over it (the
   // offer's `npm i -g` on an old engine) changes the fingerprint and is
   // re-probed on the next turn, just as an install is.
-  const seen = bin ? fingerprint(bin) : null
   if (probeMemo && probeMemo.result.kind === "ok") return probeMemo.result
+  const bin = which(ENGINE_BINARY)
+  const seen = bin ? fingerprint(bin) : null
   if (
     probeMemo &&
     probeMemo.result.kind === "too-old" &&
@@ -107,6 +108,8 @@ async function probeEngine(): Promise<Probe> {
     const version = await versionOf(bin)
     result = clearsFloor(version) ? { kind: "ok", version: version! } : { kind: "too-old", found: version }
   }
+  // A `missing` result is recorded too but never honoured: the guards above
+  // match only `ok` and `too-old`, so an install is noticed on the next call.
   probeMemo = { result, at, fingerprint: seen }
   return result
 }
@@ -706,7 +709,11 @@ export async function announceRefusal(
   const at = now()
   let repeat = false
   if (rec.announced === signature) {
-    const expired = offering && rec.announcedAt !== undefined && at - rec.announcedAt >= OFFER_SKIP_TTL_MS
+    // A clock that moved backwards (NTP correction, VM resume) reads as
+    // expired, as the TUI's latch treats it — otherwise the overlay would stop
+    // raising the offer until real time caught up plus the whole window.
+    const elapsed = rec.announcedAt === undefined ? undefined : at - rec.announcedAt
+    const expired = offering && elapsed !== undefined && (elapsed < 0 || elapsed >= OFFER_SKIP_TTL_MS)
     if (!expired) return
     repeat = true
   }

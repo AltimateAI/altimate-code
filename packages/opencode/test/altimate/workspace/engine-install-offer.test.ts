@@ -216,6 +216,22 @@ describe("offer routing — engine missing", () => {
     clock += 1
     await beforeTurn("s1")
     expect(h.published).toBe(3)
+    // …and again an hour later: the cadence holds, not just the first repeat.
+    clock += OFFER_RECHECK_MS
+    await beforeTurn("s1")
+    expect(h.published).toBe(4)
+  })
+  test("a clock that moves backwards re-raises rather than waiting out a longer window", async () => {
+    // The TUI's latch treats a negative delta as expired; the overlay must
+    // agree, or the TUI would show the offer that the overlay never raises.
+    let clock = 1_000_000
+    syncInternals.now = () => clock
+    const h = install({})
+    await beforeTurn("s1")
+    expect(h.published).toBe(1)
+    clock -= 60_000
+    await beforeTurn("s1")
+    expect(h.published).toBe(2)
   })
   test("a count that arrives on a later turn does not re-raise the offer in the session", async () => {
     // Same verdict, better number: the dialog was already raised for it.

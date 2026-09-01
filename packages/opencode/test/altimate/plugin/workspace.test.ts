@@ -28,7 +28,16 @@ afterAll(() => {
   }
 })
 
-const { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip, awaitKvReady } = await import(
+const {
+  isSkipActive,
+  recordSkip,
+  isEngineSkipActive,
+  recordEngineSkip,
+  awaitKvReady,
+  canInstallWith,
+  engineOfferInternals,
+  showEngineInstallOffer,
+} = await import(
   "../../../src/plugin/tui/altimate/workspace"
 )
 const { projectNameFromRemote, detectProjectRemote } = await import(
@@ -37,6 +46,7 @@ const { projectNameFromRemote, detectProjectRemote } = await import(
 const { cachePath, readLocalBinding, recordApprovedBinding } = await import(
   "../../../src/altimate/workspace/state"
 )
+const { syncInternals } = await import("../../../src/altimate/workspace/engine-seams")
 
 // Stub AltimateApi.getCredentials / isConfigured — used by readLocalBinding
 // and recordApprovedBinding for tenant/apiUrl scoping. Re-import allows
@@ -601,6 +611,110 @@ describe("Engine install-offer latch", () => {
     recordSkip(api, ident, scope, now)
     expect(isSkipActive(api, ident, scope, now + DAY)).toBe(true)
     expect(isEngineSkipActive(api, workspaceId, scope, now + DAY)).toBe(false)
+  })
+})
+
+describe("engine install offer — raise path", () => {
+  // `showEngineInstallOffer` runs without a renderer: the dialog factory handed
+  // to `dialog.replace` is never invoked here. What is under test is the path
+  // up to it — the single-offer slot, the in-flight guard, the attach-host
+  // guard, and what a null offer does to the slot.
+  const binding = {
+    datamateId: 42,
+    datamateName: "analytics",
+    repoRemote: null,
+    projectPath: os.tmpdir(),
+    linkedAt: 0,
+  }
+  function api(directory: string) {
+    const h = { replaced: 0, toasts: [] as { message: string }[] }
+    const kv = makeKv()
+    const a = {
+      kv: { ...kv, ready: true },
+      state: { path: { directory } },
+      ui: {
+        toast: (t: { message: string }) => {
+          h.toasts.push(t)
+        },
+        dialog: {
+          replace: () => {
+            h.replaced += 1
+          },
+          clear: () => {},
+        },
+      },
+    } as any
+    return { a, h }
+  }
+  function missingEngine() {
+    syncInternals.resolveBinding = async () => binding as any
+    syncInternals.which = () => null
+    syncInternals.declared = async () => ({ keys: ["dbt_build_model"], extensionKeys: [] })
+    syncInternals.nodeMajor = async () => 22
+    syncInternals.npmAvailable = () => true
+  }
+  beforeEach(() => {
+    engineOfferInternals.reset()
+    stubCreds("acme", "https://api.acme.example.com")
+  })
+  afterEach(() => {
+    engineOfferInternals.reset()
+    for (const key of Object.keys(syncInternals)) delete (syncInternals as Record<string, unknown>)[key]
+  })
+
+  test("canInstallWith: Node 20+ is not enough, npm must be on PATH too", () => {
+    expect(canInstallWith(22, true)).toBe(true)
+    expect(canInstallWith(22, false)).toBe(false)
+    expect(canInstallWith(18, true)).toBe(false)
+    expect(canInstallWith(null, true)).toBe(false)
+  })
+  test("a missing engine reaches the dialog once; a second raise while it is up does not", async () => {
+    missingEngine()
+    const { a, h } = api(os.tmpdir())
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(1)
+    expect(engineOfferInternals.visible).toBe(true)
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(1)
+  })
+  test("a raise while an install is in flight never reaches the dialog", async () => {
+    missingEngine()
+    engineOfferInternals.set({ inFlight: true })
+    const { a, h } = api(os.tmpdir())
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(0)
+    expect(engineOfferInternals.visible).toBe(false)
+  })
+  test("a null offer releases the slot, so the next raise can proceed", async () => {
+    syncInternals.resolveBinding = async () => null
+    const { a, h } = api(os.tmpdir())
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(0)
+    expect(engineOfferInternals.visible).toBe(false)
+    missingEngine()
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(1)
+  })
+  test("a directory that does not exist here is not this host's to install for", async () => {
+    let resolved = 0
+    syncInternals.resolveBinding = async () => {
+      resolved += 1
+      return binding as any
+    }
+    const { a, h } = api(path.join(os.tmpdir(), "engine-offer-not-here", String(process.pid)))
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(0)
+    expect(resolved).toBe(0)
+    expect(h.toasts.map((t) => t.message).join(" ")).toContain("on the server")
+    expect(engineOfferInternals.visible).toBe(false)
+  })
+  test("the 7-day latch suppresses the dialog and frees the slot", async () => {
+    missingEngine()
+    const { a, h } = api(os.tmpdir())
+    recordEngineSkip(a, "42", { tenant: "acme", apiUrl: "https://api.acme.example.com" }, Date.now())
+    await showEngineInstallOffer(a)
+    expect(h.replaced).toBe(0)
+    expect(engineOfferInternals.visible).toBe(false)
   })
 })
 

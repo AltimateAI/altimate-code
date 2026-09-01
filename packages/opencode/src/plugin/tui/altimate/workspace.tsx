@@ -1185,6 +1185,8 @@ function engineSkipKey(workspaceId: string, scope: LatchScope | null): string {
  * does, on a failed read as well as a successful one). Resolves to whether
  * the store was ready; the caller decides what a timeout means. */
 const KV_READY_TIMEOUT_MS = 3_000
+/** Upper bound on holding an offer for hydration; see `showEngineInstallOffer`. */
+export const KV_READY_HOLD_MS = 6 * 60_000
 const KV_READY_POLL_MS = 25
 async function awaitKvReady(
   kv: { readonly ready: boolean },
@@ -1244,7 +1246,7 @@ interface EngineOfferProps {
  * DialogSelect's ``filtered()`` drops those, leaving an empty list). */
 function EngineInstallOfferDialog(props: EngineOfferProps) {
   const clipboard = useClipboard()
-  const [phase, setPhase] = createSignal<"idle" | "installing" | "installed" | "failed">("idle")
+  const [phase, setPhase] = createSignal<"idle" | "installing" | "failed">("idle")
   const [failure, setFailure] = createSignal<string | null>(null)
   // The install outlives this component: Escape or a click outside dismisses
   // the dialog while npm keeps running. Signals set after that update nothing
@@ -1266,7 +1268,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   let installing = false
 
   const command = () => props.offer.command
-  const canInstall = () => props.nodeMajor !== null && props.nodeMajor >= MIN_NODE_MAJOR && props.hasNpm
+  const canInstall = () => canInstallWith(props.nodeMajor, props.hasNpm)
 
   const title = () => {
     const n = props.offer.declared
@@ -1296,8 +1298,6 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
     switch (phase()) {
       case "installing":
         return [{ title: "Installing… this can take a minute.", value: "busy" }]
-      case "installed":
-        return [{ title: "Installed — attaching integrations.", value: "close" }]
       case "failed":
         return [
           { title: "Copy command", value: "copy", description: "Run it yourself, then start a new session." },
@@ -1356,7 +1356,6 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       setPhase("failed")
       return
     }
-    setPhase("installed")
     // Only clear a dialog we still own — by now the user may have opened
     // another, and clearing the stack would take theirs down instead.
     if (mounted) props.api.ui.dialog.clear()
@@ -1413,7 +1412,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       // the box itself only collects stray keystrokes while the install runs.
       skipFilter
       renderFilter={false}
-      current={canInstall() ? "install" : "copy"}
+      current={phase() === "failed" ? "copy" : canInstall() ? "install" : "copy"}
       onSelect={(option) => {
         if (option.value === "busy") return
         if (option.value === "install") {
@@ -1528,7 +1527,14 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
     // cannot leave it stale.
     if (!(await awaitKvReady(api.kv))) {
       log.warn("kv store not hydrated in time; holding the engine install offer until it is")
-      await awaitKvReady(api.kv, Number.POSITIVE_INFINITY)
+      // The hold has a local bound, set above the kv file lock's own timeout
+      // (Flock, five minutes, in the TUI's kv provider) so it only ends a hold
+      // the store itself has already given up on. Past it the slot is freed
+      // and the offer waits for a later raise rather than opening unlatched.
+      if (!(await awaitKvReady(api.kv, KV_READY_HOLD_MS))) {
+        log.warn("kv store still not hydrated; releasing the engine install offer for a later raise")
+        return release()
+      }
     }
     const offer = await describeOffer(api.state.path.directory)
     // Null means the situation resolved between the attach and this dialog — an
@@ -1620,5 +1626,29 @@ export default { id: PLUGIN_ID, tui } satisfies BuiltinTuiPlugin
 // Exported for unit tests only. The shared logic (WorkspaceApi, cache, detect,
 // project-name) lives in `@/altimate/workspace/*` and should be tested there;
 // the plugin owns just the TUI-specific latch semantics.
-export { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip, awaitKvReady }
+/** "Install now" is offered only with Node 20+ and npm on PATH — Node is not
+ * enough on its own, npm ships separately on several distributions. */
+export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boolean {
+  return nodeMajor !== null && nodeMajor >= MIN_NODE_MAJOR && hasNpm
+}
+
+/** Test seam for the raise path's process-wide state. */
+export const engineOfferInternals = {
+  get visible() {
+    return engineOfferVisible
+  },
+  get inFlight() {
+    return engineInstallInFlight
+  },
+  set({ visible, inFlight }: { visible?: boolean; inFlight?: boolean }) {
+    if (visible !== undefined) engineOfferVisible = visible
+    if (inFlight !== undefined) engineInstallInFlight = inFlight
+  },
+  reset() {
+    engineOfferVisible = false
+    engineInstallInFlight = false
+  },
+}
+
+export { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip, awaitKvReady, showEngineInstallOffer }
 // altimate_change end
