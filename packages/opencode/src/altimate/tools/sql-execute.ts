@@ -13,6 +13,9 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { getCache } from "../native/schema/cache"
 import * as Registry from "../native/connections/registry"
 // altimate_change end
+// altimate_change start — workspace precedence
+import * as Precedence from "../workspace/precedence"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -36,6 +39,19 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         metadata: { queryType },
       })
     }
+    // altimate_change end
+
+    // altimate_change start — workspace precedence.
+    // Last, after BOTH native safety checks. A redirect returns early, so anything
+    // above it stops running — and neither check has an equivalent on the other side:
+    // the engine's execution tools apply no hard-deny list, and an engine tool key is
+    // matched by the builder's `"*": "allow"` rule while `sql_execute_write` is "ask".
+    // Redirecting first would let a write reach the warehouse without the confirmation
+    // the same statement needed a moment ago. Approving and then redirecting is not a
+    // wasted prompt: the write still happens, through the engine, and what the user
+    // authorised is the write — not which connection carries it.
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
     // altimate_change end
 
     // altimate_change start — shadow-mode pre-execution SQL validation
@@ -87,18 +103,24 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         })
       }
       // altimate_change end
-      return {
+      // altimate_change — carries the fail-open notice when the target could not be
+      // attributed to the workspace; a no-op otherwise.
+      return Precedence.annotate(precedence, {
         title: `SQL: ${args.query.slice(0, 60)}${args.query.length > 60 ? "..." : ""}`,
         metadata: { rowCount: result.row_count, truncated: result.truncated },
         output,
-      }
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      // altimate_change — annotate the failure too. A fail-open notice that only rides
+      // on success is worse than none: the reason vanishes exactly when the call went
+      // wrong, and the `precedence` marker under-counts fail-open in precisely the
+      // cases most likely to fail.
+      return Precedence.annotate(precedence, {
         title: "SQL: ERROR",
         metadata: { rowCount: 0, truncated: false, error: msg },
         output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
-      }
+      })
     }
   },
 })

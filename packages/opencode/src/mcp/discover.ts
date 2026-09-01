@@ -34,11 +34,137 @@ function resolveServerEnvVars(
       field: context.field,
       unresolved: stats.unresolvedNames.join(", "),
     })
+    // altimate_change start — upstream_fix: remember it for the user, not just the log (#701).
+    // An unresolved `${SNOWFLAKE_PASSWORD}` becomes "" and the server launches with a blank
+    // credential, failing later with something that names neither the variable nor the config
+    // file. The log line already had the answer; nobody reads it. Recorded here so `/mcps` can
+    // say so. Mirrors the `setDiscoveryResult` handoff below.
+    const seen = _unresolvedEnv.get(context.server) ?? new Set<string>()
+    for (const name of stats.unresolvedNames) seen.add(name)
+    _unresolvedEnv.set(context.server, seen)
+    // altimate_change end
   }
   return out
 }
 // altimate_change end
 
+// altimate_change start — upstream_fix: unresolved-variable record for the user surface (#701).
+/** Server name -> variable names that resolved to "" during discovery. */
+const _unresolvedEnv = new Map<string, Set<string>>()
+
+/**
+ * Variable names that silently became "" for `server`, from the most recent discovery.
+ *
+ * The record is cleared at the start of every `discoverExternalMcp` run and then unioned
+ * within that run, because one server is resolved twice — once for `headers` and once for
+ * `environment`. Without the reset the map only ever grew: a server whose `{env:VAR}` had
+ * since been fixed kept its old entry (the recording site below is inside an
+ * `unresolvedNames.length > 0` guard, so a clean run never touched it), and `/mcps` went on
+ * telling the user to set a variable that already resolved.
+ *
+ * Only the latest run's servers are present, so a daemon that discovers for a second project
+ * replaces the first project's entries rather than mixing the two under a shared server name.
+ */
+export function unresolvedEnvVars(server: string): string[] {
+  return [...(_unresolvedEnv.get(server) ?? [])].sort()
+}
+
+/** Drop the previous run's records. Called once per `discoverExternalMcp`. */
+function resetUnresolvedEnv() {
+  _unresolvedEnv.clear()
+}
+// altimate_change end
+
+// altimate_change start — upstream_fix (#878): report drift instead of silently skipping.
+// Discovery is first-source-wins, so a server already present in altimate-code.json is skipped
+// outright and a changed `.vscode/mcp.json` (a new ALTIMATE_EXTENSION_RPC port, a moved command)
+// is never mentioned. Overwriting the user's own config would be worse than the silence, so the
+// differing field names are recorded and a user surface reports them; the user decides.
+const _drift = new Map<string, { source: string; fields: string[] }>()
+
+/**
+ * Fields whose difference is expected and not worth reporting.
+ *
+ * `updatedAt` is the datamate sync change-signal: `normalizeMcpConfig` preserves it on the
+ * configured entry and discovery never produces one, so every comparison saw a value against
+ * `undefined` and reported drift on every `mcp list` for any datamate-synced server.
+ */
+const DRIFT_IGNORED = new Set(["enabled", "updatedAt"])
+
+/** Key order must not read as a difference — `{a,b}` and `{b,a}` are the same config. */
+function stableStringify(value: any): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value)
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]"
+  return (
+    "{" +
+    Object.keys(value)
+      .sort()
+      .map((k) => JSON.stringify(k) + ":" + stableStringify(value[k]))
+      .join(",") +
+    "}"
+  )
+}
+
+const isPlainObject = (v: any): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v)
+
+/**
+ * Field names that differ between a discovered server and the one already configured.
+ * Nested `environment`/`headers` differences are reported per key (`environment.FOO`) so the
+ * message names the thing to fix rather than just "environment".
+ */
+export function driftFields(discovered: Record<string, any>, configured: Record<string, any>): string[] {
+  const fields: string[] = []
+  for (const key of new Set([...Object.keys(discovered), ...Object.keys(configured)])) {
+    if (DRIFT_IGNORED.has(key)) continue
+    const a = discovered[key]
+    const b = configured[key]
+    // Nested when EITHER side has the block: requiring both meant a server that gained or lost
+    // an `environment` wholesale reported the bare word "environment" and lost the key names,
+    // which is the one thing this function exists to provide.
+    if ((key === "environment" || key === "headers") && (isPlainObject(a) || isPlainObject(b))) {
+      const left = isPlainObject(a) ? a : {}
+      const right = isPlainObject(b) ? b : {}
+      const inner = new Set([...Object.keys(left), ...Object.keys(right)])
+      // An empty block against a missing one has no key to name, so report it at the top level
+      // rather than saying nothing at all.
+      if (inner.size === 0) {
+        if (stableStringify(a) !== stableStringify(b)) fields.push(key)
+        continue
+      }
+      for (const name of inner) if (left[name] !== right[name]) fields.push(`${key}.${name}`)
+      continue
+    }
+    if (stableStringify(a) !== stableStringify(b)) fields.push(key)
+  }
+  return fields.sort()
+}
+
+/** Record that `server` is configured differently from what discovery found in `source`. */
+export function setConfigDrift(server: string, source: string, fields: string[]) {
+  if (fields.length > 0) _drift.set(server, { source, fields })
+  else _drift.delete(server)
+}
+
+/** Servers whose configured definition differs from the discovered one. */
+export function configDrift(): { server: string; source: string; fields: string[] }[] {
+  return [..._drift.entries()]
+    .map(([server, info]) => ({ server, ...info }))
+    .sort((a, b) => a.server.localeCompare(b.server))
+}
+
+/** Server name -> the file that actually defined it, for drift attribution. */
+const _discoveredSource = new Map<string, string>()
+
+/** The config file a discovered server came from, or undefined if it was not discovered. */
+export function discoveredSource(server: string): string | undefined {
+  return _discoveredSource.get(server)
+}
+
+/** Test seam — drift accumulates at module level. */
+export function resetConfigDrift() {
+  _drift.clear()
+}
+// altimate_change end
 interface ExternalMcpSource {
   /** Relative path from base directory */
   file: string
@@ -204,6 +330,10 @@ function addServersFromFile(
         ;(transformed as any).enabled = false
       }
       result[name] = transformed
+      // altimate_change start — upstream_fix (#878): attribute drift to the file that defined
+      // this server, not to every file that contributed something to the run.
+      _discoveredSource.set(name, sourceLabel)
+      // altimate_change end
       added++
     }
   }
@@ -302,6 +432,13 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   sources: string[]
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
+  // Start from a clean slate so a variable fixed since the last run stops being reported.
+  resetUnresolvedEnv()
+  // Same for drift: a server removed from the external config, or a reload that resolved the
+  // difference, otherwise left a stale entry and `mcp status` reported a mismatch that no
+  // longer existed. The setConfigDrift calls after this run repopulate it.
+  resetConfigDrift()
+  _discoveredSource.clear()
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()

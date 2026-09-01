@@ -4,6 +4,9 @@ import { pathToFileURL } from "url"
 import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { Flag } from "../../flag/flag"
+// altimate_change start — workspace feature gate (see the flush after loopPromise)
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change end
 import { bootstrap } from "../bootstrap"
 import { EOL } from "os"
 import { Filesystem } from "../../util/filesystem"
@@ -28,6 +31,23 @@ import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
+// altimate_change start — run accounting helpers (fork-only module)
+import { RunAccounting } from "./run-accounting"
+// altimate_change start — stable message id for idempotent prompt retries
+import { MessageID } from "../../session/schema"
+// altimate_change end
+// altimate_change end
+// altimate_change start — run implies run mode (fork-only module)
+import { applyRunModeDefault } from "./run/run-mode"
+// altimate_change end
+// altimate_change start — run-mode-only idle-done fallback (fork-only modules).
+// Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
+// token contract live in session/termination.ts; delivery goes through the nudge
+// arbiter (at most one system-authored directive block per injected turn).
+import { IdleDone } from "./idle-done"
+import { NudgeArbiter } from "../../session/nudge"
+import { SessionTermination } from "../../session/termination"
+// altimate_change end
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change end
@@ -375,6 +395,21 @@ export const RunCommand = cmd({
     // altimate_change end
   },
   handler: async (args) => {
+    // altimate_change start — mark the headless surface. Nothing here can render a
+    // toast, so workspace engine refusals degrade to one stderr line. An env var
+    // because it must be readable from every module realm.
+    process.env["ALTIMATE_CODE_HEADLESS"] = "1"
+    // altimate_change end
+    // altimate_change start — validate --max-turns before anything runs. yargs
+    // coerces a non-numeric value to NaN, which is falsy and SILENTLY disabled
+    // the budget; a negative value is truthy and aborted the session on its
+    // very first step with a nonsense message. Both are configuration errors a
+    // benchmark harness must hear about immediately, not discover afterwards.
+    if (args.maxTurns !== undefined && !RunAccounting.isValidMaxTurns(args.maxTurns)) {
+      UI.error(`--max-turns must be a positive integer (got ${String(args.maxTurns)})`)
+      process.exit(1)
+    }
+    // altimate_change end
     // altimate_change start — `run` is the only entrypoint without an answer
     // channel for the question tool: no TUI is mounted and the in-process
     // Server.Default() shim below does not bind a port, so a connected IDE
@@ -399,6 +434,16 @@ export const RunCommand = cmd({
     if (!args.attach && !process.env["ALTIMATE_NON_INTERACTIVE"]?.trim()) {
       process.env["ALTIMATE_NON_INTERACTIVE"] = "1"
     }
+    // altimate_change end
+    // altimate_change start — mark this process as run mode so
+    // run-mode-only mechanisms (DONE-termination gate, starvation-breaker
+    // directives, doom-loop escalation ladder) arm in the in-process session.
+    // Explicit ALTIMATE_RUN_MODE=0 opts out; --attach skips entirely (the agent
+    // runs on the remote, possibly interactive, server). See run/run-mode.ts.
+    applyRunModeDefault(process.env, {
+      attach: Boolean(args.attach),
+      resumed: Boolean(args.continue || args.session),
+    })
     // altimate_change end
 
     let message = [...args.message, ...(args["--"] || [])]
@@ -593,8 +638,35 @@ You are speaking to a non-technical business executive. Follow these rules stric
         return false
       }
 
-      const events = await sdk.event.subscribe()
+      // altimate_change start — every subscription has an explicit lifetime so
+      // prompt-send failures cannot leave an SSE stream keeping the process alive.
+      const eventAbort = new AbortController()
+      const events = await sdk.event.subscribe(undefined, { signal: eventAbort.signal })
+      // altimate_change end
       let error: string | undefined
+      // altimate_change start — retain overflow trace errors until compaction proves recovery
+      const recoverableOverflowTraceErrors = RunAccounting.createRecoverableOverflowTraceErrors()
+      // altimate_change end
+      // altimate_change start — turn accounting + dual-attribution
+      // termination state for this run (see run-accounting.ts).
+      const accounting = RunAccounting.create()
+      // altimate_change end
+      // altimate_change start — idle-done fallback state (run-mode-only by
+      // construction — this exists only in the run command). Thresholds are
+      // config-exposed via env with first-principles provenance (see idle-done.ts).
+      // Armed ONLY for a local run with run mode active: --attach targets a
+      // remote, possibly shared/interactive session, and ALTIMATE_RUN_MODE=0 is
+      // the documented opt-out for every run-mode-only mechanism.
+      const idleDone = IdleDone.create(
+        IdleDone.armedOptions(IdleDone.optionsFromEnv(), {
+          attach: Boolean(args.attach),
+          runMode: Flag.ALTIMATE_RUN_MODE,
+        }),
+        {
+          isCompactionStep: (messageID) => accounting.isCompactionStep(messageID),
+        },
+      )
+      // altimate_change end
 
       // Build tracer from config + CLI flags — must never crash the run command
       const tracer = await (async () => {
@@ -628,14 +700,39 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       })()
 
-      async function loop() {
+      // altimate_change start — the event loop takes its stream as a
+      // parameter so the idle-done challenge phase can re-run it over a fresh
+      // subscription after the deliberate mid-run abort (same accounting, same
+      // max-turns budget — the challenge continuation stays budget-enforced).
+      // requireBusyFirst: the challenge-phase loop ignores idle events until the
+      // challenge turn has actually started (a straggler idle from the abort
+      // would otherwise end the phase before the challenge prompt begins).
+      async function loop(
+        stream: typeof events.stream,
+        options?: { requireBusyFirst?: boolean; suppressInterruptedPromptAbort?: boolean },
+      ) {
+        let sawBusy = false
+        // altimate_change end
         const toggles = new Map<string, boolean>()
-        // altimate_change start — max-turns budget enforcement
-        let turnCount = 0
+        // altimate_change start — max-turns budget enforcement (count kept in accounting)
         const maxTurns = args.maxTurns
         // altimate_change end
 
-        for await (const event of events.stream) {
+        // altimate_change start — parameterized stream
+        for await (const event of stream) {
+          // altimate_change end
+          // altimate_change start — record each assistant message's agent so
+          // step-start parts (which carry only messageID/sessionID) can be attributed.
+          // The assistant message row is persisted — and this event published — before
+          // its first step-start part streams, so the lookup is populated in time.
+          if (
+            event.type === "message.updated" &&
+            event.properties.info.role === "assistant" &&
+            event.properties.info.sessionID === sessionID
+          ) {
+            accounting.onAssistantMessage(event.properties.info)
+          }
+          // altimate_change end
           if (
             event.type === "message.updated" &&
             event.properties.info.role === "assistant" &&
@@ -660,6 +757,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "message.part.updated") {
             const part = event.properties.part
             if (part.sessionID !== sessionID) continue
+
+            // altimate_change start — feed every part event through the
+            // idle-done observer (event-stream ordering for build-after-last-write,
+            // text-only-turn counting, outstanding-tool suppression).
+            idleDone.observePart(part as unknown as IdleDone.PartSlice)
+            // altimate_change end
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
               tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
@@ -689,8 +792,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "step-start") {
               tracer?.logStepStart(part)
               // altimate_change start — enforce max-turns budget
-              turnCount++
-              if (maxTurns && turnCount > maxTurns) {
+              // compaction-machinery steps are excluded from turn accounting —
+              // the owning message's agent is resolved via the message.updated lookup
+              // above, so compacting models are not differentially charged turns.
+              const counted = accounting.onStepStart(part.messageID)
+              if (counted && maxTurns && accounting.turnCount > maxTurns) {
+                accounting.onBudgetExhausted()
                 error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
                 UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
                 await sdk.session.abort({ sessionID })
@@ -702,11 +809,42 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
             if (part.type === "step-finish") {
               tracer?.logStepFinish(part)
+              // altimate_change start — record the model-side finish reason
+              accounting.onStepFinish(part.messageID, (part as { reason?: string }).reason)
+              // altimate_change end
+              // altimate_change start — idle-done fallback firing point.
+              // All hard preconditions are checked in idle-done.ts (compaction-gated,
+              // build-after-last-write green verify, no outstanding tools/permissions,
+              // one-shot). Firing aborts the churning prompt and hands off to the
+              // confirm-DONE challenge phase after the event loop drains. Checked
+              // BEFORE the json-mode emit-continue so headless drivers take this path too.
+              if (idleDone.shouldChallenge()) {
+                idleDone.markChallengeIssued()
+                accounting.onIdleDoneChallengeIssued()
+                const detail = idleDone.snapshot()
+                if (!emit("idle_done_challenge", { detail })) {
+                  UI.println(
+                    UI.Style.TEXT_WARNING_BOLD + "!",
+                    UI.Style.TEXT_NORMAL +
+                      ` idle-done: completion signature detected (green verify after last write, ${detail.idle_turns} idle turns, ${detail.compactions} compactions) — issuing one-shot confirm-DONE challenge`,
+                  )
+                }
+                await sdk.session.abort({ sessionID })
+                // Keep the initial subscription alive until this interrupted
+                // generation publishes its ordered MessageAbortedError -> idle
+                // tail. Starting the challenge subscription before that tail is
+                // drained lets the intentional abort poison the fresh phase.
+                continue
+              }
+              // altimate_change end
               if (emit("step_finish", { part })) continue
             }
 
             if (part.type === "text" && part.time?.end) {
               tracer?.logText(part)
+              // altimate_change start — explicit-done attribution input
+              accounting.onText(part.messageID, part.text, part.synthetic === true)
+              // altimate_change end
               if (emit("text", { part })) continue
               const text = part.text.trim()
               if (!text) continue
@@ -738,26 +876,73 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (event.type === "session.error") {
             const props = event.properties
             if (props.sessionID !== sessionID || !props.error) continue
-            let err = String(props.error.name)
-            if ("data" in props.error && props.error.data && "message" in props.error.data) {
-              err = String(props.error.data.message)
+            // altimate_change start — the idle-done challenge is delivered
+            // by aborting the in-flight prompt; that harness-initiated abort is not
+            // a run error — don't display it or fold it into the error record.
+            if (
+              options?.suppressInterruptedPromptAbort &&
+              idleDone.challengeIssued &&
+              props.error.name === "MessageAbortedError"
+            ) {
+              continue
             }
-            error = error ? error + EOL + err : err
+            // altimate_change end
+            // altimate_change start — serialize the real error name/message/status
+            // (never a bare name, "[object Object]", or a literal {}); feed the
+            // harness-stop attribution (recoverable overflow errors are excluded there).
+            const err = RunAccounting.serializeSessionError(props.error)
+            accounting.onSessionError(
+              props.error.name,
+              "data" in props.error && props.error.data && "message" in props.error.data
+                ? String(props.error.data.message)
+                : undefined,
+            )
+            // altimate_change end
+            // altimate_change start — keep overflow trace failures recoverable only through compaction
+            if (props.error.name === "ContextOverflowError") recoverableOverflowTraceErrors.add(err)
+            else error = error ? error + EOL + err : err
+            // altimate_change end
             if (emit("error", { error: props.error })) continue
             UI.error(err)
           }
 
+          // altimate_change start — require an actual recovery event before forgiving overflow
+          // A ContextOverflowError is only recoverable after compaction really
+          // completes. This event closes the pending-overflow accounting state;
+          // without it (disabled/failed compaction) the run exits nonzero.
+          if (event.type === "session.compacted" && event.properties.sessionID === sessionID) {
+            accounting.onCompactionRecovered()
+            recoverableOverflowTraceErrors.recover()
+          }
+          // altimate_change end
+
+          // altimate_change start — track busy for the challenge-phase guard
+          if (
+            event.type === "session.status" &&
+            event.properties.sessionID === sessionID &&
+            event.properties.status.type === "busy"
+          ) {
+            sawBusy = true
+          }
+          // altimate_change end
           if (
             event.type === "session.status" &&
             event.properties.sessionID === sessionID &&
             event.properties.status.type === "idle"
           ) {
+            // altimate_change start — ignore stale pre-challenge idles
+            if (options?.requireBusyFirst && !sawBusy) continue
+            // altimate_change end
             break
           }
 
           if (event.type === "permission.asked") {
             const permission = event.properties
             if (permission.sessionID !== sessionID) continue
+            // altimate_change start — idle-done is suppressed while a
+            // permission request is outstanding (hard precondition iii).
+            idleDone.onPermissionAsked(permission.id)
+            // altimate_change end
             // altimate_change start - yolo mode: auto-approve but respect explicit deny rules.
             // --dangerously-skip-permissions (backport of upstream PR #21266) is treated as
             // an alias — same auto-approve behavior, plus our deny-rule safety net which
@@ -806,6 +991,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 reply: "reject",
               })
             }
+            // altimate_change end
+            // altimate_change start — every branch above replied; clear the pending flag
+            idleDone.onPermissionResolved(permission.id)
             // altimate_change end
           }
         }
@@ -867,52 +1055,402 @@ You are speaking to a non-technical business executive. Follow these rules stric
         tracer?.flushSync("Process interrupted")
         process.exit(143)
       }
-      const onBeforeExit = () => {
-        tracer?.flushSync("Process exited")
-      }
+      // altimate_change start — honest rc on fatal abort. beforeExit firing
+      // before the run finishes means the event loop drained before the run
+      // completed — the prompt/event stream was abandoned (observed: a
+      // mid-stream provider failure tears everything down and the process used
+      // to die here with rc 0). The flag (not just listener removal) makes the
+      // outcome sticky in the right direction: a spurious firing during an
+      // event-loop gap on a run that later completes must not poison the rc —
+      // the success path marks the shared guard finished and restores exitCode.
+      const beforeExit = RunAccounting.createBeforeExitGuard(process, () => tracer?.flushSync("Process exited"))
+      const onBeforeExit = beforeExit.onBeforeExit
+      // altimate_change end
       process.on("SIGINT", onSigint)
       process.on("SIGTERM", onSigterm)
       process.on("beforeExit", onBeforeExit)
 
       // Start event listener before sending the prompt so no events are missed
-      const loopPromise = loop().catch((e) => {
+      // altimate_change start — pass the stream explicitly (see loop signature)
+      let eventLoopFailure: unknown
+      const loopPromise = loop(events.stream, { suppressInterruptedPromptAbort: true }).catch((e) => {
+        eventLoopFailure = e
+        accounting.onSessionError("EventStreamError", e instanceof Error ? e.message : String(e))
         console.error(e)
-        process.exit(1)
+        // The session.prompt/session.command POST is synchronous and may still
+        // be waiting on a hung generation. It shares this signal, so losing SSE
+        // releases both sides of the run instead of waiting forever in send().
+        eventAbort.abort()
       })
+      // altimate_change end
 
-      if (args.command) {
-        await sdk.session.command({
-          sessionID,
-          agent,
-          model: args.model,
-          command: args.command,
-          arguments: message,
-          variant: args.variant,
-        })
-      } else {
-        const model = args.model ? Provider.parseModel(args.model) : undefined
-        await sdk.session.prompt({
-          sessionID,
-          agent,
-          model,
-          variant: args.variant,
-          parts: [...files, { type: "text", text: message }],
-          ...(audienceSystem ? { system: audienceSystem } : {}),
-        })
+      // altimate_change start — bounded retry-with-backoff on provider 5xx/timeout
+      // at the enqueue boundary. Bounds are config-exposed via env (provenance:
+      // bounded retries with every retry logged so they can
+      // never mask a persistent provider failure; defaults mirror the in-stream
+      // SessionRetry posture — bounded and visible). On exhaustion the error is thrown
+      // so the process exits nonzero instead of hanging on an idle event that will
+      // never arrive.
+      // altimate_change start — upstream_fix: cap the upper bound too, not just
+      // reject non-finite/negative — an unbounded ALTIMATE_RUN_RETRY_MAX permits
+      // runaway retries, and an unbounded base delay compounds through
+      // `retryBaseMs * 2 ** attempt` past setTimeout's ~24.8-day int32 ceiling
+      // (Node clamps an oversized delay to fire immediately, turning "backoff"
+      // into a tight retry loop).
+      const envBound = (name: string, fallback: number, max: number) => {
+        const raw = process.env[name]?.trim()
+        if (!raw) return fallback
+        const parsed = Number(raw)
+        return Number.isFinite(parsed) && parsed >= 0 ? Math.min(parsed, max) : fallback
       }
+      const retryMax = envBound("ALTIMATE_RUN_RETRY_MAX", 3, 20)
+      const retryBaseMs = envBound("ALTIMATE_RUN_RETRY_BASE_MS", 1000, 60_000)
+      // The per-value bounds alone do NOT keep the compounded delay inside the
+      // timer range — see RunAccounting.retryDelayMs, which clamps it.
+      // altimate_change end
+      // altimate_change start — retry idempotency. `session.prompt`/`command`
+      // run the whole task synchronously, so an ambiguous transport failure
+      // (timeout, ECONNRESET, gateway 5xx) can arrive AFTER the server accepted
+      // the POST and started the run. Re-sending then duplicates the task —
+      // a second user message and a second execution. Pinning a stable
+      // messageID makes the attempt identifiable: before each retry we ask the
+      // server whether that message landed, and only re-send when it did not.
+      const sendMessageID = MessageID.ascending()
+      const send = () => {
+        if (args.command)
+          return sdk.session.command(
+            {
+              sessionID,
+              messageID: sendMessageID,
+              agent,
+              model: args.model,
+              command: args.command,
+              arguments: message,
+              variant: args.variant,
+            },
+            { signal: eventAbort.signal },
+          )
+        const model = args.model ? Provider.parseModel(args.model) : undefined
+        return sdk.session.prompt(
+          {
+            sessionID,
+            messageID: sendMessageID,
+            agent,
+            model,
+            variant: args.variant,
+            parts: [...files, { type: "text", text: message }],
+            ...(audienceSystem ? { system: audienceSystem } : {}),
+          },
+          { signal: eventAbort.signal },
+        )
+      }
+      /** Did the server persist this attempt's user message?
+       *  Three-valued ON PURPOSE — a retry may only proceed on definitive
+       *  evidence that the message did NOT land. Treating an unreachable
+       *  server as "absent" would resend a task that may already be running,
+       *  which is the duplication this whole mechanism exists to prevent. */
+      const acceptanceState = async (messageID: string): Promise<"accepted" | "absent" | "unknown"> => {
+        try {
+          const res = (await sdk.session.message({ sessionID, messageID })) as {
+            data?: { info?: unknown }
+            error?: unknown
+            response?: { status?: number }
+          }
+          if (res?.data?.info) return "accepted"
+          // A definitive 404 from a reachable server is the only proof of absence.
+          if (res?.response?.status === 404) return "absent"
+          return "unknown"
+        } catch {
+          // The probe itself failed — the server is unreachable, so we cannot tell.
+          return "unknown"
+        }
+      }
+      // altimate_change end
+      type SendResult = {
+        error?: unknown
+        response?: Response
+        data?: { info?: { finish?: string; error?: { name?: unknown; data?: unknown } } }
+      }
+      // altimate_change start — run a synthetic follow-up over one bounded,
+      // shared request/SSE lifetime. This is used for both the confirm-DONE
+      // challenge and the single continuation turn when that challenge is
+      // declined. A stream failure aborts the synchronous POST; a POST failure
+      // aborts the stream. Stable message IDs preserve retry idempotency.
+      const runSyntheticTurn = async (
+        text: string,
+        kind: "challenge" | "continuation",
+      ): Promise<SendResult | undefined> => {
+        const turnAbort = new AbortController()
+        const eventErrorName = kind === "challenge" ? "ChallengeEventStreamError" : "ContinuationEventStreamError"
+        const sendErrorName = kind === "challenge" ? "IdleDoneChallengeFailed" : "IdleDoneContinuationFailed"
+        const humanName = kind === "challenge" ? "idle-done challenge" : "idle-done continuation"
+        const eventName = kind === "challenge" ? "idle_done_challenge_failed" : "idle_done_continuation_failed"
+        const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
+          accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
+          return undefined
+        })
+        if (!turnEvents) return undefined
+
+        let sendFailed!: () => void
+        const sendFailure = new Promise<void>((resolveFailure) => {
+          sendFailed = resolveFailure
+        })
+        let streamFailed = false
+        const messageID = MessageID.ascending()
+        const promptPromise = (async (): Promise<SendResult | undefined> => {
+          // The previous turn may have published idle just before releasing its
+          // session lock. Retry that narrow race, but only after definitive
+          // proof this exact message was not persisted.
+          for (let attempt = 0; ; attempt++) {
+            const res = (await sdk.session
+              .prompt(
+                {
+                  sessionID,
+                  messageID,
+                  agent,
+                  model: args.model ? Provider.parseModel(args.model) : undefined,
+                  variant: args.variant,
+                  ...(audienceSystem ? { system: audienceSystem } : {}),
+                  // Synthetic harness text must never replace the authoritative
+                  // original task pin when this session is resumed.
+                  parts: [{ type: "text", text, synthetic: true }],
+                },
+                { signal: turnAbort.signal },
+              )
+              .catch((e) => ({ error: e }) as SendResult)) as SendResult
+            if (!res?.error) return res
+            const status = res.response?.status
+            const detail = RunAccounting.serializeSessionError(res.error)
+            const retryable =
+              status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
+            if (!retryable) throw new Error(`${humanName} prompt failed: ${detail}`)
+
+            const acceptance = await acceptanceState(messageID)
+            if (acceptance === "accepted") return undefined
+            if (acceptance === "unknown") {
+              throw new Error(
+                `${humanName} failed and acceptance could not be determined; ` +
+                  `not retrying to avoid duplication — ${detail}`,
+              )
+            }
+            if (attempt >= 8) {
+              emit(eventName, { error: detail })
+              throw new Error(`${humanName} prompt failed: ${detail}`)
+            }
+            await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+          }
+        })()
+        promptPromise.catch(() => sendFailed())
+        await Promise.race([
+          loop(turnEvents.stream, { requireBusyFirst: true }).catch((e) => {
+            streamFailed = true
+            accounting.onSessionError(eventErrorName, e instanceof Error ? e.message : String(e))
+            console.error(e)
+            turnAbort.abort()
+          }),
+          sendFailure,
+        ])
+        const result = await promptPromise.catch((e) => {
+          if (!streamFailed) accounting.onSessionError(sendErrorName, e instanceof Error ? e.message : String(e))
+          return undefined
+        })
+        turnAbort.abort()
+        return result
+      }
+      // altimate_change end
+      let sendResult: SendResult | undefined
+      let sendFailure: unknown
+      for (let sendAttempt = 0; ; sendAttempt++) {
+        let reason: string
+        try {
+          const res = (await send()) as SendResult
+          const status = res?.response?.status
+          if (!res?.error || !RunAccounting.isRetryableStatus(status)) {
+            sendResult = res
+            break
+          }
+          reason = `provider returned status ${status}`
+        } catch (e) {
+          if (!RunAccounting.isRetryableThrown(e)) {
+            sendFailure = e
+            break
+          }
+          reason = e instanceof Error ? e.message : String(e)
+        }
+        // altimate_change start — a retry may only proceed on definitive
+        // evidence that the message did NOT land. Re-sending an accepted prompt
+        // duplicates the task; re-sending on an UNKNOWN state risks the same,
+        // so that case fails the run loudly instead of guessing.
+        const acceptance = await acceptanceState(sendMessageID)
+        if (acceptance === "accepted") {
+          // The failure was on the response path only — the run is in flight,
+          // so fall through and let the event loop drain to idle.
+          if (!emit("retry_skipped", { reason, messageID: sendMessageID })) {
+            UI.println(
+              UI.Style.TEXT_WARNING_BOLD + "!",
+              UI.Style.TEXT_NORMAL + ` prompt already accepted by the server; not retrying — ${reason}`,
+            )
+          }
+          break
+        }
+        if (acceptance === "unknown") {
+          sendFailure = new Error(
+            `prompt failed and the server could not be reached to determine whether it was accepted; ` +
+              `not retrying to avoid running the task twice — ${reason}`,
+          )
+          break
+        }
+        // altimate_change end
+        if (sendAttempt >= retryMax) {
+          sendFailure = new Error(`prompt failed after ${retryMax} retries: ${reason}`)
+          break
+        }
+        const delay = RunAccounting.retryDelayMs(retryBaseMs, sendAttempt)
+        if (!emit("retry", { attempt: sendAttempt + 1, max: retryMax, reason, delayMs: delay })) {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL + ` retrying prompt (${sendAttempt + 1}/${retryMax}) in ${delay}ms — ${reason}`,
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+      // the prompt response carries the TERMINAL assistant message —
+      // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
+      if (sendFailure) {
+        // Losing SSE intentionally aborts the synchronous POST. Attribute that
+        // derivative AbortError to the original stream failure; otherwise it
+        // overwrites timeout/error classification and the actionable message.
+        if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
+        else {
+          accounting.onPromptSendError(sendFailure)
+          error = RunAccounting.serializeSessionError(sendFailure)
+        }
+        eventAbort.abort()
+      } else if (sendResult?.error) {
+        if (eventLoopFailure) error = RunAccounting.serializeSessionError(eventLoopFailure)
+        else {
+          accounting.onPromptSendError(sendResult.error, sendResult.response?.status)
+          error = RunAccounting.serializeSessionError(sendResult.error)
+        }
+        eventAbort.abort()
+      } else accounting.onPromptResult(sendResult?.data?.info)
+      // altimate_change end
 
       // Wait for the event loop to drain (breaks when session reaches idle)
       await loopPromise
+      // altimate_change start — close the initial SSE lifetime on every outcome
+      eventAbort.abort()
+      if (eventLoopFailure && !error) error = RunAccounting.serializeSessionError(eventLoopFailure)
+      // altimate_change end
+
+      // altimate_change start — one-shot confirm-DONE challenge phase.
+      // Reached only when the idle-done detector fired (all hard preconditions
+      // held) and aborted the churning prompt. The challenge is a normal prompt:
+      // the model either confirms DONE (session ends, done_reason=idle_heuristic)
+      // or states what remains and continues working — budget enforcement,
+      // accounting, and display all flow through the same loop() over a fresh
+      // event subscription. Recursion guard: the detector is one-shot, so the
+      // challenge can never breed further challenges. The directive is
+      // delivered via the nudge arbiter so this injected turn carries exactly
+      // ONE system-authored directive.
+      if (idleDone.challengeIssued && !accounting.fatal) {
+        // altimate_change start — upstream_fix: mark the challenge reply as
+        // sent BEFORE anything in this phase can raise a session-error/prompt-
+        // result event, so a genuine failure of the reply itself is never
+        // absorbed by the interrupted prompt's own abort suppression.
+        accounting.onIdleDoneChallengeReplySent()
+        // altimate_change end
+        NudgeArbiter.register(sessionID, {
+          source: "termination_challenge",
+          kind: "confirm_done",
+          text: SessionTermination.CONFIRM_DONE_CHALLENGE,
+        })
+        const challengeDirective = NudgeArbiter.take(sessionID)
+        const challengeResult = await runSyntheticTurn(
+          challengeDirective?.text ?? SessionTermination.CONFIRM_DONE_CHALLENGE,
+          "challenge",
+        )
+        accounting.onPromptResult(challengeResult?.data?.info)
+        const challengeConfirmed = accounting.termination().done_reason === "idle_heuristic"
+        accounting.onIdleDoneChallengeCompleted()
+
+        // A model may follow the challenge's "state what remains and continue"
+        // branch with a normal text-only stop. That has already returned from
+        // SessionPrompt.loop, so enqueue one explicit continuation turn instead
+        // of silently finalizing the run at rc 0 with done_reason=none.
+        if (!accounting.fatal && !challengeConfirmed) {
+          NudgeArbiter.register(sessionID, {
+            source: "termination_challenge",
+            kind: "continue_after_decline",
+            text: SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE,
+          })
+          const continuationDirective = NudgeArbiter.take(sessionID)
+          if (!emit("idle_done_continuation", {})) {
+            UI.println(
+              UI.Style.TEXT_WARNING_BOLD + "!",
+              UI.Style.TEXT_NORMAL + " idle-done: completion was not confirmed — continuing the remaining work",
+            )
+          }
+          const continuationResult = await runSyntheticTurn(
+            continuationDirective?.text ?? SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE,
+            "continuation",
+          )
+          accounting.onPromptResult(continuationResult?.data?.info)
+          if (!accounting.fatal && accounting.termination().done_reason === "none") {
+            accounting.onSessionError(
+              "IdleDoneContinuationUnconfirmed",
+              "the continuation ended without an explicit DONE confirmation",
+            )
+          }
+        }
+      }
+      // altimate_change end
+
+      // altimate_change start — a cold workspace skill sync outlives a short
+      // turn, and this process exits the moment the turn ends. Without this the
+      // staged tree is discarded on exit and, since nothing was persisted, the
+      // next `run` starts cold and loses the same race — so such a project never
+      // received its skills at all. Imported lazily and only when the feature is
+      // on, so an opted-out run does not load the module.
+      if (CoreFlag.ALTIMATE_WORKSPACE) {
+        await import("../../altimate/workspace/skill-sync")
+          .then((m) => m.flushPendingSyncs())
+          .catch(() => {})
+      }
+      // altimate_change end
 
       // Remove crash handlers — trace will be finalized cleanly
+      // altimate_change start — the run loop drained normally: mark the run
+      // finished and clear any exit code a premature beforeExit firing set.
+      // accounting.fatal below remains the single authority for a nonzero rc.
+      beforeExit.finish()
+      // altimate_change end
       process.removeListener("SIGINT", onSigint)
       process.removeListener("SIGTERM", onSigterm)
       process.removeListener("beforeExit", onBeforeExit)
 
+      // altimate_change start — dual-attribution termination
+      // record with done_reason. why_model_stopped and why_harness_stopped are
+      // independent fields so model-looping, tight budgets, and harness errors
+      // are distinguishable in the run output (rc alone conflates them);
+      // done_reason distinguishes explicit_done vs idle_heuristic vs none.
+      const termination = accounting.termination()
+      if (!emit("termination", { ...termination }) && process.stdout.isTTY) {
+        UI.println(
+          UI.Style.TEXT_DIM +
+            `why_model_stopped=${termination.why_model_stopped} why_harness_stopped=${termination.why_harness_stopped} done_reason=${termination.done_reason}` +
+            UI.Style.TEXT_NORMAL,
+        )
+      }
+      // altimate_change end
+
       // Finalize trace and save to disk
       if (tracer) {
         Tracer.setActive(null)
-        const tracePath = await tracer.endTrace(error)
+        // altimate_change start — persist only overflow errors that never reached a recovery event
+        const traceError = [error, ...recoverableOverflowTraceErrors.values()].filter(Boolean).join(EOL) || undefined
+        const tracePath = await tracer.endTrace(traceError)
+        // altimate_change end
         if (tracePath) {
           emit("trace_saved", { path: tracePath })
           if (args.format !== "json" && process.stdout.isTTY) {
@@ -928,6 +1466,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
         await Bun.write(outputPath, content)
         process.stderr.write(`\n✓ Output saved to: ${outputPath}\n`)
       }
+
+      // altimate_change start — honest rc — exit nonzero on fatal abort
+      // (budget exhaustion or an unrecovered session error). Uses process.exitCode
+      // (not process.exit) so pending stdout/trace writes still flush.
+      if (accounting.fatal) process.exitCode = 1
+      // altimate_change end
     }
 
     if (args.attach) {

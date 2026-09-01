@@ -149,7 +149,17 @@ export namespace SystemPrompt {
       for (const skill of autoLoaded) {
         parts.push("")
         parts.push(`<auto_loaded_skill name="${escapeXmlAttr(skill.name)}">`)
-        parts.push(skill.content.trim())
+        // altimate_change start — neutralise the closing tag inside the body.
+        // The name is escaped but the body was not, so content containing
+        // `</auto_loaded_skill>` closed the wrapper and continued as unwrapped
+        // system-prompt text — able to impersonate the harness's own framing,
+        // directly after the prompt has told the model to treat this as binding
+        // guidance. Skill bodies are now remote content (a bound workspace
+        // syncs them), so this is reachable by anyone who can upload a skill.
+        // Deliberately not a full XML escape: bodies legitimately contain code
+        // and angle brackets, and mangling those would break working skills.
+        parts.push(neutralizeSkillWrapper(skill.content.trim()))
+        // altimate_change end
         parts.push(`</auto_loaded_skill>`)
       }
       parts.push("")
@@ -193,6 +203,12 @@ export namespace SystemPrompt {
       // eslint-disable-next-line no-control-regex
       .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
   }
+
+  // altimate_change start — see the auto-loaded skill block below.
+  function neutralizeSkillWrapper(content: string): string {
+    return content.replace(/<(\/?)auto_loaded_skill\b/gi, "&lt;$1auto_loaded_skill")
+  }
+  // altimate_change end
 
   async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
     const out: Skill.Info[] = []

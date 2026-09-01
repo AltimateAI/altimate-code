@@ -6,6 +6,8 @@ import { Instance } from "../../project/instance"
 import { Global } from "../../global"
 import { MCP } from "../../mcp"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+import { DATAMATE_KEY } from "../datamate-transport"
+import { managedWorkspaceLoaded } from "../workspace/engine-overlay"
 
 /**
  * Check which MCP server names are permanently configured on disk
@@ -125,7 +127,21 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       useGlobal,
     )
 
+    const added: string[] = []
     for (const name of toAdd) {
+      // In workspace mode the `datamate` key is the bound workspace's own engine,
+      // derived at config load; a discovered IDE entry under it is refused like
+      // every other in-process writer of that key, and the refusal is reported.
+      if (name === DATAMATE_KEY) {
+        const managed = await managedWorkspaceLoaded()
+        if (managed) {
+          lines.push(
+            `\n'${DATAMATE_KEY}' was not added: this project is linked to workspace "${managed.name}", ` +
+              `whose engine serves that server. Unlink the project, or run without ALTIMATE_WORKSPACE, to add it by hand.`,
+          )
+          continue
+        }
+      }
       // strip the discovery-time  flag. Project-scoped discovery sets
       //  as a security default (no auto-connect until user approves).
       // When the user explicitly adds a server via this tool, it should be enabled.
@@ -134,14 +150,15 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
       // Connect immediately so /mcps reflects the server status in the current session
       // without requiring a restart.
       await MCP.connect(name)
+      added.push(name)
     }
 
-    lines.push(`\nAdded ${toAdd.length} server(s) to ${configPath}: ${toAdd.join(", ")}`)
-    lines.push("These servers are already active in the current session via auto-discovery.")
+    lines.push(`\nAdded ${added.length} server(s) to ${configPath}: ${added.join(", ")}`)
+    if (added.length > 0) lines.push("These servers are already active in the current session via auto-discovery.")
 
     return {
-      title: `MCP Discover: added ${toAdd.length} server(s)`,
-      metadata: { discovered: discoveredNames.length, new: newServers.length, existing: alreadyAdded.length, added: toAdd.length },
+      title: `MCP Discover: added ${added.length} server(s)`,
+      metadata: { discovered: discoveredNames.length, new: newServers.length, existing: alreadyAdded.length, added: added.length },
       output: lines.join("\n"),
     }
   },

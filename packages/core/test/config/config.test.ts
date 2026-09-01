@@ -71,8 +71,12 @@ describe("Config", () => {
       expect(ConfigMigrateV1.isV1({ snapshot: false })).toBe(true)
       expect(ConfigMigrateV1.isV1({ snapshot: false, agents: {} })).toBe(true)
       expect(ConfigMigrateV1.isV1({ reference: {} })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { tail_turns: 2 } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { preserve_recent_tokens: 4_000 } })).toBe(true)
+      expect(ConfigMigrateV1.isV1({ compaction: { reserved: 8_000 } })).toBe(true)
       expect(ConfigMigrateV1.isV1({ shell: "/bin/zsh", model: "anthropic/claude" })).toBe(false)
       expect(ConfigMigrateV1.isV1({ references: {} })).toBe(false)
+      expect(ConfigMigrateV1.isV1({ compaction: { keep: { turns: 2 }, buffer: 8_000 } })).toBe(false)
     }),
   )
 
@@ -86,6 +90,129 @@ describe("Config", () => {
       )
     }),
   )
+
+  // altimate_change start — PR #1171 review: mixed documents with explicit
+  // V2 keep/buffer fields must not lose them through the V1 decoder.
+  it.effect("prefers explicit v2 compaction fields when legacy keys remain beside them", () =>
+    Effect.sync(() => {
+      const mixed = {
+        compaction: {
+          keep: { tokens: 4_000, turns: 2 },
+          buffer: 8_000,
+          tail_turns: 99,
+          reserved: 16_000,
+        },
+      }
+
+      expect(ConfigMigrateV1.isV1(mixed)).toBe(false)
+      expect(Schema.decodeUnknownSync(Config.Info)(mixed).compaction).toMatchObject({
+        keep: { tokens: 4_000, turns: 2 },
+        buffer: 8_000,
+      })
+    }),
+  )
+  // altimate_change end
+
+  // altimate_change start — V2 parity round-trip for the fork reliability keys
+  // (dispatch cap, compaction safety fraction, task pin, state ledger,
+  // starvation breaker). A V2 cutover must not silently drop these controls.
+  it.effect("round-trips the fork reliability keys through ConfigMigrateV1 into valid v2", () =>
+    Effect.sync(() => {
+      const v1: typeof ConfigV1.Info.Type = {
+        tool_output: { max_lines: 100, max_bytes: 9_000, dispatch_max_tokens: 5_000 },
+        compaction: {
+          auto: true,
+          reserved: 12_000,
+          tail_turns: 0,
+          preserve_recent_tokens: 3_000,
+          context_safety_fraction: 0.7,
+          state_ledger: true,
+          ledger_max_tokens: 400,
+          ledger_recent_calls: 8,
+          summary_carry: false,
+          summary_first_person: true,
+          pin_task: true,
+          pin_max_tokens: 2_048,
+          pin_window_fraction: 0.15,
+          pin_card_max_tokens: 300,
+        },
+        experimental: {
+          starvation_breaker: {
+            mode: "armed",
+            max_turns_without_mutation: 10,
+            repeat_signature_threshold: 4,
+            doom_loop_threshold: 5,
+            polling_threshold_multiplier: 6,
+            polling_pattern: "\\b(sleep)\\b",
+            exempt_agents: ["plan"],
+            generated_path_patterns: ["dist/"],
+          },
+        },
+      }
+      const migrated = ConfigMigrateV1.migrate(v1)
+      const decoded = Schema.decodeUnknownSync(Config.Info)(migrated, { errors: "all" })
+      expect(decoded.tool_output?.dispatch_max_tokens).toBe(5_000)
+      expect(decoded.compaction?.keep?.turns).toBe(0)
+      expect(decoded.compaction?.keep?.tokens).toBe(3_000)
+      expect(decoded.compaction?.context_safety_fraction).toBe(0.7)
+      expect(decoded.compaction?.state_ledger).toBe(true)
+      expect(decoded.compaction?.ledger_max_tokens).toBe(400)
+      expect(decoded.compaction?.ledger_recent_calls).toBe(8)
+      expect(decoded.compaction?.summary_carry).toBe(false)
+      expect(decoded.compaction?.summary_first_person).toBe(true)
+      expect(decoded.compaction?.pin_task).toBe(true)
+      expect(decoded.compaction?.pin_max_tokens).toBe(2_048)
+      expect(decoded.compaction?.pin_window_fraction).toBe(0.15)
+      expect(decoded.compaction?.pin_card_max_tokens).toBe(300)
+      expect(decoded.experimental?.starvation_breaker?.mode).toBe("armed")
+      expect(decoded.experimental?.starvation_breaker?.max_turns_without_mutation).toBe(10)
+      expect(decoded.experimental?.starvation_breaker?.repeat_signature_threshold).toBe(4)
+      expect(decoded.experimental?.starvation_breaker?.doom_loop_threshold).toBe(5)
+      expect(decoded.experimental?.starvation_breaker?.polling_threshold_multiplier).toBe(6)
+      expect(decoded.experimental?.starvation_breaker?.polling_pattern).toBe("\\b(sleep)\\b")
+      expect(decoded.experimental?.starvation_breaker?.exempt_agents).toEqual(["plan"])
+      expect(decoded.experimental?.starvation_breaker?.generated_path_patterns).toEqual(["dist/"])
+    }),
+  )
+  // altimate_change end
+
+  // altimate_change start — normalize the safety fraction at runtime instead
+  // of rejecting (and thereby dropping) an otherwise valid config document.
+  // pin_window_fraction has no runtime clamp, so it remains schema-bounded.
+  it.effect("V2 accepts clampable context_safety_fraction values but bounds pin_window_fraction", () =>
+    Effect.sync(() => {
+      const decodeCompaction = (compaction: Record<string, unknown>) =>
+        Schema.decodeUnknownResult(Config.Info)({ compaction })
+
+      expect(decodeCompaction({ context_safety_fraction: 0.05 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 1.5 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 0.65 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: Number.NaN })._tag).toBe("Failure")
+      expect(decodeCompaction({ context_safety_fraction: Number.POSITIVE_INFINITY })._tag).toBe("Failure")
+      expect(decodeCompaction({ context_safety_fraction: Number.NEGATIVE_INFINITY })._tag).toBe("Failure")
+
+      expect(decodeCompaction({ pin_window_fraction: -0.1 })._tag).toBe("Failure")
+      expect(decodeCompaction({ pin_window_fraction: 1.1 })._tag).toBe("Failure")
+      expect(decodeCompaction({ pin_window_fraction: 0.175 })._tag).toBe("Success")
+    }),
+  )
+
+  it.effect("V1 and V2 retain out-of-range safety fractions for runtime clamping", () =>
+    Effect.sync(() => {
+      const decodeCompaction = (compaction: Record<string, unknown>) =>
+        Schema.decodeUnknownResult(Config.Info)({ compaction })
+      expect(decodeCompaction({ context_safety_fraction: 0.1 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 1 })._tag).toBe("Success")
+      expect(decodeCompaction({ context_safety_fraction: 0.099 })._tag).toBe("Success")
+
+      const decodeV1 = (compaction: Record<string, unknown>) =>
+        Schema.decodeUnknownResult(ConfigV1.Info)({ compaction })
+      expect(decodeV1({ context_safety_fraction: 0.1 })._tag).toBe("Success")
+      expect(decodeV1({ context_safety_fraction: 1 })._tag).toBe("Success")
+      expect(decodeV1({ context_safety_fraction: 0.099 })._tag).toBe("Success")
+    }),
+  )
+  // altimate_change end
 
   it.effect("migrates v1 provider setup options into AISDK settings", () =>
     Effect.sync(() => {
@@ -620,7 +747,7 @@ describe("Config", () => {
             expect(documents[0]?.info.compaction).toEqual({
               auto: true,
               prune: undefined,
-              keep: { tokens: 2000 },
+              keep: { tokens: 2000, turns: 3 },
               buffer: 10000,
             })
             expect(documents[0]?.info.mcp).toMatchObject({

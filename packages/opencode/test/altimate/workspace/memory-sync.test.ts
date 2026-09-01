@@ -87,6 +87,20 @@ function stubFetch() {
       return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
     }
     const payload = (() => {
+      // Server-side binding lookup, used when no local cache entry exists.
+      if (url.includes("/datamate-project-bindings/by-")) {
+        if (!serverBinding) return { detail: "not found" }
+        return {
+          binding: {
+            id: 5,
+            datamate_id: serverBinding.datamateId,
+            datamate_name: serverBinding.datamateName,
+            repo_remote: serverBinding.repoRemote,
+            project_path: serverBinding.projectPath,
+          },
+          datamate: { id: serverBinding.datamateId, name: serverBinding.datamateName },
+        }
+      }
       if (url.includes("/datamates/memory/list")) return listResponse
       if (url.includes("/datamates/memory/")) {
         // A created record becomes visible to later reads, as it would on the
@@ -103,8 +117,10 @@ function stubFetch() {
       if (url.includes("/datamates/")) return { datamates: workspaces }
       return { message: "ok" }
     })()
+    const status =
+      url.includes("/datamate-project-bindings/by-") && !serverBinding ? 404 : 200
     return new Response(JSON.stringify(payload), {
-      status: 200,
+      status,
       headers: { "Content-Type": "application/json" },
     })
   }) as typeof fetch
@@ -128,6 +144,10 @@ function block(over: Partial<any> = {}): any {
   }
 }
 
+/** When set, the stubbed server reports this project as bound. Null means the
+ * lookup 404s, exactly as an unbound remote does. */
+let serverBinding: typeof BINDING | null = null
+
 const BINDING = {
   datamateId: 42,
   datamateName: "acme",
@@ -142,6 +162,7 @@ beforeEach(() => {
   listFails = false
   createResult = [{ id: "mem-new" }]
   workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
+  serverBinding = null
   stubCreds("acme", "https://api.example.com")
   stubFetch()
   resetOverlay()
@@ -153,6 +174,10 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  // Reset the server-binding fixture too: tests that delete the resolveBinding
+  // seam fall through to the real lookup, so a leaked value from a previous
+  // test would decide their outcome.
+  serverBinding = null
   ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured =
     originalIsConfigured
   ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials =
@@ -582,6 +607,7 @@ describe("memory_enabled", () => {
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
 
     workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
+  serverBinding = null
     captured = []
     await mirrorBlock(block({ id: "after-enable" }))
     expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
@@ -1078,5 +1104,50 @@ describe("whenHydrated", () => {
     const elapsed = Date.now() - started
     expect(elapsed).toBeGreaterThanOrEqual(100)
     expect(elapsed).toBeLessThan(2_000)
+  })
+})
+
+// ── binding resolution ──────────────────────────────────────────────────────
+describe("binding resolution for the mirror", () => {
+  test("mirrors from a directory bound only on the server", async () => {
+    // The local cache is written only by an explicit link, so a directory
+    // holding a repo that IS bound — a git worktree, a second clone, a
+    // teammate's checkout — has no entry. Reading only that cache made the
+    // mirror a silent no-op in every one of those.
+    //
+    // This encodes a DECISION, so it is worth stating plainly: adopting a
+    // server-side binding does enable the ongoing memory mirror, which POSTs
+    // blocks to the workspace. Only the one-shot backfill of memory this
+    // machine already held stays behind an explicit link, via `seededAt`.
+    // The reasoning is that a worktree of a linked repo is the same project by
+    // the same user, and a mirror that silently does nothing there is the bug
+    // being fixed. Flip this test if that trade is ever reversed.
+    delete syncInternals.resolveBinding
+    serverBinding = BINDING
+    const dir = path.join(SANDBOX, "server-bound-proj")
+    mkdirSync(dir, { recursive: true })
+
+    await mirrorBlock(block(), dir)
+
+    const posts = captured.filter(
+      (c) => c.method === "POST" && c.url.includes("/datamates/memory/"),
+    )
+    expect(posts.length).toBe(1)
+  })
+
+  test("an unbound directory still mirrors nothing", async () => {
+    // The fallback must not invent a binding: a 404 means unbound, and an
+    // unbound directory has no workspace to attribute a memory to.
+    delete syncInternals.resolveBinding
+    serverBinding = null
+    const dir = path.join(SANDBOX, "genuinely-unbound-proj")
+    mkdirSync(dir, { recursive: true })
+
+    await mirrorBlock(block(), dir)
+
+    const posts = captured.filter(
+      (c) => c.method === "POST" && c.url.includes("/datamates/memory/"),
+    )
+    expect(posts.length).toBe(0)
   })
 })
