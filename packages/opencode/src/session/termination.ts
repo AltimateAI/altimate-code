@@ -191,9 +191,17 @@ export const RUN_MODE_COMPLETION_INSTRUCTION =
   `response with the literal token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` ` +
   "while work or verification remains."
 
+/**
+ * Agents that receive the run-mode completion-token contract. builder is the
+ * historical carrier; data-qa is the builder-derived opt-in profile (its
+ * headless runs need a termination contract without inheriting the dbt
+ * finish-build ritual, which lives in the prompt packs it omits).
+ */
+const COMPLETION_CONTRACT_AGENTS = new Set(["builder", "data-qa"])
+
 /** The sole gate for injecting the completion-token contract into a prompt. */
 export function completionInstruction(input: { runMode: boolean; agent: string }): string | undefined {
-  return input.runMode && input.agent === "builder" ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
+  return input.runMode && COMPLETION_CONTRACT_AGENTS.has(input.agent) ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
 }
 
 /**

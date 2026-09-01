@@ -2,33 +2,17 @@ import { describe, expect, test } from "bun:test"
 import path from "path"
 import os from "os"
 import fs from "fs"
-import {
-  assemble,
-  BUILDER_PROFILE,
-  DATA_QA_PROFILE,
-  FRAGMENTS,
-  PROMPT_BUILDER,
-  PROMPT_DATA_QA,
-} from "../../src/altimate/prompts/profiles"
+import { PromptProfiles } from "../../src/altimate/prompts/profiles"
+import { EXPECTED_BYTES, EXPECTED_SHA256, sha256 } from "./prompt-identity"
+
+const { assemble, BUILDER_PROFILE, DATA_QA_PROFILE, FRAGMENTS, PROMPT_BUILDER, PROMPT_DATA_QA } = PromptProfiles
 
 // The byte-identity gate for the workload-adaptive harness PR 1 (compile-time
-// split of builder.txt into core + packs).
-//
-// EXPECTED_SHA256 is the sha256 of the pre-split monolithic
-// `src/altimate/prompts/builder.txt` as of the commit that removed it
-// (7bbf8a6d23f5aa880be3e8436d3e74764e5928a4). The assembled default profile must
-// reproduce that file byte-for-byte — this is the entire quality argument for
-// the split: identical bytes, identical behavior, no eval run needed.
-//
-// If this test fails after a deliberate prompt edit, update the pin AND note in
-// the PR that the default prompt bytes changed (that PR then needs its own
-// quality evidence — byte identity no longer covers it).
-const EXPECTED_SHA256 = "17663410dd9accc527b4cbd84558fc577ccc36d33d0428c5c5205d5df25400d7"
-const EXPECTED_BYTES = 14773
-
-function sha256(text: string): string {
-  return new Bun.CryptoHasher("sha256").update(text).digest("hex")
-}
+// split of builder.txt into core + packs). The assembled default profile must
+// reproduce the pre-split builder.txt byte-for-byte — this is the entire
+// quality argument for the split: identical bytes, identical behavior, no eval
+// run needed. The pin lives in ./prompt-identity (shared with the agent
+// registry test and the subprocess helper).
 
 describe("builder profile byte identity", () => {
   test("assembled default profile is byte-identical to the pre-split builder.txt", () => {

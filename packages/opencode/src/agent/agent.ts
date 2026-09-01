@@ -18,9 +18,9 @@ import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 // altimate_change start - import custom agent mode prompts
-// PROMPT_BUILDER is assembled from core + pack fragments (byte-identical to the
-// former builder.txt — see profiles.ts and test/altimate/prompt-profiles.test.ts)
-import { PROMPT_BUILDER, PROMPT_DATA_QA } from "../altimate/prompts/profiles"
+// PromptProfiles.PROMPT_BUILDER is assembled from core + pack fragments (byte-identical
+// to the former builder.txt — see profiles.ts and test/altimate/prompt-profiles.test.ts)
+import { PromptProfiles } from "../altimate/prompts/profiles"
 import { Flag } from "@/flag/flag"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
@@ -227,7 +227,7 @@ export const layer = Layer.effect(
           builder: {
             name: "builder",
             description: "Create and modify dbt models, SQL, and data pipelines. Full read/write access.",
-            prompt: PROMPT_BUILDER,
+            prompt: PromptProfiles.PROMPT_BUILDER,
             options: {},
             permission: Permission.merge(
               defaults,
@@ -318,19 +318,23 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
-          // Opt-in data-qa profile (workload-adaptive harness PR 1): the builder
-          // prompt minus the dbt-specific packs and the Pre-Execution Protocol
-          // (sql-guard) pack; identical tool permissions to builder. Registered
-          // ONLY when ALTIMATE_DATA_QA_PROFILE=1/true is set — nothing selects
-          // it implicitly. Users opt in explicitly via `--agent data-qa`, the
-          // TUI agent cycle, or `agent: "data-qa"` in config.
-          ...(Flag.truthyEnv("ALTIMATE_DATA_QA_PROFILE")
+          // Opt-in data-qa profile (workload-adaptive harness PR 1): the invariant
+          // core + skills catalogue + teammate training — omits the Pre-Execution
+          // Protocol (sql-guard) pack and the build-oriented packs (dbt-ops,
+          // dbt-verify, dbt-workflow, pitfalls, self-review, finish). Ships the
+          // same DEFAULT permission ruleset as builder; per-agent config
+          // overrides apply per agent, as for every agent. Registered ONLY on
+          // explicit opt-in: ALTIMATE_DATA_QA_PROFILE=1/true, or an
+          // `agent: {"data-qa": {...}}` entry in config (which then overlays the
+          // native profile via the standard merge below). Nothing selects it
+          // implicitly; the default agent stays builder.
+          ...(Flag.truthyEnv("ALTIMATE_DATA_QA_PROFILE") || cfg.agent?.["data-qa"] != null
             ? {
                 "data-qa": {
                   name: "data-qa",
                   description:
                     "Opt-in data Q&A profile: builder toolset with a slimmer prompt (no dbt build protocols).",
-                  prompt: PROMPT_DATA_QA,
+                  prompt: PromptProfiles.PROMPT_DATA_QA,
                   options: {},
                   permission: Permission.merge(
                     defaults,

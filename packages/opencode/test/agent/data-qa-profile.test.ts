@@ -10,17 +10,12 @@ import { Plugin } from "../../src/plugin"
 import { Provider } from "../../src/provider/provider"
 import { Skill } from "../../src/skill"
 import { LocationServiceMap } from "@opencode-ai/core/location-layer"
-import { PROMPT_BUILDER, PROMPT_DATA_QA } from "../../src/altimate/prompts/profiles"
+import { PromptProfiles } from "../../src/altimate/prompts/profiles"
+import { EXPECTED_SHA256, sha256 } from "../altimate/prompt-identity"
 
 // Registry-level tests for the opt-in data-qa profile (workload-adaptive
 // harness PR 1). Exercises the REAL Agent service (config load + agent list
 // build) — the same code path `session/llm.ts` reads `input.agent.prompt` from.
-
-const EXPECTED_SHA256 = "17663410dd9accc527b4cbd84558fc577ccc36d33d0428c5c5205d5df25400d7"
-
-function sha256(text: string): string {
-  return new Bun.CryptoHasher("sha256").update(text).digest("hex")
-}
 
 const agentLayer = () =>
   Agent.layer.pipe(
@@ -60,7 +55,7 @@ it.instance("with no selection mechanism engaged, data-qa does not exist and bui
     // The default profile the product actually serves is byte-identical to the
     // pre-split builder.txt.
     const builder = yield* load((svc) => svc.get("builder"))
-    expect(builder?.prompt).toBe(PROMPT_BUILDER)
+    expect(builder?.prompt).toBe(PromptProfiles.PROMPT_BUILDER)
     expect(sha256(builder?.prompt ?? "")).toBe(EXPECTED_SHA256)
   }),
 )
@@ -71,7 +66,7 @@ it.instance("ALTIMATE_DATA_QA_PROFILE=1 registers data-qa as an explicitly selec
     const dataQa = yield* load((svc) => svc.get("data-qa"))
     expect(dataQa).toBeDefined()
     expect(dataQa?.mode).toBe("primary")
-    expect(dataQa?.prompt).toBe(PROMPT_DATA_QA)
+    expect(dataQa?.prompt).toBe(PromptProfiles.PROMPT_DATA_QA)
     // Opt-in registration must not disturb the default profile.
     const builder = yield* load((svc) => svc.get("builder"))
     expect(sha256(builder?.prompt ?? "")).toBe(EXPECTED_SHA256)
@@ -80,4 +75,30 @@ it.instance("ALTIMATE_DATA_QA_PROFILE=1 registers data-qa as an explicitly selec
     const fallback = yield* load((svc) => svc.defaultAgent())
     expect(fallback).toBe("builder")
   }),
+)
+
+it.instance(
+  "an explicit agent config entry for data-qa also opts in (native profile + config overlay)",
+  () =>
+    Effect.gen(function* () {
+      // No env flag — the config entry itself is the explicit opt-in. The
+      // native profile registers and the standard config merge overlays it, so
+      // the user gets the real data-qa prompt rather than a bare custom agent.
+      const dataQa = yield* load((svc) => svc.get("data-qa"))
+      expect(dataQa).toBeDefined()
+      expect(dataQa?.native).toBe(true)
+      expect(dataQa?.prompt).toBe(PromptProfiles.PROMPT_DATA_QA)
+      // Still nothing implicit: the default agent remains builder.
+      const fallback = yield* load((svc) => svc.defaultAgent())
+      expect(fallback).toBe("builder")
+    }),
+  {
+    config: {
+      agent: {
+        "data-qa": {
+          description: "opted in via config",
+        },
+      },
+    },
+  },
 )
