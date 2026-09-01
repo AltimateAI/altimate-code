@@ -20,6 +20,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { NamedError } from "@opencode-ai/util/error"
 import type { LLM } from "./llm"
 // altimate_change start — completion-aware continue nudge via the nudge arbiter
+import { DEFAULT_SAFETY_FRACTION } from "./tool-result-cap"
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Flag } from "@/flag/flag"
@@ -155,7 +156,11 @@ export namespace SessionCompaction {
   // exact and is always compared against the raw limit minus headroom —
   // scaling exact counts by the fraction forfeited ~35% of every window for
   // sessions whose counts contain no estimate at all.
-  const DEFAULT_CONTEXT_SAFETY_FRACTION = 0.65
+  // altimate_change start — was a second bare `0.65`, cross-referenced to
+  // `tool-result-cap.ts` by comment only. The two had already drifted once;
+  // a comment cannot keep them equal, so take the exported value. (review)
+  const DEFAULT_CONTEXT_SAFETY_FRACTION = DEFAULT_SAFETY_FRACTION
+  // altimate_change end
   // Trigger floor for small-context models where the safety fraction would push
   // the threshold to ~0 tokens — firing on a near-empty session would livelock
   // compaction. Clamped to the raw threshold so the margin can only ever make
