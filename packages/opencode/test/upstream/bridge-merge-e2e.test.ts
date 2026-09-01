@@ -524,10 +524,13 @@ describe("E2E: chat.params maxOutputTokens hook (cycle 6)", () => {
     expect(hookBlock).toMatch(/maxOutputTokens/)
   })
 
-  test("session/llm.ts reads params.maxOutputTokens (not the local var) for streamText", async () => {
+  test("session/llm.ts routes params.maxOutputTokens through the context clamp", async () => {
     const content = readFileSync(path.join(srcDir, "session", "llm.ts"), "utf-8")
-    // streamText config must reference params.maxOutputTokens
-    expect(content).toMatch(/maxOutputTokens:\s*params\.maxOutputTokens/)
+    // altimate_change start — the plugin result is now clamped before streamText receives it
+    expect(content).toMatch(/requested:\s*params\.maxOutputTokens/)
+    expect(content).toMatch(/const maxOutputTokens = clampOutputTokens/)
+    expect(content).toMatch(/return streamText\([\s\S]*?(?<![.\w])maxOutputTokens,/)
+    // altimate_change end
   })
 
   test("plugin/codex.ts chat.params hook still sets output.maxOutputTokens = undefined", async () => {

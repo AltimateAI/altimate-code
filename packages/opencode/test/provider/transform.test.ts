@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
+import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { ProviderTransform } from "@/provider/transform"
+import {
+  clampOutputTokens,
+  clampReasoningBudget,
+  effectiveContextWindow,
+  estimateInputTokens,
+  InputTokenBudgetError,
+  OUTPUT_TOKEN_FLOOR,
+  OutputTokenBudgetError,
+} from "@/provider/output-token-budget"
 import { LLMRequestPrep } from "@/session/llm/request"
 // ProviderTransform.message expects a Provider.Model with the fork's ModelID/ProviderID brands.
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -1922,6 +1932,22 @@ describe("ProviderTransform.message - empty image handling", () => {
     expect(result[0].content).toHaveLength(2)
     expect(result[0].content[0]).toEqual({ type: "text", text: "What is in this image?" })
     expect(result[0].content[1]).toEqual({
+      type: "text",
+      text: "ERROR: Image file is empty or corrupted. Please provide a valid image.",
+    })
+  })
+
+  test("should replace an empty base64 image wrapped in a URL object", () => {
+    const msgs = [
+      {
+        role: "user",
+        content: [{ type: "image", image: new URL("data:image/png;base64,") }],
+      },
+    ] as any[]
+
+    const result = ProviderTransform.message(msgs, mockModel, {})
+
+    expect(result[0].content[0]).toEqual({
       type: "text",
       text: "ERROR: Image file is empty or corrupted. Please provide a valid image.",
     })
@@ -4648,5 +4674,900 @@ describe("ProviderTransform.providerOptions - ai-gateway-provider", () => {
     // which @ai-sdk/openai-compatible never reads, silently dropping reasoningEffort.
     const result = ProviderTransform.providerOptions(createModel(), { reasoningEffort: "high" })
     expect(result).toEqual({ openaiCompatible: { reasoningEffort: "high" } })
+  })
+})
+
+// Regression suite for the output-token reservation exceeding the context window.
+//
+// Reported failure: with a large system prompt on a model declaring a 65,536-token window, the
+// shipped 16,384-token reservation produced a hard provider 400 before any model work —
+// "You requested a total of 68564 tokens: 52180 tokens from the input messages and 16384 tokens
+// for the completion". The reservation was applied without ever being compared to the input size.
+describe("output token budget", () => {
+  const createWindowModel = (limit: { context: number; input?: number; output: number }) =>
+    ({
+      id: "large-window-model",
+      providerID: "openai-compatible",
+      api: { id: "large-window-model", url: "https://example.invalid/v1", npm: "@ai-sdk/openai-compatible" },
+      name: "Large Window Model",
+      capabilities: {
+        temperature: true,
+        reasoning: false,
+        attachment: false,
+        toolcall: true,
+        input: { text: true, audio: false, image: false, video: false, pdf: false },
+        output: { text: true, audio: false, image: false, video: false, pdf: false },
+        interleaved: false,
+      },
+      cost: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+      limit,
+      status: "active",
+      options: {},
+      headers: {},
+    }) as any
+
+  // The exact reported case.
+  const REPORTED = { inputTokens: 52_180, requested: 16_384, context: 65_536 }
+
+  test("the reported case is clamped instead of being sent as-is", () => {
+    const model = createWindowModel({ context: REPORTED.context, output: 16_384 })
+    const result = clampOutputTokens({
+      model,
+      requested: REPORTED.requested,
+      inputTokens: REPORTED.inputTokens,
+    })!
+
+    // Unclamped, this is exactly the request the provider rejected.
+    expect(REPORTED.inputTokens + REPORTED.requested).toBeGreaterThan(REPORTED.context)
+    expect(result).toBeLessThan(REPORTED.requested)
+    // The clamped request fits, with the estimator margin (2%, min 512) still spare.
+    expect(REPORTED.inputTokens + result).toBeLessThanOrEqual(REPORTED.context)
+    // 65536 - 52180 - ceil(52180 * 0.02) = 12312
+    expect(result).toBe(12_312)
+    // Still a usable completion budget, not a stub.
+    expect(result).toBeGreaterThanOrEqual(OUTPUT_TOKEN_FLOOR)
+  })
+
+  test("throws with the actual numbers when even the floor does not fit", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    let thrown: unknown
+    try {
+      clampOutputTokens({ model, requested: 16_384, inputTokens: 65_000 })
+    } catch (e) {
+      thrown = e
+    }
+    expect(thrown).toBeInstanceOf(OutputTokenBudgetError)
+    const message = (thrown as Error).message
+    // The message must name input tokens, the requested reservation and the window.
+    expect(message).toContain("65000")
+    expect(message).toContain("16384")
+    expect(message).toContain("65536")
+    expect(message).toContain("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX")
+  })
+
+  test("throws rather than clamping to an unusable budget just above zero", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    // 65536 - 65000 = 536 would "fit" arithmetically but is below the floor.
+    expect(536).toBeLessThan(OUTPUT_TOKEN_FLOOR)
+    expect(() => clampOutputTokens({ model, requested: 16_384, inputTokens: 65_000 })).toThrow()
+  })
+
+  test("leaves a config that already fits completely unchanged", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    expect(clampOutputTokens({ model, requested: 16_384, inputTokens: 10_000 })).toBe(16_384)
+    // An exact estimated fit still needs room for estimator drift.
+    expect(clampOutputTokens({ model, requested: 16_384, inputTokens: 49_152 })).toBe(15_400)
+  })
+
+  test("leaves large-window models unchanged", () => {
+    const model = createWindowModel({ context: 200_000, output: 8_192 })
+    expect(clampOutputTokens({ model, requested: 8_192, inputTokens: 150_000 })).toBe(8_192)
+  })
+
+  test("still clamps models that also declare an input ceiling", () => {
+    // limit.input is an input ceiling, not evidence that completion tokens use a separate window.
+    const model = createWindowModel({ context: 65_536, input: 65_536, output: 16_384 })
+    expect(clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(4_336)
+  })
+
+  test("rejects a prompt that exceeds a dedicated input ceiling", () => {
+    const model = createWindowModel({ context: 200_000, input: 65_536, output: 16_384 })
+    expect(() => clampOutputTokens({ model, requested: 16_384, inputTokens: 70_000 })).toThrow(InputTokenBudgetError)
+  })
+
+  test("does not clamp when the model declares no context window", () => {
+    const model = createWindowModel({ context: 0, output: 16_384 })
+    expect(clampOutputTokens({ model, requested: 16_384, inputTokens: 60_000 })).toBe(16_384)
+  })
+
+  test("never demands more headroom than the model's own output reservation", () => {
+    const model = createWindowModel({ context: 8_192, output: 512 })
+    expect(clampOutputTokens({ model, requested: 512, inputTokens: 7_516 })).toBe(512)
+    // One token more would require discarding the estimator margin. Refuse instead of sending an
+    // exact-fill request that is likely to reproduce the provider context error.
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 7_517 })).toThrow(OutputTokenBudgetError)
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 8_000 })).toThrow(OutputTokenBudgetError)
+  })
+
+  test("enforces real context windows at or below the default output floor", () => {
+    const model = createWindowModel({ context: 512, output: 512 })
+    expect(clampOutputTokens({ model, requested: 1, inputTokens: 1 })).toBe(1)
+    expect(() => clampOutputTokens({ model, requested: 512, inputTokens: 1 })).toThrow(OutputTokenBudgetError)
+  })
+
+  test("scales the safety margin for a small dedicated input ceiling", () => {
+    const model = createWindowModel({ context: 200_000, input: 512, output: 1 })
+    expect(clampOutputTokens({ model, requested: 1, inputTokens: 501 })).toBe(1)
+    expect(() => clampOutputTokens({ model, requested: 1, inputTokens: 502 })).toThrow(InputTokenBudgetError)
+  })
+
+  test("passes an omitted reservation through untouched", () => {
+    // Codex and GitHub Copilot deliberately send no maxOutputTokens.
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    expect(clampOutputTokens({ model, requested: undefined, inputTokens: 60_000 })).toBeUndefined()
+  })
+
+  test("does not evaluate a lazy estimate when the reservation is omitted", () => {
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    let evaluated = false
+    expect(
+      clampOutputTokens({
+        model,
+        requested: undefined,
+        inputTokens: () => {
+          evaluated = true
+          return 60_000
+        },
+      }),
+    ).toBeUndefined()
+    expect(evaluated).toBeFalse()
+  })
+
+  test("counts tool schemas and provider instructions", () => {
+    const base = estimateInputTokens({ system: ["system"], messages: [{ role: "user", content: "hello" }] })
+    const complete = estimateInputTokens({
+      system: ["system"],
+      messages: [{ role: "user", content: "hello" }],
+      instructions: "provider instruction ".repeat(400),
+      tools: {
+        search: {
+          description: "search fields ".repeat(400),
+          inputSchema: { type: "object", properties: { query: { type: "string" } } },
+        },
+      },
+    })
+    expect(complete).toBeGreaterThan(base + 1_000)
+  })
+
+  test("counts identical system and instructions as separate wire occurrences", () => {
+    const prompt = "same provider instruction ".repeat(1_000)
+    const systemOnly = estimateInputTokens({ system: [prompt], messages: [] })
+    const both = estimateInputTokens({ system: [prompt], messages: [], instructions: prompt })
+
+    expect(both).toBeGreaterThan(systemOnly * 1.8)
+  })
+
+  test("counts framing for every separately transmitted system message", () => {
+    const entries = Array.from({ length: 2_000 }, () => "x")
+    const flattened = estimateInputTokens({ system: [entries.join("\n")], messages: [] })
+    const framed = estimateInputTokens({ system: entries, messages: [] })
+
+    expect(framed).toBeGreaterThan(flattened + entries.length)
+  })
+
+  test("charges dense high-entropy ASCII more conservatively than repetitive text", () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    let state = 0x12345678
+    const dense = Array.from({ length: 8_192 }, () => {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0
+      return alphabet[state & 63]
+    }).join("")
+    const repetitive = "x".repeat(dense.length)
+    const estimate = (content: string) => estimateInputTokens({ system: [], messages: [{ role: "user", content }] })
+
+    expect(estimate(dense)).toBeGreaterThan(8_000)
+    expect(estimate(dense)).toBeGreaterThan(estimate(repetitive) * 3)
+
+    const shortDense = alphabet.slice(0, 32)
+    for (let padding = 0; padding < 400; padding++) {
+      const prefix = " ".repeat(padding)
+      expect(estimate(prefix + shortDense)).toBeGreaterThan(estimate(prefix + "x".repeat(32)) + 15)
+    }
+  })
+
+  test("does not tokenize encoded media bytes as literal prompt text", () => {
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", image: `data:image/png;base64,${"A".repeat(1_048_576)}` }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThan(2_000)
+    expect(estimated).toBeLessThan(10_000)
+  })
+
+  test("counts data-URL-shaped text in every textual request field", () => {
+    const prefixes = [
+      "data:image/png;base64,",
+      "data:audio/wav;base64,",
+      "data:video/mp4;base64,",
+      "data:application/pdf;base64,",
+    ]
+    for (const prefix of prefixes) {
+      const text = prefix + "漢".repeat(70_000)
+      expect(
+        estimateInputTokens({
+          system: [],
+          messages: [{ role: "user", content: [{ type: "text", text }] }],
+        }),
+      ).toBeGreaterThan(70_000)
+    }
+
+    const text = prefixes[0] + "漢".repeat(70_000)
+    const estimates = [
+      estimateInputTokens({ system: [], messages: [{ role: "user", content: text }] }),
+      estimateInputTokens({ system: [], messages: [], instructions: text }),
+      estimateInputTokens({
+        system: [],
+        messages: [],
+        tools: { inspect: { description: text, inputSchema: { type: "object" } } },
+      }),
+      estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool-call", toolCallId: "call-1", toolName: "inspect", input: { type: "file", data: text } },
+            ],
+          },
+        ],
+      }),
+      estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image", image: "data:image/png;base64,AQ==", filename: text }],
+          },
+        ],
+      }),
+    ]
+    for (const estimated of estimates) expect(estimated).toBeGreaterThan(70_000)
+
+    const model = createWindowModel({ context: 65_536, output: 16_384 })
+    expect(() => clampOutputTokens({ model, requested: 16_384, inputTokens: estimates[0] })).toThrow(
+      OutputTokenBudgetError,
+    )
+  })
+
+  test("charges the same fixed allowance for URL-backed media", () => {
+    const base = estimateInputTokens({ system: [], messages: [{ role: "user", content: "show this" }] })
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", image: new URL("https://example.com/tiny.png") }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThan(base + 2_000)
+    expect(estimated).toBeLessThan(base + 3_000)
+  })
+
+  test("keeps binary images bounded while scaling PDF estimates with document size", () => {
+    const binaryImage = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "image", image: new Uint8Array(1_048_576) }],
+        },
+      ],
+    })
+    const pdfToolResult = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "read",
+              output: {
+                type: "content",
+                value: [{ type: "media", mediaType: "application/pdf", data: "A".repeat(1_048_576) }],
+              },
+            },
+          ],
+        },
+      ],
+    })
+    expect(binaryImage).toBeGreaterThan(2_000)
+    expect(binaryImage).toBeLessThan(10_000)
+    expect(pdfToolResult).toBeGreaterThan(100_000)
+  })
+
+  test("does not trust unparsed PDF metadata as page-count evidence", () => {
+    const marker = "/Type /Pages /Count 600"
+    const variants = [
+      ["%PDF-1.4", `% ${marker}`, "1 0 obj << /Type /Pages /Count 1 >> endobj", "%%EOF"].join("\n"),
+      ["%PDF-1.4", `1 0 obj << /Note (${marker}) >> endobj`, "%%EOF"].join("\n"),
+      ["%PDF-1.4", "1 0 obj << /Length 24 >> stream", marker, "endstream endobj", "%%EOF"].join("\n"),
+      ["%PDF-1.4", `99 0 obj << ${marker} >> endobj`, "%%EOF"].join("\n"),
+    ]
+    const estimate = (data: string | Uint8Array | ArrayBuffer) =>
+      estimateInputTokens({
+        system: [],
+        messages: [{ role: "user", content: [{ type: "file", mediaType: "application/pdf", data }] }],
+      })
+
+    for (const pdf of variants) {
+      const bytes = new Uint8Array(Buffer.from(pdf, "latin1"))
+      const payloads = [
+        Buffer.from(bytes).toString("base64"),
+        `data:application/pdf;base64,${Buffer.from(bytes).toString("base64")}`,
+        bytes,
+        bytes.buffer,
+      ]
+      for (const payload of payloads) {
+        const estimated = estimate(payload)
+        expect(estimated).toBeGreaterThan(32_000)
+        expect(estimated).toBeLessThan(40_000)
+        expect(
+          clampOutputTokens({
+            model: createWindowModel({ context: 200_000, input: 180_000, output: 16_384 }),
+            requested: 16_384,
+            inputTokens: estimated,
+          }),
+        ).toBe(16_384)
+      }
+    }
+  })
+
+  test("never lets a page marker suppress the PDF byte-size floor", () => {
+    const pdf = ["%PDF-1.7", "1 0 obj << /Type /Page >> endobj", "x".repeat(200_000), "%%EOF"].join("\n")
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: Buffer.from(pdf).toString("base64") }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThan(200_000)
+  })
+
+  test("bounds malformed data-URL header inspection and keeps its size floor", () => {
+    const lateDelimiter = [
+      "data:application/pdf",
+      "x".repeat(70 * 1_024),
+      ",%PDF-1.7 << /Type /Pages /Count 600 >> %%EOF",
+    ].join("")
+    const lateEstimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: lateDelimiter }],
+        },
+      ],
+    })
+    // The comma is outside the bounded data-URL header prefix. The full string still establishes
+    // a conservative size floor without inspecting attacker-controlled PDF metadata.
+    expect(lateEstimated).toBeGreaterThan(70_000)
+    expect(lateEstimated).toBeLessThan(100_000)
+
+    const missingDelimiter = `data:application/pdf${"A".repeat(100_000)}`
+    const missingEstimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "application/pdf", data: missingDelimiter }],
+        },
+      ],
+    })
+    expect(missingEstimated).toBeGreaterThan(100_000)
+  })
+
+  test("scales inline non-PDF files with decoded payload size", () => {
+    const text = "漢".repeat(50_000)
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "text/plain", data: Buffer.from(text, "utf8").toString("base64") }],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThanOrEqual(150_000)
+  })
+
+  test("uses semantic baselines plus a coarse size floor for audio and video", () => {
+    const estimate = (mediaType: string, data: string) =>
+      estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "file", mediaType, data }],
+          },
+        ],
+      })
+
+    const tinyAudio = estimate("audio/wav", "AQ==")
+    const tinyVideo = estimate("video/mp4", "AQ==")
+    expect(tinyAudio).toBeGreaterThan(8_000)
+    expect(tinyAudio).toBeLessThan(10_000)
+    expect(tinyVideo).toBeGreaterThan(8_000)
+    expect(tinyVideo).toBeLessThan(10_000)
+
+    const smallContext = createWindowModel({ context: 16_384, output: 8_192 })
+    expect(clampOutputTokens({ model: smallContext, requested: 8_192, inputTokens: tinyVideo })).toBeGreaterThan(
+      OUTPUT_TOKEN_FLOOR,
+    )
+
+    const oneMiB = "A".repeat(1_398_104)
+    expect(estimate("audio/wav", oneMiB)).toBeGreaterThan(16_000)
+    expect(estimate("audio/wav", oneMiB)).toBeLessThan(20_000)
+    expect(estimate("video/mp4", oneMiB)).toBeGreaterThan(16_000)
+    expect(estimate("video/mp4", oneMiB)).toBeLessThan(20_000)
+
+    const fourMiB = "A".repeat(5_592_408)
+    expect(estimate("audio/wav", fourMiB)).toBeGreaterThan(65_000)
+    expect(estimate("video/mp4", fourMiB)).toBeGreaterThan(65_000)
+  })
+
+  test("uses a fixed parser-free fallback for remote PDFs", () => {
+    const estimated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "file", mediaType: "application/pdf", data: new URL("https://example.invalid/report.pdf") },
+          ],
+        },
+      ],
+    })
+    expect(estimated).toBeGreaterThan(32_000)
+    expect(estimated).toBeLessThan(40_000)
+  })
+
+  test("counts every AI SDK v6 tool-result media variant once per transport occurrence", () => {
+    const payload = "A".repeat(1_048_576)
+    const variants = [
+      { type: "media" as const, mediaType: "application/pdf", data: payload },
+      { type: "file-data" as const, mediaType: "application/pdf", data: payload },
+      { type: "file-url" as const, url: `https://example.invalid/${payload}` },
+      { type: "file-id" as const, fileId: { openai: payload } },
+      { type: "image-data" as const, mediaType: "image/png", data: payload },
+      { type: "image-url" as const, url: `https://example.invalid/${payload}` },
+      { type: "image-file-id" as const, fileId: { openai: payload } },
+    ]
+
+    for (const variant of variants) {
+      const estimated = estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call-1",
+                toolName: "read",
+                output: { type: "content", value: [variant] },
+              },
+            ],
+          },
+        ],
+      })
+      if (variant.type.startsWith("image")) {
+        expect(estimated).toBeGreaterThan(2_000)
+        expect(estimated).toBeLessThan(10_000)
+      } else {
+        expect(estimated).toBeGreaterThan(16_000)
+      }
+    }
+
+    const shared = { type: "image-data" as const, mediaType: "image/png", data: "AQ==" }
+    const repeated = estimateInputTokens({
+      system: [],
+      messages: [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "read",
+              output: { type: "content", value: Array.from({ length: 64 }, () => shared) },
+            },
+          ],
+        },
+      ],
+    })
+    expect(repeated).toBeGreaterThan(64 * 2_000)
+  })
+
+  test("projects unsupported media before estimation without discounting supported media", () => {
+    const unsupported = createWindowModel({ context: 65_536, output: 16_384 })
+    const messages = [
+      {
+        role: "user",
+        content: Array.from({ length: 64 }, () => ({
+          type: "image" as const,
+          image: "data:image/png;base64,AQ==",
+        })),
+      },
+    ] satisfies ModelMessage[]
+
+    const projected = ProviderTransform.messagesForInputEstimate(messages, unsupported)
+    expect((messages[0].content[0] as { type: string }).type).toBe("image")
+    expect((projected[0]!.content[0] as { type: string }).type).toBe("text")
+    const projectedEstimate = estimateInputTokens({ system: [], messages: projected })
+    expect(projectedEstimate).toBeLessThan(10_000)
+    expect(clampOutputTokens({ model: unsupported, requested: 16_384, inputTokens: projectedEstimate })).toBe(16_384)
+
+    const supported = {
+      ...unsupported,
+      capabilities: {
+        ...unsupported.capabilities,
+        input: { ...unsupported.capabilities.input, image: true },
+      },
+    }
+    const preserved = ProviderTransform.messagesForInputEstimate(messages, supported)
+    expect((preserved[0]!.content[0] as { type: string }).type).toBe("image")
+    expect(estimateInputTokens({ system: [], messages: preserved })).toBeGreaterThan(64 * 2_000)
+  })
+
+  test("projects every valid unsupported image payload and case-normalized file media type", () => {
+    const unsupported = createWindowModel({ context: 65_536, output: 16_384 })
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "image" as const, image: new URL("https://example.invalid/image.png") },
+          { type: "image" as const, image: "AQ==" },
+          { type: "image" as const, image: new Uint8Array([1]) },
+          { type: "image" as const, image: new Uint8Array([1]).buffer },
+          { type: "image" as const, image: "DATA:IMAGE/PNG;BASE64,AQ==" },
+          { type: "file" as const, data: "AQ==", mediaType: "IMAGE/PNG" },
+          { type: "file" as const, data: "AQ==", mediaType: "APPLICATION/PDF; VERSION=1.7" },
+        ],
+      },
+    ] satisfies ModelMessage[]
+
+    const projected = ProviderTransform.messagesForInputEstimate(messages, unsupported)
+    expect((projected[0]!.content as Array<{ type: string }>).every((part) => part.type === "text")).toBeTrue()
+    expect(estimateInputTokens({ system: [], messages: projected })).toBeLessThan(10_000)
+    expect((messages[0].content as Array<{ type: string }>).every((part) => part.type !== "text")).toBeTrue()
+  })
+
+  test("projects Mistral's synthetic tool-to-user bridge before estimation", () => {
+    const model = {
+      ...createWindowModel({ context: 65_536, output: 16_384 }),
+      providerID: "mistral",
+      api: { id: "mistral-large", url: "https://example.invalid/v1", npm: "@ai-sdk/mistral" },
+    }
+    const messages = Array.from({ length: 64 }, (_, index) => [
+      { role: "tool" as const, content: [] },
+      { role: "user" as const, content: `continue ${index}` },
+    ]).flat() as ModelMessage[]
+
+    const projected = ProviderTransform.messagesForInputEstimate(messages, model)
+    const normalized = ProviderTransform.message(structuredClone(messages), model, {})
+
+    expect(projected).toEqual(normalized)
+    expect(projected).toHaveLength(messages.length + 64)
+    expect(estimateInputTokens({ system: [], messages: projected })).toBeGreaterThan(
+      estimateInputTokens({ system: [], messages }) + 1_000,
+    )
+  })
+
+  test("counts repeated shared tool objects while terminating true cycles", () => {
+    const sharedTool = tool({
+      description: "shared schema documentation ".repeat(1_200),
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: { query: { type: "string", description: "query details ".repeat(1_200) } },
+      }),
+    })
+    const once = estimateInputTokens({ system: [], messages: [], tools: { first: sharedTool } })
+    const twice = estimateInputTokens({ system: [], messages: [], tools: { first: sharedTool, second: sharedTool } })
+    expect(twice).toBeGreaterThan(once * 1.8)
+
+    const circular: Record<string, unknown> = { text: "still counted" }
+    circular.self = circular
+    expect(estimateInputTokens({ system: [], messages: [circular] })).toBeGreaterThan(0)
+  })
+
+  test("uses a conservative multilingual floor instead of the ASCII ratio", () => {
+    const text = "漢".repeat(10_000)
+    expect(estimateInputTokens({ system: [text], messages: [] })).toBeGreaterThanOrEqual(10_000)
+  })
+
+  test("honors the known one-million-token Anthropic beta header", () => {
+    const model = createWindowModel({ context: 200_000, output: 16_384 })
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [{ aiGatewayHeaders: { "anthropic-beta": "context-1m-2025-08-07" } }],
+      }),
+    ).toBe(1_000_000)
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [{ "Anthropic-Beta": "context-1m-2025-08-07" }],
+      }),
+    ).toBe(1_000_000)
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [{ aiGatewayHeaders: { "anthropic-beta": "interleaved-thinking-2025-05-14" } }],
+      }),
+    ).toBe(200_000)
+  })
+
+  test("uses the final outgoing Anthropic beta header value", () => {
+    const model = createWindowModel({ context: 200_000, output: 16_384 })
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [
+          { "anthropic-beta": "context-1m-2025-08-07" },
+          { "Anthropic-Beta": "interleaved-thinking-2025-05-14" },
+        ],
+      }),
+    ).toBe(200_000)
+    expect(
+      effectiveContextWindow({
+        model,
+        headerSources: [
+          { "anthropic-beta": "interleaved-thinking-2025-05-14" },
+          { aiGatewayHeaders: { "anthropic-beta": "context-1m-2025-08-07" } },
+        ],
+      }),
+    ).toBe(1_000_000)
+  })
+
+  test("clamps fixed reasoning budgets with the output reservation without mutating inputs", () => {
+    const options = {
+      thinking: { type: "enabled", budgetTokens: 16_000 },
+      thinkingConfig: { thinkingBudget: 16_000 },
+      reasoningConfig: { budgetTokens: 31_999 },
+    }
+    const result = clampReasoningBudget(options, 12_312)
+    expect(result.thinking.budgetTokens).toBe(11_288)
+    expect(result.thinkingConfig.thinkingBudget).toBe(11_288)
+    expect(result.reasoningConfig.budgetTokens).toBe(11_288)
+    expect(options.thinking.budgetTokens).toBe(16_000)
+  })
+
+  test("preserves non-JSON provider options while lowering reasoning budgets", () => {
+    const callback = () => undefined
+    const options = {
+      thinking: { budgetTokens: 31_999 },
+      keepUndefined: undefined,
+      keepFunction: callback,
+      keepBigInt: 10n,
+      nested: [{ thinkingBudget: 31_999 }, { untouched: "value" }],
+    }
+    const result = clampReasoningBudget(options, 8_192)
+    expect(result.thinking.budgetTokens).toBe(7_168)
+    expect(result.nested[0]!.thinkingBudget).toBe(7_168)
+    expect(result.nested[1]!.untouched).toBe("value")
+    expect("keepUndefined" in result).toBeTrue()
+    expect(result.keepFunction).toBe(callback)
+    expect(result.keepBigInt).toBe(10n)
+    expect(options.thinking.budgetTokens).toBe(31_999)
+
+    const unchanged = { thinking: { budgetTokens: 512 } }
+    expect(clampReasoningBudget(unchanged, 8_192)).toBe(unchanged)
+  })
+
+  test("fails clearly when reasoning and visible output cannot both fit", () => {
+    expect(() => clampReasoningBudget({ thinking: { budgetTokens: 16_000 } }, 1_500)).toThrow(
+      /cannot preserve the configured reasoning budget/,
+    )
+  })
+})
+
+describe("LLMRequestPrep.prepare - output token reservation", () => {
+  const sessionID = "ses_clamp-test"
+
+  const model = {
+    id: "large-window-model",
+    providerID: "openai-compatible",
+    api: { id: "large-window-model", url: "https://example.invalid/v1", npm: "@ai-sdk/openai-compatible" },
+    name: "Large Window Model",
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 1, output: 1, cache: { read: 0, write: 0 } },
+    limit: { context: 65_536, output: 16_384 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  const messages: ModelMessage[] = [{ role: "user", content: "Hello" }]
+
+  const run = (
+    systemPrompt: string,
+    overrides: {
+      readonly tools?: Record<string, Tool>
+      readonly agentOptions?: Record<string, unknown>
+      readonly outputTokenMax?: number
+      readonly messages?: ModelMessage[]
+      readonly providerOptions?: Record<string, unknown>
+      readonly modelHeaders?: Record<string, string>
+      readonly chatHeaders?: Record<string, string>
+      readonly isWorkflow?: boolean
+    } = {},
+  ) =>
+    Effect.runPromise(
+      LLMRequestPrep.prepare({
+        user: {
+          id: "msg_user-clamp",
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model: { providerID: "openai-compatible", modelID: "large-window-model" },
+        } as any,
+        sessionID,
+        model: { ...model, headers: overrides.modelHeaders ?? model.headers },
+        agent: {
+          name: "test",
+          mode: "primary",
+          options: overrides.agentOptions ?? {},
+          permission: [],
+          prompt: systemPrompt,
+        } as any,
+        system: [],
+        messages: overrides.messages ?? messages,
+        tools: overrides.tools ?? {},
+        provider: { id: "openai-compatible", options: overrides.providerOptions ?? {} } as any,
+        auth: undefined,
+        plugin: {
+          trigger: (name: string, _input: unknown, output: unknown) => {
+            if (name === "chat.params" && overrides.outputTokenMax !== undefined) {
+              return Effect.succeed({
+                ...(output as Record<string, unknown>),
+                maxOutputTokens: overrides.outputTokenMax,
+              })
+            }
+            if (name === "chat.headers" && overrides.chatHeaders) {
+              return Effect.succeed({ headers: overrides.chatHeaders })
+            }
+            return Effect.succeed(output)
+          },
+          list: () => Effect.succeed([]),
+          init: () => Effect.void,
+        } as any,
+        flags: { outputTokenMax: 32_000, client: "test" } as any,
+        isWorkflow: overrides.isWorkflow ?? false,
+      }),
+    )
+
+  // Prose with no code or JSON characters, so Token.estimate uses its default 3.7 chars/token.
+  const PROSE = "the quick brown fox jumps over the lazy dog "
+  const largePrompt = PROSE.repeat(Math.ceil((52_180 * 3.7) / PROSE.length))
+
+  test("a ~52K-token system prompt does not produce an unclamped request", async () => {
+    const estimated = estimateInputTokens({ system: [largePrompt], messages })
+    // Sized to reproduce the reported 52,180-token prompt.
+    expect(estimated).toBeGreaterThan(51_500)
+    expect(estimated).toBeLessThan(53_500)
+    // Unclamped this is the request the provider rejected: 52,180 + 16,384 > 65,536.
+    expect(estimated + 16_384).toBeGreaterThan(65_536)
+
+    const result = await run(largePrompt)
+    const maxOutputTokens = result.params.maxOutputTokens!
+    expect(maxOutputTokens).toBeLessThan(16_384)
+    expect(estimated + maxOutputTokens).toBeLessThanOrEqual(65_536)
+    expect(maxOutputTokens).toBeGreaterThanOrEqual(OUTPUT_TOKEN_FLOOR)
+  })
+
+  test("a small system prompt keeps the full model reservation", async () => {
+    const result = await run("You are a helpful assistant.")
+    expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("does not budget a generated system prompt omitted from workflow requests", async () => {
+    const result = await run(largePrompt, { isWorkflow: true })
+    expect(result.messages).toEqual(messages)
+    expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("uses provider then model then chat header precedence at the request boundary", async () => {
+    const beta = "context-1m-2025-08-07"
+    const disabled = "interleaved-thinking-2025-05-14"
+    const clamped = await run(largePrompt, {
+      providerOptions: { headers: { "Anthropic-Beta": beta } },
+      modelHeaders: { "Anthropic-Beta": beta },
+      chatHeaders: { "anthropic-beta": disabled },
+    })
+    expect(clamped.params.maxOutputTokens).toBeLessThan(16_384)
+    expect(new Headers(clamped.headers).get("anthropic-beta")).toBe(disabled)
+    expect(Object.keys(clamped.headers).filter((key) => key.toLowerCase() === "anthropic-beta")).toHaveLength(1)
+
+    const widened = await run(largePrompt, {
+      providerOptions: { headers: { "Anthropic-Beta": disabled } },
+      modelHeaders: { "Anthropic-Beta": disabled },
+      chatHeaders: { "anthropic-beta": beta },
+    })
+    expect(widened.params.maxOutputTokens).toBe(16_384)
+    expect(new Headers(widened.headers).get("anthropic-beta")).toBe(beta)
+    expect(Object.keys(widened.headers).filter((key) => key.toLowerCase() === "anthropic-beta")).toHaveLength(1)
+  })
+
+  test("unsupported media is normalized before the request-builder estimate", async () => {
+    const result = await run("You are a helpful assistant.", {
+      messages: [
+        {
+          role: "user",
+          content: Array.from({ length: 64 }, () => ({
+            type: "image" as const,
+            image: "data:image/png;base64,AQ==",
+          })),
+        },
+      ],
+    })
+    expect(result.params.maxOutputTokens).toBe(16_384)
+  })
+
+  test("large finalized tool schemas participate in the request-builder clamp", async () => {
+    const mediumPrompt = PROSE.repeat(Math.ceil((47_500 * 3.7) / PROSE.length))
+    expect((await run(mediumPrompt)).params.maxOutputTokens).toBe(16_384)
+
+    const schemaHeavyTool = tool({
+      description: "search parameter documentation ".repeat(1_200),
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+      }),
+    })
+    const result = await run(mediumPrompt, { tools: { schema_heavy: schemaHeavyTool } })
+    expect(result.params.maxOutputTokens).toBeLessThan(16_384)
+  })
+
+  test("a clamped request also clamps a fixed reasoning budget", async () => {
+    const result = await run(largePrompt, {
+      agentOptions: { thinking: { type: "enabled", budgetTokens: 16_000 } },
+    })
+    expect(result.params.options.thinking.budgetTokens).toBeLessThan(result.params.maxOutputTokens!)
+    expect(result.params.options.thinking.budgetTokens + OUTPUT_TOKEN_FLOOR).toBe(result.params.maxOutputTokens!)
+  })
+
+  test("a plugin-selected output budget always reconciles fixed reasoning", async () => {
+    const result = await run("You are a helpful assistant.", {
+      outputTokenMax: 8_192,
+      agentOptions: { thinking: { type: "enabled", budgetTokens: 16_000 } },
+    })
+    expect(result.params.maxOutputTokens).toBe(8_192)
+    expect(result.params.options.thinking.budgetTokens).toBe(8_192 - OUTPUT_TOKEN_FLOOR)
+  })
+
+  test("a system prompt that leaves no usable budget fails before the request is built", async () => {
+    const hugePrompt = PROSE.repeat(Math.ceil((65_000 * 3.7) / PROSE.length))
+    await expect(run(hugePrompt)).rejects.toThrow(/Context budget exceeded/)
   })
 })

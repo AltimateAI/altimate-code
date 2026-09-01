@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test"
 import path from "path"
-import type { ModelMessage, Tool } from "ai"
+import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { LLM } from "../../src/session/llm"
 import { Global } from "../../src/global"
 import { Instance } from "../../src/project/instance"
@@ -705,6 +705,205 @@ describe("session.llm.stream", () => {
         expect(config?.temperature).toBe(0.3)
         expect(config?.topP).toBe(0.8)
         expect(config?.maxOutputTokens).toBe(ProviderTransform.maxOutputTokens(resolved))
+      },
+    })
+  }, 30_000)
+
+  test("clamps finalized tools and reasoning in the Google stream request", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "google"
+    const modelID = "gemini-2.5-flash"
+    const fixture = await loadFixture(providerID, modelID)
+    const pathSuffix = `/v1beta/models/${fixture.model.id}:streamGenerateContent`
+    const request = waitRequest(
+      pathSuffix,
+      createEventResponse([
+        {
+          candidates: [{ content: { parts: [{ text: "Hello" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+        },
+      ]),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            enabled_providers: [providerID],
+            provider: {
+              [providerID]: {
+                options: {
+                  apiKey: "test-google-key",
+                  baseURL: `${server.url.origin}/v1beta`,
+                  headers: { "Anthropic-Beta": "context-1m-2025-08-07" },
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const budgeted = {
+          ...resolved,
+          headers: { "anthropic-beta": "interleaved-thinking-2025-05-14" },
+          limit: { ...resolved.limit, context: 65_536, output: 16_384 },
+        }
+        const sessionID = SessionID.make("session-budget-stream")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: { thinkingConfig: { includeThoughts: true, thinkingBudget: 16_000 } },
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user_budget_stream"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make(providerID), modelID: budgeted.id },
+        } satisfies MessageV2.User
+        const prose = "the quick brown fox jumps over the lazy dog "
+        const largeSystem = prose.repeat(Math.ceil((45_000 * 3.7) / prose.length))
+        const schemaMarker = "finalized-tool-schema-marker"
+        const tools = {
+          schema_heavy: tool({
+            description: `${schemaMarker} ${"search parameter documentation ".repeat(1_000)}`,
+            inputSchema: jsonSchema({
+              type: "object",
+              properties: {
+                query: { type: "string", description: "query details ".repeat(1_000) },
+              },
+              required: ["query"],
+            }),
+          }),
+        }
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: budgeted,
+          agent,
+          system: [largeSystem],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Hello" }],
+          tools,
+        })
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        const config = capture.body.generationConfig as
+          | { maxOutputTokens?: number; thinkingConfig?: { thinkingBudget?: number } }
+          | undefined
+        const maxOutputTokens = config?.maxOutputTokens
+        expect(maxOutputTokens).toBeDefined()
+        expect(maxOutputTokens!).toBeLessThan(16_384)
+        expect(maxOutputTokens!).toBeGreaterThanOrEqual(1_024)
+        expect(config?.thinkingConfig?.thinkingBudget).toBe(maxOutputTokens! - 1_024)
+        expect(JSON.stringify(capture.body.tools)).toContain(schemaMarker)
+        expect(capture.headers.get("anthropic-beta")).toBe("interleaved-thinking-2025-05-14")
+      },
+    })
+  }, 30_000)
+
+  test("normalizes unsupported media before the Google stream budget is enforced", async () => {
+    const server = state.server
+    if (!server) throw new Error("Server not initialized")
+
+    const providerID = "google"
+    const modelID = "gemini-2.5-flash"
+    const fixture = await loadFixture(providerID, modelID)
+    const pathSuffix = `/v1beta/models/${fixture.model.id}:streamGenerateContent`
+    const request = waitRequest(
+      pathSuffix,
+      createEventResponse([
+        {
+          candidates: [{ content: { parts: [{ text: "Hello" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 },
+        },
+      ]),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://altimate.ai/config.json",
+            enabled_providers: [providerID],
+            provider: {
+              [providerID]: {
+                options: { apiKey: "test-google-key", baseURL: `${server.url.origin}/v1beta` },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(fixture.model.id))
+        const textOnly = {
+          ...resolved,
+          capabilities: {
+            ...resolved.capabilities,
+            input: { ...resolved.capabilities.input, image: false },
+          },
+          limit: { ...resolved.limit, context: 65_536, output: 16_384 },
+        }
+        const sessionID = SessionID.make("session-budget-unsupported-media")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_user_budget_unsupported_media"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make(providerID), modelID: textOnly.id },
+        } satisfies MessageV2.User
+
+        const stream = await LLM.stream({
+          user,
+          sessionID,
+          model: textOnly,
+          agent,
+          system: ["You are a helpful assistant."],
+          abort: new AbortController().signal,
+          messages: [
+            {
+              role: "user",
+              content: Array.from({ length: 64 }, () => ({
+                type: "image" as const,
+                image: "data:image/png;base64,AQ==",
+              })),
+            },
+          ],
+          tools: {},
+        })
+        for await (const _ of stream.fullStream) {
+        }
+
+        const capture = await request
+        const config = capture.body.generationConfig as { maxOutputTokens?: number } | undefined
+        expect(config?.maxOutputTokens).toBe(16_384)
+        expect(JSON.stringify(capture.body.contents)).toContain("Cannot read image")
       },
     })
   }, 30_000)

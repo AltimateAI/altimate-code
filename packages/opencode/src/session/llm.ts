@@ -13,6 +13,15 @@ import {
 } from "ai"
 import { mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — size and clamp the finalized provider request
+import {
+  clampOutputTokens,
+  clampReasoningBudget,
+  effectiveContextWindow,
+  estimateInputTokens,
+  mergeRequestHeaders,
+} from "@/provider/output-token-budget"
+// altimate_change end
 // altimate_change start — tool retrieval
 import { Retrieval } from "@/tool/retrieval"
 // altimate_change end
@@ -73,7 +82,9 @@ export namespace LLM {
     ])
     const isCodex = provider.id === "openai" && auth?.type === "oauth"
 
-    const system = []
+    // altimate_change start — keep the request-budget input typed before the first push
+    const system: string[] = []
+    // altimate_change end
     system.push(
       [
         // use agent prompt otherwise provider prompt
@@ -164,6 +175,25 @@ export namespace LLM {
       },
     )
 
+    // altimate_change start — canonicalize the exact outgoing header precedence before budgeting
+    const requestHeaders = mergeRequestHeaders(
+      input.model.providerID.startsWith("opencode")
+        ? {
+            "x-opencode-project": Instance.project.id,
+            "x-opencode-session": input.sessionID,
+            "x-opencode-request": input.user.id,
+            "x-opencode-client": Flag.OPENCODE_CLIENT,
+          }
+        : input.model.providerID !== "anthropic"
+          ? {
+              "User-Agent": `altimate-code/${Installation.VERSION}`,
+            }
+          : undefined,
+      input.model.headers,
+      headers,
+    )
+    // altimate_change end
+
     const tools = await resolveTools(input)
 
     // altimate_change start — ensure tool definitions exist for all tool_use blocks in history
@@ -197,6 +227,30 @@ export namespace LLM {
         if (name !== "invalid" && !keep.has(name)) delete tools[name]
       }
     }
+    // altimate_change end
+
+    // altimate_change start — clamp after every context-affecting request field is finalized.
+    // Tool schemas and provider instructions consume the shared context window, while encoded
+    // media bytes do not count as literal text. The estimator runs lazily so providers that omit
+    // maxOutputTokens pay no serialization cost. Known context beta headers widen the catalog
+    // limit before the clamp. Fixed reasoning budgets are reconciled with the final reservation.
+    const maxOutputTokens = clampOutputTokens({
+      model: input.model,
+      requested: params.maxOutputTokens,
+      context: effectiveContextWindow({
+        model: input.model,
+        // Provider defaults are lower precedence than the exact case-normalized outgoing record.
+        headerSources: [provider.options, requestHeaders],
+      }),
+      inputTokens: () =>
+        estimateInputTokens({
+          system,
+          messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+          tools,
+          instructions: params.options.instructions,
+        }),
+    })
+    const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
     // altimate_change end
 
     return streamText({
@@ -233,32 +287,19 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
-      providerOptions: ProviderTransform.providerOptions(input.model, params.options),
+      // altimate_change start — use the reasoning options reconciled with the final output reservation
+      providerOptions: ProviderTransform.providerOptions(input.model, requestOptions),
+      // altimate_change end
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       toolChoice: input.toolChoice,
-      // altimate_change start — read maxOutputTokens from params (now plumbed through chat.params hook)
-      maxOutputTokens: params.maxOutputTokens,
+      // altimate_change start — use the plugin-selected reservation after context clamping
+      maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
-      headers: {
-        ...(input.model.providerID.startsWith("opencode")
-          ? {
-              "x-opencode-project": Instance.project.id,
-              "x-opencode-session": input.sessionID,
-              "x-opencode-request": input.user.id,
-              "x-opencode-client": Flag.OPENCODE_CLIENT,
-            }
-          : input.model.providerID !== "anthropic"
-            ? {
-                // altimate_change start — upstream_fix: UA brand
-                "User-Agent": `altimate-code/${Installation.VERSION}`,
-                // altimate_change end
-              }
-            : undefined),
-        ...input.model.headers,
-        ...headers,
-      },
+      // altimate_change start — send the canonical headers used by the budget estimator
+      headers: requestHeaders,
+      // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [
         ...system.map(
@@ -276,8 +317,10 @@ export namespace LLM {
             specificationVersion: "v3",
             async transformParams(args) {
               if (args.type === "stream") {
+                // altimate_change start — transform messages with the reconciled reasoning options
                 // @ts-expect-error
-                args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, options)
+                args.params.prompt = ProviderTransform.message(args.params.prompt, input.model, requestOptions)
+                // altimate_change end
               }
               return args.params
             },

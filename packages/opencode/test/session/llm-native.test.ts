@@ -344,6 +344,26 @@ describe("session.llm-native.request", () => {
     expect(anthropic.route.id).toBe("anthropic-messages")
     expect(anthropic.route.endpoint.baseURL).toBe("https://api.anthropic.com/v1")
 
+    const disabledBeta = "interleaved-thinking-2025-05-14"
+    const anthropicWithCanonicalHeaders = LLMNative.model(
+      {
+        model: {
+          ...baseModel,
+          api: { ...baseModel.api, url: "", npm: "@ai-sdk/anthropic" },
+          headers: { "Anthropic-Beta": "context-1m-2025-08-07" },
+        },
+        apiKey: "test-key",
+        messages: [],
+      },
+      { "anthropic-beta": disabledBeta },
+    )
+    expect(anthropicWithCanonicalHeaders.route.defaults.headers?.["anthropic-beta"]).toBe(disabledBeta)
+    expect(
+      Object.keys(anthropicWithCanonicalHeaders.route.defaults.headers ?? {}).filter(
+        (key) => key.toLowerCase() === "anthropic-beta",
+      ),
+    ).toHaveLength(1)
+
     const google = LLMNative.model({
       model: { ...baseModel, api: { ...baseModel.api, url: "", npm: "@ai-sdk/google" } },
       apiKey: "test-key",
