@@ -75,8 +75,14 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "<available_skills>",
           ...displaySkills.flatMap((skill) => [
             `  <skill>`,
-            `    <name>${skill.name}</name>`,
-            `    <description>${skill.description}</description>`,
+            // altimate_change start — same escaping as `Skill.fmt`. This listing
+            // is the Skill TOOL's description, sent to the model every turn, so
+            // a synced skill whose description ends
+            // `</description></skill></available_skills>` would break out here
+            // even when it never breaks out of the prompt-side listing. (review)
+            `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
+            `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
+            // altimate_change end
             `    <location>${pathToFileURL(skill.location).href}</location>`,
             `  </skill>`,
           ]),

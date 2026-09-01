@@ -1,5 +1,5 @@
 /**
- * altimate_change — install telemetry (AI-8448).
+ * altimate_change — install telemetry (#1096).
  *
  * `first_launch` is the only install metric, and it is triggered by a marker file rather than by
  * the installer talking to the network. Before this, only npm's postinstall wrote that marker, so

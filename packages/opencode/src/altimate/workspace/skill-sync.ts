@@ -344,7 +344,15 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
   // must be an error, not a default of 1 — defaulting turns a partial first
   // page into "the whole workspace" and prunes everything on later pages.
   const rawPages = (payload as { pages?: unknown }).pages
-  if (typeof rawPages !== "number" || !Number.isInteger(rawPages) || rawPages < 1) return null
+  if (typeof rawPages !== "number" || !Number.isInteger(rawPages) || rawPages < 0) return null
+  // `pages: 0` is what the server actually sends for an EMPTY workspace --
+  // verified against production: `{"items":[],"total":0,"page":1,"size":50,"pages":0}`.
+  // Rejecting it as malformed (the previous `rawPages < 1`) meant an emptied
+  // workspace could never be observed, so the `remote.length === 0` purge below
+  // was unreachable and a detached skill stayed on disk forever. Zero is only
+  // trustworthy when the rest of the envelope agrees it is empty; `pages: 0`
+  // alongside rows, or alongside a non-zero total, is still an inconsistency.
+  if (rawPages === 0 && !(p.items.length === 0 && (payload as { total?: unknown }).total === 0)) return null
   const pages = rawPages
   // An empty page while the envelope claims rows exist is a proxy or backend
   // inconsistency, not an empty workspace — and "empty workspace" is the one

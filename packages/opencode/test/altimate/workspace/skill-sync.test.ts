@@ -952,12 +952,46 @@ describe("workspace skill sync", () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
 
-    for (const bad of [undefined, 0, 1.5, "2"]) {
+    // NOT 0: the server sends `pages: 0` for a genuinely empty workspace, so
+    // treating it as malformed made an emptied workspace unobservable. It is
+    // covered as a real empty listing by the tests below instead. (review)
+    for (const bad of [undefined, -1, 1.5, "2"]) {
       globalThis.fetch = (async () =>
         json({ items: [], total: 0, page: 1, size: 50, pages: bad })) as unknown as typeof fetch
       await syncSkills(project)
       expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
     }
+  })
+
+  test("`pages: 0` with a consistent empty envelope purges, as the real server sends it", async () => {
+    // Production sends exactly `{"items":[],"total":0,"page":1,"size":50,"pages":0}`
+    // for a workspace whose last skill was detached. While that was rejected as
+    // malformed, the sync kept the old snapshot and the detached skill stayed on
+    // disk indefinitely — the `remote.length === 0` purge was unreachable.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+    globalThis.fetch = (async () =>
+      json({ items: [], total: 0, page: 1, size: 50, pages: 0 })) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
+  test("`pages: 0` alongside rows is still refused as inconsistent", async () => {
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async () =>
+      json({
+        items: [{ public_id: "pub-2", updated_at: "2026-01-01T00:00:00Z" }],
+        total: 1,
+        page: 1,
+        size: 50,
+        pages: 0,
+      })) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("a file response omitting `path` is refused", async () => {

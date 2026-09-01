@@ -412,8 +412,20 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 // altimate_change end
 
 // altimate_change start — see the call sites inside `fmt`.
-function neutralizeListingWrapper(text: string): string {
-  return text.replace(/<(\/?)(available_skills|skill|name|description|location)\b/gi, "&lt;$1$2")
+// Exported because `tool/skill.ts` builds the SAME `<available_skills>` listing
+// for the Skill tool's own description, which is sent to the model on EVERY
+// turn — a wider exposure than either prompt-side site. It must escape through
+// this one function so the two listings cannot drift apart again. (review)
+//
+// `system-reminder` and `auto_loaded_skill` are in the list even though this
+// function does not emit them: the harness uses both as trust boundaries
+// elsewhere in the same message stream, so remote skill text must not be able
+// to forge either one. (review)
+export function neutralizeListingWrapper(text: string): string {
+  return text.replace(
+    /<(\/?)(available_skills|skill|name|description|location|system-reminder|auto_loaded_skill)\b/gi,
+    "&lt;$1$2",
+  )
 }
 // altimate_change end
 
