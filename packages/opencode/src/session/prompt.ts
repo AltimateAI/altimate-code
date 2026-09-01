@@ -20,6 +20,8 @@ import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema }
 import { SessionCompaction } from "./compaction"
 import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
+// altimate_change — task-shape-scoped pre-execution protocol (see pre-execution.ts)
+import { SessionPreExecution } from "./pre-execution"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
@@ -1480,6 +1482,20 @@ export namespace SessionPrompt {
         agent: agent.name,
       })
       if (completionInstruction) system.push(completionInstruction)
+      // altimate_change end
+      // altimate_change start — task-shape-scoped pre-execution protocol. Same
+      // shape as the completion instruction above and for the same reason: the
+      // text used to sit in builder.txt, and builder is a PRIMARY agent, so it
+      // reached every builder surface. A paired ablation measured it as pure
+      // overhead on headless question-answering (2,805 ritual tool calls → 0, no
+      // score effect) but says nothing about dbt work or interactive chat, so
+      // those keep it. See session/pre-execution.ts for the gate and the numbers.
+      const preExecutionInstruction = await SessionPreExecution.preExecutionInstruction({
+        runMode: Flag.ALTIMATE_RUN_MODE,
+        agent: agent.name,
+        directories: [Instance.directory, Instance.worktree],
+      })
+      if (preExecutionInstruction) system.push(preExecutionInstruction)
       // altimate_change end
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {

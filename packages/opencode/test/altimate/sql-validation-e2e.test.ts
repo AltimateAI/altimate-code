@@ -8,6 +8,7 @@
  * 4. altimate_core_check composite pipeline works end-to-end
  * 5. sql.analyze composite pipeline works end-to-end
  * 6. Pre-execution protocol tools are callable (sql_analyze → altimate_core_validate → sql_execute)
+ *    (the protocol TEXT itself is gated in session/pre-execution.ts, tested there)
  * 7. sql-classify correctly gates sql_execute
  * 8. Analyst and builder agent permissions are consistent with their prompts
  */
@@ -15,6 +16,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import fs from "fs"
 import path from "path"
+import { SessionPreExecution } from "../../src/session/pre-execution"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/altimate-core"
 import { registerAllSql } from "../../src/altimate/native/sql/register"
@@ -95,21 +97,35 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test("builder prompt contains pre-execution protocol with correct tool names", async () => {
+  test("builder prompt names the pre-execution tools", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const builder = await Agent.get("builder")
         expect(builder).toBeDefined()
-        // Pre-Execution Protocol references:
         expect(builder!.prompt).toContain("sql_analyze")
         expect(builder!.prompt).toContain("altimate_core_validate")
         expect(builder!.prompt).toContain("sql_execute")
-        // The protocol section itself
-        expect(builder!.prompt).toContain("Pre-Execution Protocol")
       },
     })
+  })
+
+  // The protocol section itself is no longer static in builder.txt — it is
+  // injected per-session by the gate in session/pre-execution.ts, which drops it
+  // only for headless builder runs in a workspace with no dbt project. The
+  // wording is unchanged; see test/session/pre-execution.test.ts for the gate.
+  test("the pre-execution protocol still reaches an interactive builder", async () => {
+    await using tmp = await tmpdir()
+    const instruction = await SessionPreExecution.preExecutionInstruction({
+      runMode: false,
+      agent: "builder",
+      directories: [tmp.path],
+    })
+    expect(instruction).toContain("Pre-Execution Protocol")
+    expect(instruction).toContain("sql_analyze")
+    expect(instruction).toContain("altimate_core_validate")
+    expect(instruction).toContain("sql_execute")
   })
 })
 
