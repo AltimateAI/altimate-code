@@ -22,7 +22,7 @@
 // SERVER-SIDE ONLY, for the same reason `precedence.ts` is: the TUI plugin runtime
 // loads plugins in a separate module realm, so an import from there would read a
 // different, always-empty `Precedence` map. Import this only from the session layer.
-import { type Capability, type Precedence, servedInventory } from "./precedence"
+import { type Capability, type Precedence, inertWorkspaceName, servedInventory } from "./precedence"
 
 /** Hard ceiling on the rendered section. Deliberately independent of
  * `UNIFIED_INJECTION_BUDGET`: this is a routing directive, not knowledge, and must
@@ -133,17 +133,13 @@ export function systemSection(precedence: Precedence | undefined): string {
 }
 
 /** The workspace name is customer-authored and lands in the system prompt — the
- * highest-trust surface there is. Emitted as inert data: control characters stripped,
- * whitespace collapsed, length bounded, then JSON-quoted so quotes, newlines and
- * Markdown cannot break out of the sentence. The numeric id, when known, is the
- * stable identifier and is named alongside. */
-const MAX_NAME_CHARS = 80
+ * highest-trust surface there is. The snapshot already carries it inert (one line,
+ * no control characters, bounded — `inertWorkspaceName`); here it is JSON-quoted as
+ * well, so quotes cannot break out of the sentence, and the numeric id, when known,
+ * is named alongside as the stable identifier. Re-applying the sanitiser costs
+ * nothing and keeps this surface safe even for a snapshot built elsewhere. */
 function workspaceLabel(name: string, id: string | undefined): string {
-  const cleaned = name
-    .replace(/[\u0000-\u001F\u007F]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-  const bounded = cleaned.length > MAX_NAME_CHARS ? cleaned.slice(0, MAX_NAME_CHARS - 1) + "…" : cleaned
+  const bounded = inertWorkspaceName(name)
   return id ? `${JSON.stringify(bounded)} (id ${id})` : JSON.stringify(bounded)
 }
 

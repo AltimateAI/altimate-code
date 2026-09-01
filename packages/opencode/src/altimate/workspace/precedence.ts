@@ -150,6 +150,19 @@ export interface Precedence {
   ruleset?: PermissionNext.Ruleset
 }
 
+/** The workspace name as model-visible text: control characters stripped, whitespace
+ * collapsed onto one line, length bounded. Quoting is the caller's choice — the
+ * system-prompt section JSON-quotes it as well — but nothing that passes through here
+ * can start a new line, and so a new heading or role, in what the model reads. */
+export const MAX_WORKSPACE_NAME_CHARS = 80
+export function inertWorkspaceName(name: string): string {
+  const cleaned = name
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  return cleaned.length > MAX_WORKSPACE_NAME_CHARS ? cleaned.slice(0, MAX_WORKSPACE_NAME_CHARS - 1) + "…" : cleaned
+}
+
 const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
   workspaceName,
   enabled: false,
@@ -495,7 +508,11 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   if (read.kind === "unreadable") return EMPTY("binding-unreadable")
   if (read.kind === "unbound") return EMPTY("unbound")
   const binding = read
-  const workspaceName = binding.datamateName
+  // Customer-authored, and it reaches the model through every surface below —
+  // redirect notices, tool descriptions, the `warehouse_list` note, the prompt
+  // section. Made inert once, here, so no downstream interpolation can carry a
+  // newline, a heading or a control character into model-visible text.
+  const workspaceName = inertWorkspaceName(binding.datamateName)
 
   // Mechanism 1a — refuse to engage on an engine we cannot attribute to this binding.
   // Two signals, and both must agree. The attach outcome says the running engine is
