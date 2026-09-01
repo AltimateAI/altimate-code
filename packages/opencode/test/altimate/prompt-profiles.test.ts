@@ -1,0 +1,131 @@
+import { describe, expect, test } from "bun:test"
+import path from "path"
+import os from "os"
+import fs from "fs"
+import {
+  assemble,
+  BUILDER_PROFILE,
+  DATA_QA_PROFILE,
+  FRAGMENTS,
+  PROMPT_BUILDER,
+  PROMPT_DATA_QA,
+} from "../../src/altimate/prompts/profiles"
+
+// The byte-identity gate for the workload-adaptive harness PR 1 (compile-time
+// split of builder.txt into core + packs).
+//
+// EXPECTED_SHA256 is the sha256 of the pre-split monolithic
+// `src/altimate/prompts/builder.txt` as of the commit that removed it
+// (7bbf8a6d23f5aa880be3e8436d3e74764e5928a4). The assembled default profile must
+// reproduce that file byte-for-byte — this is the entire quality argument for
+// the split: identical bytes, identical behavior, no eval run needed.
+//
+// If this test fails after a deliberate prompt edit, update the pin AND note in
+// the PR that the default prompt bytes changed (that PR then needs its own
+// quality evidence — byte identity no longer covers it).
+const EXPECTED_SHA256 = "17663410dd9accc527b4cbd84558fc577ccc36d33d0428c5c5205d5df25400d7"
+const EXPECTED_BYTES = 14773
+
+function sha256(text: string): string {
+  return new Bun.CryptoHasher("sha256").update(text).digest("hex")
+}
+
+describe("builder profile byte identity", () => {
+  test("assembled default profile is byte-identical to the pre-split builder.txt", () => {
+    expect(Buffer.byteLength(PROMPT_BUILDER, "utf8")).toBe(EXPECTED_BYTES)
+    expect(sha256(PROMPT_BUILDER)).toBe(EXPECTED_SHA256)
+  })
+
+  test("assembly is a plain ordered concatenation of the fragments", () => {
+    expect(assemble(BUILDER_PROFILE)).toBe(PROMPT_BUILDER)
+    let rest = PROMPT_BUILDER
+    for (const name of BUILDER_PROFILE) {
+      expect(rest.startsWith(FRAGMENTS[name])).toBe(true)
+      rest = rest.slice(FRAGMENTS[name].length)
+    }
+    // Fragments cover the whole prompt — nothing appended outside the profile.
+    expect(rest).toBe("")
+  })
+
+  test("every fragment is non-empty, newline-terminated, and used at most once per profile", () => {
+    for (const [name, text] of Object.entries(FRAGMENTS)) {
+      expect(text.length, `fragment ${name} is empty`).toBeGreaterThan(0)
+      // Fragments carry their own trailing newline; profiles join with "".
+      expect(text.endsWith("\n"), `fragment ${name} must end with a newline`).toBe(true)
+    }
+    for (const profile of [BUILDER_PROFILE, DATA_QA_PROFILE]) {
+      expect(new Set(profile).size).toBe(profile.length)
+    }
+    // The default profile uses every fragment exactly once (the split is total).
+    expect([...BUILDER_PROFILE].map(String).sort()).toEqual(Object.keys(FRAGMENTS).sort())
+  })
+})
+
+describe("assembly determinism across processes and environments", () => {
+  // We have been burned by cwd-dependent behavior repeatedly: assemble in two
+  // separate processes, from different cwds and different HOMEs, and require
+  // the same pinned bytes both times.
+  const helper = path.join(import.meta.dir, "prompt-profiles-hash-helper.ts")
+
+  function assembleInSubprocess(cwd: string, home: string): string {
+    const proc = Bun.spawnSync({
+      cmd: [process.execPath, "run", helper],
+      cwd,
+      env: { ...process.env, HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(proc.exitCode, new TextDecoder().decode(proc.stderr)).toBe(0)
+    return new TextDecoder().decode(proc.stdout).trim()
+  }
+
+  test("two fresh processes with different cwd and HOME produce identical pinned bytes", () => {
+    const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-profiles-a-"))
+    const tmpB = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-profiles-b-"))
+    try {
+      const a = assembleInSubprocess(tmpA, tmpA)
+      const b = assembleInSubprocess(tmpB, tmpB)
+      expect(a).toBe(`${EXPECTED_SHA256} ${EXPECTED_BYTES}`)
+      expect(b).toBe(a)
+    } finally {
+      fs.rmSync(tmpA, { recursive: true, force: true })
+      fs.rmSync(tmpB, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
+describe("data-qa profile composition", () => {
+  test("omits the dbt-specific packs and the Pre-Execution Protocol pack", () => {
+    // Omitted pack section headers must be absent.
+    expect(PROMPT_DATA_QA).not.toContain("## Pre-Execution Protocol")
+    expect(PROMPT_DATA_QA).not.toContain("## dbt Operations")
+    expect(PROMPT_DATA_QA).not.toContain("## dbt Verification Workflow")
+    expect(PROMPT_DATA_QA).not.toContain("## Workflow\n")
+    expect(PROMPT_DATA_QA).not.toContain("## Common Pitfalls")
+    expect(PROMPT_DATA_QA).not.toContain("## Self-Review Before Completion")
+    expect(PROMPT_DATA_QA).not.toContain("## Finish Protocol")
+    // Everything else (core identity + principles, skills catalogue, teammate
+    // training) must be present.
+    expect(PROMPT_DATA_QA).toContain("## Principles")
+    expect(PROMPT_DATA_QA).toContain("**Understand before writing**")
+    expect(PROMPT_DATA_QA).toContain("## Skills — When to Invoke")
+    expect(PROMPT_DATA_QA).toContain("## Proactive Skill Invocation")
+    expect(PROMPT_DATA_QA).toContain("## Teammate Training")
+  })
+
+  test("is strictly a subsequence of the builder profile (subtractive, nothing new)", () => {
+    expect(DATA_QA_PROFILE.every((name) => BUILDER_PROFILE.includes(name))).toBe(true)
+    const order = DATA_QA_PROFILE.map((name) => BUILDER_PROFILE.indexOf(name))
+    expect([...order].sort((x, y) => x - y)).toEqual(order)
+    for (const name of DATA_QA_PROFILE) {
+      expect(PROMPT_DATA_QA).toContain(FRAGMENTS[name])
+    }
+  })
+
+  test("selecting data-qa cannot change the default profile bytes", () => {
+    // PROMPT_BUILDER and PROMPT_DATA_QA are independent constants; assembling
+    // one never mutates the other.
+    void assemble(DATA_QA_PROFILE)
+    expect(sha256(PROMPT_BUILDER)).toBe(EXPECTED_SHA256)
+  })
+})

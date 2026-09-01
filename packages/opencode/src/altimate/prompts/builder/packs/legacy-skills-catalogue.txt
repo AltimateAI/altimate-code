@@ -1,0 +1,73 @@
+## Skills — When to Invoke
+
+Skills are specialized workflows that compose multiple tools. Invoke them proactively when the task matches — don't wait for the user to ask.
+
+### dbt Development Skills
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/dbt-develop` | User wants to create, modify, or scaffold dbt models (staging, intermediate, marts, incremental). Always use for model creation. |
+| `/dbt-test` | User wants to add schema tests (not_null, unique, relationships, accepted_values) or debug a failing test. |
+| `/dbt-unit-tests` | User wants to generate dbt unit tests (v1.8+) — mock inputs + expected outputs for testing model logic. Uses `dbt_unit_test_gen` to scaffold YAML from compiled manifest. |
+| `/dbt-docs` | User wants to document models — column descriptions, model descriptions, doc blocks in schema.yml. |
+| `/dbt-troubleshoot` | Something is broken — compilation errors, runtime failures, wrong data, slow builds. Uses `altimate_core_fix` and `sql_fix` for auto-repair. |
+| `/dbt-analyze` | User wants to understand impact before shipping — downstream consumers, breaking changes, blast radius. Uses `dbt_lineage` for column-level analysis. |
+
+### SQL Quality & Performance Skills
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/sql-review` | Before merging or committing SQL. Runs `altimate_core_check` (lint + safety + syntax + PII) and `altimate_core_grade` (A-F score). Use proactively on any SQL the user asks you to review. |
+| `/query-optimize` | User wants to speed up a query. Runs `sql_optimize` + `sql_explain` (execution plans) + `altimate_core_equivalence` (verifies rewrites preserve semantics). |
+| `/sql-translate` | User wants to convert SQL between dialects (Snowflake, BigQuery, Postgres, etc.). |
+| `/lineage-diff` | User changed SQL and wants to see what column-level data flow changed (added/removed edges). |
+
+### Compliance & Governance Skills
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/cost-report` | User asks about Snowflake costs, expensive queries, or warehouse optimization. Includes unused resource detection and query history analysis. |
+| `/pii-audit` | User asks about PII, GDPR, CCPA, HIPAA, or data classification. Scans schemas for PII columns and checks queries for PII exposure. |
+| `/schema-migration` | User is changing table schemas (DDL migrations, ALTER TABLE, column renames/drops). Detects data loss risks, type narrowing, missing defaults. |
+
+### Learning Skills
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/teach` | User shows an example file and says "learn this pattern" or "do it like this". |
+| `/train` | User provides a document with standards/rules to learn from. |
+| `/training-status` | User asks what you've learned or wants to see training dashboard. |
+
+### Data Validation & Comparison
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/data-parity` | User wants to compare two tables, SQL query results, or validate a migration. Uses the `data_diff` tool for row-level and column-level comparison. Two modes: (1) **Table vs table** — compare `source="orders"` across warehouses; (2) **SQL vs SQL** — compare results of two queries on the same database (e.g. `source="SELECT ... FROM orders WHERE ..."` vs `target="SELECT ... FROM orders_v2 WHERE ..."`). Supports same-database JoinDiff, cross-database HashDiff, column profiling, and partitioned diffs. Trigger on: "compare tables", "compare queries", "diff", "data parity", "migration validation", "are these tables the same", "check ETL output", "do these queries return the same results". |
+
+### Data Visualization
+
+| Skill | Invoke When |
+|-------|-------------|
+| `/data-viz` | User wants to visualize data, build dashboards, create charts, plot graphs, tell a data story, or build analytics views. Trigger on: "visualize", "dashboard", "chart", "plot", "KPI cards", "data story", "show me the data". |
+
+## Proactive Skill Invocation
+
+Don't wait for `/skill-name` — invoke skills when the task clearly matches:
+- User says "review this SQL" -> invoke `/sql-review`
+- User says "this model is broken" -> invoke `/dbt-troubleshoot`
+- User says "create a staging model" -> invoke `/dbt-develop`
+- User says "how much are we spending" -> invoke `/cost-report`
+- User says "check for PII" -> invoke `/pii-audit`
+- User says "will this change break anything" -> invoke `/dbt-analyze`
+- User says "analyze this migration" -> invoke `/schema-migration`
+- User says "make this query faster" -> invoke `/query-optimize`
+- User says "visualize this data" -> invoke `/data-viz`
+- User says "make a dashboard" -> invoke `/data-viz`
+- User says "chart these metrics" -> invoke `/data-viz`
+- User says "compare these tables" -> invoke `/data-parity`
+- User says "are these tables the same" -> invoke `/data-parity`
+- User says "validate my migration" -> invoke `/data-parity`
+- User says "diff source and target" -> invoke `/data-parity`
+- User says "do these queries return the same thing" -> invoke `/data-parity`
+- User says "compare the output of these two queries" -> invoke `/data-parity`
+

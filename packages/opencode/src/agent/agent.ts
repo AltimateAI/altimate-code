@@ -18,7 +18,10 @@ import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 // altimate_change start - import custom agent mode prompts
-import PROMPT_BUILDER from "../altimate/prompts/builder.txt"
+// PROMPT_BUILDER is assembled from core + pack fragments (byte-identical to the
+// former builder.txt — see profiles.ts and test/altimate/prompt-profiles.test.ts)
+import { PROMPT_BUILDER, PROMPT_DATA_QA } from "../altimate/prompts/profiles"
+import { Flag } from "@/flag/flag"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
 // altimate_change end
@@ -315,6 +318,34 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
+          // Opt-in data-qa profile (workload-adaptive harness PR 1): the builder
+          // prompt minus the dbt-specific packs and the Pre-Execution Protocol
+          // (sql-guard) pack; identical tool permissions to builder. Registered
+          // ONLY when ALTIMATE_DATA_QA_PROFILE=1/true is set — nothing selects
+          // it implicitly. Users opt in explicitly via `--agent data-qa`, the
+          // TUI agent cycle, or `agent: "data-qa"` in config.
+          ...(Flag.truthyEnv("ALTIMATE_DATA_QA_PROFILE")
+            ? {
+                "data-qa": {
+                  name: "data-qa",
+                  description:
+                    "Opt-in data Q&A profile: builder toolset with a slimmer prompt (no dbt build protocols).",
+                  prompt: PROMPT_DATA_QA,
+                  options: {},
+                  permission: Permission.merge(
+                    defaults,
+                    Permission.fromConfig({
+                      question: "allow",
+                      plan_enter: "allow",
+                      sql_execute_write: "ask",
+                    }),
+                    userWithSafety,
+                  ),
+                  mode: "primary",
+                  native: true,
+                } satisfies Info,
+              }
+            : {}),
           // reviewer agent: dbt PR review verdict engine
           reviewer: {
             name: "reviewer",

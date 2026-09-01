@@ -278,10 +278,12 @@ describe("builder completion contract", () => {
   // interactive chat — where nothing interprets or strips the token and the user
   // saw a literal DONE on every final answer, including mid-conversation on a
   // follow-up. The instruction must therefore NOT be static in the prompt file.
-  test("the builder prompt file does not carry the token instruction", async () => {
-    const prompt = await Bun.file(new URL("../../src/altimate/prompts/builder.txt", import.meta.url).pathname).text()
-    expect(prompt).not.toContain("literal token `DONE`")
-    expect(prompt).not.toContain("Do not emit `DONE`")
+  test("the builder prompt does not carry the token instruction", async () => {
+    // builder.txt was split into core + pack fragments (workload-adaptive
+    // harness PR 1); the assembled prompt is byte-identical to the old file.
+    const { PROMPT_BUILDER } = await import("../../src/altimate/prompts/profiles")
+    expect(PROMPT_BUILDER).not.toContain("literal token `DONE`")
+    expect(PROMPT_BUILDER).not.toContain("Do not emit `DONE`")
   })
 
   // The token itself is unchanged, so the detector that ends a run still pairs
