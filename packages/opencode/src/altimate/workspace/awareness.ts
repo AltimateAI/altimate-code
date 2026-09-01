@@ -15,9 +15,20 @@
 //
 // PURELY ADDITIVE BY CONSTRUCTION. This module renders a string and nothing else. It
 // has no effect on which calls are shadowed, on what a shadowed call returns, or on
-// any tool body. Its one safety property is that it returns "" in every state except
-// a bound, attributed workspace with materialised engine tools — so a session without
-// a bound workspace assembles a byte-identical system prompt to before this shipped.
+// any tool body.
+//
+// Its safety property is scoped, and worth stating exactly rather than generously: a
+// project this session knows is NOT linked to a workspace assembles a byte-identical
+// system prompt to before this shipped. `pilot-off`, `unbound` and
+// `nothing-materialised` all render "", and `derive` settles the link read before it
+// reads the escape hatch, so once that read says `unbound` no reason that speaks is
+// still reachable. (`binding-unreadable` is the read failing, not saying no — the
+// project may or may not be linked, and the copy for it claims neither.) The
+// module is NOT silent for every disabled state: the hatch and the three uncertain
+// states (`binding-unreadable`, `unattributed`, `derive-failed`) each render a short
+// paragraph steering to the local tools, because in all four the engine's tools can
+// still be in the catalog while routing refuses them, and silence would leave the
+// model free to call what it can see. `DISABLED_COPY` below is the decision table.
 //
 // SERVER-SIDE ONLY, for the same reason `precedence.ts` is: the TUI plugin runtime
 // loads plugins in a separate module realm, so an import from there would read a
@@ -55,7 +66,9 @@ const ALL_LOCAL_TOOLS = (Object.keys(CAPABILITY_LABEL) as Capability[]).map(loca
 /** Said when the escape hatch is on. Engine tools can still materialise in that
  * session — `derive` refuses before it looks at them, but the MCP client connects the
  * configured entry regardless — so silence here would leave the model free to reach
- * for tools it can see and should not use. */
+ * for tools it can see and should not use. Never reached on a project known to have no
+ * link: the flag is process-wide, so `derive` reads it after the link rather than
+ * before, and a project that reads as unbound settles as `unbound` and says nothing. */
 const ESCAPE_HATCH_SECTION = [
   HEADING,
   "",
@@ -64,25 +77,30 @@ const ESCAPE_HATCH_SECTION = [
     "are present in this catalog.",
 ].join("\n")
 
-/** Said when routing is off because the engine could not be verified — the binding
- * unreadable, the engine not attributable to the bound workspace, or the derivation
- * failed. `check()` fails open in those states and the engine's tools may still be in
- * the catalog (under `unattributed` they may belong to a DIFFERENT workspace, which is
- * why routing refused them), so the model is steered to the local tools the same way
- * the hatch does. The workspace is not named: nothing here has verified it. */
+/** Said when routing is off because it could not be established — the link unreadable,
+ * the engine not attributable to the bound workspace, or the derivation failed.
+ * `check()` fails open in those states and the engine's tools may still be in the
+ * catalog (under `unattributed` they may belong to a DIFFERENT workspace, which is why
+ * routing refused them), so the model is steered to the local tools the same way the
+ * hatch does. The workspace is not named: nothing here has verified it. Nor is one
+ * asserted to exist — `binding-unreadable` is reached whenever the link read throws,
+ * which a project with no link can do, so this copy claims only what is true in all
+ * three states. */
 const UNVERIFIED_SECTION = [
   HEADING,
   "",
-  "Workspace routing is not active for this session: the bound workspace's engine could not " +
-    `be verified. Use the local warehouse tools (${ALL_LOCAL_TOOLS}) for every connection, even ` +
-    "if `datamate_*` tools are present in this catalog.",
+  "Workspace routing could not be established for this session. Use the local warehouse tools " +
+    `(${ALL_LOCAL_TOOLS}) for every connection, even if \`datamate_*\` tools are present in this ` +
+    "catalog.",
 ].join("\n")
 
 /** What a non-routing session is told, keyed on the union so a new `disabledReason`
  * is a compile error here rather than silently rendering nothing. Silence is reserved
  * for the states where there is nothing the model could misuse: the pilot off, no
  * binding, or no engine tools materialised. Those keep the system prompt byte-identical
- * to before this module existed. */
+ * to before this module existed. No reason that speaks survives a link read that
+ * settled as `unbound` — that is the property the silence claim above rests on, and
+ * the reason the hatch is read after the link rather than before it. */
 const DISABLED_COPY: Record<NonNullable<Precedence["disabledReason"]>, string> = {
   "pilot-off": "",
   "escape-hatch": ESCAPE_HATCH_SECTION,
@@ -151,15 +169,15 @@ function workspaceLabel(name: string, id: string | undefined): string {
  * were omitted, though: the omitted types ARE served, so forbidding `datamate_*` for
  * "types not listed" would contradict the omission line — the partial list is said to
  * be partial instead, and the prohibition is kept only for types the workspace does
- * not serve. */
+ * not serve. The count is stated once, on the list where it belongs; the converse
+ * carries only what the model should DO about the omission. */
 function assemble(workspaceName: string, workspaceId: string | undefined, typeLines: string[]): string {
   const label = workspaceLabel(workspaceName, workspaceId)
   const render = (lines: string[]) => {
     const omitted = typeLines.length - lines.length
     const converse =
       omitted > 0
-        ? `This list is partial: ${omitted} further connection type${omitted === 1 ? " is" : "s are"} served by this ` +
-          "workspace and omitted for length; for those, prefer the `datamate_*` tool for that type when one is in the " +
+        ? "For the served types omitted above, prefer the `datamate_*` tool for that type when one is in the " +
           `catalog. Connection types this workspace does not serve use the local tools (${ALL_LOCAL_TOOLS}).`
         : `Every other connection type uses the local tools (${ALL_LOCAL_TOOLS}). Do not use ` +
           "`datamate_*` warehouse tools for connection types that are not listed above."

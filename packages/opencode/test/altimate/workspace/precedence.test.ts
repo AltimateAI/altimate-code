@@ -1096,6 +1096,35 @@ describe("mechanism 6 — the escape hatch", () => {
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.enabled).toBe(true)
   })
+
+  // altimate_change start — the hatch is read after the link, not before it.
+  test("an unbound project reports `unbound`, not the hatch", async () => {
+    // Both answers disable routing identically, so this is only about which reason is
+    // reported — and every user-facing surface keys on that. `escape-hatch` is a claim
+    // about workspace routing, so reporting it to a project with no link puts a
+    // workspace toast on screen and a workspace section in the system prompt of a
+    // session that has no workspace at all.
+    precedenceInternals.binding = async () => null
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.enabled).toBe(false)
+    expect(precedence.disabledReason).toBe("unbound")
+    expect(inventoryLine(precedence)).toBe("")
+  })
+
+  test("an unreadable link still reports the hatch", async () => {
+    // The flag is a fact about this session whatever the link says, and it outranks a
+    // read that could not settle: someone who switched routing off is told that, not
+    // that an engine they disabled could not be verified.
+    precedenceInternals.binding = async () => {
+      throw new Error("link unreadable")
+    }
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.disabledReason).toBe("escape-hatch")
+    expect(inventoryLine(precedence)).toContain("--integrations=local")
+  })
+  // altimate_change end
 })
 
 describe("descriptions and listings", () => {

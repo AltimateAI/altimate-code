@@ -360,7 +360,9 @@ async function announce(line: string): Promise<boolean> {
 
 /** Mechanism 6 — the escape hatch. `--integrations=local` (or the env var) turns
  * shadowing off for the whole process — it is `process.env.ALTIMATE_INTEGRATIONS`,
- * inherited by child processes, and under `serve` it covers every session. */
+ * inherited by child processes, and under `serve` it covers every session. Because it
+ * is process-wide it also reaches projects with no workspace, which is why `derive`
+ * reads it only after establishing that this project has a link at all. */
 export function escapeHatchOn(): boolean {
   return CoreFlag.ALTIMATE_INTEGRATIONS_LOCAL
 }
@@ -504,13 +506,22 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   // for someone who has switched the pilot off. Without this gate their local
   // warehouse calls would start redirecting.
   if (!isEnabled()) return EMPTY("pilot-off")
-  if (escapeHatchOn()) return EMPTY("escape-hatch")
 
   const read = await currentBinding()
   // An unreadable link is unknown, not opted out: it must reach the result as a stated
   // reason (Claim 1), where a genuinely unbound project runs silently by design.
-  if (read.kind === "unreadable") return EMPTY("binding-unreadable")
   if (read.kind === "unbound") return EMPTY("unbound")
+  // altimate_change start — the hatch is read AFTER the link, not before it. Both
+  // answers disable routing identically, so the order decides only which reason is
+  // reported, and `escape-hatch` is a claim about workspace routing — which an unbound
+  // project has none of. Reported there it puts a workspace toast on screen and a
+  // workspace section in the system prompt of a session that has no workspace at all.
+  // It still outranks `unreadable`: the flag is a fact about this session whatever the
+  // link says, and someone who switched routing off should hear that rather than that
+  // an engine they disabled could not be verified.
+  if (escapeHatchOn()) return EMPTY("escape-hatch")
+  // altimate_change end
+  if (read.kind === "unreadable") return EMPTY("binding-unreadable")
   const binding = read
   // Customer-authored, and it reaches the model through every surface below —
   // redirect notices, tool descriptions, the `warehouse_list` note, the prompt

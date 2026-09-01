@@ -76,10 +76,13 @@ describe("the section is silent unless the workspace is really routing", () => {
     await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(forSession(SESSION)?.disabledReason).toBe("unattributed")
     const out = section()
-    expect(out).toContain("could not be verified")
+    expect(out).toContain("could not be established")
     expect(out).toContain("`sql_execute`")
     expect(out).not.toContain("analytics")
     expect(out).not.toContain("datamate_snowflake_execute_database_query")
+    // Nor may it assert a binding: this copy is shared with `binding-unreadable`,
+    // which a project with no link can reach.
+    expect(out).not.toContain("bound workspace")
   })
 
   test("a declared-but-absent integration renders nothing", async () => {
@@ -99,6 +102,32 @@ describe("the escape hatch", () => {
     expect(out).toContain("--integrations=local")
     expect(out).toContain("`sql_execute`")
     expect(out).not.toContain("datamate_snowflake_execute_database_query")
+  })
+
+  test("stays silent on a project with no workspace at all", async () => {
+    // The flag is `process.env.ALTIMATE_INTEGRATIONS`, so it is on for every project
+    // the user opens, not just the bound one. Read before the link it would report
+    // `escape-hatch` for an unbound project and put a workspace section in the system
+    // prompt of a session that has no workspace — the one case where this module must
+    // leave the prompt byte-identical. `derive` reads the link first for that reason.
+    precedenceInternals.binding = async () => null
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(forSession(SESSION)?.disabledReason).toBe("unbound")
+    expect(section()).toBe("")
+  })
+
+  test("outranks an unreadable link, which it does not contradict", async () => {
+    // The flag is a fact about this session whatever the link says. Someone who
+    // switched routing off should hear that, not that an engine they disabled could
+    // not be verified — and both copies steer to the same local tools regardless.
+    precedenceInternals.binding = async () => {
+      throw new Error("link unreadable")
+    }
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(forSession(SESSION)?.disabledReason).toBe("escape-hatch")
+    expect(section()).toContain("--integrations=local")
   })
 })
 
@@ -223,10 +252,13 @@ describe("the size ceiling", () => {
     expect(out.length).toBeLessThanOrEqual(MAX_SECTION_CHARS)
     expect(out).toContain("- warehouse1 — ")
     expect(out).toMatch(/…and \d+ further connection types? served by this workspace/)
-    expect(out).toContain("partial")
     // The converse must not contradict the omission line: the dropped types ARE served.
     expect(out).not.toContain("Do not use `datamate_*` warehouse tools for connection types that are not listed")
+    expect(out).toContain("For the served types omitted above, prefer the `datamate_*` tool")
     expect(out).toContain("Connection types this workspace does not serve use the local tools")
+    // The count belongs to the list, and is stated once. Saying it again in the
+    // converse was two sentences for one fact.
+    expect(out.match(/further connection types? served by this workspace/g)).toHaveLength(1)
   })
 
   test("a single oversized line cannot breach the cap either", () => {
@@ -285,8 +317,12 @@ describe("the shared fixture stays tethered to the real allowlist", () => {
 })
 
 describe("the regression guard", () => {
-  // The whole safety case for shipping this: a session that is not routing must
-  // assemble exactly the system prompt it did before this module existed.
+  // The safety case for shipping this, stated exactly: a project this session knows is
+  // NOT linked to a workspace must assemble the system prompt it did before this module
+  // existed. That is narrower than "every non-routing session" — the hatch and the three
+  // uncertain states deliberately speak — and it holds because `derive` settles the link
+  // read before it reaches any reason that does. (`binding-unreadable` is the read
+  // failing rather than saying no, so it is outside the claim and speaks.)
 
   test("every disabled reason is decided explicitly; the hatch and the uncertain states speak", () => {
     // A `Record` over the union, NOT an array of it: `Reason[]` would accept a short
@@ -314,11 +350,37 @@ describe("the regression guard", () => {
       if (expected === "silent") expect(out).toBe("")
       if (expected === "hatch") expect(out).toContain("--integrations=local")
       if (expected === "unverified") {
-        expect(out).toContain("could not be verified")
+        expect(out).toContain("could not be established")
         expect(out).not.toContain("analytics")
       }
       if (expected !== "silent") expect(out).toContain("`sql_execute`")
     }
+  })
+
+  test("no reason that speaks survives a link read that settled as unbound", async () => {
+    // The table above says WHAT each reason renders. This says which reasons `derive`
+    // can actually produce for a project that reads as unbound — the other half of the
+    // claim, and the half a copy change alone cannot keep true. Every disabling
+    // condition is driven on an unbound project; each must settle as a silent reason.
+    precedenceInternals.binding = async () => null
+    const silentOnUnbound = async () => {
+      const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+      expect(systemSection(p)).toBe("")
+      return p.disabledReason
+    }
+    expect(await silentOnUnbound()).toBe("unbound")
+
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    expect(await silentOnUnbound()).toBe("unbound")
+    delete process.env.ALTIMATE_INTEGRATIONS
+
+    precedenceInternals.attributedTo = async () => "999"
+    expect(await silentOnUnbound()).toBe("unbound")
+
+    expect(systemSection(await refresh(SESSION, {}))).toBe("")
+
+    delete process.env.ALTIMATE_WORKSPACE
+    expect(await silentOnUnbound()).toBe("pilot-off")
   })
 
   test("contributes a section only once the workspace is really routing", async () => {
