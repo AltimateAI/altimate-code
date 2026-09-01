@@ -14,8 +14,9 @@ const ESTIMATE_CHUNK_SIZE = 400
 const MEDIA_TOKEN_ALLOWANCE = 2_048
 const FILE_TOKEN_ALLOWANCE = 16_384
 const PDF_TOKEN_ALLOWANCE = 32_768
-const AUDIO_TOKEN_ALLOWANCE = 32_768
-const VIDEO_TOKEN_ALLOWANCE = 131_072
+const AUDIO_TOKEN_ALLOWANCE = 8_192
+const VIDEO_TOKEN_ALLOWANCE = 8_192
+const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
@@ -247,15 +248,27 @@ function pdfTokenAllowance(payload: unknown): number {
   return Math.max(PDF_TOKEN_ALLOWANCE, bytes)
 }
 
-/** Assign an allowance that matches the semantic media kind rather than its encoded bytes. */
+/** Keep semantic media usable on small contexts while making very large inline payloads monotonic. */
+function semanticMediaTokenAllowance(payload: unknown, baseline: number): number {
+  const bytes = inlinePayloadSize(payload) ?? 0
+  // Encoded bytes do not map directly to provider tokens, but a coarse size floor prevents an
+  // arbitrarily large inline recording from receiving the same allowance as a tiny or remote one.
+  return Math.max(baseline, Math.ceil(bytes / SEMANTIC_MEDIA_BYTES_PER_TOKEN))
+}
+
+/** Assign an allowance that matches the semantic media kind rather than charging every byte. */
 function mediaTokenAllowance(part: JsonRecord): number {
   const payload = mediaPayload(part)
   const mime = mediaType(part, payload)
   const type = String(part.type)
   if (mime?.startsWith("image/") || type.startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
   if (mime === "application/pdf") return pdfTokenAllowance(payload)
-  if (mime?.startsWith("audio/") || type === "audio") return AUDIO_TOKEN_ALLOWANCE
-  if (mime?.startsWith("video/") || type === "video") return VIDEO_TOKEN_ALLOWANCE
+  if (mime?.startsWith("audio/") || type === "audio") {
+    return semanticMediaTokenAllowance(payload, AUDIO_TOKEN_ALLOWANCE)
+  }
+  if (mime?.startsWith("video/") || type === "video") {
+    return semanticMediaTokenAllowance(payload, VIDEO_TOKEN_ALLOWANCE)
+  }
   if (FILE_PART_TYPES.has(type)) {
     return Math.max(FILE_TOKEN_ALLOWANCE, inlinePayloadSize(payload) ?? 0)
   }

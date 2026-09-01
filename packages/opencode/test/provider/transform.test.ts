@@ -5091,24 +5091,39 @@ describe("output token budget", () => {
     expect(estimated).toBeGreaterThanOrEqual(150_000)
   })
 
-  test("uses semantic allowances instead of decoded byte size for audio and video", () => {
-    const estimate = (mediaType: string) =>
+  test("uses semantic baselines plus a coarse size floor for audio and video", () => {
+    const estimate = (mediaType: string, data: string) =>
       estimateInputTokens({
         system: [],
         messages: [
           {
             role: "user",
-            content: [{ type: "file", mediaType, data: "A".repeat(1_398_104) }],
+            content: [{ type: "file", mediaType, data }],
           },
         ],
       })
 
-    const audio = estimate("audio/wav")
-    const video = estimate("video/mp4")
-    expect(audio).toBeGreaterThan(32_000)
-    expect(audio).toBeLessThan(40_000)
-    expect(video).toBeGreaterThan(131_000)
-    expect(video).toBeLessThan(140_000)
+    const tinyAudio = estimate("audio/wav", "AQ==")
+    const tinyVideo = estimate("video/mp4", "AQ==")
+    expect(tinyAudio).toBeGreaterThan(8_000)
+    expect(tinyAudio).toBeLessThan(10_000)
+    expect(tinyVideo).toBeGreaterThan(8_000)
+    expect(tinyVideo).toBeLessThan(10_000)
+
+    const smallContext = createWindowModel({ context: 16_384, output: 8_192 })
+    expect(clampOutputTokens({ model: smallContext, requested: 8_192, inputTokens: tinyVideo })).toBeGreaterThan(
+      OUTPUT_TOKEN_FLOOR,
+    )
+
+    const oneMiB = "A".repeat(1_398_104)
+    expect(estimate("audio/wav", oneMiB)).toBeGreaterThan(16_000)
+    expect(estimate("audio/wav", oneMiB)).toBeLessThan(20_000)
+    expect(estimate("video/mp4", oneMiB)).toBeGreaterThan(16_000)
+    expect(estimate("video/mp4", oneMiB)).toBeLessThan(20_000)
+
+    const fourMiB = "A".repeat(5_592_408)
+    expect(estimate("audio/wav", fourMiB)).toBeGreaterThan(65_000)
+    expect(estimate("video/mp4", fourMiB)).toBeGreaterThan(65_000)
   })
 
   test("uses a fixed parser-free fallback for remote PDFs", () => {
