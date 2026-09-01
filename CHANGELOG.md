@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-02
+
+Workspaces grow from a memory-only pilot into a working surface: a bound workspace now supplies its custom skills, attaches its own engine, and routes warehouse tools through it. Alongside that, a run no longer dies when one oversized tool result overflows the window, and the ChatGPT-subscription model picker was rebuilt against what the backend actually serves. Everything workspace-related stays behind `ALTIMATE_WORKSPACE=1` and is invisible to anyone not opted in.
+
+### Added
+
+- **A bound workspace's custom skills sync into the project.** Skill bundles attached to the workspace are pulled into `.altimate-code/skill/_workspace/<publicId>/`, where the existing discovery finds them with no other change — a synced skill is listed and invoked exactly like a local one. The tree carries its own `.gitignore` so it never reaches version control, is removed when you opt out or disconnect, and a directory the client did not create is never touched. (#1172)
+- **The bound workspace's engine attaches as a derived MCP overlay.** In a bound project the `datamate` MCP entry is derived at config load from the workspace's pinned local engine — never written to disk, overriding IDE, hosted and stale entries. Each turn boundary re-reads the binding, replaces the entry on re-link, and retries a failed handshake once. (#1167)
+- **Warehouse tools route through the workspace's engine.** A native warehouse capability is shadowed only when the engine materialised the matching tool and attach attests the engine is its own; the redirect happens after the native safety checks, and fails open with a reason otherwise. `--integrations=local` turns it off. (#1168)
+- **An offer to install the engine a bound workspace needs.** A missing engine used to be a toast with a command in it. It is now an offer — Install now / Copy command / Not now — and the install only ever runs from an explicit choice; the next turn boundary picks the installed engine up. (#1169)
+- **The model is told what a bound workspace serves.** Redirecting to an engine tool did not make the model choose it first, so every session paid a wasted turn learning the rule. The workspace's capabilities are now stated up front. (#1182)
+- **`altimate-code mcp status`.** Reports each configured server's real state, including drift between discovered and on-disk config. (#1160)
+- **Installs are counted from the shell installers, not just npm.** (#1096)
+
+### Fixed
+
+- **Warehouse SDKs are resolved from disk instead of reported missing.** A bare `import("snowflake-sdk")` inside the compiled binary resolved against bunfs, which has no `node_modules`, so an SDK the user had already installed was invisible and reported as "not installed" — the single root cause behind nine open issues, five of them filed automatically by the telemetry scanner. (#1122)
+- **Startup scans prune dependency trees again.** `Glob.Options` lost its `ignore` field in the v1.17.9 bridge, so the two `**/mcp.json` scans filtered results after every directory had already been opened and read. On a repo with `node_modules` installed that cost 12.93 CPU-seconds on every startup. (#1184)
+- **Release binaries embed the live models.dev catalog.** Every platform binary was built with a checked-in test fixture as its bundled catalog, whose newest entry was dated 2026-03-30; verified against the shipped 0.9.7 binary in an isolated `HOME`. (#1188)
+- **The ChatGPT-subscription model allowlist matches the backend.** The filter was built from the models.dev catalog rather than what the Codex endpoint serves, so it was wrong in both directions: `gpt-5.2`, `gpt-5.6` and `gpt-5.3-codex` were offered and rejected with HTTP 400, while the current flagship subscription models `gpt-5.6-sol`, `gpt-5.6-luna` and `gpt-5.6-terra` were hidden. Every id was verified against a live Pro credential and the `includes("codex")` substring auto-allow — which cannot express the real policy — was replaced with exact matching. The filter now matches on `api.id` rather than the config map key, so a model aliased in config is no longer deleted. (#1179, closes #1178)
+- **`gpt-5.4` and `gpt-5.4-mini` are retired from the picker.** Both retired backend-side on 2026-08-31; the replacements are `gpt-5.6-terra` and `gpt-5.6-luna`. (#1190)
+- **A large prompt no longer gets a hard 400 before generating anything.** The per-model output-token reservation never consulted `limit.context`, so on a model where prompt and completion share one window a large system prompt pushed input plus reservation past it. The reservation is now clamped against the context window. (#1196)
+- **A run survives a single oversized tool result.** Previously the recovery compaction resent the full conversation, overflowed the same way and terminated with "Session too large to compact". It now summarizes what fits, with tightened context-safety margins and compaction fidelity. (#1171)
+- **MCP failures say what actually went wrong.** `server unavailable` logged the constant string `"failed"` and discarded `status.error`, the field holding the real message — a `401 Unauthorized`, a transport error, the actual cause. (#1159)
+- **The marker check runs in a fresh worktree.** `script/upstream/analyze.ts` imported `minimatch` from the repo root, where it was never declared, so the check failed with `Cannot find package minimatch` before it could run. (#1177)
+
 ## [0.9.7] - 2026-08-25
 
 Grep/search reliability fix for everyone, a Codex model-picker unblock, and a first, opt-in look at Workspaces — shared project binding with cloud-synced memory.
