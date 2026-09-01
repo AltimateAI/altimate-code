@@ -1006,13 +1006,18 @@ function countShadowedConnections(precedence: Precedence): number {
   }
 }
 
-/** Per-capability note for a `warehouse_list` row, or null when the row is untouched. */
-export function warehouseListNote(precedence: Precedence | undefined, warehouseType: string): string | null {
-  if (!precedence?.enabled) return null
+/** Per-capability note for a `warehouse_list` row, or null when the row is untouched.
+ * `inventory` lets a caller that annotates many rows project the snapshot once. */
+export function warehouseListNote(
+  precedence: Precedence | undefined,
+  warehouseType: string,
+  inventory: ServedType[] | undefined = precedence ? servedInventory(precedence) : undefined,
+): string | null {
+  if (!precedence?.enabled || !inventory) return null
   const type = canonicalType(warehouseType)
   if (!type) return null
   // altimate_change - same projection as the toast and the prompt section.
-  const entry = servedInventory(precedence).find((e) => e.type === type)
+  const entry = inventory.find((e) => e.type === type)
   if (!entry) return null
   return (
     `${entry.served.map((s) => short(s.capability)).join("/")} via workspace ${precedence.workspaceName}` +
@@ -1035,8 +1040,9 @@ export async function warehouseListNotes(
   const precedence = bySession.get(sessionID)
   if (!precedence?.enabled) return notes
   if (!(await snapshotCurrent(precedence))) return notes
+  const inventory = servedInventory(precedence)
   for (const wh of warehouses) {
-    const note = warehouseListNote(precedence, wh.type)
+    const note = warehouseListNote(precedence, wh.type, inventory)
     if (note) notes.set(wh.name, note)
   }
   return notes
