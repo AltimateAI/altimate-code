@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test"
-import { Skill } from "../../src/skill/skill"
+import { Skill } from "../../src/skill"
 
 function skill(overrides: Partial<Skill.Info> = {}): Skill.Info {
   return {

@@ -797,6 +797,48 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
+  test("a bundle beyond the client BYTE limit is refused before anything is downloaded", async () => {
+    // Sibling of the file-count ceiling above, isolating the other term. Four
+    // files keeps the count two orders of magnitude under MAX_TOTAL_FILES, so
+    // only `totalBytes + skillBytes > MAX_TOTAL_BYTES` can refuse this bundle.
+    //
+    // Asserting only "the files are absent" would be VACUOUS: with the byte term
+    // deleted the bundle is fetched and then rejected by the integrity check for
+    // advertising 16MB and serving one byte, so the files are absent either way.
+    // (Verified by mutation — the first version of this test passed against a
+    // ceiling with the byte term removed.) The ceiling's actual contract is that
+    // it is evaluated on the ADVERTISED inventory BEFORE any download, so what
+    // distinguishes it is that no file is ever requested.
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    let fileRequests = 0
+    const huge = Array.from({ length: 4 }, (_, i) => ({ path: `big${i}.md`, size: 16 * 1024 * 1024 }))
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) {
+        fileRequests++
+        const rel = url.split("/files/")[1]
+        return json({ path: decodeURIComponent(rel), content: "x" })
+      }
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-huge", name: "h", file_count: huge.length, updated_at: "2026-08-08T00:00:00Z" }],
+          total: 1,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-huge", files: huge, content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    expect(fileRequests).toBe(0)
+    expect(existsSync(skillFile("pub-huge", "big0.md"))).toBe(false)
+    // Refusing an oversized workspace must not be read as an empty one.
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
   test("a synced bundle has the shape a skill needs", async () => {
     // Shape only. Most fixtures here assert bytes reached disk, which does not
     // show a bundle yields a USABLE skill — but neither does this: discovery is

@@ -452,7 +452,15 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
           `    <name>${neutralizeListingWrapper(skill.name)}</name>`,
           `    <description>${neutralizeListingWrapper(skill.description ?? "")}</description>`,
           // altimate_change end
-          `    <location>${pathToFileURL(skill.location).href}</location>`,
+          // altimate_change start — a built-in skill's `location` is a
+          // `builtin:` URI, not a filesystem path, so `pathToFileURL` resolved
+          // it against the CWD and emitted a location that does not exist
+          // (`file:///…/packages/opencode/builtin:my-skill/SKILL.md`). The
+          // now-deleted duplicate renderer in `./skill.ts` had this guard and
+          // this one never did; the divergence surfaced when its tests were
+          // repointed here. (review)
+          `    <location>${skill.location.startsWith("builtin:") ? skill.location : pathToFileURL(skill.location).href}</location>`,
+          // altimate_change end
           "  </skill>",
         ]),
       "</available_skills>",

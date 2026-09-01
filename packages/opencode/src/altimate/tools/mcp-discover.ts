@@ -137,7 +137,7 @@ export const McpDiscoverTool = Tool.define("mcp_discover", {
         if (managed) {
           lines.push(
             `\n'${DATAMATE_KEY}' was not added: this project is linked to workspace "${managed.name}", ` +
-              `whose engine serves that server. Unlink the project, or run without ALTIMATE_WORKSPACE, to add it by hand.`,
+              `whose engine serves that server. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to add it by hand.`,
           )
           continue
         }
