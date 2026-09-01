@@ -149,6 +149,9 @@ describe("messages", () => {
     expect(describeRefusal(null, "analytics")).toContain(INSTALL_COMMAND)
     expect(describeRefusal("0.6.3", "analytics")).toContain(`needs ${MIN_ENGINE_VERSION} or newer`)
     expect(describeRefusal("0.6.3", "analytics")).toContain("Found datamate 0.6.3")
+    expect(describeRefusal("0.6.3", "analytics", "npm i -g @altimateai/datamate@next")).toContain(
+      "Update with: npm i -g @altimateai/datamate@next",
+    )
   })
   test("the missing list is truncated after five", () => {
     expect(describeMissing([])).toBe("")

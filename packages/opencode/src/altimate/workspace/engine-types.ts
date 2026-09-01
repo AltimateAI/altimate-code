@@ -189,17 +189,21 @@ export function pinnedWorkspace(entry: EntryLike | null): string | null {
  * run" are one code path and very different problems; conflating them sent
  * more than one debugging session hunting a version mismatch that did not
  * exist. */
-export function describeRefusal(found: string | null, workspaceName: string): string {
+export function describeRefusal(
+  found: string | null,
+  workspaceName: string,
+  command: string = INSTALL_COMMAND,
+): string {
   if (!found) {
     return (
       `The ${ENGINE_BINARY} on PATH did not report a usable version, so it cannot serve workspace ` +
       `"${workspaceName}". It is more likely broken than out of date — try \`${ENGINE_BINARY} --version\` ` +
-      `directly. Reinstall with: ${INSTALL_COMMAND}`
+      `directly. Reinstall with: ${command}`
     )
   }
   return (
     `Found ${ENGINE_BINARY} ${found}; workspace "${workspaceName}" needs ${MIN_ENGINE_VERSION} or newer. ` +
-    `Update with: ${INSTALL_COMMAND}`
+    `Update with: ${command}`
   )
 }
 

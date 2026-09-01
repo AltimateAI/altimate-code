@@ -7,6 +7,7 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { CachedBinding } from "./state"
 import type { Declared, LocalMcpConfig, McpEntry, McpStatus, Toast } from "./engine-types"
+import type { EngineOffer, InstallResult } from "./engine-offer"
 
 export const log = Log.create({ service: "workspace-engine" })
 
@@ -24,9 +25,21 @@ export const syncInternals: {
   resolveBinding?: (directory: string) => Promise<ScopedBinding | null>
   which?: (cmd: string) => string | null
   versionOf?: (bin: string) => Promise<string | null>
+  fingerprint?: (bin: string) => string | null
   declared?: (workspaceId: string) => Promise<Declared | null>
   notify?: (toast: Toast) => Promise<void>
   printLine?: (line: string) => void
+  /** Install-offer seams (see engine-offer.ts). */
+  offer?: (offer: EngineOffer) => boolean
+  publishOffer?: (sessionID: string) => Promise<boolean>
+  runInstall?: (
+    argv: string[],
+    timeoutMs: number,
+    graceMs: number,
+  ) => Promise<{ code: number | null; timedOut: boolean; stderr: string }>
+  nodeMajor?: () => Promise<number | null>
+  npmAvailable?: () => boolean
+  install?: (spec: string) => Promise<InstallResult>
   instanceDirectory?: () => string | null
   headless?: () => boolean
   serve?: () => boolean

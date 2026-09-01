@@ -55,6 +55,7 @@ type Harness = {
   /** Whether MCP holds a client under the key — set when MCP "bootstraps" from
    * the first config load, then tracked through add/remove, as in the runtime. */
   live?: boolean
+  fingerprint: string | null
 }
 
 function install(opts: {
@@ -90,6 +91,7 @@ function install(opts: {
     toasts: [],
     lines: [],
     clock: 1_000_000,
+    fingerprint: "bin-1",
   }
   process.env.ALTIMATE_WORKSPACE = opts.flag === false ? "" : "1"
   syncInternals.serve = () => opts.serve === true
@@ -112,6 +114,10 @@ function install(opts: {
     h.lines.push(line)
   }
   syncInternals.now = () => h.clock
+  syncInternals.fingerprint = () => h.fingerprint
+  // No TUI bus in this harness, so a refusal that would raise the install
+  // offer falls back to the toast, which is what these tests observe.
+  syncInternals.publishOffer = async () => false
   syncInternals.mcp = {
     status: async () =>
       h.live ? { datamate: { status: h.status, ...(h.statusError ? { error: h.statusError } : {}) } } : {},
@@ -247,13 +253,13 @@ describe("overlay — what the config loader gets", () => {
     expect(h.probes).toBe(1)
 
     resetForTests()
-    const missing = install({ version: "0.6.3" })
-    await overlay(DIR, missing.config)
-    await overlay(DIR, missing.config)
-    expect(missing.probes).toBe(1)
-    missing.clock += FAILED_PROBE_TTL_MS
-    await overlay(DIR, missing.config)
-    expect(missing.probes).toBe(2)
+    const old = install({ version: "0.6.3" })
+    await overlay(DIR, old.config)
+    await overlay(DIR, old.config)
+    expect(old.probes).toBe(1)
+    old.clock += FAILED_PROBE_TTL_MS
+    await overlay(DIR, old.config)
+    expect(old.probes).toBe(2)
   })
 
   test("a binding read that throws leaves the config as loaded", async () => {
@@ -532,7 +538,7 @@ describe("beforeTurn — what a turn boundary does", () => {
     await beforeTurn("s1")
     expect(h.invalidates).toBe(1)
     expect(h.added).toHaveLength(1)
-    expect(pinnedWorkspace(h.added[0])).toBe("7")
+    expect(pinnedWorkspace(h.added[0] as LocalMcpConfig)).toBe("7")
     expect(pinnedWorkspace(h.config.mcp!.datamate as LocalMcpConfig)).toBe("7")
     expect(managedWorkspace()).toEqual({ id: "7", name: "growth" })
     expect(settledOutcome("s1")?.kind).toBe("attached")
@@ -720,20 +726,60 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toEqual([])
   })
 
-  test("an engine installed after a refusal is picked up once the probe is asked again", async () => {
+  test("an engine installed after a refusal is picked up at the next turn boundary", async () => {
+    // The install dialog runs in another module realm and cannot reach the
+    // probe memo, so a missing engine is looked for on PATH every turn.
     const h = install({ which: null })
     await beforeTurn("s1")
     expect(settledOutcome("s1")?.kind).toBe("engine-missing")
     h.which = "/usr/local/bin/datamate"
-    // Within the TTL the failed probe is not repeated...
-    await beforeTurn("s1")
-    expect(settledOutcome("s1")?.kind).toBe("engine-missing")
-    expect(h.added).toEqual([])
-    // ...the install offer invalidates it explicitly; a later turn re-probes on its own.
-    invalidateProbe()
     await beforeTurn("s1")
     expect(h.added).toHaveLength(1)
-    expect(pinnedWorkspace(h.added[0])).toBe("42")
+    expect(pinnedWorkspace(h.added[0] as LocalMcpConfig)).toBe("42")
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+  })
+
+  test("a too-old engine is re-probed only after the TTL, or when the probe is invalidated", async () => {
+    const h = install({ version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(h.probes).toBe(1)
+    h.version = MIN_ENGINE_VERSION
+    await beforeTurn("s1")
+    expect(h.probes).toBe(1)
+    expect(settledOutcome("s1")?.kind).toBe("engine-too-old")
+    invalidateProbe()
+    await beforeTurn("s1")
+    expect(h.probes).toBe(2)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+  })
+
+  test("a too-old engine updated in place is re-probed on the next turn, inside the TTL", async () => {
+    // The offer's install writes the new engine over the old one at the same
+    // PATH entry, from another module realm that cannot invalidate this memo.
+    // The file's fingerprint changing is what ends the memo, not the clock.
+    const h = install({ version: "0.6.3" })
+    await beforeTurn("s1")
+    expect(h.probes).toBe(1)
+    expect(settledOutcome("s1")?.kind).toBe("engine-too-old")
+    h.version = MIN_ENGINE_VERSION
+    h.fingerprint = "bin-2"
+    h.clock += 1_000
+    await beforeTurn("s1")
+    expect(h.probes).toBe(2)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    // A binary that cannot be stat'ed has no fingerprint to compare, so the
+    // memo falls back to its TTL alone — never a spawn on every turn.
+    resetForTests()
+    const u = install({ version: "0.6.3" })
+    u.fingerprint = null
+    await beforeTurn("s1")
+    u.version = MIN_ENGINE_VERSION
+    u.clock += 1_000
+    await beforeTurn("s1")
+    expect(u.probes).toBe(1)
+    u.clock += FAILED_PROBE_TTL_MS
+    await beforeTurn("s1")
+    expect(u.probes).toBe(2)
     expect(settledOutcome("s1")?.kind).toBe("attached")
   })
 

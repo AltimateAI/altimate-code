@@ -2,6 +2,7 @@
 //
 // Everything that asks the outside world a question: the binary, its
 // version, the workspace allowlist, and the user-facing surfaces.
+import { statSync } from "fs"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { AltimateApi } from "@/altimate/api/client"
@@ -43,6 +44,23 @@ async function readScoped(directory: string): Promise<ScopedBinding | null> {
 
 export function which(cmd: string): string | null {
   return syncInternals.which ? syncInternals.which(cmd) : whichBinary(cmd)
+}
+
+/** Identity of the file behind a PATH hit, cheap enough to ask every turn:
+ * inode, size, mtime and ctime of the target (symlinks followed, so an npm
+ * bin shim whose package was reinstalled reads as changed). A replacement
+ * file has a new inode; a rewrite in place that keeps the length and restores
+ * the mtime still moves the ctime, which nothing in userland can set back —
+ * so an update cannot read as the same file. Null when it cannot be stat'ed;
+ * with nothing to compare, the caller's memo falls back to its TTL. */
+export function fingerprint(bin: string): string | null {
+  if (syncInternals.fingerprint) return syncInternals.fingerprint(bin)
+  try {
+    const stat = statSync(bin)
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+  } catch {
+    return null
+  }
 }
 
 /** `datamate --version`, stdout only. The engine prints its real package

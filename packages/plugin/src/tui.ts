@@ -180,6 +180,9 @@ export type TuiDialogSelectProps<Value = unknown> = {
   onFilter?: (query: string) => void
   onSelect?: (option: TuiDialogSelectOption<Value>) => void
   skipFilter?: boolean
+  // altimate_change start — a fixed-option dialog can hide the filter box entirely
+  renderFilter?: boolean
+  // altimate_change end
   current?: Value
 }
 

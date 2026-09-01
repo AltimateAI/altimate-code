@@ -35,10 +35,11 @@ import {
   syncInternals,
   type ScopedBinding,
 } from "./engine-seams"
-import { declaredBounded, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
+import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
+import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
 import {
   ENGINE_BINARY,
-  INSTALL_COMMAND,
+  INSTALL_HELPS,
   REPAIRABLE,
   TOOL_PREFIX,
   clearsFloor,
@@ -56,6 +57,7 @@ import {
 } from "./engine-types"
 
 export * from "./engine-types"
+export * from "./engine-offer"
 export { isEnabled, isHeadless, isServe, syncInternals } from "./engine-seams"
 
 /** Sessions remembered per process. It is a memo; an evicted session just re-settles. */
@@ -64,13 +66,13 @@ export const MAX_TRACKED_SESSIONS = 256
  * cost a process spawn on every turn while still being noticed once installed. */
 export const FAILED_PROBE_TTL_MS = 30_000
 /** A failed allowlist lookup is retried at most this often. */
-const DECLARED_RETRY_MS = 60_000
+export const DECLARED_RETRY_MS = 60_000
 
 // ── the engine on PATH ──────────────────────────────────────────────────────
 
 type Probe = { kind: "ok"; version: string } | { kind: "missing" } | { kind: "too-old"; found: string | null }
 
-let probeMemo: { result: Probe; at: number } | null = null
+let probeMemo: { result: Probe; at: number; fingerprint: string | null } | null = null
 
 function now(): number {
   return syncInternals.now ? syncInternals.now() : Date.now()
@@ -78,10 +80,27 @@ function now(): number {
 
 async function probeEngine(): Promise<Probe> {
   const at = now()
-  if (probeMemo && (probeMemo.result.kind === "ok" || at - probeMemo.at < FAILED_PROBE_TTL_MS)) {
+  // A usable engine is remembered for the process — before the PATH scan, so
+  // the healthy path costs nothing per turn. A missing one is asked
+  // about on every call — `which` is a PATH scan, no process spawn — so an
+  // install made from the offer dialog (which runs in another module realm and
+  // cannot reach this memo) is seen on the next turn. A too-old or broken one
+  // costs a spawn to re-check, so that is rate-limited by the TTL — but only
+  // while the file on PATH is the same one: an update written over it (the
+  // offer's `npm i -g` on an old engine) changes the fingerprint and is
+  // re-probed on the next turn, just as an install is.
+  if (probeMemo && probeMemo.result.kind === "ok") return probeMemo.result
+  const bin = which(ENGINE_BINARY)
+  const seen = bin ? fingerprint(bin) : null
+  if (
+    probeMemo &&
+    probeMemo.result.kind === "too-old" &&
+    bin &&
+    probeMemo.fingerprint === seen &&
+    at - probeMemo.at < FAILED_PROBE_TTL_MS
+  ) {
     return probeMemo.result
   }
-  const bin = which(ENGINE_BINARY)
   let result: Probe
   if (!bin) {
     result = { kind: "missing" }
@@ -89,12 +108,16 @@ async function probeEngine(): Promise<Probe> {
     const version = await versionOf(bin)
     result = clearsFloor(version) ? { kind: "ok", version: version! } : { kind: "too-old", found: version }
   }
-  probeMemo = { result, at }
+  // A `missing` result is recorded too but never honoured: the guards above
+  // match only `ok` and `too-old`, so an install is noticed on the next call.
+  probeMemo = { result, at, fingerprint: seen }
   return result
 }
 
 /** Forget the last probe, so the next turn boundary looks for the engine
- * again immediately. The install offer calls this after an install. */
+ * again immediately. Nothing in production calls this — the offer dialog runs
+ * in another module realm — which is why the probe itself notices an engine
+ * that appeared or changed on PATH. Kept for tests and diagnostics. */
 export function invalidateProbe(): void {
   probeMemo = null
 }
@@ -277,14 +300,21 @@ export async function managedWorkspaceLoaded(
 
 /** `retried`: this session already spent its one re-add on a failed handshake.
  * Per session, so "start a new session to try again" is true. */
-type SessionRecord = { outcome: Outcome; announced?: string; retried?: boolean }
+type SessionRecord = { outcome: Outcome; announced?: string; announcedAt?: number; retried?: boolean }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
+/** Verdict signatures a headless process has already printed to stderr. */
+const headlessPrinted = new Set<string>()
 
 function record(sessionID: string, outcome: Outcome): SessionRecord {
   const previous = sessions.get(sessionID)
   sessions.delete(sessionID)
-  const next: SessionRecord = { outcome, announced: previous?.announced, retried: previous?.retried }
+  const next: SessionRecord = {
+    outcome,
+    announced: previous?.announced,
+    announcedAt: previous?.announcedAt,
+    retried: previous?.retried,
+  }
   sessions.set(sessionID, next)
   while (sessions.size > MAX_TRACKED_SESSIONS) {
     const oldest = sessions.keys().next().value
@@ -545,19 +575,43 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
         count === undefined
           ? `Workspace "${workspace.name}" has integration tools that run on the local engine, which is not installed.`
           : `Workspace "${workspace.name}" declares ${count} integration tool${count === 1 ? "" : "s"}. They run on the local engine, which is not installed.`
-      await announceRefusal(sessionID, outcome, {
-        title: `Workspace "${workspace.name}" needs the local engine`,
-        message: `${what} Install it with: ${INSTALL_COMMAND}`,
-        variant: "warning",
-      })
+      await announceRefusal(
+        sessionID,
+        outcome,
+        {
+          title: `Workspace "${workspace.name}" needs the local engine`,
+          message: `${what} Install it with: ${installCommand()}`,
+          variant: "warning",
+        },
+        {
+          reason: "engine-missing",
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          ...(count === undefined ? {} : { declared: count }),
+          command: installCommand(),
+        },
+      )
       return
     }
     record(sessionID, refusal)
-    await announceRefusal(sessionID, refusal, {
-      title: `Workspace "${workspace.name}": engine not usable`,
-      message: describeRefusal(refusal.found, workspace.name),
-      variant: "warning",
-    })
+    const declared = (await declaredFor(workspace))?.keys.length
+    await announceRefusal(
+      sessionID,
+      refusal,
+      {
+        title: `Workspace "${workspace.name}": engine not usable`,
+        message: describeRefusal(refusal.found, workspace.name, installCommand()),
+        variant: "warning",
+      },
+      {
+        reason: "engine-too-old",
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        ...(declared === undefined ? {} : { declared }),
+        found: refusal.found ?? "unknown",
+        command: installCommand(),
+      },
+    )
     return
   }
 
@@ -625,16 +679,57 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 
 /** Tell the session about a refusal, once per unchanged verdict.
  *
- * The substitution point for the install offer: when `installWouldHelp(outcome)`
- * a dialog replaces the toast here; it never adds a second message. Headless
- * `run` prints one stderr line instead. */
-export async function announceRefusal(sessionID: string, outcome: Outcome, toast: Toast): Promise<void> {
+ * The substitution point for the install offer: when installing would help
+ * and an `offer` is supplied, the offer surface (dialog, headless line, or
+ * toast fallback) replaces the toast — never adds to it. Otherwise headless
+ * `run` prints one stderr line and the TUI gets the toast.
+ *
+ * The offer route's "once" expires with the "Not now" latch: a session that
+ * stays open past `OFFER_SKIP_TTL_MS` is offered again, so the latch (which
+ * the TUI checks on every offer) decides, not the age of the session. The
+ * latch is measured from the user's "Not now", which can come well after the
+ * offer was raised, so after the first expiry the offer is re-raised every
+ * `OFFER_RECHECK_MS` rather than once per further window — the TUI keeps
+ * suppressing it until its latch really ends. */
+export async function announceRefusal(
+  sessionID: string,
+  outcome: Outcome,
+  toast: Toast,
+  offer?: EngineOffer,
+): Promise<void> {
   const rec = sessions.get(sessionID) ?? record(sessionID, outcome)
   const detail = "error" in outcome ? outcome.error : "found" in outcome ? String(outcome.found) : ""
-  const declared = "declared" in outcome ? String(outcome.declared ?? "?") : ""
-  const signature = `${outcome.kind}:${detail}:${declared}:${toast.title}`
-  if (rec.announced === signature) return
+  // The declared count is not part of the verdict: a lookup that fails on one
+  // turn and recovers on the next changes the number in the text, not what
+  // the text has to say, so it must not re-announce (nor re-print). The
+  // workspace is: the title carries its name, and two workspaces can share
+  // one, so the id goes in as well.
+  const signature = `${outcome.kind}:${detail}:${toast.title}:${offer?.workspaceId ?? ""}`
+  const offering = !!offer && INSTALL_HELPS[outcome.kind]
+  const at = now()
+  let repeat = false
+  if (rec.announced === signature) {
+    // A clock that moved backwards (NTP correction, VM resume) reads as
+    // expired, as the TUI's latch treats it — otherwise the overlay would stop
+    // raising the offer until real time caught up plus the whole window.
+    const elapsed = rec.announcedAt === undefined ? undefined : at - rec.announcedAt
+    const expired = offering && elapsed !== undefined && (elapsed < 0 || elapsed >= OFFER_SKIP_TTL_MS)
+    if (!expired) return
+    repeat = true
+  }
   rec.announced = signature
+  rec.announcedAt = repeat ? at - OFFER_SKIP_TTL_MS + OFFER_RECHECK_MS : at
+  if (isHeadless()) {
+    // A headless `run` is one process with one stderr, whatever sessions it
+    // creates along the way (a sub-agent's session settles the same verdict
+    // and would print the same line). One line per verdict per process.
+    if (headlessPrinted.has(signature)) return
+    headlessPrinted.add(signature)
+  }
+  if (offering) {
+    await offerOrNotify(offer, toast, sessionID)
+    return
+  }
   if (isHeadless()) {
     printLine(`${toast.title}: ${toast.message}`)
     return
@@ -643,8 +738,8 @@ export async function announceRefusal(sessionID: string, outcome: Outcome, toast
 }
 
 /** Is a re-probe worth asking for on the next turn? Exposed for the install
- * offer, which schedules nothing itself: it installs, invalidates the probe,
- * and the next turn boundary attaches. */
+ * offer, which schedules nothing itself: it installs, and the next turn
+ * boundary sees the new or changed binary on PATH and attaches. */
 export function isRepairable(outcome: Outcome | undefined): boolean {
   return !!outcome && REPAIRABLE[outcome.kind]
 }
@@ -656,6 +751,7 @@ export function resetForTests(): void {
   sessions.clear()
   turnTools.clear()
   declaredCache.clear()
+  headlessPrinted.clear()
 }
 
 /** Test-only views. */
