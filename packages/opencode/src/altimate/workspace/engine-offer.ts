@@ -200,21 +200,24 @@ export function runInstall(
       killTree("SIGTERM")
       hard = setTimeout(() => {
         // The group outlives its leader while any member is alive, so this
-        // reaches survivors even after npm itself has exited. Unref'd: it must
-        // not keep the process alive once the run has already resolved.
+        // reaches survivors even after npm itself has exited. Referenced on
+        // purpose: an unref'd timer never fires in a process that is draining
+        // its loop, and the SIGKILL is the only thing that ends a descendant
+        // that ignored SIGTERM — five seconds of loop is the price.
         killTree("SIGKILL")
         finish(null)
-      }, graceMs).unref()
+      }, graceMs)
     }, timeoutMs)
     child.once("exit", (code) => {
       finish(code)
       // npm is done, but a descendant it forked may still be alive in the
       // group (a lifecycle script's daemon). It is the install's straggler,
       // not the user's: reap it — SIGTERM now, SIGKILL after the grace —
-      // without holding the result or this process for it.
+      // without holding the result for it. The timer stays referenced for
+      // the same reason the deadline's does: it must actually fire.
       if (!timedOut && grouped) {
         killTree("SIGTERM")
-        setTimeout(() => killTree("SIGKILL"), graceMs).unref()
+        setTimeout(() => killTree("SIGKILL"), graceMs)
       }
     })
     child.once("error", (err) => {
@@ -244,15 +247,23 @@ export async function installEngine(): Promise<InstallResult> {
       }
     }
     const installedVersion = await versionOf(installedBin)
-    if (!clearsFloor(installedVersion)) {
-      // The likeliest cause is not a bad install: an older engine earlier on
-      // PATH shadows the one npm just wrote.
+    if (!installedVersion) {
+      // Could not run or did not answer: say what was observed, no diagnosis.
       return {
         ok: false,
         error:
-          `npm installed it, but the ${ENGINE_BINARY} first on PATH (${installedBin}) reports ` +
-          `${installedVersion ?? "no version"} — an older install earlier on PATH is shadowing the new one; ` +
-          `remove it, or put npm's global bin directory ahead of it`,
+          `npm installed it, but the ${ENGINE_BINARY} first on PATH (${installedBin}) did not report a version — ` +
+          `try \`${ENGINE_BINARY} --version\` there before retrying`,
+      }
+    }
+    if (!clearsFloor(installedVersion)) {
+      // A real, older version first on PATH: an earlier install shadows the
+      // one npm just wrote.
+      return {
+        ok: false,
+        error:
+          `npm installed it, but the ${ENGINE_BINARY} first on PATH (${installedBin}) reports ${installedVersion} — ` +
+          `an older install earlier on PATH is shadowing the new one; remove it, or put npm's global bin directory ahead of it`,
       }
     }
     return { ok: true }
