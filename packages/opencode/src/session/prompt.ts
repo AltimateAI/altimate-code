@@ -33,6 +33,7 @@ import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { DATAMATE_KEY } from "../altimate/datamate-transport"
 import * as Precedence from "../altimate/workspace/precedence"
+import * as Awareness from "../altimate/workspace/awareness"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -1449,10 +1450,22 @@ export namespace SessionPrompt {
             sessionID,
           })
       // altimate_change end
+      // altimate_change start — workspace tool awareness.
+      // Reads the snapshot `Precedence.refresh` stored for this turn during tool
+      // resolution, so the section, the tool descriptions and the mid-turn `check()`
+      // verdict all derive from one object. This runs on every step of the loop, not
+      // once per turn, so it stays a cheap pure render. Yields "" unless a bound
+      // workspace's engine is attributed AND its tools materialised — so a session
+      // with no workspace assembles exactly the array it did before this shipped.
+      const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
+      // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
         ...(skills ? [skills] : []),
         ...(knowledgeInjection ? [knowledgeInjection] : []),
+        // altimate_change start — workspace routing directive
+        ...(workspaceAwareness ? [workspaceAwareness] : []),
+        // altimate_change end
         ...(await InstructionPrompt.system()),
         ...hoistedReminders,
       ]

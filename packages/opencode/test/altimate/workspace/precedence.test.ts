@@ -23,36 +23,18 @@ import {
   snapshotState,
   warehouseListNote,
   warehouseListNotes,
+  servedInventory,
 } from "../../../src/altimate/workspace/precedence"
 import * as Registry from "../../../src/altimate/native/connections/registry"
+// altimate_change - shared with awareness.test.ts; see precedence-fixture.ts
+import { BIGQUERY_TOOLS, SNOWFLAKE_TOOLS, WAREHOUSE_CONFIGS, bindTo } from "./precedence-fixture"
 import { canonicalType } from "../../../src/altimate/native/connections/registry"
 
 const SESSION = "ses_precedence"
 const ORIGINAL_INTEGRATIONS = process.env.ALTIMATE_INTEGRATIONS
 const ORIGINAL_PILOT = process.env.ALTIMATE_WORKSPACE
 
-/** The engine tools a workspace with a Snowflake connection materialises. Snowflake is
- * the only integration serving all three capabilities. */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
-
-const SNOWFLAKE_TOOLS = {
-  datamate_snowflake_execute_database_query: {},
-  datamate_snowflake_get_query_explain_plan: {},
-  datamate_snowflake_get_table_stats: {},
-  datamate_snowflake_list_database_connections: {},
-}
-
-/** BigQuery and postgresql ship execute + list only — no explain, no table stats. */
-const BIGQUERY_TOOLS = {
-  datamate_bigquery_execute_database_query: {},
-  datamate_bigquery_list_database_connections: {},
-}
-
-function bindTo(id = 42, name = "analytics") {
-  precedenceInternals.binding = async () => ({ datamateId: id, datamateName: name })
-  precedenceInternals.attributedTo = async () => String(id)
-  precedenceInternals.attachOutcome = async () => ({ kind: "attached", available: 12, declared: 12, missing: [] })
-}
 
 beforeEach(() => {
   resetForTests()
@@ -62,13 +44,7 @@ beforeEach(() => {
   // Real local connections. Without them `check()` would return "run" simply because
   // the connection is unknown, and every "stays local" assertion below would pass
   // without proving anything.
-  Registry.setConfigs({
-    local_snow: { type: "snowflake", account: "acct", user: "u" } as never,
-    local_duck: { type: "duckdb", path: ":memory:" } as never,
-    bq_conn: { type: "bigquery", project: "p" } as never,
-    pg_conn: { type: "postgresql", host: "h" } as never,
-    rs_conn: { type: "redshift", host: "h" } as never,
-  })
+  Registry.setConfigs({ ...WAREHOUSE_CONFIGS })
 })
 
 afterEach(() => {
@@ -412,7 +388,9 @@ describe("mechanism 1a — attributed to the bound workspace", () => {
     let reads = 0
     precedenceInternals.config = {
       get: async () =>
-        reads++ === 0 ? PINNED_TO_42 : { mcp: { datamate: { command: ["datamate", "start-stdio", "--datamate", "77"] } } },
+        reads++ === 0
+          ? PINNED_TO_42
+          : { mcp: { datamate: { command: ["datamate", "start-stdio", "--datamate", "77"] } } },
       invalidate: async () => {},
     }
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
@@ -1118,6 +1096,35 @@ describe("mechanism 6 — the escape hatch", () => {
     const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
     expect(precedence.enabled).toBe(true)
   })
+
+  // altimate_change start — the hatch is read after the link, not before it.
+  test("an unbound project reports `unbound`, not the hatch", async () => {
+    // Both answers disable routing identically, so this is only about which reason is
+    // reported — and every user-facing surface keys on that. `escape-hatch` is a claim
+    // about workspace routing, so reporting it to a project with no link puts a
+    // workspace toast on screen and a workspace section in the system prompt of a
+    // session that has no workspace at all.
+    precedenceInternals.binding = async () => null
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.enabled).toBe(false)
+    expect(precedence.disabledReason).toBe("unbound")
+    expect(inventoryLine(precedence)).toBe("")
+  })
+
+  test("an unreadable link still reports the hatch", async () => {
+    // The flag is a fact about this session whatever the link says, and it outranks a
+    // read that could not settle: someone who switched routing off is told that, not
+    // that an engine they disabled could not be verified.
+    precedenceInternals.binding = async () => {
+      throw new Error("link unreadable")
+    }
+    process.env.ALTIMATE_INTEGRATIONS = "local"
+    const precedence = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(precedence.disabledReason).toBe("escape-hatch")
+    expect(inventoryLine(precedence)).toContain("--integrations=local")
+  })
+  // altimate_change end
 })
 
 describe("descriptions and listings", () => {
@@ -1321,3 +1328,74 @@ describe("drift is reported for every warehouse capability shape", () => {
     expect(warned.sort()).toEqual(["redshift_get_query_explain_plan", "redshift_get_table_stats"])
   })
 })
+// altimate_change start — the projection the awareness section renders from. It must
+// agree with `check()` on every call, so these assert against the same snapshot the
+// guard uses rather than against a hand-built object.
+describe("servedInventory — what the model will be told is routed", () => {
+  test("lists every materialised capability with its model-facing key", async () => {
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    expect(servedInventory(p)).toEqual([
+      {
+        type: "snowflake",
+        served: [
+          { capability: "sql_execute", modelKey: "datamate_snowflake_execute_database_query" },
+          { capability: "sql_explain", modelKey: "datamate_snowflake_get_query_explain_plan" },
+          { capability: "schema_inspect", modelKey: "datamate_snowflake_get_table_stats" },
+        ],
+        local: [],
+      },
+    ])
+  })
+
+  test("an execute-only integration reports execute only", async () => {
+    // Keying on the warehouse type instead of the capability would advertise an
+    // explain tool that does not exist on the engine side.
+    const p = await refresh(SESSION, BIGQUERY_TOOLS)
+    expect(servedInventory(p)).toEqual([
+      {
+        type: "bigquery",
+        served: [{ capability: "sql_execute", modelKey: "datamate_bigquery_execute_database_query" }],
+        local: ["sql_explain", "schema_inspect"],
+      },
+    ])
+  })
+
+  test("is empty for every disabled snapshot", async () => {
+    delete process.env.ALTIMATE_WORKSPACE
+    expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
+    process.env.ALTIMATE_WORKSPACE = "1"
+
+    precedenceInternals.binding = async () => null
+    expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
+    bindTo()
+
+    precedenceInternals.attributedTo = async () => "999"
+    expect(servedInventory(await refresh(SESSION, SNOWFLAKE_TOOLS))).toEqual([])
+    bindTo()
+
+    expect(servedInventory(await refresh(SESSION, {}))).toEqual([])
+  })
+
+  test("excludes destinations the caller is forbidden to call", async () => {
+    // Same filter `check()` applies. A listing that ignored the ruleset would promise
+    // the analyst a routing it will never get, and steer it off the tools it can use.
+    const analystLike = [
+      { permission: "*", pattern: "*", action: "deny" as const },
+      { permission: "sql_execute", pattern: "*", action: "allow" as const },
+    ]
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS, analystLike)
+    expect(servedInventory(p)).toEqual([])
+  })
+
+  test("agrees with check() on the same snapshot", async () => {
+    // The property that matters: anything the section advertises, the guard redirects.
+    const p = await refresh(SESSION, SNOWFLAKE_TOOLS)
+    const rows = servedInventory(p).flatMap((t) => t.served)
+    expect(rows.length).toBe(3)
+    for (const row of rows) {
+      const verdict = await check(SESSION, row.capability, "local_snow")
+      expect(verdict.redirect?.metadata.redirect_to).toBe(row.modelKey)
+    }
+  })
+})
+// altimate_change end
