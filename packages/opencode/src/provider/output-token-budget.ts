@@ -14,9 +14,13 @@ const ESTIMATE_CHUNK_SIZE = 400
 const MEDIA_TOKEN_ALLOWANCE = 2_048
 const FILE_TOKEN_ALLOWANCE = 16_384
 const PDF_TOKEN_ALLOWANCE = 32_768
+const AUDIO_TOKEN_ALLOWANCE = 32_768
+const VIDEO_TOKEN_ALLOWANCE = 131_072
 const DATA_URL_HEADER_LIMIT = 1_024
 const MIN_REASONING_BUDGET = 1_024
 const EMOJI = /\p{Extended_Pictographic}/u
+const DENSE_ASCII_RUN = /[A-Za-z0-9+/_=-]{32,}/g
+const DENSE_ASCII_MIN_UNIQUE = 6
 const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
 const CONTEXT_WINDOW_BETAS = new Map([["context-1m-2025-08-07", 1_000_000]])
 const MEDIA_PART_TYPES = new Set([
@@ -141,7 +145,20 @@ export function mergeRequestHeaders(...sources: readonly unknown[]): Record<stri
   return result
 }
 
-/** Estimate heterogeneous text in small chunks and conservatively count non-ASCII scripts. */
+/** Charge opaque ASCII runs conservatively without penalizing repetitive prose or padding. */
+function estimateAsciiTokens(input: string): number {
+  let total = 0
+  let offset = 0
+  for (const match of input.matchAll(DENSE_ASCII_RUN)) {
+    const value = match[0]
+    if (new Set(value).size < DENSE_ASCII_MIN_UNIQUE) continue
+    total += Token.estimate(input.slice(offset, match.index)) + value.length
+    offset = match.index + value.length
+  }
+  return total + Token.estimate(input.slice(offset))
+}
+
+/** Estimate heterogeneous text in small chunks and conservatively count dense or non-ASCII text. */
 function estimateTextTokens(input: string): number {
   let total = 0
   for (let offset = 0; offset < input.length; offset += ESTIMATE_CHUNK_SIZE) {
@@ -157,7 +174,7 @@ function estimateTextTokens(input: string): number {
         if (EMOJI.test(character)) emoji++
       }
     }
-    const multilingualFloor = Token.estimate(ascii) + nonAscii + emoji
+    const multilingualFloor = estimateAsciiTokens(ascii) + nonAscii + emoji
     total += Math.max(Token.estimate(chunk), multilingualFloor)
   }
   return total
@@ -221,9 +238,12 @@ function pdfTokenAllowance(payload: unknown): number {
 function mediaTokenAllowance(part: JsonRecord): number {
   const payload = mediaPayload(part)
   const mime = mediaType(part, payload)
-  if (mime?.startsWith("image/") || String(part.type).startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
+  const type = String(part.type)
+  if (mime?.startsWith("image/") || type.startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
   if (mime === "application/pdf") return pdfTokenAllowance(payload)
-  if (FILE_PART_TYPES.has(String(part.type))) {
+  if (mime?.startsWith("audio/") || type === "audio") return AUDIO_TOKEN_ALLOWANCE
+  if (mime?.startsWith("video/") || type === "video") return VIDEO_TOKEN_ALLOWANCE
+  if (FILE_PART_TYPES.has(type)) {
     return Math.max(FILE_TOKEN_ALLOWANCE, inlinePayloadSize(payload) ?? 0)
   }
   return MEDIA_TOKEN_ALLOWANCE

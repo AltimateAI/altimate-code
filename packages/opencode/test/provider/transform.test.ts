@@ -4855,6 +4855,20 @@ describe("output token budget", () => {
     expect(framed).toBeGreaterThan(flattened + entries.length)
   })
 
+  test("charges dense high-entropy ASCII more conservatively than repetitive text", () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    let state = 0x12345678
+    const dense = Array.from({ length: 8_192 }, () => {
+      state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0
+      return alphabet[state & 63]
+    }).join("")
+    const repetitive = "x".repeat(dense.length)
+    const estimate = (content: string) => estimateInputTokens({ system: [], messages: [{ role: "user", content }] })
+
+    expect(estimate(dense)).toBeGreaterThan(8_000)
+    expect(estimate(dense)).toBeGreaterThan(estimate(repetitive) * 3)
+  })
+
   test("does not tokenize encoded media bytes as literal prompt text", () => {
     const estimated = estimateInputTokens({
       system: [],
@@ -5069,6 +5083,26 @@ describe("output token budget", () => {
       ],
     })
     expect(estimated).toBeGreaterThanOrEqual(150_000)
+  })
+
+  test("uses semantic allowances instead of decoded byte size for audio and video", () => {
+    const estimate = (mediaType: string) =>
+      estimateInputTokens({
+        system: [],
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "file", mediaType, data: "A".repeat(1_398_104) }],
+          },
+        ],
+      })
+
+    const audio = estimate("audio/wav")
+    const video = estimate("video/mp4")
+    expect(audio).toBeGreaterThan(32_000)
+    expect(audio).toBeLessThan(40_000)
+    expect(video).toBeGreaterThan(131_000)
+    expect(video).toBeLessThan(140_000)
   })
 
   test("uses a fixed parser-free fallback for remote PDFs", () => {
