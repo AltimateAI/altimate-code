@@ -80,7 +80,7 @@ export function renderSkillContent(skill: Skill.Info, base: string, files: strin
     // `neutralizeListingWrapper`'s `skill\b` does not match `skill_content`, so
     // a name ending `</skill_content>` broke out of the block entirely. Caught
     // by the render-site test added alongside this. (bot review)
-    `# Skill: ${Skill.neutralizeBodyWrapper(Skill.neutralizeListingWrapper(skill.name))}`,
+    `# Skill: ${Skill.neutralizeSkillNameText(skill.name)}`,
     "",
     // The SKILL.md body is remote content for a synced bundle, and this
     // on-demand path is WIDER than the auto-load path that was already escaped.

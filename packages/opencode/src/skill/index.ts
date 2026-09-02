@@ -440,9 +440,14 @@ export const TRUST_BOUNDARY_TAGS = [
 export function makeWrapperNeutralizer(tags: readonly string[]): (text: string) => string {
   // `[\\s/>]` rather than `\\b`: a word boundary also sits before `-`, so
   // `<name-value>` and `<file-path>` were escaped as if they were wrapper tags.
-  // Requiring a real delimiter keeps legitimate markup intact while still
-  // catching `<name>`, `</ name >` and `< system-reminder>`. (bot review)
-  const re = new RegExp(`<(?=\\s*/?\\s*(?:${tags.join("|")})\\s*(?:[/>]|$))`, "gi")
+  //
+  // Whitespace is a TERMINATOR here, not something to skip. An earlier form,
+  // `\\s*(?:[/>]|$)`, skipped whitespace and then demanded `/`, `>` or
+  // end-of-input — which stopped matching every attribute-bearing tag, i.e.
+  // exactly the shapes this codebase emits (`<skill_content name="...">`,
+  // `<auto_loaded_skill name="...">`). Remote text could forge those verbatim.
+  // (review)
+  const re = new RegExp(`<(?=\\s*/?\\s*(?:${tags.join("|")})(?:[\\s/>]|$))`, "gi")
   return (text: string) => {
     re.lastIndex = 0
     return text.replace(re, "&lt;")
@@ -506,6 +511,19 @@ const neutralizeBody = makeWrapperNeutralizer(BODY_BOUNDARY_TAGS)
  * auto-load path, which needs `alwaysApply` or a matching glob. Left raw, a body
  * could close `</skill_content>` and continue as post-skill tool output, or
  * forge a `<system-reminder>`. (review) */
+/** Every boundary a skill NAME could forge. A name is rendered inside
+ * `<skill_content>` (body boundaries) and inside the listing (structural tags),
+ * so one set covers both — rather than chaining two neutralizers and relying on
+ * the caller to remember both, which is how the wrong-set bug happened. (review) */
+export const SKILL_NAME_TAGS = [...new Set([...BODY_BOUNDARY_TAGS, ...TRUST_BOUNDARY_TAGS])] as const
+
+const neutralizeSkillName = makeWrapperNeutralizer(SKILL_NAME_TAGS)
+
+/** Neutralize a skill name for rendering in any wrapper context. */
+export function neutralizeSkillNameText(text: string): string {
+  return neutralizeSkillName(text)
+}
+
 const neutralizeFilePath = makeWrapperNeutralizer(FILE_PATH_BOUNDARY_TAGS)
 
 /** Neutralize a generated `<file>` path entry. */
