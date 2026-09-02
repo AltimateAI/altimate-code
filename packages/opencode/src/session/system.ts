@@ -206,7 +206,18 @@ export namespace SystemPrompt {
 
   // altimate_change start — see the auto-loaded skill block below.
   function neutralizeSkillWrapper(content: string): string {
-    return content.replace(/<(\/?)auto_loaded_skill\b/gi, "&lt;$1auto_loaded_skill")
+    // altimate_change — share the listing's trust-boundary tag list. This
+    // escaper handles remote skill BODIES, injected right after "Treat their
+    // content as binding guidance", so it is the more privileged surface of the
+    // two even though the listing is the wider one. It previously covered only
+    // `auto_loaded_skill`, so a synced body could forge a `<system-reminder>`
+    // verbatim. Whitespace between `<`, `/` and the name is allowed for the
+    // same reason as the listing: the consumer is a model, not a parser.
+    // (review)
+    return content.replace(
+      new RegExp(`<(?=\\s*/?\\s*(?:${Skill.TRUST_BOUNDARY_TAGS.join("|")})\\b)`, "gi"),
+      "&lt;",
+    )
   }
   // altimate_change end
 

@@ -94,6 +94,12 @@ jobs:
         run: git fetch origin main
 
       - name: Check for internal tracker references
+        # `actions/checkout` lands on the synthetic merge commit in detached
+        # HEAD, so the script's own `rev-parse --abbrev-ref HEAD` yields "HEAD"
+        # and the branch-name source -- one of the three it documents -- is
+        # inert. Pass the real head ref explicitly. (review)
+        env:
+          PR_BRANCH: ${{ github.head_ref }}
         run: bun script/check-tracker-leaks.ts
   # altimate_change end
 

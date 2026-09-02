@@ -177,23 +177,32 @@ export async function notify(toast: Toast): Promise<void> {
 
 // altimate_change start — see `printLine`.
 function stripControl(text: string): string {
+  // C0 minus TAB (a tab is harmless here and legitimate in a name), DEL, and
+  // C1 (U+0080-U+009F) — U+009B is CSI, so a terminal decoding C1 from UTF-8
+  // would still act on an escape sequence the C0-only range let through.
+  // (review)
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\u0000-\u001F\u007F]/g, "")
+  return text.replace(/[\u0000-\u0008\u000A-\u001F\u007F-\u009F]/g, "")
 }
 // altimate_change end
 
 /** stderr, deliberately: `run --format json` documents stdout as raw JSON
  * events, and this is a status notice, not run output. */
 export function printLine(line: string): void {
-  if (syncInternals.printLine) return syncInternals.printLine(line)
+  // altimate_change — strip BEFORE the test-seam branch. Stripping after it
+  // meant the override path (and therefore anything routed through it) never
+  // got sanitised at all, so the guard covered only one of the two exits.
+  // (review)
+  const safe = stripControl(line)
+  if (syncInternals.printLine) return syncInternals.printLine(safe)
   try {
-    // altimate_change start — these lines embed the workspace NAME, which is
+    // altimate_change — these lines embed the workspace NAME, which is
     // set server-side and never validated for control characters. Writing it
     // raw lets a workspace name carrying ANSI escapes repaint or hide
     // surrounding output — including, in a CI log, the "engine not usable"
     // notice this function exists to deliver. Strip C0 and DEL; the newline is
     // added below, so nothing legitimate here needs them. (review)
-    process.stderr.write(stripControl(line) + "\n")
+    process.stderr.write(safe + "\n")
   } catch {
     // A closed stream must not take down the turn.
   }

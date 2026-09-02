@@ -23,7 +23,6 @@ import { Bus } from "@/bus"
 import { Session } from "@/session"
 import { Discovery } from "./discovery"
 import { Glob } from "../util/glob"
-import { pathToFileURL } from "url"
 import type { Agent } from "@/agent/agent"
 import { PermissionNext } from "@/permission/next"
 
@@ -304,7 +303,8 @@ export namespace Skill {
 
   // altimate_change start — `fmt` removed. This module carried a second,
   // near-identical `<available_skills>` renderer that no production code called
-  // (`session/system.ts` and `tool/skill.ts` both use the one in `./index.ts`),
+  // (`session/system.ts` calls `Skill.fmt` from `./index.ts`; `tool/skill.ts`
+  // builds its own listing inline from the same shared helpers),
   // and it was the copy WITHOUT the wrapper-tag escaping that synced, remote
   // skill text requires. Only `test/skill/fmt.test.ts` referenced it, so the
   // suite was covering the dead copy while the live renderer went untested.

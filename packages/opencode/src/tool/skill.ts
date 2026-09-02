@@ -38,6 +38,29 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
 // altimate_change end
 // altimate_change end
 
+// altimate_change start — the `<available_skills>` block the Skill TOOL sends
+// to the model on every turn, extracted so it can be tested directly. Testing
+// the escaping helpers alone did not pin this: reverting these interpolations
+// to raw `${skill.name}` left every test passing, which is how the missing
+// `builtin:` guard survived here after being fixed in the prompt-side listing.
+// Both renderers now share `neutralizeListingWrapper` and `formatSkillLocation`,
+// so the escaping cannot diverge again; consolidating the two into one renderer
+// outright is the remaining follow-up. (review)
+export function renderAvailableSkills(skills: Skill.Info[]): string[] {
+  return [
+    "<available_skills>",
+    ...skills.flatMap((skill) => [
+      `  <skill>`,
+      `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
+      `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
+      `    <location>${Skill.formatSkillLocation(skill.location)}</location>`,
+      `  </skill>`,
+    ]),
+    "</available_skills>",
+  ]
+}
+// altimate_change end
+
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const list = await Skill.available(ctx?.agent)
 
@@ -72,21 +95,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "The following skills provide specialized sets of instructions for particular tasks",
           "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
           "",
-          "<available_skills>",
-          ...displaySkills.flatMap((skill) => [
-            `  <skill>`,
-            // altimate_change start — same escaping as `Skill.fmt`. This listing
-            // is the Skill TOOL's description, sent to the model every turn, so
-            // a synced skill whose description ends
-            // `</description></skill></available_skills>` would break out here
-            // even when it never breaks out of the prompt-side listing. (review)
-            `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
-            `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
-            // altimate_change end
-            `    <location>${pathToFileURL(skill.location).href}</location>`,
-            `  </skill>`,
-          ]),
-          "</available_skills>",
+          ...renderAvailableSkills(displaySkills),
           // altimate_change start - add hint when skills are truncated
           ...(hasMore
             ? [
@@ -193,7 +202,10 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         title: `Loaded skill: ${skill.name}`,
         output: [
           ...(followups ? [followups, ""] : []),
-          `<skill_content name="${skill.name}">`,
+          // altimate_change — the name is frontmatter, so for a synced skill it is
+          // attacker-influenced: a `"` breaks out of the attribute. Escaped like
+          // the listing above. (review)
+          `<skill_content name="${Skill.neutralizeListingWrapper(skill.name).replace(/"/g, "&quot;")}">`,
           `# Skill: ${skill.name}`,
           "",
           skill.content.trim(),

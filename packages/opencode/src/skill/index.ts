@@ -421,12 +421,43 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 // function does not emit them: the harness uses both as trust boundaries
 // elsewhere in the same message stream, so remote skill text must not be able
 // to forge either one. (review)
+export const TRUST_BOUNDARY_TAGS = [
+  "available_skills",
+  "skill",
+  "name",
+  "description",
+  "location",
+  "system-reminder",
+  "auto_loaded_skill",
+] as const
+
 export function neutralizeListingWrapper(text: string): string {
+  // Neutralise only the `<`, via a lookahead, so the rest of the text survives
+  // byte-for-byte. Whitespace is permitted between `<`, `/` and the tag name
+  // because the consumer is a language model, not an XML parser: a model
+  // reading `</ description>` or `< system-reminder>` mid-listing may well take
+  // it as a boundary, and the earlier `<(\/?)(tag)` form let both through. (review)
   return text.replace(
-    /<(\/?)(available_skills|skill|name|description|location|system-reminder|auto_loaded_skill)\b/gi,
-    "&lt;$1$2",
+    new RegExp(`<(?=\\s*/?\\s*(?:${TRUST_BOUNDARY_TAGS.join("|")})\\b)`, "gi"),
+    "&lt;",
   )
 }
+
+/** A built-in skill's `location` is a `builtin:` URI, not a filesystem path.
+ * `pathToFileURL` would resolve it against the CWD and emit a path that does
+ * not exist. Shared by every renderer so the guard cannot be applied to one
+ * listing and forgotten at another — which is exactly how it was missed. */
+//
+// `location` appears in TRUST_BOUNDARY_TAGS but is deliberately not passed
+// through the neutralizer: the value is either a `builtin:` URI we control or a
+// `pathToFileURL` result, and that percent-encodes `<`/`>` to `%3C`/`%3E`
+// (verified), so a `public_id` containing them cannot forge a tag here. The tag
+// stays in the list so hostile text elsewhere cannot mint a `<location>`.
+// (review)
+export function formatSkillLocation(location: string): string {
+  return location.startsWith("builtin:") ? location : pathToFileURL(location).href
+}
+
 // altimate_change end
 
 export function fmt(list: Info[], opts: { verbose: boolean }) {
@@ -459,7 +490,7 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
           // now-deleted duplicate renderer in `./skill.ts` had this guard and
           // this one never did; the divergence surfaced when its tests were
           // repointed here. (review)
-          `    <location>${skill.location.startsWith("builtin:") ? skill.location : pathToFileURL(skill.location).href}</location>`,
+          `    <location>${formatSkillLocation(skill.location)}</location>`,
           // altimate_change end
           "  </skill>",
         ]),
@@ -471,7 +502,11 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
     "## Available Skills",
     ...described
       .toSorted((a, b) => a.name.localeCompare(b.name))
-      .map((skill) => `- **${skill.name}**: ${skill.description}`),
+      // altimate_change — the same untrusted metadata as the verbose branch. No
+      // production caller passes `verbose: false` today, so this is latent
+      // rather than live — but an unescaped second path on the same function is
+      // the exact shape of the bug this release exists to close. (review)
+      .map((skill) => `- **${neutralizeListingWrapper(skill.name)}**: ${neutralizeListingWrapper(skill.description ?? "")}`),
   ].join("\n")
 }
 

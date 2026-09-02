@@ -358,7 +358,14 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
   // inconsistency, not an empty workspace — and "empty workspace" is the one
   // answer that deletes the user's snapshot. Refuse it.
   const total = (payload as { total?: unknown }).total
-  if (p.items.length === 0 && typeof total === "number" && total > 0) return null
+  // altimate_change — an empty page is only trustworthy when `total` is present
+  // AND zero. Requiring `total > 0` to refuse meant an envelope with `total`
+  // missing, a string, or fractional still parsed as a real empty workspace and
+  // authorised `removeManaged` — a malformed 200 deleting the snapshot, which is
+  // the one outcome this parser exists to prevent. Worse, that path sets none of
+  // the flags `lastSyncedAt` gates on, so the destructive purge was recorded as
+  // a successful poll and recovery waited out the full interval. (review)
+  if (p.items.length === 0 && (typeof total !== "number" || total > 0)) return null
   // A page that is not the one requested means the accumulation below would be
   // wrong; treat it as unrecognised rather than merging it.
   const echoed = (payload as { page?: unknown }).page

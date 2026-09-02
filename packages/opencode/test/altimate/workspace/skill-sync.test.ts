@@ -1020,6 +1020,24 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
   })
 
+  test("an empty page with `total` missing or non-numeric never authorises a purge", async () => {
+    // The `pages: 0` gate requires `items: []` AND `total === 0`. But the older
+    // guard only REFUSED when `total > 0`, so an envelope with `total` absent,
+    // a string, or fractional still parsed as a real empty workspace and reached
+    // `removeManaged` — a malformed 200 deleting the snapshot, which is the one
+    // outcome this parser exists to prevent. (review)
+    for (const total of [undefined, "0", 0.5, null]) {
+      serve({ "pub-1": { "SKILL.md": "one" } })
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+      globalThis.fetch = (async () =>
+        json({ items: [], page: 1, size: 50, pages: 1, ...(total === undefined ? {} : { total }) })) as unknown as typeof fetch
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    }
+  })
+
   test("`pages: 0` alongside rows is still refused as inconsistent", async () => {
     serve({ "pub-1": { "SKILL.md": "one" } })
     await syncSkills(project)
