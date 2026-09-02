@@ -109,12 +109,17 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
 
   // altimate_change start - use displaySkills for examples
   const examples = displaySkills
-    // altimate_change — NOT escaped, deliberately: this hint is copied verbatim
-    // by the model as the `name` argument, and an escaped form would not match
-    // the real skill on lookup. Names that the neutralizer would alter contain
-    // `<tag`, which `isSkillFrontmatter` does not produce for a usable skill —
-    // and the authoritative listing above is escaped either way. (bot review)
-    .map((skill) => `'${skill.name.replace(/[<>]/g, "")}'`)
+    // altimate_change — this hint is copied verbatim by the model as the `name`
+    // argument, so whatever it advertises must match the real skill on lookup.
+    // That rules out both escaping it (`&lt;name>` matches nothing) and
+    // stripping brackets (`foo <bar>` -> `foobar`, breaking every legitimately
+    // bracketed name — `isSkillFrontmatter` only requires a string, so names
+    // CAN contain `<`/`>`). Instead, advertise only names the neutralizer would
+    // leave untouched: those are exactly the ones that are both copyable and
+    // free of trust-tag text. The authoritative listing above still carries
+    // every skill, escaped. (bot review)
+    .filter((skill) => Skill.neutralizeListingWrapper(skill.name) === skill.name)
+    .map((skill) => `'${skill.name}'`)
     .slice(0, 3)
     .join(", ")
   const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
