@@ -460,6 +460,32 @@ export function neutralizeListingWrapper(text: string): string {
  * `&quot;` intact, and the consumer then decodes it back into a real quote that
  * closes the attribute — the very break-out the escaping was added to stop.
  * (bot review) */
+/** Tags that delimit a skill BODY in tool output. Distinct from the listing set
+ * on purpose: `neutralizeListingWrapper` cannot be reused here, because its
+ * `skill\b` alternative does not match `skill_content` — `\b` fails between the
+ * `l` and the `_`. (review) */
+export const BODY_BOUNDARY_TAGS = [
+  "skill_content",
+  "skill_files",
+  "file",
+  "auto_loaded_skill",
+  "system-reminder",
+] as const
+
+const BODY_WRAPPER_RE = new RegExp(`<(?=\\s*/?\\s*(?:${BODY_BOUNDARY_TAGS.join("|")})\\b)`, "gi")
+
+/** Neutralize the wrapper tags around a rendered skill body.
+ *
+ * `SKILL.md` content is remote for a workspace-synced bundle, and the on-demand
+ * load path renders it into `<skill_content>` — a wider surface than the
+ * auto-load path, which needs `alwaysApply` or a matching glob. Left raw, a body
+ * could close `</skill_content>` and continue as post-skill tool output, or
+ * forge a `<system-reminder>`. (review) */
+export function neutralizeBodyWrapper(text: string): string {
+  BODY_WRAPPER_RE.lastIndex = 0
+  return text.replace(BODY_WRAPPER_RE, "&lt;")
+}
+
 export function escapeSkillAttr(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }

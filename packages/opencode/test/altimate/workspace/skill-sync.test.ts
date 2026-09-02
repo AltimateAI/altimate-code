@@ -1054,6 +1054,23 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
+  test("`total: 0` while `pages` claims more than one page is refused", async () => {
+    // The mirror of the `pages: 0` cases. Both `rawPages === 0` guards skip a
+    // `pages: 3` envelope, so an empty page claiming three pages was accepted
+    // and `listAll` returned `[]` — purging the snapshot on a malformed 200.
+    // (review)
+    for (const pages of [3, 99]) {
+      serve({ "pub-1": { "SKILL.md": "one" } })
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+
+      globalThis.fetch = (async () =>
+        json({ items: [], total: 0, page: 1, size: 50, pages })) as unknown as typeof fetch
+      await syncSkills(project)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    }
+  })
+
   test("`pages: 0` arriving on a LATER page is refused, not read as an empty workspace", async () => {
     // Page 1 announcing several pages, then a later page claiming `pages: 0`,
     // contradicts itself. Accepting it made `listAll` stop early and return a

@@ -371,6 +371,13 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
   // the flags `lastSyncedAt` gates on, so the destructive purge was recorded as
   // a successful poll and recovery waited out the full interval. (review)
   if (p.items.length === 0 && (!Number.isInteger(total) || (total as number) !== 0)) return null
+  // altimate_change — and symmetrically: `total: 0` while `pages` claims more
+  // than one page is the same self-contradiction in the other direction. Both
+  // `rawPages === 0` guards above skip a `pages: 3` envelope, so an empty page
+  // claiming three pages was accepted and `listAll` returned `[]` — purging the
+  // user's snapshot on a malformed 200, the one outcome this parser exists to
+  // prevent. (review)
+  if (p.items.length === 0 && rawPages > 1) return null
   // A page that is not the one requested means the accumulation below would be
   // wrong; treat it as unrecognised rather than merging it.
   const echoed = (payload as { page?: unknown }).page

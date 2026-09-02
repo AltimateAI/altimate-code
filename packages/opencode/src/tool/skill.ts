@@ -28,6 +28,11 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   // `node_modules/<pkg>` isn't tagged as Altimate.
   if (
     normalized.startsWith("builtin:") ||
+    // altimate_change — `<built-in>` is the sentinel used by the embedded
+    // customization skill. Missing it here made `isBuiltin` false, so
+    // `path.dirname("<built-in>")` resolved to "." and the file scan ran over
+    // the user's entire project. (review)
+    normalized === "<built-in>" ||
     /\/node_modules\/(@altimateai\/|altimate-code\/)/.test(normalized) ||
     normalized.includes(".altimate/builtin")
   )
@@ -153,7 +158,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       })
 
       // altimate_change start — handle builtin: skills that have no filesystem directory
-      const isBuiltin = skill.location.startsWith("builtin:")
+      // altimate_change — one predicate, so a new sentinel cannot be handled at one
+  // site and missed at another. (review)
+  const isBuiltin = classifySkillSource(skill.location) === "builtin"
       const dir = isBuiltin ? "" : path.dirname(skill.location)
       const base = isBuiltin ? skill.location : pathToFileURL(dir).href
 
@@ -177,7 +184,14 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
               }
             }
             return arr
-          }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+          }).then((f) =>
+            f
+              // altimate_change — bundle file paths are remote too:
+              // `safeRelativePath` rejects `..`, absolute paths and NUL, but
+              // permits `<` and `>`. (review)
+              .map((file) => `<file>${Skill.neutralizeBodyWrapper(file)}</file>`)
+              .join("\n"),
+          )
       // altimate_change end
 
       // altimate_change start — append follow-up suggestions after skill content
@@ -222,7 +236,11 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           // this release keeps tripping over. (bot review)
           `# Skill: ${Skill.neutralizeListingWrapper(skill.name)}`,
           "",
-          skill.content.trim(),
+          // altimate_change — the SKILL.md body is remote content for a synced
+          // bundle, and this on-demand path is WIDER than the auto-load path
+          // that was already escaped. Left raw it could close
+          // `</skill_content>` or forge a `<system-reminder>`. (review)
+          Skill.neutralizeBodyWrapper(skill.content.trim()),
           "",
           `Base directory for this skill: ${base}`,
           "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
