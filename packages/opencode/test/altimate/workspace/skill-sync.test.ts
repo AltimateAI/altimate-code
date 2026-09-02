@@ -1059,23 +1059,38 @@ describe("workspace skill sync", () => {
     // contradicts itself. Accepting it made `listAll` stop early and return a
     // PARTIAL list as though it were the whole workspace — pruning everything
     // past page 1. (bot review)
-    serve({ "pub-1": { "SKILL.md": "one" } })
-    await syncSkills(project)
+    //
+    // The skill under threat MUST live on page 2: an earlier version of this
+    // test kept its only skill on page 1, so the partial list still contained
+    // it and the assertion passed with or without the guard. (bot review — the
+    // second vacuous test in this file's history, hence the note.)
+    const page = (n: number, id: string, pages: number) =>
+      json({ items: [{ public_id: id, updated_at: "2026-01-01T00:00:00Z" }], total: 2, page: n, size: 1, pages })
+    const files = (id: string) => json({ skill: { public_id: id, files: [{ path: "SKILL.md", size: 3 }], content: "" } })
 
     globalThis.fetch = (async (input: string | URL) => {
       const url = String(input)
-      if (url.includes("page=1"))
-        return json({
-          items: [{ public_id: "pub-1", updated_at: "2026-01-01T00:00:00Z" }],
-          total: 9,
-          page: 1,
-          size: 1,
-          pages: 3,
-        })
-      return json({ items: [], total: 0, page: 2, size: 1, pages: 0 })
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "one" })
+      if (url.includes("datamate_id")) return url.includes("page=2") ? page(2, "pub-2", 2) : page(1, "pub-1", 2)
+      return files(url.includes("pub-2") ? "pub-2" : "pub-1")
     }) as unknown as typeof fetch
     await syncSkills(project)
-    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+
+    // Now page 2 contradicts page 1's count.
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "one" })
+      if (url.includes("datamate_id"))
+        return url.includes("page=2")
+          ? json({ items: [], total: 0, page: 2, size: 1, pages: 0 })
+          : page(1, "pub-1", 2)
+      return files(url.includes("pub-2") ? "pub-2" : "pub-1")
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+
+    // Under the bug this is pruned by the partial list; the guard keeps it.
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
   })
 
   test("a file response omitting `path` is refused", async () => {

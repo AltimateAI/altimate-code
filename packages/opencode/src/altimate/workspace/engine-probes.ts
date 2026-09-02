@@ -182,7 +182,9 @@ function stripControl(text: string): string {
   // would still act on an escape sequence the C0-only range let through.
   // (review)
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\u0000-\u0008\u000A-\u001F\u007F-\u009F]/g, "")
+  // U+2028/U+2029 are Unicode line/paragraph separators: not C0 or C1, but they
+  // still break the one-notice-per-line framing this writer depends on. (bot review)
+  return text.replace(/[\u0000-\u0008\u000A-\u001F\u007F-\u009F\u2028\u2029]/g, "")
 }
 // altimate_change end
 

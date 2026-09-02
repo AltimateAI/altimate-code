@@ -109,7 +109,12 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
 
   // altimate_change start - use displaySkills for examples
   const examples = displaySkills
-    .map((skill) => `'${Skill.neutralizeListingWrapper(skill.name)}'`)
+    // altimate_change — NOT escaped, deliberately: this hint is copied verbatim
+    // by the model as the `name` argument, and an escaped form would not match
+    // the real skill on lookup. Names that the neutralizer would alter contain
+    // `<tag`, which `isSkillFrontmatter` does not produce for a usable skill —
+    // and the authoritative listing above is escaped either way. (bot review)
+    .map((skill) => `'${skill.name.replace(/[<>]/g, "")}'`)
     .slice(0, 3)
     .join(", ")
   const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
