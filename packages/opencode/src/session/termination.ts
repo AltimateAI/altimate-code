@@ -174,7 +174,7 @@ export function explicitDoneStop(input: {
 }
 
 /**
- * Run-mode completion instruction for the builder agent.
+ * Run-mode completion instruction for builder and builder-derived agents.
  *
  * This wording lived in `builder.txt`, but builder is a PRIMARY agent, so a
  * static instruction there also governs interactive chat — where nothing
@@ -182,8 +182,10 @@ export function explicitDoneStop(input: {
  * final answer, including mid-conversation on follow-ups. `isExplicitDone()`
  * is only consumed by the run-mode accounting path.
  *
- * Injected only in run mode and only for builder, which is byte-identical to
- * the previous run-mode behaviour: builder was the only prompt carrying it.
+ * Injected only in run mode, and only for the agents named in
+ * COMPLETION_CONTRACT_AGENTS below (builder, plus the opt-in data-qa profile
+ * — see that set for why). For builder alone this is byte-identical to the
+ * previous run-mode behaviour, when builder was the only prompt carrying it.
  * Prompt-visible text — changes need extra review.
  */
 export const RUN_MODE_COMPLETION_INSTRUCTION =

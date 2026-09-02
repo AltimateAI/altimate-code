@@ -323,12 +323,17 @@ export const layer = Layer.effect(
           // Protocol (sql-guard) pack and the build-oriented packs (dbt-ops,
           // dbt-verify, dbt-workflow, pitfalls, self-review, finish). Ships the
           // same DEFAULT permission ruleset as builder; per-agent config
-          // overrides apply per agent, as for every agent. Registered ONLY on
-          // explicit opt-in: ALTIMATE_DATA_QA_PROFILE=1/true, or an
+          // overrides apply per agent, as for every agent. Registered on any of
+          // three explicit opt-ins: ALTIMATE_DATA_QA_PROFILE=1/true, an
           // `agent: {"data-qa": {...}}` entry in config (which then overlays the
-          // native profile via the standard merge below). Nothing selects it
-          // implicitly; the default agent stays builder.
-          ...(Flag.truthyEnv("ALTIMATE_DATA_QA_PROFILE") || cfg.agent?.["data-qa"] != null
+          // native profile via the standard merge below), or `default_agent:
+          // "data-qa"` (naming it as the default is itself an explicit
+          // selection — without this arm, defaultInfo() would throw "default
+          // agent \"data-qa\" not found" instead of registering it). Nothing
+          // selects it implicitly otherwise; the default agent stays builder.
+          ...(Flag.truthyEnv("ALTIMATE_DATA_QA_PROFILE") ||
+          cfg.agent?.["data-qa"] != null ||
+          cfg.default_agent === "data-qa"
             ? {
                 "data-qa": {
                   name: "data-qa",

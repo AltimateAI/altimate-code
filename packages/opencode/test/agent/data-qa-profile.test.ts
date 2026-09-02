@@ -102,3 +102,25 @@ it.instance(
     },
   },
 )
+
+it.instance(
+  "default_agent: \"data-qa\" with no flag and no agent entry also opts in and resolves as default",
+  () =>
+    Effect.gen(function* () {
+      // No env flag, no `agent.data-qa` entry — naming data-qa as the
+      // configured default is itself the explicit opt-in. Without this path
+      // registration is skipped and defaultInfo() throws `default agent
+      // "data-qa" not found` (Codex/cubic finding, agent.ts:331).
+      const dataQa = yield* load((svc) => svc.get("data-qa"))
+      expect(dataQa).toBeDefined()
+      expect(dataQa?.native).toBe(true)
+      expect(dataQa?.prompt).toBe(PromptProfiles.PROMPT_DATA_QA)
+      const fallback = yield* load((svc) => svc.defaultAgent())
+      expect(fallback).toBe("data-qa")
+    }),
+  {
+    config: {
+      default_agent: "data-qa",
+    },
+  },
+)
