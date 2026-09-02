@@ -27,6 +27,7 @@ export const syncInternals: {
   versionOf?: (bin: string) => Promise<string | null>
   fingerprint?: (bin: string) => string | null
   declared?: (workspaceId: string) => Promise<Declared | null>
+  liveBridge?: (cwd: string) => boolean
   notify?: (toast: Toast) => Promise<void>
   printLine?: (line: string) => void
   /** Install-offer seams (see engine-offer.ts). */

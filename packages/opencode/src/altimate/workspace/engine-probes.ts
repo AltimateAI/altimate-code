@@ -2,7 +2,9 @@
 //
 // Everything that asks the outside world a question: the binary, its
 // version, the workspace allowlist, and the user-facing surfaces.
-import { statSync } from "fs"
+import { readFileSync, readdirSync, statSync } from "fs"
+import { homedir } from "os"
+import { isAbsolute, join, relative, resolve } from "path"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { AltimateApi } from "@/altimate/api/client"
@@ -161,6 +163,53 @@ export async function declaredBounded(workspaceId: string): Promise<Declared | n
     ])
   } finally {
     if (timer) clearTimeout(timer)
+  }
+}
+
+/** Whether a live VS Code bridge would serve `cwd`, resolved the way the
+ * engine resolves it at spawn (see the engine's extensionRpcDiscovery): a
+ * sidecar whose recorded workspaceFolders contain `cwd`, else the sole live
+ * bridge. Read-only — a dead pid is skipped, never unlinked; GC of stale
+ * sidecars belongs to the engine and the extension. Presentation only: the
+ * engine remains the authority on what actually connects. */
+export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate", "extension-rpc")): boolean {
+  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd)
+  const bridges: string[][] = []
+  try {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".json")) continue
+      try {
+        const data = JSON.parse(readFileSync(join(dir, entry), "utf8")) as {
+          socketPath?: string
+          workspaceFolders?: string[]
+          pid?: number
+        }
+        if (!data.socketPath) continue
+        if (typeof data.pid === "number" && !pidAlive(data.pid)) continue
+        bridges.push(data.workspaceFolders ?? [])
+      } catch {
+        // An unreadable sidecar is not a live bridge.
+      }
+    }
+  } catch {
+    return false
+  }
+  if (bridges.length === 0) return false
+  const within = (folder: string) => {
+    const rel = relative(resolve(folder), resolve(cwd))
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+  }
+  if (bridges.some((folders) => folders.some(within))) return true
+  return bridges.length === 1
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // EPERM is a live process owned by someone else.
+    return (err as NodeJS.ErrnoException).code === "EPERM"
   }
 }
 
