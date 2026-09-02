@@ -435,7 +435,7 @@ export const TRUST_BOUNDARY_TAGS = [
  * to a list rather than remembering to patch a second regex — which is how the
  * body escaper ended up without `system-reminder`. The sets stay separate on
  * purpose: escaping the listing's structural tags inside a BODY mangles
- * legitimate prose (`.opencode/skills/` ships 117 `<name>`). The pattern is
+ * legitimate prose (`.opencode/skills/` ships 117 `<name>` occurrences across 23 files). The pattern is
  * built once per set, not per call. (bot review) */
 export function makeWrapperNeutralizer(tags: readonly string[]): (text: string) => string {
   // `[\\s/>]` rather than `\\b`: a word boundary also sits before `-`, so
@@ -511,10 +511,18 @@ const neutralizeBody = makeWrapperNeutralizer(BODY_BOUNDARY_TAGS)
  * auto-load path, which needs `alwaysApply` or a matching glob. Left raw, a body
  * could close `</skill_content>` and continue as post-skill tool output, or
  * forge a `<system-reminder>`. (review) */
-/** Every boundary a skill NAME could forge. A name is rendered inside
- * `<skill_content>` (body boundaries) and inside the listing (structural tags),
- * so one set covers both — rather than chaining two neutralizers and relying on
- * the caller to remember both, which is how the wrong-set bug happened. (review) */
+/** Every boundary a skill NAME could forge when it is rendered INSIDE
+ * `<skill_content>` — the `# Skill:` heading, and the filter that decides which
+ * names are safe to advertise as copyable. Those are the only two sites that use
+ * this set.
+ *
+ * The three LISTING name sites keep `neutralizeListingWrapper` deliberately: in
+ * a listing the body tags are not boundaries, and escaping `<skill_content>`
+ * inside a `<name>` would mangle a legitimate skill name — plausibly one
+ * documenting this very mechanism — for no gain.
+ *
+ * One set rather than chaining two neutralizers, because "did the caller
+ * remember both?" is how the wrong-set bug happened. (review) */
 export const SKILL_NAME_TAGS = [...new Set([...BODY_BOUNDARY_TAGS, ...TRUST_BOUNDARY_TAGS])] as const
 
 const neutralizeSkillName = makeWrapperNeutralizer(SKILL_NAME_TAGS)

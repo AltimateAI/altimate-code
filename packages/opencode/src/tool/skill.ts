@@ -66,6 +66,26 @@ export function resolveSkillBase(location: string): { isBuiltin: boolean; dir: s
   return { isBuiltin, dir, base: isBuiltin ? location : pathToFileURL(dir).href }
 }
 
+// altimate_change start — extracted so the FILTER is testable, not just the
+// helper it calls: a test asserting `neutralizeSkillNameText(x) !== x` stays true
+// however this filter is written. (review)
+//
+// The hint is copied verbatim by the model as the `name` argument, so what it
+// advertises must match the real skill on lookup. That rules out escaping it
+// (`&lt;name>` matches nothing) and stripping brackets (`foo <bar>` -> `foobar`,
+// breaking legitimately bracketed names — `isSkillFrontmatter` only requires a
+// string). So: advertise only names the neutralizer leaves untouched, which are
+// exactly the ones both copyable and free of trust-tag text. The authoritative
+// listing carries every skill, escaped.
+export function selectExampleNames(skills: Skill.Info[]): string {
+  return skills
+    .filter((skill) => Skill.neutralizeSkillNameText(skill.name) === skill.name)
+    .map((skill) => `'${skill.name}'`)
+    .slice(0, 3)
+    .join(", ")
+}
+// altimate_change end
+
 export function renderSkillFileEntry(file: string): string {
   return `<file>${Skill.neutralizeFilePathEntry(file)}</file>`
 }
@@ -161,20 +181,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   // altimate_change end
 
   // altimate_change start - use displaySkills for examples
-  const examples = displaySkills
-    // altimate_change — this hint is copied verbatim by the model as the `name`
-    // argument, so whatever it advertises must match the real skill on lookup.
-    // That rules out both escaping it (`&lt;name>` matches nothing) and
-    // stripping brackets (`foo <bar>` -> `foobar`, breaking every legitimately
-    // bracketed name — `isSkillFrontmatter` only requires a string, so names
-    // CAN contain `<`/`>`). Instead, advertise only names the neutralizer would
-    // leave untouched: those are exactly the ones that are both copyable and
-    // free of trust-tag text. The authoritative listing above still carries
-    // every skill, escaped. (bot review)
-    .filter((skill) => Skill.neutralizeListingWrapper(skill.name) === skill.name)
-    .map((skill) => `'${skill.name}'`)
-    .slice(0, 3)
-    .join(", ")
+  const examples = selectExampleNames(displaySkills)
   const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
   // altimate_change end
 

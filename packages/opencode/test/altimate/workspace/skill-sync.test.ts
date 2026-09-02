@@ -1055,18 +1055,30 @@ describe("workspace skill sync", () => {
   })
 
   test("`total: 0` while `pages` claims more than one page is refused", async () => {
-    // The mirror of the `pages: 0` cases. Both `rawPages === 0` guards skip a
-    // `pages: 3` envelope, so an empty page claiming three pages was accepted
-    // and `listAll` returned `[]` — purging the snapshot on a malformed 200.
+    // Counts list requests rather than asserting survival: with the guard
+    // reverted the fixture would be accepted and pagination would continue, so
+    // "exactly one list request" is what actually distinguishes the two. The
+    // earlier version asserted only that the snapshot survived — which held
+    // either way, because the echoed-page check rejected page 2 regardless.
     // (review)
     for (const pages of [3, 99]) {
       serve({ "pub-1": { "SKILL.md": "one" } })
       await syncSkills(project)
       expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
 
-      globalThis.fetch = (async () =>
-        json({ items: [], total: 0, page: 1, size: 50, pages })) as unknown as typeof fetch
+      let listRequests = 0
+      globalThis.fetch = (async (input: string | URL) => {
+        const url = String(input)
+        if (url.includes("datamate_id")) {
+          listRequests++
+          const page = Number(new URL(url, "http://x").searchParams.get("page") ?? "1")
+          return json({ items: [], total: 0, page, size: 50, pages })
+        }
+        return json({ path: "SKILL.md", content: "x" })
+      }) as unknown as typeof fetch
       await syncSkills(project)
+
+      expect(listRequests).toBe(1)
       expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
     }
   })
@@ -1108,6 +1120,70 @@ describe("workspace skill sync", () => {
 
     // Under the bug this is pruned by the partial list; the guard keeps it.
     expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+  })
+
+  test("a non-empty page claiming `total: 0` is refused", async () => {
+    // `total` was validated only on EMPTY pages, so `{items: [A], total: 0}` was
+    // accepted as the COMPLETE workspace and every other skill was pruned.
+    // (review)
+    serve({ "pub-1": { "SKILL.md": "one" }, "pub-2": { "SKILL.md": "two" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("/files/")) return json({ path: "SKILL.md", content: "x" })
+      if (url.includes("datamate_id"))
+        return json({
+          items: [{ public_id: "pub-1", updated_at: "2026-01-01T00:00:00Z" }],
+          total: 0,
+          page: 1,
+          size: 50,
+          pages: 1,
+        })
+      return json({ skill: { public_id: "pub-1", files: [{ path: "SKILL.md", size: 3 }], content: "" } })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(true)
+  })
+
+  test("a later page that lowers the page count is refused", async () => {
+    // Page 1 says 3 pages, page 2 says 2 — `page >= pages` then ends pagination
+    // early and the partial list prunes everything on page 3. (review)
+    const row = (id: string) => ({ public_id: id, updated_at: "2026-01-01T00:00:00Z" })
+    const serveN = (pagesOnP2: number) =>
+      (async (input: string | URL) => {
+        const url = String(input)
+        if (url.includes("/files/")) return json({ path: "SKILL.md", content: "x" })
+        if (url.includes("datamate_id")) {
+          const page = Number(new URL(url, "http://x").searchParams.get("page") ?? "1")
+          if (page === 1) return json({ items: [row("pub-1")], total: 3, page: 1, size: 1, pages: 3 })
+          if (page === 2) return json({ items: [row("pub-2")], total: 3, page: 2, size: 1, pages: pagesOnP2 })
+          return json({ items: [row("pub-3")], total: 3, page: 3, size: 1, pages: 3 })
+        }
+        const id = url.includes("pub-3") ? "pub-3" : url.includes("pub-2") ? "pub-2" : "pub-1"
+        return json({ skill: { public_id: id, files: [{ path: "SKILL.md", size: 1 }], content: "" } })
+      }) as unknown as typeof fetch
+
+    globalThis.fetch = serveN(3)
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-3", "SKILL.md"))).toBe(true)
+
+    globalThis.fetch = serveN(2)
+    await syncSkills(project)
+    // The contradictory page 2 must be refused, leaving the snapshot intact.
+    expect(existsSync(skillFile("pub-3", "SKILL.md"))).toBe(true)
+  })
+
+  test("a response omitting the echoed `page` is refused", async () => {
+    // The echoed page is the only request/response correlation there is; a
+    // cached page-1 body could otherwise stand in for page 2. (review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+    globalThis.fetch = (async () =>
+      json({ items: [], total: 0, size: 50, pages: 1 })) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
   test("a file response omitting `path` is refused", async () => {

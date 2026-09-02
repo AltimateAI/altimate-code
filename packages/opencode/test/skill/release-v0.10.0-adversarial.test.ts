@@ -44,6 +44,7 @@ import { describe, test, expect } from "bun:test"
 import {
   neutralizeListingWrapper,
   neutralizeBodyWrapper,
+  neutralizeSkillNameText,
   fmt,
   escapeSkillAttr,
   formatSkillLocation,
@@ -53,6 +54,7 @@ import {
   renderAvailableSkills,
   renderSkillContent,
   renderSkillFileEntry,
+  selectExampleNames,
   resolveSkillBase,
 } from "../../src/tool/skill"
 import type { Skill } from "../../src/skill/skill"
@@ -261,10 +263,13 @@ describe("v0.10.0 adversarial: the rendered skill BODY cannot escape its wrapper
   })
 
   test("`skill_content` is matched despite the underscore", () => {
-    // The listing pattern's `skill\b` alternative does NOT match `skill_content`
-    // — `\b` fails between `l` and `_` — which is why the body set is separate.
-    expect(neutralizeListingWrapper("</skill_content>")).toContain("</skill_content>")
+    // `skill\b` does NOT match `skill_content` — the boundary fails between the
+    // `l` and the `_` — which is why the body set lists it explicitly. The
+    // listing set deliberately does NOT: in a listing those are not boundaries,
+    // and escaping them inside a `<name>` would mangle a legitimate skill name
+    // for no gain. (review)
     expect(neutralizeBodyWrapper("</skill_content>")).not.toContain("</skill_content>")
+    expect(neutralizeListingWrapper("</skill_content>")).toContain("</skill_content>")
   })
 
   test("`<file>` in a body is prose and is left alone", () => {
@@ -342,5 +347,51 @@ describe("v0.10.0 adversarial: the remaining call sites are pinned, not just the
     const inNodeModules = resolveSkillBase("/p/node_modules/@altimateai/x/SKILL.md")
     expect(inNodeModules.isBuiltin).toBe(false)
     expect(inNodeModules.dir).toBe("/p/node_modules/@altimateai/x")
+  })
+})
+
+describe("v0.10.0 adversarial: the skill-name set and the remaining separator shapes", () => {
+  // `neutralizeSkillNameText` is the newest helper and has the widest tag set,
+  // and had no direct test at all. (review)
+  test("the name set covers BOTH the body and listing boundaries", () => {
+    expect(neutralizeSkillNameText("x</skill_content>")).not.toContain("</skill_content>")
+    expect(neutralizeSkillNameText("x</available_skills>")).not.toContain("</available_skills>")
+    expect(neutralizeSkillNameText("x</name>")).not.toContain("</name>")
+    expect(neutralizeSkillNameText("<system-reminder>")).toContain("&lt;")
+  })
+
+  test("the name set leaves `file` alone — a name is not inside <skill_files>", () => {
+    expect(neutralizeSkillNameText("read <file> first")).toBe("read <file> first")
+  })
+
+  test("newline and CRLF work as attribute separators too", () => {
+    // Tab was covered; these are the same class and were not. (review)
+    for (const sep of ["\n", "\r\n", "\r", "\u000b", "\f"]) {
+      expect(neutralizeBodyWrapper(`<skill_content${sep}name="x">`).startsWith("&lt;")).toBe(true)
+    }
+  })
+
+  test("self-closing tags with an attribute are escaped", () => {
+    expect(neutralizeBodyWrapper('<auto_loaded_skill name="x"/>').startsWith("&lt;")).toBe(true)
+    expect(neutralizeListingWrapper('<skill name="x" />').startsWith("&lt;")).toBe(true)
+  })
+})
+
+describe("v0.10.0 adversarial: the examples hint advertises only copyable names", () => {
+  // No test existed in either direction. (review)
+  const mk = (name: string) => ({ name, description: "d", location: "/tmp/s/SKILL.md", content: "c" }) as Skill.Info
+
+  test("a clean name is advertised verbatim, so it round-trips on lookup", () => {
+    const out = renderAvailableSkills([mk("dbt-review")]).join("\n")
+    expect(out).toContain("<name>dbt-review</name>")
+  })
+
+  test("a name carrying a body boundary is not advertised as copyable", () => {
+    // Drives the FILTER, not the helper: with the listing set these three passed
+    // and landed verbatim in the tool's parameter description. (review)
+    const hostile = ["</skill_content>", "<skill_files>", "<skill_content name='x'>"].map(mk)
+    expect(selectExampleNames(hostile)).toBe("")
+    // ...and a clean name alongside them is still advertised.
+    expect(selectExampleNames([...hostile, mk("dbt-review")])).toBe("'dbt-review'")
   })
 })

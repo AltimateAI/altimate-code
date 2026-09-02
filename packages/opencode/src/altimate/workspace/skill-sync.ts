@@ -336,57 +336,52 @@ function safePathComponent(p: unknown): p is string {
  * malformed 200 from reading as an empty workspace and deleting the user's
  * tree. ``api-client``'s helpers coerce unknown envelopes to ``[]``, so an
  * empty result is only trustworthy when the envelope itself parsed. */
-function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummary[]; pages: number } | null {
+function parsePage(
+  payload: unknown,
+  expectedPage: number,
+  // altimate_change — page 1 establishes the shape of the listing; every later
+  // page must repeat it. Without this there was no cross-page invariant at all:
+  // a later page could lower `pages`, terminate pagination early and let the
+  // partial result prune every skill on the pages never fetched. (review)
+  expected?: { pages: number; total: number | null },
+): { rows: RemoteSummary[]; pages: number; total: number | null } | null {
   if (!payload || typeof payload !== "object") return null
   const p = payload as { items?: unknown; pages?: unknown }
   if (!Array.isArray(p.items)) return null
-  // `pages` decides when to stop paginating, so a missing or nonsense value
-  // must be an error, not a default of 1 — defaulting turns a partial first
-  // page into "the whole workspace" and prunes everything on later pages.
+
   const rawPages = (payload as { pages?: unknown }).pages
   if (typeof rawPages !== "number" || !Number.isInteger(rawPages) || rawPages < 0) return null
-  // `pages: 0` is what the server actually sends for an EMPTY workspace --
-  // verified against production: `{"items":[],"total":0,"page":1,"size":50,"pages":0}`.
-  // Rejecting it as malformed (the previous `rawPages < 1`) meant an emptied
-  // workspace could never be observed, so the `remote.length === 0` purge below
-  // was unreachable and a detached skill stayed on disk forever. Zero is only
-  // trustworthy when the rest of the envelope agrees it is empty; `pages: 0`
-  // alongside rows, or alongside a non-zero total, is still an inconsistency.
-  // `pages: 0` is only meaningful on the FIRST page. Arriving on a later page it
-  // contradicts the earlier page count, and accepting it made `listAll` stop and
-  // return a PARTIAL list as if it were the whole workspace — which then prunes
-  // every skill beyond page 1. (bot review)
-  // An EMPTY page after page 1 contradicts the count page 1 established, whatever
-  // `pages` now claims. The earlier guard only caught `pages: 0`; `{items: [],
-  // total: 0, page: 2, pages: 1}` slipped through, `listAll` stopped on
-  // `page >= pages` and returned only page 1's rows as the whole workspace —
-  // pruning everything on later pages. (review)
-  if (p.items.length === 0 && expectedPage !== 1) return null
-  if (rawPages === 0 && !(p.items.length === 0 && (payload as { total?: unknown }).total === 0)) return null
-  const pages = rawPages
-  // An empty page while the envelope claims rows exist is a proxy or backend
-  // inconsistency, not an empty workspace — and "empty workspace" is the one
-  // answer that deletes the user's snapshot. Refuse it.
-  const total = (payload as { total?: unknown }).total
-  // altimate_change — an empty page is only trustworthy when `total` is present
-  // AND zero. Requiring `total > 0` to refuse meant an envelope with `total`
-  // missing, a string, or fractional still parsed as a real empty workspace and
-  // authorised `removeManaged` — a malformed 200 deleting the snapshot, which is
-  // the one outcome this parser exists to prevent. Worse, that path sets none of
-  // the flags `lastSyncedAt` gates on, so the destructive purge was recorded as
-  // a successful poll and recovery waited out the full interval. (review)
-  if (p.items.length === 0 && (!Number.isInteger(total) || (total as number) !== 0)) return null
-  // altimate_change — and symmetrically: `total: 0` while `pages` claims more
-  // than one page is the same self-contradiction in the other direction. Both
-  // `rawPages === 0` guards above skip a `pages: 3` envelope, so an empty page
-  // claiming three pages was accepted and `listAll` returned `[]` — purging the
-  // user's snapshot on a malformed 200, the one outcome this parser exists to
-  // prevent. (review)
-  if (p.items.length === 0 && rawPages > 1) return null
-  // A page that is not the one requested means the accumulation below would be
-  // wrong; treat it as unrecognised rather than merging it.
+
+  // The echoed page is the only request/response correlation there is, so it must
+  // be PRESENT and numeric — "absent" previously meant "unchecked", which let a
+  // cached or misrouted page-1 body stand in for page 2. (review)
   const echoed = (payload as { page?: unknown }).page
-  if (typeof echoed === "number" && echoed !== expectedPage) return null
+  if (typeof echoed !== "number" || echoed !== expectedPage) return null
+
+  const rawTotal = (payload as { total?: unknown }).total
+  const total = Number.isInteger(rawTotal) ? (rawTotal as number) : null
+
+  if (p.items.length === 0) {
+    // An empty page after page 1 contradicts the count page 1 established.
+    if (expectedPage !== 1) return null
+    // Empty is only trustworthy when the envelope agrees: an integer zero total
+    // and no claim of further pages.
+    if (total !== 0) return null
+    if (rawPages > 1) return null
+  } else {
+    // altimate_change — `total` was only validated on EMPTY pages, so
+    // `{items: [A], total: 0}` was accepted as a complete workspace and every
+    // other skill was pruned. A non-empty page must carry a sane total. (review)
+    if (total === null || total < 0 || total < p.items.length) return null
+    if (rawPages < 1) return null
+  }
+
+  // altimate_change — later pages must repeat page 1's counts. (review)
+  if (expected) {
+    if (rawPages !== expected.pages) return null
+    if (total !== expected.total) return null
+  }
+
   const rows: RemoteSummary[] = []
   for (const row of p.items) {
     if (!row || typeof row !== "object") return null
@@ -395,7 +390,7 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
     if (typeof r.updated_at !== "string" || !r.updated_at) return null
     rows.push({ publicId: r.public_id, updatedAt: r.updated_at })
   }
-  return { rows, pages }
+  return { rows, pages: rawPages, total }
 }
 
 /** ``GET /skills/{id}/files/{path}`` answers ``{path, content}``. Anything else
@@ -947,6 +942,7 @@ export async function syncSkills(directory: string): Promise<{ changed: boolean 
  * unrecognised payload — callers must treat that as "unknown", not "empty". */
 async function listAll(binding: CachedBinding): Promise<RemoteSummary[] | null> {
   const all: RemoteSummary[] = []
+  let expected: { pages: number; total: number | null } | undefined
   for (let page = 1; page <= MAX_PAGES; page++) {
     let payload: unknown
     try {
@@ -960,7 +956,8 @@ async function listAll(binding: CachedBinding): Promise<RemoteSummary[] | null> 
       })
       return null
     }
-    const parsed = parsePage(payload, page)
+    const parsed = parsePage(payload, page, expected)
+    if (parsed && page === 1) expected = { pages: parsed.pages, total: parsed.total }
     if (!parsed) {
       log.warn("workspace skill list was not in a recognised shape; keeping the existing snapshot")
       return null

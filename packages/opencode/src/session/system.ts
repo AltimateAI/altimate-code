@@ -206,9 +206,12 @@ export namespace SystemPrompt {
 
   // altimate_change start — see the auto-loaded skill block below.
   // altimate_change — same factory as the skill-body escaper, with its own tag
-  // set: only the two TRUST boundaries, since escaping the listing's structural
-  // tags here would mangle legitimate prose in shipped skill bodies. (bot review)
-  const neutralizeSkillWrapper = Skill.makeWrapperNeutralizer(["auto_loaded_skill", "system-reminder"])
+  // set. Uses the SAME `BODY_BOUNDARY_TAGS` as the on-demand body renderer:
+  // keeping a private narrower list here recreated the exact site-drift defect
+  // this release exists to close — it silently omitted `skill_content` and
+  // `skill_files`. The listing's structural tags stay out of the body set, so
+  // legitimate `<name>` prose in shipped skills is still untouched. (review)
+  const neutralizeSkillWrapper = Skill.makeWrapperNeutralizer(Skill.BODY_BOUNDARY_TAGS)
   // altimate_change end
 
   async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
