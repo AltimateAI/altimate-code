@@ -51,6 +51,39 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
 // Both renderers now share `neutralizeListingWrapper` and `formatSkillLocation`,
 // so the escaping cannot diverge again; consolidating the two into one renderer
 // outright is the remaining follow-up. (review)
+// altimate_change start — the `<skill_content>` block, extracted so the BODY
+// render site can be tested directly. Testing `neutralizeBodyWrapper` alone did
+// not pin this: the regression being defended against is this site forgetting to
+// call it, and the helper-only tests passed with the call removed. Same reason
+// `renderAvailableSkills` exists. (bot review)
+export function renderSkillContent(skill: Skill.Info, base: string, files: string): string[] {
+  return [
+    `<skill_content name="${Skill.escapeSkillAttr(skill.name)}">`,
+    // The heading interpolates the same attacker-influenced frontmatter one line
+    // below the attribute that was escaped for it — and it sits INSIDE
+    // `<skill_content>`, so it needs the BODY tag set, not the listing one:
+    // `neutralizeListingWrapper`'s `skill\b` does not match `skill_content`, so
+    // a name ending `</skill_content>` broke out of the block entirely. Caught
+    // by the render-site test added alongside this. (bot review)
+    `# Skill: ${Skill.neutralizeBodyWrapper(Skill.neutralizeListingWrapper(skill.name))}`,
+    "",
+    // The SKILL.md body is remote content for a synced bundle, and this
+    // on-demand path is WIDER than the auto-load path that was already escaped.
+    // Left raw it could close `</skill_content>` or forge a `<system-reminder>`.
+    Skill.neutralizeBodyWrapper(skill.content.trim()),
+    "",
+    `Base directory for this skill: ${base}`,
+    "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+    "Note: file list is sampled.",
+    "",
+    "<skill_files>",
+    files,
+    "</skill_files>",
+    "</skill_content>",
+  ]
+}
+// altimate_change end
+
 export function renderAvailableSkills(skills: Skill.Info[]): string[] {
   return [
     "<available_skills>",
@@ -158,9 +191,13 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       })
 
       // altimate_change start — handle builtin: skills that have no filesystem directory
-      // altimate_change — one predicate, so a new sentinel cannot be handled at one
-  // site and missed at another. (review)
-  const isBuiltin = classifySkillSource(skill.location) === "builtin"
+      // altimate_change — one predicate for "has no filesystem directory", covering
+  // BOTH sentinels so a new one cannot be handled at one site and missed at
+  // another. Deliberately NOT `classifySkillSource`: that answers "who shipped
+  // this" and returns "builtin" for real directories too (`~/.altimate/builtin`,
+  // Altimate-owned `node_modules`), whose bundled files must still be listed.
+  // Using it here suppressed their resource directories. (bot review)
+  const isBuiltin = Skill.hasNoSkillDirectory(skill.location)
       const dir = isBuiltin ? "" : path.dirname(skill.location)
       const base = isBuiltin ? skill.location : pathToFileURL(dir).href
 
@@ -229,27 +266,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           // altimate_change — the name is frontmatter, so for a synced skill it is
           // attacker-influenced: a `"` breaks out of the attribute. Escaped like
           // the listing above. (review)
-          `<skill_content name="${Skill.escapeSkillAttr(skill.name)}">`,
-          // altimate_change — the heading interpolates the same attacker-influenced
-          // frontmatter one line below the attribute that was escaped for it.
-          // Escaping the attribute and not its neighbour is the same one-site fix
-          // this release keeps tripping over. (bot review)
-          `# Skill: ${Skill.neutralizeListingWrapper(skill.name)}`,
-          "",
-          // altimate_change — the SKILL.md body is remote content for a synced
-          // bundle, and this on-demand path is WIDER than the auto-load path
-          // that was already escaped. Left raw it could close
-          // `</skill_content>` or forge a `<system-reminder>`. (review)
-          Skill.neutralizeBodyWrapper(skill.content.trim()),
-          "",
-          `Base directory for this skill: ${base}`,
-          "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
-          "Note: file list is sampled.",
-          "",
-          "<skill_files>",
-          files,
-          "</skill_files>",
-          "</skill_content>",
+          ...renderSkillContent(skill, base, files),
         ].join("\n"),
         metadata: {
           name: skill.name,

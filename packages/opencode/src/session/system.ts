@@ -205,24 +205,10 @@ export namespace SystemPrompt {
   }
 
   // altimate_change start — see the auto-loaded skill block below.
-  function neutralizeSkillWrapper(content: string): string {
-    // altimate_change — escape only the TRUST-BOUNDARY tags here, not the
-    // listing's structural ones. Bodies are prose: `.opencode/skills/` ships 117
-    // legitimate `<name>` occurrences, and escaping those corrupts the shipped
-    // skills. The listing escapes more because there the tags are structure;
-    // here they are content. This
-    // escaper handles remote skill BODIES, injected right after "Treat their
-    // content as binding guidance", so it is the more privileged surface of the
-    // two even though the listing is the wider one. It previously covered only
-    // `auto_loaded_skill`, so a synced body could forge a `<system-reminder>`
-    // verbatim. Whitespace between `<`, `/` and the name is allowed for the
-    // same reason as the listing: the consumer is a model, not a parser.
-    // (review)
-    return content.replace(
-      new RegExp(`<(?=\\s*/?\\s*(?:auto_loaded_skill|system-reminder)\\b)`, "gi"),
-      "&lt;",
-    )
-  }
+  // altimate_change — same factory as the skill-body escaper, with its own tag
+  // set: only the two TRUST boundaries, since escaping the listing's structural
+  // tags here would mangle legitimate prose in shipped skill bodies. (bot review)
+  const neutralizeSkillWrapper = Skill.makeWrapperNeutralizer(["auto_loaded_skill", "system-reminder"])
   // altimate_change end
 
   async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {

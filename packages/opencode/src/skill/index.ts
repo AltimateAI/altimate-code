@@ -431,16 +431,29 @@ export const TRUST_BOUNDARY_TAGS = [
   "auto_loaded_skill",
 ] as const
 
+/** One implementation, several tag sets. Adding a trust boundary means adding it
+ * to a list rather than remembering to patch a second regex — which is how the
+ * body escaper ended up without `system-reminder`. The sets stay separate on
+ * purpose: escaping the listing's structural tags inside a BODY mangles
+ * legitimate prose (`.opencode/skills/` ships 117 `<name>`). The pattern is
+ * built once per set, not per call. (bot review) */
+export function makeWrapperNeutralizer(tags: readonly string[]): (text: string) => string {
+  const re = new RegExp(`<(?=\\s*/?\\s*(?:${tags.join("|")})\\b)`, "gi")
+  return (text: string) => {
+    re.lastIndex = 0
+    return text.replace(re, "&lt;")
+  }
+}
+
+const neutralizeListing = makeWrapperNeutralizer(TRUST_BOUNDARY_TAGS)
+
 export function neutralizeListingWrapper(text: string): string {
   // Neutralise only the `<`, via a lookahead, so the rest of the text survives
   // byte-for-byte. Whitespace is permitted between `<`, `/` and the tag name
   // because the consumer is a language model, not an XML parser: a model
   // reading `</ description>` or `< system-reminder>` mid-listing may well take
   // it as a boundary, and the earlier `<(\/?)(tag)` form let both through. (review)
-  return text.replace(
-    new RegExp(`<(?=\\s*/?\\s*(?:${TRUST_BOUNDARY_TAGS.join("|")})\\b)`, "gi"),
-    "&lt;",
-  )
+  return neutralizeListing(text)
 }
 
 /** A built-in skill's `location` is a `builtin:` URI, not a filesystem path.
@@ -472,7 +485,7 @@ export const BODY_BOUNDARY_TAGS = [
   "system-reminder",
 ] as const
 
-const BODY_WRAPPER_RE = new RegExp(`<(?=\\s*/?\\s*(?:${BODY_BOUNDARY_TAGS.join("|")})\\b)`, "gi")
+const neutralizeBody = makeWrapperNeutralizer(BODY_BOUNDARY_TAGS)
 
 /** Neutralize the wrapper tags around a rendered skill body.
  *
@@ -482,19 +495,26 @@ const BODY_WRAPPER_RE = new RegExp(`<(?=\\s*/?\\s*(?:${BODY_BOUNDARY_TAGS.join("
  * could close `</skill_content>` and continue as post-skill tool output, or
  * forge a `<system-reminder>`. (review) */
 export function neutralizeBodyWrapper(text: string): string {
-  BODY_WRAPPER_RE.lastIndex = 0
-  return text.replace(BODY_WRAPPER_RE, "&lt;")
+  return neutralizeBody(text)
 }
 
 export function escapeSkillAttr(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
+/** True when a skill's `location` is a sentinel rather than a real path, so it
+ * has no directory and no bundled files. The two sentinels are `builtin:<name>`
+ * and `<built-in>`. Kept beside `formatSkillLocation` because both answer the
+ * same question and drifted apart once already. (bot review) */
+export function hasNoSkillDirectory(location: string): boolean {
+  return location.startsWith("builtin:") || location === "<built-in>"
+}
+
 export function formatSkillLocation(location: string): string {
   // `<built-in>` is the sentinel `Skill.Info.location` for the embedded
   // customization skills; like `builtin:` it is not a filesystem path, and
   // `pathToFileURL` would resolve it against the CWD. (bot review)
-  if (location.startsWith("builtin:") || location === "<built-in>") return location
+  if (hasNoSkillDirectory(location)) return location
   return pathToFileURL(location).href
 }
 
