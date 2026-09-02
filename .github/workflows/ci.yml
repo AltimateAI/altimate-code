@@ -77,10 +77,16 @@ jobs:
     name: Tracker Leaks
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # This job runs pull-request code, so it gets read-only scope and no
+    # persisted credentials — the checked-out branch must not be able to reach
+    # the token in `.git/config`. (bot review)
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:

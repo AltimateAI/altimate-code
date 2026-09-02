@@ -1054,6 +1054,30 @@ describe("workspace skill sync", () => {
     expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
   })
 
+  test("`pages: 0` arriving on a LATER page is refused, not read as an empty workspace", async () => {
+    // Page 1 announcing several pages, then a later page claiming `pages: 0`,
+    // contradicts itself. Accepting it made `listAll` stop early and return a
+    // PARTIAL list as though it were the whole workspace — pruning everything
+    // past page 1. (bot review)
+    serve({ "pub-1": { "SKILL.md": "one" } })
+    await syncSkills(project)
+
+    globalThis.fetch = (async (input: string | URL) => {
+      const url = String(input)
+      if (url.includes("page=1"))
+        return json({
+          items: [{ public_id: "pub-1", updated_at: "2026-01-01T00:00:00Z" }],
+          total: 9,
+          page: 1,
+          size: 1,
+          pages: 3,
+        })
+      return json({ items: [], total: 0, page: 2, size: 1, pages: 0 })
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
   test("a file response omitting `path` is refused", async () => {
     // The mis-routed response this guard exists for is exactly the case where
     // the echoed field may be missing, so "checked when present" is no check.

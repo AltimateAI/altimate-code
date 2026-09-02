@@ -16,7 +16,6 @@ Workspaces grow from a memory-only pilot into a working surface: a bound workspa
 - **Warehouse tools route through the workspace's engine.** A native warehouse capability is shadowed only when the engine materialised the matching tool and attach attests the engine is its own; the redirect happens after the native safety checks, and fails open with a reason otherwise. `--integrations=local` turns it off. (#1168)
 - **An offer to install the engine a bound workspace needs.** A missing engine used to be a toast with a command in it. It is now an offer — Install now / Copy command / Not now — and the install only ever runs from an explicit choice; the next turn boundary picks the installed engine up. (#1169)
 - **The model is told what a bound workspace serves.** Redirecting to an engine tool did not make the model choose it first, so every session paid a wasted turn learning the rule. The workspace's capabilities are now stated up front. (#1182)
-- **`altimate-code mcp status`.** Reports each configured server's real state, including drift between discovered and on-disk config. (#1160)
 - **Installs are counted from the shell installers, not just npm.** (#1096)
 
 ### Fixed
@@ -30,7 +29,7 @@ Workspaces grow from a memory-only pilot into a working surface: a bound workspa
 - **A run survives a single oversized tool result.** Previously the recovery compaction resent the full conversation, overflowed the same way and terminated with "Session too large to compact". It now summarizes what fits, with tightened context-safety margins and compaction fidelity. (#1171)
 - **A credential could survive redaction and be replayed.** The mask that replaces cleared tool output is resent on every later request, and two of its fields bypassed the redactor — so an AWS key, an OpenAI key, a `curl` basic-auth value or a signed URL already in the conversation could still be transmitted after the output it came from was pruned. Both fields now go through the same redactor as the rest of the ledger, which also learned to recognise `curl.exe` and path-qualified `curl`. (#1171)
 - **Interactive chat no longer ends answers with a literal `DONE`.** The run-mode completion token was declared on the `builder` agent, which is also the agent behind ordinary conversation, and nothing stripped the token before rendering — so it was appended to final answers in normal chat. It is now scoped to run mode. (#1171)
-- **MCP failures say what actually went wrong.** `server unavailable` logged the constant string `"failed"` and discarded `status.error`, the field holding the real message — a `401 Unauthorized`, a transport error, the actual cause. (#1159)
+- **MCP diagnostics say what actually went wrong.** `mcp status` now reports each configured server's real state, including drift between discovered and on-disk config. `server unavailable` logged the constant string `"failed"` and discarded `status.error`, the field holding the real message — a `401 Unauthorized`, a transport error, the actual cause. (#1159)
 - **The marker check runs in a fresh worktree.** `script/upstream/analyze.ts` imported `minimatch` from the repo root, where it was never declared, so the check failed with `Cannot find package minimatch` before it could run. (#1177)
 
 ## [0.9.7] - 2026-08-25

@@ -454,8 +454,22 @@ export function neutralizeListingWrapper(text: string): string {
 // (verified), so a `public_id` containing them cannot forge a tag here. The tag
 // stays in the list so hostile text elsewhere cannot mint a `<location>`.
 // (review)
+/** Escape a skill name for use inside a double-quoted XML attribute.
+ *
+ * `&` must go FIRST: escaping only `"` left a name containing the literal text
+ * `&quot;` intact, and the consumer then decodes it back into a real quote that
+ * closes the attribute — the very break-out the escaping was added to stop.
+ * (bot review) */
+export function escapeSkillAttr(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
 export function formatSkillLocation(location: string): string {
-  return location.startsWith("builtin:") ? location : pathToFileURL(location).href
+  // `<built-in>` is the sentinel `Skill.Info.location` for the embedded
+  // customization skills; like `builtin:` it is not a filesystem path, and
+  // `pathToFileURL` would resolve it against the CWD. (bot review)
+  if (location.startsWith("builtin:") || location === "<built-in>") return location
+  return pathToFileURL(location).href
 }
 
 // altimate_change end

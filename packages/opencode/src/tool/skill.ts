@@ -109,7 +109,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
 
   // altimate_change start - use displaySkills for examples
   const examples = displaySkills
-    .map((skill) => `'${skill.name}'`)
+    .map((skill) => `'${Skill.neutralizeListingWrapper(skill.name)}'`)
     .slice(0, 3)
     .join(", ")
   const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
@@ -205,8 +205,12 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           // altimate_change — the name is frontmatter, so for a synced skill it is
           // attacker-influenced: a `"` breaks out of the attribute. Escaped like
           // the listing above. (review)
-          `<skill_content name="${Skill.neutralizeListingWrapper(skill.name).replace(/"/g, "&quot;")}">`,
-          `# Skill: ${skill.name}`,
+          `<skill_content name="${Skill.escapeSkillAttr(skill.name)}">`,
+          // altimate_change — the heading interpolates the same attacker-influenced
+          // frontmatter one line below the attribute that was escaped for it.
+          // Escaping the attribute and not its neighbour is the same one-site fix
+          // this release keeps tripping over. (bot review)
+          `# Skill: ${Skill.neutralizeListingWrapper(skill.name)}`,
           "",
           skill.content.trim(),
           "",

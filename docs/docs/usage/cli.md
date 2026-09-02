@@ -54,7 +54,7 @@ altimate --agent analyst
 | `--agent <name>` | Start with a specific agent |
 | `--yolo` | Auto-approve all permission prompts (explicit `deny` rules still enforced) |
 | `--dangerously-skip-permissions` | Same as `--yolo` (alias for upstream compatibility); auto-approves prompts that aren't explicitly denied. `run` subcommand only. |
-| `--integrations <local>` | Use only local warehouse tools for this session, instead of routing them through a bound workspace's engine (pilot). Equivalent to `ALTIMATE_INTEGRATIONS=local`. |
+| `--integrations <local>` | Use only local warehouse tools instead of routing them through a bound workspace's engine (pilot). Sets `ALTIMATE_INTEGRATIONS` for the process, so child processes inherit it. |
 | `--print-logs` | Print logs to stderr |
 | `--log-level <level>` | Set log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `--help`, `-h` | Show help |

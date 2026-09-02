@@ -352,6 +352,11 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
   // was unreachable and a detached skill stayed on disk forever. Zero is only
   // trustworthy when the rest of the envelope agrees it is empty; `pages: 0`
   // alongside rows, or alongside a non-zero total, is still an inconsistency.
+  // `pages: 0` is only meaningful on the FIRST page. Arriving on a later page it
+  // contradicts the earlier page count, and accepting it made `listAll` stop and
+  // return a PARTIAL list as if it were the whole workspace — which then prunes
+  // every skill beyond page 1. (bot review)
+  if (rawPages === 0 && expectedPage !== 1) return null
   if (rawPages === 0 && !(p.items.length === 0 && (payload as { total?: unknown }).total === 0)) return null
   const pages = rawPages
   // An empty page while the envelope claims rows exist is a proxy or backend
@@ -365,7 +370,7 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
   // the one outcome this parser exists to prevent. Worse, that path sets none of
   // the flags `lastSyncedAt` gates on, so the destructive purge was recorded as
   // a successful poll and recovery waited out the full interval. (review)
-  if (p.items.length === 0 && (typeof total !== "number" || total > 0)) return null
+  if (p.items.length === 0 && (!Number.isInteger(total) || (total as number) !== 0)) return null
   // A page that is not the one requested means the accumulation below would be
   // wrong; treat it as unrecognised rather than merging it.
   const echoed = (payload as { page?: unknown }).page

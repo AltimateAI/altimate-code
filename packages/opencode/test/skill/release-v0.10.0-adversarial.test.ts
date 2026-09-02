@@ -33,15 +33,15 @@
  * to call it, and an earlier version of this file passed in full with
  * `tool/skill.ts` reverted to raw interpolation. (review)
  *
- * Note on module identity: the live listing is `src/skill/index.ts`. There is a
- * second, near-identical `Skill.fmt` in `src/skill/skill.ts` which is currently
- * unreferenced by production code, and which `test/skill/fmt.test.ts` imports.
- * These tests deliberately import from `src/skill/index` so they exercise the
- * code that actually ships.
+ * Note on module identity: the live listing is `src/skill/index.ts`. The
+ * near-identical `Skill.fmt` that used to sit in `src/skill/skill.ts` was
+ * DELETED in this release, and `test/skill/fmt.test.ts` was repointed at the
+ * live module — which is what surfaced the `builtin:` location bug. These tests
+ * import from `src/skill/index` for the same reason.
  */
 
 import { describe, test, expect } from "bun:test"
-import { neutralizeListingWrapper, fmt } from "../../src/skill/index"
+import { neutralizeListingWrapper, fmt, escapeSkillAttr, formatSkillLocation } from "../../src/skill/index"
 import { renderAvailableSkills } from "../../src/tool/skill"
 import type { Skill } from "../../src/skill/skill"
 
@@ -178,4 +178,27 @@ describe("v0.10.0 adversarial: the live render sites route through the escaping"
       expect(out).not.toContain("file://")
     })
   }
+})
+
+describe("v0.10.0 adversarial: attribute escaping and location sentinels", () => {
+  test("`&` is escaped first, so an encoded quote cannot become a real one", () => {
+    // Escaping only `"` left the literal text `&quot;` intact; the consumer then
+    // decodes it back into a quote that closes the attribute — the exact
+    // break-out the escaping exists to stop. (bot review)
+    const out = escapeSkillAttr('a&quot; onerror=x')
+    expect(out).not.toContain('"')
+    expect(out).toContain("&amp;quot;")
+  })
+
+  test("a real quote is still escaped", () => {
+    expect(escapeSkillAttr('say "hi"')).toBe("say &quot;hi&quot;")
+  })
+
+  test("both built-in location sentinels survive intact", () => {
+    // `builtin:` and `<built-in>` are both non-filesystem sentinels; either one
+    // run through pathToFileURL becomes a path that does not exist.
+    expect(formatSkillLocation("builtin:my-skill/SKILL.md")).toBe("builtin:my-skill/SKILL.md")
+    expect(formatSkillLocation("<built-in>")).toBe("<built-in>")
+    expect(formatSkillLocation("/tmp/x/SKILL.md")).toBe("file:///tmp/x/SKILL.md")
+  })
 })
