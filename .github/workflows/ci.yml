@@ -87,7 +87,11 @@ jobs:
           bun-version: "1.3.14"
 
       - name: Fetch base branch
-        run: git fetch origin main --depth=0
+        # `--depth=0` is not valid git ("depth 0 is not a positive number") and
+        # failed the job before the guard could run. `fetch-depth: 0` on the
+        # checkout above already gives full history, so a plain fetch of the
+        # base ref is all this needs.
+        run: git fetch origin main
 
       - name: Check for internal tracker references
         run: bun script/check-tracker-leaks.ts
