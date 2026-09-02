@@ -438,7 +438,11 @@ export const TRUST_BOUNDARY_TAGS = [
  * legitimate prose (`.opencode/skills/` ships 117 `<name>`). The pattern is
  * built once per set, not per call. (bot review) */
 export function makeWrapperNeutralizer(tags: readonly string[]): (text: string) => string {
-  const re = new RegExp(`<(?=\\s*/?\\s*(?:${tags.join("|")})\\b)`, "gi")
+  // `[\\s/>]` rather than `\\b`: a word boundary also sits before `-`, so
+  // `<name-value>` and `<file-path>` were escaped as if they were wrapper tags.
+  // Requiring a real delimiter keeps legitimate markup intact while still
+  // catching `<name>`, `</ name >` and `< system-reminder>`. (bot review)
+  const re = new RegExp(`<(?=\\s*/?\\s*(?:${tags.join("|")})\\s*(?:[/>]|$))`, "gi")
   return (text: string) => {
     re.lastIndex = 0
     return text.replace(re, "&lt;")

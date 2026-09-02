@@ -212,7 +212,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   // this" and returns "builtin" for real directories too (`~/.altimate/builtin`,
   // Altimate-owned `node_modules`), whose bundled files must still be listed.
   // Using it here suppressed their resource directories. (bot review)
-  const { isBuiltin, dir, base } = resolveSkillBase(skill.location)
+      const { isBuiltin, dir, base } = resolveSkillBase(skill.location)
 
       const limit = 10
       const files = isBuiltin

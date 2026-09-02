@@ -50,11 +50,11 @@ import {
 } from "../../src/skill/index"
 import {
   classifySkillSource,
+  renderAvailableSkills,
   renderSkillContent,
   renderSkillFileEntry,
   resolveSkillBase,
 } from "../../src/tool/skill"
-import { renderAvailableSkills } from "../../src/tool/skill"
 import type { Skill } from "../../src/skill/skill"
 
 describe("v0.10.0 adversarial: workspace-synced skill text cannot break the listing", () => {
@@ -124,6 +124,17 @@ describe("v0.10.0 adversarial: workspace-synced skill text cannot break the list
       expect(out.startsWith("&lt;")).toBe(true)
       expect(out).not.toContain("<")
     }
+  })
+
+  test("hyphenated markup is not mistaken for a wrapper tag", () => {
+    // `\b` is also a boundary before `-`, so `<name-value>` used to be escaped
+    // as though it were `<name>`. (bot review)
+    for (const ok of ["<name-value>", "<file-path>", "<description-list>", "<location-id>"]) {
+      expect(neutralizeListingWrapper(ok)).toBe(ok)
+    }
+    // ...while the real tags, including the hyphenated one, still escape.
+    expect(neutralizeListingWrapper("<system-reminder>")).toContain("&lt;")
+    expect(neutralizeListingWrapper("</ name >")).toContain("&lt;")
   })
 
   test("tag-like text that is not a real wrapper tag is left alone", () => {
