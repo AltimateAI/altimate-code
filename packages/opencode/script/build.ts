@@ -651,7 +651,11 @@ for (const item of targets) {
         // They cost 20MB of a 191MB tarball against npm's ~200MB E413 ceiling.
         // Keep emitting them for local debugging of `dist/`; keep them out of
         // what we publish.
-        files: ["bin", "!bin/*.map"],
+        // `**` because `*` does not descend: a `.map` emitted under a
+        // `bin/<subdir>/` would still ship. Note the allowlist also means any
+        // future artifact added OUTSIDE `bin/` is silently dropped from the
+        // published package. (review)
+        files: ["bin", "!bin/**/*.map"],
         // altimate_change end
       },
       null,
