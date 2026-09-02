@@ -356,7 +356,12 @@ function parsePage(payload: unknown, expectedPage: number): { rows: RemoteSummar
   // contradicts the earlier page count, and accepting it made `listAll` stop and
   // return a PARTIAL list as if it were the whole workspace — which then prunes
   // every skill beyond page 1. (bot review)
-  if (rawPages === 0 && expectedPage !== 1) return null
+  // An EMPTY page after page 1 contradicts the count page 1 established, whatever
+  // `pages` now claims. The earlier guard only caught `pages: 0`; `{items: [],
+  // total: 0, page: 2, pages: 1}` slipped through, `listAll` stopped on
+  // `page >= pages` and returned only page 1's rows as the whole workspace —
+  // pruning everything on later pages. (review)
+  if (p.items.length === 0 && expectedPage !== 1) return null
   if (rawPages === 0 && !(p.items.length === 0 && (payload as { total?: unknown }).total === 0)) return null
   const pages = rawPages
   // An empty page while the envelope claims rows exist is a proxy or backend

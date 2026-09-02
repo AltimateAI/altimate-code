@@ -480,10 +480,18 @@ export function neutralizeListingWrapper(text: string): string {
 export const BODY_BOUNDARY_TAGS = [
   "skill_content",
   "skill_files",
-  "file",
   "auto_loaded_skill",
   "system-reminder",
 ] as const
+
+/** The body set plus `file`, for the GENERATED `<file>` path entries.
+ *
+ * `file` is deliberately absent from the prose set above: in a skill body
+ * `<file>` is ordinary documentation (`cat <file>`, or any Maven / log4j /
+ * `.csproj` snippet), and escaping it there is the same over-correction that
+ * kept `name` out of the body set. In a generated path it really is a
+ * boundary. (review) */
+export const FILE_PATH_BOUNDARY_TAGS = [...BODY_BOUNDARY_TAGS, "file"] as const
 
 const neutralizeBody = makeWrapperNeutralizer(BODY_BOUNDARY_TAGS)
 
@@ -494,6 +502,13 @@ const neutralizeBody = makeWrapperNeutralizer(BODY_BOUNDARY_TAGS)
  * auto-load path, which needs `alwaysApply` or a matching glob. Left raw, a body
  * could close `</skill_content>` and continue as post-skill tool output, or
  * forge a `<system-reminder>`. (review) */
+const neutralizeFilePath = makeWrapperNeutralizer(FILE_PATH_BOUNDARY_TAGS)
+
+/** Neutralize a generated `<file>` path entry. */
+export function neutralizeFilePathEntry(text: string): string {
+  return neutralizeFilePath(text)
+}
+
 export function neutralizeBodyWrapper(text: string): string {
   return neutralizeBody(text)
 }

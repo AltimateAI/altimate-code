@@ -56,6 +56,21 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
 // not pin this: the regression being defended against is this site forgetting to
 // call it, and the helper-only tests passed with the call removed. Same reason
 // `renderAvailableSkills` exists. (bot review)
+// altimate_change start — extracted so the CALL SITES are testable, not just the
+// predicates they use. A test asserting `hasNoSkillDirectory("<built-in>")` stays
+// true even if this site stops calling it — which is exactly how the previous
+// regression here went unpinned. (review)
+export function resolveSkillBase(location: string): { isBuiltin: boolean; dir: string; base: string } {
+  const isBuiltin = Skill.hasNoSkillDirectory(location)
+  const dir = isBuiltin ? "" : path.dirname(location)
+  return { isBuiltin, dir, base: isBuiltin ? location : pathToFileURL(dir).href }
+}
+
+export function renderSkillFileEntry(file: string): string {
+  return `<file>${Skill.neutralizeFilePathEntry(file)}</file>`
+}
+// altimate_change end
+
 export function renderSkillContent(skill: Skill.Info, base: string, files: string): string[] {
   return [
     `<skill_content name="${Skill.escapeSkillAttr(skill.name)}">`,
@@ -197,9 +212,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   // this" and returns "builtin" for real directories too (`~/.altimate/builtin`,
   // Altimate-owned `node_modules`), whose bundled files must still be listed.
   // Using it here suppressed their resource directories. (bot review)
-  const isBuiltin = Skill.hasNoSkillDirectory(skill.location)
-      const dir = isBuiltin ? "" : path.dirname(skill.location)
-      const base = isBuiltin ? skill.location : pathToFileURL(dir).href
+  const { isBuiltin, dir, base } = resolveSkillBase(skill.location)
 
       const limit = 10
       const files = isBuiltin
@@ -226,7 +239,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
               // altimate_change — bundle file paths are remote too:
               // `safeRelativePath` rejects `..`, absolute paths and NUL, but
               // permits `<` and `>`. (review)
-              .map((file) => `<file>${Skill.neutralizeBodyWrapper(file)}</file>`)
+              .map((file) => renderSkillFileEntry(file))
               .join("\n"),
           )
       // altimate_change end
