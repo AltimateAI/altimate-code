@@ -194,7 +194,7 @@ Describe "install.ps1 Test-Checksum" {
 }
 
 # ---------------------------------------------------------------------------
-# Write-InstallMarker (install telemetry — AI-8448)
+# Write-InstallMarker (install telemetry — #1096)
 # ---------------------------------------------------------------------------
 # The subprocess tests above stop the installer via -Help / unknown -Version, so
 # they never reach the marker block. It is AST-extracted and executed here instead,

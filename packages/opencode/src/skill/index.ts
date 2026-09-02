@@ -412,9 +412,157 @@ export const defaultLayer = Layer.suspend(() => layer.pipe(
 // altimate_change end
 
 // altimate_change start — see the call sites inside `fmt`.
-function neutralizeListingWrapper(text: string): string {
-  return text.replace(/<(\/?)(available_skills|skill|name|description|location)\b/gi, "&lt;$1$2")
+// Exported because `tool/skill.ts` builds the SAME `<available_skills>` listing
+// for the Skill tool's own description, which is sent to the model on EVERY
+// turn — a wider exposure than either prompt-side site. It must escape through
+// this one function so the two listings cannot drift apart again. (review)
+//
+// `system-reminder` and `auto_loaded_skill` are in the list even though this
+// function does not emit them: the harness uses both as trust boundaries
+// elsewhere in the same message stream, so remote skill text must not be able
+// to forge either one. (review)
+export const TRUST_BOUNDARY_TAGS = [
+  "available_skills",
+  "skill",
+  "name",
+  "description",
+  "location",
+  "system-reminder",
+  "auto_loaded_skill",
+] as const
+
+/** One implementation, several tag sets. Adding a trust boundary means adding it
+ * to a list rather than remembering to patch a second regex — which is how the
+ * body escaper ended up without `system-reminder`. The sets stay separate on
+ * purpose: escaping the listing's structural tags inside a BODY mangles
+ * legitimate prose (`.opencode/skills/` ships 117 `<name>` occurrences across 23 files). The pattern is
+ * built once per set, not per call. (bot review) */
+export function makeWrapperNeutralizer(tags: readonly string[]): (text: string) => string {
+  // `[\\s/>]` rather than `\\b`: a word boundary also sits before `-`, so
+  // `<name-value>` and `<file-path>` were escaped as if they were wrapper tags.
+  //
+  // Whitespace is a TERMINATOR here, not something to skip. An earlier form,
+  // `\\s*(?:[/>]|$)`, skipped whitespace and then demanded `/`, `>` or
+  // end-of-input — which stopped matching every attribute-bearing tag, i.e.
+  // exactly the shapes this codebase emits (`<skill_content name="...">`,
+  // `<auto_loaded_skill name="...">`). Remote text could forge those verbatim.
+  // (review)
+  const re = new RegExp(`<(?=\\s*/?\\s*(?:${tags.join("|")})(?:[\\s/>]|$))`, "gi")
+  return (text: string) => {
+    re.lastIndex = 0
+    return text.replace(re, "&lt;")
+  }
 }
+
+const neutralizeListing = makeWrapperNeutralizer(TRUST_BOUNDARY_TAGS)
+
+export function neutralizeListingWrapper(text: string): string {
+  // Neutralise only the `<`, via a lookahead, so the rest of the text survives
+  // byte-for-byte. Whitespace is permitted between `<`, `/` and the tag name
+  // because the consumer is a language model, not an XML parser: a model
+  // reading `</ description>` or `< system-reminder>` mid-listing may well take
+  // it as a boundary, and the earlier `<(\/?)(tag)` form let both through. (review)
+  return neutralizeListing(text)
+}
+
+/** A built-in skill's `location` is a `builtin:` URI, not a filesystem path.
+ * `pathToFileURL` would resolve it against the CWD and emit a path that does
+ * not exist. Shared by every renderer so the guard cannot be applied to one
+ * listing and forgotten at another — which is exactly how it was missed. */
+//
+// `location` appears in TRUST_BOUNDARY_TAGS but is deliberately not passed
+// through the neutralizer: the value is either a `builtin:` URI we control or a
+// `pathToFileURL` result, and that percent-encodes `<`/`>` to `%3C`/`%3E`
+// (verified), so a `public_id` containing them cannot forge a tag here. The tag
+// stays in the list so hostile text elsewhere cannot mint a `<location>`.
+// (review)
+/** Escape a skill name for use inside a double-quoted XML attribute.
+ *
+ * `&` must go FIRST: escaping only `"` left a name containing the literal text
+ * `&quot;` intact, and the consumer then decodes it back into a real quote that
+ * closes the attribute — the very break-out the escaping was added to stop.
+ * (bot review) */
+/** Tags that delimit a skill BODY in tool output. Distinct from the listing set
+ * on purpose: `neutralizeListingWrapper` cannot be reused here, because its
+ * `skill\b` alternative does not match `skill_content` — `\b` fails between the
+ * `l` and the `_`. (review) */
+export const BODY_BOUNDARY_TAGS = [
+  "skill_content",
+  "skill_files",
+  "auto_loaded_skill",
+  "system-reminder",
+] as const
+
+/** The body set plus `file`, for the GENERATED `<file>` path entries.
+ *
+ * `file` is deliberately absent from the prose set above: in a skill body
+ * `<file>` is ordinary documentation (`cat <file>`, or any Maven / log4j /
+ * `.csproj` snippet), and escaping it there is the same over-correction that
+ * kept `name` out of the body set. In a generated path it really is a
+ * boundary. (review) */
+export const FILE_PATH_BOUNDARY_TAGS = [...BODY_BOUNDARY_TAGS, "file"] as const
+
+const neutralizeBody = makeWrapperNeutralizer(BODY_BOUNDARY_TAGS)
+
+/** Neutralize the wrapper tags around a rendered skill body.
+ *
+ * `SKILL.md` content is remote for a workspace-synced bundle, and the on-demand
+ * load path renders it into `<skill_content>` — a wider surface than the
+ * auto-load path, which needs `alwaysApply` or a matching glob. Left raw, a body
+ * could close `</skill_content>` and continue as post-skill tool output, or
+ * forge a `<system-reminder>`. (review) */
+/** Every boundary a skill NAME could forge when it is rendered INSIDE
+ * `<skill_content>` — the `# Skill:` heading, and the filter that decides which
+ * names are safe to advertise as copyable. Those are the only two sites that use
+ * this set.
+ *
+ * The three LISTING name sites keep `neutralizeListingWrapper` deliberately: in
+ * a listing the body tags are not boundaries, and escaping `<skill_content>`
+ * inside a `<name>` would mangle a legitimate skill name — plausibly one
+ * documenting this very mechanism — for no gain.
+ *
+ * One set rather than chaining two neutralizers, because "did the caller
+ * remember both?" is how the wrong-set bug happened. (review) */
+export const SKILL_NAME_TAGS = [...new Set([...BODY_BOUNDARY_TAGS, ...TRUST_BOUNDARY_TAGS])] as const
+
+const neutralizeSkillName = makeWrapperNeutralizer(SKILL_NAME_TAGS)
+
+/** Neutralize a skill name for rendering in any wrapper context. */
+export function neutralizeSkillNameText(text: string): string {
+  return neutralizeSkillName(text)
+}
+
+const neutralizeFilePath = makeWrapperNeutralizer(FILE_PATH_BOUNDARY_TAGS)
+
+/** Neutralize a generated `<file>` path entry. */
+export function neutralizeFilePathEntry(text: string): string {
+  return neutralizeFilePath(text)
+}
+
+export function neutralizeBodyWrapper(text: string): string {
+  return neutralizeBody(text)
+}
+
+export function escapeSkillAttr(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
+/** True when a skill's `location` is a sentinel rather than a real path, so it
+ * has no directory and no bundled files. The two sentinels are `builtin:<name>`
+ * and `<built-in>`. Kept beside `formatSkillLocation` because both answer the
+ * same question and drifted apart once already. (bot review) */
+export function hasNoSkillDirectory(location: string): boolean {
+  return location.startsWith("builtin:") || location === "<built-in>"
+}
+
+export function formatSkillLocation(location: string): string {
+  // `<built-in>` is the sentinel `Skill.Info.location` for the embedded
+  // customization skills; like `builtin:` it is not a filesystem path, and
+  // `pathToFileURL` would resolve it against the CWD. (bot review)
+  if (hasNoSkillDirectory(location)) return location
+  return pathToFileURL(location).href
+}
+
 // altimate_change end
 
 export function fmt(list: Info[], opts: { verbose: boolean }) {
@@ -440,7 +588,15 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
           `    <name>${neutralizeListingWrapper(skill.name)}</name>`,
           `    <description>${neutralizeListingWrapper(skill.description ?? "")}</description>`,
           // altimate_change end
-          `    <location>${pathToFileURL(skill.location).href}</location>`,
+          // altimate_change start — a built-in skill's `location` is a
+          // `builtin:` URI, not a filesystem path, so `pathToFileURL` resolved
+          // it against the CWD and emitted a location that does not exist
+          // (`file:///…/packages/opencode/builtin:my-skill/SKILL.md`). The
+          // now-deleted duplicate renderer in `./skill.ts` had this guard and
+          // this one never did; the divergence surfaced when its tests were
+          // repointed here. (review)
+          `    <location>${formatSkillLocation(skill.location)}</location>`,
+          // altimate_change end
           "  </skill>",
         ]),
       "</available_skills>",
@@ -451,7 +607,13 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
     "## Available Skills",
     ...described
       .toSorted((a, b) => a.name.localeCompare(b.name))
-      .map((skill) => `- **${skill.name}**: ${skill.description}`),
+      // altimate_change start — the non-verbose branch renders the same
+      // untrusted metadata as the verbose one. No production caller passes
+      // `verbose: false` today, so this is latent rather than live — but an
+      // unescaped second path on the same function is the exact shape of the
+      // bug this release exists to close. (review)
+      .map((skill) => `- **${neutralizeListingWrapper(skill.name)}**: ${neutralizeListingWrapper(skill.description ?? "")}`),
+      // altimate_change end
   ].join("\n")
 }
 

@@ -641,6 +641,22 @@ for (const item of targets) {
         version: Script.version,
         os: [item.os],
         cpu: [item.arch],
+        // altimate_change start — do not publish the orphaned sourcemaps.
+        // `Bun.build` above runs with `sourcemap: "external"`, so it writes
+        // `index.js.map` / `worker.js.map` next to the binary — but the bundles
+        // they describe are compiled INTO the executable, so the package shipped
+        // `.map` files with no `.js` companion: unusable by any consumer that
+        // follows `sourceMappingURL`, and not read by the binary at runtime
+        // (verified — it runs and reports errors normally with them deleted).
+        // They cost 20MB of a 191MB tarball against npm's ~200MB E413 ceiling.
+        // Keep emitting them for local debugging of `dist/`; keep them out of
+        // what we publish.
+        // `**` because `*` does not descend: a `.map` emitted under a
+        // `bin/<subdir>/` would still ship. Note the allowlist also means any
+        // future artifact added OUTSIDE `bin/` is silently dropped from the
+        // published package. (review)
+        files: ["bin", "!bin/**/*.map"],
+        // altimate_change end
       },
       null,
       2,

@@ -3767,7 +3767,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (managed) {
           return respond(
             userMsg.info.id,
-            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage it by hand.`,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to manage it by hand.`,
             model,
           )
         }

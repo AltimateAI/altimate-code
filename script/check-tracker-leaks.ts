@@ -148,7 +148,16 @@ async function main() {
   // `rev-parse --abbrev-ref HEAD` exit 128. Failing loud there contradicted the
   // documented "brand-new repo → silent success" path below, so this one lookup
   // tolerates failure while every other git call still fails hard.
-  const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], { failOnError: false })
+  // altimate_change start — in a pull_request checkout `actions/checkout` lands
+  // on the synthetic merge commit in detached HEAD, so `rev-parse --abbrev-ref`
+  // yields "HEAD" and the branch-name source — one of the three this script
+  // documents — is silently inert. CI exports the real head ref as PR_BRANCH.
+  // (bot review: the env var was added to the workflow without this read, so it
+  // had no effect at all.)
+  const branch =
+    process.env.PR_BRANCH?.trim() ||
+    (await git(["rev-parse", "--abbrev-ref", "HEAD"], { failOnError: false }))
+  // altimate_change end
 
   const hits: Hit[] = []
   if (pushed.hadInput) {
