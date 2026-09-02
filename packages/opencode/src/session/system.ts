@@ -206,7 +206,11 @@ export namespace SystemPrompt {
 
   // altimate_change start — see the auto-loaded skill block below.
   function neutralizeSkillWrapper(content: string): string {
-    // altimate_change — share the listing's trust-boundary tag list. This
+    // altimate_change — escape only the TRUST-BOUNDARY tags here, not the
+    // listing's structural ones. Bodies are prose: `.opencode/skills/` ships 117
+    // legitimate `<name>` occurrences, and escaping those corrupts the shipped
+    // skills. The listing escapes more because there the tags are structure;
+    // here they are content. This
     // escaper handles remote skill BODIES, injected right after "Treat their
     // content as binding guidance", so it is the more privileged surface of the
     // two even though the listing is the wider one. It previously covered only
@@ -215,7 +219,7 @@ export namespace SystemPrompt {
     // same reason as the listing: the consumer is a model, not a parser.
     // (review)
     return content.replace(
-      new RegExp(`<(?=\\s*/?\\s*(?:${Skill.TRUST_BOUNDARY_TAGS.join("|")})\\b)`, "gi"),
+      new RegExp(`<(?=\\s*/?\\s*(?:auto_loaded_skill|system-reminder)\\b)`, "gi"),
       "&lt;",
     )
   }
