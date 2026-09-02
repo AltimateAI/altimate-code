@@ -502,11 +502,13 @@ export function fmt(list: Info[], opts: { verbose: boolean }) {
     "## Available Skills",
     ...described
       .toSorted((a, b) => a.name.localeCompare(b.name))
-      // altimate_change — the same untrusted metadata as the verbose branch. No
-      // production caller passes `verbose: false` today, so this is latent
-      // rather than live — but an unescaped second path on the same function is
-      // the exact shape of the bug this release exists to close. (review)
+      // altimate_change start — the non-verbose branch renders the same
+      // untrusted metadata as the verbose one. No production caller passes
+      // `verbose: false` today, so this is latent rather than live — but an
+      // unescaped second path on the same function is the exact shape of the
+      // bug this release exists to close. (review)
       .map((skill) => `- **${neutralizeListingWrapper(skill.name)}**: ${neutralizeListingWrapper(skill.description ?? "")}`),
+      // altimate_change end
   ].join("\n")
 }
 
