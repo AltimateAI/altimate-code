@@ -70,6 +70,8 @@ describe("review_run", () => {
     expect(e.ai_status).toBe("ok")
     expect(e.ai_findings).toBe(2)
     expect(e.undecidable_findings).toBe(0)
+    expect(e.lint_only).toBe(false)
+    expect(e.empty_scope).toBe(false)
   })
 
   test("tier_forced normalises absent to false", () => {
@@ -143,6 +145,8 @@ describe("review_run", () => {
     emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: envelope() })
     expect((events[0] as any).stale_manifest).toBe(false)
     expect((events[0] as any).degraded).toBe(false)
+    expect((events[0] as any).lint_only).toBe(false)
+    expect((events[0] as any).empty_scope).toBe(false)
 
     events.length = 0
     emitReviewRun({
@@ -164,6 +168,8 @@ describe("review_run", () => {
     })
     expect((events[0] as any).stale_manifest).toBe(true)
     expect((events[0] as any).degraded).toBe(true)
+    expect((events[0] as any).lint_only).toBe(true)
+    expect((events[0] as any).empty_scope).toBe(false)
 
     events.length = 0
     emitReviewRun({
@@ -184,6 +190,27 @@ describe("review_run", () => {
       }),
     })
     expect((events[0] as any).degraded).toBe(true)
+    expect((events[0] as any).lint_only).toBe(false)
+    expect((events[0] as any).empty_scope).toBe(true)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
+      }),
+    })
+    expect((events[0] as any).lint_only).toBe(true)
+    expect((events[0] as any).empty_scope).toBe(false)
   })
 
   test("undecidable findings do not turn review_run degraded", () => {

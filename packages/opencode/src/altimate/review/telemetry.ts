@@ -112,6 +112,8 @@ export function emitReviewRun(input: {
       // Compatibility field: degraded covers either run-level reduced scope,
       // never an individual undecidable finding.
       degraded: env.summary.degraded,
+      lint_only: env.summary.lintOnly ?? env.summary.degraded,
+      empty_scope: env.summary.emptyScope ?? false,
       undecidable_findings: env.summary.undecidableFindings ?? 0,
       ai_status: env.summary.aiReview?.status,
       ai_findings: env.summary.aiReview?.findings ?? 0,

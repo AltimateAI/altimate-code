@@ -89,7 +89,7 @@ export function renderSummary(env: VerdictEnvelope): string {
     lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
 
-  if (!env.findings.length) {
+  if (!env.findings.length && !env.summary.emptyScope) {
     lines.push("No issues found in the changed dbt models. 🎉", "")
   } else {
     const grouped = groupBySeverity(env.findings)
@@ -120,7 +120,7 @@ export function renderSummary(env: VerdictEnvelope): string {
     )
   }
 
-  if (env.tier !== "trivial" && env.summary.aiReview) {
+  if (!env.summary.emptyScope && env.tier !== "trivial" && env.summary.aiReview) {
     const ai = env.summary.aiReview
     if (ai.status === "ok") {
       lines.push(`🤖 AI reviewer: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")

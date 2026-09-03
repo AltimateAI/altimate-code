@@ -135,6 +135,35 @@ describe("defaultBaseRef", () => {
     const expected = (await $`git merge-base HEAD origin/release`.cwd(tmp.path).quiet().text()).trim()
     expect(await defaultBaseRef(tmp.path)).toBe(expected)
   })
+
+  test("computes the pull request fork point from a caller-supplied head", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const root = (await $`git rev-parse HEAD`.cwd(tmp.path).quiet().text()).trim()
+
+    await Bun.write(path.join(tmp.path, "release.txt"), "release\n")
+    await $`git add release.txt`.cwd(tmp.path).quiet()
+    await $`git commit -m release`.cwd(tmp.path).quiet()
+    const release = (await $`git rev-parse HEAD`.cwd(tmp.path).quiet().text()).trim()
+    await $`git update-ref refs/remotes/origin/release ${release}`.cwd(tmp.path).quiet()
+
+    await Bun.write(path.join(tmp.path, "current.txt"), "current\n")
+    await $`git add current.txt`.cwd(tmp.path).quiet()
+    await $`git commit -m current`.cwd(tmp.path).quiet()
+    await $`git update-ref refs/heads/custom-head ${root}`.cwd(tmp.path).quiet()
+
+    const eventPath = path.join(tmp.path, "event.json")
+    await Bun.write(eventPath, JSON.stringify({ pull_request: { base: { ref: "release" } } }))
+    process.env.GITHUB_EVENT_PATH = eventPath
+
+    expect(await defaultBaseRef(tmp.path)).toBe(release)
+    expect(await defaultBaseRef(tmp.path, "custom-head")).toBe(root)
+  })
+
+  test("the composite action fetches and derives the merge-base from its effective head", async () => {
+    const action = await Bun.file(path.resolve(import.meta.dir, "../../../../github/review/action.yml")).text()
+    expect(action).toContain('git fetch --no-tags origin "$IN_HEAD" || true')
+    expect(action).toContain('git merge-base "origin/$PR_BASE_REF" "${IN_HEAD:-$PR_HEAD_SHA}"')
+  })
 })
 
 describe("resolveGitHubTarget", () => {

@@ -140,7 +140,7 @@ export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
 }
 
 /** Resolve a sensible default base ref from the PR event or main/master. */
-export async function defaultBaseRef(cwd: string): Promise<string> {
+export async function defaultBaseRef(cwd: string, head = "HEAD"): Promise<string> {
   const eventPath = process.env.GITHUB_EVENT_PATH
   if (eventPath) {
     try {
@@ -148,7 +148,7 @@ export async function defaultBaseRef(cwd: string): Promise<string> {
       const ref = event?.pull_request?.base?.ref
       if (typeof ref === "string" && ref) {
         const candidate = `origin/${ref}`
-        const mb = (await git(["merge-base", "HEAD", candidate], cwd)).trim()
+        const mb = (await git(["merge-base", head, candidate], cwd)).trim()
         if (mb) return mb
       }
     } catch {
@@ -158,7 +158,7 @@ export async function defaultBaseRef(cwd: string): Promise<string> {
 
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
     try {
-      const mb = (await git(["merge-base", "HEAD", candidate], cwd)).trim()
+      const mb = (await git(["merge-base", head, candidate], cwd)).trim()
       if (mb) return mb
     } catch {
       // try next

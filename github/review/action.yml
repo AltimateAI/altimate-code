@@ -118,10 +118,15 @@ runs:
       env:
         PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        IN_HEAD: ${{ inputs.head }}
       run: |
         set -euo pipefail
         git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
-        git fetch --no-tags origin "$PR_HEAD_SHA"
+        if [[ -n "${IN_HEAD:-}" ]]; then
+          git fetch --no-tags origin "$IN_HEAD" || true
+        else
+          git fetch --no-tags origin "$PR_HEAD_SHA"
+        fi
         if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
           git fetch --no-tags --unshallow origin
         fi
@@ -203,7 +208,7 @@ runs:
         elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_REF" ]]; then
           # Use the fork point for both the file list and old content: base-only
           # changes after it must never be attributed to this pull request.
-          if MERGE_BASE=$(git merge-base "origin/$PR_BASE_REF" "$PR_HEAD_SHA"); then
+          if MERGE_BASE=$(git merge-base "origin/$PR_BASE_REF" "${IN_HEAD:-$PR_HEAD_SHA}"); then
             args+=(--base "$MERGE_BASE")
           else
             echo "::warning::Could not compute pull request merge-base; falling back to origin/$PR_BASE_REF"

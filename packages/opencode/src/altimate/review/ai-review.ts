@@ -104,9 +104,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
   if (!files.length) return { findings: [], status: "skipped", reason: "no reviewable files" }
 
-  const AI_TIMEOUT_MS = Math.min(180_000, 60_000 + 2_000 * files.length)
+  const AI_TIMEOUT_MS = Math.min(180_000, 60_000 + 2_000 * Math.min(files.length, MAX_FILES))
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS)
+  let streamAborted = false
   try {
     // Prompt comes from the compiled core, not this file.
     const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
@@ -146,10 +147,14 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       retries: 1,
       messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
     })
-    for await (const _ of stream.fullStream) {
+    for await (const event of stream.fullStream) {
       // drain to avoid SDK hangs
+      if (event.type === "abort") streamAborted = true
     }
     const text = await Promise.resolve(stream.text)
+    if (controller.signal.aborted || streamAborted) {
+      return { findings: [], status: "timeout", reason: `timed out after ${AI_TIMEOUT_MS / 1000}s` }
+    }
     if (!text) return { findings: [], status: "error", reason: "Error: empty response" }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
@@ -197,7 +202,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   } catch (err) {
     log.error("ai review failed", { error: err })
     if (noModelError(err)) return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
-    if (controller.signal.aborted || (err as { name?: unknown } | undefined)?.name === "AbortError") {
+    if (controller.signal.aborted || streamAborted || (err as { name?: unknown } | undefined)?.name === "AbortError") {
       return { findings: [], status: "timeout", reason: `timed out after ${AI_TIMEOUT_MS / 1000}s` }
     }
     return { findings: [], status: "error", reason: errorReason(err) }

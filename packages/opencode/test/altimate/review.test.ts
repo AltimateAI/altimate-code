@@ -1907,6 +1907,21 @@ describe("orchestrate", () => {
     expect(renderSummary(trivial)).not.toContain("AI reviewer:")
   })
 
+  test("empty scope skips the generic success and AI reviewer lines", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      emptyScope: true,
+      aiReview: { status: "ok", findings: 2 },
+    })
+    const summary = renderSummary(env)
+
+    expect(summary).toContain("Nothing to review")
+    expect(summary).not.toContain("No issues found in the changed dbt models")
+    expect(summary).not.toContain("AI reviewer:")
+  })
+
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/fct_revenue.sql", status: "modified", diff: "+x\n-y\n" }]
     const runner: ReviewRunner = {
@@ -2547,6 +2562,8 @@ describe("orchestrate", () => {
     expect(summary).toContain(
       "⚙️ Nothing to review — no dbt model, schema, or macro files changed in this diff.",
     )
+    expect(summary).not.toContain("No issues found in the changed dbt models")
+    expect(summary).not.toContain("AI reviewer:")
   })
 
   test("loaded manifest is not marked lint-only when a changed model is absent from it", async () => {

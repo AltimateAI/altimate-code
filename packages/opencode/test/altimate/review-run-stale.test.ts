@@ -2,7 +2,8 @@ import { describe, test, expect } from "bun:test"
 import { promises as fs } from "node:fs"
 import path from "node:path"
 import { tmpdir } from "../fixture/fixture"
-import { detectArtifactHints, isManifestAffecting } from "../../src/altimate/review/run"
+import { detectArtifactHints, isManifestAffecting, reviewPullRequest } from "../../src/altimate/review/run"
+import { renderSummary } from "../../src/altimate/review/format"
 
 /**
  * Guards on `warnIfStale`'s changed-file filter. The stale warning gates on a
@@ -63,15 +64,13 @@ describe("isManifestAffecting", () => {
 })
 
 describe("detectArtifactHints", () => {
-  test("reports a missing catalog when both compiled directories exist", async () => {
+  test("returns no hints when no models changed, even when the catalog is absent", async () => {
     await using tmp = await tmpdir()
     const manifest = path.join(tmp.path, "target", "manifest.json")
     await fs.mkdir(path.dirname(manifest), { recursive: true })
     await fs.writeFile(manifest, "{}")
-    await fs.mkdir(path.join(tmp.path, "target", "compiled"), { recursive: true })
-    await fs.mkdir(path.join(tmp.path, "target-base", "compiled"), { recursive: true })
 
-    expect(await detectArtifactHints(manifest, tmp.path)).toEqual(["catalog.json (run `dbt docs generate`)"])
+    expect(await detectArtifactHints(manifest, tmp.path)).toEqual([])
   })
 
   test("reports both missing compiled directories when the catalog exists", async () => {
@@ -123,6 +122,107 @@ describe("detectArtifactHints", () => {
 
   test("does not report artifacts when the manifest itself is absent", async () => {
     await using tmp = await tmpdir()
-    expect(await detectArtifactHints(path.join(tmp.path, "target", "manifest.json"), tmp.path)).toEqual([])
+    expect(
+      await detectArtifactHints(
+        path.join(tmp.path, "target", "manifest.json"),
+        tmp.path,
+        [{ path: "models/a.sql", status: "modified" }],
+        "analytics",
+      ),
+    ).toEqual([])
+  })
+
+  test("reports an unresolved project name once and keeps the catalog hint", async () => {
+    await using tmp = await tmpdir()
+    const manifest = path.join(tmp.path, "target", "manifest.json")
+    await fs.mkdir(path.dirname(manifest), { recursive: true })
+    await fs.writeFile(manifest, "{}")
+
+    expect(
+      await detectArtifactHints(manifest, tmp.path, [
+        { path: "models/a.sql", status: "modified" },
+        { path: "models/b.sql", status: "modified" },
+      ]),
+    ).toEqual([
+      "catalog.json (run `dbt docs generate`)",
+      "dbt project name not resolved — no readable dbt_project.yml next to the manifest, so compiled SQL cannot be located",
+    ])
+  })
+})
+
+async function writeDbtArtifacts(root: string, catalog = false) {
+  const target = path.join(root, "target")
+  await fs.mkdir(target, { recursive: true })
+  await fs.writeFile(
+    path.join(target, "manifest.json"),
+    JSON.stringify({
+      metadata: { adapter_type: "duckdb" },
+      nodes: {
+        "model.analytics.existing": {
+          resource_type: "model",
+          name: "existing",
+          original_file_path: "models/existing.sql",
+          depends_on: { nodes: [] },
+        },
+      },
+      sources: {},
+    }),
+  )
+  if (catalog) await fs.writeFile(path.join(target, "catalog.json"), "{}")
+  await fs.writeFile(path.join(root, "dbt_project.yml"), "name: analytics\n")
+}
+
+describe("review artifact hint scope", () => {
+  test("a README-only diff renders only the empty-scope message", async () => {
+    await using tmp = await tmpdir()
+    await writeDbtArtifacts(tmp.path)
+
+    const env = await reviewPullRequest({
+      cwd: tmp.path,
+      changedFiles: [{ path: "README.md", status: "modified", diff: "+docs\n" }],
+      getContent: async () => undefined,
+      noAi: true,
+    })
+    const summary = renderSummary(env)
+
+    expect(summary).toContain("Nothing to review")
+    expect(summary).not.toContain("Missing artifacts")
+    expect(summary).not.toContain("No issues found")
+    expect(summary).not.toContain("AI reviewer:")
+  })
+
+  test("excluded models and tracked compiled output do not produce hints", async () => {
+    await using tmp = await tmpdir()
+    await writeDbtArtifacts(tmp.path)
+    await fs.mkdir(path.join(tmp.path, ".altimate"), { recursive: true })
+    await fs.writeFile(path.join(tmp.path, ".altimate", "review.yml"), "exclude:\n  - models/excluded.sql\n")
+
+    const env = await reviewPullRequest({
+      cwd: tmp.path,
+      changedFiles: [
+        { path: "models/excluded.sql", status: "modified", diff: "+select 1\n" },
+        { path: "target/compiled/analytics/models/x.sql", status: "modified", diff: "+select 1\n" },
+      ],
+      getContent: async () => undefined,
+      noAi: true,
+    })
+
+    expect(env.summary.artifactHints).toEqual([])
+  })
+
+  test("a changed Python model is included in compiled artifact hints", async () => {
+    await using tmp = await tmpdir()
+    await writeDbtArtifacts(tmp.path, true)
+
+    const env = await reviewPullRequest({
+      cwd: tmp.path,
+      changedFiles: [{ path: "models/new_model.py", status: "added", diff: "+def model(): pass\n" }],
+      getContent: async () => undefined,
+      noAi: true,
+    })
+
+    expect(env.summary.artifactHints).toEqual([
+      "target/compiled missing for 1 changed model(s) (run `dbt compile` for the head)",
+    ])
   })
 })

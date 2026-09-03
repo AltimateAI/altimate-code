@@ -10,7 +10,7 @@ import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { runAiReview } from "./ai-review"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
-import { classifyDbtFile, type ChangedFile } from "./diff-filter"
+import { filterChangedFiles, type ChangedFile } from "./diff-filter"
 
 /**
  * End-to-end review entry point: load `.altimate/review.yml`, collect the diff,
@@ -135,6 +135,8 @@ export async function detectArtifactHints(
   projectName?: string,
   pathPrefix?: string,
 ): Promise<string[]> {
+  if (changedModels.length === 0) return []
+
   try {
     await access(manifestAbs)
   } catch {
@@ -146,6 +148,13 @@ export async function detectArtifactHints(
     await access(path.join(path.dirname(manifestAbs), "catalog.json"))
   } catch {
     hints.push("catalog.json (run `dbt docs generate`)")
+  }
+
+  if (projectName === undefined) {
+    hints.push(
+      "dbt project name not resolved — no readable dbt_project.yml next to the manifest, so compiled SQL cannot be located",
+    )
+    return hints
   }
 
   const getCompiled = makeCompiledResolver({ cwd: dbtRoot, projectName, pathPrefix })
@@ -259,7 +268,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // `getContent` (e.g. a non-git CI integration) must not be forced through a
   // git lookup that can fail when there's no usable history.
   const needGit = !opts.changedFiles || !opts.getContent
-  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd) : "")
+  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd, opts.head ?? "HEAD") : "")
   const changedFiles = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
   // Resolve the repo top-level once; used to root working-tree FS reads, the
   // stale-manifest existence check, and the compiled-SQL resolver's path
@@ -366,7 +375,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     /* keep original values on realpath failure */
   }
   const pathPrefix = path.relative(gitRootReal, dbtRootReal)
-  const changedModels = changedFiles.filter((file) => classifyDbtFile(file.path) === "model_sql")
+  const changedModels = filterChangedFiles(changedFiles, rubric.exclusions.excludeGlobs).filter(
+    (file) => file.kind === "model_sql" || file.kind === "python_model",
+  )
   const artifactHints = await detectArtifactHints(manifestAbs, dbtRootReal, changedModels, projectName, pathPrefix)
   const getCompiled = opts.getContent
     ? undefined

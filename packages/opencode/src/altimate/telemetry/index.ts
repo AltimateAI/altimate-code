@@ -977,8 +977,12 @@ export namespace Telemetry {
         mode?: string
         tier?: string
         tier_forced?: boolean
-        /** Run-level lint-only flag: no reviewable model resolved against a dbt manifest. */
+        /** Compatibility run-level reduced-scope flag (`lint_only` or `empty_scope`). */
         degraded?: boolean
+        /** True when reviewable models exist but no dbt manifest was available. */
+        lint_only?: boolean
+        /** True when no reviewable dbt files remain after filtering. */
+        empty_scope?: boolean
         /** Count of surfaced findings whose deterministic analysis could not decide. */
         undecidable_findings?: number
         /** Advisory AI reviewer outcome when the lane applied. */
