@@ -1,3 +1,4 @@
+import path from "path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { AltimateApi } from "../api/client"
@@ -140,6 +141,23 @@ async function handleList() {
   }
 }
 
+// altimate_change start — the cwd the shared datamate entry would be spawned
+// with, mirroring connectLocal: a local entry's `cwd` resolved against the
+// instance directory, else the instance directory. Runtime-added entries win
+// over file config (MCP.entry uses the connect path's own precedence). Falls
+// back to the instance directory when no MCP runtime is up — that is
+// connectLocal's default too.
+async function engineSpawnCwd(): Promise<string> {
+  try {
+    const entry = await MCP.entry(DATAMATE_KEY)
+    if (entry && entry.type === "local" && entry.cwd) return path.resolve(Instance.directory, entry.cwd)
+  } catch (e) {
+    log.warn("could not read the datamate MCP entry for the bridge probe", { error: String(e) })
+  }
+  return Instance.directory
+}
+// altimate_change end
+
 async function handleListIntegrations() {
   try {
     const catalog = await AltimateApi.listIntegrations()
@@ -150,12 +168,12 @@ async function handleListIntegrations() {
     // (2026-09-03) proved the full chain: compile_model/run_model over the
     // bridge materialized a model on the warehouse from a headless run.
     const extension = catalog.filter((i) => i.type === "extension")
-    // Probe with Instance.directory, not projectRoot(): the engine is spawned
-    // with the instance directory as its cwd (mcp/index.ts connectLocal), so
-    // this is the cwd its own discovery will match. Probing the Git root
-    // instead diverged when altimate-code was launched from a subdirectory
-    // with more than one live bridge. (codex review)
-    const bridged = extension.length > 0 && liveBridge(Instance.directory)
+    // Probe with the cwd the engine is actually spawned with: connectLocal
+    // resolves a local entry's `cwd` against the instance directory and falls
+    // back to the instance directory itself — not the Git root projectRoot()
+    // returns. Probing anything else diverged whenever the effective spawn cwd
+    // and the probe input straddled different sidecars. (codex review, r1+r2)
+    const bridged = extension.length > 0 && liveBridge(await engineSpawnCwd())
     const integrations = bridged ? catalog : catalog.filter((i) => i.type !== "extension")
     const hidden = catalog.length - integrations.length
     const footer = bridged

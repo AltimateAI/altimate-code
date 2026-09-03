@@ -83,6 +83,9 @@ describe("liveBridge", () => {
     })
     expect(liveBridge(cwd, dir)).toBe(true)
     expect(liveBridge(path.join(cwd, "models", "staging"), dir)).toBe(true)
+    // A child literally named "..cache" is inside: ".." only counts as a
+    // complete path component.
+    expect(liveBridge(path.join(cwd, "..cache"), dir)).toBe(true)
     // A sibling directory that merely shares the prefix string is not within.
     expect(liveBridge(cwd + "-other", dir)).toBe(false)
   })
@@ -94,6 +97,16 @@ describe("liveBridge", () => {
     })
     expect(liveBridge(cwd, dir)).toBe(false)
     expect(statSync(path.join(dir, "a.json")).isFile()).toBe(true)
+  })
+
+  test("a non-positive or non-integer pid is never alive — kill(0)/kill(-1) probe process groups", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    for (const pid of [0, -1, 1.5]) {
+      const dir = sidecars({
+        "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid },
+      })
+      expect(liveBridge(cwd, dir)).toBe(false)
+    }
   })
 
   test("the sole live bridge counts even for an unrelated directory; two decline to guess", () => {
@@ -118,5 +131,27 @@ describe("liveBridge", () => {
     writeFileSync(path.join(dir, "broken.json"), "{not json")
     writeFileSync(path.join(dir, "not-a-sidecar.txt"), "ignored")
     expect(liveBridge(cwd, dir)).toBe(false)
+  })
+
+  test("a malformed folders shape degrades to a folderless live bridge, never a throw", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Object-valued and mixed-type folders come from an unvalidated JSON file.
+    const dir = sidecars({
+      "obj.json": { socketPath: "/tmp/a.sock", workspaceFolders: {}, pid: process.pid },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true) // sole live bridge, no folders — fallback
+    const mixed = sidecars({
+      "mixed.json": { socketPath: "/tmp/a.sock", workspaceFolders: [42, cwd], pid: process.pid },
+      "other.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, mixed)).toBe(true) // the string folder still matches
+  })
+
+  test("a sidecar without a pid counts as live, matching the engine's discovery", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const dir = sidecars({
+      "no-pid.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd] },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true)
   })
 })

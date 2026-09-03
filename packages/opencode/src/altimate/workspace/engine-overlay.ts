@@ -663,7 +663,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   const rec = record(sessionID, outcome)
   // Keyed on the workspace too: a re-link with an identical inventory is still
   // a new verdict the user should hear.
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}`
+  // extServed is part of what the user hears, so it is part of the signature:
+  // an equal-count tool swap that changes only the extension share must still
+  // re-announce. (bot review)
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}:${extServed}`
   if (rec.announced === signature) return
   rec.announced = signature
   log.info("workspace engine attached", {

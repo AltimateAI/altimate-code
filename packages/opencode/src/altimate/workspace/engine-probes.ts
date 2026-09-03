@@ -4,7 +4,7 @@
 // version, the workspace allowlist, and the user-facing surfaces.
 import { readFileSync, readdirSync, statSync } from "fs"
 import { homedir } from "os"
-import { isAbsolute, join, relative, resolve } from "path"
+import { isAbsolute, join, relative, resolve, sep } from "path"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { AltimateApi } from "@/altimate/api/client"
@@ -184,9 +184,20 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
           workspaceFolders?: string[]
           pid?: number
         }
-        if (!data.socketPath) continue
-        if (typeof data.pid === "number" && !pidAlive(data.pid)) continue
-        bridges.push(data.workspaceFolders ?? [])
+        if (typeof data.socketPath !== "string" || !data.socketPath) continue
+        // A sidecar without a pid counts as live, matching the engine's own
+        // discovery; a recorded pid disqualifies unless it names a live real
+        // process. Non-positive pids never do — kill(0)/kill(-1) probe process
+        // groups, which would read any garbage pid as alive. (bot review)
+        if (typeof data.pid === "number" && !(Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
+          continue
+        // Validate the folders shape: this is an unvalidated JSON file, and a
+        // non-array here must degrade to "live bridge, no recorded folders",
+        // not throw out of the probe. (bot review)
+        const folders = Array.isArray(data.workspaceFolders)
+          ? data.workspaceFolders.filter((f): f is string => typeof f === "string")
+          : []
+        bridges.push(folders)
       } catch {
         // An unreadable sidecar is not a live bridge.
       }
@@ -197,7 +208,9 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
   if (bridges.length === 0) return false
   const within = (folder: string) => {
     const rel = relative(resolve(folder), resolve(cwd))
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))
+    // ".." must be a complete path component: a child literally named
+    // "..cache" yields rel "..cache", which is inside. (bot review)
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
   }
   if (bridges.some((folders) => folders.some(within))) return true
   return bridges.length === 1
