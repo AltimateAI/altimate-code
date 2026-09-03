@@ -123,13 +123,15 @@ runs:
         set -euo pipefail
         git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
         if [[ -n "${IN_HEAD:-}" ]]; then
+          if [[ "$IN_HEAD" == -* ]]; then
+            echo "::error::Custom head must not start with '-': $IN_HEAD" >&2
+            exit 1
+          fi
           if git rev-parse --verify --quiet "$IN_HEAD^{commit}" >/dev/null; then
             echo "HEAD_REF=$IN_HEAD" >> "$GITHUB_ENV"
-          elif git fetch --no-tags origin "$IN_HEAD"; then
+          elif git fetch --no-tags origin -- "$IN_HEAD"; then
             git update-ref refs/altimate/review-head FETCH_HEAD
             echo "HEAD_REF=refs/altimate/review-head" >> "$GITHUB_ENV"
-          elif git fetch --no-tags origin "+refs/heads/${IN_HEAD}:refs/remotes/origin/${IN_HEAD}"; then
-            echo "HEAD_REF=origin/${IN_HEAD}" >> "$GITHUB_ENV"
           else
             echo "Unable to fetch custom head '$IN_HEAD' from origin" >&2
             exit 1

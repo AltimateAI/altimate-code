@@ -5,6 +5,15 @@ import { tmpdir } from "../fixture/fixture"
 import { detectArtifactHints, isManifestAffecting, reviewPullRequest } from "../../src/altimate/review/run"
 import { renderSummary } from "../../src/altimate/review/format"
 
+const USABLE_CATALOG = JSON.stringify({
+  nodes: {
+    "model.analytics.fixture": {
+      metadata: { name: "fixture" },
+      columns: { id: { name: "id", type: "integer" } },
+    },
+  },
+})
+
 /**
  * Guards on `warnIfStale`'s changed-file filter. The stale warning gates on a
  * changed file having an mtime newer than the manifest; iterating every path
@@ -73,13 +82,33 @@ describe("detectArtifactHints", () => {
     expect(await detectArtifactHints(manifest, tmp.path)).toEqual([])
   })
 
+  test("distinguishes a missing catalog from an unreadable or empty catalog", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    const changedModels = [{ path: "models/a.sql", status: "added" as const }]
+    await fs.mkdir(target, { recursive: true })
+    await fs.writeFile(manifest, "{}")
+
+    expect(await detectArtifactHints(manifest, tmp.path, changedModels, "analytics")).toContain(
+      "catalog.json (run `dbt docs generate`)",
+    )
+
+    for (const contents of ["{}", "{not json"]) {
+      await fs.writeFile(path.join(target, "catalog.json"), contents)
+      expect(await detectArtifactHints(manifest, tmp.path, changedModels, "analytics")).toContain(
+        "catalog.json unreadable or empty (regenerate with `dbt docs generate`)",
+      )
+    }
+  })
+
   test("reports both missing compiled directories when the catalog exists", async () => {
     await using tmp = await tmpdir()
     const target = path.join(tmp.path, "target")
     const manifest = path.join(target, "manifest.json")
     await fs.mkdir(target, { recursive: true })
     await fs.writeFile(manifest, "{}")
-    await fs.writeFile(path.join(target, "catalog.json"), "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
 
     expect(
       await detectArtifactHints(
@@ -102,7 +131,7 @@ describe("detectArtifactHints", () => {
     await fs.mkdir(path.join(target, "compiled", project, "models"), { recursive: true })
     await fs.mkdir(path.join(tmp.path, "target-base", "compiled", project, "models"), { recursive: true })
     await fs.writeFile(manifest, "{}")
-    await fs.writeFile(path.join(target, "catalog.json"), "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
     await fs.writeFile(path.join(target, "compiled", project, "models", "a.sql"), "select 1")
     await fs.writeFile(path.join(tmp.path, "target-base", "compiled", project, "models", "a.sql"), "select 1")
     await fs.writeFile(path.join(tmp.path, "target-base", "compiled", project, "models", "b.sql"), "select 1")
@@ -131,7 +160,7 @@ describe("detectArtifactHints", () => {
     await fs.mkdir(path.dirname(siblingBaseModel), { recursive: true })
     await fs.mkdir(path.dirname(fallbackBaseModel), { recursive: true })
     await fs.writeFile(path.join(build, "manifest.json"), "{}")
-    await fs.writeFile(path.join(build, "catalog.json"), "{}")
+    await fs.writeFile(path.join(build, "catalog.json"), USABLE_CATALOG)
     await fs.writeFile(headModel, "select 1")
     await fs.writeFile(fallbackBaseModel, "select 1")
 
@@ -147,6 +176,47 @@ describe("detectArtifactHints", () => {
 
     await fs.writeFile(siblingBaseModel, "select 1")
     expect(await detectArtifactHints(manifest, tmp.path, changedModels, project)).toEqual([])
+  })
+
+  test("uses the sole base project directory and oldPath when the dbt project was renamed", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    const headModel = path.join(target, "compiled", "new_analytics", "models", "new_name.sql")
+    const baseModel = path.join(tmp.path, "target-base", "compiled", "old_analytics", "models", "old_name.sql")
+    await fs.mkdir(path.dirname(headModel), { recursive: true })
+    await fs.mkdir(path.dirname(baseModel), { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
+    await fs.writeFile(headModel, "select 1")
+    await fs.writeFile(baseModel, "select 1")
+
+    expect(
+      await detectArtifactHints(
+        manifest,
+        tmp.path,
+        [{ path: "models/new_name.sql", oldPath: "models/old_name.sql", status: "renamed" }],
+        "new_analytics",
+      ),
+    ).toEqual([])
+  })
+
+  test("does not request base compiled SQL for a deletion-only diff", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    await fs.mkdir(target, { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
+
+    expect(
+      await detectArtifactHints(
+        manifest,
+        tmp.path,
+        [{ path: "models/deleted.sql", status: "deleted" }],
+        "analytics",
+      ),
+    ).toEqual([])
   })
 
   test("does not report artifacts when the manifest itself is absent", async () => {
@@ -197,7 +267,7 @@ async function writeDbtArtifacts(root: string, catalog = false) {
       sources: {},
     }),
   )
-  if (catalog) await fs.writeFile(path.join(target, "catalog.json"), "{}")
+  if (catalog) await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
   await fs.writeFile(path.join(root, "dbt_project.yml"), "name: analytics\n")
 }
 

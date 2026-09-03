@@ -1918,7 +1918,7 @@ describe("orchestrate", () => {
     expect(renderSummary(withoutAiReview)).not.toContain("AI reviewer:")
   })
 
-  test("empty scope skips the generic success and AI reviewer lines", () => {
+  test("format renders an AI status whenever the envelope contains one", () => {
     const env = buildEnvelope({
       findings: [],
       tier: "lite",
@@ -1930,7 +1930,7 @@ describe("orchestrate", () => {
 
     expect(summary).toContain("Nothing to review")
     expect(summary).not.toContain("No issues found in the changed dbt models")
-    expect(summary).not.toContain("AI reviewer:")
+    expect(summary).toContain("🤖 AI reviewer: 2 advisory findings")
   })
 
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {
@@ -2555,6 +2555,7 @@ describe("orchestrate", () => {
   })
 
   test("README-only diff with a manifest is empty scope, not lint-only", async () => {
+    let aiCalls = 0
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async manifestAvailable() {
@@ -2563,12 +2564,18 @@ describe("orchestrate", () => {
     }
     const env = await runReview({
       changedFiles: [{ path: "README.md", status: "modified", diff: "+docs\n" }],
-      config: { ...DEFAULT_REVIEW_CONFIG },
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"] },
       rubric: DEFAULT_RUBRIC,
       mode: "comment",
       runner,
+      aiReview: async () => {
+        aiCalls++
+        return { status: "ok", findings: [] }
+      },
     })
 
+    expect(aiCalls).toBe(0)
+    expect(env.summary.aiReview).toBeUndefined()
     expect(env.summary).toMatchObject({ degraded: true, lintOnly: false, emptyScope: true })
     const summary = renderSummary(env)
     expect(summary).not.toContain("Lint-only")

@@ -152,7 +152,7 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
     )
   }
 
-  if (!env.summary.emptyScope && env.summary.aiReview) {
+  if (env.summary.aiReview) {
     const ai = env.summary.aiReview
     if (ai.status === "ok") {
       lines.push(`🤖 AI reviewer: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")

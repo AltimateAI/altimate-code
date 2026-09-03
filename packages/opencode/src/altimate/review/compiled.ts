@@ -40,6 +40,8 @@ export interface CompiledResolverOptions {
   /** dbt project root (the dir containing `dbt_project.yml`). */
   cwd: string
   projectName?: string
+  /** BASE-side dbt project name. Defaults to projectName. */
+  baseProjectName?: string
   /** Directory holding HEAD-side compiled SQL (relative to cwd, or absolute). */
   headDir?: string
   /** Directory holding BASE-side compiled SQL (relative to cwd, or absolute). */
@@ -58,7 +60,8 @@ export interface CompiledResolverOptions {
  * undefined when no compiled artifact is present.
  */
 export function makeCompiledResolver(opts: CompiledResolverOptions) {
-  const project = opts.projectName
+  const headProject = opts.projectName
+  const baseProject = opts.baseProjectName ?? headProject
   const headDir = opts.headDir ?? "target/compiled"
   const baseDir = opts.baseDir ?? "target-base/compiled"
   // Normalise the prefix so both "" and "." mean "no prefix". Match against
@@ -72,6 +75,7 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
       : ""
 
   return async (file: string, side: "old" | "new"): Promise<string | undefined> => {
+    const project = side === "new" ? headProject : baseProject
     if (!project) return undefined
     // When the dbt project sits inside a subdir of the repo, `file` (from
     // `git diff --name-status`) is repo-root relative and always uses

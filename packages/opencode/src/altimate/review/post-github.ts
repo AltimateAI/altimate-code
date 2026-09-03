@@ -62,13 +62,19 @@ export interface PostResult {
   postError?: string
 }
 
+function lastLineMarker(body: string, pattern: RegExp): string | undefined {
+  let value: string | undefined
+  for (const match of body.matchAll(pattern)) value = match[1]
+  return value
+}
+
 /** Parse the finding fingerprint block appended to an Altimate summary. */
 export function parseFindingIds(body: string | null | undefined): Set<string> | undefined {
   if (!body) return undefined
-  const match = /(?:^|\n)<!-- altimate-findings:\s*(.*?)\s*-->\s*$/.exec(body)
-  if (!match) return undefined
+  const value = lastLineMarker(body, /^<!-- altimate-findings:[ \t]*(.*?)[ \t]*-->[ \t]*\r?$/gm)
+  if (value === undefined) return undefined
   return new Set(
-    match[1]
+    value
       .split(",")
       .map((id) => id.trim())
       .filter(Boolean),
@@ -77,12 +83,12 @@ export function parseFindingIds(body: string | null | undefined): Set<string> | 
 
 function parsePolicySignature(body: string | null | undefined): string | undefined {
   if (!body) return undefined
-  return /(?:^|\n)<!-- altimate-policy:\s*([^\s]+)\s*-->/.exec(body)?.[1]
+  return lastLineMarker(body, /^<!-- altimate-policy:[ \t]*([^\s]+)[ \t]*-->[ \t]*\r?$/gm)
 }
 
 function parseTier(body: string | null | undefined): VerdictEnvelope["tier"] | undefined {
   if (!body) return undefined
-  return /(?:^|\n)<!-- altimate-tier:\s*(trivial|lite|full)\s*-->/.exec(body)?.[1] as
+  return lastLineMarker(body, /^<!-- altimate-tier:[ \t]*(trivial|lite|full)[ \t]*-->[ \t]*\r?$/gm) as
     | VerdictEnvelope["tier"]
     | undefined
 }

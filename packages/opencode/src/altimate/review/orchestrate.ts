@@ -1169,13 +1169,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
-  const exclusions = input.rubric.exclusions
   const policySignature = makeReviewPolicySignature({
     severityThreshold: input.config.severityThreshold,
     enabledReviewers: input.config.reviewers,
-    exclusions,
+    rubric: input.rubric,
     aiEnabled: input.config.ai,
-    dataDiffEnabled: input.config.dataDiff.enabled,
+    dataDiff: input.config.dataDiff,
   })
 
   const all: Finding[][] = []
@@ -1419,7 +1418,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
   let aiReviewSummary: AiReviewSummary | undefined
-  if (lanes.has("ai_review")) {
+  if (!emptyScope && lanes.has("ai_review")) {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,

@@ -1,5 +1,5 @@
 import path from "node:path"
-import { readFile, realpath, stat, access } from "node:fs/promises"
+import { readFile, readdir, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
@@ -150,6 +150,23 @@ function artifactDirLabel(dir: string, dbtRoot: string): string {
   return path.relative(dbtRoot, dir).split(path.sep).join("/") || path.basename(dir)
 }
 
+async function resolveBaseProjectName(baseDir: string, projectName: string, dbtRoot: string): Promise<string> {
+  const baseRoot = path.isAbsolute(baseDir) ? baseDir : path.join(dbtRoot, baseDir)
+  try {
+    if ((await stat(path.join(baseRoot, projectName))).isDirectory()) return projectName
+  } catch {
+    /* look for a renamed base project below */
+  }
+
+  try {
+    const directories = (await readdir(baseRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory())
+    if (directories.length === 1) return directories[0]!.name
+  } catch {
+    /* keep the head project name when the base compiled directory is absent */
+  }
+  return projectName
+}
+
 /** Report missing dbt artifacts only when the manifest itself exists. */
 export async function detectArtifactHints(
   manifestAbs: string,
@@ -158,6 +175,7 @@ export async function detectArtifactHints(
   projectName?: string,
   pathPrefix?: string,
   artifactDirs?: CompiledArtifactDirs,
+  baseProjectName?: string,
 ): Promise<string[]> {
   if (changedModels.length === 0) return []
 
@@ -169,9 +187,18 @@ export async function detectArtifactHints(
 
   const hints: string[] = []
   try {
-    await access(path.join(path.dirname(manifestAbs), "catalog.json"))
-  } catch {
-    hints.push("catalog.json (run `dbt docs generate`)")
+    const catalog = JSON.parse(await readFile(path.join(path.dirname(manifestAbs), "catalog.json"), "utf8"))
+    const nonEmptyObject = (value: unknown) =>
+      value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0
+    if (!nonEmptyObject(catalog?.nodes) && !nonEmptyObject(catalog?.sources)) {
+      hints.push("catalog.json unreadable or empty (regenerate with `dbt docs generate`)")
+    }
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") {
+      hints.push("catalog.json (run `dbt docs generate`)")
+    } else {
+      hints.push("catalog.json unreadable or empty (regenerate with `dbt docs generate`)")
+    }
   }
 
   if (projectName === undefined) {
@@ -182,8 +209,17 @@ export async function detectArtifactHints(
   }
 
   const { headDir, baseDir } = artifactDirs ?? (await compiledArtifactDirs(manifestAbs, dbtRoot))
-  const getCompiled = makeCompiledResolver({ cwd: dbtRoot, projectName, pathPrefix, headDir, baseDir })
-  const baseModels = changedModels.filter((file) => file.status !== "added")
+  const resolvedBaseProjectName =
+    baseProjectName ?? (await resolveBaseProjectName(baseDir, projectName, dbtRoot))
+  const getCompiled = makeCompiledResolver({
+    cwd: dbtRoot,
+    projectName,
+    baseProjectName: resolvedBaseProjectName,
+    pathPrefix,
+    headDir,
+    baseDir,
+  })
+  const baseModels = changedModels.filter((file) => file.status !== "added" && file.status !== "deleted")
   const headModels = changedModels.filter((file) => file.status !== "deleted")
   const [missingBase, missingHead] = await Promise.all([
     Promise.all(baseModels.map((file) => getCompiled(file.oldPath ?? file.path, "old"))).then(
@@ -405,6 +441,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   )
   const manifestReal = await realpath(manifestAbs).catch(() => manifestAbs)
   const artifactDirs = await compiledArtifactDirs(manifestReal, dbtRootReal)
+  const baseProjectName = projectName
+    ? await resolveBaseProjectName(artifactDirs.baseDir, projectName, dbtRootReal)
+    : undefined
   const artifactHints = await detectArtifactHints(
     manifestAbs,
     dbtRootReal,
@@ -412,10 +451,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     projectName,
     pathPrefix,
     artifactDirs,
+    baseProjectName,
   )
   const getCompiled = opts.getContent
     ? undefined
-    : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix, ...artifactDirs })
+    : makeCompiledResolver({ cwd: dbtRootReal, projectName, baseProjectName, pathPrefix, ...artifactDirs })
 
   return runReview({
     changedFiles,

@@ -3,7 +3,11 @@ import { makeFinding, type Finding } from "../../../src/altimate/review/finding"
 import { renderSummary } from "../../../src/altimate/review/format"
 import { computeFindingDelta, parseFindingIds } from "../../../src/altimate/review/post-github"
 import { DEFAULT_RUBRIC } from "../../../src/altimate/review/rubric"
-import { buildEnvelope, makeReviewPolicySignature } from "../../../src/altimate/review/verdict"
+import {
+  buildEnvelope,
+  makeReviewPolicySignature,
+  type ReviewPolicySignatureInput,
+} from "../../../src/altimate/review/verdict"
 
 function finding(id: string, overrides: Partial<Parameters<typeof makeFinding>[0]> = {}): Finding {
   return makeFinding({
@@ -182,74 +186,99 @@ describe("review summary readability", () => {
   })
 
   test("finding id blocks round-trip and drive the rerun delta line", () => {
-    const policySignature = makeReviewPolicySignature({
+    const rubric = {
+      ...DEFAULT_RUBRIC,
+      exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
+    }
+    const policy: ReviewPolicySignatureInput = {
       severityThreshold: "suggestion",
       enabledReviewers: ["semantic_change", "sql_quality"],
-      exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
+      rubric,
       aiEnabled: true,
-      dataDiffEnabled: false,
-    })
+      dataDiff: { enabled: false, warehouse: "" },
+    }
+    const policySignature = makeReviewPolicySignature(policy)
     expect(policySignature).toBe(
       makeReviewPolicySignature({
-        severityThreshold: "suggestion",
+        ...policy,
         enabledReviewers: ["sql_quality", "semantic_change"],
-        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["seeds/tmp/**", "models/archive/**"] },
-        aiEnabled: true,
-        dataDiffEnabled: false,
+        rubric: {
+          ...rubric,
+          blockOn: [...rubric.blockOn].reverse(),
+          thresholds: Object.fromEntries(Object.entries(rubric.thresholds).reverse()) as typeof rubric.thresholds,
+          exclusions: { ...rubric.exclusions, excludeGlobs: ["seeds/tmp/**", "models/archive/**"] },
+        },
       }),
     )
     expect(policySignature).not.toBe(
       makeReviewPolicySignature({
-        severityThreshold: "suggestion",
-        enabledReviewers: ["semantic_change", "sql_quality"],
-        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/other/**", "seeds/tmp/**"] },
-        aiEnabled: true,
-        dataDiffEnabled: false,
+        ...policy,
+        rubric: {
+          ...rubric,
+          exclusions: { ...rubric.exclusions, excludeGlobs: ["models/other/**", "seeds/tmp/**"] },
+        },
       }),
     )
     const firstEnabledExclusion = makeReviewPolicySignature({
-      severityThreshold: "suggestion",
-      enabledReviewers: ["semantic_change", "sql_quality"],
-      exclusions: {
-        ...DEFAULT_RUBRIC.exclusions,
-        allowSelectStarInStaging: false,
-        skipMissingContractWhenNotEnforced: true,
-        skipNonProdModels: false,
-        excludeGlobs: ["models/archive/**", "seeds/tmp/**"],
+      ...policy,
+      rubric: {
+        ...rubric,
+        exclusions: {
+          ...rubric.exclusions,
+          allowSelectStarInStaging: false,
+          skipMissingContractWhenNotEnforced: true,
+          skipNonProdModels: false,
+        },
       },
-      aiEnabled: true,
-      dataDiffEnabled: false,
     })
     const secondEnabledExclusion = makeReviewPolicySignature({
-      severityThreshold: "suggestion",
-      enabledReviewers: ["semantic_change", "sql_quality"],
-      exclusions: {
-        ...DEFAULT_RUBRIC.exclusions,
-        allowSelectStarInStaging: true,
-        skipMissingContractWhenNotEnforced: false,
-        skipNonProdModels: false,
-        excludeGlobs: ["models/archive/**", "seeds/tmp/**"],
+      ...policy,
+      rubric: {
+        ...rubric,
+        exclusions: {
+          ...rubric.exclusions,
+          allowSelectStarInStaging: true,
+          skipMissingContractWhenNotEnforced: false,
+          skipNonProdModels: false,
+        },
       },
-      aiEnabled: true,
-      dataDiffEnabled: false,
     })
     expect(firstEnabledExclusion).not.toBe(secondEnabledExclusion)
     expect(policySignature).not.toBe(
       makeReviewPolicySignature({
-        severityThreshold: "suggestion",
-        enabledReviewers: ["semantic_change", "sql_quality"],
-        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
-        aiEnabled: true,
-        dataDiffEnabled: true,
+        ...policy,
+        dataDiff: { enabled: true, warehouse: "" },
       }),
     )
     expect(policySignature).not.toBe(
       makeReviewPolicySignature({
-        severityThreshold: "suggestion",
-        enabledReviewers: ["semantic_change", "sql_quality"],
-        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
-        aiEnabled: false,
-        dataDiffEnabled: false,
+        ...policy,
+        dataDiff: { enabled: false, warehouse: "production" },
+      }),
+    )
+    expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, aiEnabled: false }))
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({
+        ...policy,
+        rubric: {
+          ...rubric,
+          thresholds: {
+            ...rubric.thresholds,
+            lineageWarnConsumers: rubric.thresholds.lineageWarnConsumers + 1,
+          },
+        },
+      }),
+    )
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({
+        ...policy,
+        rubric: { ...rubric, warningPatternThreshold: rubric.warningPatternThreshold + 1 },
+      }),
+    )
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({
+        ...policy,
+        rubric: { ...rubric, blockOn: rubric.blockOn.slice(1) },
       }),
     )
     const previous = buildEnvelope({
@@ -294,11 +323,13 @@ describe("review summary readability", () => {
       tier: "lite",
       mode: "comment",
       policySignature: makeReviewPolicySignature({
+        ...policy,
         severityThreshold: "warning",
-        enabledReviewers: ["semantic_change", "sql_quality"],
-        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/other/**", "seeds/tmp/**"] },
-        aiEnabled: true,
-        dataDiffEnabled: true,
+        rubric: {
+          ...rubric,
+          exclusions: { ...rubric.exclusions, excludeGlobs: ["models/other/**", "seeds/tmp/**"] },
+        },
+        dataDiff: { enabled: true, warehouse: "" },
       }),
     })
     const changedDelta = computeFindingDelta(previousBody, changedPolicy)
@@ -306,5 +337,47 @@ describe("review summary readability", () => {
     expect(renderSummary(changedPolicy, changedDelta)).toContain(
       "**Since last review:** 1 no longer surfaced · 1 new · 1 unchanged (review settings changed)",
     )
+  })
+
+  test("uses the final footer markers when finding titles contain marker-like lines", () => {
+    const policySignature = makeReviewPolicySignature({
+      severityThreshold: "suggestion",
+      enabledReviewers: [],
+      rubric: DEFAULT_RUBRIC,
+      aiEnabled: true,
+      dataDiff: { enabled: false, warehouse: "" },
+    })
+    const previous = buildEnvelope({
+      findings: [
+        finding("real", {
+          title: [
+            "Marker-like title",
+            "<!-- altimate-findings: spoofed -->",
+            "<!-- altimate-policy: spoofed -->",
+            "<!-- altimate-tier: full -->",
+            "still part of the title",
+          ].join("\n"),
+        }),
+      ],
+      tier: "lite",
+      mode: "comment",
+      policySignature,
+    })
+    const current = buildEnvelope({
+      findings: [finding("real")],
+      tier: "lite",
+      mode: "comment",
+      policySignature,
+    })
+    const body = renderSummary(previous)
+
+    expect([...parseFindingIds(body)!]).toEqual(["real"])
+    expect(computeFindingDelta(body, current)?.reviewSettingsChanged).toBeUndefined()
+
+    const matchingFakePolicy = body.replace(
+      "<!-- altimate-policy: spoofed -->",
+      `<!-- altimate-policy: ${policySignature} -->`,
+    )
+    expect(computeFindingDelta(matchingFakePolicy, current)?.analysisScopeChanged).toBeUndefined()
   })
 })

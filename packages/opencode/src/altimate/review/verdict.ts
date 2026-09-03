@@ -92,26 +92,51 @@ export type AiReviewSummary = z.infer<typeof AiReviewSummary>
 export interface ReviewPolicySignatureInput {
   severityThreshold: Severity
   enabledReviewers: string[]
-  exclusions: Rubric["exclusions"]
+  rubric: Rubric
   aiEnabled: boolean
-  dataDiffEnabled: boolean
+  dataDiff: {
+    enabled: boolean
+    warehouse: string
+  }
+}
+
+function normalizePolicyValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizePolicyValue)
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, normalizePolicyValue(item)]),
+    )
+  }
+  return value
 }
 
 /** Compact fingerprint for the settings that determine which findings surface. */
 export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): string {
-  const { excludeGlobs, ...booleanExclusions } = input.exclusions
+  const { excludeGlobs, ...booleanExclusions } = input.rubric.exclusions
   const enabledExclusions = Object.entries(booleanExclusions)
     .filter(([, enabled]) => enabled)
     .map(([name]) => name)
     .sort()
-  const body = JSON.stringify([
-    input.severityThreshold,
-    [...new Set(input.enabledReviewers)].sort(),
-    [...new Set(excludeGlobs)].sort(),
-    enabledExclusions,
-    input.aiEnabled,
-    input.dataDiffEnabled,
-  ])
+  const body = JSON.stringify(
+    normalizePolicyValue({
+      severityThreshold: input.severityThreshold,
+      enabledReviewers: [...new Set(input.enabledReviewers)].sort(),
+      exclusions: {
+        excludeGlobs: [...new Set(excludeGlobs)].sort(),
+        enabled: enabledExclusions,
+      },
+      rubric: {
+        version: input.rubric.version,
+        blockOn: [...new Set(input.rubric.blockOn)].sort(),
+        warningPatternThreshold: input.rubric.warningPatternThreshold,
+        thresholds: input.rubric.thresholds,
+      },
+      aiEnabled: input.aiEnabled,
+      dataDiff: input.dataDiff,
+    }),
+  )
   return createHash("sha256").update(body).digest("hex").slice(0, 16)
 }
 

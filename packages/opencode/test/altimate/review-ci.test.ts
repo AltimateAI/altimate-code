@@ -161,12 +161,13 @@ describe("defaultBaseRef", () => {
 
   test("the composite action fetches and derives the merge-base from its effective head", async () => {
     const action = await Bun.file(path.resolve(import.meta.dir, "../../../../github/review/action.yml")).text()
+    expect(action).toContain('if [[ "$IN_HEAD" == -* ]]')
+    expect(action).toContain("echo \"::error::Custom head must not start with '-': $IN_HEAD\" >&2")
     expect(action).toContain('git rev-parse --verify --quiet "$IN_HEAD^{commit}"')
-    expect(action).toContain('git fetch --no-tags origin "$IN_HEAD"')
+    expect(action).toContain('git fetch --no-tags origin -- "$IN_HEAD"')
     expect(action).toContain("git update-ref refs/altimate/review-head FETCH_HEAD")
     expect(action).toContain('echo "HEAD_REF=refs/altimate/review-head" >> "$GITHUB_ENV"')
-    expect(action).toContain('git fetch --no-tags origin "+refs/heads/${IN_HEAD}:refs/remotes/origin/${IN_HEAD}"')
-    expect(action).toContain('echo "HEAD_REF=origin/${IN_HEAD}" >> "$GITHUB_ENV"')
+    expect(action).not.toContain("+refs/heads/${IN_HEAD}:refs/remotes/origin/${IN_HEAD}")
     expect(action).toContain('echo "HEAD_REF=$IN_HEAD" >> "$GITHUB_ENV"')
     expect(action).toContain('echo "Unable to fetch custom head \'$IN_HEAD\' from origin" >&2')
     expect(action).toContain('git merge-base "origin/$PR_BASE_REF" "${HEAD_REF:-$PR_HEAD_SHA}"')

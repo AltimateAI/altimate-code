@@ -149,35 +149,50 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       model: { providerID: model.providerID, modelID: model.id },
     }
 
-    const stream = await LLM.stream({
-      agent,
-      user,
-      system: [system],
-      small: false,
-      tools: {},
-      model,
-      abort: controller.signal,
-      sessionID: user.sessionID,
-      retries: 1,
-      messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
-    })
+    const streamResult = await Promise.race([
+      LLM.stream({
+        agent,
+        user,
+        system: [system],
+        small: false,
+        tools: {},
+        model,
+        abort: controller.signal,
+        sessionID: user.sessionID,
+        retries: 1,
+        messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
+      }),
+      abortPromise,
+    ])
+    if (streamResult === setupTimedOut || controller.signal.aborted) {
+      return { findings: [], status: "timeout", reason: timeoutReason }
+    }
+    const stream = streamResult
     for await (const event of stream.fullStream) {
       // drain to avoid SDK hangs
       if (event.type === "abort") streamAborted = true
       if (event.type === "error") throw event.error
     }
-    const text = await Promise.resolve(stream.text)
-    if (controller.signal.aborted || streamAborted) {
+    const textResult = await Promise.race([Promise.resolve(stream.text), abortPromise])
+    if (textResult === setupTimedOut || controller.signal.aborted || streamAborted) {
       return { findings: [], status: "timeout", reason: timeoutReason }
     }
+    const text = textResult
     if (!text) return { findings: [], status: "error", reason: "Error: empty response" }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
-    const parseRes = await Dispatcher.call("altimate_core.review_ai_parse", {
-      text,
-      valid_files: files.map((f) => f.path),
-    })
+    const parseResult = await Promise.race([
+      Dispatcher.call("altimate_core.review_ai_parse", {
+        text,
+        valid_files: files.map((f) => f.path),
+      }),
+      abortPromise,
+    ])
+    if (parseResult === setupTimedOut || controller.signal.aborted) {
+      return { findings: [], status: "timeout", reason: timeoutReason }
+    }
+    const parseRes = parseResult
     const parsed = (((parseRes.data ?? {}) as Record<string, unknown>).findings as any[]) ?? []
     const byFile = new Map(files.map((f) => [f.path, f]))
 
