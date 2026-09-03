@@ -32,7 +32,16 @@ function envelope(over: Record<string, any> = {}) {
     idealVerdict: "REQUEST_CHANGES",
     mode: "comment",
     tier: "full",
-    summary: { critical: 1, warning: 2, suggestion: 0, degraded: false },
+    summary: {
+      critical: 1,
+      warning: 2,
+      suggestion: 0,
+      degraded: false,
+      lintOnly: false,
+      undecidableFindings: 0,
+      artifactHints: [],
+      aiReview: { status: "ok", findings: 2 },
+    },
     findings: [
       { category: "join_risk", severity: "critical" },
       { category: "join_risk", severity: "warning" },
@@ -58,6 +67,9 @@ describe("review_run", () => {
     expect(e.ideal_verdict).toBe("REQUEST_CHANGES")
     expect(e.critical).toBe(1)
     expect(e.duration_ms).toBe(1234)
+    expect(e.ai_status).toBe("ok")
+    expect(e.ai_findings).toBe(2)
+    expect(e.undecidable_findings).toBe(0)
   })
 
   test("tier_forced normalises absent to false", () => {
@@ -123,7 +135,7 @@ describe("review_run", () => {
     for (const v of Object.values(byCategory)) expect(typeof v).toBe("number")
   })
 
-  test("stale_manifest and degraded are carried from the envelope", () => {
+  test("stale_manifest and run-level lintOnly are carried from the envelope", () => {
     // Same `=== true` normalisation as tier_forced, which has its own test; these two had none,
     // and the shared envelope() helper omits staleManifest so every other test covers only the
     // undefined case.
@@ -139,11 +151,45 @@ describe("review_run", () => {
       sessionID: "",
       envelope: envelope({
         staleManifest: true,
-        summary: { critical: 0, warning: 0, suggestion: 0, degraded: true },
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          lintOnly: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
       }),
     })
     expect((events[0] as any).stale_manifest).toBe(true)
     expect((events[0] as any).degraded).toBe(true)
+  })
+
+  test("undecidable findings do not turn review_run degraded", () => {
+    const events = captureEvents()
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 1,
+          suggestion: 0,
+          degraded: false,
+          lintOnly: false,
+          undecidableFindings: 1,
+          artifactHints: [],
+          aiReview: { status: "timeout", reason: "timed out after 62s", findings: 0 },
+        },
+      }),
+    })
+
+    expect((events[0] as any).degraded).toBe(false)
+    expect((events[0] as any).undecidable_findings).toBe(1)
+    expect((events[0] as any).ai_status).toBe("timeout")
+    expect((events[0] as any).ai_findings).toBe(0)
   })
 
   test("the tool path carries its session, the CLI path does not", () => {

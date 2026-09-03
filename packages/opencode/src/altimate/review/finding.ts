@@ -80,8 +80,10 @@ export const Finding = z.object({
   model: z.string().optional(),
   /** Column the finding concerns, when applicable. */
   column: z.string().optional(),
+  /** Stable presentation key for collapsing related findings in summaries. */
+  groupKey: z.string().optional(),
   confidence: Confidence.default("high"),
-  /** True when produced without a manifest/warehouse (lint-only degraded run). */
+  /** True when this finding's deterministic analysis could not decide. */
   degraded: z.boolean().default(false),
   evidence: Evidence.optional(),
 })

@@ -1,7 +1,14 @@
-import { describe, test, expect, afterEach } from "bun:test"
+import { $ } from "bun"
+import { describe, test, expect, afterEach, mock, spyOn } from "bun:test"
+import path from "node:path"
 import { resolveGitHubTarget } from "../../src/altimate/review/post-github"
+import { defaultBaseRef } from "../../src/altimate/review/git"
+import * as ReviewRun from "../../src/altimate/review/run"
 import { ReviewCommand } from "../../src/cli/cmd/review"
 import { buildReviewSchemaContext } from "../../src/altimate/review/schema-context"
+import { Telemetry } from "../../src/altimate/telemetry"
+import { buildEnvelope } from "../../src/altimate/review/verdict"
+import { tmpdir } from "../fixture/fixture"
 
 const ENV_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_PATH", "ALTIMATE_PR_NUMBER"]
 const saved: Record<string, string | undefined> = {}
@@ -12,6 +19,8 @@ afterEach(() => {
     if (saved[k] === undefined) delete process.env[k]
     else process.env[k] = saved[k]
   }
+  mock.restore()
+  Telemetry.setContext({ sessionId: "", projectId: "" })
 })
 
 describe("review CLI command", () => {
@@ -55,6 +64,75 @@ describe("review CLI command", () => {
       const explicitFalse = await parse([`${f.long}=false`])
       expect((explicitFalse as any)[f.camel]).toBe(false)
     }
+  })
+
+  test("sets project context before the CLI emits review_run", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Bun.write(path.join(tmp.path, "README.md"), "before\n")
+    await $`git add README.md`.cwd(tmp.path).quiet()
+    await $`git commit -m fixture`.cwd(tmp.path).quiet()
+    await Bun.write(path.join(tmp.path, "README.md"), "after\n")
+
+    let projectIdAtRun = ""
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+    spyOn(Telemetry, "track").mockImplementation((event) => {
+      if (event.type === "review_run" && event.invocation === "cli") {
+        projectIdAtRun = Telemetry.getContext().projectId
+      }
+    })
+
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: true,
+      explainTier: false,
+    })
+
+    expect(projectIdAtRun).not.toBe("")
+  })
+
+  test("passes pull request title and capped body from the GitHub event", async () => {
+    await using tmp = await tmpdir({ git: true })
+    const eventPath = path.join(tmp.path, "event.json")
+    const body = "intent ".repeat(700)
+    await Bun.write(eventPath, JSON.stringify({ pull_request: { title: "Keep customer grain", body } }))
+    process.env.GITHUB_EVENT_PATH = eventPath
+
+    const review = spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(
+      buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }),
+    )
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: true,
+      explainTier: false,
+    })
+
+    expect(review).toHaveBeenCalledTimes(1)
+    expect(review.mock.calls[0][0]).toMatchObject({
+      prTitle: "Keep customer grain",
+      prBody: body.slice(0, 4_000),
+    })
+  })
+})
+
+describe("defaultBaseRef", () => {
+  test("uses the pull request base ref from GITHUB_EVENT_PATH when it resolves", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await $`git update-ref refs/remotes/origin/release HEAD`.cwd(tmp.path).quiet()
+    const eventPath = path.join(tmp.path, "event.json")
+    await Bun.write(eventPath, JSON.stringify({ pull_request: { base: { ref: "release" } } }))
+    process.env.GITHUB_EVENT_PATH = eventPath
+
+    expect(await defaultBaseRef(tmp.path)).toBe("origin/release")
   })
 })
 

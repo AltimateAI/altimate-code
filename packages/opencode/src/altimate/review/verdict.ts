@@ -78,6 +78,33 @@ export function applyMode(verdict: Verdict, mode: ReviewMode): Verdict {
 export const RiskTier = z.enum(["trivial", "lite", "full"])
 export type RiskTier = z.infer<typeof RiskTier>
 
+export const AiReviewStatus = z.enum(["ok", "skipped", "timeout", "error"])
+export type AiReviewStatus = z.infer<typeof AiReviewStatus>
+export const NO_MODEL_REASON = "no model configured (set `altimate_api_key` or `model` in the action)"
+
+export const AiReviewSummary = z.object({
+  status: AiReviewStatus,
+  reason: z.string().optional(),
+  findings: z.number().int().nonnegative(),
+})
+export type AiReviewSummary = z.infer<typeof AiReviewSummary>
+
+const ReviewSummary = z.object({
+  critical: z.number().int().nonnegative(),
+  warning: z.number().int().nonnegative(),
+  suggestion: z.number().int().nonnegative(),
+  /** Compatibility alias for lintOnly. Never reflects individual undecidable findings. */
+  degraded: z.boolean(),
+  /** True when no changed model resolved against a dbt manifest. */
+  lintOnly: z.boolean().optional(),
+  /** Surfaced findings whose deterministic analysis could not decide. */
+  undecidableFindings: z.number().int().nonnegative().optional(),
+  /** Missing dbt artifacts that reduce lineage/equivalence fidelity. */
+  artifactHints: z.array(z.string()).optional(),
+  /** Advisory AI lane outcome, when that lane applied. */
+  aiReview: AiReviewSummary.optional(),
+})
+
 export const EngineVersions = z.object({
   reviewer: z.string().default("dbt-pr-review/1"),
   core: z.string().optional(),
@@ -104,13 +131,7 @@ export const VerdictEnvelope = z.object({
   /** The classifier's original tier before --force-tier overrode it (G2). */
   tierClassified: RiskTier.optional(),
   findings: z.array(Finding),
-  summary: z.object({
-    critical: z.number().int().nonnegative(),
-    warning: z.number().int().nonnegative(),
-    suggestion: z.number().int().nonnegative(),
-    /** True when the review ran without a manifest/warehouse (lint-only). */
-    degraded: z.boolean(),
-  }),
+  summary: ReviewSummary,
   engine: EngineVersions,
   /** Hash of the dbt manifest the verdict was computed against, when present. */
   manifestHash: z.string().optional(),
@@ -169,7 +190,12 @@ export interface BuildEnvelopeInput {
   engine?: Partial<EngineVersions>
   manifestHash?: string
   generatedAt?: string
+  /** Run-level lint-only flag. */
+  lintOnly?: boolean
+  /** Compatibility input alias for lintOnly. */
   degraded?: boolean
+  artifactHints?: string[]
+  aiReview?: AiReviewSummary
   /** G1 — classifier reasons for the tier (only surfaced when explainTier=true). */
   tierReasons?: string[]
   /** G2 — set when --force-tier was applied. */
@@ -180,10 +206,24 @@ export interface BuildEnvelopeInput {
   staleManifest?: boolean
 }
 
-function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
+function summarize(
+  findings: Finding[],
+  lintOnly: boolean,
+  artifactHints: string[],
+  aiReview?: AiReviewSummary,
+): VerdictEnvelope["summary"] {
   const tally: Record<Severity, number> = { critical: 0, warning: 0, suggestion: 0 }
   for (const f of findings) tally[f.severity]++
-  return { critical: tally.critical, warning: tally.warning, suggestion: tally.suggestion, degraded }
+  return {
+    critical: tally.critical,
+    warning: tally.warning,
+    suggestion: tally.suggestion,
+    degraded: lintOnly,
+    lintOnly,
+    undecidableFindings: findings.filter((f) => f.degraded).length,
+    artifactHints,
+    aiReview,
+  }
 }
 
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
@@ -191,7 +231,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   const rubric = input.rubric ?? DEFAULT_RUBRIC
   const ideal = computeIdealVerdict(input.findings, rubric)
   const verdict = applyMode(ideal, input.mode)
-  const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
+  const lintOnly = input.lintOnly ?? input.degraded ?? false
   return VerdictEnvelope.parse({
     version: "1",
     verdict,
@@ -202,7 +242,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
     findings: input.findings,
-    summary: summarize(input.findings, degraded),
+    summary: summarize(input.findings, lintOnly, input.artifactHints ?? [], input.aiReview),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,

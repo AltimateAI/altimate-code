@@ -18,10 +18,10 @@ inputs:
     required: false
     default: "suggestion"
   base:
-    description: "Base git ref to diff against. Defaults to the merge-base with origin/main."
+    description: "Base git ref to diff against. On pull_request events, defaults to origin/<PR base ref>."
     required: false
   head:
-    description: "Head git ref. Defaults to the checked-out PR head."
+    description: "Head git ref. On pull_request events, defaults to the PR head SHA."
     required: false
   post:
     description: "Post the verdict to the PR (summary comment + inline review)."
@@ -112,6 +112,15 @@ runs:
       shell: bash
       run: echo "$HOME/.altimate/bin" >> $GITHUB_PATH
 
+    - name: Fetch pull request base ref
+      if: ${{ github.event_name == 'pull_request' && inputs.base == '' }}
+      shell: bash
+      env:
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      run: |
+        set -euo pipefail
+        git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+
     # Configure the OPTIONAL advisory LLM lane. Two mutually-exclusive routes:
     #   A) altimate_api_key (+ altimate_instance) → hosted altimate model
     #   B) model (+ model_api_key)               → bring-your-own provider
@@ -175,13 +184,24 @@ runs:
         IN_BASE: ${{ inputs.base }}
         IN_HEAD: ${{ inputs.head }}
         IN_POST: ${{ inputs.post }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         GITHUB_TOKEN: ${{ github.token }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_EVENT_PATH: ${{ github.event_path }}
         ALTIMATE_REVIEW_SIGNING_KEY: ${{ inputs.signing_key }}
       run: |
         args=(--mode "$IN_MODE" --manifest "$IN_MANIFEST" --severity "$IN_SEVERITY")
-        [[ -n "$IN_BASE" ]] && args+=(--base "$IN_BASE")
-        [[ -n "$IN_HEAD" ]] && args+=(--head "$IN_HEAD")
+        if [[ -n "$IN_BASE" ]]; then
+          args+=(--base "$IN_BASE")
+        elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_REF" ]]; then
+          args+=(--base "origin/$PR_BASE_REF")
+        fi
+        if [[ -n "$IN_HEAD" ]]; then
+          args+=(--head "$IN_HEAD")
+        elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_HEAD_SHA" ]]; then
+          args+=(--head "$PR_HEAD_SHA")
+        fi
         [[ "$IN_POST" == "true" ]] && args+=(--post)
         altimate review "${args[@]}"

@@ -139,8 +139,23 @@ export async function gitRepoRoot(cwd: string): Promise<string | undefined> {
   }
 }
 
-/** Resolve a sensible default base ref (merge-base with origin/main/master). */
+/** Resolve a sensible default base ref from the PR event or main/master. */
 export async function defaultBaseRef(cwd: string): Promise<string> {
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (eventPath) {
+    try {
+      const event = JSON.parse(await fs.readFile(eventPath, "utf8"))
+      const ref = event?.pull_request?.base?.ref
+      if (typeof ref === "string" && ref) {
+        const candidate = `origin/${ref}`
+        const resolved = await git(["rev-parse", "--verify", "--quiet", candidate], cwd)
+        if (resolved.trim()) return candidate
+      }
+    } catch {
+      // Invalid/missing event or unavailable remote ref — use the normal fallbacks.
+    }
+  }
+
   for (const candidate of ["origin/main", "origin/master", "main", "master"]) {
     try {
       const mb = (await git(["merge-base", "HEAD", candidate], cwd)).trim()

@@ -20,7 +20,7 @@ a model's opinion:
 
 - **column-lineage / DAG blast radius** — which downstream models a change breaks
 - **query equivalence** — whether a "refactor" provably returns the same rows
-- **PII classification** — columns that newly expose sensitive data
+- **PII classification** — PII columns present in a touched model are flagged; acknowledgement is a follow-up
 - **A–F grade + anti-patterns** — readability, correctness, warehouse-cost issues
 
 !!! warning "The bot posts a COMMENT review — never a formal GitHub *Approve*"
@@ -120,10 +120,10 @@ Options:
 | `--json` / `--output <file>` | Emit the verdict envelope as JSON. |
 
 > **Full vs lint-only.** With a compiled `manifest.json` present, the reviewer
-> proves lineage and equivalence exactly. Without it (or without a warehouse) it
-> runs **lint-only** and conservatively *warns* on changes it cannot prove safe —
-> clearly labeled, never mistaken for a full verdict. Run `dbt compile` first for
-> the full verdict.
+> can resolve the dbt graph. Without it, it runs **lint-only** and conservatively
+> *warns* on changes it cannot prove safe — clearly labeled, never mistaken for a
+> full verdict. Run `dbt compile` first; the review separately identifies missing
+> catalog or compiled-SQL artifacts that reduce fidelity.
 
 !!! question "Stuck in lint-only mode? It is **not** an API-key problem."
     The deterministic engine (lineage, equivalence, PII, grade) runs fully
@@ -140,6 +140,12 @@ Options:
       on the CLI), or set `manifestPath:` in `.altimate/review.yml`.
     - **Freshness.** A stale manifest that predates the changed models can't
       resolve them. Run `dbt compile` (or `dbt build`) to regenerate it before reviewing.
+    - **Column metadata.** Run `dbt docs generate` so `target/catalog.json`
+      supplies real column types for lineage and PII analysis.
+    - **Base compiled SQL.** In CI, compile the base ref into
+      `target-base/compiled`:
+      `git worktree add ../dbt-review-base origin/<base> && (cd ../dbt-review-base && dbt deps && dbt compile --target-path ../<repo>/target-base)`.
+      Without `target-base/compiled`, equivalence is undecidable and the review says so.
     - **Working directory.** Run the review from the dbt project root so the
       relative manifest path resolves.
 
@@ -185,8 +191,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      # Produce target/manifest.json for the full verdict (adapter-specific).
-      - run: pip install dbt-core dbt-bigquery && dbt deps && dbt compile
+      # Produce manifest/catalog plus compiled SQL for both sides (adapter-specific).
+      - name: Build dbt review artifacts
+        env:
+          DBT_PROFILES_DIR: ${{ github.workspace }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          pip install dbt-core dbt-bigquery
+          dbt deps
+          dbt compile
+          dbt docs generate
+          git worktree add ../dbt-review-base "origin/${PR_BASE_REF}"
+          (
+            cd ../dbt-review-base
+            dbt deps
+            dbt compile --target-path "${{ github.workspace }}/target-base"
+          )
       - uses: AltimateAI/altimate-code/github/review@v0.8.5
         with:
           mode: comment                       # `gate` to block merges
@@ -198,6 +218,9 @@ jobs:
           # …or bring your own:  model: anthropic/claude-sonnet-4-6
           #                      model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
+
+Without `target-base/compiled`, base-vs-head equivalence is undecidable; the
+review reports that explicitly rather than presenting the run as lint-only.
 
 ### Model & credentials for the advisory lane
 

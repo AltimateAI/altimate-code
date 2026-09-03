@@ -977,10 +977,14 @@ export namespace Telemetry {
         mode?: string
         tier?: string
         tier_forced?: boolean
-        /** The envelope's fidelity flag: no reviewable files, no usable manifest for the changed
-         *  models, OR a surfaced finding whose engine analysis was undecidable. It does NOT mean
-         *  merely "no warehouse". */
+        /** Run-level lint-only flag: no reviewable model resolved against a dbt manifest. */
         degraded?: boolean
+        /** Count of surfaced findings whose deterministic analysis could not decide. */
+        undecidable_findings?: number
+        /** Advisory AI reviewer outcome when the lane applied. */
+        ai_status?: "ok" | "skipped" | "timeout" | "error"
+        /** Surfaced advisory AI findings after filtering and deduplication. */
+        ai_findings?: number
         stale_manifest?: boolean
         critical?: number
         warning?: number

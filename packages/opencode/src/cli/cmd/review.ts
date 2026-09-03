@@ -3,6 +3,8 @@ import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import { Installation } from "../../installation"
+import { Instance } from "../../project/instance"
+import { Telemetry } from "../../altimate/telemetry"
 import { reviewPullRequest } from "../../altimate/review/run"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
@@ -10,6 +12,26 @@ import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/pos
 import { classifyPostOutcome, emitReviewPostOutcome, emitReviewRun } from "../../altimate/review/telemetry"
 import type { ReviewMode } from "../../altimate/review/verdict"
 import type { Severity } from "../../altimate/review/finding"
+
+const MAX_GITHUB_PR_BODY_CHARS = 4_000
+
+async function readGitHubPullRequestMetadata(): Promise<{ prTitle?: string; prBody?: string }> {
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (!eventPath) return {}
+  try {
+    const event = JSON.parse(await fs.readFile(eventPath, "utf8")) as {
+      pull_request?: { title?: unknown; body?: unknown }
+    }
+    const title = event.pull_request?.title
+    const body = event.pull_request?.body
+    return {
+      prTitle: typeof title === "string" ? title : undefined,
+      prBody: typeof body === "string" ? body.slice(0, MAX_GITHUB_PR_BODY_CHARS) : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
 
 /**
  * `altimate review` — run the dbt PR review locally or in CI.
@@ -69,6 +91,7 @@ export const ReviewCommand = cmd({
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
+    const prMetadata = await readGitHubPullRequestMetadata()
     if (args.forceTier) {
       process.stderr.write(
         `⚠️  --force-tier=${args.forceTier} is EXPERIMENTAL (bench / debug only). ` +
@@ -76,6 +99,7 @@ export const ReviewCommand = cmd({
       )
     }
     await bootstrap(cwd, async () => {
+      Telemetry.setContext({ sessionId: "", projectId: Instance.project?.id ?? "" })
       // altimate_change — time the engine only. Output writing and posting happen after this and
       // must not be counted as review latency, nor turn a computed review into a failed one.
       const startedAt = Date.now()
@@ -93,6 +117,8 @@ export const ReviewCommand = cmd({
           noAi: args.noAi === true || args.ai === false,
           explainTier: args.explainTier === true,
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
+          prTitle: prMetadata.prTitle,
+          prBody: prMetadata.prBody,
           // Stamp the CLI version into engine.cliVersion so an auditor can
           // reconstruct which policy version generated a stored verdict long
           // after the binary that ran it is gone.

@@ -2,9 +2,9 @@
 # Copy to the target repo as `.github/workflows/dbt-pr-review.yml` and adjust the
 # dbt adapter + profiles/secrets to match the warehouse.
 #
-# Flow: checkout (full history) → dbt deps/compile (+ docs generate) → altimate review.
+# Flow: checkout (full history) → compile head + base and generate docs → altimate review.
 # The review step itself needs NO warehouse access — it runs the deterministic
-# engine over the compiled artifacts (target/manifest.json + target/catalog.json).
+# engine over target/manifest.json, target/catalog.json, and both compiled-SQL trees.
 name: dbt PR review
 
 on:
@@ -35,10 +35,9 @@ jobs:
       - name: Install dbt
         run: pip install "dbt-snowflake>=1.8,<2.0"
 
-      # Compile to produce target/manifest.json. `dbt docs generate` additionally
-      # produces target/catalog.json (real warehouse column types) — strongly
-      # recommended so column-lineage breakage and proven equivalence fire at full
-      # fidelity rather than degraded (manifest-only) mode.
+      # Compile HEAD to produce target/manifest.json + target/compiled, generate
+      # target/catalog.json for real warehouse column types, and compile the PR
+      # base into target-base/compiled for base-vs-head equivalence.
       #
       # Warehouse creds are consumed HERE (by dbt), via env_var() in profiles.yml.
       # They are NOT needed by the review step.
@@ -47,7 +46,7 @@ jobs:
       # warehouse (e.g. a malicious macro calling run_query()). Use a
       # LEAST-PRIVILEGE, read-only warehouse role for these credentials so a
       # hostile PR can't read or mutate production data at compile time.
-      - name: dbt deps + compile
+      - name: Build dbt review artifacts
         env:
           DBT_PROFILES_DIR: ${{ github.workspace }}
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -56,10 +55,18 @@ jobs:
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
           SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          # Route event data through env, never straight into the script.
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           dbt deps
           dbt compile
-          dbt docs generate || echo "docs generate skipped — review runs in degraded (manifest-only) mode"
+          dbt docs generate || echo "docs generate skipped — lineage/PII run without catalog column types"
+          git worktree add ../dbt-review-base "origin/${PR_BASE_REF}"
+          (
+            cd ../dbt-review-base
+            dbt deps
+            dbt compile --target-path "${{ github.workspace }}/target-base"
+          )
 
       - name: altimate dbt PR review
         # Pin to the altimate-code release that ships `altimate review`

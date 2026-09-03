@@ -7,10 +7,10 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
+import { NO_MODEL_REASON, type AiReviewStatus } from "./verdict"
 
 const log = Log.create({ service: "ai-review" })
 
-const AI_TIMEOUT_MS = 60_000
 const MAX_DIFF_CHARS = 6_000 // per file, keep the prompt bounded
 const MAX_FILES = 20
 
@@ -32,6 +32,12 @@ export interface AiReviewInput {
   prBody?: string
 }
 
+export interface AiReviewResult {
+  findings: Finding[]
+  status: AiReviewStatus
+  reason?: string
+}
+
 /**
  * IP boundary: the reviewer's system prompt (its remit + "what NOT to flag"
  * guardrails + output contract) and the response parse/clamp logic live in the
@@ -43,6 +49,25 @@ export interface AiReviewInput {
 function truncate(s: string | undefined, n: number): string {
   if (!s) return ""
   return s.length > n ? s.slice(0, n) + "\n… (truncated)" : s
+}
+
+function errorReason(err: unknown): string {
+  const name =
+    err instanceof Error ? (err.name && err.name !== "Error" ? err.name : err.constructor.name || "Error") : "Error"
+  const message = err instanceof Error ? err.message : String(err)
+  const raw = message && message !== name ? `${name}: ${message}` : name
+  return raw
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<redacted-url>")
+    .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
+    .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120)
+}
+
+function noModelError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return err.message === "no providers found" || err.message === "no models found"
 }
 
 /** Assemble the user message (mechanical formatting — not IP). */
@@ -71,21 +96,22 @@ function buildUserMessage(input: AiReviewInput): string {
 }
 
 /**
- * Run the LLM reviewer lane. Returns advisory findings (severity ≤ warning,
- * clamped by core), or [] if no model / core is available or the call fails —
- * a review must never crash because the AI layer is unavailable.
+ * Run the LLM reviewer lane. Findings are advisory (severity ≤ warning,
+ * clamped by core), and failures are returned as status rather than thrown — a
+ * review must never crash because the AI layer is unavailable.
  */
-export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
+export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
-  if (!files.length) return []
+  if (!files.length) return { findings: [], status: "skipped", reason: "no reviewable files" }
 
+  const AI_TIMEOUT_MS = Math.min(180_000, 60_000 + 2_000 * files.length)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS)
   try {
     // Prompt comes from the compiled core, not this file.
     const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
     const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
-    if (!system) return []
+    if (!system) return { findings: [], status: "skipped", reason: "reviewer prompt unavailable" }
 
     const defaultModel = await Provider.defaultModel()
     const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
@@ -123,11 +149,8 @@ export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
     for await (const _ of stream.fullStream) {
       // drain to avoid SDK hangs
     }
-    const text = await Promise.resolve(stream.text).catch((err: unknown) => {
-      log.error("ai review stream failed", { error: err })
-      return undefined
-    })
-    if (!text) return []
+    const text = await Promise.resolve(stream.text)
+    if (!text) return { findings: [], status: "error", reason: "Error: empty response" }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
@@ -170,10 +193,14 @@ export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
       }
     }
     log.info("ai review complete", { findings: out.length })
-    return out
+    return { findings: out, status: "ok" }
   } catch (err) {
     log.error("ai review failed", { error: err })
-    return []
+    if (noModelError(err)) return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
+    if (controller.signal.aborted || (err as { name?: unknown } | undefined)?.name === "AbortError") {
+      return { findings: [], status: "timeout", reason: `timed out after ${AI_TIMEOUT_MS / 1000}s` }
+    }
+    return { findings: [], status: "error", reason: errorReason(err) }
   } finally {
     clearTimeout(timeout)
   }

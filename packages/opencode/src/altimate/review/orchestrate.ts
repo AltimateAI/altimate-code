@@ -12,9 +12,16 @@ import { type ChangedFile, filterChangedFiles } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
-import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
+import {
+  type AiReviewSummary,
+  type ReviewMode,
+  type VerdictEnvelope,
+  NO_MODEL_REASON,
+  buildEnvelope,
+  signEnvelope,
+} from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type AiReviewInput } from "./ai-review"
+import type { AiReviewInput, AiReviewResult } from "./ai-review"
 
 /**
  * The deterministic review recipe.
@@ -186,9 +193,10 @@ export interface OrchestrateInput {
    * Optional LLM reviewer lane. Injected (not imported) so the orchestrator
    * stays pure/unit-testable: production wires `runAiReview` (harness LLM);
    * tests pass a fake or omit it (the lane is then skipped). Receives the
-   * deterministic findings as grounding and returns ADVISORY findings only.
+   * deterministic findings as grounding and returns ADVISORY findings plus the
+   * lane status.
    */
-  aiReview?: (input: AiReviewInput) => Promise<Finding[]>
+  aiReview?: (input: AiReviewInput) => Promise<AiReviewResult>
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -198,6 +206,8 @@ export interface OrchestrateInput {
   forceTier?: "trivial" | "lite" | "full"
   /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
   staleManifest?: boolean
+  /** Missing dbt build artifacts detected by the entry point. */
+  artifactHints?: string[]
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -755,6 +765,7 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
         `Add a uniqueness test on the model's grain so the contract is enforced in CI.`,
       file: file.path,
       model,
+      groupKey: "missing_grain_test",
       confidence: "medium",
       evidence: { tool: "dbt.manifest", result: { hasGrainTest: false } },
       ruleKey: "test_coverage:missing-grain-test",
@@ -1391,7 +1402,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // findings are clamped to ≤ warning upstream, so they enrich the review but
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
-  if (lanes.has("ai_review") && input.aiReview) {
+  let aiReviewSummary: AiReviewSummary | undefined
+  if (lanes.has("ai_review")) {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
@@ -1399,17 +1411,30 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       diff: ctx.file.diff,
       sql: ctx.engineNewSql ?? ctx.newSql,
     }))
-    try {
-      const aiFindings = await input.aiReview({
-        files: aiFiles,
-        grounding: merged,
-        prTitle: input.prTitle,
-        prBody: input.prBody,
-      })
-      // Defense in depth: the AI never blocks, regardless of what it returns.
-      for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
-    } catch {
-      // A failed AI lane must never fail the review.
+    if (!input.aiReview) {
+      aiReviewSummary = { status: "skipped", reason: NO_MODEL_REASON, findings: 0 }
+    } else {
+      try {
+        const result = await input.aiReview({
+          files: aiFiles,
+          grounding: merged,
+          prTitle: input.prTitle,
+          prBody: input.prBody,
+        })
+        aiReviewSummary = { status: result.status, reason: result.reason, findings: 0 }
+        // Defense in depth: normalize provenance and clamp severity so injected
+        // callers cannot make the AI lane authoritative.
+        for (const f of result.findings) {
+          merged.push({
+            ...f,
+            severity: f.severity === "critical" ? "warning" : f.severity,
+            evidence: { tool: "ai-review", result: f.evidence?.result },
+          })
+        }
+      } catch {
+        // A failed injected lane must never fail the review or leak exception text.
+        aiReviewSummary = { status: "error", reason: "AI reviewer failed", findings: 0 }
+      }
     }
   }
 
@@ -1421,7 +1446,13 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Sort by severity desc, then file.
   findings.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
 
-  const degraded = runDegraded || findings.some((f) => f.degraded)
+  if (aiReviewSummary) {
+    aiReviewSummary = {
+      ...aiReviewSummary,
+      findings: findings.filter((f) => f.evidence?.tool === "ai-review").length,
+    }
+  }
+
   const envelope = buildEnvelope({
     findings,
     tier,
@@ -1431,7 +1462,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest,
     generatedAt: input.generatedAt,
-    degraded,
+    lintOnly: runDegraded,
+    artifactHints: input.artifactHints,
+    aiReview: aiReviewSummary,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
     // when a riskTierPathTokens config error was caught above, OR when the
     // classifier lands on `full` tier — a naturally-full run is a customer-

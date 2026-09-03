@@ -127,6 +127,39 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
   }
 }
 
+/** Report missing dbt artifacts only when the manifest itself exists. */
+export async function detectArtifactHints(manifestAbs: string, dbtRoot: string): Promise<string[]> {
+  try {
+    await access(manifestAbs)
+  } catch {
+    return []
+  }
+
+  const artifacts: Array<{ path: string; hint: string }> = [
+    {
+      path: path.join(path.dirname(manifestAbs), "catalog.json"),
+      hint: "catalog.json (run `dbt docs generate`)",
+    },
+    {
+      path: path.join(dbtRoot, "target-base", "compiled"),
+      hint: "target-base/compiled (compile the base ref)",
+    },
+    {
+      path: path.join(dbtRoot, "target", "compiled"),
+      hint: "target/compiled (run `dbt compile` for the head)",
+    },
+  ]
+  const present = await Promise.all(
+    artifacts.map(({ path: artifactPath }) =>
+      access(artifactPath).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  )
+  return artifacts.filter((_, index) => !present[index]).map(({ hint }) => hint)
+}
+
 /** Whether a repo-relative path is one whose modification could invalidate
  *  the compiled manifest — dbt source (SQL, YAML, Python models, seed CSV,
  *  docs markdown blocks) or top-level dbt config. `README.md` at repo root,
@@ -292,6 +325,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // breakage and proven equivalence actually fire (the manifest only has
   // documented columns). Falls back to manifest-derived schema when absent.
   const catalogAbs = path.join(path.dirname(manifestAbs), "catalog.json")
+  const artifactHints = await detectArtifactHints(manifestAbs, dbtRoot)
   const catalogSchema = await buildCatalogSchemaContext(catalogAbs)
   const runner = createDispatcherRunner({ manifestPath: manifestAbs, schemaContext: catalogSchema })
   const mhash = await manifestHash(manifestAbs, opts.cwd)
@@ -347,11 +381,15 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     // so a missing default silently regresses envelope provenance for tool-
     // path verdicts (cubic-review PR #1041).
     cliVersion: opts.cliVersion ?? Installation.VERSION,
-    aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
+    aiReview:
+      opts.noAi || config.ai === false
+        ? async () => ({ findings: [], status: "skipped" as const, reason: "disabled by configuration" })
+        : runAiReview,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
     forceTier: opts.forceTier,
     staleManifest,
+    artifactHints,
   })
 }

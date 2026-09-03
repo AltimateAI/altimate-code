@@ -1,5 +1,8 @@
 import { describe, test, expect } from "bun:test"
-import { isManifestAffecting } from "../../src/altimate/review/run"
+import { promises as fs } from "node:fs"
+import path from "node:path"
+import { tmpdir } from "../fixture/fixture"
+import { detectArtifactHints, isManifestAffecting } from "../../src/altimate/review/run"
 
 /**
  * Guards on `warnIfStale`'s changed-file filter. The stale warning gates on a
@@ -56,5 +59,37 @@ describe("isManifestAffecting", () => {
     "snapshots/README.md",
   ])("rejects: %s", (rel) => {
     expect(isManifestAffecting(rel)).toBe(false)
+  })
+})
+
+describe("detectArtifactHints", () => {
+  test("reports a missing catalog when both compiled directories exist", async () => {
+    await using tmp = await tmpdir()
+    const manifest = path.join(tmp.path, "target", "manifest.json")
+    await fs.mkdir(path.dirname(manifest), { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.mkdir(path.join(tmp.path, "target", "compiled"), { recursive: true })
+    await fs.mkdir(path.join(tmp.path, "target-base", "compiled"), { recursive: true })
+
+    expect(await detectArtifactHints(manifest, tmp.path)).toEqual(["catalog.json (run `dbt docs generate`)"])
+  })
+
+  test("reports both missing compiled directories when the catalog exists", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    await fs.mkdir(target, { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), "{}")
+
+    expect(await detectArtifactHints(manifest, tmp.path)).toEqual([
+      "target-base/compiled (compile the base ref)",
+      "target/compiled (run `dbt compile` for the head)",
+    ])
+  })
+
+  test("does not report artifacts when the manifest itself is absent", async () => {
+    await using tmp = await tmpdir()
+    expect(await detectArtifactHints(path.join(tmp.path, "target", "manifest.json"), tmp.path)).toEqual([])
   })
 })

@@ -40,10 +40,22 @@ export function verdictHeadline(env: VerdictEnvelope): string {
 export function renderSummary(env: VerdictEnvelope): string {
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
 
-  if (env.summary.degraded) {
+  if (env.summary.lintOnly ?? env.summary.degraded) {
+    lines.push("> ⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)", "")
+  }
+
+  const undecidableFindings =
+    env.summary.undecidableFindings ?? env.findings.filter((finding) => finding.degraded).length
+  if (undecidableFindings > 0) {
     lines.push(
-      "> ⚙️ **Lint-only run** — no dbt manifest/warehouse was available, so lineage, equivalence and",
-      "> data-impact checks were skipped. Wire `manifest_path` (and optionally warehouse creds) for the full verdict.",
+      `> ℹ️ ${undecidableFindings} finding${undecidableFindings === 1 ? "" : "s"} could not be decided without compiled SQL for base and head — see each finding.`,
+      "",
+    )
+  }
+
+  if (env.summary.artifactHints?.length) {
+    lines.push(
+      `> 🧩 Missing artifacts: ${env.summary.artifactHints.join(" · ")} — equivalence and lineage run at reduced fidelity`,
       "",
     )
   }
@@ -87,7 +99,12 @@ export function renderSummary(env: VerdictEnvelope): string {
       const items = grouped[sev]
       if (!items.length) continue
       lines.push(`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, "")
-      for (const f of items) {
+      for (const summaryGroup of groupForSummary(items)) {
+        if (summaryGroup.length > 1) {
+          lines.push(renderGroupedFinding(summaryGroup))
+          continue
+        }
+        const f = summaryGroup[0]
         const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
         lines.push(
           `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
@@ -103,6 +120,19 @@ export function renderSummary(env: VerdictEnvelope): string {
       `> (would have been \`${env.override.priorVerdict}\`)`,
       "",
     )
+  }
+
+  if (env.tier !== "trivial" && env.summary.aiReview) {
+    const ai = env.summary.aiReview
+    if (ai.status === "ok") {
+      lines.push(`🤖 AI reviewer: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")
+    } else if (ai.status === "skipped") {
+      lines.push(`🤖 AI reviewer: skipped${ai.reason ? ` — ${ai.reason}` : ""}`, "")
+    } else if (ai.status === "timeout") {
+      lines.push(`🤖 AI reviewer: ${ai.reason ?? "timed out"}`, "")
+    } else {
+      lines.push(`🤖 AI reviewer: error${ai.reason ? ` — ${ai.reason}` : ""}`, "")
+    }
   }
 
   lines.push(
@@ -138,6 +168,57 @@ function groupBySeverity(findings: Finding[]): Record<Severity, Finding[]> {
   const out: Record<Severity, Finding[]> = { critical: [], warning: [], suggestion: [] }
   for (const f of findings) out[f.severity].push(f)
   return out
+}
+
+const MISSING_GRAIN_TITLE_FAMILY = "has no uniqueness/grain test"
+
+function summaryGroupKey(finding: Finding): string | undefined {
+  if (finding.groupKey) return `group:${finding.groupKey}`
+  if (finding.title.toLowerCase().includes(MISSING_GRAIN_TITLE_FAMILY)) {
+    return `title:${MISSING_GRAIN_TITLE_FAMILY}`
+  }
+  return undefined
+}
+
+/** Group only the human summary; the envelope and inline comments remain atomic. */
+function groupForSummary(findings: Finding[]): Finding[][] {
+  const groups: Finding[][] = []
+  const groupIndexes = new Map<string, number>()
+  for (const finding of findings) {
+    const key = summaryGroupKey(finding)
+    if (!key) {
+      groups.push([finding])
+      continue
+    }
+    const existing = groupIndexes.get(key)
+    if (existing === undefined) {
+      groupIndexes.set(key, groups.length)
+      groups.push([finding])
+    } else {
+      groups[existing].push(finding)
+    }
+  }
+  return groups
+}
+
+function titleFamily(finding: Finding): string {
+  const modelPrefix = finding.model ? `${finding.model}: ` : ""
+  return modelPrefix && finding.title.startsWith(modelPrefix)
+    ? finding.title.slice(modelPrefix.length)
+    : finding.title
+}
+
+function groupedTitle(findings: Finding[]): string {
+  const family = titleFamily(findings[0])
+  const newModel = /^new model has\s+(.+)$/i.exec(family)
+  if (newModel) return `${findings.length} new models have ${newModel[1]}`
+  return `${findings.length} findings: ${family}`
+}
+
+function renderGroupedFinding(findings: Finding[]): string {
+  const subjects = findings.map((finding) => `\`${finding.model ?? finding.file}\``).join(", ")
+  const categories = [...new Set(findings.map((finding) => finding.category))].join(", ")
+  return `- **${groupedTitle(findings)}** — ${subjects} · ${categories}`
 }
 
 function capitalize(s: string): string {

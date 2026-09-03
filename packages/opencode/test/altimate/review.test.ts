@@ -201,6 +201,20 @@ describe("verdict", () => {
     expect(computeIdealVerdict([mk("suggestion")], DEFAULT_RUBRIC)).toBe("COMMENT")
   })
 
+  test("summary keeps lint-only separate from undecidable findings", () => {
+    const undecidable = makeFinding({
+      severity: "warning",
+      category: "semantic_change",
+      title: "could not prove equivalence",
+      body: "compiled SQL is missing",
+      file: "models/m.sql",
+      degraded: true,
+      ruleKey: "undecidable",
+    })
+    const env = buildEnvelope({ findings: [undecidable], tier: "full", mode: "comment", lintOnly: false })
+    expect(env.summary).toMatchObject({ degraded: false, lintOnly: false, undecidableFindings: 1 })
+  })
+
   test("the bot NEVER emits a formal APPROVE review event", () => {
     // A bot approval could satisfy branch protection and merge a PR without human
     // sign-off. An APPROVE verdict must post a COMMENT review event instead.
@@ -1585,6 +1599,12 @@ describe("orchestrate", () => {
     expect(topo!.severity).toBe("warning")
     expect(topo!.degraded).toBe(true)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    expect(env.summary).toMatchObject({ degraded: false, lintOnly: false, undecidableFindings: 1 })
+    const summary = renderSummary(env)
+    expect(summary).not.toContain("Lint-only")
+    expect(summary).toContain(
+      "ℹ️ 1 finding could not be decided without compiled SQL for base and head — see each finding.",
+    )
   })
 
   test("topology lane: no compiled SQL available → skips (no crash)", async () => {
@@ -1729,6 +1749,36 @@ describe("orchestrate", () => {
     expect(env.findings.some((x) => /no uniqueness\/grain test/.test(x.title))).toBe(false)
   })
 
+  test("missing grain test: multiple new models remain atomic findings", async () => {
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async declaredPrimaryKey() {
+        return undefined
+      },
+    }
+    const env = await runReview({
+      changedFiles: [
+        { path: "models/intermediate/int_new_orders.sql", status: "added", diff: "+select 1\n" },
+        { path: "models/marts/fct_new_orders.sql", status: "added", diff: "+select 1\n" },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["test_coverage"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: content("select 1"),
+      generatedAt: "2026-05-29T00:00:00Z",
+    })
+    const findings = env.findings.filter((x) => /no uniqueness\/grain test/.test(x.title))
+    expect(findings).toHaveLength(2)
+    expect(findings.map((finding) => finding.file)).toEqual([
+      "models/intermediate/int_new_orders.sql",
+      "models/marts/fct_new_orders.sql",
+    ])
+    expect(findings.map((finding) => finding.model)).toEqual(["int_new_orders", "fct_new_orders"])
+    expect(findings.every((finding) => finding.groupKey === "missing_grain_test")).toBe(true)
+    expect(new Set(findings.map((finding) => finding.id)).size).toBe(2)
+  })
+
   test("missing grain test: new mart WITH a declared PK → not flagged", async () => {
     const runner: ReviewRunner = { ...fakeRunner({}), async declaredPrimaryKey() { return ["id"] } }
     const env = await runReview({
@@ -1780,29 +1830,32 @@ describe("orchestrate", () => {
       // that must be downgraded — the AI must never block.
       aiReview: async (input) => {
         groundingSeen = input.grounding.length
-        return [
-          makeFinding({
-            severity: "warning",
-            category: "sql_correctness",
-            title: "m: `revenue` may double-count un-deduped orders",
-            body: "If orders has multiple rows per order_id, summing amount inflates revenue.",
-            file: "models/marts/m.sql",
-            model: "m",
-            confidence: "medium",
-            evidence: { tool: "ai-review", result: { confidence: "medium" } },
-            ruleKey: "ai:sql_correctness:revenue-double-count",
-          }),
-          makeFinding({
-            severity: "critical", // disallowed for AI — must be downgraded, must not block
-            category: "sql_correctness",
-            title: "m: bogus critical",
-            body: "AI should never block.",
-            file: "models/marts/m.sql",
-            model: "m",
-            evidence: { tool: "ai-review", result: {} },
-            ruleKey: "ai:sql_correctness:bogus",
-          }),
-        ]
+        return {
+          status: "ok",
+          findings: [
+            makeFinding({
+              severity: "warning",
+              category: "sql_correctness",
+              title: "m: `revenue` may double-count un-deduped orders",
+              body: "If orders has multiple rows per order_id, summing amount inflates revenue.",
+              file: "models/marts/m.sql",
+              model: "m",
+              confidence: "medium",
+              evidence: { tool: "ai-review", result: { confidence: "medium" } },
+              ruleKey: "ai:sql_correctness:revenue-double-count",
+            }),
+            makeFinding({
+              severity: "critical", // disallowed for AI — must be downgraded, must not block
+              category: "sql_correctness",
+              title: "m: bogus critical",
+              body: "AI should never block.",
+              file: "models/marts/m.sql",
+              model: "m",
+              evidence: { tool: "spoofed-engine", result: {} },
+              ruleKey: "ai:sql_correctness:bogus",
+            }),
+          ],
+        }
       },
       generatedAt: "2026-05-29T00:00:00Z",
     })
@@ -1813,6 +1866,45 @@ describe("orchestrate", () => {
     // No AI finding survived as critical, and the AI did NOT cause a block.
     expect(env.findings.some((f) => f.evidence?.tool === "ai-review" && f.severity === "critical")).toBe(false)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    expect(env.summary.aiReview).toEqual({ status: "ok", findings: 2 })
+  })
+
+  test("AI reviewer status renders each outcome and never changes the verdict", () => {
+    const cases = [
+      {
+        aiReview: { status: "ok" as const, findings: 2 },
+        expected: "🤖 AI reviewer: 2 advisory findings",
+      },
+      {
+        aiReview: {
+          status: "skipped" as const,
+          reason: "no model configured (set `altimate_api_key` or `model` in the action)",
+          findings: 0,
+        },
+        expected: "🤖 AI reviewer: skipped — no model configured (set `altimate_api_key` or `model` in the action)",
+      },
+      {
+        aiReview: { status: "timeout" as const, reason: "timed out after 74s", findings: 0 },
+        expected: "🤖 AI reviewer: timed out after 74s",
+      },
+      {
+        aiReview: { status: "error" as const, reason: "ProviderError: unavailable", findings: 0 },
+        expected: "🤖 AI reviewer: error — ProviderError: unavailable",
+      },
+    ]
+    for (const { aiReview, expected } of cases) {
+      const env = buildEnvelope({ findings: [], tier: "lite", mode: "gate", aiReview })
+      expect(env.verdict).toBe("APPROVE")
+      expect(renderSummary(env)).toContain(expected)
+    }
+
+    const trivial = buildEnvelope({
+      findings: [],
+      tier: "trivial",
+      mode: "comment",
+      aiReview: { status: "skipped", reason: "no reviewable files", findings: 0 },
+    })
+    expect(renderSummary(trivial)).not.toContain("AI reviewer:")
   })
 
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {
@@ -2426,6 +2518,10 @@ describe("orchestrate", () => {
       getContent: content("select 1"),
     })
     expect(env.summary.degraded).toBe(true)
+    expect(env.summary.lintOnly).toBe(true)
+    expect(renderSummary(env)).toContain(
+      "⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)",
+    )
     expect(["APPROVE", "COMMENT"]).toContain(env.verdict)
   })
 
@@ -2532,5 +2628,56 @@ describe("orchestrate", () => {
     const inline = inlineComments(env)
     expect(inline.length).toBe(1)
     expect(inline[0]).toMatchObject({ path: "models/x.sql", line: 5, side: "RIGHT" })
+  })
+
+  test("renderSummary groups related model findings while a singleton renders normally", () => {
+    const groupedFindings = [
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model_a: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test for model_a.",
+        file: "models/model_a.sql",
+        model: "model_a",
+        startLine: 1,
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model_b: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test for model_b.",
+        file: "models/model_b.sql",
+        model: "model_b",
+        startLine: 1,
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+    ]
+    const groupedEnv = buildEnvelope({ findings: groupedFindings, tier: "lite", mode: "comment" })
+    const groupedSummary = renderSummary(groupedEnv)
+    expect(groupedSummary).toContain(
+      "- **2 new models have no uniqueness/grain test** — `model_a`, `model_b` · test_coverage",
+    )
+    expect(groupedSummary).not.toContain("Add a uniqueness test for model_a.")
+    expect(inlineComments(groupedEnv)).toHaveLength(2)
+
+    const singletonEnv = buildEnvelope({ findings: [groupedFindings[0]], tier: "lite", mode: "comment" })
+    const singletonSummary = renderSummary(singletonEnv)
+    expect(singletonSummary).toContain("- **model_a: new model has no uniqueness/grain test**")
+    expect(singletonSummary).toContain("Add a uniqueness test for model_a.")
+  })
+
+  test("renderSummary collapses missing artifact hints onto one line", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      artifactHints: ["catalog.json (run `dbt docs generate`)", "target-base/compiled (compile the base ref)"],
+    })
+    expect(renderSummary(env)).toContain(
+      "🧩 Missing artifacts: catalog.json (run `dbt docs generate`) · target-base/compiled (compile the base ref) — equivalence and lineage run at reduced fidelity",
+    )
   })
 })
