@@ -1,7 +1,7 @@
 import type { Argv } from "yargs"
 import { Auth } from "../../auth"
 // altimate_change start — surface OAuth plan/account in `auth list`
-import { describeOAuthIdentity } from "../../auth/oauth-claims"
+import { OAuthClaims } from "../../auth/oauth-claims"
 // altimate_change end
 import { cmd } from "./cmd"
 import { CliError, effectCmd, fail } from "../effect-cmd"
@@ -310,8 +310,11 @@ export const ProvidersListCommand = effectCmd({
       // altimate_change start — show which account/plan an OAuth credential belongs to,
       // so a wrong-account login is visible here instead of surfacing later as an
       // unexplained model error. Only non-secret claims are decoded, and the account id
-      // is truncated; the token itself is never rendered.
-      const identity = result.type === "oauth" ? describeOAuthIdentity(result.access) : undefined
+      // is truncated; the token itself is never rendered. `result.accountId` (stored at
+      // login) is the fallback for credentials whose access token never carries the
+      // account claim — see `describeOAuthIdentity`.
+      const identity =
+        result.type === "oauth" ? OAuthClaims.describeOAuthIdentity(result.access, result.accountId) : undefined
       yield* Prompt.log.info(`${name} ${UI.Style.TEXT_DIM}${result.type}${identity ? ` (${identity})` : ""}`)
       // altimate_change end
     }

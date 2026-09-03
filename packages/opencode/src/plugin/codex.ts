@@ -3,7 +3,7 @@ import { Log } from "../util/log"
 import { Installation } from "../installation"
 import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 // altimate_change start — plan/account diagnostics for wrong-account logins
-import { decodeJwtClaims, enrichCodexPlanMismatchBody, extractOAuthIdentity, maskAccountId } from "../auth/oauth-claims"
+import { OAuthClaims } from "../auth/oauth-claims"
 // altimate_change end
 import os from "os"
 import { ProviderTransform } from "@/provider/transform"
@@ -248,7 +248,7 @@ export interface IdTokenClaims {
 export function parseJwtClaims(token: string): IdTokenClaims | undefined {
   // altimate_change start — one JWT decoder, shared with auth/oauth-claims which
   // reads the same tokens for the plan/account diagnostics
-  return decodeJwtClaims(token) as IdTokenClaims | undefined
+  return OAuthClaims.decodeJwtClaims(token) as IdTokenClaims | undefined
   // altimate_change end
 }
 
@@ -704,17 +704,26 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                 .clone()
                 .text()
                 .catch(() => "")
-              const enriched = enrichCodexPlanMismatchBody(body, currentAuth.access)
+              const enriched = OAuthClaims.enrichCodexPlanMismatchBody(
+                body,
+                currentAuth.access,
+                authWithAccount.accountId,
+              )
               if (enriched) {
-                const identity = extractOAuthIdentity(currentAuth.access)
                 log.warn("codex request rejected for this account's plan", {
-                  plan: identity.plan,
-                  account: maskAccountId(identity.accountId),
+                  plan: enriched.identity.plan,
+                  account: OAuthClaims.maskAccountId(enriched.identity.accountId),
                 })
-                return new Response(JSON.stringify({ detail: enriched }), {
+                // Preserve the upstream headers (e.g. a request id) so this failure
+                // stays correlatable with provider-side logs; only content-type and
+                // content-length change because the body is being replaced.
+                const headers = new Headers(response.headers)
+                headers.set("content-type", "application/json")
+                headers.delete("content-length")
+                return new Response(JSON.stringify({ detail: enriched.message }), {
                   status: response.status,
                   statusText: response.statusText,
-                  headers: { "content-type": "application/json" },
+                  headers,
                 })
               }
             }

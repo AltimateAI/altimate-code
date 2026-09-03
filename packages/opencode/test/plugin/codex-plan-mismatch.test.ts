@@ -41,13 +41,14 @@ afterEach(() => {
 
 /** Build the provider fetch wrapper the AI SDK would call, with an OAuth
  * credential that is valid and unexpired (so no refresh round-trip happens). */
-async function makeCodexFetch(accessToken: string) {
+async function makeCodexFetch(accessToken: string, accountId?: string) {
   const plugin = await CodexAuthPlugin({ client: {} } as any)
   const auth = {
     type: "oauth" as const,
     access: accessToken,
     refresh: "refresh-token",
     expires: Date.now() + 60 * 60 * 1000,
+    ...(accountId && { accountId }),
   }
   const loaded = await plugin.auth!.loader!((async () => auth) as any, { models: { "gpt-5.6": {} } } as any)
   return (loaded as { fetch: typeof fetch }).fetch
@@ -126,5 +127,44 @@ describe("codex fetch wrapper — plan/account diagnosis", () => {
 
     await codexFetch("https://api.openai.com/v1/responses", {})
     expect(calls[0].url).toBe("https://chatgpt.com/backend-api/codex/responses")
+  })
+
+  test("preserves upstream headers (e.g. a request id) on the enriched error", async () => {
+    stubFetch(
+      new Response(PLAN_MISMATCH_BODY, {
+        status: 400,
+        statusText: "Bad Request",
+        headers: {
+          "x-request-id": "req_abc123",
+          "content-type": "application/json",
+          "content-length": String(PLAN_MISMATCH_BODY.length),
+        },
+      }),
+    )
+    const codexFetch = await makeCodexFetch(FREE_TOKEN)
+
+    const response = await codexFetch("https://api.openai.com/v1/responses", { method: "POST", body: "{}" })
+    expect(response.status).toBe(400)
+    // The diagnostic request id survives so this failure stays correlatable
+    // with provider-side logs.
+    expect(response.headers.get("x-request-id")).toBe("req_abc123")
+    expect(response.headers.get("content-type")).toBe("application/json")
+    // The body was replaced, so a stale content-length must not survive with it.
+    const body = await response.text()
+    expect(response.headers.get("content-length")).not.toBe(String(PLAN_MISMATCH_BODY.length))
+    expect(body.length).toBeGreaterThan(0)
+  })
+
+  test("falls back to the stored OAuth account id when the token carries none", async () => {
+    stubFetch(new Response(PLAN_MISMATCH_BODY, { status: 400 }))
+    // A token with a readable plan but no account claim — the request itself
+    // still selected an account via the stored id (sent as ChatGPT-Account-Id).
+    const tokenWithNoAccount = fakeJwt({ chatgpt_plan_type: "free" })
+    const codexFetch = await makeCodexFetch(tokenWithNoAccount, "stored-acct-12345")
+
+    const detail = ((await (await codexFetch("https://api.openai.com/v1/responses", {})).json()) as {
+      detail: string
+    }).detail
+    expect(detail).toContain("stored-a…")
   })
 })
