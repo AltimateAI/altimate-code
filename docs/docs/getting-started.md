@@ -143,7 +143,7 @@ altimate offers specialized agent modes for different workflows:
 
 | What do you want to do? | Use this agent mode |
 |---|---|
-| Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
+| Asking questions about your data, or analyzing it without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
 | Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring. SQL writes prompt for approval. |
 | Planning before acting | **Plan** for outlining an approach before switching to builder to execute it |
 

@@ -5,7 +5,7 @@ import fs from "fs"
 import { PromptProfiles } from "../../src/altimate/prompts/profiles"
 import { EXPECTED_BYTES, EXPECTED_SHA256, sha256 } from "./prompt-identity"
 
-const { assemble, BUILDER_PROFILE, DATA_QA_PROFILE, FRAGMENTS, PROMPT_BUILDER, PROMPT_DATA_QA } = PromptProfiles
+const { assemble, BUILDER_PROFILE, FRAGMENTS, PROMPT_BUILDER } = PromptProfiles
 
 // The byte-identity gate for the workload-adaptive harness PR 1 (compile-time
 // split of builder.txt into core + packs). The assembled default profile must
@@ -37,7 +37,7 @@ describe("builder profile byte identity", () => {
       // Fragments carry their own trailing newline; profiles join with "".
       expect(text.endsWith("\n"), `fragment ${name} must end with a newline`).toBe(true)
     }
-    for (const profile of [BUILDER_PROFILE, DATA_QA_PROFILE]) {
+    for (const profile of [BUILDER_PROFILE]) {
       expect(new Set(profile).size).toBe(profile.length)
     }
     // The default profile uses every fragment exactly once (the split is total).
@@ -76,40 +76,4 @@ describe("assembly determinism across processes and environments", () => {
       fs.rmSync(tmpB, { recursive: true, force: true })
     }
   }, 30_000)
-})
-
-describe("data-qa profile composition", () => {
-  test("omits the dbt-specific packs and the Pre-Execution Protocol pack", () => {
-    // Omitted pack section headers must be absent.
-    expect(PROMPT_DATA_QA).not.toContain("## Pre-Execution Protocol")
-    expect(PROMPT_DATA_QA).not.toContain("## dbt Operations")
-    expect(PROMPT_DATA_QA).not.toContain("## dbt Verification Workflow")
-    expect(PROMPT_DATA_QA).not.toContain("## Workflow\n")
-    expect(PROMPT_DATA_QA).not.toContain("## Common Pitfalls")
-    expect(PROMPT_DATA_QA).not.toContain("## Self-Review Before Completion")
-    expect(PROMPT_DATA_QA).not.toContain("## Finish Protocol")
-    // Everything else (core identity + principles, skills catalogue, teammate
-    // training) must be present.
-    expect(PROMPT_DATA_QA).toContain("## Principles")
-    expect(PROMPT_DATA_QA).toContain("**Understand before writing**")
-    expect(PROMPT_DATA_QA).toContain("## Skills — When to Invoke")
-    expect(PROMPT_DATA_QA).toContain("## Proactive Skill Invocation")
-    expect(PROMPT_DATA_QA).toContain("## Teammate Training")
-  })
-
-  test("is strictly a subsequence of the builder profile (subtractive, nothing new)", () => {
-    expect(DATA_QA_PROFILE.every((name) => BUILDER_PROFILE.includes(name))).toBe(true)
-    const order = DATA_QA_PROFILE.map((name) => BUILDER_PROFILE.indexOf(name))
-    expect([...order].sort((x, y) => x - y)).toEqual(order)
-    for (const name of DATA_QA_PROFILE) {
-      expect(PROMPT_DATA_QA).toContain(FRAGMENTS[name])
-    }
-  })
-
-  test("selecting data-qa cannot change the default profile bytes", () => {
-    // PROMPT_BUILDER and PROMPT_DATA_QA are independent constants; assembling
-    // one never mutates the other.
-    void assemble(DATA_QA_PROFILE)
-    expect(sha256(PROMPT_BUILDER)).toBe(EXPECTED_SHA256)
-  })
 })

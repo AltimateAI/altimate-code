@@ -12,7 +12,7 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | Agent | Description | Access Level |
 |-------|------------|-------------|
 | `builder` | Create and modify dbt models, SQL pipelines, and data transformations | Full read/write. SQL mutations prompt for approval. |
-| `analyst` | Explore data, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes denied. Safe bash commands auto-allowed. |
+| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes denied. Safe bash commands auto-allowed. |
 | `plan` | Plan before acting — restricted to planning files only | Minimal — no edits, no bash, no SQL |
 
 ### Builder
@@ -21,7 +21,7 @@ Full access mode. Can read/write files, run any bash command (with approval), ex
 
 ### Analyst
 
-Truly read-only mode for safe data exploration:
+The agent for asking questions about your data. Truly read-only mode for safe data exploration:
 
 - **File access**: Read, grep, glob — no prompts
 - **SQL**: SELECT queries execute freely. Write queries are denied (not prompted — blocked entirely)

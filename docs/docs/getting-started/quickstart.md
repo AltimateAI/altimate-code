@@ -150,7 +150,7 @@ altimate ships with specialized agent modes, each with its own tool permissions:
 | Mode        | Access     | Use when you want to...                                                        |
 | ----------- | ---------- | ------------------------------------------------------------------------------ |
 | **Builder** | Read/Write | Create and modify SQL, dbt models, pipelines. SQL writes prompt for approval.  |
-| **Analyst** | Read-only  | Explore production data safely, run cost analysis. SQL writes denied entirely. |
+| **Analyst** | Read-only  | Ask questions about your data, explore production data safely, run cost analysis. SQL writes denied entirely. |
 | **Plan**    | Minimal    | Plan an approach before switching to builder to execute it                     |
 
 Switch modes in the TUI:

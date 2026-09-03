@@ -263,10 +263,6 @@ describe("builder completion contract", () => {
     expect(instruction).toContain("Do not emit `DONE` while work or verification remains")
     expect(SessionTermination.completionInstruction({ runMode: false, agent: "builder" })).toBeUndefined()
     expect(SessionTermination.completionInstruction({ runMode: true, agent: "plan" })).toBeUndefined()
-    // The builder-derived opt-in data-qa profile is also covered: its headless
-    // runs need the termination contract (its prompt omits the finish pack).
-    expect(SessionTermination.completionInstruction({ runMode: true, agent: "data-qa" })).toBe(instruction)
-    expect(SessionTermination.completionInstruction({ runMode: false, agent: "data-qa" })).toBeUndefined()
   })
 
   test("prompt assembly wires the contract to the run-mode flag", async () => {

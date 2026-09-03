@@ -183,8 +183,7 @@ export function explicitDoneStop(input: {
  * is only consumed by the run-mode accounting path.
  *
  * Injected only in run mode, and only for the agents named in
- * COMPLETION_CONTRACT_AGENTS below (builder, plus the opt-in data-qa profile
- * — see that set for why). For builder alone this is byte-identical to the
+ * COMPLETION_CONTRACT_AGENTS below (builder). This is byte-identical to the
  * previous run-mode behaviour, when builder was the only prompt carrying it.
  * Prompt-visible text — changes need extra review.
  */
@@ -195,11 +194,9 @@ export const RUN_MODE_COMPLETION_INSTRUCTION =
 
 /**
  * Agents that receive the run-mode completion-token contract. builder is the
- * historical carrier; data-qa is the builder-derived opt-in profile (its
- * headless runs need a termination contract without inheriting the dbt
- * finish-build ritual, which lives in the prompt packs it omits).
+ * historical (and currently sole) carrier.
  */
-const COMPLETION_CONTRACT_AGENTS = new Set(["builder", "data-qa"])
+const COMPLETION_CONTRACT_AGENTS = new Set(["builder"])
 
 /** The sole gate for injecting the completion-token contract into a prompt. */
 export function completionInstruction(input: { runMode: boolean; agent: string }): string | undefined {
