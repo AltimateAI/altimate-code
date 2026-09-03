@@ -196,11 +196,12 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
           continue
         // Validate the folders shape: this is an unvalidated JSON file, and a
         // non-array must degrade to "live bridge, no recorded folders", not
-        // throw out of the probe. Only nonempty absolute strings survive —
-        // resolve("") is the process cwd, so an empty or relative entry would
-        // spuriously match and bypass the two-bridge decline. (codex r3)
+        // throw out of the probe. Only fully qualified strings survive —
+        // anything resolve() would complete from the process's own cwd or
+        // drive could spuriously match and bypass the two-bridge decline.
+        // (codex r3+r4)
         const folders = Array.isArray(data.workspaceFolders)
-          ? data.workspaceFolders.filter((f): f is string => typeof f === "string" && isAbsolute(f))
+          ? data.workspaceFolders.filter((f): f is string => typeof f === "string" && qualifiedFolder(f))
           : []
         bridges.push(folders)
       } catch {
@@ -219,6 +220,17 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
   }
   if (bridges.some((folders) => folders.some(within))) return true
   return bridges.length === 1
+}
+
+/** A recorded folder must be fully qualified. On Windows, drive-relative
+ * paths like "\repo" count as absolute to Node, but resolve() completes them
+ * with the process's CURRENT drive — so a corrupt entry could match any cwd
+ * on that drive and defeat the two-bridge decline. Drive-qualified (C:\ or
+ * C:/) or UNC (\\server\share) only; POSIX keeps plain isAbsolute. The
+ * platform parameter exists for tests. (codex r4) */
+export function qualifiedFolder(f: string, win: boolean = process.platform === "win32"): boolean {
+  if (!f) return false
+  return win ? /^([a-zA-Z]:[\\/]|\\\\)/.test(f) : isAbsolute(f)
 }
 
 function pidAlive(pid: number): boolean {

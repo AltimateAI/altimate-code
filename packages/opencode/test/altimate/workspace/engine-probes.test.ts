@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { fingerprint, liveBridge, versionOf } from "../../../src/altimate/workspace/engine-probes"
+import { fingerprint, liveBridge, qualifiedFolder, versionOf } from "../../../src/altimate/workspace/engine-probes"
 
 const posix = process.platform !== "win32"
 
@@ -109,6 +109,21 @@ describe("liveBridge", () => {
       })
       expect(liveBridge(cwd, dir)).toBe(false)
     }
+  })
+
+  test("a recorded folder must be fully qualified on Windows — drive-relative resolves onto the current drive", () => {
+    // win branch
+    expect(qualifiedFolder("C:\\ws", true)).toBe(true)
+    expect(qualifiedFolder("c:/ws", true)).toBe(true)
+    expect(qualifiedFolder("\\\\server\\share\\ws", true)).toBe(true)
+    expect(qualifiedFolder("\\repo", true)).toBe(false)
+    expect(qualifiedFolder("\\", true)).toBe(false)
+    expect(qualifiedFolder("C:relative", true)).toBe(false)
+    expect(qualifiedFolder("", true)).toBe(false)
+    // posix branch
+    expect(qualifiedFolder("/home/ws", false)).toBe(true)
+    expect(qualifiedFolder("relative/dir", false)).toBe(false)
+    expect(qualifiedFolder("", false)).toBe(false)
   })
 
   test("empty and relative folder strings are dropped — resolve('') is the process cwd", () => {
