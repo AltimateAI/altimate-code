@@ -942,24 +942,31 @@ describe("altimate-core failure isolation", () => {
     }
   })
 
-  test("sql-execute fingerprint try/catch isolates failures from query results", () => {
-    // Verify the code structure: fingerprinting runs AFTER query result is computed
-    // and is wrapped in its own try/catch
+  test("sql-execute fingerprints every outcome (success, result-error, and thrown exception) via a guarded helper", () => {
+    // altimate_change: fingerprinting used to run only on the success path, so a
+    // failed query never got fingerprinted at all — biasing sql_fingerprint
+    // telemetry away from exactly the queries most worth seeing. It is now
+    // emitted from all three outcomes through one shared, try/catch-guarded
+    // helper (`emitSqlFingerprint`) so they cannot drift out of sync.
     const fs = require("fs")
     const src = fs.readFileSync(
       require("path").join(__dirname, "../../src/altimate/tools/sql-execute.ts"),
       "utf8",
     )
-    // Query execution happens first
     const execIdx = src.indexOf('Dispatcher.call("sql.execute"')
-    const formatIdx = src.indexOf("formatResult(result)")
-    const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query)")
+    const helperDefIdx = src.indexOf("function emitSqlFingerprint(")
+    const fpCallInsideHelperIdx = src.indexOf("computeSqlFingerprint(query)")
     const guardComment = src.indexOf("Fingerprinting must never break query execution")
 
     expect(execIdx).toBeGreaterThan(0)
-    expect(formatIdx).toBeGreaterThan(execIdx) // format after execute
-    expect(fpCallIdx).toBeGreaterThan(formatIdx) // fingerprint after format
-    expect(guardComment).toBeGreaterThan(fpCallIdx) // catch guard exists after fingerprint
+    expect(helperDefIdx).toBeGreaterThan(execIdx)
+    // The helper itself calls computeSqlFingerprint and is guarded by a try/catch.
+    expect(fpCallInsideHelperIdx).toBeGreaterThan(helperDefIdx)
+    expect(guardComment).toBeGreaterThan(fpCallInsideHelperIdx)
+
+    // All three outcomes call the shared helper.
+    const callSites = [...src.matchAll(/emitSqlFingerprint\(args\.query, ctx\.sessionID\)/g)]
+    expect(callSites.length).toBe(3)
   })
 
   test("crash-resistant SQL inputs all handled safely", () => {

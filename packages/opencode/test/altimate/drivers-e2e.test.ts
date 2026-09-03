@@ -72,7 +72,11 @@ async function probeDuckDB(): Promise<boolean> {
   if (!isDuckDBAvailable()) return false
   try {
     const mod = await import("@altimateai/drivers/duckdb")
-    const probe = await mod.connect({ type: "duckdb" })
+    // altimate_change start — requireStorePath() now rejects a missing path;
+    // an in-memory probe must ask for ":memory:" explicitly or every DuckDB
+    // E2E test below silently skips (duckdbAvailable stays false).
+    const probe = await mod.connect({ type: "duckdb", path: ":memory:" })
+    // altimate_change end
     await probe.connect()
     // Guard against a leaked mock.module from another test file (e.g.
     // dbt-first-execution.test.ts mocks @altimateai/drivers/duckdb at module
@@ -116,7 +120,9 @@ describe("DuckDB Driver E2E", () => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const mod = await import("@altimateai/drivers/duckdb")
-        connector = await mod.connect({ type: "duckdb" })
+        // altimate_change start — requireStorePath() now rejects a missing path
+        connector = await mod.connect({ type: "duckdb", path: ":memory:" })
+        // altimate_change end
         await connector.connect()
         duckdbReady = true
         break
@@ -286,7 +292,9 @@ describe("DuckDB Driver E2E", () => {
     async () => {
       if (!duckdbReady) return
       const mod = await import("@altimateai/drivers/duckdb")
-      const tmp = await mod.connect({ type: "duckdb" })
+      // altimate_change start — requireStorePath() now rejects a missing path
+      const tmp = await mod.connect({ type: "duckdb", path: ":memory:" })
+      // altimate_change end
       await tmp.connect()
       const result = await tmp.execute("SELECT 42 AS answer")
       expect(result.rows[0][0]).toBe(42)

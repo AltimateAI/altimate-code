@@ -80,6 +80,13 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       const responseError = normalizeError((result as SqlExecuteResult & { error?: unknown }).error)
       if (responseError !== undefined) {
         const msg = responseError.trim() || "SQL execution failed."
+        // altimate_change start — fingerprint a failed execution too. The
+        // fingerprint used to be emitted only on the success path below, so a
+        // failed query (this error branch, and the thrown-exception catch
+        // further down) never got fingerprinted at all — biasing the sql
+        // structure telemetry away from exactly the queries most worth seeing.
+        emitSqlFingerprint(args.query, ctx.sessionID)
+        // altimate_change end
         // altimate_change — annotate this failure too, same as the catch block below:
         // a fail-open notice that only rides on success under-counts fail-open in
         // precisely the cases most likely to fail.
@@ -93,26 +100,7 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
 
       let output = formatResult(result)
       // altimate_change start — emit SQL structure fingerprint telemetry
-      try {
-        const fp = computeSqlFingerprint(args.query)
-        if (fp) {
-          Telemetry.track({
-            type: "sql_fingerprint",
-            timestamp: Date.now(),
-            session_id: ctx.sessionID,
-            statement_types: JSON.stringify(fp.statement_types),
-            categories: JSON.stringify(fp.categories),
-            table_count: fp.table_count,
-            function_count: fp.function_count,
-            has_subqueries: fp.has_subqueries,
-            has_aggregation: fp.has_aggregation,
-            has_window_functions: fp.has_window_functions,
-            node_count: fp.node_count,
-          })
-        }
-      } catch {
-        // Fingerprinting must never break query execution
-      }
+      emitSqlFingerprint(args.query, ctx.sessionID)
       // altimate_change end
       // altimate_change start — progressive disclosure suggestions
       const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
@@ -134,6 +122,10 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      // altimate_change start — fingerprint a thrown-exception failure too (see the
+      // matching comment on the result-error branch above)
+      emitSqlFingerprint(args.query, ctx.sessionID)
+      // altimate_change end
       // altimate_change — annotate the failure too. A fail-open notice that only rides
       // on success is worse than none: the reason vanishes exactly when the call went
       // wrong, and the `precedence` marker under-counts fail-open in precisely the
@@ -146,6 +138,32 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     }
   },
 })
+
+// altimate_change start — emit SQL structure fingerprint telemetry on every
+// execution outcome (success, a result-shaped error, or a thrown exception),
+// not only on success. Extracted so all three call sites stay in sync.
+function emitSqlFingerprint(query: string, sessionID: string): void {
+  try {
+    const fp = computeSqlFingerprint(query)
+    if (!fp) return
+    Telemetry.track({
+      type: "sql_fingerprint",
+      timestamp: Date.now(),
+      session_id: sessionID,
+      statement_types: JSON.stringify(fp.statement_types),
+      categories: JSON.stringify(fp.categories),
+      table_count: fp.table_count,
+      function_count: fp.function_count,
+      has_subqueries: fp.has_subqueries,
+      has_aggregation: fp.has_aggregation,
+      has_window_functions: fp.has_window_functions,
+      node_count: fp.node_count,
+    })
+  } catch {
+    // Fingerprinting must never break query execution
+  }
+}
+// altimate_change end
 
 // altimate_change start — pre-execution SQL validation via cached schema
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours

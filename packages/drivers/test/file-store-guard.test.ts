@@ -15,7 +15,7 @@ import { Database } from "bun:sqlite"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
-import { allowsCreate, assertStoreExists, isLocalFilePath } from "../src/file-store"
+import { allowsCreate, assertStoreExists, absoluteFileUriPath, isLocalFilePath } from "../src/file-store"
 
 const CANARY_TABLE = "zorbulax_ledger"
 
@@ -57,6 +57,19 @@ describe("isLocalFilePath", () => {
     expect(isLocalFilePath(":memory")).toBe(true)
     expect(isLocalFilePath(":foo")).toBe(true)
   })
+
+  // altimate_change start — regression: an ordinary filename that merely
+  // contains a colon must not be misread as a remote scheme
+  test("a local filename shaped like `scheme:name` (no `//`) is still a local file", () => {
+    // The exclusion used to match ANY "2+ letter prefix + colon", so a file
+    // literally named "data:warehouse.duckdb" was misclassified as a remote
+    // target and silently skipped both path resolution and the existence
+    // guard. Only a real `scheme://` URI or one of the specific non-slash
+    // DuckDB extension schemes (md:, motherduck:, ducklake:) should be excluded.
+    expect(isLocalFilePath("data:warehouse.duckdb")).toBe(true)
+    expect(isLocalFilePath("foo:warehouse.db")).toBe(true)
+  })
+  // altimate_change end
 })
 
 describe("assertStoreExists", () => {
@@ -89,6 +102,64 @@ describe("assertStoreExists", () => {
     expect(allowsCreate({ type: "duckdb", create: true })).toBe(true)
     expect(allowsCreate({ type: "duckdb", create: "true" })).toBe(false)
     expect(allowsCreate({ type: "duckdb" })).toBe(false)
+  })
+
+  // altimate_change start — an absolute `file:` URI is not a "local file" by
+  // isLocalFilePath (see its own comment), but it still names one unambiguous
+  // on-disk location and must be existence-checked, or a missing absolute
+  // file: store opens silently empty — the exact bug class this guard exists
+  // to catch.
+  test("throws for a missing absolute `file:` URI", () => {
+    const missing = path.join(tmp(), "absent.duckdb")
+    const uri = `file://${missing}`
+    expect(() => assertStoreExists({ type: "duckdb" }, uri, "DuckDB")).toThrow("not found")
+    expect(fs.existsSync(missing)).toBe(false)
+  })
+
+  test("passes for an existing absolute `file:` URI", () => {
+    const dir = tmp()
+    const present = path.join(dir, "present.duckdb")
+    fs.writeFileSync(present, "")
+    const uri = `file://${present}`
+    expect(() => assertStoreExists({ type: "duckdb" }, uri, "DuckDB")).not.toThrow()
+  })
+
+  test("does not existence-check a relative `file:` URI (tracked separately as #1209)", () => {
+    // resolveStorePaths leaves relative file: URIs untouched, so guarding
+    // existence here would check against whatever the process cwd happens to
+    // be — the exact cwd-following bug this PR removes for plain paths. That
+    // stays out of scope; absoluteFileUriPath returns undefined for it and
+    // the guard falls through isLocalFilePath's own file: exclusion.
+    expect(() => assertStoreExists({ type: "duckdb" }, "file:relative/warehouse.duckdb", "DuckDB")).not.toThrow()
+  })
+  // altimate_change end
+
+  // altimate_change start — a directory at dbPath is not a valid store
+  test("throws when dbPath names a directory, not a file", () => {
+    const dir = tmp()
+    expect(() => assertStoreExists({ type: "duckdb" }, dir, "DuckDB")).toThrow("not found")
+  })
+  // altimate_change end
+})
+
+describe("absoluteFileUriPath", () => {
+  test("resolves an absolute `file://` URI to its filesystem path", () => {
+    expect(absoluteFileUriPath("file:///var/data/warehouse.duckdb")).toBe("/var/data/warehouse.duckdb")
+  })
+
+  test("returns undefined for a relative `file:` URI", () => {
+    expect(absoluteFileUriPath("file:relative/warehouse.duckdb")).toBeUndefined()
+  })
+
+  test("returns undefined for the in-memory/temporary forms", () => {
+    expect(absoluteFileUriPath("file:")).toBeUndefined()
+    expect(absoluteFileUriPath("file::memory:")).toBeUndefined()
+    expect(absoluteFileUriPath("file:test.db?mode=memory")).toBeUndefined()
+  })
+
+  test("returns undefined for a non-`file:` path", () => {
+    expect(absoluteFileUriPath("/var/data/warehouse.duckdb")).toBeUndefined()
+    expect(absoluteFileUriPath(":memory:")).toBeUndefined()
   })
 })
 

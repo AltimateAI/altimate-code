@@ -261,7 +261,7 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `path` | No | Database file path. Omit or use `":memory:"` for in-memory |
+| `path` | Yes | Database file path, or `":memory:"` for in-memory. Cannot be omitted — a missing `path` is rejected rather than silently falling back to `":memory:"` |
 | `create` | No | Create the database file if it is missing (default: `false`) |
 
 !!! warning "The store must already exist"
@@ -461,7 +461,7 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `path` | No | Database file path. Omit or use `":memory:"` for in-memory |
+| `path` | Yes | Database file path, or `":memory:"` for in-memory. Cannot be omitted — a missing `path` is rejected rather than silently falling back to `":memory:"` |
 | `readonly` | No | Open in read-only mode (default: `false`) |
 | `create` | No | Create the database file if it is missing (default: `false`) |
 

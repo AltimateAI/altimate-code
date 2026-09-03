@@ -13,7 +13,17 @@
  */
 
 import * as fs from "fs"
+import { fileURLToPath } from "url"
 import type { ConnectionConfig } from "./types"
+
+// altimate_change start — narrow the scheme exclusion to genuine remote/extension targets
+/**
+ * DuckDB extension schemes that take a bare `scheme:rest` form with no `//`
+ * — MotherDuck (`md:`) and DuckLake (`ducklake:`) — and so cannot be told
+ * apart from a local filename by the `://` check below.
+ */
+const NON_SLASH_REMOTE_SCHEMES = ["md:", "motherduck:", "ducklake:"]
+// altimate_change end
 
 /**
  * Whether `dbPath` names a file on the local filesystem, and so can be
@@ -29,15 +39,62 @@ import type { ConnectionConfig } from "./types"
  * A scheme-qualified target is not a local file: MotherDuck (`md:`), object
  * storage (`s3://`), DuckLake, and any other scheme a DuckDB extension
  * provides. Those are left to the driver, which reports an unknown scheme as a
- * missing-extension error rather than silently creating anything. The pattern
- * requires two or more characters before the colon so a Windows drive letter
- * (`C:\data\wh.duckdb`) stays a path.
+ * missing-extension error rather than silently creating anything.
+ *
+ * altimate_change: the exclusion used to fire on ANY two-or-more-letter
+ * prefix followed by a colon, which misclassified an ordinary local filename
+ * that happens to contain one — `data:warehouse.duckdb`, `foo:warehouse.db`
+ * — as a remote target, silently skipping both path resolution and the
+ * existence guard below. Only a `scheme://` URI or one of the specific
+ * non-slash extension schemes DuckDB actually recognizes is excluded now; a
+ * `C:\...` Windows drive letter still passes through unaffected, since
+ * neither pattern matches it. `file:` is deliberately still excluded here —
+ * it is a real local path, but resolving/existence-checking it is handled
+ * separately (see `absoluteFileUriPath` below) because it is not safe to
+ * treat as an ordinary path string (see registry.ts's `resolveStorePaths`,
+ * which would otherwise mangle it with `path.resolve`).
  */
 export function isLocalFilePath(dbPath: string): boolean {
   if (dbPath === "" || dbPath === ":memory:") return false
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(dbPath)) return false
+  if (/^file:/i.test(dbPath)) return false
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(dbPath)) return false
+  if (NON_SLASH_REMOTE_SCHEMES.some((scheme) => dbPath.toLowerCase().startsWith(scheme))) return false
   return true
 }
+
+// altimate_change start — existence-check absolute `file:` URIs too
+/**
+ * The on-disk path an ABSOLUTE `file:` URI names, or `undefined` if `dbPath`
+ * is not a `file:` URI, is a relative one, or is one of SQLite/DuckDB's
+ * in-memory or temporary URI forms (`file:`, `file::memory:`,
+ * `file:name?mode=memory`) that never touch disk.
+ *
+ * Scoped deliberately narrow to the absolute case. This PR does not resolve a
+ * relative `file:` URI against a base directory (registry.ts's
+ * `resolveStorePaths` leaves `file:` paths untouched — see `isLocalFilePath`
+ * above), so guarding a relative one's existence here would check whatever
+ * the process's current directory happens to be, which is exactly the
+ * cwd-following bug this PR exists to remove. An absolute `file:` URI names
+ * one unambiguous location regardless of cwd, so it is safe to check.
+ */
+export function absoluteFileUriPath(dbPath: string): string | undefined {
+  if (!/^file:/i.test(dbPath)) return undefined
+  const rest = dbPath.slice("file:".length)
+  if (rest === "" || rest.startsWith(":")) return undefined // file:, file::memory:
+  if (/[?&]mode=memory\b/i.test(dbPath)) return undefined
+  const isSlashForm = /^\/{1,3}/.test(rest)
+  const isBareWindowsDrive = /^[a-zA-Z]:[\\/]/.test(rest)
+  if (!isSlashForm && !isBareWindowsDrive) return undefined // relative — not this guard's job
+  try {
+    // fileURLToPath requires an authority (even an empty one); `file:C:/x`
+    // needs a slash inserted before the drive letter to parse as one.
+    const href = isBareWindowsDrive ? dbPath.replace(/^file:/i, "file:/") : dbPath
+    return fileURLToPath(href)
+  } catch {
+    return undefined
+  }
+}
+// altimate_change end
 
 /**
  * The store path a file-backed connection names, or a loud failure.
@@ -69,6 +126,26 @@ export function allowsCreate(config: ConnectionConfig): boolean {
   return config.create === true
 }
 
+// altimate_change start — a directory at dbPath is not a valid store either
+/**
+ * Whether `path` names a store file that actually exists. `fs.existsSync`
+ * alone is also true for a directory at that path, which the driver would
+ * then fail to open with a confusing engine-level error instead of this
+ * guard's clear one — a config that names a directory (a typo, or a path one
+ * level off) should be reported the same way a missing file is.
+ */
+function existsAsFile(path: string): boolean {
+  if (!fs.existsSync(path)) return false
+  try {
+    return !fs.statSync(path).isDirectory()
+  } catch {
+    // A stat failure (e.g. a race with a delete, or a permissions error)
+    // is not this guard's to diagnose — let the driver's own open surface it.
+    return true
+  }
+}
+// altimate_change end
+
 /**
  * Throw unless the store is safe to open: it already exists, the caller opted
  * in to creating it, or the path is not a local file at all.
@@ -85,8 +162,24 @@ export function assertStoreExists(
   allowCreate: boolean = allowsCreate(config),
 ): void {
   if (allowCreate) return
+  // altimate_change start — existence-check an absolute `file:` URI too;
+  // `isLocalFilePath` deliberately excludes `file:` (see its own comment), so
+  // without this branch every `file:` store — including absolute ones that
+  // name one unambiguous on-disk location regardless of cwd — skipped the
+  // guard entirely and a missing absolute file: store opened silently empty,
+  // the exact bug class this guard exists to catch.
+  const fileUriPath = absoluteFileUriPath(dbPath)
+  if (fileUriPath !== undefined) {
+    if (existsAsFile(fileUriPath)) return
+    throw new Error(
+      `${engine} database file not found: "${dbPath}" (resolved to "${fileUriPath}"). ` +
+        `Opening a warehouse connection never creates the database — an empty store would answer every query with no rows. ` +
+        `Check the "path" in your connection config, or pass "create": true if this store is meant to be created.`,
+    )
+  }
+  // altimate_change end
   if (!isLocalFilePath(dbPath)) return
-  if (fs.existsSync(dbPath)) return
+  if (existsAsFile(dbPath)) return
   throw new Error(
     `${engine} database file not found: "${dbPath}". ` +
       `Opening a warehouse connection never creates the database — an empty store would answer every query with no rows. ` +
