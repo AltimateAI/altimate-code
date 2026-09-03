@@ -13,6 +13,43 @@ import { createServer } from "http"
 
 const log = Log.create({ service: "plugin.codex" })
 
+// altimate_change start — bound the diagnostic body read
+/** Upper bound on how much of a 400 body gets buffered to check for the plan-
+ * mismatch phrase. A real mismatch payload is one short JSON object (well
+ * under 1KB); this is generous headroom without buffering an arbitrarily
+ * large — or hostile — upstream error body into memory on every Codex 400,
+ * including ones that are not the mismatch shape at all. */
+const MAX_DIAGNOSTIC_BODY_BYTES = 16 * 1024
+
+/**
+ * Read at most `maxBytes` of a response body. Returns undefined if the body
+ * is missing, unreadable, or exceeds the bound — in every one of those cases
+ * the caller treats the response as "not the mismatch shape" and passes the
+ * original, untouched response through instead.
+ */
+async function readBoundedBody(response: Response, maxBytes: number): Promise<string | undefined> {
+  const reader = response.body?.getReader()
+  if (!reader) return undefined
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > maxBytes) return undefined
+      chunks.push(value)
+    }
+  } catch {
+    return undefined
+  } finally {
+    reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).toString("utf-8")
+}
+// altimate_change end
+
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
@@ -700,10 +737,7 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
             // and account the request actually used, plus the commands to switch.
             // Only this one 400 shape is touched; every other response passes through.
             if (response.status === 400) {
-              const body = await response
-                .clone()
-                .text()
-                .catch(() => "")
+              const body = await readBoundedBody(response.clone(), MAX_DIAGNOSTIC_BODY_BYTES)
               const enriched = OAuthClaims.enrichCodexPlanMismatchBody(
                 body,
                 currentAuth.access,

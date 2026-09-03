@@ -186,10 +186,12 @@ export function codexPlanMismatchMessage(identity: OAuthIdentity, originalDetail
  * untouched). Callers that also want to log the plan/account should reuse the
  * returned `identity` instead of decoding the token again.
  *
- * `storedAccountId` is the same login-time fallback `describeOAuthIdentity`
- * accepts: some credentials never carry `chatgpt_account_id` on the access
- * token, so the account the request actually selected (`ChatGPT-Account-Id`)
- * would otherwise go unnamed in this diagnostic.
+ * `storedAccountId` is the account id this request actually sent as the
+ * `ChatGPT-Account-Id` header (see `plugin/codex.ts`) — that is unambiguously
+ * the account the failed request was scoped to, even when it differs from
+ * whatever `chatgpt_account_id` claim happens to be embedded in the access
+ * token. It is preferred over the token claim for that reason; the token
+ * claim is used only when no stored id is available.
  */
 export function enrichCodexPlanMismatchBody(
   body: string | undefined,
@@ -208,7 +210,7 @@ export function enrichCodexPlanMismatchBody(
   const tokenIdentity = extractOAuthIdentity(accessToken)
   const identity: OAuthIdentity = {
     plan: tokenIdentity.plan,
-    accountId: tokenIdentity.accountId ?? stringClaim({ accountId: storedAccountId }, "accountId"),
+    accountId: stringClaim({ accountId: storedAccountId }, "accountId") ?? tokenIdentity.accountId,
   }
   return { message: codexPlanMismatchMessage(identity, detail), identity }
 }

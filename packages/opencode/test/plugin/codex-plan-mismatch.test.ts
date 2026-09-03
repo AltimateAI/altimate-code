@@ -167,4 +167,32 @@ describe("codex fetch wrapper — plan/account diagnosis", () => {
     }).detail
     expect(detail).toContain("stored-a…")
   })
+
+  test("names the stored account, not the token's, when both are present", async () => {
+    // FREE_TOKEN carries its own chatgpt_account_id, but ChatGPT-Account-Id on
+    // the actual request is built from the stored id — that's the account the
+    // failed request was scoped to, so the diagnostic should name it.
+    stubFetch(new Response(PLAN_MISMATCH_BODY, { status: 400 }))
+    const codexFetch = await makeCodexFetch(FREE_TOKEN, "stored-acct-99999")
+
+    const detail = ((await (await codexFetch("https://api.openai.com/v1/responses", {})).json()) as {
+      detail: string
+    }).detail
+    expect(detail).toContain("stored-a…")
+    expect(detail).not.toContain("4f3a1b2c")
+  })
+
+  test("an oversized 400 body is not buffered — the response passes through untouched", async () => {
+    // Padding pushes this well past MAX_DIAGNOSTIC_BODY_BYTES even though it
+    // still contains the mismatch phrase; the bounded reader must bail before
+    // finishing the read, so the original (oversized) response comes back
+    // unenriched rather than a rewritten one.
+    const hugeBody = "x".repeat(20 * 1024) + PLAN_MISMATCH_BODY
+    stubFetch(new Response(hugeBody, { status: 400 }))
+    const codexFetch = await makeCodexFetch(FREE_TOKEN)
+
+    const response = await codexFetch("https://api.openai.com/v1/responses", {})
+    expect(response.status).toBe(400)
+    expect(await response.text()).toBe(hugeBody)
+  })
 })
