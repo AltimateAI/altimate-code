@@ -942,43 +942,54 @@ describe("altimate-core failure isolation", () => {
     }
   })
 
-  test("sql-execute fingerprints only executed outcomes (success and result-error), not a never-executed thrown exception", () => {
-    // altimate_change: fingerprinting used to run only on the success path, so a
-    // failed-but-executed query (the result-error branch) never got fingerprinted —
-    // biasing sql_fingerprint telemetry away from exactly the queries most worth
-    // seeing. It is now emitted from both outcomes where a warehouse actually ran
-    // the query, through one shared, try/catch-guarded helper (`emitSqlFingerprint`)
-    // so they cannot drift out of sync. It is deliberately NOT called from the
-    // thrown-exception catch block: that path only fires when the query never
-    // reached a warehouse at all (e.g. dispatcher down), so fingerprinting it there
-    // would fold "never executed" into a signal meant to measure "executed SQL",
-    // re-biasing the telemetry in the opposite direction.
+  test("sql-execute fingerprints success only — de-scoped to the minimal honest form (see follow-up issue)", () => {
+    // altimate_change: earlier revisions of this fix tried fingerprinting on both
+    // the success path AND the result-error branch (sql.execute returns a
+    // result-shaped `{ ..., error }` instead of throwing for a connection/query
+    // failure). But that result shape is ALSO what a pre-execution failure returns
+    // — no warehouse configured, connector setup failed (connections/register.ts)
+    // — so the result-error branch cannot reliably tell "warehouse ran the query
+    // and it failed" apart from "never reached a warehouse at all". Fingerprinting
+    // it would mislabel some never-executed queries as executed SQL. After three
+    // review rounds converging on this, it was deliberately de-scoped to
+    // fingerprint-on-success-only (the pre-existing behavior before any of this
+    // started) rather than build a failed-execution-vs-never-executed taxonomy in
+    // this cleanup PR. A distinct execution-phase signal is tracked as
+    // altimate-code#1242.
     const fs = require("fs")
     const src = fs.readFileSync(
       require("path").join(__dirname, "../../src/altimate/tools/sql-execute.ts"),
       "utf8",
     )
     const execIdx = src.indexOf('Dispatcher.call("sql.execute"')
-    const helperDefIdx = src.indexOf("function emitSqlFingerprint(")
-    const fpCallInsideHelperIdx = src.indexOf("computeSqlFingerprint(query)")
+    const responseErrorIdx = src.indexOf("if (responseError !== undefined) {")
+    const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query)")
+    const formatIdx = src.indexOf("formatResult(result)")
     const guardComment = src.indexOf("Fingerprinting must never break query execution")
 
     expect(execIdx).toBeGreaterThan(0)
-    expect(helperDefIdx).toBeGreaterThan(execIdx)
-    // The helper itself calls computeSqlFingerprint and is guarded by a try/catch.
-    expect(fpCallInsideHelperIdx).toBeGreaterThan(helperDefIdx)
-    expect(guardComment).toBeGreaterThan(fpCallInsideHelperIdx)
+    expect(responseErrorIdx).toBeGreaterThan(execIdx)
+    // The single fingerprint call sits strictly between the error check and
+    // formatResult() — i.e. only on the success path — and BEFORE formatting, so a
+    // formatResult() throw cannot cause a genuinely-executed query to go uncounted.
+    expect(fpCallIdx).toBeGreaterThan(responseErrorIdx)
+    expect(formatIdx).toBeGreaterThan(fpCallIdx)
+    expect(guardComment).toBeGreaterThan(fpCallIdx)
+    expect(guardComment).toBeLessThan(formatIdx)
 
-    // Exactly two outcomes call the shared helper: success and the result-error
-    // branch. The catch block (thrown exception / non-execution) must not.
-    const callSites = [...src.matchAll(/emitSqlFingerprint\(args\.query, ctx\.sessionID\)/g)]
-    expect(callSites.length).toBe(2)
+    // Exactly one call site — no more "every outcome" fan-out.
+    const callSites = [...src.matchAll(/computeSqlFingerprint\(args\.query\)/g)]
+    expect(callSites.length).toBe(1)
 
-    // The catch block itself must not reference the fingerprint helper at all.
+    // Neither the result-error branch nor the catch block references it.
+    const resultErrorBlockEnd = src.indexOf("// altimate_change end", responseErrorIdx)
+    const resultErrorBlockBody = src.slice(responseErrorIdx, resultErrorBlockEnd)
+    expect(resultErrorBlockBody.includes("computeSqlFingerprint")).toBe(false)
+
     const catchBlockStart = src.indexOf("} catch (e) {")
     const catchBlockEnd = src.indexOf("\n    }\n  },\n})", catchBlockStart)
     const catchBlockBody = src.slice(catchBlockStart, catchBlockEnd)
-    expect(catchBlockBody.includes("emitSqlFingerprint")).toBe(false)
+    expect(catchBlockBody.includes("computeSqlFingerprint")).toBe(false)
   })
 
   test("crash-resistant SQL inputs all handled safely", () => {

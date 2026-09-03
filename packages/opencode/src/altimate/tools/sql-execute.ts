@@ -80,13 +80,14 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       const responseError = normalizeError((result as SqlExecuteResult & { error?: unknown }).error)
       if (responseError !== undefined) {
         const msg = responseError.trim() || "SQL execution failed."
-        // altimate_change start — fingerprint a failed execution too. The
-        // fingerprint used to be emitted only on the success path below, so a
-        // failed query (this error branch, and the thrown-exception catch
-        // further down) never got fingerprinted at all — biasing the sql
-        // structure telemetry away from exactly the queries most worth seeing.
-        emitSqlFingerprint(args.query, ctx.sessionID)
-        // altimate_change end
+        // altimate_change: deliberately NOT fingerprinted. `sql.execute` returns this
+        // same result shape both for a warehouse query that ran and failed AND for a
+        // pre-execution failure — no warehouse configured, connector setup failed
+        // (see connections/register.ts). This branch alone cannot tell those apart, so
+        // fingerprinting it would mislabel some never-executed queries as "executed
+        // SQL". De-scoped to fingerprint-on-success-only (below) rather than build a
+        // failed-execution-vs-never-executed taxonomy in this cleanup PR; tracked as
+        // altimate-code#1242.
         // altimate_change — annotate this failure too, same as the catch block below:
         // a fail-open notice that only rides on success under-counts fail-open in
         // precisely the cases most likely to fail.
@@ -98,10 +99,34 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       }
       // altimate_change end
 
-      let output = formatResult(result)
-      // altimate_change start — emit SQL structure fingerprint telemetry
-      emitSqlFingerprint(args.query, ctx.sessionID)
+      // altimate_change start — emit SQL structure fingerprint telemetry on the
+      // success path, BEFORE formatting the result. A query that reached this point
+      // genuinely executed against a warehouse; emitting the fingerprint here (rather
+      // than after formatResult()) means a formatting failure below still leaves this
+      // execution counted, instead of silently dropping it from the telemetry.
+      try {
+        const fp = computeSqlFingerprint(args.query)
+        if (fp) {
+          Telemetry.track({
+            type: "sql_fingerprint",
+            timestamp: Date.now(),
+            session_id: ctx.sessionID,
+            statement_types: JSON.stringify(fp.statement_types),
+            categories: JSON.stringify(fp.categories),
+            table_count: fp.table_count,
+            function_count: fp.function_count,
+            has_subqueries: fp.has_subqueries,
+            has_aggregation: fp.has_aggregation,
+            has_window_functions: fp.has_window_functions,
+            node_count: fp.node_count,
+          })
+        }
+      } catch {
+        // Fingerprinting must never break query execution
+      }
       // altimate_change end
+
+      let output = formatResult(result)
       // altimate_change start — progressive disclosure suggestions
       const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
       if (suggestion) {
@@ -122,14 +147,9 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      // altimate_change: deliberately NOT fingerprinted. This catch only fires when
-      // `Dispatcher.call` itself throws (dispatcher down, no warehouse configured) —
-      // per the comment on the result-error branch above, `sql.execute` never throws
-      // for a connection/query failure, it returns a result carrying `error`, which
-      // that branch already fingerprints. A query that reaches here never ran against
-      // any warehouse, so fingerprinting it here would fold "never executed" into a
-      // signal meant to measure "executed SQL" (success and result-error), re-biasing
-      // the telemetry this change is meant to correct in the opposite direction.
+      // altimate_change: deliberately NOT fingerprinted, same reasoning as the
+      // result-error branch above — this catch only fires when `Dispatcher.call`
+      // itself throws, which never happened after a warehouse actually ran the query.
       // altimate_change — annotate the failure too. A fail-open notice that only rides
       // on success is worse than none: the reason vanishes exactly when the call went
       // wrong, and the `precedence` marker under-counts fail-open in precisely the
@@ -142,38 +162,6 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     }
   },
 })
-
-// altimate_change start — emit SQL structure fingerprint telemetry for every
-// outcome where a warehouse actually ran the query: success, and a result-shaped
-// error (sql.execute returns `{ ..., error }` rather than throwing for a
-// connection/query failure — see the result-error branch above). Deliberately
-// NOT called from the thrown-exception catch block: that path only fires when
-// the query never reached a warehouse at all (e.g. dispatcher down), and
-// fingerprinting a never-executed query there would bias this "executed SQL
-// structure" signal toward attempts that never ran. Extracted so the two
-// legitimate call sites stay in sync.
-function emitSqlFingerprint(query: string, sessionID: string): void {
-  try {
-    const fp = computeSqlFingerprint(query)
-    if (!fp) return
-    Telemetry.track({
-      type: "sql_fingerprint",
-      timestamp: Date.now(),
-      session_id: sessionID,
-      statement_types: JSON.stringify(fp.statement_types),
-      categories: JSON.stringify(fp.categories),
-      table_count: fp.table_count,
-      function_count: fp.function_count,
-      has_subqueries: fp.has_subqueries,
-      has_aggregation: fp.has_aggregation,
-      has_window_functions: fp.has_window_functions,
-      node_count: fp.node_count,
-    })
-  } catch {
-    // Fingerprinting must never break query execution
-  }
-}
-// altimate_change end
 
 // altimate_change start — pre-execution SQL validation via cached schema
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
