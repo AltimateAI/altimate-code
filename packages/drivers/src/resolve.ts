@@ -25,6 +25,7 @@ import { createRequire } from "node:module"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { spawn } from "node:child_process"
 import { performance } from "node:perf_hooks"
+import { randomUUID } from "node:crypto"
 
 /**
  * Quote a path for a copy-pasteable shell command on the current platform.
@@ -277,10 +278,20 @@ export function enclosingNodeModulesRoots(candidate: string, sep: string = path.
   return roots
 }
 
-/** True when `candidate` is `base` itself, or nested anywhere inside it. */
+/**
+ * True when `candidate` is `base` itself, or nested anywhere inside it.
+ *
+ * `rel.startsWith("..")` is not the same check as "escapes base" — a genuine
+ * descendant such as `base/..evil/node_modules` produces a relative path
+ * that also starts with the two characters `..`, without being parent
+ * traversal at all. Only `".."` itself, or `".."` followed by a separator,
+ * means the relative path actually climbed above `base`.
+ */
 function isWithin(base: string, candidate: string): boolean {
   const rel = path.relative(base, candidate)
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+  if (rel === "") return true
+  if (path.isAbsolute(rel)) return false
+  return rel !== ".." && !rel.startsWith(`..${path.sep}`)
 }
 
 /** True when `root` is workspace-controlled and must not be imported from. */
@@ -1166,8 +1177,18 @@ const installsInFlight = new Map<string, Promise<InstallResult>>()
  *
  * That is not benchmark-specific — any concurrent use of the CLI hits it.
  *
- * `mkdir` is atomic and fails with EEXIST when the directory exists, on both
- * POSIX and Windows, which makes a lock directory the portable primitive here.
+ * The lock itself is a single file, created with the `wx` flag — `O_CREAT |
+ * O_EXCL`, portable to POSIX and Windows — whose *content*, an acquisition
+ * token, is written as part of that same atomic create. That is the
+ * property an earlier version of this lock lacked: it created a directory
+ * atomically and then wrote the ownership token into a file *inside* it as a
+ * second, non-atomic step, leaving a real window where a lock existed with no
+ * way to tell who — or whether anyone reliable — owned it. Ownership is
+ * settled by comparing that token, never by filesystem identity (an inode):
+ * inode numbers are recycled promptly on common filesystems (verified on
+ * Linux tmpfs in CI), so two unrelated acquisitions at the same path could
+ * share one and be mistaken for each other.
+ *
  * The lock lives beside the install directory rather than inside it so npm
  * never sees it as stray package content.
  */
@@ -1192,33 +1213,47 @@ export function installLockPath(dir: string): string {
  * filesystem root rather than a directory inside one.
  *
  * The UNC case is the one that is easy to miss, and it has more than one
- * spelling: the plain share, its extended-length form (which bypasses
- * `MAX_PATH` and Windows' own UNC parsing), and the equally valid
- * forward-slash spelling `ALTIMATE_DRIVER_DIR` can carry. A share root is a
- * root in exactly the way a drive letter is, and appending `.lock` to any of
- * these forms names an unrelated share rather than anything under the
- * directory being locked.
+ * spelling: the plain share (in any mix of "\" and "/" between its
+ * components — Node's Windows path handling normalizes them to the same
+ * root), and its extended-length form (which bypasses `MAX_PATH` and
+ * Windows' own UNC parsing, and is backslash-only since its "\\?\" prefix
+ * explicitly disables that normalization). A share root is a root in exactly
+ * the way a drive letter is, and appending `.lock` to any of these forms
+ * names an unrelated share rather than anything under the directory being
+ * locked.
  */
 function isFilesystemRoot(candidate: string): boolean {
   if (candidate === "") return true // POSIX "/" strips to ""
   if (/^[A-Za-z]:$/.test(candidate)) return true // "C:\" strips to "C:"
-  if (/^\\\\[^\\/]+\\[^\\/]+$/.test(candidate)) return true // "\\server\share"
-  if (/^\\\\\?\\UNC\\[^\\/]+\\[^\\/]+$/i.test(candidate)) return true // "\\?\UNC\server\share"
-  return /^\/\/[^/]+\/[^/]+$/.test(candidate) // "//server/share"
+  // Any mix of "\" and "/" between the two leading separators, the host, and
+  // the share: Node's Windows path handling normalizes "\\server/share" and
+  // "//server\share" to the same UNC root as "\\server\share", so accepting
+  // only one spelling of each separator leaves the others unrecognized.
+  if (/^[\\/]{2}[^\\/]+[\\/][^\\/]+$/.test(candidate)) return true // "\\server\share", any separator mix
+  // The extended-length "\\?\" prefix is the one exception: it explicitly
+  // disables Windows' own path normalization ("verbatim" paths), so a "/"
+  // there is a literal character, not a separator — backslash-only is correct.
+  return /^\\\\\?\\UNC\\[^\\/]+\\[^\\/]+$/i.test(candidate) // "\\?\UNC\server\share"
 }
 
 /**
- * The atomically-created lock itself, which lives *inside* the container
+ * The atomically-created lock file itself, which lives *inside* the container
  * `installLockPath()` names.
  *
- * Two directories rather than one so every path this mechanism writes sits
- * under a single approved prefix. Stale recovery renames the held lock aside
- * before deleting it, and that destination has to be somewhere the install tool
- * asked permission for; a sibling of the container would be outside the
- * `<dir>.lock/*` pattern the tool brokers.
+ * A file inside its own container directory, rather than the lock being the
+ * container, so every path this mechanism writes — the lock and its stale-claim
+ * rename target alike — sits under a single approved prefix. Stale recovery
+ * renames the held lock aside before deleting it, and that destination has to
+ * be somewhere the install tool asked permission for; a sibling of the
+ * container would be outside the `<dir>.lock/*` pattern the tool brokers.
  */
 function heldLockPath(dir: string): string {
   return path.join(installLockPath(dir), "held")
+}
+
+/** A fresh, unguessable acquisition token — see the module doc above. */
+function newLockToken(): string {
+  return randomUUID()
 }
 
 interface LockHolder {
@@ -1226,7 +1261,13 @@ interface LockHolder {
   hostname: string
   /** Absent when the owner file is malformed; age then falls back to mtime. */
   startedAt?: number
-  /** Identifies one acquisition, so a holder only ever releases its own lock. */
+  /**
+   * Identifies one acquisition, so a holder only ever releases its own lock.
+   * Always present on a lock this scheme creates — written atomically as part
+   * of the `wx` create, never as a separate step. Optional in the type only to
+   * tolerate a corrupt or foreign-written record, which then reads as "not
+   * ours" rather than being trusted.
+   */
   token?: string
   /**
    * This holder's own reclaim backstop, in ms from `startedAt` — the
@@ -1244,9 +1285,9 @@ interface LockHolder {
  *  cannot wedge the lock directory indefinitely by claiming an absurd one. */
 const MAX_TRUSTED_BUDGET_MS = 24 * 60 * 60_000
 
-function readLockHolder(lockDir: string): LockHolder | undefined {
+function readLockHolder(lockPath: string): LockHolder | undefined {
   try {
-    const raw = fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
+    const raw = fs.readFileSync(lockPath, "utf8")
     const parsed: unknown = JSON.parse(raw)
     if (!parsed || typeof parsed !== "object") return undefined
     const holder = parsed as Partial<LockHolder>
@@ -1280,12 +1321,12 @@ function readLockHolder(lockDir: string): LockHolder | undefined {
  *   available and the lock ages out.
  */
 function isStaleLock(
-  lockDir: string,
+  lockPath: string,
   holder: LockHolder | undefined,
   maxAgeMs: number,
   hardMaxAgeMs: number,
 ): boolean {
-  const age = lockAgeMs(lockDir, holder)
+  const age = lockAgeMs(lockPath, holder)
   if (holder && holder.hostname === os.hostname()) {
     if (!processExists(holder.pid)) return true
     // `processExists` answers "some process holds this pid", not "our installer
@@ -1309,12 +1350,12 @@ function isStaleLock(
   return age !== undefined && age > maxAgeMs
 }
 
-/** How long the lock has been held, by owner record or directory mtime. */
-function lockAgeMs(lockDir: string, holder: LockHolder | undefined): number | undefined {
+/** How long the lock has been held, by owner record or file mtime. */
+function lockAgeMs(lockPath: string, holder: LockHolder | undefined): number | undefined {
   const startedAt = holder?.startedAt
   if (typeof startedAt === "number") return Date.now() - startedAt
   try {
-    return Date.now() - fs.statSync(lockDir).mtimeMs
+    return Date.now() - fs.statSync(lockPath).mtimeMs
   } catch {
     // Vanished between checks — someone else released it, so it is not stale.
     return undefined
@@ -1334,20 +1375,20 @@ function sameHolder(a: LockHolder | undefined, b: LockHolder | undefined): boole
  * pathname, the first would delete the dead lock and acquire a fresh one, and
  * the second would then delete *that* live lock and acquire its own — putting
  * both inside the critical section, which is the failure the lock exists to
- * prevent. `rename` is atomic: exactly one process can move a given directory,
- * and only that process goes on to delete it. The loser's rename fails and it
+ * prevent. `rename` is atomic: exactly one process can move a given path, and
+ * only that process goes on to delete it. The loser's rename fails and it
  * simply retries against whatever state now exists.
  */
-function claimStaleLock(lockDir: string, judged: LockHolder | undefined): boolean {
+function claimStaleLock(lockPath: string, judged: LockHolder | undefined): boolean {
   // The staleness verdict was formed before this call, and the owner can have
   // released the lock and a peer re-taken it since. Renaming blindly would move
   // a *live* lock aside and put two installs over the same tree. Check the owner
   // record still matches the one judged stale before touching anything.
-  if (!sameHolder(judged, readLockHolder(lockDir))) return false
+  if (!sameHolder(judged, readLockHolder(lockPath))) return false
 
-  const claimed = path.join(path.dirname(lockDir), `stale-${process.pid}-${Date.now().toString(36)}`)
+  const claimed = path.join(path.dirname(lockPath), `stale-${process.pid}-${Date.now().toString(36)}`)
   try {
-    fs.renameSync(lockDir, claimed)
+    fs.renameSync(lockPath, claimed)
   } catch {
     // Another process claimed it first, the owner released it, or the parent
     // does not permit rename. Nothing of ours to clean up.
@@ -1359,19 +1400,31 @@ function claimStaleLock(lockDir: string, judged: LockHolder | undefined): boolea
   // moved, and put it back if a peer had re-taken the lock in between.
   if (!sameHolder(judged, readLockHolder(claimed))) {
     try {
-      fs.renameSync(claimed, lockDir)
-      return false
+      // `link`, not `rename`, for the restore: `rename` onto an existing
+      // destination *replaces* it silently, which would clobber a live lock a
+      // third process had legitimately created at `lockPath` in the gap since
+      // we moved the peer's lock out. `link` fails closed with EEXIST there
+      // instead, so a third process's lock is left untouched either way.
+      fs.linkSync(claimed, lockPath)
     } catch {
-      // Cannot restore — a third process has already re-created the lock. Fall
-      // through and remove what we moved rather than leaking it.
+      // Either the restore landed, or `lockPath` is now occupied by a third
+      // process's own lock — leave that in place untouched. `claimed` is
+      // cleaned up below regardless.
     }
+    try {
+      fs.rmSync(claimed, { force: true })
+    } catch {
+      // The path is unreachable except through what we're about to clean up,
+      // or already gone; either way there is nothing left to leak.
+    }
+    return false
   }
 
   try {
-    fs.rmSync(claimed, { recursive: true, force: true })
+    fs.rmSync(claimed, { force: true })
   } catch {
-    // The rename already made the lock unreachable, so a leftover directory
-    // costs nothing but disk.
+    // The rename already made the lock unreachable, so a leftover file costs
+    // nothing but disk.
   }
   return true
 }
@@ -1383,26 +1436,15 @@ function claimStaleLock(lockDir: string, judged: LockHolder | undefined): boolea
  * still running — an install that outlives `staleAfterMs` on a machine whose
  * owner record is unreadable, say. Removing it by pathname would then delete
  * the successor's live lock and admit a third process. The token is written
- * when the lock is taken, so a mismatch means the directory is somebody else's.
+ * atomically as part of creating the lock, so every lock this scheme creates
+ * carries one from the instant it exists — a mismatch (or an unreadable file,
+ * which cannot be ours) means the path is somebody else's.
  */
-function releaseInstallLock(lockDir: string, token: string, ino: number | undefined): void {
-  const holder = readLockHolder(lockDir)
-  if (holder?.token !== undefined) {
-    if (holder.token !== token) return
-  } else if (ino !== undefined) {
-    // No token to compare against. There is a real window for this: the lock
-    // directory is created before `owner.json` is written, so a successor that
-    // re-took the lock in between holds a live lock carrying no token, and
-    // removing it by pathname would admit a third process. The directory's own
-    // identity settles it — a different inode is a different lock.
-    try {
-      if (fs.statSync(lockDir).ino !== ino) return
-    } catch {
-      return
-    }
-  }
+function releaseInstallLock(lockPath: string, token: string): void {
+  const holder = readLockHolder(lockPath)
+  if (holder?.token !== token) return
   try {
-    fs.rmSync(lockDir, { recursive: true, force: true })
+    fs.rmSync(lockPath, { force: true })
   } catch {
     // Leaving it behind is safe: the next contender ages it out as stale.
   }
@@ -1411,15 +1453,18 @@ function releaseInstallLock(lockDir: string, token: string, ino: number | undefi
 /**
  * A value that changes when the lock changes hands.
  *
- * The owner's token when it published one; otherwise the lock directory's own
- * identity, which a fresh `mkdir` changes even when the owner file is missing
- * or unreadable. `undefined` means we could not tell, and the caller then
- * treats the holder as unchanged rather than inventing progress.
+ * The owner's token when it publishes one — which every lock this scheme
+ * creates always does. The file-identity fallback below is purely
+ * informational (it only ever widens *how long we wait*, never who owns or
+ * deletes what), for the torn-read case where a concurrent `wx` create is
+ * observed mid-write and its content does not parse yet: `undefined` there
+ * would make the caller treat the holder as unchanged rather than inventing
+ * progress, so a coarse identity is better than none for that purpose alone.
  */
-function lockIdentity(lockDir: string, holder: LockHolder | undefined): string | undefined {
+function lockIdentity(lockPath: string, holder: LockHolder | undefined): string | undefined {
   if (holder?.token) return holder.token
   try {
-    const stat = fs.statSync(lockDir)
+    const stat = fs.statSync(lockPath)
     return `${stat.ino}:${stat.mtimeMs}`
   } catch {
     return undefined
@@ -1439,7 +1484,7 @@ export async function withInstallLock<T>(
   fn: (acquired: boolean) => Promise<T>,
   options: { timeoutMs?: number; staleAfterMs?: number; hardStaleAfterMs?: number; pollMs?: number } = {},
 ): Promise<T> {
-  const lockDir = heldLockPath(dir)
+  const lockPath = heldLockPath(dir)
   const timeoutMs = options.timeoutMs ?? 240_000
   const staleAfterMs = options.staleAfterMs ?? 300_000
   const hardStaleAfterMs = options.hardStaleAfterMs ?? Math.max(staleAfterMs, 3_600_000)
@@ -1456,18 +1501,17 @@ export async function withInstallLock<T>(
   const maxHandovers = 32
   let handovers = 0
   let lastHolder: string | undefined
-  const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  const token = newLockToken()
   let acquired = false
-  let ino: number | undefined
 
-  // The container must exist before the atomic mkdir inside it can land. On a
+  // The container must exist before the atomic create inside it can land. On a
   // cold machine nothing has created the XDG data directory yet —
   // `performInstall` is the first thing that does, and it runs *after* this — so
-  // a non-recursive mkdir would fail ENOENT, take the "cannot lock" branch, and
+  // a non-recursive create would fail ENOENT, take the "cannot lock" branch, and
   // drop every caller straight into an unlocked install. That is precisely the
   // cold-start stampede this lock exists to prevent.
   try {
-    fs.mkdirSync(path.dirname(lockDir), { recursive: true })
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true })
   } catch {
     // Genuinely unwritable. The acquire below then fails too and we proceed
     // unlocked, which is the documented degradation.
@@ -1475,44 +1519,12 @@ export async function withInstallLock<T>(
 
   for (;;) {
     try {
-      fs.mkdirSync(lockDir, { recursive: false })
-      acquired = true
-      try {
-        ino = fs.statSync(lockDir).ino
-      } catch {
-        // Identity check is skipped on release; the token check still applies.
-      }
-      break
-    } catch (e) {
-      // Anything but "already held" — an unwritable parent, say — means we
-      // cannot lock at all, so proceed unlocked rather than block forever.
-      const code = e && typeof e === "object" && "code" in e ? (e as { code?: unknown }).code : undefined
-      if (code !== "EEXIST") break
-      const holder = readLockHolder(lockDir)
-      const identity = lockIdentity(lockDir, holder)
-      if (identity !== undefined && identity !== lastHolder) {
-        if (lastHolder !== undefined && handovers < maxHandovers) {
-          handovers++
-          deadline = Date.now() + timeoutMs
-        }
-        lastHolder = identity
-      }
-      if (isStaleLock(lockDir, holder, staleAfterMs, hardStaleAfterMs)) {
-        // A claim can fail persistently — a lock owned by another user, or a
-        // container that permits inspection but not rename. Retrying such a
-        // claim without yielding spins at full CPU and never reaches the
-        // deadline, so only a claim that actually succeeded skips the wait.
-        if (claimStaleLock(lockDir, holder)) continue
-      }
-      if (Date.now() >= deadline) break
-      await sleep(pollMs)
-    }
-  }
-
-  if (acquired) {
-    try {
+      // `wx`: O_CREAT | O_EXCL | O_WRONLY. Exactly one process can succeed in
+      // creating `lockPath`, and the token that settles ownership is written
+      // as part of that same call — there is no window where the lock exists
+      // without one, unlike the earlier mkdir-then-write-owner-file scheme.
       fs.writeFileSync(
-        path.join(lockDir, "owner.json"),
+        lockPath,
         JSON.stringify({
           pid: process.pid,
           hostname: os.hostname(),
@@ -1520,16 +1532,40 @@ export async function withInstallLock<T>(
           token,
           budgetMs: hardStaleAfterMs,
         } satisfies LockHolder),
+        { flag: "wx" },
       )
-    } catch {
-      // Diagnostics only — the lock is the directory, not the file in it.
+      acquired = true
+      break
+    } catch (e) {
+      // Anything but "already held" — an unwritable parent, say — means we
+      // cannot lock at all, so proceed unlocked rather than block forever.
+      const code = e && typeof e === "object" && "code" in e ? (e as { code?: unknown }).code : undefined
+      if (code !== "EEXIST") break
+      const holder = readLockHolder(lockPath)
+      const identity = lockIdentity(lockPath, holder)
+      if (identity !== undefined && identity !== lastHolder) {
+        if (lastHolder !== undefined && handovers < maxHandovers) {
+          handovers++
+          deadline = Date.now() + timeoutMs
+        }
+        lastHolder = identity
+      }
+      if (isStaleLock(lockPath, holder, staleAfterMs, hardStaleAfterMs)) {
+        // A claim can fail persistently — a lock owned by another user, or a
+        // container that permits inspection but not rename. Retrying such a
+        // claim without yielding spins at full CPU and never reaches the
+        // deadline, so only a claim that actually succeeded skips the wait.
+        if (claimStaleLock(lockPath, holder)) continue
+      }
+      if (Date.now() >= deadline) break
+      await sleep(pollMs)
     }
   }
 
   try {
     return await fn(acquired)
   } finally {
-    if (acquired) releaseInstallLock(lockDir, token, ino)
+    if (acquired) releaseInstallLock(lockPath, token)
   }
 }
 

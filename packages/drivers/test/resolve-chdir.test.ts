@@ -136,6 +136,32 @@ describe("resolution does not depend on the working directory", () => {
     expect(mod.dir).toBe(fs.realpathSync(pkgDir))
   })
 
+  test("treats a descendant named with a leading '..' as workspace-controlled, not parent traversal", () => {
+    // A directory component that merely STARTS WITH ".." — "..evil" — is a
+    // real child of cwd, not parent traversal, even though the relative path
+    // string built from it also starts with the two characters "..". Only
+    // ".." itself, or ".." followed by a separator, means a path actually
+    // climbed above cwd; a naive `rel.startsWith("..")` check conflates the
+    // two and would admit this as an external, non-workspace root.
+    const evilNodeModules = path.join(root, "..evil", "node_modules", "duckdb")
+    fs.mkdirSync(evilNodeModules, { recursive: true })
+    fs.writeFileSync(path.join(evilNodeModules, "package.json"), JSON.stringify({ name: "duckdb", version: "1.0.0" }))
+
+    process.chdir(root)
+
+    const named = path.join(evilNodeModules, "package.json")
+    const ambient = Object.assign(new Error(`ENOENT: no such file or directory, open '${named}'`), {
+      code: "ENOENT",
+    })
+
+    const roots = searchRootsFromError(ambient)
+
+    // The workspace-controlled node_modules under "..evil" must not be
+    // returned — it is a real descendant of cwd, so it stays excluded exactly
+    // like any other project node_modules.
+    expect(roots).toEqual([])
+  })
+
   test("excludes a nested dependency root under an ancestor node_modules when cwd starts below the project root", () => {
     // The CLI can start in a subdirectory that has no node_modules of its own
     // — cwd = <project>/packages/app — while the hoisted node_modules lives at

@@ -61,6 +61,31 @@ describe("installLockPath keeps a root intact", () => {
   test("a directory deeper than a forward-slash UNC root is not treated as a root", () => {
     expect(installLockPath("//server/share/a")).toBe("//server/share/a.lock")
   })
+
+  test("puts the lock inside a mixed-separator UNC share root", () => {
+    // Node's Windows path handling normalizes "\\server/share" to the same
+    // UNC root as "\\server\share" — accepting only one separator spelling
+    // between the leading pair, the host, and the share left this
+    // unrecognized, so ALTIMATE_DRIVER_DIR="\\server/share" got a lock
+    // addressing a different share.
+    expect(installLockPath("\\\\server/share/")).toBe("\\\\server/share\\.lock")
+    expect(installLockPath("\\\\server/share")).toBe("\\\\server/share\\.lock")
+    // Whichever separator the input carries wins for the appended one too:
+    // `installLockPath`'s own `separator` choice is "\\" whenever the input
+    // contains any backslash at all, forward-slash otherwise.
+    expect(installLockPath("//server\\share")).toBe("//server\\share\\.lock")
+  })
+
+  test("a directory deeper than a mixed-separator UNC root is not treated as a root", () => {
+    expect(installLockPath("\\\\server/share/a")).toBe("\\\\server/share/a.lock")
+  })
+
+  test("does not treat the verbatim \\\\?\\ prefix as separator-flexible", () => {
+    // "\\?\" explicitly disables Windows' own path normalization, so a "/"
+    // inside it is a literal character in a component name, not a separator.
+    // This must NOT be recognized as the extended-length UNC root shape.
+    expect(installLockPath("\\\\?\\UNC/server/share")).toBe("\\\\?\\UNC/server/share.lock")
+  })
 })
 
 describe("quotedAbsolutePaths covers every absolute shape", () => {

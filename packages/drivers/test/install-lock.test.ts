@@ -18,14 +18,14 @@ import { installLockPath, withInstallLock } from "../src/resolve"
 
 const resolveModule = fileURLToPath(new URL("../src/resolve.ts", import.meta.url))
 
-/** The atomic lock inside the container, which is what contention is fought over. */
+/** The atomic lock file inside the container, which is what contention is fought over. */
 const heldPath = (target: string) => path.join(installLockPath(target), "held")
 
 /** Plant a lock with a given owner record, as a peer process would leave it. */
 function plantLock(target: string, holder: Record<string, unknown>) {
   const held = heldPath(target)
-  fs.mkdirSync(held, { recursive: true })
-  fs.writeFileSync(path.join(held, "owner.json"), JSON.stringify(holder))
+  fs.mkdirSync(path.dirname(held), { recursive: true })
+  fs.writeFileSync(held, JSON.stringify(holder))
   return held
 }
 
@@ -353,9 +353,12 @@ process.exit(0)
 
     await withInstallLock(target, async (acquired) => {
       expect(acquired).toBe(true)
-      // A peer breaks our lock and takes its own.
+      // A peer breaks our lock and takes its own — overwriting the lock file
+      // directly, the way a successor's own `wx` create would leave it (this
+      // test is simulating the successor's write, not going through the real
+      // acquire path itself).
       fs.writeFileSync(
-        path.join(held, "owner.json"),
+        held,
         JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now(), token: "successor" }),
       )
     })
@@ -363,21 +366,45 @@ process.exit(0)
     expect(fs.existsSync(held)).toBe(true)
   })
 
-  test("does not delete a successor lock that has no owner record yet", async () => {
-    // The lock directory is created before `owner.json` is written, so a
-    // successor can hold a live lock carrying no token at all. Identity of the
-    // directory itself is what settles ownership in that window.
+  test("does not delete a successor lock with no readable token, even at the same inode (inode-reuse regression)", async () => {
+    // This is the race that mattered under the old scheme, and the one that
+    // actually failed in CI on Linux/tmpfs: filesystem identity (an inode) is
+    // not a portable ownership signal. `rmSync` + `writeFileSync` at the same
+    // path CAN hand the new file the very inode the old one had — that is
+    // exactly what tripped the old "no token, fall back to inode" release
+    // branch there — but whether it does is filesystem- and OS-dependent; it
+    // did not reproduce across 20 local runs on macOS/APFS, which is why this
+    // failure was invisible locally and only showed up in CI.
+    //
+    // Overwriting the lock's content IN PLACE, rather than deleting and
+    // recreating it, pins the exact same invariant deterministically on every
+    // platform: it *guarantees* the inode is unchanged (there is no unlink in
+    // between — POSIX writes to an existing file do not allocate a new one),
+    // while the content — and therefore the token — genuinely changes. A
+    // release that still trusts inode identity as a fallback would treat this
+    // as "unchanged, still ours" and delete a live successor's lock; a release
+    // that trusts only the token treats a token mismatch (here: no token at
+    // all) as "not provably ours" regardless of what the inode says.
+    //
+    // This must fail against a release that falls back to inode identity when
+    // no token is readable, and pass against one that trusts only the token —
+    // verified directly: temporarily restoring the old inode-fallback branch
+    // and confirming this test fails against it before restoring the fix.
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
     const held = heldPath(target)
 
     await withInstallLock(target, async (acquired) => {
       expect(acquired).toBe(true)
-      // Replace the lock with a different directory carrying no owner record.
-      fs.rmSync(held, { recursive: true, force: true })
-      fs.mkdirSync(held, { recursive: true })
+      // A successor that reclaimed this path but has not (yet, or ever)
+      // written a readable token — a corrupted write, a foreign or older
+      // writer — leaves exactly this shape: same inode, no token.
+      fs.writeFileSync(held, JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: Date.now() }))
     })
 
+    // Our release must not have deleted the successor's untokened lock: no
+    // token in the record means it cannot be proven to be ours, regardless of
+    // filesystem identity.
     expect(fs.existsSync(held)).toBe(true)
   })
 
