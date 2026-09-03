@@ -191,7 +191,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }} # compile the PR head, not the synthetic merge commit
       # Produce manifest/catalog plus compiled SQL for both sides (adapter-specific).
       - name: Build dbt review artifacts
         env:

@@ -89,6 +89,22 @@ export const AiReviewSummary = z.object({
 })
 export type AiReviewSummary = z.infer<typeof AiReviewSummary>
 
+export interface ReviewPolicySignatureInput {
+  severityThreshold: Severity
+  enabledReviewers: string[]
+  exclusionCount: number
+}
+
+/** Compact fingerprint for the settings that determine which findings surface. */
+export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): string {
+  const body = JSON.stringify([
+    input.severityThreshold,
+    [...new Set(input.enabledReviewers)].sort(),
+    input.exclusionCount,
+  ])
+  return createHash("sha256").update(body).digest("hex").slice(0, 16)
+}
+
 const ReviewSummary = z.object({
   critical: z.number().int().nonnegative(),
   warning: z.number().int().nonnegative(),
@@ -125,6 +141,8 @@ export const VerdictEnvelope = z.object({
   idealVerdict: Verdict,
   mode: ReviewMode,
   tier: RiskTier,
+  /** Fingerprint of the severity, enabled lanes, and exclusion count used for this run. */
+  policySignature: z.string().optional(),
   /** G1 — reasons the classifier assigned this tier (only when --explain-tier). */
   tierReasons: z.array(z.string()).optional(),
   /** G2 — true when --force-tier bypassed the classifier. Included in signature so
@@ -200,6 +218,7 @@ export interface BuildEnvelopeInput {
   degraded?: boolean
   artifactHints?: string[]
   aiReview?: AiReviewSummary
+  policySignature?: string
   /** G1 — classifier reasons for the tier (only surfaced when explainTier=true). */
   tierReasons?: string[]
   /** G2 — set when --force-tier was applied. */
@@ -244,6 +263,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     idealVerdict: ideal,
     mode: input.mode,
     tier: input.tier,
+    policySignature: input.policySignature,
     tierReasons: input.tierReasons,
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,

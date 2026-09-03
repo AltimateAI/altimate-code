@@ -1912,10 +1912,13 @@ describe("orchestrate", () => {
       mode: "comment",
       aiReview: { status: "skipped", reason: "no reviewable files", findings: 0 },
     })
-    expect(renderSummary(trivial)).not.toContain("AI reviewer:")
+    expect(renderSummary(trivial)).toContain("🤖 AI reviewer: skipped — no reviewable files")
+
+    const withoutAiReview = buildEnvelope({ findings: [], tier: "trivial", mode: "comment" })
+    expect(renderSummary(withoutAiReview)).not.toContain("AI reviewer:")
   })
 
-  test("empty scope skips the generic success and AI reviewer lines", () => {
+  test("empty scope skips the generic success line but renders a present AI reviewer status", () => {
     const env = buildEnvelope({
       findings: [],
       tier: "lite",
@@ -1927,7 +1930,7 @@ describe("orchestrate", () => {
 
     expect(summary).toContain("Nothing to review")
     expect(summary).not.toContain("No issues found in the changed dbt models")
-    expect(summary).not.toContain("AI reviewer:")
+    expect(summary).toContain("🤖 AI reviewer: 2 advisory findings")
   })
 
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {

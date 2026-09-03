@@ -18,6 +18,7 @@ import {
   type VerdictEnvelope,
   NO_MODEL_REASON,
   buildEnvelope,
+  makeReviewPolicySignature,
   signEnvelope,
 } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
@@ -1162,6 +1163,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
+  const exclusions = input.rubric.exclusions
+  const policySignature = makeReviewPolicySignature({
+    severityThreshold: input.config.severityThreshold,
+    enabledReviewers: [...lanes],
+    exclusionCount:
+      Number(exclusions.allowSelectStarInStaging) +
+      Number(exclusions.skipMissingContractWhenNotEnforced) +
+      Number(exclusions.skipNonProdModels) +
+      exclusions.excludeGlobs.length,
+  })
 
   const all: Finding[][] = []
   // Files where the diff-scoped PII classifier completed (looked at the change),
@@ -1458,6 +1469,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     findings,
     tier,
     mode: input.mode,
+    policySignature,
     rubric: input.rubric,
     engine: { core: input.coreVersion, model: input.modelVersion, cliVersion: input.cliVersion },
     manifestHash: input.manifestHash,

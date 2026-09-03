@@ -120,6 +120,31 @@ describe("detectArtifactHints", () => {
     ).toEqual(["target/compiled missing for 1 changed model(s) (run `dbt compile` for the head)"])
   })
 
+  test("uses compiled SQL beside a custom manifest and prefers its sibling base directory", async () => {
+    await using tmp = await tmpdir()
+    const project = "analytics"
+    const build = path.join(tmp.path, "build")
+    const headModel = path.join(build, "compiled", project, "models", "a.sql")
+    const siblingBaseModel = path.join(tmp.path, "build-base", "compiled", project, "models", "a.sql")
+    const fallbackBaseModel = path.join(tmp.path, "target-base", "compiled", project, "models", "a.sql")
+    await fs.mkdir(path.dirname(headModel), { recursive: true })
+    await fs.mkdir(path.dirname(siblingBaseModel), { recursive: true })
+    await fs.mkdir(path.dirname(fallbackBaseModel), { recursive: true })
+    await fs.writeFile(path.join(build, "manifest.json"), "{}")
+    await fs.writeFile(path.join(build, "catalog.json"), "{}")
+    await fs.writeFile(headModel, "select 1")
+    await fs.writeFile(fallbackBaseModel, "select 1")
+
+    const manifest = path.join(build, "manifest.json")
+    const changedModels = [{ path: "models/a.sql", status: "modified" as const }]
+    expect(await detectArtifactHints(manifest, tmp.path, changedModels, project)).toEqual([
+      "build-base/compiled missing for 1 changed model(s) (compile the base ref)",
+    ])
+
+    await fs.writeFile(siblingBaseModel, "select 1")
+    expect(await detectArtifactHints(manifest, tmp.path, changedModels, project)).toEqual([])
+  })
+
   test("does not report artifacts when the manifest itself is absent", async () => {
     await using tmp = await tmpdir()
     expect(

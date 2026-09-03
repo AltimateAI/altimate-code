@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { makeFinding, type Finding } from "../../../src/altimate/review/finding"
 import { renderSummary } from "../../../src/altimate/review/format"
 import { computeFindingDelta, parseFindingIds } from "../../../src/altimate/review/post-github"
-import { buildEnvelope } from "../../../src/altimate/review/verdict"
+import { buildEnvelope, makeReviewPolicySignature } from "../../../src/altimate/review/verdict"
 
 function finding(id: string, overrides: Partial<Parameters<typeof makeFinding>[0]> = {}): Finding {
   return makeFinding({
@@ -17,7 +17,7 @@ function finding(id: string, overrides: Partial<Parameters<typeof makeFinding>[0
   })
 }
 
-function summary(findings: Finding[], options: { lintOnly?: boolean } = {}): string {
+function summary(findings: Finding[], options: { lintOnly?: boolean; artifactHints?: string[] } = {}): string {
   return renderSummary(buildEnvelope({ findings, tier: "full", mode: "comment", ...options }))
 }
 
@@ -90,7 +90,9 @@ describe("review summary readability", () => {
       }),
     ]
 
-    const rendered = summary(findings)
+    const rendered = summary(findings, {
+      artifactHints: ["target/compiled missing for 2 changed model(s)"],
+    })
 
     expect(rendered).toContain("### ⚠️ Warning (6 findings · 3 items)")
     expect(rendered).toContain(
@@ -102,6 +104,12 @@ describe("review summary readability", () => {
     expect(rendered).toContain("**`orders`: grain columns without `not_null`** — `id`, `created_at` · test_coverage")
     expect(rendered).toContain("Add `not_null` to each listed column's `data_tests:` on `orders`")
     expect(rendered.split("Add `not_null`")).toHaveLength(2)
+
+    const withoutCompiledHint = summary(findings)
+    expect(withoutCompiledHint).toContain(
+      "**Equivalence could not be decided for 2 models** — no schema, or unsupported SQL. Undecidable with the available artifacts — unsupported SQL for this dialect or missing schema; verify with a data-diff. Models: `orders`, `customers`",
+    )
+    expect(withoutCompiledHint).not.toContain("Fix once: compile base and head")
   })
 
   test("long non-critical sections fold after 12 rendered items, while critical never folds", () => {
@@ -173,24 +181,55 @@ describe("review summary readability", () => {
   })
 
   test("finding id blocks round-trip and drive the rerun delta line", () => {
+    const policySignature = makeReviewPolicySignature({
+      severityThreshold: "suggestion",
+      enabledReviewers: ["semantic_change", "sql_quality"],
+      exclusionCount: 3,
+    })
+    expect(policySignature).toBe(
+      makeReviewPolicySignature({
+        severityThreshold: "suggestion",
+        enabledReviewers: ["sql_quality", "semantic_change"],
+        exclusionCount: 3,
+      }),
+    )
     const previous = buildEnvelope({
       findings: [finding("fixed"), finding("unchanged")],
       tier: "lite",
       mode: "comment",
+      policySignature,
     })
     const current = buildEnvelope({
       findings: [finding("unchanged"), finding("new")],
       tier: "lite",
       mode: "comment",
+      policySignature,
     })
     const previousBody = renderSummary(previous)
 
     expect([...parseFindingIds(previousBody)!]).toEqual(["fixed", "unchanged"])
     const delta = computeFindingDelta(previousBody, current)
-    expect(delta).toEqual({ fixed: 1, new: 1, unchanged: 1 })
+    expect(delta).toEqual({ noLongerSurfaced: 1, new: 1, unchanged: 1, reviewSettingsChanged: undefined })
 
     const currentBody = renderSummary(current, delta)
-    expect(currentBody).toContain("**Since last review:** 1 fixed · 1 new · 1 unchanged")
+    expect(currentBody).toContain("**Since last review:** 1 no longer surfaced · 1 new · 1 unchanged")
+    expect(currentBody).toContain(`<!-- altimate-policy: ${policySignature} -->`)
     expect(currentBody.endsWith("<!-- altimate-findings: unchanged,new -->")).toBe(true)
+
+    const changedPolicy = buildEnvelope({
+      findings: current.findings,
+      tier: "lite",
+      mode: "comment",
+      policySignature: makeReviewPolicySignature({
+        severityThreshold: "warning",
+        enabledReviewers: ["semantic_change", "sql_quality"],
+        exclusionCount: 4,
+      }),
+    })
+    const changedDelta = computeFindingDelta(previousBody, changedPolicy)
+    expect(changedDelta?.reviewSettingsChanged).toBe(true)
+    expect(renderSummary(changedPolicy, changedDelta)).toContain(
+      "**Since last review:** 1 no longer surfaced · 1 new · 1 unchanged (review settings changed)",
+    )
   })
 })

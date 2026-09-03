@@ -164,6 +164,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     for await (const event of stream.fullStream) {
       // drain to avoid SDK hangs
       if (event.type === "abort") streamAborted = true
+      if (event.type === "error") throw event.error
     }
     const text = await Promise.resolve(stream.text)
     if (controller.signal.aborted || streamAborted) {

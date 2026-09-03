@@ -113,7 +113,7 @@ runs:
       run: echo "$HOME/.altimate/bin" >> $GITHUB_PATH
 
     - name: Fetch pull request base ref
-      if: ${{ github.event_name == 'pull_request' && (inputs.base == '' || inputs.head == '') }}
+      if: ${{ github.event_name == 'pull_request' }}
       shell: bash
       env:
         PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -123,7 +123,12 @@ runs:
         set -euo pipefail
         git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
         if [[ -n "${IN_HEAD:-}" ]]; then
-          git fetch --no-tags origin "$IN_HEAD" || true
+          if git rev-parse --verify --quiet "$IN_HEAD^{commit}" >/dev/null; then
+            echo "HEAD_REF=$IN_HEAD" >> "$GITHUB_ENV"
+          else
+            git fetch --no-tags origin "+refs/heads/${IN_HEAD}:refs/remotes/origin/${IN_HEAD}"
+            echo "HEAD_REF=origin/${IN_HEAD}" >> "$GITHUB_ENV"
+          fi
         else
           git fetch --no-tags origin "$PR_HEAD_SHA"
         fi
@@ -208,17 +213,17 @@ runs:
         elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_REF" ]]; then
           # Use the fork point for both the file list and old content: base-only
           # changes after it must never be attributed to this pull request.
-          if MERGE_BASE=$(git merge-base "origin/$PR_BASE_REF" "${IN_HEAD:-$PR_HEAD_SHA}"); then
+          if MERGE_BASE=$(git merge-base "origin/$PR_BASE_REF" "${HEAD_REF:-$PR_HEAD_SHA}"); then
             args+=(--base "$MERGE_BASE")
           else
             echo "::warning::Could not compute pull request merge-base; falling back to origin/$PR_BASE_REF"
             args+=(--base "origin/$PR_BASE_REF")
           fi
         fi
-        if [[ -n "$IN_HEAD" ]]; then
+        if [[ "$EVENT_NAME" == "pull_request" && -n "${HEAD_REF:-$PR_HEAD_SHA}" ]]; then
+          args+=(--head "${HEAD_REF:-$PR_HEAD_SHA}")
+        elif [[ -n "$IN_HEAD" ]]; then
           args+=(--head "$IN_HEAD")
-        elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_HEAD_SHA" ]]; then
-          args+=(--head "$PR_HEAD_SHA")
         fi
         [[ "$IN_POST" == "true" ]] && args+=(--post)
         altimate review "${args[@]}"

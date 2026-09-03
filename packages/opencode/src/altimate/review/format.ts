@@ -10,9 +10,10 @@ import { type VerdictEnvelope } from "./verdict"
 export const REVIEW_MARKER = "<!-- altimate-code-review -->"
 
 export interface FindingDelta {
-  fixed: number
+  noLongerSurfaced: number
   new: number
   unchanged: number
+  reviewSettingsChanged?: boolean
 }
 
 const SEVERITY_EMOJI: Record<Severity, string> = {
@@ -55,7 +56,11 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
 
   if (delta) {
-    lines.push(`**Since last review:** ${delta.fixed} fixed · ${delta.new} new · ${delta.unchanged} unchanged`, "")
+    lines.push(
+      `**Since last review:** ${delta.noLongerSurfaced} no longer surfaced · ${delta.new} new · ${delta.unchanged} unchanged` +
+        (delta.reviewSettingsChanged ? " (review settings changed)" : ""),
+      "",
+    )
   }
 
   const readFirst = selectReadFirst(env.findings)
@@ -122,7 +127,7 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
           : `${items.length} findings · ${summaryGroups.length} items`
       lines.push(`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${sectionCount})`, "")
 
-      const renderedItems = summaryGroups.map(renderSummaryGroup)
+      const renderedItems = summaryGroups.map((group) => renderSummaryGroup(group, env.summary.artifactHints))
       const fold = sev !== "critical" && renderedItems.length > 12
       lines.push(...renderedItems.slice(0, fold ? 12 : renderedItems.length))
       if (fold) {
@@ -141,7 +146,7 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
     )
   }
 
-  if (!env.summary.emptyScope && env.tier !== "trivial" && env.summary.aiReview) {
+  if (env.summary.aiReview) {
     const ai = env.summary.aiReview
     if (ai.status === "ok") {
       lines.push(`🤖 AI reviewer: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")
@@ -161,6 +166,7 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
       (env.manifestHash ? ` · manifest \`${env.manifestHash.slice(0, 10)}\`` : "") +
       "</sub>",
     "",
+    ...(env.policySignature ? [`<!-- altimate-policy: ${env.policySignature} -->`] : []),
     `<!-- altimate-findings: ${env.findings.map((finding) => finding.id).join(",")} -->`,
   )
   return lines.join("\n")
@@ -264,8 +270,8 @@ function groupedTitle(findings: Finding[]): string {
   return `${findings.length} findings: ${family}`
 }
 
-function renderSummaryGroup(findings: Finding[]): string {
-  if (findings.length > 1) return renderGroupedFinding(findings)
+function renderSummaryGroup(findings: Finding[], artifactHints?: string[]): string {
+  if (findings.length > 1) return renderGroupedFinding(findings, artifactHints)
   const finding = findings[0]
   const loc = finding.file + (finding.startLine ? `:${finding.startLine}` : "")
   return (
@@ -274,7 +280,7 @@ function renderSummaryGroup(findings: Finding[]): string {
   )
 }
 
-function renderGroupedFinding(findings: Finding[]): string {
+function renderGroupedFinding(findings: Finding[], artifactHints?: string[]): string {
   const subjects = findings.map((finding) => codeSpan(finding.model ?? finding.file)).join(", ")
   const categories = [...new Set(findings.map((finding) => finding.category))].join(", ")
 
@@ -302,9 +308,12 @@ function renderGroupedFinding(findings: Finding[]): string {
     const flatBody = oneLine(findings[0].body)
     const cause = /equivalence could not be decided\s*\(([^)]+)\)/i.exec(flatBody)?.[1]?.trim() ?? flatBody
     const sentence = /[.!?]$/.test(cause) ? cause : `${cause}.`
+    const remedy = artifactHints?.some((hint) => /\bcompiled\b/i.test(hint))
+      ? "Fix once: compile base and head (see missing-artifact line)."
+      : "Undecidable with the available artifacts — unsupported SQL for this dialect or missing schema; verify with a data-diff."
     return (
       `- **Equivalence could not be decided for ${findings.length} models** — ${sentence} ` +
-      `Fix once: compile base and head (see missing-artifact line). Models: ${subjects}`
+      `${remedy} Models: ${subjects}`
     )
   }
 

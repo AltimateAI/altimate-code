@@ -75,6 +75,11 @@ export function parseFindingIds(body: string | null | undefined): Set<string> | 
   )
 }
 
+function parsePolicySignature(body: string | null | undefined): string | undefined {
+  if (!body) return undefined
+  return /(?:^|\n)<!-- altimate-policy:\s*([^\s]+)\s*-->/.exec(body)?.[1]
+}
+
 /** Compare the prior sticky comment's finding ids with the current envelope. */
 export function computeFindingDelta(
   previousBody: string | null | undefined,
@@ -83,10 +88,15 @@ export function computeFindingDelta(
   const previousIds = parseFindingIds(previousBody)
   if (!previousIds) return undefined
   const currentIds = new Set(current.findings.map((finding) => finding.id))
+  const previousPolicySignature = parsePolicySignature(previousBody)
   return {
-    fixed: [...previousIds].filter((id) => !currentIds.has(id)).length,
+    noLongerSurfaced: [...previousIds].filter((id) => !currentIds.has(id)).length,
     new: [...currentIds].filter((id) => !previousIds.has(id)).length,
     unchanged: [...currentIds].filter((id) => previousIds.has(id)).length,
+    reviewSettingsChanged:
+      previousPolicySignature && current.policySignature && previousPolicySignature !== current.policySignature
+        ? true
+        : undefined,
   }
 }
 

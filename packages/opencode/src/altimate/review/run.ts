@@ -127,6 +127,29 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
   }
 }
 
+interface CompiledArtifactDirs {
+  headDir: string
+  baseDir: string
+}
+
+async function compiledArtifactDirs(manifestAbs: string, dbtRoot: string): Promise<CompiledArtifactDirs> {
+  const manifestDir = path.dirname(manifestAbs)
+  const headDir = path.join(manifestDir, "compiled")
+  const siblingBaseDir = path.join(`${manifestDir}-base`, "compiled")
+  let baseDir = path.join(dbtRoot, "target-base", "compiled")
+  try {
+    await access(siblingBaseDir)
+    baseDir = siblingBaseDir
+  } catch {
+    /* keep the conventional target-base/compiled fallback */
+  }
+  return { headDir, baseDir }
+}
+
+function artifactDirLabel(dir: string, dbtRoot: string): string {
+  return path.relative(dbtRoot, dir).split(path.sep).join("/") || path.basename(dir)
+}
+
 /** Report missing dbt artifacts only when the manifest itself exists. */
 export async function detectArtifactHints(
   manifestAbs: string,
@@ -134,6 +157,7 @@ export async function detectArtifactHints(
   changedModels: Array<Pick<ChangedFile, "path" | "status" | "oldPath">> = [],
   projectName?: string,
   pathPrefix?: string,
+  artifactDirs?: CompiledArtifactDirs,
 ): Promise<string[]> {
   if (changedModels.length === 0) return []
 
@@ -157,7 +181,8 @@ export async function detectArtifactHints(
     return hints
   }
 
-  const getCompiled = makeCompiledResolver({ cwd: dbtRoot, projectName, pathPrefix })
+  const { headDir, baseDir } = artifactDirs ?? (await compiledArtifactDirs(manifestAbs, dbtRoot))
+  const getCompiled = makeCompiledResolver({ cwd: dbtRoot, projectName, pathPrefix, headDir, baseDir })
   const baseModels = changedModels.filter((file) => file.status !== "added")
   const headModels = changedModels.filter((file) => file.status !== "deleted")
   const [missingBase, missingHead] = await Promise.all([
@@ -169,10 +194,10 @@ export async function detectArtifactHints(
     ),
   ])
   if (missingBase > 0) {
-    hints.push(`target-base/compiled missing for ${missingBase} changed model(s) (compile the base ref)`)
+    hints.push(`${artifactDirLabel(baseDir, dbtRoot)} missing for ${missingBase} changed model(s) (compile the base ref)`)
   }
   if (missingHead > 0) {
-    hints.push(`target/compiled missing for ${missingHead} changed model(s) (run \`dbt compile\` for the head)`)
+    hints.push(`${artifactDirLabel(headDir, dbtRoot)} missing for ${missingHead} changed model(s) (run \`dbt compile\` for the head)`)
   }
   return hints
 }
@@ -378,10 +403,18 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const changedModels = filterChangedFiles(changedFiles, rubric.exclusions.excludeGlobs).filter(
     (file) => file.kind === "model_sql" || file.kind === "python_model",
   )
-  const artifactHints = await detectArtifactHints(manifestAbs, dbtRootReal, changedModels, projectName, pathPrefix)
+  const artifactDirs = await compiledArtifactDirs(manifestAbs, dbtRootReal)
+  const artifactHints = await detectArtifactHints(
+    manifestAbs,
+    dbtRootReal,
+    changedModels,
+    projectName,
+    pathPrefix,
+    artifactDirs,
+  )
   const getCompiled = opts.getContent
     ? undefined
-    : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
+    : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix, ...artifactDirs })
 
   return runReview({
     changedFiles,

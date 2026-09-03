@@ -26,6 +26,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # REQUIRED: the merge-base diff needs full history
+          # Check out the PR head, not the synthetic merge commit the event
+          # defaults to: the head compile must match the commit the review
+          # compares against, or base-only changes leak into target/compiled.
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - uses: actions/setup-python@v5
         with:

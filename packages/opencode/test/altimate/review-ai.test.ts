@@ -37,7 +37,7 @@ function reviewFile(index: number): AiReviewFile {
   }
 }
 
-describe("runAiReview timeout", () => {
+describe("runAiReview stream handling", () => {
   test("returns timeout when pre-stream setup never resolves", async () => {
     spyOn(Dispatcher as any, "call").mockImplementation(
       (() => new Promise(() => {})) as any,
@@ -106,6 +106,33 @@ describe("runAiReview timeout", () => {
 
     expect(signal?.aborted).toBe(true)
     expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 62s" })
+    expect(parseCalls()).toBe(0)
+  })
+
+  test("returns a sanitised error without parsing partial text when the stream emits an error event", async () => {
+    const parseCalls = stubModelAndPrompt()
+    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "text-delta", text: "partial" }
+          yield {
+            type: "error",
+            error: new Error(
+              "upstream failed at https://provider.example/v1 using sk-abcdefghijklmnopqrstuvwxyz",
+            ),
+          }
+        },
+      },
+      text: Promise.resolve('[{"file":"models/model_0.sql","title":"partial","body":"partial"}]'),
+    }))
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+
+    expect(result).toEqual({
+      findings: [],
+      status: "error",
+      reason: "Error: upstream failed at <redacted-url> using sk-***",
+    })
     expect(parseCalls()).toBe(0)
   })
 })

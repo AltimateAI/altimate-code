@@ -40,9 +40,9 @@ export interface CompiledResolverOptions {
   /** dbt project root (the dir containing `dbt_project.yml`). */
   cwd: string
   projectName?: string
-  /** Directory holding HEAD-side compiled SQL (relative to cwd). */
+  /** Directory holding HEAD-side compiled SQL (relative to cwd, or absolute). */
   headDir?: string
-  /** Directory holding BASE-side compiled SQL (relative to cwd). */
+  /** Directory holding BASE-side compiled SQL (relative to cwd, or absolute). */
   baseDir?: string
   /** Prefix within the repo-relative file path that maps to `cwd`.
    *  For a monorepo where the dbt project lives at `packages/dbt/`, callers
@@ -80,7 +80,8 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
     // this the compiled resolver silently misses in monorepo layouts.
     const rel = prefix && (file === prefix || file.startsWith(prefix + "/")) ? file.slice(prefix.length + 1) : file
     const root = side === "new" ? headDir : baseDir
-    const compiledRoot = path.join(opts.cwd, root, project)
+    const rootAbs = path.isAbsolute(root) ? root : path.join(opts.cwd, root)
+    const compiledRoot = path.join(rootAbs, project)
     // Shared realpath containment check — matches makeContentResolver's
     // symlink-safe read so a future tweak to the containment logic can't
     // leave one call site behind (cubic + kilo suggestion).
