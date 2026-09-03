@@ -130,7 +130,15 @@ Replies on a finding open an altimate-code session with the finding, compiled SQ
 5. Widen `altimate-ingestion` to the Databricks package now and move it from the 0.9.3 pin to an exact pin of the current release with automated bumps (Dependabot/Renovate on the `--version` line), so Phase 1 measures real volume without floating `latest`. Same policy as Phase 0C item 14.
 6. Budget a core release (prompt guidance slot, typed suggestion payload, `ruleId` in engine output) — Phases 1–2 depend on it.
 
-## 7. Not verified
+## 7. Deferred from PR #1241's automated review (eighth wave, all P2, none affect the verdict)
+- Signature versioning so a sticky comment from before the field existed does not report "review settings changed" once (`verdict.ts`).
+- Ignore an inherited `HEAD_REF` environment variable when no custom head was selected (`action.yml`).
+- Skip base-artifact probing for renames whose old SQL is never read (`run.ts`).
+- Treat a valid zero-model manifest as available when a PR deletes the project's last model (`orchestrate.ts`).
+- Make the compiled resolver use the artifact directories the fidelity probe accepted when an integration supplies a custom `getContent` (`run.ts`).
+- Check core parse success before reporting the AI lane as `ok` (`ai-review.ts`).
+
+## 8. Not verified
 - The wrong-PR posting in #1320: the base-ref bug is confirmed; PR-number resolution reads the event correctly, so the misdirection needs a repro against the dogfood workflow's exact trigger.
 - The AI layer's output quality: no run in this investigation had credentials for it.
 - The positional equivalence comparator lives in the core; reproduced, not fixed.
