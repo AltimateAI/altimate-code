@@ -226,11 +226,13 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
  * paths like "\repo" count as absolute to Node, but resolve() completes them
  * with the process's CURRENT drive — so a corrupt entry could match any cwd
  * on that drive and defeat the two-bridge decline. Drive-qualified (C:\ or
- * C:/) or UNC (\\server\share) only; POSIX keeps plain isAbsolute. The
- * platform parameter exists for tests. (codex r4) */
+ * C:/) or complete UNC only: a UNC value needs nonempty server AND share
+ * components — resolve("\\\\") is "C:\\" and resolve("\\\\server") is
+ * "C:\\server", both on the current drive again. POSIX keeps plain
+ * isAbsolute. The platform parameter exists for tests. (codex r4+r5) */
 export function qualifiedFolder(f: string, win: boolean = process.platform === "win32"): boolean {
   if (!f) return false
-  return win ? /^([a-zA-Z]:[\\/]|\\\\)/.test(f) : isAbsolute(f)
+  return win ? /^([a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/]+[^\\/]+)/.test(f) : isAbsolute(f)
 }
 
 function pidAlive(pid: number): boolean {

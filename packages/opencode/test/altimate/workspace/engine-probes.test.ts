@@ -116,8 +116,14 @@ describe("liveBridge", () => {
     expect(qualifiedFolder("C:\\ws", true)).toBe(true)
     expect(qualifiedFolder("c:/ws", true)).toBe(true)
     expect(qualifiedFolder("\\\\server\\share\\ws", true)).toBe(true)
+    expect(qualifiedFolder("\\\\server\\share", true)).toBe(true)
     expect(qualifiedFolder("\\repo", true)).toBe(false)
     expect(qualifiedFolder("\\", true)).toBe(false)
+    // Incomplete pseudo-UNC: resolve("\\\\") is "C:\\", resolve("\\\\server")
+    // is "C:\\server" — the current drive again, not a UNC device.
+    expect(qualifiedFolder("\\\\", true)).toBe(false)
+    expect(qualifiedFolder("\\\\server", true)).toBe(false)
+    expect(qualifiedFolder("\\\\server\\", true)).toBe(false)
     expect(qualifiedFolder("C:relative", true)).toBe(false)
     expect(qualifiedFolder("", true)).toBe(false)
     // posix branch
