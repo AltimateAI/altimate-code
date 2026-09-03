@@ -42,7 +42,9 @@ describe("warehouse.test against a real DuckDB store", () => {
     storePath = path.join(dir, "warehouse.duckdb")
     lockedPath = path.join(dir, "locked.duckdb")
     Registry.reset()
-    Registry.setConfigs({ seed: { type: "duckdb", path: storePath } })
+    // `create: true`: this deliberately materializes a fresh scratch store for
+    // the suite, which is exactly the case the store-existence guard exempts.
+    Registry.setConfigs({ seed: { type: "duckdb", path: storePath, create: true } })
     const c = await Registry.get("seed")
     await c.execute("CREATE TABLE t AS SELECT 1 AS a")
     const probe = await c.execute("SELECT count(*) AS n FROM t")

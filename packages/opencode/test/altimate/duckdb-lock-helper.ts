@@ -39,7 +39,10 @@ export async function holdWriteLock(storePath: string, scratchDir: string): Prom
       // same HOLD_FAILED channel as any other failure rather than surfacing as
       // a bare unhandled rejection the parent has to guess at.
       `  const { connect } = await import(${JSON.stringify(DRIVER_PATH)})`,
-      `  const c = await connect({ type: "duckdb", path: process.argv[2] })`,
+      // The lock-holder always creates a fresh store, so it must opt in to
+      // creation — otherwise the store-existence guard would refuse it before
+      // it can take the lock the caller is waiting on.
+      `  const c = await connect({ type: "duckdb", path: process.argv[2], create: true })`,
       `  await c.connect()`,
       // A real write, so the lock is unambiguously a writer's.
       `  await c.execute("CREATE TABLE IF NOT EXISTS lock_probe (x INTEGER)")`,

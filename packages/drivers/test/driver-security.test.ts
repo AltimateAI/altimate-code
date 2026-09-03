@@ -178,7 +178,7 @@ describe("DuckDB driver", () => {
       }))
 
       const { connect } = await import("../src/duckdb")
-      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb" })
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb", create: true })
       await connector.connect()
       expect(connectAttempts).toBe(2) // First failed, second succeeded in READ_ONLY
       // The retry must specifically request READ_ONLY — two attempts alone don't
@@ -219,7 +219,11 @@ describe("DuckDB driver", () => {
       }))
 
       const { connect } = await import("../src/duckdb")
-      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb" })
+      // altimate_change start — bypass the store-existence guard for this mock:
+      // it never touches the real filesystem, and the test targets lock-error
+      // classification, not the existence check.
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb", create: true })
+      // altimate_change end
 
       try {
         await connector.connect()
@@ -267,7 +271,10 @@ describe("DuckDB driver", () => {
       }))
 
       const { connect } = await import("../src/duckdb")
-      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb" })
+      // altimate_change start — bypass the store-existence guard for this mock;
+      // see the identical note above.
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb", create: true })
+      // altimate_change end
       await connector.connect()
 
       expect(attempts).toBe(2)
@@ -306,7 +313,11 @@ describe("DuckDB driver", () => {
       }))
 
       const { connect } = await import("../src/duckdb")
-      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb", readonly: true })
+      // altimate_change start — bypass the store-existence guard for this mock;
+      // see the identical note above. `create` and `readonly` are independent
+      // flags: `create` only controls the existence check, not access mode.
+      const connector = await connect({ type: "duckdb", path: "/tmp/test.duckdb", readonly: true, create: true })
+      // altimate_change end
 
       try {
         await connector.connect()
@@ -405,7 +416,7 @@ describe("DuckDB driver", () => {
       }))
 
       const { connect } = await import("../src/duckdb")
-      const connector = await connect({ type: "duckdb", path: "/tmp/sync-lock.duckdb" })
+      const connector = await connect({ type: "duckdb", path: "/tmp/sync-lock.duckdb", create: true })
       await connector.connect()
       expect(connectAttempts).toBe(2)
       expect(await connector.execute("SELECT 1")).toMatchObject({ columns: ["ok"], rows: [[1]], row_count: 1 })
@@ -430,7 +441,7 @@ describe("DuckDB driver", () => {
       }))
 
       const { connect } = await import("../src/duckdb")
-      const connector = await connect({ type: "duckdb", path: "/tmp/corrupt.duckdb" })
+      const connector = await connect({ type: "duckdb", path: "/tmp/corrupt.duckdb", create: true })
       await expect(connector.connect()).rejects.toThrow("catalog is corrupt")
     })
   })

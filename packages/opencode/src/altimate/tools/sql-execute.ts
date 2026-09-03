@@ -16,6 +16,9 @@ import * as Registry from "../native/connections/registry"
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
+// altimate_change start — never render a warehouse failure as an empty result
+import { normalizeError } from "./response-normalization"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -68,6 +71,25 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         warehouse: args.warehouse,
         limit: args.limit,
       })
+
+      // altimate_change start — a failure must not be rendered as "(0 rows)".
+      // sql.execute never throws: it catches every connection and query error
+      // and returns a result-shaped object carrying `error`, so an unresolvable
+      // warehouse used to reach the agent as a successful empty table with no
+      // fault string at all. Surface it the way schema_inspect already does.
+      const responseError = normalizeError((result as SqlExecuteResult & { error?: unknown }).error)
+      if (responseError !== undefined) {
+        const msg = responseError.trim() || "SQL execution failed."
+        // altimate_change — annotate this failure too, same as the catch block below:
+        // a fail-open notice that only rides on success under-counts fail-open in
+        // precisely the cases most likely to fail.
+        return Precedence.annotate(precedence, {
+          title: "SQL: ERROR",
+          metadata: { rowCount: 0, truncated: false, error: msg },
+          output: `Failed to execute SQL: ${msg}`,
+        })
+      }
+      // altimate_change end
 
       let output = formatResult(result)
       // altimate_change start — emit SQL structure fingerprint telemetry
@@ -137,7 +159,11 @@ interface PreValidationResult {
   error?: string
 }
 
-async function preValidateSql(sql: string, warehouse: string | undefined, queryType: string): Promise<PreValidationResult> {
+async function preValidateSql(
+  sql: string,
+  warehouse: string | undefined,
+  queryType: string,
+): Promise<PreValidationResult> {
   const startTime = Date.now()
   // Yield the event loop before heavy synchronous SQLite work so concurrent
   // tasks aren't blocked. Bun's sqlite API is sync and listColumns can touch

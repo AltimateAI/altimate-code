@@ -304,7 +304,9 @@ describe("DuckDB Driver E2E", () => {
       const dbFile = join(tmpDir, "test.duckdb")
       try {
         const mod = await import("@altimateai/drivers/duckdb")
-        const fileConn = await mod.connect({ type: "duckdb", path: dbFile })
+        // First open materializes the store, so it opts in to create; the
+        // reopen below deliberately does NOT, proving the file really persisted.
+        const fileConn = await mod.connect({ type: "duckdb", path: dbFile, create: true })
         await fileConn.connect()
 
         await fileConn.execute("CREATE TABLE persist (x INT)")
@@ -495,7 +497,8 @@ describe("SQLite Driver E2E", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "sqlite-test-"))
     const dbFile = join(tmpDir, "test.sqlite")
     const mod = await import("@altimateai/drivers/sqlite")
-    connector = await mod.connect({ type: "sqlite", path: dbFile })
+    // This suite materializes its own scratch store, so it opts in to create.
+    connector = await mod.connect({ type: "sqlite", path: dbFile, create: true })
     await connector.connect()
   })
 
@@ -648,7 +651,7 @@ describe("SQLite Driver E2E", () => {
       const dbFile = join(tmpDir2, "close.sqlite")
       try {
         const mod = await import("@altimateai/drivers/sqlite")
-        const conn = await mod.connect({ type: "sqlite", path: dbFile })
+        const conn = await mod.connect({ type: "sqlite", path: dbFile, create: true })
         await conn.connect()
         await conn.execute("SELECT 1")
         await conn.close()

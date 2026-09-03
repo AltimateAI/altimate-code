@@ -2,6 +2,7 @@
  * DuckDB driver using the `duckdb` package.
  */
 
+import { assertStoreExists, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
 
@@ -55,7 +56,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   duckdb = await loadOptionalDriver("duckdb", "duckdb")
   duckdb = duckdb.default || duckdb
 
-  const dbPath = (config.path as string) ?? ":memory:"
+  // altimate_change start — a missing path must fail loudly, not become :memory:
+  const dbPath = requireStorePath(config, "DuckDB")
+  // altimate_change end
   // altimate_change start — configurable open budget
   const { ms: openTimeoutMs, source: openTimeoutSource } = resolveOpenTimeoutMs(config)
   // altimate_change end
@@ -118,6 +121,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   return {
     async connect() {
+      // altimate_change start — never conjure an empty store on open
+      assertStoreExists(config, dbPath, "DuckDB")
+      // altimate_change end
       // altimate_change start — retry with read-only on lock errors
       const tryConnect = (accessMode?: string): Promise<any> =>
         new Promise<any>((resolve, reject) => {
