@@ -8,6 +8,7 @@ import {
   loadOptionalDriver,
   driverInstallDir,
   driverLabel,
+  installLockPath,
   installOptionalDriver,
   isDriverInstalled,
   npmInstallArgs,
@@ -85,6 +86,14 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
 
     const packages = DRIVER_PACKAGES[driver].join(" ")
     const externalPattern = FSUtil.normalizePathPattern(path.join(dir, "*"))
+    // The cross-process install lock is a sibling of the managed directory, not
+    // a child of it — it lives outside so npm never treats it as stray package
+    // content. That puts it outside the pattern above, so it has to be approved
+    // explicitly: this tool creates, writes and removes that directory, and
+    // asking for `<dir>/*` alone would mutate an external path the user never
+    // agreed to.
+    const lockPattern = FSUtil.normalizePathPattern(path.join(installLockPath(dir), "*"))
+    const externalPatterns = [externalPattern, lockPattern]
     const installCommand = ["npm", ...npmInstallArgs(DRIVER_PACKAGES[driver])].join(" ")
 
     // This tool bypasses the bash and edit tools, so it must broker the same
@@ -93,9 +102,9 @@ export const WarehouseInstallDriverTool = Tool.define("warehouse_install_driver"
     // choose only a driver enum, never shell text or package names.
     await ctx.ask({
       permission: "external_directory",
-      patterns: [externalPattern],
-      always: [externalPattern],
-      metadata: { driver, dir },
+      patterns: externalPatterns,
+      always: externalPatterns,
+      metadata: { driver, dir, lockDir: installLockPath(dir) },
     })
     await ctx.ask({
       permission: "bash",
