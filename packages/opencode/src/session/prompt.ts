@@ -610,6 +610,13 @@ export namespace SessionPrompt {
     // compaction, context overflow), so "step === 1" is not "first catalog".
     let catalogued = false
     // altimate_change end
+    // altimate_change start — one cache per loop() invocation for the
+    // task-shape-scoped pre-execution gate (see the call site below and
+    // SessionPreExecution.createScopedBuilderPromptCache's doc comment). The
+    // classification is invariant across this loop's steps, so computing it
+    // once here and reusing it avoids a filesystem scan on every step.
+    const getScopedBuilderPrompt = SessionPreExecution.createScopedBuilderPromptCache()
+    // altimate_change end
     // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
     // single "bootstrap" span right before the first processor.process call so
     // the pre-first-generation region has a visible parent duration in traces.
@@ -1485,9 +1492,19 @@ export namespace SessionPrompt {
       // part of the byte-pinned default builder profile), so scoping it out
       // means swapping in a pack-excluded prompt variant for THIS session only
       // — the registered agent and its default `.prompt` are never mutated.
-      const scopedBuilderPrompt = await SessionPreExecution.scopedBuilderPrompt({
+      //
+      // `agent: lastUser.agent` — the REGISTRY KEY (e.g. "builder"), not
+      // `agent.name`, which config can rename independently of the key an
+      // agent is registered under (`agent.builder.name` in config). Keying on
+      // the mutable display name would stop scoping a renamed builder forever
+      // and start scoping an unrelated custom agent a user happens to name
+      // "builder". `prompt: agent.prompt` lets the gate refuse to touch a
+      // customized builder prompt (config override or markdown agent file) —
+      // see scopedBuilderPrompt's doc comment.
+      const scopedBuilderPrompt = await getScopedBuilderPrompt({
         runMode: Flag.ALTIMATE_RUN_MODE,
-        agent: agent.name,
+        agent: lastUser.agent,
+        prompt: agent.prompt,
         directories: [Instance.directory, Instance.worktree],
       })
       const effectiveAgent = scopedBuilderPrompt ? { ...agent, prompt: scopedBuilderPrompt } : agent
