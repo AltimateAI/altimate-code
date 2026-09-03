@@ -86,6 +86,7 @@ import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change start - validator framework (see session/validators/types.ts header)
 import { ValidatorRegistry } from "./validators/registry"
 import { registerAltimateValidators } from "../altimate/validators"
+import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils"
 // Explicit registration call (not a side-effect import) so bun's --single
 // bundler cannot tree-shake the validator registrations.
 registerAltimateValidators()
@@ -1654,10 +1655,29 @@ export namespace SessionPrompt {
       //
       // ALTIMATE_VALIDATORS_SHADOW=1 runs validators WITHOUT enforcement so
       // telemetry can measure "would have fired" rates against historical
-      // traffic, but no subprocess spawns or synthetic-message retries happen
-      // unless this is also set. By default, NEITHER flag is set so
-      // non-opting-in sessions skip the entire dispatch path (no fs scan,
-      // no subprocess spawn, no perf tax).
+      // traffic. Shadow suppresses ONLY the synthetic-message retry: every
+      // applicable validator still executes in full, including the two that
+      // spawn one `altimate-dbt` child per touched model. Shadow is therefore
+      // free of behavioural risk but NOT free of cost — it pays the same
+      // filesystem scans, subprocess time and warehouse work as enforcement,
+      // just without acting on the result. Budget for it accordingly.
+      //
+      // By default NEITHER flag is set, so non-opting-in sessions skip the
+      // entire dispatch path (no fs scan, no subprocess spawn, no perf tax).
+      //
+      // DO NOT set ALTIMATE_VALIDATORS_ENABLED=1 beyond a soak in shadow mode
+      // without first reading the "REQUIRED precondition before enforcement
+      // beyond shadow mode" section in
+      // .github/meta/deterministic-validators-followups.md. Several of the
+      // dbt validators' heuristics (name-matching bare-vs-full-identity,
+      // extension/source-dir filtering, package exclusion, conditional-config
+      // resolution, file-vs-model modification tracking) are duplicated
+      // per-validator rather than shared, and that duplication has already
+      // reintroduced the same bug — including a blocking false positive — in
+      // more than one place across four review-fix rounds. Enforcement mode
+      // acts on a false positive instead of only measuring it, so it should
+      // not ship until those heuristics are consolidated into shared,
+      // tested primitives.
       const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
       const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
       const validatorsActive = validatorsEnabled || validatorsShadow
@@ -1740,6 +1760,15 @@ export namespace SessionPrompt {
           // rollup. Always emitted, even when the feature flag is off, so we
           // can measure baseline fire rate vs prompt-only enforcement.
           for (const { validator, result: vRes } of checks) {
+            // Several validators' `details` carry absolute filesystem paths
+            // (dbt project root, run_results.json path, discovered task
+            // file, …) for use in `reason`/`fixHint` text. Forwarded
+            // verbatim, that sends local directory names — and the
+            // usernames often embedded in them — to telemetry despite the
+            // documented contract that file paths are never collected
+            // (docs/docs/reference/telemetry.md). sanitizeTelemetryDetails
+            // hashes any absolute-path-shaped string; everything else
+            // (verdict enums, counters, model names) passes through.
             Telemetry.track({
               type: "validator_check",
               timestamp: Date.now(),
@@ -1749,7 +1778,7 @@ export namespace SessionPrompt {
               step,
               retry_count: validatorRetryCount,
               enforced: validatorsEnabled,
-              ...(vRes.details && { details: vRes.details }),
+              ...(vRes.details && { details: sanitizeTelemetryDetails(vRes.details) }),
             } as any)
           }
 
