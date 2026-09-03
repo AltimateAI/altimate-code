@@ -21,6 +21,25 @@ import type { ConnectionConfig } from "./types"
  * DuckDB extension schemes that take a bare `scheme:rest` form with no `//`
  * — MotherDuck (`md:`) and DuckLake (`ducklake:`) — and so cannot be told
  * apart from a local filename by the `://` check below.
+ *
+ * Fundamental ambiguity: a bare `word:target` is syntactically identical
+ * whether `word` is a filename prefix (`data:warehouse.duckdb`, a real local
+ * file) or a remote extension scheme (`md:my_database`). Nothing in the
+ * string alone can distinguish them.
+ *
+ * Deliberate choice: a closed list, not a broad heuristic. Local filenames
+ * that happen to contain a colon are the common case here; bare-scheme
+ * DuckDB extensions are a small, enumerable set. Listing the known ones and
+ * treating everything else as local is safer than the reverse (treating
+ * every `word:target` as remote, which misclassified real local files — see
+ * `isLocalFilePath`'s own comment).
+ *
+ * Escape hatch: a custom/future extension whose target uses a bare scheme
+ * not in this list is NOT forwarded — it's treated as a local path and will
+ * fail the existence guard. Two ways out: (1) use the extension's `scheme://`
+ * form if it has one (always forwarded, see the `://` check below), or (2)
+ * add the new bare scheme to this list once it's an extension the driver
+ * actually needs to support.
  */
 const NON_SLASH_REMOTE_SCHEMES = ["md:", "motherduck:", "ducklake:"]
 // altimate_change end
