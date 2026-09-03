@@ -1998,6 +1998,7 @@ describe("orchestrate", () => {
     })
     const lin = env.findings.find((f) => f.category === "lineage_breakage")
     expect(lin?.severity).toBe("warning")
+    expect(lin?.groupKey).toBe("lineage_fanout")
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
@@ -2065,6 +2066,7 @@ describe("orchestrate", () => {
     expect(sem).toBeDefined()
     expect(sem!.confidence).toBe("unknown")
     expect(sem!.severity).not.toBe("critical")
+    expect(sem!.groupKey).toBe("equivalence_undecided")
   })
 
   test("PII exposure → critical pii_exposure finding", async () => {

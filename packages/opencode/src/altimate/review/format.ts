@@ -9,6 +9,12 @@ import { type VerdictEnvelope } from "./verdict"
 
 export const REVIEW_MARKER = "<!-- altimate-code-review -->"
 
+export interface FindingDelta {
+  fixed: number
+  new: number
+  unchanged: number
+}
+
 const SEVERITY_EMOJI: Record<Severity, string> = {
   critical: "🛑",
   warning: "⚠️",
@@ -45,8 +51,21 @@ export function verdictHeadline(env: VerdictEnvelope): string {
 }
 
 /** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
-export function renderSummary(env: VerdictEnvelope): string {
+export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): string {
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
+
+  if (delta) {
+    lines.push(`**Since last review:** ${delta.fixed} fixed · ${delta.new} new · ${delta.unchanged} unchanged`, "")
+  }
+
+  const readFirst = selectReadFirst(env.findings)
+  if (readFirst.length) {
+    lines.push("**Read first**", "")
+    for (const finding of readFirst) {
+      lines.push(`- **${finding.title}** <sub>${codeSpan(finding.file)}</sub>`)
+    }
+    lines.push("")
+  }
 
   if (env.summary.lintOnly ?? env.summary.degraded) {
     lines.push("> ⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)", "")
@@ -96,17 +115,19 @@ export function renderSummary(env: VerdictEnvelope): string {
     for (const sev of ["critical", "warning", "suggestion"] as const) {
       const items = grouped[sev]
       if (!items.length) continue
-      lines.push(`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, "")
-      for (const summaryGroup of groupForSummary(items)) {
-        if (summaryGroup.length > 1) {
-          lines.push(renderGroupedFinding(summaryGroup))
-          continue
-        }
-        const f = summaryGroup[0]
-        const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
-        lines.push(
-          `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
-        )
+      const summaryGroups = groupForSummary(items)
+      const sectionCount =
+        summaryGroups.length === items.length
+          ? `${items.length}`
+          : `${items.length} findings · ${summaryGroups.length} items`
+      lines.push(`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${sectionCount})`, "")
+
+      const renderedItems = summaryGroups.map(renderSummaryGroup)
+      const fold = sev !== "critical" && renderedItems.length > 12
+      lines.push(...renderedItems.slice(0, fold ? 12 : renderedItems.length))
+      if (fold) {
+        const remainder = renderedItems.slice(12)
+        lines.push("", "<details>", `<summary>${remainder.length} more …</summary>`, "", ...remainder, "", "</details>")
       }
       lines.push("")
     }
@@ -139,6 +160,8 @@ export function renderSummary(env: VerdictEnvelope): string {
       (env.signature ? ` · signed \`${env.signature.slice(0, 18)}…\`` : "") +
       (env.manifestHash ? ` · manifest \`${env.manifestHash.slice(0, 10)}\`` : "") +
       "</sub>",
+    "",
+    `<!-- altimate-findings: ${env.findings.map((finding) => finding.id).join(",")} -->`,
   )
   return lines.join("\n")
 }
@@ -199,6 +222,34 @@ function groupForSummary(findings: Finding[]): Finding[][] {
   return groups
 }
 
+function selectReadFirst(findings: Finding[]): Finding[] {
+  if (findings.length < 8) return []
+
+  const selected: Finding[] = []
+  const selectedIds = new Set<string>()
+  const add = (finding: Finding) => {
+    if (selected.length < 3 && !selectedIds.has(finding.id)) {
+      selected.push(finding)
+      selectedIds.add(finding.id)
+    }
+  }
+
+  for (const finding of findings) if (finding.severity === "critical") add(finding)
+  for (const finding of findings) if (finding.evidence?.tool === "ai-review") add(finding)
+
+  const repetitiveWarningIds = new Set(
+    groupForSummary(findings.filter((finding) => finding.severity === "warning"))
+      .filter((group) => group.length >= 3)
+      .flatMap((group) => group.map((finding) => finding.id)),
+  )
+  for (const finding of findings) {
+    if (finding.severity === "warning" && finding.confidence === "high" && !repetitiveWarningIds.has(finding.id)) {
+      add(finding)
+    }
+  }
+  return selected
+}
+
 function titleFamily(finding: Finding): string {
   const modelPrefix = finding.model ? `${finding.model}: ` : ""
   return modelPrefix && finding.title.startsWith(modelPrefix)
@@ -213,9 +264,70 @@ function groupedTitle(findings: Finding[]): string {
   return `${findings.length} findings: ${family}`
 }
 
+function renderSummaryGroup(findings: Finding[]): string {
+  if (findings.length > 1) return renderGroupedFinding(findings)
+  const finding = findings[0]
+  const loc = finding.file + (finding.startLine ? `:${finding.startLine}` : "")
+  return (
+    `- **${finding.title}**  \n  ${oneLine(finding.body)}  \n  ` +
+    `<sub>\`${loc}\`${finding.degraded ? " · _unverified_" : ""} · ${finding.category}</sub>`
+  )
+}
+
 function renderGroupedFinding(findings: Finding[]): string {
   const subjects = findings.map((finding) => codeSpan(finding.model ?? finding.file)).join(", ")
   const categories = [...new Set(findings.map((finding) => finding.category))].join(", ")
+
+  if (findings[0].groupKey === "lineage_fanout") {
+    const members = findings
+      .map((finding) => {
+        const subject = codeSpan(finding.model ?? finding.file)
+        const result = finding.evidence?.result
+        if (!result || typeof result !== "object") return subject
+        const impact = result as Record<string, unknown>
+        if (
+          typeof impact.directCount !== "number" ||
+          typeof impact.transitiveCount !== "number" ||
+          typeof impact.testCount !== "number"
+        ) {
+          return subject
+        }
+        return `${subject} (${impact.directCount} direct/${impact.transitiveCount} transitive, +${impact.testCount} tests)`
+      })
+      .join(", ")
+    return `- **Downstream fan-out on ${findings.length} models** (informational) — ${members}`
+  }
+
+  if (findings[0].groupKey === "equivalence_undecided") {
+    const flatBody = oneLine(findings[0].body)
+    const cause = /equivalence could not be decided\s*\(([^)]+)\)/i.exec(flatBody)?.[1]?.trim() ?? flatBody
+    const sentence = /[.!?]$/.test(cause) ? cause : `${cause}.`
+    return (
+      `- **Equivalence could not be decided for ${findings.length} models** — ${sentence} ` +
+      `Fix once: compile base and head (see missing-artifact line). Models: ${subjects}`
+    )
+  }
+
+  if (findings[0].groupKey?.startsWith("grain_not_null:")) {
+    const model = findings[0].model ?? findings[0].groupKey.slice("grain_not_null:".length)
+    const columns = [
+      ...new Set(findings.map((finding) => finding.column).filter((column): column is string => !!column)),
+    ]
+      .map(codeSpan)
+      .join(", ")
+    const flatBody = oneLine(findings[0].body)
+    const remediationStart = flatBody.lastIndexOf(" Add ")
+    let remediation =
+      remediationStart >= 0
+        ? flatBody.slice(remediationStart + 1)
+        : "Add `not_null` coverage to each listed grain column."
+    if (findings[0].column) remediation = remediation.replace(codeSpan(findings[0].column), "each listed column")
+    return (
+      `- **${codeSpan(model)}: grain columns without \`not_null\`** — ${columns || subjects} · ${categories}  \n  ` +
+      remediation
+    )
+  }
+
   return `- **${groupedTitle(findings)}** — ${subjects} · ${categories}`
 }
 

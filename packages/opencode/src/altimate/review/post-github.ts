@@ -1,7 +1,13 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
 import { type VerdictEnvelope, VCS_EVENT } from "./verdict"
-import { renderSummary, inlineComments, REVIEW_MARKER, verdictHeadline } from "./format"
+import {
+  renderSummary,
+  inlineComments,
+  REVIEW_MARKER,
+  verdictHeadline,
+  type FindingDelta,
+} from "./format"
 
 /**
  * Post a verdict envelope to a GitHub pull request: an upserted summary comment
@@ -56,6 +62,34 @@ export interface PostResult {
   postError?: string
 }
 
+/** Parse the finding fingerprint block appended to an Altimate summary. */
+export function parseFindingIds(body: string | null | undefined): Set<string> | undefined {
+  if (!body) return undefined
+  const match = /(?:^|\n)<!-- altimate-findings:\s*(.*?)\s*-->\s*$/.exec(body)
+  if (!match) return undefined
+  return new Set(
+    match[1]
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  )
+}
+
+/** Compare the prior sticky comment's finding ids with the current envelope. */
+export function computeFindingDelta(
+  previousBody: string | null | undefined,
+  current: VerdictEnvelope,
+): FindingDelta | undefined {
+  const previousIds = parseFindingIds(previousBody)
+  if (!previousIds) return undefined
+  const currentIds = new Set(current.findings.map((finding) => finding.id))
+  return {
+    fixed: [...previousIds].filter((id) => !currentIds.has(id)).length,
+    new: [...currentIds].filter((id) => !previousIds.has(id)).length,
+    unchanged: [...currentIds].filter((id) => previousIds.has(id)).length,
+  }
+}
+
 export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarget): Promise<PostResult> {
   const octo = new Octokit({ auth: target.token })
   const { owner, repo, prNumber } = target
@@ -64,7 +98,6 @@ export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarge
   // 1. Upsert the summary comment (dedup by marker). Paginate ALL comments —
   //    on a busy PR the prior marker comment can be past the first page, and
   //    missing it would post a duplicate summary on every rerun.
-  const summary = renderSummary(env)
   const existing = await octo.paginate(octo.rest.issues.listComments, {
     owner,
     repo,
@@ -72,6 +105,7 @@ export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarge
     per_page: 100,
   })
   const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
+  const summary = renderSummary(env, computeFindingDelta(prior?.body, env))
   if (prior) {
     const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })
     result.summaryCommentId = r.data.id

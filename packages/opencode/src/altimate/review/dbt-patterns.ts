@@ -1572,6 +1572,7 @@ export function detectSchemaYmlPatterns(
         file: file.path,
         model: g.model,
         column: g.column,
+        groupKey: `grain_not_null:${g.model}`,
         confidence: "high",
         evidence: {
           tool: "dbt-patterns",
