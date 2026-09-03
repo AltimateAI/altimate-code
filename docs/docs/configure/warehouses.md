@@ -285,12 +285,12 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 !!! note "Bare `word:target` values are treated as local files"
     A `path` shaped like `word:target` with no `//` (for example
-    `data:warehouse.duckdb`) is treated as an ordinary local filename, not a
-    remote target — including the exact `word` prefix a DuckDB storage
-    extension uses. Only a full `scheme://` URI (`s3://...`, `md://...`) or
-    one of the specific bare schemes DuckDB extensions actually use —
-    `md:`, `motherduck:`, `ducklake:` — is treated as remote. To target any
-    other custom storage extension, use its `scheme://` form.
+    `data:warehouse.duckdb`) is treated as an ordinary local filename by
+    default. The only exceptions are `md:`, `motherduck:`, and `ducklake:` —
+    these specific bare prefixes are recognized remote storage schemes and
+    are always forwarded as remote targets. To force any other value to be
+    treated as remote, use its full `scheme://` form (`s3://...`,
+    `md://...`) instead of a bare prefix.
 
 !!! note "Concurrent access"
     DuckDB does not support concurrent write access to the same file. If another process holds a write lock, Altimate Code automatically retries the connection in **read-only** mode so you can still query the data. A clear error message is shown if read-only access also fails.
