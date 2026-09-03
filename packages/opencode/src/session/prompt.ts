@@ -1664,6 +1664,20 @@ export namespace SessionPrompt {
       //
       // By default NEITHER flag is set, so non-opting-in sessions skip the
       // entire dispatch path (no fs scan, no subprocess spawn, no perf tax).
+      //
+      // DO NOT set ALTIMATE_VALIDATORS_ENABLED=1 beyond a soak in shadow mode
+      // without first reading the "REQUIRED precondition before enforcement
+      // beyond shadow mode" section in
+      // .github/meta/deterministic-validators-followups.md. Several of the
+      // dbt validators' heuristics (name-matching bare-vs-full-identity,
+      // extension/source-dir filtering, package exclusion, conditional-config
+      // resolution, file-vs-model modification tracking) are duplicated
+      // per-validator rather than shared, and that duplication has already
+      // reintroduced the same bug — including a blocking false positive — in
+      // more than one place across four review-fix rounds. Enforcement mode
+      // acts on a false positive instead of only measuring it, so it should
+      // not ship until those heuristics are consolidated into shared,
+      // tested primitives.
       const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
       const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
       const validatorsActive = validatorsEnabled || validatorsShadow

@@ -551,3 +551,132 @@ subprocess dependency the validator's own design forbids, or trading this
 false negative for a blocking false positive on a correct session (the same
 pattern items 19–20 already ruled out for the same reason). Left open with the
 reasoning recorded rather than patched.
+
+---
+
+## REQUIRED precondition before enforcement beyond shadow mode
+
+**`ALTIMATE_VALIDATORS_ENABLED` must not be turned on beyond shadow mode
+(`ALTIMATE_VALIDATORS_SHADOW`) until the duplicated heuristics below are
+consolidated into a single shared, tested primitive per concern.** Default-off
+and shadow are fine to ship as-is; enforcement is not, until this is done.
+
+### The evidence
+
+PR #1175 went through four consecutive review-fix rounds after the initial
+consensus pass (3d2f6e96be → 631be58f44 → 677b00bb19 → fc64a3619d, plus the
+false-positive fix that landed after 677b00bb19's round-4 findings). Each
+round fixed real, adversarially-tested bugs — but the SAME underlying defect
+kept reappearing in a sibling validator or a sibling code path within the same
+file, because the fix for it existed only where it was first found rather than
+in one shared place:
+
+- **Bare-name vs. full-identity matching.** Fixed for `dbt-build-green`'s
+  status lookup, then separately for its failure-classification path, then
+  found again (round 4, open) in `dbt-build-green`'s manifest-exemption
+  lookup — three instances of the identical bug (a dependency package's node
+  standing in for the root project's node of the same bare name) in one file.
+- **Extension/source-dir filtering.** Fixed for `collectProducedNodeNames`,
+  then separately for `dbt-nothing-built`'s authored-work scan — two
+  independent implementations of "only `.sql`/`.py` under
+  models/snapshots, only `.csv` under seeds."
+- **Package-directory exclusion.** Fixed for `dbt-dialect-guard`'s convention
+  probe, then separately for `collectProducedNodeNames`'s manifest loop, then
+  found again (round 4, open) for `dbt-build-green`'s manifest-exemption
+  lookup — the same "is this node under `dbt_packages/`" check, written three
+  times.
+- **Conditional-config resolution.** `readConfigAxes` needed its own
+  unresolved-`{% if %}` guard; `dbt-incremental-config`'s idempotency-scope
+  parsing has an open, structurally identical gap (round 4: an inline
+  non-model code span silently marks a demand as model-scoped and skips
+  enforcement) because it re-implements code-span/verb parsing independently
+  of `extractRequiredDeliverables`.
+- **File-vs-model modification tracking.** Added for model names
+  (`modificationModels`), then separately for file paths
+  (`modificationFiles`), and the false-positive fixed in this pass (a
+  modification file outside the scanned dbt source paths could never be
+  satisfied) was a direct consequence of the file-path variant being a
+  parallel, incomplete copy of the model variant rather than sharing one
+  evidence primitive.
+
+Round 4 surfaced 11 more findings after the false-positive fix; 2 were the
+false positive itself (now fixed), the other 9 are each **another instance of
+one of the five duplicated-heuristic categories above** (recorded, not fixed,
+per the hard-stop decision below) — that recurrence, not any single bug, is
+the actual finding.
+
+### Why this gates enforcement specifically
+
+Shadow mode only measures; a false positive there is a data point. Enabled
+mode blocks session termination on a false positive — the failure mode that
+erodes trust in the gate fastest, and the one class of bug (file-vs-model
+modification tracking, above) that round 4 actually produced. Per-validator
+duplication has now demonstrably reintroduced false positives once already;
+without consolidation there is no reason to expect the next duplicated copy
+(idempotency scoping, manifest exemptions, the two round-4 findings already
+identified as open) won't do the same the next time someone edits one of the
+five copies and not the others.
+
+### What "consolidated" means here
+
+One shared, unit-tested module per concern, imported by every validator that
+needs it, replacing the current copies:
+- a single node-identity resolver (full manifest `unique_id` first, bare-name
+  fallback only when unresolved) used everywhere a validator matches a
+  touched file to a run-result row or a manifest node;
+- a single source-directory/extension classifier used everywhere a validator
+  decides whether a file counts as a model/seed/snapshot;
+- a single package-directory exclusion check used everywhere a validator
+  walks the manifest or the filesystem for project-owned nodes;
+- a single conditional-config resolver (config value plus "was this call
+  inside an unresolved `{% if %}`") used by every reader of `config()` state;
+- a single modification-vs-creation evidence primitive that takes a required
+  name OR path and returns "needs session evidence" vs. "existence suffices,"
+  used by both the model and file branches of `dbt-nothing-built`.
+
+### Code pointer
+
+See the comment beside the `ALTIMATE_VALIDATORS_ENABLED` read in
+`packages/opencode/src/session/prompt.ts` — it points back here.
+
+### Round-4 findings deferred, not fixed (hard stop after the false-positive fix)
+
+Recorded so the consolidation work above has a concrete list to close against,
+rather than re-deriving it:
+
+1. `dbt-incremental-config.ts` — an idempotency-scope demand line whose inline
+   code span names a term/function rather than a model is read as scoped and
+   silently drops enforcement instead of falling back to workspace-wide.
+2. `validator-utils.ts` (`extractRequiredDeliverables`) — a requirement line
+   containing both a creation and a modification clause records only the
+   first verb, so the modification set can miss a real modification target
+   named later on the same line.
+3. `validator-utils.ts` (`sanitizeTelemetryDetails`) — a relative path nested
+   inside an object under a path-bearing key is not redacted; only top-level
+   array/primitive entries under the key inherit the "this is a path field"
+   context.
+4. `dbt-nothing-built.ts` — modification contracts are only read from the
+   FIRST task document that names deliverables, not merged across every
+   document the way `dbt-deliverable-names` already does (item resolved for
+   that file in the third sweep; the equivalent merge was never applied to
+   `dbt-nothing-built`'s `artifactExpectation`).
+5. `dbt-nothing-built.ts` — `matchedDeliverables.length > 0` is satisfied by
+   ANY one matched item, so a task requesting updates to multiple models/files
+   passes after only one of them has session evidence.
+6. `dbt-build-green.ts` — `exemptFromManifest` (ephemeral/disabled) is still
+   looked up by bare name; a dependency's ephemeral/disabled `orders` can
+   exempt the root project's distinct `orders` from the coverage assertion.
+   The status and failure-classification lookups were already moved to full
+   manifest identity in this pass; this is the third instance of the same
+   bare-name gap in the same file.
+7. `dbt-incremental-config.ts` — a path-scoped idempotency demand
+   (`` Make the model `models/orders.sql` idempotent ``) stores the full path
+   as the scoped name, which never matches the bare model name looked up at
+   enforcement time, so the scope silently never applies.
+8. `validator-utils.ts` (`resolveWithinRoot`) — resolves the real path of the
+   candidate's containing DIRECTORY (closing the round-3 directory-symlink
+   finding) but not the candidate FILE itself; a required path that is
+   directly a symlink to a file outside the root still passes.
+9. `validator-utils.ts` (dialect-guard masking) — a BigQuery `#`-style line
+   comment containing a curated function name is not stripped before
+   matching, since `stripSqlComments` only recognises `--` and `/* */`.

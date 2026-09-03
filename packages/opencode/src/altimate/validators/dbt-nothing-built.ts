@@ -312,7 +312,6 @@ export const DbtNothingBuiltValidator: Validator = {
         matchedFiles.push(file)
         continue
       }
-      if (modificationFileSet.has(file)) continue
       // Same existence escape hatch as for named models, and resolved from
       // both roots exactly as `dbt-deliverable-names` does. With the dbt
       // project nested below the workspace, a required `reports/output.yml`
@@ -320,6 +319,7 @@ export const DbtNothingBuiltValidator: Validator = {
       // so a correct session was blocked by one of two gates that are supposed
       // to agree on what "delivered" means.
       let found = false
+      let foundMtimeMs: number | null = null
       for (const root of new Set([dbtRoot, ctx.workingDirectory])) {
         // A task-required file path is repository content and the extractor's
         // shape check allows `.`/`/` freely (`../../outside/secret.yml`
@@ -333,13 +333,31 @@ export const DbtNothingBuiltValidator: Validator = {
           const stat = await fs.stat(safePath)
           if (stat.isFile()) {
             found = true
+            foundMtimeMs = stat.mtimeMs
             break
           }
         } catch {
           // absent under this root — keep looking
         }
       }
-      if (found) matchedFiles.push(file)
+      if (!found) continue
+      if (modificationFileSet.has(file)) {
+        // A modification target still cannot be satisfied by mere pre-session
+        // existence — but `authoredWork.relPaths` only covers the dbt source
+        // paths (models/seeds/snapshots/analyses/macros/tests) plus a small
+        // root-file allowlist. A required file OUTSIDE all of those
+        // (`reports/output.yml`) never appears there even when the session
+        // genuinely edited it this run, so the relPaths check above can never
+        // catch it — falling through to a blanket skip made the contract
+        // permanently unsatisfiable for a legitimately-updated file living
+        // outside the scanned directories. `mtime` is the fallback session-
+        // evidence signal for exactly that case: a fresh mtime (>=
+        // sessionStartMs) is genuine authorship even for an unscanned path: a
+        // stale one means the file only pre-existed, same as before.
+        if (foundMtimeMs !== null && foundMtimeMs >= ctx.sessionStartMs) matchedFiles.push(file)
+        continue
+      }
+      matchedFiles.push(file)
     }
     // A name the task asked to be MODIFIED (update/fix/rename/…) cannot be
     // satisfied by mere pre-session existence: "Update the model `orders`"

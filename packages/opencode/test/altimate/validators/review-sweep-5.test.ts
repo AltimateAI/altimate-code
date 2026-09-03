@@ -267,4 +267,64 @@ describe("resolveWithinRoot resolves real paths, not just lexical ones", () => {
     expect(resolved).toBe(join(dir, "models", "orders.sql"))
   })
 })
+
+// ---------------------------------------------------------------------------
+// Round-4 false positive: a modification target outside the scanned dbt
+// source paths could never be satisfied, even when genuinely edited
+// ---------------------------------------------------------------------------
+
+describe("a modification target outside the dbt source paths can still be satisfied", () => {
+  test("genuinely editing reports/output.yml this session satisfies the update contract", async () => {
+    await makeProject()
+    // `reports/` is outside every directory `authoredWorkSince` scans
+    // (models/seeds/snapshots/analyses/macros/tests) and outside the
+    // AUTHORED_ROOT_FILES allowlist, so `authoredWork.relPaths` never
+    // contains it even when the session genuinely wrote it.
+    await fs.mkdir(join(dir, "reports"), { recursive: true })
+    await fs.writeFile(join(dir, "reports", "output.yml"), "total: 42\n")
+    await fs.writeFile(
+      join(dir, "TASK.md"),
+      "Update the file `reports/output.yml` with the latest numbers.\n",
+    )
+    // The file's mtime is fresh (written just now, after sessionStartMs) —
+    // genuine session evidence, even though it was never scanned.
+    const r = await DbtNothingBuiltValidator.check(ctx({ sessionStartMs: Date.now() - 60_000 }))
+    expect(r.ok).toBe(true)
+  })
+
+  test("a pre-existing, untouched reports/output.yml still does not satisfy the contract", async () => {
+    await makeProject()
+    await fs.mkdir(join(dir, "reports"), { recursive: true })
+    await fs.writeFile(join(dir, "reports", "output.yml"), "total: 42\n")
+    // Backdated well before session start — pre-existing, not edited this
+    // session.
+    await fs.utimes(
+      join(dir, "reports", "output.yml"),
+      (Date.now() - 3600_000) / 1000,
+      (Date.now() - 3600_000) / 1000,
+    )
+    await fs.writeFile(
+      join(dir, "TASK.md"),
+      "Update the file `reports/output.yml` with the latest numbers.\n",
+    )
+    const r = await DbtNothingBuiltValidator.check(ctx({ sessionStartMs: Date.now() - 60_000 }))
+    expect(r.ok).toBe(false)
+  })
+
+  test("a CREATE contract on a file outside the source paths is unaffected", async () => {
+    await makeProject()
+    await fs.mkdir(join(dir, "reports"), { recursive: true })
+    await fs.writeFile(join(dir, "reports", "output.yml"), "total: 42\n")
+    await fs.utimes(
+      join(dir, "reports", "output.yml"),
+      (Date.now() - 3600_000) / 1000,
+      (Date.now() - 3600_000) / 1000,
+    )
+    await fs.writeFile(join(dir, "TASK.md"), "Create the file `reports/output.yml`.\n")
+    // A create contract's existence escape hatch is unaffected by the
+    // mtime-aware modification-file path — mere presence still satisfies it.
+    const r = await DbtNothingBuiltValidator.check(ctx({ sessionStartMs: Date.now() - 60_000 }))
+    expect(r.ok).toBe(true)
+  })
+})
 // altimate_change end
