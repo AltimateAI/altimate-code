@@ -42,10 +42,14 @@ jobs:
       # Warehouse creds are consumed HERE (by dbt), via env_var() in profiles.yml.
       # They are NOT needed by the review step.
       #
-      # SECURITY: `dbt compile` executes the PR's Jinja/macros against the
-      # warehouse (e.g. a malicious macro calling run_query()). Use a
-      # LEAST-PRIVILEGE, read-only warehouse role for these credentials so a
-      # hostile PR can't read or mutate production data at compile time.
+      # SECURITY: `dbt compile` and `dbt docs generate` both execute the PR's
+      # Jinja/macros against the warehouse (`run_query()` runs during compile,
+      # not only during `dbt run`). A read-only role still lets a hostile macro
+      # READ data. Point these credentials at an isolated CI database with
+      # sanitized/synthetic data and a role scoped to it, never at production.
+      # Keep the trigger on `pull_request` (not `pull_request_target`): PRs from
+      # forks then receive no secrets and this step fails closed; for such PRs,
+      # omit the credentials entirely and the review runs lint-only.
       - name: Build dbt review artifacts
         env:
           DBT_PROFILES_DIR: ${{ github.workspace }}

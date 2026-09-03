@@ -21,6 +21,14 @@ const VERDICT_LABEL: Record<VerdictEnvelope["verdict"], string> = {
   REQUEST_CHANGES: "🛑 Changes requested",
 }
 
+function codeSpan(value: string): string {
+  const runs = value.match(/`+/g)
+  const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
+  const fence = "`".repeat(maxRun + 1)
+  const pad = /^`|`$/.test(value) ? " " : ""
+  return `${fence}${pad}${value}${pad}${fence}`
+}
+
 /** One-line headline used at the top of the summary and as the check title. */
 export function verdictHeadline(env: VerdictEnvelope): string {
   const { critical, warning, suggestion } = env.summary
@@ -44,11 +52,15 @@ export function renderSummary(env: VerdictEnvelope): string {
     lines.push("> ⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)", "")
   }
 
+  if (env.summary.emptyScope) {
+    lines.push("> ⚙️ Nothing to review — no dbt model, schema, or macro files changed in this diff.", "")
+  }
+
   const undecidableFindings =
     env.summary.undecidableFindings ?? env.findings.filter((finding) => finding.degraded).length
   if (undecidableFindings > 0) {
     lines.push(
-      `> ℹ️ ${undecidableFindings} finding${undecidableFindings === 1 ? "" : "s"} could not be decided without compiled SQL for base and head — see each finding.`,
+      `> ℹ️ ${undecidableFindings} finding${undecidableFindings === 1 ? "" : "s"} could not be decided — compiled SQL missing for base or head, unsupported SQL for this dialect, or no schema — see each finding.`,
       "",
     )
   }
@@ -69,21 +81,7 @@ export function renderSummary(env: VerdictEnvelope): string {
   // the signed envelope's tierReasons[]; the summary shows the first 8.
   if (env.tierReasons && env.tierReasons.length) {
     const RENDER_CAP = 8
-    // Pick an inline-code-span fence longer than any backtick run inside `r`
-    // so a path like `packages/…/foo`bar`.sql` cannot terminate the span
-    // (cubic-review P3).
-    const shown = env.tierReasons
-      .slice(0, RENDER_CAP)
-      .map((r) => {
-        const runs = r.match(/`+/g)
-        const maxRun = runs ? Math.max(...runs.map((run) => run.length)) : 0
-        const fence = "`".repeat(maxRun + 1)
-        // If the reason itself starts/ends with a backtick, pad with a space so
-        // the leading/trailing backtick isn't glued to the fence.
-        const pad = /^`|`$/.test(r) ? " " : ""
-        return `${fence}${pad}${r}${pad}${fence}`
-      })
-      .join(", ")
+    const shown = env.tierReasons.slice(0, RENDER_CAP).map(codeSpan).join(", ")
     const overflow =
       env.tierReasons.length > RENDER_CAP
         ? ` (+${env.tierReasons.length - RENDER_CAP} more in verdict envelope)`
@@ -216,7 +214,7 @@ function groupedTitle(findings: Finding[]): string {
 }
 
 function renderGroupedFinding(findings: Finding[]): string {
-  const subjects = findings.map((finding) => `\`${finding.model ?? finding.file}\``).join(", ")
+  const subjects = findings.map((finding) => codeSpan(finding.model ?? finding.file)).join(", ")
   const categories = [...new Set(findings.map((finding) => finding.category))].join(", ")
   return `- **${groupedTitle(findings)}** — ${subjects} · ${categories}`
 }

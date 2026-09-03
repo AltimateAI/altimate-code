@@ -148,8 +148,8 @@ export async function defaultBaseRef(cwd: string): Promise<string> {
       const ref = event?.pull_request?.base?.ref
       if (typeof ref === "string" && ref) {
         const candidate = `origin/${ref}`
-        const resolved = await git(["rev-parse", "--verify", "--quiet", candidate], cwd)
-        if (resolved.trim()) return candidate
+        const mb = (await git(["merge-base", "HEAD", candidate], cwd)).trim()
+        if (mb) return mb
       }
     } catch {
       // Invalid/missing event or unavailable remote ref — use the normal fallbacks.

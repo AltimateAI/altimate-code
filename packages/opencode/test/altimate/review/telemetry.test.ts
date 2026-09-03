@@ -135,7 +135,7 @@ describe("review_run", () => {
     for (const v of Object.values(byCategory)) expect(typeof v).toBe("number")
   })
 
-  test("stale_manifest and run-level lintOnly are carried from the envelope", () => {
+  test("stale_manifest and run-level degraded states are carried from the envelope", () => {
     // Same `=== true` normalisation as tier_forced, which has its own test; these two had none,
     // and the shared envelope() helper omits staleManifest so every other test covers only the
     // undefined case.
@@ -163,6 +163,26 @@ describe("review_run", () => {
       }),
     })
     expect((events[0] as any).stale_manifest).toBe(true)
+    expect((events[0] as any).degraded).toBe(true)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
+          lintOnly: false,
+          emptyScope: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
+      }),
+    })
     expect((events[0] as any).degraded).toBe(true)
   })
 

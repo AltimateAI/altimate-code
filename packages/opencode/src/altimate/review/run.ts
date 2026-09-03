@@ -10,7 +10,7 @@ import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { runAiReview } from "./ai-review"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
-import type { ChangedFile } from "./diff-filter"
+import { classifyDbtFile, type ChangedFile } from "./diff-filter"
 
 /**
  * End-to-end review entry point: load `.altimate/review.yml`, collect the diff,
@@ -128,36 +128,44 @@ async function autoDiscoverManifest(cwd: string): Promise<{ path: string; projec
 }
 
 /** Report missing dbt artifacts only when the manifest itself exists. */
-export async function detectArtifactHints(manifestAbs: string, dbtRoot: string): Promise<string[]> {
+export async function detectArtifactHints(
+  manifestAbs: string,
+  dbtRoot: string,
+  changedModels: Array<Pick<ChangedFile, "path" | "status" | "oldPath">> = [],
+  projectName?: string,
+  pathPrefix?: string,
+): Promise<string[]> {
   try {
     await access(manifestAbs)
   } catch {
     return []
   }
 
-  const artifacts: Array<{ path: string; hint: string }> = [
-    {
-      path: path.join(path.dirname(manifestAbs), "catalog.json"),
-      hint: "catalog.json (run `dbt docs generate`)",
-    },
-    {
-      path: path.join(dbtRoot, "target-base", "compiled"),
-      hint: "target-base/compiled (compile the base ref)",
-    },
-    {
-      path: path.join(dbtRoot, "target", "compiled"),
-      hint: "target/compiled (run `dbt compile` for the head)",
-    },
-  ]
-  const present = await Promise.all(
-    artifacts.map(({ path: artifactPath }) =>
-      access(artifactPath).then(
-        () => true,
-        () => false,
-      ),
+  const hints: string[] = []
+  try {
+    await access(path.join(path.dirname(manifestAbs), "catalog.json"))
+  } catch {
+    hints.push("catalog.json (run `dbt docs generate`)")
+  }
+
+  const getCompiled = makeCompiledResolver({ cwd: dbtRoot, projectName, pathPrefix })
+  const baseModels = changedModels.filter((file) => file.status !== "added")
+  const headModels = changedModels.filter((file) => file.status !== "deleted")
+  const [missingBase, missingHead] = await Promise.all([
+    Promise.all(baseModels.map((file) => getCompiled(file.oldPath ?? file.path, "old"))).then(
+      (contents) => contents.filter((content) => content === undefined).length,
     ),
-  )
-  return artifacts.filter((_, index) => !present[index]).map(({ hint }) => hint)
+    Promise.all(headModels.map((file) => getCompiled(file.path, "new"))).then(
+      (contents) => contents.filter((content) => content === undefined).length,
+    ),
+  ])
+  if (missingBase > 0) {
+    hints.push(`target-base/compiled missing for ${missingBase} changed model(s) (compile the base ref)`)
+  }
+  if (missingHead > 0) {
+    hints.push(`target/compiled missing for ${missingHead} changed model(s) (run \`dbt compile\` for the head)`)
+  }
+  return hints
 }
 
 /** Whether a repo-relative path is one whose modification could invalidate
@@ -325,7 +333,6 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // breakage and proven equivalence actually fire (the manifest only has
   // documented columns). Falls back to manifest-derived schema when absent.
   const catalogAbs = path.join(path.dirname(manifestAbs), "catalog.json")
-  const artifactHints = await detectArtifactHints(manifestAbs, dbtRoot)
   const catalogSchema = await buildCatalogSchemaContext(catalogAbs)
   const runner = createDispatcherRunner({ manifestPath: manifestAbs, schemaContext: catalogSchema })
   const mhash = await manifestHash(manifestAbs, opts.cwd)
@@ -359,6 +366,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     /* keep original values on realpath failure */
   }
   const pathPrefix = path.relative(gitRootReal, dbtRootReal)
+  const changedModels = changedFiles.filter((file) => classifyDbtFile(file.path) === "model_sql")
+  const artifactHints = await detectArtifactHints(manifestAbs, dbtRootReal, changedModels, projectName, pathPrefix)
   const getCompiled = opts.getContent
     ? undefined
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })

@@ -1603,7 +1603,7 @@ describe("orchestrate", () => {
     const summary = renderSummary(env)
     expect(summary).not.toContain("Lint-only")
     expect(summary).toContain(
-      "ℹ️ 1 finding could not be decided without compiled SQL for base and head — see each finding.",
+      "ℹ️ 1 finding could not be decided — compiled SQL missing for base or head, unsupported SQL for this dialect, or no schema — see each finding.",
     )
   })
 
@@ -2519,10 +2519,34 @@ describe("orchestrate", () => {
     })
     expect(env.summary.degraded).toBe(true)
     expect(env.summary.lintOnly).toBe(true)
+    expect(env.summary.emptyScope).toBe(false)
     expect(renderSummary(env)).toContain(
       "⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)",
     )
     expect(["APPROVE", "COMMENT"]).toContain(env.verdict)
+  })
+
+  test("README-only diff with a manifest is empty scope, not lint-only", async () => {
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async manifestAvailable() {
+        return true
+      },
+    }
+    const env = await runReview({
+      changedFiles: [{ path: "README.md", status: "modified", diff: "+docs\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+    })
+
+    expect(env.summary).toMatchObject({ degraded: true, lintOnly: false, emptyScope: true })
+    const summary = renderSummary(env)
+    expect(summary).not.toContain("Lint-only")
+    expect(summary).toContain(
+      "⚙️ Nothing to review — no dbt model, schema, or macro files changed in this diff.",
+    )
   })
 
   test("loaded manifest is not marked lint-only when a changed model is absent from it", async () => {
@@ -2667,6 +2691,34 @@ describe("orchestrate", () => {
     const singletonSummary = renderSummary(singletonEnv)
     expect(singletonSummary).toContain("- **model_a: new model has no uniqueness/grain test**")
     expect(singletonSummary).toContain("Add a uniqueness test for model_a.")
+  })
+
+  test("renderSummary fences grouped model identifiers containing backticks", () => {
+    const findings = [
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model`a: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test.",
+        file: "models/model_a.sql",
+        model: "model`a",
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model_b: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test.",
+        file: "models/model_b.sql",
+        model: "model_b",
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+    ]
+
+    const summary = renderSummary(buildEnvelope({ findings, tier: "lite", mode: "comment" }))
+    expect(summary).toContain("``model`a``, `model_b`")
   })
 
   test("renderSummary collapses missing artifact hints onto one line", () => {

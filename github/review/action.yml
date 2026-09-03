@@ -113,13 +113,18 @@ runs:
       run: echo "$HOME/.altimate/bin" >> $GITHUB_PATH
 
     - name: Fetch pull request base ref
-      if: ${{ github.event_name == 'pull_request' && inputs.base == '' }}
+      if: ${{ github.event_name == 'pull_request' && (inputs.base == '' || inputs.head == '') }}
       shell: bash
       env:
         PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+        git fetch --no-tags origin "$PR_HEAD_SHA"
+        if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+          git fetch --no-tags --unshallow origin
+        fi
 
     # Configure the OPTIONAL advisory LLM lane. Two mutually-exclusive routes:
     #   A) altimate_api_key (+ altimate_instance) → hosted altimate model
@@ -196,7 +201,14 @@ runs:
         if [[ -n "$IN_BASE" ]]; then
           args+=(--base "$IN_BASE")
         elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_REF" ]]; then
-          args+=(--base "origin/$PR_BASE_REF")
+          # Use the fork point for both the file list and old content: base-only
+          # changes after it must never be attributed to this pull request.
+          if MERGE_BASE=$(git merge-base "origin/$PR_BASE_REF" "$PR_HEAD_SHA"); then
+            args+=(--base "$MERGE_BASE")
+          else
+            echo "::warning::Could not compute pull request merge-base; falling back to origin/$PR_BASE_REF"
+            args+=(--base "origin/$PR_BASE_REF")
+          fi
         fi
         if [[ -n "$IN_HEAD" ]]; then
           args+=(--head "$IN_HEAD")

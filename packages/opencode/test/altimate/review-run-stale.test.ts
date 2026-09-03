@@ -82,10 +82,43 @@ describe("detectArtifactHints", () => {
     await fs.writeFile(manifest, "{}")
     await fs.writeFile(path.join(target, "catalog.json"), "{}")
 
-    expect(await detectArtifactHints(manifest, tmp.path)).toEqual([
-      "target-base/compiled (compile the base ref)",
-      "target/compiled (run `dbt compile` for the head)",
+    expect(
+      await detectArtifactHints(
+        manifest,
+        tmp.path,
+        [{ path: "models/a.sql", status: "modified" }],
+        "analytics",
+      ),
+    ).toEqual([
+      "target-base/compiled missing for 1 changed model(s) (compile the base ref)",
+      "target/compiled missing for 1 changed model(s) (run `dbt compile` for the head)",
     ])
+  })
+
+  test("reports changed models missing from a partially populated compiled directory", async () => {
+    await using tmp = await tmpdir()
+    const project = "analytics"
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    await fs.mkdir(path.join(target, "compiled", project, "models"), { recursive: true })
+    await fs.mkdir(path.join(tmp.path, "target-base", "compiled", project, "models"), { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), "{}")
+    await fs.writeFile(path.join(target, "compiled", project, "models", "a.sql"), "select 1")
+    await fs.writeFile(path.join(tmp.path, "target-base", "compiled", project, "models", "a.sql"), "select 1")
+    await fs.writeFile(path.join(tmp.path, "target-base", "compiled", project, "models", "b.sql"), "select 1")
+
+    expect(
+      await detectArtifactHints(
+        manifest,
+        tmp.path,
+        [
+          { path: "models/a.sql", status: "modified" },
+          { path: "models/b.sql", status: "modified" },
+        ],
+        project,
+      ),
+    ).toEqual(["target/compiled missing for 1 changed model(s) (run `dbt compile` for the head)"])
   })
 
   test("does not report artifacts when the manifest itself is absent", async () => {

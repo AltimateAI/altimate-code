@@ -132,7 +132,8 @@ describe("defaultBaseRef", () => {
     await Bun.write(eventPath, JSON.stringify({ pull_request: { base: { ref: "release" } } }))
     process.env.GITHUB_EVENT_PATH = eventPath
 
-    expect(await defaultBaseRef(tmp.path)).toBe("origin/release")
+    const expected = (await $`git merge-base HEAD origin/release`.cwd(tmp.path).quiet().text()).trim()
+    expect(await defaultBaseRef(tmp.path)).toBe(expected)
   })
 })
 

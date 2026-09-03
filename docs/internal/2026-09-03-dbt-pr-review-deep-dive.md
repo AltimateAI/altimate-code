@@ -114,7 +114,7 @@ Design corrections accepted for later phases: appending `REVIEW.md` to the AI us
 Replies on a finding open an altimate-code session with the finding, compiled SQL and lineage as context ("explain", "fix", "diff the data" via the opt-in warehouse lane); the `reviewer` agent, not `builder`, is the default for review conversations so it starts on a 65 K-window model. The GitHub App already exists; the missing piece is finding-scoped context.
 
 ### Metrics (once Phase 0B/2 identities exist)
-- Lint-only share of CI invocations < 20% (from 57%).
+- Lint-only share of CI invocations < 20% (from 57%). Definition: numerator = `review_run` events with run-level `summary.lintOnly === true` (no changed model resolved against a manifest); denominator = all `review_run` events with `invocation=cli` and at least one reviewable model file, over a trailing 4-week window. Per-finding `degraded` / `undecidableFindings` are excluded so undecidable equivalence cannot move this number. The 57% baseline was measured on the 30 dogfood PRs from the posted comment banner (which used the old combined flag), so the first post-fix reading resets the baseline.
 - AI `status=ok` ≥ 90% of eligible invocations (from ≤ 82%).
 - Findings per completed invocation p50 ≤ 8 (from 11); top rule ≤ 10% of findings (from 50%).
 - Reaction or structured feedback on ≥ 20% of reviewed PRs (from 0–3%).
@@ -126,7 +126,7 @@ Replies on a finding open an altimate-code session with the finding, compiled SQ
 2. Hosted altimate model as the default AI lane in the action (we pay per review) vs BYO key only. Recommendation: hosted by default with a per-repo cap; the AI layer is otherwise invisible.
 3. Feedback store: hybrid (repo policy + server observations via the GitHub App) vs repo-only. Recommendation: hybrid; repo-only cannot see reactions or cross-PR thresholds.
 4. Reconcile `altimate-code-actions@v0` (says "Safe" without proof) with this product: fold in or retire.
-5. Widen `altimate-ingestion` to the Databricks package and unpin now, so Phase 1 measures real volume.
+5. Widen `altimate-ingestion` to the Databricks package now and move it from the 0.9.3 pin to an exact pin of the current release with automated bumps (Dependabot/Renovate on the `--version` line), so Phase 1 measures real volume without floating `latest`. Same policy as Phase 0C item 14.
 6. Budget a core release (prompt guidance slot, typed suggestion payload, `ruleId` in engine output) — Phases 1–2 depend on it.
 
 ## 7. Not verified

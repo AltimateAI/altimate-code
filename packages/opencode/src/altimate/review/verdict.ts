@@ -93,10 +93,12 @@ const ReviewSummary = z.object({
   critical: z.number().int().nonnegative(),
   warning: z.number().int().nonnegative(),
   suggestion: z.number().int().nonnegative(),
-  /** Compatibility alias for lintOnly. Never reflects individual undecidable findings. */
+  /** Compatibility flag for lintOnly or emptyScope. Never reflects individual undecidable findings. */
   degraded: z.boolean(),
   /** True when no changed model resolved against a dbt manifest. */
   lintOnly: z.boolean().optional(),
+  /** True when the diff contains no reviewable dbt files. */
+  emptyScope: z.boolean().optional(),
   /** Surfaced findings whose deterministic analysis could not decide. */
   undecidableFindings: z.number().int().nonnegative().optional(),
   /** Missing dbt artifacts that reduce lineage/equivalence fidelity. */
@@ -192,6 +194,8 @@ export interface BuildEnvelopeInput {
   generatedAt?: string
   /** Run-level lint-only flag. */
   lintOnly?: boolean
+  /** Run-level empty-review-scope flag. */
+  emptyScope?: boolean
   /** Compatibility input alias for lintOnly. */
   degraded?: boolean
   artifactHints?: string[]
@@ -209,6 +213,7 @@ export interface BuildEnvelopeInput {
 function summarize(
   findings: Finding[],
   lintOnly: boolean,
+  emptyScope: boolean | undefined,
   artifactHints: string[],
   aiReview?: AiReviewSummary,
 ): VerdictEnvelope["summary"] {
@@ -218,8 +223,9 @@ function summarize(
     critical: tally.critical,
     warning: tally.warning,
     suggestion: tally.suggestion,
-    degraded: lintOnly,
+    degraded: lintOnly || emptyScope === true,
     lintOnly,
+    emptyScope,
     undecidableFindings: findings.filter((f) => f.degraded).length,
     artifactHints,
     aiReview,
@@ -242,7 +248,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
     findings: input.findings,
-    summary: summarize(input.findings, lintOnly, input.artifactHints ?? [], input.aiReview),
+    summary: summarize(input.findings, lintOnly, input.emptyScope, input.artifactHints ?? [], input.aiReview),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,

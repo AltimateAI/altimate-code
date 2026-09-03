@@ -109,9 +109,9 @@ export function emitReviewRun(input: {
       tier: env.tier,
       // Optional in the schema and explicitly invalid as `false`, so normalise rather than copy.
       tier_forced: env.tierForced === true,
-      // Compatibility field: degraded now means the run-level lint-only state,
+      // Compatibility field: degraded covers either run-level reduced scope,
       // never an individual undecidable finding.
-      degraded: env.summary.lintOnly ?? env.summary.degraded,
+      degraded: env.summary.degraded,
       undecidable_findings: env.summary.undecidableFindings ?? 0,
       ai_status: env.summary.aiReview?.status,
       ai_findings: env.summary.aiReview?.findings ?? 0,

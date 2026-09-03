@@ -1104,8 +1104,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }),
   )
 
-  // A run is degraded when model files exist but none resolved against a manifest.
-  const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
+  const lintOnly = modelFiles.length > 0 && !anyManifest
+  const emptyScope = reviewable.length === 0
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
   // the reviewer core carries no default list. `undefined` when no
@@ -1462,7 +1462,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest,
     generatedAt: input.generatedAt,
-    lintOnly: runDegraded,
+    lintOnly,
+    emptyScope,
     artifactHints: input.artifactHints,
     aiReview: aiReviewSummary,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
