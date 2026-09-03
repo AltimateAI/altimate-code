@@ -80,6 +80,13 @@ function parsePolicySignature(body: string | null | undefined): string | undefin
   return /(?:^|\n)<!-- altimate-policy:\s*([^\s]+)\s*-->/.exec(body)?.[1]
 }
 
+function parseTier(body: string | null | undefined): VerdictEnvelope["tier"] | undefined {
+  if (!body) return undefined
+  return /(?:^|\n)<!-- altimate-tier:\s*(trivial|lite|full)\s*-->/.exec(body)?.[1] as
+    | VerdictEnvelope["tier"]
+    | undefined
+}
+
 /** Compare the prior sticky comment's finding ids with the current envelope. */
 export function computeFindingDelta(
   previousBody: string | null | undefined,
@@ -89,13 +96,23 @@ export function computeFindingDelta(
   if (!previousIds) return undefined
   const currentIds = new Set(current.findings.map((finding) => finding.id))
   const previousPolicySignature = parsePolicySignature(previousBody)
+  const previousTier = parseTier(previousBody)
+  const reviewSettingsChanged =
+    previousPolicySignature && current.policySignature && previousPolicySignature !== current.policySignature
+      ? true
+      : undefined
+  const reviewSettingsUnchanged =
+    previousPolicySignature !== undefined &&
+    current.policySignature !== undefined &&
+    previousPolicySignature === current.policySignature
   return {
     noLongerSurfaced: [...previousIds].filter((id) => !currentIds.has(id)).length,
     new: [...currentIds].filter((id) => !previousIds.has(id)).length,
     unchanged: [...currentIds].filter((id) => previousIds.has(id)).length,
-    reviewSettingsChanged:
-      previousPolicySignature && current.policySignature && previousPolicySignature !== current.policySignature
-        ? true
+    reviewSettingsChanged,
+    analysisScopeChanged:
+      reviewSettingsUnchanged && previousTier && previousTier !== current.tier
+        ? { from: previousTier, to: current.tier }
         : undefined,
   }
 }

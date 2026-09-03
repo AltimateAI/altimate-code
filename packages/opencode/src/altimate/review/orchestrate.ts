@@ -1105,8 +1105,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }),
   )
 
-  const anyResolved = [...ctxByPath.values()].some((ctx) => ctx.impact.resolved)
-  const lintOnly = modelFiles.length > 0 && !anyResolved
+  const nonDeletedModelContexts = [...ctxByPath.values()].filter((ctx) => ctx.file.status !== "deleted")
+  const anyResolved = nonDeletedModelContexts.some((ctx) => ctx.impact.resolved)
+  let manifestAvailable = [...ctxByPath.values()].some((ctx) => ctx.impact.hasManifest)
+  if (modelFiles.length > 0 && nonDeletedModelContexts.length === 0 && input.runner.manifestAvailable) {
+    manifestAvailable = await input.runner.manifestAvailable().catch(() => false)
+  }
+  const lintOnly =
+    modelFiles.length > 0 && (nonDeletedModelContexts.length > 0 ? !anyResolved : !manifestAvailable)
   const emptyScope = reviewable.length === 0
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
@@ -1166,12 +1172,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const exclusions = input.rubric.exclusions
   const policySignature = makeReviewPolicySignature({
     severityThreshold: input.config.severityThreshold,
-    enabledReviewers: [...lanes],
-    exclusionCount:
-      Number(exclusions.allowSelectStarInStaging) +
-      Number(exclusions.skipMissingContractWhenNotEnforced) +
-      Number(exclusions.skipNonProdModels) +
-      exclusions.excludeGlobs.length,
+    enabledReviewers: input.config.reviewers,
+    exclusions,
+    aiEnabled: input.config.ai,
+    dataDiffEnabled: input.config.dataDiff.enabled,
   })
 
   const all: Finding[][] = []

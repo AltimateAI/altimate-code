@@ -137,6 +137,10 @@ describe("detectArtifactHints", () => {
 
     const manifest = path.join(build, "manifest.json")
     const changedModels = [{ path: "models/a.sql", status: "modified" as const }]
+    // The sibling `build-base/compiled` DIRECTORY already exists (created above), so it is
+    // preferred over `target-base/compiled` even though only the fallback holds `a.sql`.
+    // The hint therefore names the sibling; the fallback is never consulted once the
+    // sibling directory is present.
     expect(await detectArtifactHints(manifest, tmp.path, changedModels, project)).toEqual([
       "build-base/compiled missing for 1 changed model(s) (compile the base ref)",
     ])

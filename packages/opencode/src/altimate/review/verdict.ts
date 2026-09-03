@@ -92,15 +92,25 @@ export type AiReviewSummary = z.infer<typeof AiReviewSummary>
 export interface ReviewPolicySignatureInput {
   severityThreshold: Severity
   enabledReviewers: string[]
-  exclusionCount: number
+  exclusions: Rubric["exclusions"]
+  aiEnabled: boolean
+  dataDiffEnabled: boolean
 }
 
 /** Compact fingerprint for the settings that determine which findings surface. */
 export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): string {
+  const { excludeGlobs, ...booleanExclusions } = input.exclusions
+  const enabledExclusions = Object.entries(booleanExclusions)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name)
+    .sort()
   const body = JSON.stringify([
     input.severityThreshold,
     [...new Set(input.enabledReviewers)].sort(),
-    input.exclusionCount,
+    [...new Set(excludeGlobs)].sort(),
+    enabledExclusions,
+    input.aiEnabled,
+    input.dataDiffEnabled,
   ])
   return createHash("sha256").update(body).digest("hex").slice(0, 16)
 }
@@ -141,7 +151,7 @@ export const VerdictEnvelope = z.object({
   idealVerdict: Verdict,
   mode: ReviewMode,
   tier: RiskTier,
-  /** Fingerprint of the severity, enabled lanes, and exclusion count used for this run. */
+  /** Fingerprint of the user-configured review settings used for this run. */
   policySignature: z.string().optional(),
   /** G1 — reasons the classifier assigned this tier (only when --explain-tier). */
   tierReasons: z.array(z.string()).optional(),

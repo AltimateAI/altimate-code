@@ -403,7 +403,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const changedModels = filterChangedFiles(changedFiles, rubric.exclusions.excludeGlobs).filter(
     (file) => file.kind === "model_sql" || file.kind === "python_model",
   )
-  const artifactDirs = await compiledArtifactDirs(manifestAbs, dbtRootReal)
+  const manifestReal = await realpath(manifestAbs).catch(() => manifestAbs)
+  const artifactDirs = await compiledArtifactDirs(manifestReal, dbtRootReal)
   const artifactHints = await detectArtifactHints(
     manifestAbs,
     dbtRootReal,

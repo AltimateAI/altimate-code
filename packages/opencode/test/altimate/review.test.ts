@@ -1918,7 +1918,7 @@ describe("orchestrate", () => {
     expect(renderSummary(withoutAiReview)).not.toContain("AI reviewer:")
   })
 
-  test("empty scope skips the generic success line but renders a present AI reviewer status", () => {
+  test("empty scope skips the generic success and AI reviewer lines", () => {
     const env = buildEnvelope({
       findings: [],
       tier: "lite",
@@ -1930,7 +1930,7 @@ describe("orchestrate", () => {
 
     expect(summary).toContain("Nothing to review")
     expect(summary).not.toContain("No issues found in the changed dbt models")
-    expect(summary).toContain("🤖 AI reviewer: 2 advisory findings")
+    expect(summary).not.toContain("AI reviewer:")
   })
 
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {
@@ -2600,6 +2600,50 @@ describe("orchestrate", () => {
     })
     expect(env.summary.degraded).toBe(true)
     expect(env.summary.lintOnly).toBe(true)
+  })
+
+  test("deletion-only diffs use manifest availability for lint-only status", async () => {
+    const review = async (manifestAvailable: boolean) =>
+      runReview({
+        changedFiles: [{ path: "models/staging/removed_model.sql", status: "deleted", diff: "" }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          ...fakeRunner({}),
+          async manifestAvailable() {
+            return manifestAvailable
+          },
+          async impact() {
+            return {
+              hasManifest: manifestAvailable,
+              resolved: false,
+              severity: "SAFE",
+              directCount: 0,
+              transitiveCount: 0,
+              testCount: 0,
+            }
+          },
+        },
+      })
+
+    expect((await review(true)).summary.lintOnly).toBe(false)
+    expect((await review(false)).summary.lintOnly).toBe(true)
+  })
+
+  test("tier-derived lanes do not change the user review policy signature", async () => {
+    const input = {
+      changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: [] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment" as const,
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+    }
+    const lite = await runReview({ ...input, forceTier: "lite" })
+    const full = await runReview({ ...input, forceTier: "full" })
+
+    expect(lite.policySignature).toBe(full.policySignature)
   })
 
   test("one resolved changed model keeps a mixed-model run out of lint-only", async () => {

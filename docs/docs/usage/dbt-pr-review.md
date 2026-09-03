@@ -206,6 +206,7 @@ jobs:
           dbt compile
           dbt docs generate
           # Compile the fork point (merge-base), which is what the review compares against.
+          git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
           MERGE_BASE=$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}")
           git worktree add --detach ../dbt-review-base "${MERGE_BASE}"
           (

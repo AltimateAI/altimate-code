@@ -14,6 +14,7 @@ export interface FindingDelta {
   new: number
   unchanged: number
   reviewSettingsChanged?: boolean
+  analysisScopeChanged?: { from: VerdictEnvelope["tier"]; to: VerdictEnvelope["tier"] }
 }
 
 const SEVERITY_EMOJI: Record<Severity, string> = {
@@ -56,9 +57,14 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
 
   if (delta) {
+    const changeNote = delta.reviewSettingsChanged
+      ? " (review settings changed)"
+      : delta.analysisScopeChanged
+        ? ` (analysis scope changed: ${delta.analysisScopeChanged.from} → ${delta.analysisScopeChanged.to})`
+        : ""
     lines.push(
       `**Since last review:** ${delta.noLongerSurfaced} no longer surfaced · ${delta.new} new · ${delta.unchanged} unchanged` +
-        (delta.reviewSettingsChanged ? " (review settings changed)" : ""),
+        changeNote,
       "",
     )
   }
@@ -146,7 +152,7 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
     )
   }
 
-  if (env.summary.aiReview) {
+  if (!env.summary.emptyScope && env.summary.aiReview) {
     const ai = env.summary.aiReview
     if (ai.status === "ok") {
       lines.push(`🤖 AI reviewer: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")
@@ -166,6 +172,7 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
       (env.manifestHash ? ` · manifest \`${env.manifestHash.slice(0, 10)}\`` : "") +
       "</sub>",
     "",
+    `<!-- altimate-tier: ${env.tier} -->`,
     ...(env.policySignature ? [`<!-- altimate-policy: ${env.policySignature} -->`] : []),
     `<!-- altimate-findings: ${env.findings.map((finding) => finding.id).join(",")} -->`,
   )

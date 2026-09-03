@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { makeFinding, type Finding } from "../../../src/altimate/review/finding"
 import { renderSummary } from "../../../src/altimate/review/format"
 import { computeFindingDelta, parseFindingIds } from "../../../src/altimate/review/post-github"
+import { DEFAULT_RUBRIC } from "../../../src/altimate/review/rubric"
 import { buildEnvelope, makeReviewPolicySignature } from "../../../src/altimate/review/verdict"
 
 function finding(id: string, overrides: Partial<Parameters<typeof makeFinding>[0]> = {}): Finding {
@@ -184,13 +185,71 @@ describe("review summary readability", () => {
     const policySignature = makeReviewPolicySignature({
       severityThreshold: "suggestion",
       enabledReviewers: ["semantic_change", "sql_quality"],
-      exclusionCount: 3,
+      exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
+      aiEnabled: true,
+      dataDiffEnabled: false,
     })
     expect(policySignature).toBe(
       makeReviewPolicySignature({
         severityThreshold: "suggestion",
         enabledReviewers: ["sql_quality", "semantic_change"],
-        exclusionCount: 3,
+        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["seeds/tmp/**", "models/archive/**"] },
+        aiEnabled: true,
+        dataDiffEnabled: false,
+      }),
+    )
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({
+        severityThreshold: "suggestion",
+        enabledReviewers: ["semantic_change", "sql_quality"],
+        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/other/**", "seeds/tmp/**"] },
+        aiEnabled: true,
+        dataDiffEnabled: false,
+      }),
+    )
+    const firstEnabledExclusion = makeReviewPolicySignature({
+      severityThreshold: "suggestion",
+      enabledReviewers: ["semantic_change", "sql_quality"],
+      exclusions: {
+        ...DEFAULT_RUBRIC.exclusions,
+        allowSelectStarInStaging: false,
+        skipMissingContractWhenNotEnforced: true,
+        skipNonProdModels: false,
+        excludeGlobs: ["models/archive/**", "seeds/tmp/**"],
+      },
+      aiEnabled: true,
+      dataDiffEnabled: false,
+    })
+    const secondEnabledExclusion = makeReviewPolicySignature({
+      severityThreshold: "suggestion",
+      enabledReviewers: ["semantic_change", "sql_quality"],
+      exclusions: {
+        ...DEFAULT_RUBRIC.exclusions,
+        allowSelectStarInStaging: true,
+        skipMissingContractWhenNotEnforced: false,
+        skipNonProdModels: false,
+        excludeGlobs: ["models/archive/**", "seeds/tmp/**"],
+      },
+      aiEnabled: true,
+      dataDiffEnabled: false,
+    })
+    expect(firstEnabledExclusion).not.toBe(secondEnabledExclusion)
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({
+        severityThreshold: "suggestion",
+        enabledReviewers: ["semantic_change", "sql_quality"],
+        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
+        aiEnabled: true,
+        dataDiffEnabled: true,
+      }),
+    )
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({
+        severityThreshold: "suggestion",
+        enabledReviewers: ["semantic_change", "sql_quality"],
+        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/archive/**", "seeds/tmp/**"] },
+        aiEnabled: false,
+        dataDiffEnabled: false,
       }),
     )
     const previous = buildEnvelope({
@@ -214,7 +273,21 @@ describe("review summary readability", () => {
     const currentBody = renderSummary(current, delta)
     expect(currentBody).toContain("**Since last review:** 1 no longer surfaced · 1 new · 1 unchanged")
     expect(currentBody).toContain(`<!-- altimate-policy: ${policySignature} -->`)
+    expect(currentBody).toContain("<!-- altimate-tier: lite -->")
     expect(currentBody.endsWith("<!-- altimate-findings: unchanged,new -->")).toBe(true)
+
+    const changedTier = buildEnvelope({
+      findings: current.findings,
+      tier: "full",
+      mode: "comment",
+      policySignature,
+    })
+    const changedTierDelta = computeFindingDelta(previousBody, changedTier)
+    expect(changedTierDelta?.reviewSettingsChanged).toBeUndefined()
+    expect(changedTierDelta?.analysisScopeChanged).toEqual({ from: "lite", to: "full" })
+    expect(renderSummary(changedTier, changedTierDelta)).toContain(
+      "**Since last review:** 1 no longer surfaced · 1 new · 1 unchanged (analysis scope changed: lite → full)",
+    )
 
     const changedPolicy = buildEnvelope({
       findings: current.findings,
@@ -223,7 +296,9 @@ describe("review summary readability", () => {
       policySignature: makeReviewPolicySignature({
         severityThreshold: "warning",
         enabledReviewers: ["semantic_change", "sql_quality"],
-        exclusionCount: 4,
+        exclusions: { ...DEFAULT_RUBRIC.exclusions, excludeGlobs: ["models/other/**", "seeds/tmp/**"] },
+        aiEnabled: true,
+        dataDiffEnabled: true,
       }),
     })
     const changedDelta = computeFindingDelta(previousBody, changedPolicy)
