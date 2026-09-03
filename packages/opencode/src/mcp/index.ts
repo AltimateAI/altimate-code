@@ -1378,8 +1378,9 @@ export const layer = Layer.effect(
       supportsOAuth,
       hasStoredTokens,
       getAuthStatus,
-      // altimate_change — see Interface.entry
+      // altimate_change start — see Interface.entry
       entry: getMcpConfig,
+      // altimate_change end
     })
   }),
 )
