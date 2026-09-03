@@ -55,7 +55,7 @@
     "@parcel/watcher-linux-x64-glibc": "2.5.1",
     "@parcel/watcher-linux-x64-musl": "2.5.1",
     "@parcel/watcher-win32-arm64": "2.5.1",
-    "@parcel/watcher-win32-x64": "2.5.1",
+    "@parcel/watcher-win32-x64": "2.6.0",
     "@opencode-ai/http-recorder": "workspace:*",
     "drizzle-kit": "catalog:"
   },
