@@ -129,6 +129,7 @@ describe("Tool name consistency in prompts", () => {
         const override = await SessionPreExecution.scopedBuilderPrompt({
           runMode: false,
           agent: "builder",
+          prompt: builder!.prompt,
           directories: [tmp.path],
         })
         expect(override).toBeUndefined()
