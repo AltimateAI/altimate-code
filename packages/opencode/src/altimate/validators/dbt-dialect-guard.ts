@@ -42,6 +42,7 @@ import {
   maskJinjaExpressions,
   stripJinjaIfBlocks,
   resolveDbtSourcePaths,
+  isUnderAnyDir,
   sanitizeForPrompt,
 } from "./validator-utils"
 
@@ -134,6 +135,7 @@ interface Finding {
  * false and its edited models were never checked at all.
  */
 async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
+  const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
   async function scan(dir: string, depth: number): Promise<boolean> {
     if (depth > SCAN_MAX_DEPTH) return false
     let entries: import("fs").Dirent[]
@@ -147,6 +149,14 @@ async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
         continue
       }
       const full = join(dir, entry.name)
+      // A configured model/macro path that contains — or IS — the dependency
+      // install directory (an unusual but real configuration, e.g. broad
+      // `macro-paths`) would otherwise let an installed PACKAGE's own
+      // `target.type` guard count as this project's convention.
+      // `dbt-dialect-guard` would then switch itself on for a project that
+      // establishes no such convention and start rejecting its correct,
+      // single-warehouse SQL.
+      if (isUnderAnyDir(full, sourcePaths.packages)) continue
       let stat: import("fs").Stats
       try {
         stat = await fs.stat(full)
@@ -170,7 +180,6 @@ async function projectPrescribesGuards(dbtRoot: string): Promise<boolean> {
     }
     return false
   }
-  const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
   for (const dir of [...sourcePaths.models, ...sourcePaths.macros]) {
     if (await scan(dir, 0)) return true
   }

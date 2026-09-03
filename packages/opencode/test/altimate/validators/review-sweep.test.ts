@@ -602,9 +602,16 @@ describe("a guard chain's own elif counts as a guard", () => {
     expect(await DbtDialectGuardValidator.appliesTo(ctx())).toBe(true)
   })
 
-  test("stripJinjaIfBlocks blanks a chain whose elif carries the condition", () => {
+  test("stripJinjaIfBlocks blanks only the arm whose OWN condition carries target.type", () => {
+    // The `if a` arm is not warehouse-guarded — it runs whenever `a` is true,
+    // on every target — so it must stay visible to the lint; only the `elif`
+    // arm is actually guarded. Blanking the WHOLE chain (the old behaviour)
+    // hid a genuinely unguarded call from the lint. See `review-sweep-3` for
+    // the end-to-end regression test against `dbt-dialect-guard`.
     const sql = "{% if a %}\nsafe_cast(x)\n{% elif target.type == 'bq' %}\nsafe_cast(y)\n{% endif %}"
-    expect(stripJinjaIfBlocks(sql, /target\.type/i)).not.toContain("safe_cast")
+    const out = stripJinjaIfBlocks(sql, /target\.type/i)
+    expect(out).toContain("safe_cast(x)")
+    expect(out).not.toContain("safe_cast(y)")
   })
 
   test("a nested guard does not blank an outer block full of unguarded SQL", () => {

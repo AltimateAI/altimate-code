@@ -122,7 +122,7 @@ const LEADING_CONJUNCTION_RE = /^\s*(?:and|or)\b/i
  * form unchecked — the same under-fire the gate already has for a model with
  * no guard at all — and takes the false positive away.
  */
-const NEGATED_IS_INCREMENTAL_RE = /\bnot\s+(?<![\w.])is_incremental\s*\(\s*\)/i
+const NEGATED_IS_INCREMENTAL_RE = /\bnot\s*\(?\s*(?<![\w.])is_incremental\s*\(\s*\)\s*\)?/i
 /**
  * Clock and randomness constructs whose value changes between otherwise
  * identical runs.

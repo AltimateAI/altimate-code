@@ -10,7 +10,8 @@
  */
 
 import { promises as fs } from "fs"
-import { join, sep, basename } from "path"
+import { createHash } from "crypto"
+import { join, sep, basename, resolve } from "path"
 
 // ---------------------------------------------------------------------------
 // Subprocess timeout
@@ -525,6 +526,16 @@ export interface RequiredDeliverables {
   models: string[]
   /** Literal file paths, as written (e.g. `models/marts/orders.sql`). */
   files: string[]
+  /**
+   * Subset of `models` the task asked to be MODIFIED (update/fix/rename/…)
+   * rather than created. A completion gate that treats mere pre-session
+   * existence as satisfying a required deliverable must not do so for a name
+   * in this set — existence proves nothing about whether the requested change
+   * happened. Only populated from prose requirement lines (tier 3), where a
+   * verb is available to classify; empty for the declaration and
+   * deliverables-section tiers, which carry no verb to read.
+   */
+  modificationModels: string[]
   /** Which extraction tier produced the names — recorded for telemetry. */
   source: "declaration" | "deliverables-section" | "requirement-lines"
 }
@@ -569,7 +580,28 @@ const CODE_SPAN_RE = /`([^`\n]+)`/g
  * cannot reach a longer word.
  */
 const REQUIREMENT_VERB_RE =
-  /\b(?:(?:creat|build|produc|implement|deliver|materiali[sz]|generat|writ|deploy)\w*|add(?:s|ed|ing)?|renam(?:e|es|ed|ing)|convert(?:s|ed|ing)?|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|updat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|chang(?:e|es|ed|ing))\b/i
+  /\b(?:creat(?:e|es|ed|ing)|build(?:s|ing)?|built|produc(?:e|es|ed|ing)|implement(?:s|ed|ing)?|deliver(?:s|ed|ing)?|materiali[sz](?:e|es|ed|ing)|generat(?:e|es|ed|ing)|writ(?:e|es|ing)|wrote|written|deploy(?:s|ed|ing)?|add(?:s|ed|ing)?|renam(?:e|es|ed|ing)|convert(?:s|ed|ing)?|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|updat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|chang(?:e|es|ed|ing))\b/i
+/**
+ * Modification verbs — the subset of `REQUIREMENT_VERB_RE` that asks for a
+ * change to something that already exists, rather than its creation.
+ *
+ * A model already on disk satisfies "create the model `orders`" whenever it
+ * was delivered in an earlier session — that escape hatch is deliberate (see
+ * `dbt-nothing-built.ts`). It must NOT satisfy "update the model `orders`":
+ * the task is asking for a change, and pre-existing presence proves nothing
+ * about whether this session made it. Tagging these verbs lets the
+ * nothing-built gate demand session evidence (authorship or a fresh build)
+ * for a modification contract instead of accepting mere existence.
+ */
+const MODIFICATION_VERB_RE =
+  /\b(?:updat(?:e|es|ed|ing)|modif(?:y|ies|ied|ying)|chang(?:e|es|ed|ing)|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|renam(?:e|es|ed|ing)|convert(?:s|ed|ing)?)\b/i
+/**
+ * Rename verb — the subset of `MODIFICATION_VERB_RE` whose requirement line
+ * names two artifacts (source and destination) but only one — the
+ * destination — is actually required to exist afterwards. See
+ * `requirementHead`'s caller in `extractRequiredDeliverables`.
+ */
+const RENAME_VERB_RE = /^renam/i
 /** Noun that makes the requirement about a data artifact. */
 const DELIVERABLE_NOUN_RE =
   /\b(?:model|models|table|tables|view|views|seed|seeds|snapshot|snapshots|mart|marts|file|files)\b/i
@@ -617,7 +649,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   if (declaration && declaration[1]) {
     const collected = collectDeliverableTokens(declaration[1].split(/[,\s]+/))
     if (collected.models.length > 0 || collected.files.length > 0) {
-      return { ...collected, source: "declaration" }
+      return { ...collected, modificationModels: [], source: "declaration" }
     }
   }
 
@@ -639,11 +671,12 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   }
   const section = collectDeliverableTokens(sectionTokens)
   if (section.models.length > 0 || section.files.length > 0) {
-    return { ...section, source: "deliverables-section" }
+    return { ...section, modificationModels: [], source: "deliverables-section" }
   }
 
   // Tier 3 — requirement lines in prose.
   const proseTokens: string[] = []
+  const modificationTokens: string[] = []
   for (const line of lines) {
     const verb = REQUIREMENT_VERB_RE.exec(line)
     if (!verb) continue
@@ -653,11 +686,28 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
     // required makes the deliverable gate reject the correct implementation
     // forever, so a negated verb disqualifies the whole line.
     if (verbIsNegated(line, verb.index)) continue
-    proseTokens.push(...inlineCodeSpans(requirementHead(line, verb.index)))
+    let spans = inlineCodeSpans(requirementHead(line, verb.index))
+    // "Rename `old_orders` to `new_orders`" names two artifacts, but only the
+    // destination is required to exist once the rename is done — the source
+    // is expected to be GONE. `to` is not a qualifier `requirementHead` cuts
+    // on, so both spans survive; keeping both makes the deliverable gate
+    // reject a correct rename forever for "missing" the source name. Keep
+    // only the last span (the destination), and only when there is more than
+    // one — a rename line naming a single artifact is unaffected.
+    if (RENAME_VERB_RE.test(verb[0]) && spans.length > 1) {
+      spans = [spans[spans.length - 1]!]
+    }
+    proseTokens.push(...spans)
+    if (MODIFICATION_VERB_RE.test(verb[0])) modificationTokens.push(...spans)
   }
   const prose = collectDeliverableTokens(proseTokens)
   if (prose.models.length > 0 || prose.files.length > 0) {
-    return { ...prose, source: "requirement-lines" }
+    const modificationSet = new Set(collectDeliverableTokens(modificationTokens).models)
+    return {
+      ...prose,
+      modificationModels: prose.models.filter((m) => modificationSet.has(m)),
+      source: "requirement-lines",
+    }
   }
   return null
 }
@@ -711,19 +761,46 @@ function inlineCodeSpans(line: string): string[] {
   return out
 }
 
+/**
+ * Top-level path segments that never produce a dbt relation, even for a
+ * `.sql`/`.csv` file within them. A required `macros/generate_schema_name.sql`
+ * or `analyses/adhoc.sql` names a real, checkable file, but deriving a
+ * "required model" from its stem makes the deliverable gate permanently
+ * reject the correct macro/analysis-only implementation for lacking a model
+ * that dbt was never going to build.
+ *
+ * A conservative, directory-name heuristic rather than a project-config-aware
+ * one: this helper is pure text with no filesystem access, so it cannot
+ * consult `model-paths`/`macro-paths`. It still closes the concrete failure
+ * mode (a task naming a macro or analysis file) without guessing at custom
+ * source-path configuration it cannot see.
+ */
+const NON_RELATION_TOP_SEGMENTS = new Set(["macros", "macro", "analyses", "analysis", "tests", "test", "docs"])
+
 /** Classify raw tokens into model identifiers and literal file paths. */
 function collectDeliverableTokens(tokens: string[]): { models: string[]; files: string[] } {
   const models: string[] = []
   const files: string[] = []
   for (const raw of tokens) {
-    const token = raw.trim().replace(/[.,;:]+$/, "")
+    // Normalise Windows separators before classification. `FILE_PATH_RE` and
+    // the identifier fallback are both `/`-only; a task written with
+    // `models\marts\orders.sql` matches neither, so a Windows-authored task
+    // whose only requirement is a backslash path yields NO contract at all —
+    // both completion gates read the workspace as having no literal contract
+    // and a zero-write session finishes clean. The normalised form is also
+    // what gets returned, so downstream existence checks stay consistent
+    // with what was recorded here.
+    const token = raw.trim().replace(/[.,;:]+$/, "").replace(/\\/g, "/")
     if (!token) continue
     if (token.includes("/") && FILE_PATH_RE.test(token)) {
       if (!files.includes(token)) files.push(token)
       // A required `models/marts/orders.sql` also requires the model `orders`.
       // A required `models/schema.yml` requires a file and no relation, so no
-      // model name is derived from it.
-      if (/\.(?:sql|csv)$/i.test(token)) {
+      // model name is derived from it. Nor is one derived from a path whose
+      // top-level directory never produces a relation (see
+      // `NON_RELATION_TOP_SEGMENTS`).
+      const topSegment = token.split("/")[0]?.toLowerCase() ?? ""
+      if (/\.(?:sql|csv)$/i.test(token) && !NON_RELATION_TOP_SEGMENTS.has(topSegment)) {
         const bare = modelNameFromPath(token).toLowerCase()
         if (IDENTIFIER_RE.test(bare) && !DELIVERABLE_STOPWORDS.has(bare) && !models.includes(bare)) {
           models.push(bare)
@@ -844,6 +921,79 @@ export interface DbtSourcePaths {
  * Deliberately not a general YAML parser: this lane must not take a YAML
  * dependency for four keys, and a wrong answer here fails safe (the default).
  */
+/**
+ * Index of the `]` that closes the `[` at the start of `text`, or -1 when
+ * none is found. Quote-aware: a `]` inside a quoted Jinja expression is not a
+ * close bracket.
+ */
+function findUnquotedBracketClose(text: string): number {
+  let depth = 0
+  let quote: string | null = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === "[") depth++
+    else if (ch === "]") {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+/**
+ * Split the inside of a YAML flow sequence on top-level commas only — quote-
+ * and bracket/paren/brace-aware, so a comma inside a quoted Jinja expression
+ * (`"{{ env_var('MODEL_DIR', 'transform') }}"`) does not split the single
+ * item in two.
+ */
+function splitTopLevelListItems(text: string): string[] {
+  const items: string[] = []
+  let depth = 0
+  let quote: string | null = null
+  let start = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++
+      continue
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      depth--
+      continue
+    }
+    if (ch === "," && depth === 0) {
+      items.push(text.slice(start, i))
+      start = i + 1
+    }
+  }
+  items.push(text.slice(start))
+  return items
+}
+
 export function readDbtProjectPathList(yml: string, key: string): string[] | null {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   // `[ \t]*` rather than `\s*`: `\s` matches newlines, so around the colon it
@@ -875,10 +1025,26 @@ export function readDbtProjectPathList(yml: string, key: string): string[] | nul
   }
 
   if (rest.startsWith("[")) {
-    const close = rest.indexOf("]")
-    const inner = close === -1 ? rest.slice(1) : rest.slice(1, close)
-    const items = inner
-      .split(",")
+    // The flow sequence can (a) span multiple physical lines — valid YAML —
+    // and (b) contain a Jinja expression whose own parens/quotes carry a
+    // comma, e.g. `["{{ env_var('MODEL_DIR', 'transform') }}"]`. Splitting
+    // naively on every comma breaks case (b) into two invalid paths (both
+    // then discarded), and stopping at the first line misses case (a)
+    // entirely — both silently fall back to `models/`, so touched-model
+    // validators miss edits under the real, configured directory.
+    let combined = rest
+    let closeIdx = findUnquotedBracketClose(combined)
+    if (closeIdx === -1) {
+      const restLines = yml.slice((line.index ?? 0) + line[0].length).split("\n")
+      for (const raw of restLines) {
+        const stripped = raw.replace(/\s+#.*$/, "").replace(/^\s*#.*$/, "")
+        combined += "\n" + stripped
+        closeIdx = findUnquotedBracketClose(combined)
+        if (closeIdx !== -1) break
+      }
+    }
+    const inner = closeIdx === -1 ? combined.slice(1) : combined.slice(1, closeIdx)
+    const items = splitTopLevelListItems(inner)
       .map(unquote)
       .filter((s) => s.length > 0)
     return items.length > 0 ? items : null
@@ -965,15 +1131,32 @@ export async function resolveDbtSourcePaths(dbtRoot: string): Promise<DbtSourceP
 }
 
 /**
+ * Platforms whose default filesystem is case-insensitive (APFS on macOS,
+ * NTFS on Windows). Linux's common filesystems (ext4, xfs, …) are
+ * case-sensitive by default, so folding case there makes a configured
+ * `model-paths: ['Models']` also match a distinct, ignored `models/`
+ * directory — files under it can then falsely satisfy the deliverable
+ * inventory or read as touched models, even though dbt never loads them.
+ * This is a platform-default heuristic, not a per-volume probe (an exFAT
+ * mount on Linux, or a case-sensitive APFS volume, are outside what a path
+ * comparison alone can detect) — but it is strictly more correct than
+ * unconditional folding, which was wrong for every Linux CI run.
+ */
+const CASE_INSENSITIVE_PLATFORM = process.platform === "darwin" || process.platform === "win32"
+
+/**
  * True when `filePath` sits inside one of `dirs` (or is one of them).
  *
- * Compared case-insensitively so a case-insensitive volume (APFS, NTFS) does
- * not make `Models/` read as outside `models/`.
+ * Compared case-insensitively only on a platform whose filesystem defaults to
+ * case-insensitive (see `CASE_INSENSITIVE_PLATFORM`); case-sensitively
+ * everywhere else, so a case-sensitive filesystem's distinct same-spelled-
+ * differently-cased directories are not conflated.
  */
 export function isUnderAnyDir(filePath: string, dirs: string[]): boolean {
-  const target = filePath.toLowerCase()
+  const normalize = (p: string): string => (CASE_INSENSITIVE_PLATFORM ? p.toLowerCase() : p)
+  const target = normalize(filePath)
   for (const dir of dirs) {
-    const base = dir.toLowerCase().replace(/[\\/]+$/, "")
+    const base = normalize(dir).replace(/[\\/]+$/, "")
     if (target === base) return true
     if (target.startsWith(base + sep) || target.startsWith(base + "/")) return true
   }
@@ -1077,6 +1260,25 @@ export function runResultsExecutedModels(command: string | null): boolean {
   // above promises — denying it would quietly downgrade a green build to
   // `coverage-inconclusive` on a future dbt subcommand.
   return !NON_MODEL_EXECUTING_DBT_COMMANDS.has(command) && !NON_EXECUTING_DBT_COMMANDS.has(command)
+}
+
+/**
+ * True only when `command` is CONFIRMED to be `run` or `build` — never for a
+ * null/unrecognised command, unlike `runResultsExecutedModels`.
+ *
+ * The two predicates answer different questions and must not be conflated.
+ * `runResultsExecutedModels`'s permissive default ("an unknown command reads
+ * as executing") is correct for deciding whether ROWS THAT EXIST are usable
+ * evidence — denying an unclassifiable artifact would block a session whose
+ * build was genuinely green. It is wrong for deciding whether the ABSENCE of
+ * a row is itself evidence of anything: an artifact from an unrecognised
+ * command with zero model rows might just be a command this lane cannot
+ * classify, not a `build`/`run` invocation that legitimately selected
+ * nothing. Only a CONFIRMED `build`/`run` command turns "no model rows" into
+ * positive evidence of failed coverage rather than "no signal either way".
+ */
+export function isConfirmedModelExecutingCommand(command: string | null): boolean {
+  return command !== null && MODEL_EXECUTING_DBT_COMMANDS.has(command)
 }
 
 /**
@@ -1224,6 +1426,16 @@ export async function collectRunResultExemptModels(
       const n = node as Record<string, unknown>
       const name = typeof n["name"] === "string" ? n["name"].toLowerCase() : ""
       if (!name) continue
+      // A surviving manifest can carry a node whose defining file is gone —
+      // deleted, or replaced during a branch switch. `collectProducedNodeNames`
+      // already refuses to trust such an entry as evidence a relation exists;
+      // this exemption reader must apply the same check, or a stale
+      // `ephemeral`/`disabled` flag on a bare name is inherited by a brand
+      // new, ordinary model that happens to share it — `dbt-build-green` then
+      // drops the new model out of scope and reports success having checked
+      // nothing.
+      const originalPath = typeof n["original_file_path"] === "string" ? n["original_file_path"] : ""
+      if (originalPath.length > 0 && !(await pathExists(join(dbtRoot, originalPath)))) continue
       const config = (n["config"] ?? {}) as Record<string, unknown>
       if (String(config["materialized"] ?? "").toLowerCase() === "ephemeral") out.ephemeral.add(name)
       if (config["enabled"] === false) out.disabled.add(name)
@@ -1232,7 +1444,10 @@ export async function collectRunResultExemptModels(
       const rows = Array.isArray(entry) ? entry : [entry]
       for (const node of rows) {
         if (typeof node !== "object" || node === null) continue
-        const name = (node as Record<string, unknown>)["name"]
+        const n = node as Record<string, unknown>
+        const originalPath = typeof n["original_file_path"] === "string" ? n["original_file_path"] : ""
+        if (originalPath.length > 0 && !(await pathExists(join(dbtRoot, originalPath)))) continue
+        const name = n["name"]
         if (typeof name === "string" && name.length > 0) out.disabled.add(name.toLowerCase())
       }
     }
@@ -1268,7 +1483,13 @@ const CONFIG_CALL_HEAD_RE = /\{\{-?\s*config\s*\(/gi
 export function stripInactiveJinja(sql: string): string {
   const blank = (region: string): string => region.replace(/[^\n\r]/g, " ")
   let out = sql.replace(/\{%-?\s*raw\s*-?%\}[\s\S]*?\{%-?\s*endraw\s*-?%\}/gi, blank)
-  const deadIf = /\{%-?\s*if\s+false\s*-?%\}/gi
+  // Every literal-false spelling Jinja/Python accept as a condition: the bare
+  // word (`false`/`False`), the integer `0`, and either wrapped in a single
+  // level of parens. `{% if 0 %}{{ config(enabled=false) }}{% endif %}` is as
+  // dead as `{% if false %}` — dbt never evaluates it — but only the bare-word
+  // form was recognised, so this stripper left the call visible and
+  // `sourceExemptsFromRunResults` read a live, unbuilt model as exempt.
+  const deadIf = /\{%-?\s*if\s+\(?\s*(?:false|0)\s*\)?\s*-?%\}/gi
   for (;;) {
     deadIf.lastIndex = 0
     const m = deadIf.exec(out)
@@ -1315,15 +1536,6 @@ function nextJinjaArmStart(sql: string, from: number, chainEnd: number): number 
   }
   return null
 }
-/** `materialized='ephemeral'` in an in-model `config()` call. */
-const EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"]ephemeral['"]/i
-/** `enabled=false` in an in-model `config()` call. */
-const DISABLED_CONFIG_RE = /\benabled\s*=\s*(?:false|False|0)\b/
-/** `materialized='<anything but ephemeral>'` in an in-model `config()` call. */
-const NON_EPHEMERAL_CONFIG_RE = /materiali[sz]ed\s*=\s*['"](?!ephemeral['"])[a-z0-9_+]+['"]/i
-/** `enabled=true` in an in-model `config()` call. */
-const ENABLED_CONFIG_RE = /\benabled\s*=\s*(?:true|True|1)\b/
-
 /**
  * Concatenate the argument text of every `{{ config() }}` call in a model.
  *
@@ -1333,6 +1545,20 @@ const ENABLED_CONFIG_RE = /\benabled\s*=\s*(?:true|True|1)\b/
  * any session a one-line way to exempt an unbuilt model from the build gate.
  */
 export function dbtConfigArgs(sql: string): string {
+  return dbtConfigCallArgs(sql).join("\n")
+}
+
+/**
+ * The argument text of every `{{ config() }}` call in a model, as SEPARATE
+ * strings — one per call — rather than concatenated.
+ *
+ * Top-level key parsing (`parseTopLevelConfigAssignments`) needs each call's
+ * own argument text: joining every call's arguments together first and then
+ * splitting on commas would merge one call's trailing argument with the
+ * next call's leading one whenever a model has more than one `config()`
+ * call (e.g. one per Jinja branch), corrupting both.
+ */
+export function dbtConfigCallArgs(sql: string): string[] {
   const parts: string[] = []
   sql = stripInactiveJinja(sql)
   CONFIG_CALL_HEAD_RE.lastIndex = 0
@@ -1351,7 +1577,81 @@ export function dbtConfigArgs(sql: string): string {
     // must never become the next scan origin.
     CONFIG_CALL_HEAD_RE.lastIndex = args.end
   }
-  return parts.join("\n")
+  return parts
+}
+
+/**
+ * Parse the TOP-LEVEL `key=value` assignments out of one `config()` call's
+ * argument text, keyed by argument name with the raw (unparsed, un-unquoted)
+ * value text.
+ *
+ * Quote- and bracket/paren/brace-aware, via the same top-level-comma splitter
+ * used for YAML flow sequences: an argument value can itself contain commas
+ * inside a nested call or a quoted string (`pre_hook="{{ log(a, b) }}"`), and
+ * splitting on every comma would misread that nested comma as an argument
+ * boundary. Only the FIRST `=` in a segment separates key from value, so a
+ * value containing its own `=` (a Jinja comparison, say) is not truncated.
+ *
+ * This is the "read config()" primitive every exemption check must go
+ * through. Scanning the whole argument blob for `enabled\s*=\s*false` — the
+ * previous approach — matches that text anywhere in the blob, including
+ * inside an unrelated string argument (a hook or metadata value containing
+ * the literal text `enabled=false`), and wrongly exempts a live, unbuilt
+ * model from the build gate.
+ */
+export function parseTopLevelConfigAssignments(argsText: string): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const segment of splitTopLevelListItems(argsText)) {
+    const eqIdx = topLevelEqualsIndex(segment)
+    if (eqIdx === -1) continue
+    const key = segment.slice(0, eqIdx).trim()
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue
+    out.set(key, segment.slice(eqIdx + 1).trim())
+  }
+  return out
+}
+
+/** Index of the first top-level (unquoted, unbracketed) `=` in `text`, or -1. */
+function topLevelEqualsIndex(text: string): number {
+  let depth = 0
+  let quote: string | null = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === "\\") {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++
+      continue
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      depth--
+      continue
+    }
+    // `==` is a comparison, not an assignment; only a lone `=` counts.
+    if (ch === "=" && depth === 0 && text[i + 1] !== "=" && text[i - 1] !== "=" && text[i - 1] !== "!") {
+      return i
+    }
+  }
+  return -1
+}
+
+/** Unquote a config value's raw text, when it is a plain quoted string. */
+function unquoteConfigValue(value: string): string {
+  const t = value.trim()
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1)
+  }
+  return t
 }
 
 /**
@@ -1409,8 +1709,45 @@ function scanBalancedConfigArgs(sql: string, start: number): { text: string; end
  * let `where enabled = false` in a normal filter silently remove the model
  * from the build gate's coverage assertion.
  */
+/** Config-key axes read from every `config()` call in a model's source. */
+interface ConfigAxes {
+  /** Any call set `materialized='ephemeral'`. */
+  ephemeral: boolean
+  /** Any call set `materialized` to a value other than `ephemeral`. */
+  nonEphemeral: boolean
+  /** Any call set `enabled` to a falsy literal. */
+  disabled: boolean
+  /** Any call set `enabled` to a truthy literal. */
+  enabled: boolean
+}
+
+/**
+ * Read the `materialized`/`enabled` axes from every `config()` call's
+ * TOP-LEVEL keys — never from a regex over the whole argument blob, which
+ * matches the same text sitting inside an unrelated string argument (a hook
+ * or metadata value that happens to contain `enabled=false`).
+ */
+function readConfigAxes(sql: string): ConfigAxes {
+  const out: ConfigAxes = { ephemeral: false, nonEphemeral: false, disabled: false, enabled: false }
+  for (const callArgs of dbtConfigCallArgs(sql)) {
+    const kv = parseTopLevelConfigAssignments(callArgs)
+    const materialized = kv.get("materialized")
+    if (materialized !== undefined) {
+      if (/^ephemeral$/i.test(unquoteConfigValue(materialized))) out.ephemeral = true
+      else out.nonEphemeral = true
+    }
+    const enabled = kv.get("enabled")
+    if (enabled !== undefined) {
+      const t = enabled.trim()
+      if (/^(?:false|False|0)$/.test(t)) out.disabled = true
+      else if (/^(?:true|True|1)$/.test(t)) out.enabled = true
+    }
+  }
+  return out
+}
+
 export function sourceExemptsFromRunResults(sql: string): boolean {
-  const args = dbtConfigArgs(stripSqlComments(sql))
+  const axes = readConfigAxes(stripSqlComments(sql))
   // Per axis, and only when the source does not also declare the opposite.
   // A model whose live config states both (`{% if target.name == 'prod' %}
   // {{ config(enabled=false) }}{% else %}{{ config(enabled=true) }}{% endif %}`)
@@ -1418,9 +1755,7 @@ export function sourceExemptsFromRunResults(sql: string): boolean {
   // scope entirely, so even a fresh `error` row for it is filed as
   // out-of-scope and the build gate reports green having checked nothing.
   // An unresolved contradiction requires coverage instead of granting silence.
-  const ephemeral = EPHEMERAL_CONFIG_RE.test(args) && !NON_EPHEMERAL_CONFIG_RE.test(args)
-  const disabled = DISABLED_CONFIG_RE.test(args) && !ENABLED_CONFIG_RE.test(args)
-  return ephemeral || disabled
+  return (axes.ephemeral && !axes.nonEphemeral) || (axes.disabled && !axes.enabled)
 }
 
 /**
@@ -1433,7 +1768,7 @@ export function sourceExemptsFromRunResults(sql: string): boolean {
  * was asked to create. The model source is the newer of the two, so it wins.
  */
 export function sourceDeclaresNonEphemeral(sql: string): boolean {
-  return NON_EPHEMERAL_CONFIG_RE.test(dbtConfigArgs(stripSqlComments(sql)))
+  return readConfigAxes(stripSqlComments(sql)).nonEphemeral
 }
 
 /**
@@ -1448,7 +1783,7 @@ export function sourceDeclaresNonEphemeral(sql: string): boolean {
  * assertion, which is a gate the session cannot clear by doing anything right.
  */
 export function sourceDeclaresEnabled(sql: string): boolean {
-  return ENABLED_CONFIG_RE.test(dbtConfigArgs(stripSqlComments(sql)))
+  return readConfigAxes(stripSqlComments(sql)).enabled
 }
 
 /**
@@ -1523,8 +1858,16 @@ export async function collectExecutedModelNames(
  * absent on purpose — see `collectProducedNodeNames`.
  */
 const RELATION_PRODUCING_RESOURCE_TYPES = new Set(["model", "seed", "snapshot"])
-/** File extensions that define a node. */
-const NODE_EXTENSIONS = [".sql", ".csv", ".py"]
+/**
+ * File extensions that define a node, per source-directory kind. dbt only
+ * ever loads `.sql`/`.py` under model and snapshot paths, and only `.csv`
+ * under seed paths — a `.csv` dropped under `models/` is inert, and a `.sql`
+ * under `seeds/` is not a seed. Scanning every extension under every
+ * directory let a `.csv` written to satisfy a required model be counted as
+ * the produced node, when dbt itself never loads it.
+ */
+const MODEL_NODE_EXTENSIONS = [".sql", ".py"]
+const SEED_NODE_EXTENSIONS = [".csv"]
 /** Depth limit mirroring `modelsModifiedSince`. */
 const INVENTORY_MAX_DEPTH = 8
 
@@ -1546,7 +1889,7 @@ const INVENTORY_MAX_DEPTH = 8
  */
 export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<string>> {
   const names = new Set<string>()
-  async function scan(dir: string, depth: number): Promise<void> {
+  async function scan(dir: string, depth: number, extensions: string[]): Promise<void> {
     if (depth > INVENTORY_MAX_DEPTH) return
     let entries: import("fs").Dirent[]
     try {
@@ -1569,17 +1912,20 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
         }
       }
       if (isDir) {
-        await scan(full, depth + 1)
+        await scan(full, depth + 1, extensions)
       } else if (isFile) {
         const lower = entry.name.toLowerCase()
-        const ext = NODE_EXTENSIONS.find((e) => lower.endsWith(e))
+        const ext = extensions.find((e) => lower.endsWith(e))
         if (ext) names.add(lower.slice(0, lower.length - ext.length))
       }
     }
   }
   const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
-  for (const nodeDir of [...sourcePaths.models, ...sourcePaths.seeds, ...sourcePaths.snapshots]) {
-    await scan(nodeDir, 0)
+  for (const nodeDir of [...sourcePaths.models, ...sourcePaths.snapshots]) {
+    await scan(nodeDir, 0, MODEL_NODE_EXTENSIONS)
+  }
+  for (const nodeDir of sourcePaths.seeds) {
+    await scan(nodeDir, 0, SEED_NODE_EXTENSIONS)
   }
   // manifest.json contributes names and aliases for nodes whose relation name
   // differs from the filename.
@@ -1656,6 +2002,79 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * Resolve `relative` against `root`, refusing to leave it.
+ *
+ * A required file path is repository content (parsed out of a task
+ * document), and the extractor's own shape check (`FILE_PATH_RE`) allows
+ * `.`/`/` freely — `../../outside/secret.yml` matches it. Joining that
+ * verbatim and `stat`-ing the result can satisfy a completion gate with a
+ * file entirely outside the workspace. Returns null when the resolved path
+ * would escape `root`, so callers simply treat the requirement as unmet
+ * rather than probing outside their allowed roots.
+ */
+export function resolveWithinRoot(root: string, relative: string): string | null {
+  const resolvedRoot = resolve(root)
+  const resolvedPath = resolve(resolvedRoot, relative)
+  if (resolvedPath === resolvedRoot) return resolvedPath
+  if (resolvedPath.startsWith(resolvedRoot + sep)) return resolvedPath
+  return null
+}
+
+/**
+ * Prefix marking a telemetry field that was redacted rather than a real
+ * value, so downstream consumers can tell a hashed path from actual data.
+ */
+const TELEMETRY_PATH_HASH_PREFIX = "path:"
+/** Absolute-path shape: POSIX root, Windows drive letter, or UNC. */
+const ABSOLUTE_PATH_SHAPE_RE = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/
+
+/** True when `value` is shaped like an absolute filesystem path. */
+function looksLikeAbsolutePath(value: string): boolean {
+  return ABSOLUTE_PATH_SHAPE_RE.test(value)
+}
+
+/** A short, non-reversible fingerprint of a path — stable for dedup, not the path itself. */
+function hashPathValue(value: string): string {
+  return TELEMETRY_PATH_HASH_PREFIX + createHash("sha256").update(value).digest("hex").slice(0, 12)
+}
+
+function sanitizeTelemetryValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    return looksLikeAbsolutePath(value) ? hashPathValue(value) : value
+  }
+  if (Array.isArray(value)) return value.map(sanitizeTelemetryValue)
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = sanitizeTelemetryValue(v)
+    return out
+  }
+  return value
+}
+
+/**
+ * Redact filesystem paths out of a validator's `details` object before it is
+ * handed to telemetry.
+ *
+ * Every validator's `details` is forwarded to `Telemetry.track` verbatim by
+ * the dispatch hook, and several carry absolute paths (`dbt_root`,
+ * `run_results_path`, `task_file`, …) for use in `reason`/`fixHint` text.
+ * That collects local directory names — and, embedded in them, usernames —
+ * despite the documented telemetry contract that file paths are never sent
+ * (`docs/docs/reference/telemetry.md`). This walks the object and replaces
+ * any string shaped like an absolute path with a short hash, so a path field
+ * is still present and stable for dedup/counting without leaking its value.
+ * Non-path strings (model names, verdict enums, task_file's SOURCE tier, …)
+ * pass through unchanged.
+ */
+export function sanitizeTelemetryDetails(details: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(details)) {
+    out[key] = sanitizeTelemetryValue(value)
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------
 // SQL / Jinja text handling
 // ---------------------------------------------------------------------------
@@ -1711,8 +2130,25 @@ function scrubSql(sql: string, opts: { comments: boolean; literals: boolean }): 
       i = j
       continue
     }
-    // String literal. `''` and `\'` both escape a quote; dollar quoting is not
-    // handled because dbt models do not use it.
+    // Dollar-quoted string literal (`$$…$$` / `$tag$…$tag$`), the
+    // PostgreSQL-compatible alternative to `'…'` that needs no escaping —
+    // routinely used for function bodies and is not "SQL dbt models do not
+    // use": a Postgres-compatible warehouse's models genuinely contain it. A
+    // literal like `$$ iff(a, b, c) $$` was previously left unmasked, so
+    // dialect matching read the quoted text as an executed call.
+    if (c === "$") {
+      const tagMatch = /^\$[A-Za-z_]*\$/.exec(sql.slice(i))
+      if (tagMatch) {
+        const delim = tagMatch[0]
+        const bodyStart = i + delim.length
+        const closeIdx = sql.indexOf(delim, bodyStart)
+        const j = closeIdx === -1 ? n : closeIdx + delim.length
+        if (opts.literals) blank(bodyStart, closeIdx === -1 ? n : closeIdx)
+        i = j
+        continue
+      }
+    }
+    // String literal. `''` and `\'` both escape a quote.
     if (c === "'" || c === '"') {
       let j = i + 1
       while (j < n) {
@@ -1818,16 +2254,67 @@ function jinjaBlockEnd(sql: string, openStart: number): number {
 }
 
 /**
- * Blank every Jinja `{% if %}` block whose `if` **or** any of its own top-level
- * `{% elif %}` branches matches `conditionRe`, through its *matching*
- * `{% endif %}` rather than the first one.
+ * One arm of a Jinja if-chain, as an absolute span in the ORIGINAL string
+ * passed to `chainArmSpans` — the arm's own opening tag through to (but
+ * excluding) the next arm's opening tag / the chain's `{% endif %}`.
+ */
+interface ArmSpan {
+  /** The arm's own opening tag (`{% if … %}` / `{% elif … %}` / `{% else %}`), verbatim. */
+  opener: string
+  start: number
+  end: number
+}
+
+/**
+ * Split one if-chain into its top-level arm spans, with absolute offsets into
+ * `sql` — unlike `chainArms`, which returns arm text with no positional
+ * information, so a caller cannot blank a subset of arms in place.
+ */
+function chainArmSpans(sql: string, openStart: number, openLength: number, chainEnd: number): ArmSpan[] {
+  const tag = /\{%-?\s*(if|elif|else|endif)\b(?:[^%]|%(?!\}))*%\}/gi
+  tag.lastIndex = openStart + openLength
+  const spans: ArmSpan[] = []
+  let depth = 0
+  let currentOpener = sql.slice(openStart, openStart + openLength)
+  let armStart = openStart
+  let m: RegExpExecArray | null
+  while ((m = tag.exec(sql)) !== null) {
+    if (m.index >= chainEnd) break
+    const kind = (m[1] ?? "").toLowerCase()
+    if (kind === "if") {
+      depth++
+      continue
+    }
+    if (kind === "endif") {
+      if (depth > 0) {
+        depth--
+        continue
+      }
+      spans.push({ opener: currentOpener, start: armStart, end: m.index })
+      return spans
+    }
+    if (depth > 0) continue
+    spans.push({ opener: currentOpener, start: armStart, end: m.index })
+    currentOpener = m[0]
+    armStart = m.index
+  }
+  // Unterminated chain — one arm running to the caller's chain end.
+  spans.push({ opener: currentOpener, start: armStart, end: chainEnd })
+  return spans
+}
+
+/**
+ * Blank every ARM of a Jinja if-chain whose *own* branch condition matches
+ * `conditionRe`, matched to its chain's `{% endif %}` by nesting depth.
  *
- * `{% if a %}…{% elif target.type == 'x' %}…{% endif %}` is one guard chain: a
- * project can express its only warehouse branch in the `elif`, and blanking
- * only the arm whose opener matched would report the chain's guarded SQL as
- * unguarded. `elif` tags belonging to a *nested* `if` are not the chain's own
- * branches and are ignored, so a nested guard cannot cause an outer block full
- * of unguarded SQL to be blanked.
+ * Arm-scoped, not chain-scoped. `{% if execute %}…{% elif target.type == 'x'
+ * %}…{% endif %}` is one guard chain, but only the `elif` arm is actually
+ * warehouse-guarded — the `if` arm runs on every target whenever `execute` is
+ * true. Blanking the whole chain because ANY arm matched hid a genuinely
+ * unguarded dialect call in the `if` arm from the lint; blanking only the
+ * matching arm(s) keeps every other arm's SQL visible to it. `elif` tags
+ * belonging to a *nested* `if` are not this chain's own branches and are
+ * ignored by `chainArmSpans`'s depth tracking.
  */
 export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
   const opener = new RegExp(JINJA_IF_OPENER_SOURCE, "gi")
@@ -1838,42 +2325,26 @@ export function stripJinjaIfBlocks(sql: string, conditionRe: RegExp): string {
     const m = opener.exec(out)
     if (!m) return out
     const end = jinjaBlockEnd(out, m.index)
-    const region = out.slice(m.index, end)
-    if (!conditionRe.test(m[0]) && !ownBranchMatches(region, conditionRe)) {
-      searchFrom = m.index + m[0].length
-      continue
+    const arms = chainArmSpans(out, m.index, m[0].length, end)
+    // Blanking replaces each character with a space of equal length, so arm
+    // offsets computed above stay valid regardless of how many arms in this
+    // chain are blanked or in what order.
+    for (const arm of arms) {
+      if (!conditionRe.test(arm.opener)) continue
+      const blanked = out.slice(arm.start, arm.end).replace(/[^\n\r]/g, " ")
+      out = out.slice(0, arm.start) + blanked + out.slice(arm.end)
     }
-    out = out.slice(0, m.index) + region.replace(/[^\n\r]/g, " ") + out.slice(end)
-    searchFrom = end
+    // Resume just past THIS chain's own opening tag, not past the whole
+    // chain. An arm whose own condition did NOT match stays exposed with its
+    // original text — including any NESTED `{% if %}` chain it contains,
+    // which needs its own, independent chance to match `conditionRe` (a
+    // nested `target.type` guard inside an outer, unrelated `{% if a %}` arm
+    // must still be found and blanked). Resuming at `end` skipped straight
+    // past such nested chains without ever inspecting them. A matched arm's
+    // nested content is blanked away with it, so re-scanning there finds
+    // nothing — safe either way.
+    searchFrom = m.index + m[0].length
   }
-}
-
-/**
- * True when a `{% elif %}` belonging to *this* if-chain (depth 1, i.e. not
- * inside a nested `{% if %}`) matches `conditionRe`. `region` must start at the
- * chain's own `{% if %}` tag.
- */
-function ownBranchMatches(region: string, conditionRe: RegExp): boolean {
-  // `(?:[^%]|%(?!\}))*` rather than `[^%]*`: a Jinja modulo inside the tag
-  // (`{% if loop.index % 2 == 0 %}`) stops a `[^%]*` body dead, the tag never
-  // matches, and the depth counter silently loses an arm. Mirrors
-  // JINJA_IF_OPENER_SOURCE, which was already fixed for this.
-  const tag = /\{%-?\s*(if|elif|endif)\b(?:[^%]|%(?!\}))*%\}/gi
-  let depth = 0
-  let m: RegExpExecArray | null
-  while ((m = tag.exec(region)) !== null) {
-    const kind = m[1]?.toLowerCase()
-    if (kind === "if") {
-      depth++
-      continue
-    }
-    if (kind === "endif") {
-      depth--
-      continue
-    }
-    if (depth === 1 && conditionRe.test(m[0])) return true
-  }
-  return false
 }
 
 /**

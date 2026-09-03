@@ -86,6 +86,7 @@ import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change start - validator framework (see session/validators/types.ts header)
 import { ValidatorRegistry } from "./validators/registry"
 import { registerAltimateValidators } from "../altimate/validators"
+import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils"
 // Explicit registration call (not a side-effect import) so bun's --single
 // bundler cannot tree-shake the validator registrations.
 registerAltimateValidators()
@@ -1745,6 +1746,15 @@ export namespace SessionPrompt {
           // rollup. Always emitted, even when the feature flag is off, so we
           // can measure baseline fire rate vs prompt-only enforcement.
           for (const { validator, result: vRes } of checks) {
+            // Several validators' `details` carry absolute filesystem paths
+            // (dbt project root, run_results.json path, discovered task
+            // file, …) for use in `reason`/`fixHint` text. Forwarded
+            // verbatim, that sends local directory names — and the
+            // usernames often embedded in them — to telemetry despite the
+            // documented contract that file paths are never collected
+            // (docs/docs/reference/telemetry.md). sanitizeTelemetryDetails
+            // hashes any absolute-path-shaped string; everything else
+            // (verdict enums, counters, model names) passes through.
             Telemetry.track({
               type: "validator_check",
               timestamp: Date.now(),
@@ -1754,7 +1764,7 @@ export namespace SessionPrompt {
               step,
               retry_count: validatorRetryCount,
               enforced: validatorsEnabled,
-              ...(vRes.details && { details: vRes.details }),
+              ...(vRes.details && { details: sanitizeTelemetryDetails(vRes.details) }),
             } as any)
           }
 

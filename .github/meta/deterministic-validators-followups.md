@@ -514,3 +514,40 @@ complement of an arbitrary Jinja condition across `elif` chains, which is the
 same branch-semantics feature items 10 and 14 need, with the same property: a
 half-implementation turns this miss into a blocking false positive on correct
 models.
+
+### 23. `dbt-build-green` cannot see a model that was deleted
+
+`modelsModifiedSince` walks the CURRENT filesystem for `.sql` files with
+`mtime >= sessionStartMs`. A file that existed at session start and was
+deleted during the session cannot appear in that scan by construction — there
+is no path to stat. With no fresh artifact either, `touchedPaths.length === 0
+&& !artifactIsFresh` takes the `nothing-to-gate` path, so a session that
+deletes a model — leaving every downstream `ref()` to it broken — clears this
+gate, `dbt-deliverable-names`, and `dbt-nothing-built` (which only checks
+POSITIVE evidence of authored/built work) without a single one of them
+inspecting the deletion.
+
+Why deferred: closing this needs to know the workspace's file listing AT
+SESSION START, to diff against the current one. Two ways to get that, both
+infrastructure this lane does not have:
+
+- A session-scoped snapshot written by the harness before the agent's first
+  turn — the same missing artifact store items 19 and 20 need, generalized
+  from "the task contract" to "the file tree".
+- A VCS diff (`git diff --name-status --diff-filter=D` against a commit
+  bracketing the session start). This validator is deliberately built with
+  "No subprocess, no warehouse connection" as an architectural constraint (see
+  its own module doc), specifically so a completion check cannot itself become
+  a source of flakiness or a new external dependency in a path that gates
+  session termination. Adding a git subprocess call here is exactly the kind
+  of dependency that constraint rules out, and it degrades silently to
+  "no signal" the moment the workspace is not a git repository, or the
+  session's edits were never committed — the common case for an in-progress
+  session — leaving the same blind spot with an added dependency and no
+  reliable win.
+
+No half-measure was found that narrows this without either reintroducing a
+subprocess dependency the validator's own design forbids, or trading this
+false negative for a blocking false positive on a correct session (the same
+pattern items 19–20 already ruled out for the same reason). Left open with the
+reasoning recorded rather than patched.

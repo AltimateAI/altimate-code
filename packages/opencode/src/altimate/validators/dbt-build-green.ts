@@ -63,6 +63,7 @@
  */
 
 import { promises as fs } from "fs"
+import { join } from "path"
 import type { Validator, ValidatorContext, ValidatorResult } from "../../session/validators/types"
 import {
   findDbtProjectRoot,
@@ -77,9 +78,46 @@ import {
   sourceDeclaresEnabled,
   runResultsExecutedModels,
   runResultsCarriesNoBuildEvidence,
+  isConfirmedModelExecutingCommand,
+  resolveDbtTargetPath,
   sanitizeForPrompt,
   type RunResultsArtifact,
 } from "./validator-utils"
+
+/**
+ * Map every touched model FILE to its own manifest `unique_id`, when a fresh
+ * enough manifest exists to say so.
+ *
+ * Matching run-result rows to a touched model by BARE NAME ALONE collides
+ * whenever a dependency package defines a node of the same name: a fresh
+ * artifact containing only `model.dependency.orders` stores its status under
+ * the bare key `orders`, and an edited local `orders.sql` inherits the
+ * dependency's success — reporting `fresh-build` for a model that was never
+ * selected or executed. Resolving each touched file to ITS OWN node by
+ * `original_file_path` and matching on the full `unique_id` avoids the
+ * collision entirely; bare-name matching remains only as the fallback for a
+ * touched model the manifest does not (yet) know about.
+ */
+async function buildManifestNodeIndex(dbtRoot: string): Promise<Map<string, string>> {
+  const index = new Map<string, string>()
+  try {
+    const targetPath = await resolveDbtTargetPath(dbtRoot)
+    const raw = await fs.readFile(join(targetPath, "manifest.json"), "utf8")
+    const manifest = JSON.parse(raw) as { nodes?: Record<string, unknown> }
+    for (const [uniqueId, node] of Object.entries(manifest.nodes ?? {})) {
+      if (!uniqueId.startsWith("model.")) continue
+      if (typeof node !== "object" || node === null) continue
+      const n = node as Record<string, unknown>
+      const originalPath = typeof n["original_file_path"] === "string" ? n["original_file_path"] : ""
+      if (!originalPath) continue
+      index.set(join(dbtRoot, originalPath), uniqueId)
+    }
+  } catch {
+    // No manifest, or an unreadable one — every touched model falls back to
+    // bare-name matching below.
+  }
+  return index
+}
 
 /**
  * Slack allowed between a model's mtime and the build artifact's mtime before
@@ -204,10 +242,19 @@ export const DbtBuildGreenValidator: Validator = {
     // Statuses come from model rows only. A singular test can carry the same
     // bare name as the model it tests, and letting its row stand in for the
     // model's would both fabricate coverage and mis-attribute its failure.
+    //
+    // Indexed two ways: by full `unique_id` (package-qualified — the
+    // authoritative key) and by bare name (the fallback for a touched model
+    // the manifest does not resolve). A dependency package and the root
+    // project can define a model with the same bare name; a fresh artifact
+    // containing only `model.dependency.orders` must not let a locally
+    // edited `orders.sql` inherit the dependency's status.
+    const statusByUniqueId = new Map<string, { status: string; message: string | null }>()
     const statusByName = new Map<string, { status: string; message: string | null }>()
     if (artifactExecutedModels) {
       for (const r of fresh.results) {
         if (!r.uniqueId.startsWith("model.")) continue
+        statusByUniqueId.set(r.uniqueId, { status: r.status, message: r.message })
         for (const key of resultKeys(r)) {
           statusByName.set(key, { status: r.status, message: r.message })
         }
@@ -232,6 +279,13 @@ export const DbtBuildGreenValidator: Validator = {
       touchedPaths.length > 0
         ? await collectRunResultExemptModels(dbtRoot)
         : { ephemeral: new Set<string>(), disabled: new Set<string>() }
+    // Absolute touched-file path -> the model's OWN manifest unique_id, so a
+    // touched model can be matched to its run-result row by full identity
+    // rather than by bare name alone. Empty when there is no manifest (or an
+    // unreadable one); every touched model then falls back to bare-name
+    // matching, same as before this index existed.
+    const nodeIdByPath =
+      touchedPaths.length > 0 ? await buildManifestNodeIndex(dbtRoot) : new Map<string, string>()
 
     const states: ModelBuildState[] = []
     const exemptModels: string[] = []
@@ -275,7 +329,17 @@ export const DbtBuildGreenValidator: Validator = {
         exemptModels.push(name)
         continue
       }
-      const recorded = statusByName.get(name)
+      // When the manifest resolves this file to ITS OWN node, that identity
+      // is authoritative — look up ONLY that unique_id, even when it comes
+      // back with no row (meaning: not built). Falling back to the bare-name
+      // map here would reintroduce the exact collision this index exists to
+      // prevent: a dependency package's row for the same bare name would be
+      // read as this model's status. The bare-name fallback applies only
+      // when the manifest does not (yet) resolve this file at all, e.g. it
+      // has never been parsed since the file was added — the best available
+      // evidence in that case, same as before this index existed.
+      const uniqueId = nodeIdByPath.get(path)
+      const recorded = uniqueId !== undefined ? statusByUniqueId.get(uniqueId) : statusByName.get(name)
       states.push({
         name,
         path,
@@ -299,10 +363,27 @@ export const DbtBuildGreenValidator: Validator = {
           )
     const failedOutOfScope = allFailed.length - failedInScope.length
 
-    // Coverage is assertable when either evidence source can speak for the
-    // models we touched: the run artifact recorded models, or dbt wrote fresh
-    // model DDL during this session.
-    const coverageAssertable = modelNodes.size > 0 || executed.size > 0
+    // Coverage is assertable when ANY of three evidence sources can speak for
+    // the models we touched:
+    //   - `modelNodes.size > 0` — the artifact actually carries model rows,
+    //     regardless of whether `args.which` could be classified. A real row
+    //     is real evidence even from a command this lane does not recognise
+    //     (see `runResultsExecutedModels`'s permissive default).
+    //   - `executed.size > 0` — dbt wrote fresh model DDL during this session.
+    //   - `isConfirmedModelExecutingCommand(fresh.command)` — the artifact
+    //     came from a CONFIRMED `build`/`run` invocation, even with ZERO
+    //     model rows. Unlike the first two, this is deliberately NOT folded
+    //     into `runResultsExecutedModels`'s permissive null-command default:
+    //     an empty selection from a KNOWN `build`/`run` legitimately writes
+    //     zero model rows, and that absence IS the evidence (nothing was
+    //     covered) — but an artifact from an UNRECOGNISED command with zero
+    //     rows is genuinely no signal either way, and asserting coverage
+    //     there blocked a session over an artifact this lane simply could
+    //     not classify. Gating on `modelNodes.size` alone treated a
+    //     confirmed-but-empty build the same as no evidence at all, and
+    //     returned success having verified nothing.
+    const coverageAssertable =
+      modelNodes.size > 0 || executed.size > 0 || isConfirmedModelExecutingCommand(fresh.command)
     const notBuilt = coverageAssertable
       ? states.filter((s) => s.status === null && !executed.has(s.name))
       : []

@@ -38,6 +38,7 @@ import {
   resolveDbtSourcePaths,
   runResultsProducedNodes,
   collectProducedNodeNames,
+  resolveWithinRoot,
   sanitizeForPrompt,
   type RequiredDeliverables,
 } from "./validator-utils"
@@ -128,6 +129,13 @@ function normalizeRelPath(path: string): string {
  */
 async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<AuthoredWork> {
   const out: AuthoredWork = { any: false, names: new Set(), relPaths: new Set() }
+  // Realpaths of directories already scanned. `fs.stat` follows symlinks, so
+  // a directory symlink pointing back at an ancestor makes this recurse into
+  // the same tree again; the depth cap alone only slows that (bounding it to
+  // MAX_DEPTH copies of the cycle), and with several such links the
+  // traversal multiplies at every level. This makes a revisit a no-op
+  // instead.
+  const visitedDirs = new Set<string>()
   /**
    * `relationProducing` gates only the NAME index. Editing
    * `macros/fct_orders.sql` is real work — it counts towards `any` and is
@@ -148,6 +156,14 @@ async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<Auth
   }
   async function scan(dir: string, depth: number, relationProducing: boolean): Promise<void> {
     if (depth > SCAN_MAX_DEPTH) return
+    let realDir: string
+    try {
+      realDir = await fs.realpath(dir)
+    } catch {
+      return
+    }
+    if (visitedDirs.has(realDir)) return
+    visitedDirs.add(realDir)
     let entries: import("fs").Dirent[]
     try {
       entries = await fs.readdir(dir, { withFileTypes: true })
@@ -281,8 +297,16 @@ export const DbtNothingBuiltValidator: Validator = {
       // to agree on what "delivered" means.
       let found = false
       for (const root of new Set([dbtRoot, ctx.workingDirectory])) {
+        // A task-required file path is repository content and the extractor's
+        // shape check allows `.`/`/` freely (`../../outside/secret.yml`
+        // matches it). Resolving through `resolveWithinRoot` refuses to
+        // `stat` outside either allowed root, so a task naming a path that
+        // escapes the workspace cannot satisfy this gate with an unrelated
+        // file elsewhere on disk.
+        const safePath = resolveWithinRoot(root, file)
+        if (!safePath) continue
         try {
-          const stat = await fs.stat(join(root, file))
+          const stat = await fs.stat(safePath)
           if (stat.isFile()) {
             found = true
             break
@@ -293,14 +317,24 @@ export const DbtNothingBuiltValidator: Validator = {
       }
       if (found) matchedFiles.push(file)
     }
+    // A name the task asked to be MODIFIED (update/fix/rename/…) cannot be
+    // satisfied by mere pre-session existence: "Update the model `orders`"
+    // asks for a change, and the model being on disk from before this
+    // session proves nothing about whether this session made it. Without
+    // this, a session that touches nothing and builds nothing clears this
+    // gate — the exact zero-write end-state it exists to catch — the moment
+    // the target of an "update" contract already happens to exist.
+    const modificationSet = new Set(
+      (expectation.required?.modificationModels ?? []).map((m) => m.toLowerCase()),
+    )
     const matchedDeliverables = hasNamedDeliverables
       ? [
-          ...namedModels.filter(
-            (name) =>
-              authoredWork.names.has(name.toLowerCase()) ||
-              builtNodeNames.has(name.toLowerCase()) ||
-              existingNodes.has(name.toLowerCase()),
-          ),
+          ...namedModels.filter((name) => {
+            const lower = name.toLowerCase()
+            const sessionEvidence = authoredWork.names.has(lower) || builtNodeNames.has(lower)
+            if (modificationSet.has(lower)) return sessionEvidence
+            return sessionEvidence || existingNodes.has(lower)
+          }),
           ...matchedFiles,
         ]
       : []

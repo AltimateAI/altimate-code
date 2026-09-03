@@ -34,7 +34,6 @@
  */
 
 import { promises as fs } from "fs"
-import { join } from "path"
 import type { Validator, ValidatorContext, ValidatorResult } from "../../session/validators/types"
 import {
   findDbtProjectRoot,
@@ -43,32 +42,67 @@ import {
   collectProducedNodeNames,
   modelsModifiedSince,
   modelNameFromPath,
+  resolveWithinRoot,
+  sanitizeForPrompt,
   type RequiredDeliverables,
 } from "./validator-utils"
 
 /** The task contract for this workspace, when one is discoverable. */
 interface Contract {
+  /** Path of the first document that contributed a deliverable, for display. */
   taskFile: string
+  /** Every document that contributed at least one deliverable. */
+  taskFiles: string[]
   required: RequiredDeliverables
 }
 
-/** Read the workspace's literal deliverable contract, or null if there is none. */
+/**
+ * Read the workspace's literal deliverable contract, merged across EVERY
+ * task/instruction document that names one.
+ *
+ * A workspace can carry more than one document with real obligations — a
+ * `TASK.md` naming one model and a `REQUIREMENTS.md` naming another — and
+ * stopping at the first one that parses silently drops every deliverable in
+ * the rest. A session that satisfies only the first document's contract then
+ * passes this gate while the remaining required models are entirely absent.
+ */
 async function readContract(cwd: string, dbtRoot: string): Promise<Contract | null> {
-  // Every candidate, not just the first readable one: an informational
-  // `TASK.md` that states no deliverables must not mask a `REQUIREMENTS.md`
-  // that does, or this gate silently skips a session it was meant to check.
+  const taskFiles: string[] = []
+  const models: string[] = []
+  const files: string[] = []
+  const modificationModels: string[] = []
+  const modelSet = new Set<string>()
+  const fileSet = new Set<string>()
+  const modificationSet = new Set<string>()
+  let primarySource: RequiredDeliverables["source"] | null = null
   for (const task of await findTaskInstructionFiles(cwd, dbtRoot)) {
     const required = extractRequiredDeliverables(task.content)
-    if (required) return { taskFile: task.path, required }
+    if (!required) continue
+    taskFiles.push(task.path)
+    if (primarySource === null) primarySource = required.source
+    for (const m of required.models) if (!modelSet.has(m)) { modelSet.add(m); models.push(m) }
+    for (const f of required.files) if (!fileSet.has(f)) { fileSet.add(f); files.push(f) }
+    for (const m of required.modificationModels) {
+      if (!modificationSet.has(m)) { modificationSet.add(m); modificationModels.push(m) }
+    }
   }
-  return null
+  if (taskFiles.length === 0) return null
+  return {
+    taskFile: taskFiles[0]!,
+    taskFiles,
+    required: { models, files, modificationModels, source: primarySource! },
+  }
 }
 
 /** True when `relative` exists under either the dbt project or the workspace. */
 async function fileExists(dbtRoot: string, cwd: string, relative: string): Promise<boolean> {
   for (const root of new Set([dbtRoot, cwd])) {
+    // Refuse to resolve outside `root` — see `resolveWithinRoot`. A required
+    // path is task-document content and can contain `..` segments.
+    const safePath = resolveWithinRoot(root, relative)
+    if (!safePath) continue
     try {
-      const stat = await fs.stat(join(root, relative))
+      const stat = await fs.stat(safePath)
       if (stat.isFile()) return true
     } catch {
       // keep looking
@@ -108,6 +142,7 @@ export const DbtDeliverableNamesValidator: Validator = {
 
     const details = {
       task_file: contract.taskFile,
+      task_files: contract.taskFiles,
       required_source: contract.required.source,
       required_models: contract.required.models,
       required_files: contract.required.files,
@@ -156,8 +191,16 @@ export const DbtDeliverableNamesValidator: Validator = {
       hintLines.push(`  • Create at exactly these paths: ${missingFiles.join(", ")}`)
     }
     if (unrequested.length > 0) {
+      // `unrequested` is derived from ACTUAL FILENAMES ON DISK, which — unlike
+      // `missingModels`/`missingFiles` (constrained to identifier/path-shaped
+      // code-span tokens by `extractRequiredDeliverables`) — can contain
+      // arbitrary bytes, including newlines, on a POSIX filesystem. Spliced
+      // verbatim into `fixHint`, a hostile or merely adversarial filename
+      // breaks out of the bullet it is quoted in and lands at instruction
+      // position in the synthetic retry turn `prompt.ts` builds from this.
+      const safeUnrequested = unrequested.map((n) => sanitizeForPrompt(n, 80))
       hintLines.push(
-        `  • Models you created this session that the task did not name: ${unrequested.join(", ")}. If one of them is a renamed version of a required deliverable, rename the file (and any \`ref()\` to it) back to the required name.`,
+        `  • Models you created this session that the task did not name: ${safeUnrequested.join(", ")}. If one of them is a renamed version of a required deliverable, rename the file (and any \`ref()\` to it) back to the required name.`,
       )
     }
     hintLines.push(
