@@ -47,15 +47,25 @@ export function decodeJwtClaims(token: string): Record<string, unknown> | undefi
   }
 }
 
-/** Claim values are rendered straight into a terminal and into error text, and
- * the token is never signature-verified, so treat every claim as untrusted
- * input: keep printable ASCII only (no control or escape sequences) and cap the
- * length so a hostile claim cannot wallpaper the output. */
+/**
+ * Shared sanitizer for any text that ends up rendered straight into a
+ * terminal or error message but was never signature-verified or otherwise
+ * under our control (a JWT claim, a provider's own response body): keep
+ * printable ASCII only (no control or escape sequences) and cap the length so
+ * hostile input cannot wallpaper the output. Different callers pick different
+ * caps — see `MAX_CLAIM_LENGTH` and `MAX_PROVIDER_DETAIL_LENGTH`.
+ */
+function sanitizePrintable(value: string, maxLength: number): string | undefined {
+  const cleaned = value.replace(/[^\x20-\x7e]/g, "").slice(0, maxLength)
+  return cleaned.length > 0 ? cleaned : undefined
+}
+
+/** A claim is a single short field (a plan name, an account id), so it gets a
+ * tight cap. */
 const MAX_CLAIM_LENGTH = 64
 
 function sanitizeClaim(value: string): string | undefined {
-  const cleaned = value.replace(/[^\x20-\x7e]/g, "").slice(0, MAX_CLAIM_LENGTH)
-  return cleaned.length > 0 ? cleaned : undefined
+  return sanitizePrintable(value, MAX_CLAIM_LENGTH)
 }
 
 function stringClaim(source: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -103,7 +113,7 @@ export function maskAccountId(accountId: string | undefined): string | undefined
  */
 export function describeOAuthIdentity(accessToken: string | undefined, storedAccountId?: string): string | undefined {
   const { plan, accountId } = extractOAuthIdentity(accessToken)
-  const masked = maskAccountId(accountId ?? stringClaim({ accountId: storedAccountId }, "accountId"))
+  const masked = maskAccountId(accountId ?? (storedAccountId ? sanitizeClaim(storedAccountId) : undefined))
   const parts = [plan ? `${plan} plan` : undefined, masked ? `account ${masked}` : undefined].filter((x): x is string =>
     Boolean(x),
   )
@@ -133,14 +143,12 @@ const CODEX_ENTITLED_PLANS = new Set(["plus", "pro", "team", "business", "enterp
 
 /** The provider's own `detail` string is relayed verbatim into this message,
  * but it comes straight off the wire — not a claim we decode ourselves — so it
- * gets the same untrusted-input treatment: printable ASCII only, bounded
- * length. The cap is far larger than a claim's because real API error text
- * runs to a full sentence. */
+ * gets the same `sanitizePrintable` treatment, just with a far larger cap than
+ * a claim's: real API error text runs to a full sentence. */
 const MAX_PROVIDER_DETAIL_LENGTH = 200
 
 function sanitizeProviderDetail(value: string): string | undefined {
-  const cleaned = value.replace(/[^\x20-\x7e]/g, "").slice(0, MAX_PROVIDER_DETAIL_LENGTH)
-  return cleaned.length > 0 ? cleaned : undefined
+  return sanitizePrintable(value, MAX_PROVIDER_DETAIL_LENGTH)
 }
 
 /**
@@ -210,7 +218,7 @@ export function enrichCodexPlanMismatchBody(
   const tokenIdentity = extractOAuthIdentity(accessToken)
   const identity: OAuthIdentity = {
     plan: tokenIdentity.plan,
-    accountId: stringClaim({ accountId: storedAccountId }, "accountId") ?? tokenIdentity.accountId,
+    accountId: (storedAccountId ? sanitizeClaim(storedAccountId) : undefined) ?? tokenIdentity.accountId,
   }
   return { message: codexPlanMismatchMessage(identity, detail), identity }
 }
