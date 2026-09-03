@@ -564,14 +564,29 @@ describe("isUnderAnyDir respects the platform's filesystem case sensitivity", ()
 // ---------------------------------------------------------------------------
 
 describe("a required file path cannot escape the workspace root", () => {
-  test("resolveWithinRoot refuses a ../ escape", () => {
-    expect(resolveWithinRoot("/workspace/proj", "../../etc/passwd")).toBeNull()
+  test("resolveWithinRoot refuses a ../ escape", async () => {
+    expect(await resolveWithinRoot("/workspace/proj", "../../etc/passwd")).toBeNull()
   })
 
-  test("resolveWithinRoot accepts an ordinary relative path", () => {
-    expect(resolveWithinRoot("/workspace/proj", "models/orders.sql")).toBe(
+  test("resolveWithinRoot accepts an ordinary relative path", async () => {
+    expect(await resolveWithinRoot("/workspace/proj", "models/orders.sql")).toBe(
       "/workspace/proj/models/orders.sql",
     )
+  })
+
+  test("resolveWithinRoot refuses a symlinked directory that escapes the root", async () => {
+    await makeProject()
+    const outsideDir = await fs.mkdtemp(join(tmpdir(), "review-sweep-3-symlink-outside-"))
+    await fs.writeFile(join(outsideDir, "secret.yml"), "x: 1\n")
+    // `models/` inside the workspace is a symlink pointing OUTSIDE it. The
+    // candidate resolves lexically inside `root` but its real parent does not.
+    await fs.rm(join(dir, "models"), { recursive: true, force: true })
+    await fs.symlink(outsideDir, join(dir, "models"))
+    try {
+      expect(await resolveWithinRoot(dir, "models/secret.yml")).toBeNull()
+    } finally {
+      await fs.rm(outsideDir, { recursive: true, force: true })
+    }
   })
 
   test("dbt-nothing-built cannot be satisfied by a file outside the workspace", async () => {

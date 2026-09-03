@@ -193,9 +193,9 @@ const IDEMPOTENCY_RE = /\bidempoten(?:t|ce|cy|tly)\b/i
  * immediately after it ("idempotency is not required") — disclaims it.
  */
 const IDEMPOTENCY_NEGATION_BEFORE_RE =
-  /(?:\bnon-?|\b(?:not|never|no|without|isn'?t|aren'?t|doesn'?t|don'?t|need\s+not)\b)(?:\s+\w+){0,2}\s*$/i
+  /(?:\bnon-?|\b(?:not|never|no|without|isn'?t|aren'?t|doesn'?t|don'?t|need\s+not|optional(?:ly)?|advisory)\b)(?:\s+\w+){0,2}\s*$/i
 const IDEMPOTENCY_NEGATION_AFTER_RE =
-  /^\w*\s*(?:(?:is|are|was|were)\s+(?:not|never)|isn'?t|aren'?t|wasn'?t|weren'?t)\b/i
+  /^\w*\s*(?:(?:is|are|was|were)\s+(?:not|never|optional|not\s+required|not\s+necessary|advisory)|isn'?t|aren'?t|wasn'?t|weren'?t)\b/i
 
 /** Strategies whose semantics require a key to match rows on. */
 const KEYED_STRATEGIES = new Set(["merge", "delete+insert"])

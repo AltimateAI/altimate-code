@@ -11,7 +11,7 @@
 
 import { promises as fs } from "fs"
 import { createHash } from "crypto"
-import { join, sep, basename, resolve } from "path"
+import { join, sep, basename, resolve, dirname } from "path"
 
 // ---------------------------------------------------------------------------
 // Subprocess timeout
@@ -1592,6 +1592,74 @@ export function dbtConfigCallArgs(sql: string): string[] {
 }
 
 /**
+ * Every `{% if … %}…{% endif %}` block's span in `sql`, including nested
+ * ones — unlike `stripJinjaIfBlocks`/`extractJinjaIfBlocks`, which walk one
+ * chain's own top-level arms, this collects every block at every depth, so a
+ * caller can test "is this position inside ANY conditional" regardless of
+ * nesting.
+ */
+function allJinjaIfBlockSpans(sql: string): Array<{ start: number; end: number }> {
+  const opener = new RegExp(JINJA_IF_OPENER_SOURCE, "gi")
+  const spans: Array<{ start: number; end: number }> = []
+  let searchFrom = 0
+  for (;;) {
+    opener.lastIndex = searchFrom
+    const m = opener.exec(sql)
+    if (!m) return spans
+    const end = jinjaBlockEnd(sql, m.index)
+    spans.push({ start: m.index, end })
+    // Resume just past THIS block's own opening tag, not past its end, so a
+    // nested `{% if %}` inside it is found as its own, separate span.
+    searchFrom = m.index + m[0].length
+  }
+}
+
+/** True when `pos` sits inside any of `spans`. */
+function isInsideAnyJinjaIf(pos: number, spans: Array<{ start: number; end: number }>): boolean {
+  return spans.some((s) => pos >= s.start && pos < s.end)
+}
+
+/**
+ * The argument text of every `{{ config() }}` call whose own position is NOT
+ * inside any `{% if %}` block — i.e. the call unconditionally executes
+ * whenever the model does.
+ *
+ * `dbt` resolves a runtime-dependent condition (`target.name == 'dev'`)
+ * against the actual profile target at parse time, which this source-level
+ * scanner has no way to know — it is neither statically true nor false, so
+ * `stripInactiveJinja` leaves it (correctly) unstripped. A `config()` call
+ * inside such a block might or might not be active for the CURRENT run, and
+ * treating it as an unconditional declaration either way is a guess. Used
+ * specifically for the ephemeral/enabled EXEMPTION axes
+ * (`readConfigAxes`), where trusting a call inside an unresolved condition
+ * can grant an exemption `dbt-build-green` should not honour for the
+ * model's actual, active configuration — the manifest's resolved config,
+ * not this heuristic, is the trustworthy answer for a conditional call.
+ * `dbtConfigCallArgs` (used for the incremental-config lint's inconsistency
+ * checks) is deliberately NOT restricted this way: knowing about a
+ * conditionally-declared `unique_key`/`incremental_strategy` is still useful
+ * there even when it is not certain to be active for every target.
+ */
+export function dbtConfigCallArgsUnconditional(sql: string): string[] {
+  const parts: string[] = []
+  const stripped = stripInactiveJinja(sql)
+  const ifSpans = allJinjaIfBlockSpans(stripped)
+  CONFIG_CALL_HEAD_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = CONFIG_CALL_HEAD_RE.exec(stripped)) !== null) {
+    const argsStart = m.index + m[0].length
+    const args = scanBalancedConfigArgs(stripped, argsStart)
+    if (args === null) {
+      CONFIG_CALL_HEAD_RE.lastIndex = argsStart
+      continue
+    }
+    if (args.text.length > 0 && !isInsideAnyJinjaIf(m.index, ifSpans)) parts.push(args.text)
+    CONFIG_CALL_HEAD_RE.lastIndex = args.end
+  }
+  return parts
+}
+
+/**
  * Parse the TOP-LEVEL `key=value` assignments out of one `config()` call's
  * argument text, keyed by argument name with the raw (unparsed, un-unquoted)
  * value text.
@@ -1756,7 +1824,11 @@ function staticQuotedLiteralValue(raw: string): string | null {
 
 function readConfigAxes(sql: string): ConfigAxes {
   const out: ConfigAxes = { ephemeral: false, nonEphemeral: false, disabled: false, enabled: false }
-  for (const callArgs of dbtConfigCallArgs(sql)) {
+  // Unconditional calls only: a `config()` call sitting inside a runtime-
+  // dependent `{% if %}` (`target.name == 'dev'`) might not be active for the
+  // current run, and this axis is specifically about a real, active
+  // exemption — see `dbtConfigCallArgsUnconditional`.
+  for (const callArgs of dbtConfigCallArgsUnconditional(sql)) {
     const kv = parseTopLevelConfigAssignments(callArgs)
     const materialized = kv.get("materialized")
     if (materialized !== undefined) {
@@ -1904,8 +1976,8 @@ const RELATION_PRODUCING_RESOURCE_TYPES = new Set(["model", "seed", "snapshot"])
  * directory let a `.csv` written to satisfy a required model be counted as
  * the produced node, when dbt itself never loads it.
  */
-const MODEL_NODE_EXTENSIONS = [".sql", ".py"]
-const SEED_NODE_EXTENSIONS = [".csv"]
+export const MODEL_NODE_EXTENSIONS = [".sql", ".py"]
+export const SEED_NODE_EXTENSIONS = [".csv"]
 /** Depth limit mirroring `modelsModifiedSince`. */
 const INVENTORY_MAX_DEPTH = 8
 
@@ -1984,6 +2056,15 @@ export async function collectProducedNodeNames(dbtRoot: string): Promise<Set<str
       // A node with no recorded path cannot be checked; keep it, because
       // dropping it would move the gate towards blocking a correct project.
       if (originalPath.length > 0 && !(await pathExists(join(dbtRoot, originalPath)))) continue
+      // A dependency package can define a node with the same bare name as a
+      // required deliverable (an installed package's own `orders` model). Its
+      // manifest entry passes both the existence and resource-type checks
+      // above, and without this exclusion it satisfies "create the model
+      // `orders`" with zero session work — `dbt-build-green` then sees no
+      // touched LOCAL model at all, so every gate clears having built nothing.
+      if (originalPath.length > 0 && isUnderAnyDir(join(dbtRoot, originalPath), sourcePaths.packages)) {
+        continue
+      }
       // Only relation-producing node types can satisfy a deliverable. An
       // untyped node is kept, for the same reason an untracked path is.
       const resourceType =
@@ -2041,7 +2122,8 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 /**
- * Resolve `relative` against `root`, refusing to leave it.
+ * Resolve `relative` against `root`, refusing to leave it — including
+ * through a symlink.
  *
  * A required file path is repository content (parsed out of a task
  * document), and the extractor's own shape check (`FILE_PATH_RE`) allows
@@ -2050,13 +2132,32 @@ async function pathExists(path: string): Promise<boolean> {
  * file entirely outside the workspace. Returns null when the resolved path
  * would escape `root`, so callers simply treat the requirement as unmet
  * rather than probing outside their allowed roots.
+ *
+ * Lexical resolution (`path.resolve`) alone is not enough: it normalises
+ * `..` textually but never follows symlinks, so a symlinked directory INSIDE
+ * the allowed root that points outside it (`models/` -> `/etc`) still
+ * resolves lexically inside `root`, passes the prefix check, and lets the
+ * caller's `fs.stat` follow the symlink to an arbitrary external path. This
+ * additionally resolves the real path of the containing directory (not the
+ * candidate file itself, which may not exist yet) and re-checks containment
+ * against the real root. Same symlink-escape class already closed in
+ * `plugin/shared.ts` via `Filesystem.containsReal`.
  */
-export function resolveWithinRoot(root: string, relative: string): string | null {
+export async function resolveWithinRoot(root: string, relative: string): Promise<string | null> {
   const resolvedRoot = resolve(root)
   const resolvedPath = resolve(resolvedRoot, relative)
-  if (resolvedPath === resolvedRoot) return resolvedPath
-  if (resolvedPath.startsWith(resolvedRoot + sep)) return resolvedPath
-  return null
+  if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(resolvedRoot + sep)) return null
+  try {
+    const realRoot = await fs.realpath(resolvedRoot)
+    const realParent = await fs.realpath(dirname(resolvedPath))
+    if (realParent !== realRoot && !realParent.startsWith(realRoot + sep)) return null
+  } catch {
+    // The root or an ancestor of the candidate doesn't exist (or isn't
+    // readable) — the lexical containment check above is the best available
+    // answer, and a path that fails to resolve here will fail the caller's
+    // own `fs.stat` regardless.
+  }
+  return resolvedPath
 }
 
 /**

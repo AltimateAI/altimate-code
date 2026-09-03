@@ -104,7 +104,7 @@ async function fileExists(dbtRoot: string, cwd: string, relative: string): Promi
   for (const root of new Set([dbtRoot, cwd])) {
     // Refuse to resolve outside `root` — see `resolveWithinRoot`. A required
     // path is task-document content and can contain `..` segments.
-    const safePath = resolveWithinRoot(root, relative)
+    const safePath = await resolveWithinRoot(root, relative)
     if (!safePath) continue
     try {
       const stat = await fs.stat(safePath)
@@ -186,8 +186,14 @@ export const DbtDeliverableNamesValidator: Validator = {
       reasonParts.push(`required file(s) missing: ${missingFiles.join(", ")}`)
     }
 
+    // The workspace directory is repository/environment-controlled and can in
+    // principle carry adversarial text; `contract.taskFile` is built from it.
+    // `dbt-nothing-built` already routes its own task-file path through
+    // `sanitizeForPrompt` for this reason — this interpolation is the
+    // matching gap in this file.
+    const safeTaskFile = sanitizeForPrompt(contract.taskFile, 160)
     const hintLines: string[] = [
-      `The task document (${contract.taskFile}) states these names literally. A model that does the right thing under a different name does not satisfy the task, and self-verification against the renamed output will not detect it.`,
+      `The task document (${safeTaskFile}) states these names literally. A model that does the right thing under a different name does not satisfy the task, and self-verification against the renamed output will not detect it.`,
     ]
     if (missingModels.length > 0) {
       hintLines.push(`  • Create or rename to exactly: ${missingModels.join(", ")}`)

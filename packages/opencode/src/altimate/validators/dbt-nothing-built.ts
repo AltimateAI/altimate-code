@@ -40,6 +40,8 @@ import {
   collectProducedNodeNames,
   resolveWithinRoot,
   sanitizeForPrompt,
+  MODEL_NODE_EXTENSIONS,
+  SEED_NODE_EXTENSIONS,
   type RequiredDeliverables,
 } from "./validator-utils"
 
@@ -137,24 +139,36 @@ async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<Auth
   // instead.
   const visitedDirs = new Set<string>()
   /**
-   * `relationProducing` gates only the NAME index. Editing
-   * `macros/fct_orders.sql` is real work — it counts towards `any` and is
-   * recorded in `relPaths` — but it does not define a model called
-   * `fct_orders`, so letting its stem satisfy a required model would recreate
-   * the vacuous pass this correlation exists to close.
+   * `nameExtensions` gates only the NAME index, two ways:
+   *   - `null` — this file is under a non-relation-producing directory
+   *     (macros/analyses/tests). Editing `macros/fct_orders.sql` is real
+   *     work — it counts towards `any` and is recorded in `relPaths` — but it
+   *     does not define a model called `fct_orders`, so letting its stem
+   *     satisfy a required model would recreate the vacuous pass this
+   *     correlation exists to close.
+   *   - an extension list — this file is under a relation-producing
+   *     directory, but only counts towards the name index when its extension
+   *     is one dbt actually loads there (`.sql`/`.py` for models/snapshots,
+   *     `.csv` for seeds). Writing `models/orders.txt` under an inert
+   *     extension must not satisfy "update the model `orders`": the required
+   *     `.sql` file was never touched, and every gate would otherwise clear
+   *     having built nothing.
    */
-  const record = (full: string, relationProducing: boolean): void => {
+  const record = (full: string, nameExtensions: string[] | null): void => {
     out.any = true
-    if (relationProducing) {
-      const base = full.split(/[\\/]/).pop() ?? ""
-      const dot = base.lastIndexOf(".")
-      const stem = (dot > 0 ? base.slice(0, dot) : base).toLowerCase()
-      if (stem.length > 0) out.names.add(stem)
+    if (nameExtensions) {
+      const lower = full.toLowerCase()
+      const ext = nameExtensions.find((e) => lower.endsWith(e))
+      if (ext) {
+        const base = full.split(/[\\/]/).pop() ?? ""
+        const stem = base.slice(0, base.length - ext.length).toLowerCase()
+        if (stem.length > 0) out.names.add(stem)
+      }
     }
     const rel = full.startsWith(dbtRoot) ? full.slice(dbtRoot.length).replace(/^[\\/]+/, "") : full
     out.relPaths.add(normalizeRelPath(rel))
   }
-  async function scan(dir: string, depth: number, relationProducing: boolean): Promise<void> {
+  async function scan(dir: string, depth: number, nameExtensions: string[] | null): Promise<void> {
     if (depth > SCAN_MAX_DEPTH) return
     let realDir: string
     try {
@@ -182,28 +196,32 @@ async function authoredWorkSince(dbtRoot: string, sinceMs: number): Promise<Auth
         continue
       }
       if (stat.isDirectory()) {
-        await scan(full, depth + 1, relationProducing)
+        await scan(full, depth + 1, nameExtensions)
       } else if (stat.isFile() && stat.mtimeMs >= sinceMs) {
-        record(full, relationProducing)
+        record(full, nameExtensions)
       }
     }
   }
   // Directories come from `dbt_project.yml`, so a project on custom
   // `model-paths` is not reported as having authored nothing.
   const sourcePaths = await resolveDbtSourcePaths(dbtRoot)
-  // Only these three define relations, so only these contribute names.
-  for (const dir of [...sourcePaths.models, ...sourcePaths.seeds, ...sourcePaths.snapshots]) {
-    await scan(dir, 0, true)
+  // Only these three define relations, so only these contribute names — and
+  // only under the extension dbt actually loads for that directory kind.
+  for (const dir of [...sourcePaths.models, ...sourcePaths.snapshots]) {
+    await scan(dir, 0, MODEL_NODE_EXTENSIONS)
+  }
+  for (const dir of sourcePaths.seeds) {
+    await scan(dir, 0, SEED_NODE_EXTENSIONS)
   }
   // Real work, but not a relation definition.
   for (const dir of [...sourcePaths.analyses, ...sourcePaths.macros, ...sourcePaths.tests]) {
-    await scan(dir, 0, false)
+    await scan(dir, 0, null)
   }
   for (const name of AUTHORED_ROOT_FILES) {
     const full = join(dbtRoot, name)
     try {
       const stat = await fs.stat(full)
-      if (stat.isFile() && stat.mtimeMs >= sinceMs) record(full, false)
+      if (stat.isFile() && stat.mtimeMs >= sinceMs) record(full, null)
     } catch {
       // absent — keep looking
     }
@@ -309,7 +327,7 @@ export const DbtNothingBuiltValidator: Validator = {
         // `stat` outside either allowed root, so a task naming a path that
         // escapes the workspace cannot satisfy this gate with an unrelated
         // file elsewhere on disk.
-        const safePath = resolveWithinRoot(root, file)
+        const safePath = await resolveWithinRoot(root, file)
         if (!safePath) continue
         try {
           const stat = await fs.stat(safePath)
