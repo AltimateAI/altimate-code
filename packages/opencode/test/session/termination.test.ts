@@ -263,6 +263,10 @@ describe("builder completion contract", () => {
     expect(instruction).toContain("Do not emit `DONE` while work or verification remains")
     expect(SessionTermination.completionInstruction({ runMode: false, agent: "builder" })).toBeUndefined()
     expect(SessionTermination.completionInstruction({ runMode: true, agent: "plan" })).toBeUndefined()
+    // The builder-derived opt-in data-qa profile is also covered: its headless
+    // runs need the termination contract (its prompt omits the finish pack).
+    expect(SessionTermination.completionInstruction({ runMode: true, agent: "data-qa" })).toBe(instruction)
+    expect(SessionTermination.completionInstruction({ runMode: false, agent: "data-qa" })).toBeUndefined()
   })
 
   test("prompt assembly wires the contract to the run-mode flag", async () => {
@@ -278,10 +282,12 @@ describe("builder completion contract", () => {
   // interactive chat — where nothing interprets or strips the token and the user
   // saw a literal DONE on every final answer, including mid-conversation on a
   // follow-up. The instruction must therefore NOT be static in the prompt file.
-  test("the builder prompt file does not carry the token instruction", async () => {
-    const prompt = await Bun.file(new URL("../../src/altimate/prompts/builder.txt", import.meta.url).pathname).text()
-    expect(prompt).not.toContain("literal token `DONE`")
-    expect(prompt).not.toContain("Do not emit `DONE`")
+  test("the builder prompt does not carry the token instruction", async () => {
+    // builder.txt was split into core + pack fragments (workload-adaptive
+    // harness PR 1); the assembled prompt is byte-identical to the old file.
+    const { PROMPT_BUILDER } = await import("../../src/altimate/prompts/profiles")
+    expect(PROMPT_BUILDER).not.toContain("literal token `DONE`")
+    expect(PROMPT_BUILDER).not.toContain("Do not emit `DONE`")
   })
 
   // The token itself is unchanged, so the detector that ends a run still pairs

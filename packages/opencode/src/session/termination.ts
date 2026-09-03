@@ -174,7 +174,7 @@ export function explicitDoneStop(input: {
 }
 
 /**
- * Run-mode completion instruction for the builder agent.
+ * Run-mode completion instruction for builder and builder-derived agents.
  *
  * This wording lived in `builder.txt`, but builder is a PRIMARY agent, so a
  * static instruction there also governs interactive chat — where nothing
@@ -182,8 +182,10 @@ export function explicitDoneStop(input: {
  * final answer, including mid-conversation on follow-ups. `isExplicitDone()`
  * is only consumed by the run-mode accounting path.
  *
- * Injected only in run mode and only for builder, which is byte-identical to
- * the previous run-mode behaviour: builder was the only prompt carrying it.
+ * Injected only in run mode, and only for the agents named in
+ * COMPLETION_CONTRACT_AGENTS below (builder, plus the opt-in data-qa profile
+ * — see that set for why). For builder alone this is byte-identical to the
+ * previous run-mode behaviour, when builder was the only prompt carrying it.
  * Prompt-visible text — changes need extra review.
  */
 export const RUN_MODE_COMPLETION_INSTRUCTION =
@@ -191,9 +193,17 @@ export const RUN_MODE_COMPLETION_INSTRUCTION =
   `response with the literal token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` ` +
   "while work or verification remains."
 
+/**
+ * Agents that receive the run-mode completion-token contract. builder is the
+ * historical carrier; data-qa is the builder-derived opt-in profile (its
+ * headless runs need a termination contract without inheriting the dbt
+ * finish-build ritual, which lives in the prompt packs it omits).
+ */
+const COMPLETION_CONTRACT_AGENTS = new Set(["builder", "data-qa"])
+
 /** The sole gate for injecting the completion-token contract into a prompt. */
 export function completionInstruction(input: { runMode: boolean; agent: string }): string | undefined {
-  return input.runMode && input.agent === "builder" ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
+  return input.runMode && COMPLETION_CONTRACT_AGENTS.has(input.agent) ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
 }
 
 /**
