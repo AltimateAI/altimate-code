@@ -168,13 +168,19 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       return { findings: [], status: "timeout", reason: timeoutReason }
     }
     const stream = streamResult
-    for await (const event of stream.fullStream) {
-      // drain to avoid SDK hangs
-      if (event.type === "abort") streamAborted = true
-      if (event.type === "error") throw event.error
+    const drain = (async () => {
+      for await (const event of stream.fullStream) {
+        // drain to avoid SDK hangs
+        if (event.type === "abort") streamAborted = true
+        if (event.type === "error") throw event.error
+      }
+    })()
+    const drainResult = await Promise.race([drain, abortPromise])
+    if (drainResult === setupTimedOut || controller.signal.aborted || streamAborted) {
+      return { findings: [], status: "timeout", reason: timeoutReason }
     }
     const textResult = await Promise.race([Promise.resolve(stream.text), abortPromise])
-    if (textResult === setupTimedOut || controller.signal.aborted || streamAborted) {
+    if (textResult === setupTimedOut || controller.signal.aborted) {
       return { findings: [], status: "timeout", reason: timeoutReason }
     }
     const text = textResult

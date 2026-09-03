@@ -109,6 +109,36 @@ describe("runAiReview stream handling", () => {
     expect(parseCalls()).toBe(0)
   })
 
+  test("returns timeout without reading text when fullStream stalls", async () => {
+    const parseCalls = stubModelAndPrompt()
+    let fireTimeout: (() => void) | undefined
+    let textRead = false
+    spyOn(globalThis as any, "setTimeout").mockImplementation(((callback: () => void) => {
+      fireTimeout = callback
+      return 1
+    }) as any)
+
+    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "text-delta", text: "partial" }
+          fireTimeout?.()
+          await new Promise(() => {})
+        },
+      },
+      get text() {
+        textRead = true
+        return Promise.resolve("[]")
+      },
+    }))
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+
+    expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 62s" })
+    expect(textRead).toBe(false)
+    expect(parseCalls()).toBe(0)
+  })
+
   test("returns timeout without parsing when stream.text never settles after fullStream ends", async () => {
     const parseCalls = stubModelAndPrompt()
     let fireTimeout: (() => void) | undefined

@@ -193,6 +193,7 @@ describe("review summary readability", () => {
     const policy: ReviewPolicySignatureInput = {
       severityThreshold: "suggestion",
       enabledReviewers: ["semantic_change", "sql_quality"],
+      dialect: "snowflake",
       rubric,
       aiEnabled: true,
       dataDiff: { enabled: false, warehouse: "" },
@@ -257,6 +258,7 @@ describe("review summary readability", () => {
       }),
     )
     expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, aiEnabled: false }))
+    expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, dialect: "bigquery" }))
     expect(policySignature).not.toBe(
       makeReviewPolicySignature({
         ...policy,
@@ -343,6 +345,7 @@ describe("review summary readability", () => {
     const policySignature = makeReviewPolicySignature({
       severityThreshold: "suggestion",
       enabledReviewers: [],
+      dialect: "snowflake",
       rubric: DEFAULT_RUBRIC,
       aiEnabled: true,
       dataDiff: { enabled: false, warehouse: "" },

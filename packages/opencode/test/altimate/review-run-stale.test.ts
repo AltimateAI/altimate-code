@@ -201,13 +201,36 @@ describe("detectArtifactHints", () => {
     ).toEqual([])
   })
 
-  test("does not request base compiled SQL for a deletion-only diff", async () => {
+  test("reports an ambiguous base project directory without assuming the head project name", async () => {
+    await using tmp = await tmpdir()
+    const project = "analytics"
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    const headModel = path.join(target, "compiled", project, "models", "a.sql")
+    const baseRoot = path.join(tmp.path, "target-base", "compiled")
+    await fs.mkdir(path.dirname(headModel), { recursive: true })
+    await fs.mkdir(path.join(baseRoot, "old_analytics"), { recursive: true })
+    await fs.mkdir(path.join(baseRoot, "legacy_analytics"), { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
+    await fs.writeFile(headModel, "select 1")
+
+    expect(
+      await detectArtifactHints(
+        manifest,
+        tmp.path,
+        [{ path: "models/a.sql", status: "modified" }],
+        project,
+      ),
+    ).toEqual(["target-base/compiled has several project directories; expected `analytics`"])
+  })
+
+  test("does not request a catalog or compiled SQL for a deletion-only diff", async () => {
     await using tmp = await tmpdir()
     const target = path.join(tmp.path, "target")
     const manifest = path.join(target, "manifest.json")
     await fs.mkdir(target, { recursive: true })
     await fs.writeFile(manifest, "{}")
-    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
 
     expect(
       await detectArtifactHints(

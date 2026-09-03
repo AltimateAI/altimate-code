@@ -1172,6 +1172,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const policySignature = makeReviewPolicySignature({
     severityThreshold: input.config.severityThreshold,
     enabledReviewers: input.config.reviewers,
+    dialect,
     rubric: input.rubric,
     aiEnabled: input.config.ai,
     dataDiff: input.config.dataDiff,

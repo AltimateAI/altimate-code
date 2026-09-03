@@ -150,7 +150,11 @@ function artifactDirLabel(dir: string, dbtRoot: string): string {
   return path.relative(dbtRoot, dir).split(path.sep).join("/") || path.basename(dir)
 }
 
-async function resolveBaseProjectName(baseDir: string, projectName: string, dbtRoot: string): Promise<string> {
+async function resolveBaseProjectName(
+  baseDir: string,
+  projectName: string,
+  dbtRoot: string,
+): Promise<string | undefined> {
   const baseRoot = path.isAbsolute(baseDir) ? baseDir : path.join(dbtRoot, baseDir)
   try {
     if ((await stat(path.join(baseRoot, projectName))).isDirectory()) return projectName
@@ -161,6 +165,7 @@ async function resolveBaseProjectName(baseDir: string, projectName: string, dbtR
   try {
     const directories = (await readdir(baseRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory())
     if (directories.length === 1) return directories[0]!.name
+    if (directories.length > 1) return undefined
   } catch {
     /* keep the head project name when the base compiled directory is absent */
   }
@@ -177,7 +182,7 @@ export async function detectArtifactHints(
   artifactDirs?: CompiledArtifactDirs,
   baseProjectName?: string,
 ): Promise<string[]> {
-  if (changedModels.length === 0) return []
+  if (changedModels.length === 0 || changedModels.every((file) => file.status === "deleted")) return []
 
   try {
     await access(manifestAbs)
@@ -211,6 +216,11 @@ export async function detectArtifactHints(
   const { headDir, baseDir } = artifactDirs ?? (await compiledArtifactDirs(manifestAbs, dbtRoot))
   const resolvedBaseProjectName =
     baseProjectName ?? (await resolveBaseProjectName(baseDir, projectName, dbtRoot))
+  if (resolvedBaseProjectName === undefined) {
+    hints.push(
+      `${artifactDirLabel(baseDir, dbtRoot)} has several project directories; expected \`${projectName}\``,
+    )
+  }
   const getCompiled = makeCompiledResolver({
     cwd: dbtRoot,
     projectName,
@@ -222,9 +232,11 @@ export async function detectArtifactHints(
   const baseModels = changedModels.filter((file) => file.status !== "added" && file.status !== "deleted")
   const headModels = changedModels.filter((file) => file.status !== "deleted")
   const [missingBase, missingHead] = await Promise.all([
-    Promise.all(baseModels.map((file) => getCompiled(file.oldPath ?? file.path, "old"))).then(
-      (contents) => contents.filter((content) => content === undefined).length,
-    ),
+    resolvedBaseProjectName === undefined
+      ? Promise.resolve(0)
+      : Promise.all(baseModels.map((file) => getCompiled(file.oldPath ?? file.path, "old"))).then(
+          (contents) => contents.filter((content) => content === undefined).length,
+        ),
     Promise.all(headModels.map((file) => getCompiled(file.path, "new"))).then(
       (contents) => contents.filter((content) => content === undefined).length,
     ),

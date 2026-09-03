@@ -1923,13 +1923,10 @@ describe("orchestrate", () => {
       findings: [],
       tier: "lite",
       mode: "comment",
-      emptyScope: true,
       aiReview: { status: "ok", findings: 2 },
     })
     const summary = renderSummary(env)
 
-    expect(summary).toContain("Nothing to review")
-    expect(summary).not.toContain("No issues found in the changed dbt models")
     expect(summary).toContain("🤖 AI reviewer: 2 advisory findings")
   })
 

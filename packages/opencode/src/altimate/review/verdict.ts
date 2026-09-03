@@ -92,6 +92,7 @@ export type AiReviewSummary = z.infer<typeof AiReviewSummary>
 export interface ReviewPolicySignatureInput {
   severityThreshold: Severity
   enabledReviewers: string[]
+  dialect: string
   rubric: Rubric
   aiEnabled: boolean
   dataDiff: {
@@ -123,6 +124,7 @@ export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): st
     normalizePolicyValue({
       severityThreshold: input.severityThreshold,
       enabledReviewers: [...new Set(input.enabledReviewers)].sort(),
+      dialect: input.dialect,
       exclusions: {
         excludeGlobs: [...new Set(excludeGlobs)].sort(),
         enabled: enabledExclusions,
