@@ -37,9 +37,7 @@ describe("builder profile byte identity", () => {
       // Fragments carry their own trailing newline; profiles join with "".
       expect(text.endsWith("\n"), `fragment ${name} must end with a newline`).toBe(true)
     }
-    for (const profile of [BUILDER_PROFILE]) {
-      expect(new Set(profile).size).toBe(profile.length)
-    }
+    expect(new Set(BUILDER_PROFILE).size).toBe(BUILDER_PROFILE.length)
     // The default profile uses every fragment exactly once (the split is total).
     expect([...BUILDER_PROFILE].map(String).sort()).toEqual(Object.keys(FRAGMENTS).sort())
   })

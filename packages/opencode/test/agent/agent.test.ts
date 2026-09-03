@@ -286,6 +286,42 @@ it.instance(
 )
 
 it.instance(
+  // Regression for the data-qa agent removal: #1217 shipped `data-qa` as a
+  // config-registerable native profile, so an upgrading user's config may
+  // still carry a leftover `agent: {"data-qa": {...}}` block after this
+  // profile was dropped. That entry now takes the exact same path as any
+  // other user-defined agent name not registered natively (see "custom agent
+  // from config creates new agent" above) — it resolves to a plain generic
+  // agent (mode "all", native: false, no `data-qa`-specific prompt), it does
+  // not crash, and it does not resurrect the removed profile's permissions.
+  "a leftover config `agent.data-qa` entry resolves as a harmless generic custom agent, not a crash",
+  () =>
+    Effect.gen(function* () {
+      const dataQa = yield* load((svc) => svc.get("data-qa"))
+      expect(dataQa).toBeDefined()
+      expect(dataQa?.native).toBe(false)
+      expect(dataQa?.mode).toBe("all")
+      expect(dataQa?.description).toBe("leftover config from an old data-qa opt-in")
+      // No native data-qa prompt exists anymore to resurrect.
+      expect(dataQa?.prompt).toBeUndefined()
+      // The rest of the registry is unaffected.
+      const builder = yield* load((svc) => svc.get("builder"))
+      expect(builder?.native).toBe(true)
+      const fallback = yield* load((svc) => svc.defaultAgent())
+      expect(fallback).toBe("builder")
+    }),
+  {
+    config: {
+      agent: {
+        "data-qa": {
+          description: "leftover config from an old data-qa opt-in",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "agent disable removes agent from list",
   () =>
     Effect.gen(function* () {

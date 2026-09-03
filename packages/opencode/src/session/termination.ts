@@ -174,7 +174,7 @@ export function explicitDoneStop(input: {
 }
 
 /**
- * Run-mode completion instruction for builder and builder-derived agents.
+ * Run-mode completion instruction for builder.
  *
  * This wording lived in `builder.txt`, but builder is a PRIMARY agent, so a
  * static instruction there also governs interactive chat — where nothing
@@ -183,9 +183,9 @@ export function explicitDoneStop(input: {
  * is only consumed by the run-mode accounting path.
  *
  * Injected only in run mode, and only for the agents named in
- * COMPLETION_CONTRACT_AGENTS below (builder). This is byte-identical to the
- * previous run-mode behaviour, when builder was the only prompt carrying it.
- * Prompt-visible text — changes need extra review.
+ * COMPLETION_CONTRACT_AGENTS below (builder). Byte-identical to builder's
+ * original run-mode behaviour, from when this text was still static in
+ * `builder.txt`. Prompt-visible text — changes need extra review.
  */
 export const RUN_MODE_COMPLETION_INSTRUCTION =
   "**Signal completion explicitly**: only after every requirement above is satisfied, end your final " +
