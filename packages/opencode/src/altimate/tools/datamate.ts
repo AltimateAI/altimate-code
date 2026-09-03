@@ -150,7 +150,12 @@ async function handleListIntegrations() {
     // (2026-09-03) proved the full chain: compile_model/run_model over the
     // bridge materialized a model on the warehouse from a headless run.
     const extension = catalog.filter((i) => i.type === "extension")
-    const bridged = extension.length > 0 && liveBridge(projectRoot())
+    // Probe with Instance.directory, not projectRoot(): the engine is spawned
+    // with the instance directory as its cwd (mcp/index.ts connectLocal), so
+    // this is the cwd its own discovery will match. Probing the Git root
+    // instead diverged when altimate-code was launched from a subdirectory
+    // with more than one live bridge. (codex review)
+    const bridged = extension.length > 0 && liveBridge(Instance.directory)
     const integrations = bridged ? catalog : catalog.filter((i) => i.type !== "extension")
     const hidden = catalog.length - integrations.length
     const footer = bridged
