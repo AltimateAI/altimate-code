@@ -99,14 +99,28 @@ describe("liveBridge", () => {
     expect(statSync(path.join(dir, "a.json")).isFile()).toBe(true)
   })
 
-  test("a non-positive or non-integer pid is never alive — kill(0)/kill(-1) probe process groups", () => {
+  test("a present-but-invalid pid is a corrupt record, never a live pid-less sidecar", () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
-    for (const pid of [0, -1, 1.5]) {
+    // Non-positive and non-integer: kill(0)/kill(-1) probe process groups.
+    // Wrong type entirely: the extension always writes a positive integer.
+    for (const pid of [0, -1, 1.5, "1234", null, {}] as unknown[]) {
       const dir = sidecars({
-        "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid },
+        "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: pid as number },
       })
       expect(liveBridge(cwd, dir)).toBe(false)
     }
+  })
+
+  test("empty and relative folder strings are dropped — resolve('') is the process cwd", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Bridge A is malformed, bridge B is live elsewhere: A must not match via
+    // resolve("") and must not defeat the two-bridge decline.
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["", "relative/dir"], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(process.cwd(), dir)).toBe(false)
+    expect(liveBridge(cwd, dir)).toBe(false)
   })
 
   test("the sole live bridge counts even for an unrelated directory; two decline to guess", () => {

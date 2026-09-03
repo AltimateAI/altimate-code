@@ -186,16 +186,21 @@ export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate
         }
         if (typeof data.socketPath !== "string" || !data.socketPath) continue
         // A sidecar without a pid counts as live, matching the engine's own
-        // discovery; a recorded pid disqualifies unless it names a live real
-        // process. Non-positive pids never do — kill(0)/kill(-1) probe process
-        // groups, which would read any garbage pid as alive. (bot review)
-        if (typeof data.pid === "number" && !(Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
+        // discovery. A PRESENT pid must be a live real process: the bridge
+        // extension always writes a positive integer, so a string, null, or
+        // non-positive value is a corrupt record, not a legacy shape — and
+        // unlike the engine, this probe has no connection attempt behind it
+        // to catch a bad guess. kill(0)/kill(-1) probe process groups, which
+        // would read garbage pids as alive. (codex r3, cubic)
+        if ("pid" in data && !(typeof data.pid === "number" && Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
           continue
         // Validate the folders shape: this is an unvalidated JSON file, and a
-        // non-array here must degrade to "live bridge, no recorded folders",
-        // not throw out of the probe. (bot review)
+        // non-array must degrade to "live bridge, no recorded folders", not
+        // throw out of the probe. Only nonempty absolute strings survive —
+        // resolve("") is the process cwd, so an empty or relative entry would
+        // spuriously match and bypass the two-bridge decline. (codex r3)
         const folders = Array.isArray(data.workspaceFolders)
-          ? data.workspaceFolders.filter((f): f is string => typeof f === "string")
+          ? data.workspaceFolders.filter((f): f is string => typeof f === "string" && isAbsolute(f))
           : []
         bridges.push(folders)
       } catch {
