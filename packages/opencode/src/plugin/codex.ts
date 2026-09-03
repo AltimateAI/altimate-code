@@ -2,6 +2,9 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Log } from "../util/log"
 import { Installation } from "../installation"
 import { Auth, OAUTH_DUMMY_KEY } from "../auth"
+// altimate_change start — plan/account diagnostics for wrong-account logins
+import { OAuthClaims } from "../auth/oauth-claims"
+// altimate_change end
 import os from "os"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -9,6 +12,43 @@ import { setTimeout as sleep } from "node:timers/promises"
 import { createServer } from "http"
 
 const log = Log.create({ service: "plugin.codex" })
+
+// altimate_change start — bound the diagnostic body read
+/** Upper bound on how much of a 400 body gets buffered to check for the plan-
+ * mismatch phrase. A real mismatch payload is one short JSON object (well
+ * under 1KB); this is generous headroom without buffering an arbitrarily
+ * large — or hostile — upstream error body into memory on every Codex 400,
+ * including ones that are not the mismatch shape at all. */
+const MAX_DIAGNOSTIC_BODY_BYTES = 16 * 1024
+
+/**
+ * Read at most `maxBytes` of a response body. Returns undefined if the body
+ * is missing, unreadable, or exceeds the bound — in every one of those cases
+ * the caller treats the response as "not the mismatch shape" and passes the
+ * original, untouched response through instead.
+ */
+async function readBoundedBody(response: Response, maxBytes: number): Promise<string | undefined> {
+  const reader = response.body?.getReader()
+  if (!reader) return undefined
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > maxBytes) return undefined
+      chunks.push(value)
+    }
+  } catch {
+    return undefined
+  } finally {
+    reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).toString("utf-8")
+}
+// altimate_change end
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
@@ -243,13 +283,10 @@ export interface IdTokenClaims {
 }
 
 export function parseJwtClaims(token: string): IdTokenClaims | undefined {
-  const parts = token.split(".")
-  if (parts.length !== 3) return undefined
-  try {
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString())
-  } catch {
-    return undefined
-  }
+  // altimate_change start — one JWT decoder, shared with auth/oauth-claims which
+  // reads the same tokens for the plan/account diagnostics
+  return OAuthClaims.decodeJwtClaims(token) as IdTokenClaims | undefined
+  // altimate_change end
 }
 
 export function extractAccountIdFromClaims(claims: IdTokenClaims): string | undefined {
@@ -688,10 +725,45 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                 ? new URL(CODEX_API_ENDPOINT)
                 : parsed
 
-            return fetch(url, {
+            const response = await fetch(url, {
               ...init,
               headers,
             })
+
+            // altimate_change start — a wrong-account login is otherwise undiagnosable.
+            // A free-plan ChatGPT credential fails every Codex request with a 400 that
+            // blames the MODEL ("...is not supported when using Codex with a ChatGPT
+            // account"), never the account. Replace that body with one naming the plan
+            // and account the request actually used, plus the commands to switch.
+            // Only this one 400 shape is touched; every other response passes through.
+            if (response.status === 400) {
+              const body = await readBoundedBody(response.clone(), MAX_DIAGNOSTIC_BODY_BYTES)
+              const enriched = OAuthClaims.enrichCodexPlanMismatchBody(
+                body,
+                currentAuth.access,
+                authWithAccount.accountId,
+              )
+              if (enriched) {
+                log.warn("codex request rejected for this account's plan", {
+                  plan: enriched.identity.plan,
+                  account: OAuthClaims.maskAccountId(enriched.identity.accountId),
+                })
+                // Preserve the upstream headers (e.g. a request id) so this failure
+                // stays correlatable with provider-side logs; only content-type and
+                // content-length change because the body is being replaced.
+                const headers = new Headers(response.headers)
+                headers.set("content-type", "application/json")
+                headers.delete("content-length")
+                return new Response(JSON.stringify({ detail: enriched.message }), {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers,
+                })
+              }
+            }
+            // altimate_change end
+
+            return response
           },
         }
       },
