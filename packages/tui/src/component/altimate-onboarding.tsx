@@ -1,9 +1,9 @@
 // Altimate onboarding layer — kept in a dedicated, altimate-owned file so it does
 // NOT enlarge the rebase surface of the upstream `dialog-model.tsx`. Holds the
-// first-run readiness state, the curated welcome/provider picker, and the Big
-// Pickle interstitial. Imports back into dialog-model are runtime-only (used inside
+// first-run readiness state, the curated welcome/provider picker, and the Altimate
+// Base disclosure. Imports back into dialog-model are runtime-only (used inside
 // callbacks/JSX), so the circular reference is safe.
-import { createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show, onMount, onCleanup } from "solid-js"
 import { useLocal } from "../context/local"
 import { useDialog } from "../ui/dialog"
 import { useTheme, selectedForeground } from "../context/theme"
@@ -12,11 +12,14 @@ import { useKeyboard } from "@opentui/solid"
 import { createDialogProviderOptions } from "./dialog-provider"
 import { DialogModel } from "./dialog-model"
 import { useConnected } from "./use-connected"
+import { useSDK } from "../context/sdk"
+import { useSync } from "../context/sync"
+import { useToast } from "../ui/toast"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
-// chooses the free Big Pickle option, or finishes the gateway flow. Combined with
+// chooses Altimate Base, or finishes the gateway flow. Combined with
 // useConnected() (real credentials) via useReady(), it gates the first-run chat
 // lock. Module-global so it is shared across the app and resets on every process
 // launch (so a fresh relaunch is a clean fresh-user state).
@@ -92,7 +95,7 @@ interface WelcomeRow {
   // is identified by its raw providerID/modelID below and classified host-side.
   analyticsSearchAll?: boolean
   // Identifies the row for the "currently selected" tick. providerID alone matches
-  // any model of that provider; add modelID to match a specific model (Big Pickle).
+  // any model of that provider; add modelID to match a specific model.
   providerID?: string
   modelID?: string
 }
@@ -100,10 +103,10 @@ interface WelcomeRow {
 export function DialogModelWelcome(props: {
   intro?: string
   // altimate_change — funnel: which path opened the picker. It also opens from /connect, from
-  // declining Big Pickle, and from the prompt gate, so without this every impression would read
+  // declining Altimate Base, and from the prompt gate, so without this every impression would read
   // as a fresh first run. Defaults to the /connect case since that is the only caller that does
   // not pass one explicitly.
-  trigger?: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+  trigger?: "first_run" | "connect_command" | "altimate_base_back" | "prompt_gate"
 }) {
   const { theme } = useTheme()
   const dialog = useDialog()
@@ -133,8 +136,9 @@ export function DialogModelWelcome(props: {
     return true
   }
 
-  function chooseBigPickle(): boolean {
-    dialog.replace(() => <DialogBigPickleConfirm origin="welcome" />)
+  function chooseAltimateBase(): boolean {
+    if (!providers().some((provider) => provider.value === "altimate-free")) return false
+    dialog.replace(() => <DialogAltimateBaseConfirm origin="welcome" />)
     return true
   }
 
@@ -174,14 +178,18 @@ export function DialogModelWelcome(props: {
       providerID: "google",
       activate: () => connectProvider("google"),
     },
-    {
-      name: "Big Pickle",
-      note: "free · less reliable for data work",
-      tone: "warning",
-      providerID: "opencode",
-      modelID: "big-pickle",
-      activate: chooseBigPickle,
-    },
+    ...(providers().some((provider) => provider.value === "altimate-free")
+      ? [
+          {
+            name: "Altimate Base",
+            note: "free · no signup · prompts are logged",
+            tone: "warning" as const,
+            providerID: "altimate-free",
+            modelID: "altimate-base",
+            activate: chooseAltimateBase,
+          },
+        ]
+      : []),
     {
       name: "Search all providers…",
       note: "/",
@@ -226,10 +234,14 @@ export function DialogModelWelcome(props: {
       })
   }
 
-  // Indices 0-4 are providers, 5 is the search row (rendered below a divider).
-  const COUNT = 6
+  const searchIndex = createMemo(() => rows().length - 1)
+  createEffect(() => {
+    const last = rows().length - 1
+    if (selected() > last) setSelected(Math.max(0, last))
+  })
   function move(direction: number) {
-    setSelected((prev) => (prev + direction + COUNT) % COUNT)
+    const count = rows().length
+    setSelected((prev) => (prev + direction + count) % count)
   }
 
   useKeyboard((evt) => {
@@ -246,7 +258,7 @@ export function DialogModelWelcome(props: {
       evt.preventDefault()
       // altimate_change — the "/" shortcut is the same intent as the "Search all providers…"
       // row, so it routes through the same guarded path.
-      activateRow(rows()[5])
+      activateRow(rows()[searchIndex()])
     }
   })
 
@@ -319,82 +331,172 @@ export function DialogModelWelcome(props: {
           <span style={{ fg: theme.textMuted }}> — you can change this anytime with /model</span>
         </text>
         <box gap={0}>
-          <For each={rows().slice(0, 5)}>{(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}</For>
+          <For each={rows().slice(0, searchIndex())}>
+            {(row, i) => <Row row={row} index={i()} onActivate={activateRow} />}
+          </For>
         </box>
         <box border={["top"]} borderColor={theme.border} />
-        <Row row={rows()[5]} index={5} onActivate={activateRow} />
+        <Row row={rows()[searchIndex()]} index={searchIndex()} onActivate={activateRow} />
       </box>
     </box>
   )
 }
 
-// Big Pickle interstitial — one confirm, default No. Custom component (not
-// DialogSelect) so the full warning wraps instead of clipping; y/n keys work,
-// enter accepts the highlighted row (No by default).
-export function DialogBigPickleConfirm(props: {
-  origin: "welcome" | "model"
-  /** altimate_change — funnel: carried only so the `no()` return path can hand it back to
-   *  DialogModel. Cancelling out of Big Pickle does not leave the catalogue the user reached
-   *  through "Search all providers…", but dropping it here re-created the next pick as
-   *  via_search:false. */
+export const ALTIMATE_BASE_DISCLOSURE =
+  "Altimate Base is free and requires no signup. Requests and responses are logged and may be used to improve Altimate's products and services. Those logs are linked to a permanent identifier for this installation, which /providers logout does not reset. Don't send secrets or confidential code. Usage is rate limited."
+
+type RegisterOutcome =
+  | { ok: true }
+  | { ok: false; result: "rate_limited" | "unavailable" | "network" | "error"; message: string }
+
+const REGISTER_FAILURE_MESSAGE = "Could not set up Altimate Base. Try again, or pick another provider."
+
+async function registerAltimateBase(sdk: ReturnType<typeof useSDK>): Promise<RegisterOutcome> {
+  const register = sdk.altimateBaseRegistration
+  if (!register) return { ok: false, result: "error", message: REGISTER_FAILURE_MESSAGE }
+  try {
+    const data = await register()
+    if (data.ok) return { ok: true }
+    return {
+      ok: false,
+      result: data.result,
+      message: data.message || REGISTER_FAILURE_MESSAGE,
+    }
+  } catch {
+    return { ok: false, result: "network", message: REGISTER_FAILURE_MESSAGE }
+  }
+}
+
+// Consent disclosure and registration flow. The default remains No, and no identifier is minted
+// until the user explicitly accepts.
+export function DialogAltimateBaseConfirm(props: {
+  // altimate_change — returning Big Pickle users reuse the same disclosure before migration
+  origin: "welcome" | "model" | "migration"
   viaSearch?: boolean
+  onDecline?: () => void
 }) {
   const { theme } = useTheme()
   const dialog = useDialog()
   const local = useLocal()
+  const sdk = useSDK()
+  const sync = useSync()
+  const toast = useToast()
   const [selected, setSelected] = createSignal(0) // 0 = No (default)
-  // altimate_change start — funnel: interstitial impression + decision.
-  // `decided` guards against a double-submit: keyboard and mouse handlers both call yes()/no()
-  // directly, and nothing prevents two firing before the dialog unmounts.
+  const [busy, setBusy] = createSignal(false)
+  const [error, setError] = createSignal<string | undefined>()
   const trackOnboarding = useOnboardingTelemetry()
   const firstRunActive = useFirstRunActive()
   let decided = false
-  // Funnel-only: /model reaches this interstitial with origin="model" for an established user.
+  let choiceRecorded = false
+  let disposed = false
+  const releaseCloseGuard = dialog.guardClose(() => !busy())
+
+  function recordChoice(choice: "accept" | "cancel") {
+    if (choiceRecorded) return
+    choiceRecorded = true
+    if (firstRunActive() && props.origin !== "migration") {
+      trackOnboarding({ name: "altimate_base_choice", choice })
+    }
+  }
+
   onMount(() => {
-    if (firstRunActive()) trackOnboarding({ name: "big_pickle_confirm_shown", origin: props.origin })
+    // Migration is not first-run onboarding and must not enter that funnel.
+    if (firstRunActive() && props.origin !== "migration") {
+      trackOnboarding({ name: "altimate_base_confirm_shown", origin: props.origin })
+    }
   })
-  // Every close that is not y/n is still a decision not to take Big Pickle, and the funnel showed
-  // an impression with no choice for all of them. onCleanup (rather than the inline `esc` control)
-  // is what makes this cover ALL of them — the Escape key and click-away are handled by
-  // DialogProvider and never reach this component's own handlers. `decided` keeps yes()/no() from
-  // double-emitting when their dialog.clear()/replace() unmounts us.
   onCleanup(() => {
-    if (decided) return
+    releaseCloseGuard()
+    disposed = true
+    // Escape and click-away are handled by DialogProvider and never reach no(), but they are just
+    // as much a refusal. Persisting the decline here too keeps a dismissed migration prompt from
+    // reappearing on every launch forever.
+    if (!decided && props.origin === "migration") props.onDecline?.()
     decided = true
-    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
+    recordChoice("cancel")
   })
-  // altimate_change end
 
   function no() {
-    // altimate_change start
-    if (decided) return
+    if (decided || busy()) return
     decided = true
-    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "cancel" })
-    // altimate_change end
+    recordChoice("cancel")
+    if (props.origin === "migration") {
+      props.onDecline?.()
+      dialog.clear()
+      return
+    }
     dialog.replace(() =>
       props.origin === "welcome" ? (
-        <DialogModelWelcome trigger="big_pickle_back" />
+        <DialogModelWelcome trigger="altimate_base_back" />
       ) : (
         <DialogModel viaSearch={props.viaSearch} />
       ),
     )
   }
-  function yes() {
-    // altimate_change start
-    if (decided) return
+
+  async function yes() {
+    if (decided || busy()) return
+    recordChoice("accept")
+    setBusy(true)
+    setError(undefined)
+    const outcome = await registerAltimateBase(sdk)
+    if (disposed) return
+    if (firstRunActive() && props.origin !== "migration") {
+      trackOnboarding({
+        name: "altimate_base_register_result",
+        result: outcome.ok ? "success" : outcome.result,
+      })
+    }
+    if (!outcome.ok) {
+      setBusy(false)
+      setError(outcome.message)
+      toast.show({ variant: "error", message: outcome.message })
+      return
+    }
+
+    await sdk.client.instance.dispose().catch(() => {})
+    if (disposed) return
+    await sync.bootstrap().catch(() => {})
+    if (disposed) return
+    const available = sync.data.provider.some(
+      (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
+    )
+    if (!available) {
+      const message = "Altimate Base was registered, but the model is not ready yet. Try again in a moment."
+      setBusy(false)
+      setError(message)
+      toast.show({ variant: "error", message })
+      return
+    }
+
     decided = true
-    if (firstRunActive()) trackOnboarding({ name: "big_pickle_choice", choice: "accept" })
-    // altimate_change end
+    setBusy(false)
     dialog.clear()
-    local.model.set({ providerID: "opencode", modelID: "big-pickle" }, { recent: true })
+    // A migration also removes the retired implicit model from recents. Re-check eligibility after
+    // registration so a project allowlist or explicit model change made while the dialog was open
+    // cannot be overwritten by the returning-user migration.
+    if (props.origin === "migration") local.model.migrateLegacyDefault()
+    else local.model.set({ providerID: "altimate-free", modelID: "altimate-base" }, { recent: true })
     markSetupComplete()
   }
+
   const options = [
-    { label: "No — pick something else", hint: "(default)", run: no },
-    { label: "Yes — continue with Big Pickle", hint: "", run: yes },
+    {
+      label: props.origin === "migration" ? "No — keep Big Pickle" : "No — pick something else",
+      hint: "(default)",
+      run: no,
+    },
+    { label: "Yes — use Altimate Base", hint: "", run: () => void yes() },
   ]
 
   useKeyboard((evt) => {
+    if (busy()) {
+      if (evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
+        evt.preventDefault()
+        evt.stopPropagation()
+      }
+      return
+    }
     if (evt.name === "up" || evt.name === "down") {
       setSelected((prev) => (prev + 1) % 2)
       evt.preventDefault()
@@ -408,7 +510,7 @@ export function DialogBigPickleConfirm(props: {
     }
     if (evt.name === "y" && !evt.ctrl && !evt.meta) {
       evt.preventDefault()
-      yes()
+      void yes()
       return
     }
     if (evt.name === "n" && !evt.ctrl && !evt.meta) {
@@ -424,16 +526,23 @@ export function DialogBigPickleConfirm(props: {
     <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
       <box flexDirection="row" justifyContent="space-between">
         <text attributes={TextAttributes.BOLD} fg={theme.text}>
-          Use Big Pickle?
+          Use Altimate Base?
         </text>
-        <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+        <text fg={theme.textMuted} onMouseUp={() => !busy() && dialog.clear()}>
           esc
         </text>
       </box>
       <text fg={theme.textMuted} wrapMode="word" width="100%">
-        Big Pickle works for chat but often fails at data tasks. The Gateway is free to start (10M tokens). Continue?
-        [y/N]
+        {ALTIMATE_BASE_DISCLOSURE}
       </text>
+      <Show when={error()}>
+        <text fg={theme.error} wrapMode="word" width="100%">
+          {error()!}
+        </text>
+      </Show>
+      <Show when={busy()}>
+        <text fg={theme.textMuted}>Setting up…</text>
+      </Show>
       <box>
         <For each={options}>
           {(option, index) => (

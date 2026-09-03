@@ -148,7 +148,13 @@ const provider: Provider.Info = {
 describe("ACP service sessions", () => {
   const makeService = (
     messages: readonly { info: unknown; parts: readonly unknown[] }[] = [],
-    options?: { abort?: (input: { sessionID: string }) => Promise<{ data: boolean }> },
+    options?: {
+      abort?: (input: { sessionID: string }) => Promise<{ data: boolean }>
+      providers?: Provider.Info[]
+      providerConfig?: Record<string, unknown>
+      configModel?: string
+      configFails?: boolean
+    },
   ) => {
     const updates: SessionNotification[] = []
     const mcpAdds: string[] = []
@@ -158,6 +164,7 @@ describe("ACP service sessions", () => {
     const commands: unknown[] = []
     const summarizes: unknown[] = []
     const usageUpdates: string[] = []
+    const creates: unknown[] = []
     const sessions = Array.from({ length: 102 }, (_, index) => ({
       id: `ses_${index + 1}`,
       directory: index % 2 === 0 ? "/workspace" : "/other",
@@ -166,8 +173,16 @@ describe("ACP service sessions", () => {
     }))
     const sdk = {
       config: {
-        providers: () => Promise.resolve({ data: { providers: [provider], default: { test: modelID } } }),
-        get: () => Promise.resolve({ data: {} }),
+        providers: () =>
+          Promise.resolve({
+            data: {
+              providers: options?.providers ?? [provider],
+            },
+          }),
+        get: () =>
+          options?.configFails
+            ? Promise.reject(new Error("config unavailable"))
+            : Promise.resolve({ data: { provider: options?.providerConfig, model: options?.configModel } }),
       },
       app: {
         agents: () =>
@@ -190,7 +205,10 @@ describe("ACP service sessions", () => {
           }),
       },
       session: {
-        create: () => Promise.resolve({ data: { id: "ses_new" } }),
+        create: (input: unknown) => {
+          creates.push(input)
+          return Promise.resolve({ data: { id: "ses_new" } })
+        },
         get: () => Promise.resolve({ data: { id: "ses_loaded" } }),
         list: (input: { directory?: string }) =>
           Promise.resolve({
@@ -272,6 +290,7 @@ describe("ACP service sessions", () => {
       commands,
       summarizes,
       usageUpdates,
+      creates,
     }
   }
 
@@ -299,6 +318,247 @@ describe("ACP service sessions", () => {
     expect(mcpAdds).toEqual(["tools"])
   })
 
+  it("fails before creating a session when Big Pickle is the only implicit option", async () => {
+    const bigPickleProvider = {
+      ...provider,
+      id: ProviderID.make("opencode"),
+      name: "OpenCode",
+      models: {
+        [ModelID.make("big-pickle")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("big-pickle"),
+          providerID: ProviderID.make("opencode"),
+          name: "Big Pickle",
+        },
+      },
+    } satisfies Provider.Info
+    const { service, creates } = makeService([], { providers: [bigPickleProvider] })
+
+    const failure = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }).pipe(Effect.flip))
+
+    expect(failure).toMatchObject({
+      _tag: "ACPServiceFailureError",
+      safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
+      service: "model",
+    })
+    expect(creates).toHaveLength(0)
+  })
+
+  it("fails before creating a session when the configured model is unavailable", async () => {
+    const bigPickleProvider = {
+      ...provider,
+      id: ProviderID.make("opencode"),
+      name: "OpenCode",
+      models: {
+        [ModelID.make("big-pickle")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("big-pickle"),
+          providerID: ProviderID.make("opencode"),
+          name: "Big Pickle",
+        },
+      },
+    } satisfies Provider.Info
+    const { service, creates } = makeService([], {
+      providers: [bigPickleProvider],
+      configModel: "opencode/missing",
+    })
+
+    const failure = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }).pipe(Effect.flip))
+
+    expect(failure).toMatchObject({
+      _tag: "ACPServiceFailureError",
+      safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
+      service: "model",
+    })
+    expect(creates).toHaveLength(0)
+  })
+
+  it("keeps unrelated providers advertised when a provider block names only one of them", async () => {
+    // `config.provider` is a customization map — the docs show single-entry blocks setting apiKey
+    // or options. Treating it as a catalogue-wide allowlist hid every other authenticated provider
+    // from ACP clients and invalidated restored sessions pinned to them.
+    const other = {
+      ...provider,
+      id: ProviderID.make("anthropic"),
+      name: "Anthropic",
+      models: {
+        [ModelID.make("claude-sonnet-4")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("claude-sonnet-4"),
+          providerID: ProviderID.make("anthropic"),
+          name: "Claude Sonnet 4",
+        },
+      },
+    } satisfies Provider.Info
+    const { service } = makeService([], {
+      providers: [provider, other],
+      providerConfig: { test: {} },
+    })
+
+    const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+    const models = flattenSelectOptions(select(result, "model"))
+
+    expect(models.some((option) => option.value.includes("test-model"))).toBe(true)
+    expect(models.some((option) => option.value.includes("claude-sonnet-4"))).toBe(true)
+  })
+
+  it("does not advertise Altimate Base through an ACP snapshot excluded by a provider allowlist", async () => {
+    const baseProvider = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      name: "Altimate",
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+          name: "Altimate Base",
+        },
+      },
+    } satisfies Provider.Info
+    const { service } = makeService([], {
+      providers: [provider, baseProvider],
+      providerConfig: { test: {} },
+    })
+
+    const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+    const models = flattenSelectOptions(select(result, "model"))
+
+    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(false)
+    expect(models.some((option) => option.value.includes("test-model"))).toBe(true)
+  })
+
+  it("cannot enable Altimate Base merely by naming it in an ACP provider allowlist", async () => {
+    const baseProvider = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      name: "Altimate",
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+          name: "Altimate Base",
+        },
+      },
+    } satisfies Provider.Info
+    const { service } = makeService([], {
+      providers: [provider, baseProvider],
+      providerConfig: { test: {}, "altimate-free": {} },
+    })
+
+    const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+    const models = flattenSelectOptions(select(result, "model"))
+
+    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(false)
+    expect(models.some((option) => option.value.includes("test-model"))).toBe(true)
+  })
+
+  it("fails closed for Altimate Base when the project config lookup fails", async () => {
+    const baseProvider = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      name: "Altimate",
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+          name: "Altimate Base",
+        },
+      },
+    } satisfies Provider.Info
+    const { service, creates } = makeService([], {
+      providers: [baseProvider],
+      configFails: true,
+    })
+
+    const failure = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }).pipe(Effect.flip))
+
+    expect(failure).toMatchObject({
+      _tag: "ACPServiceFailureError",
+      safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
+      service: "model",
+    })
+    expect(creates).toHaveLength(0)
+  })
+
+  it("fails before forking when no supported implicit model exists", async () => {
+    const bigPickleProvider = {
+      ...provider,
+      id: ProviderID.make("opencode"),
+      name: "OpenCode",
+      models: {
+        [ModelID.make("big-pickle")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("big-pickle"),
+          providerID: ProviderID.make("opencode"),
+          name: "Big Pickle",
+        },
+      },
+    } satisfies Provider.Info
+    const { service, forks } = makeService([], { providers: [bigPickleProvider] })
+
+    const failure = await Effect.runPromise(
+      service.forkSession({ cwd: "/workspace", sessionId: "ses_parent", mcpServers: [] }).pipe(Effect.flip),
+    )
+
+    expect(failure).toMatchObject({ service: "model" })
+    expect(forks).toHaveLength(0)
+  })
+
+  it("forks with the current default when the source model is no longer advertised", async () => {
+    const { service, forks } = makeService([
+      {
+        info: {
+          role: "assistant",
+          providerID: "removed-provider",
+          modelID: "removed-model",
+        },
+        parts: [],
+      },
+    ])
+
+    const result = await Effect.runPromise(
+      service.forkSession({ cwd: "/workspace", sessionId: "ses_parent", mcpServers: [] }),
+    )
+
+    expect(result.configOptions?.find((option) => option.id === "model")?.currentValue).toBe("test/test-model")
+    expect(forks).toHaveLength(1)
+  })
+
+  it("drops a restored variant when load, resume, or fork falls back to a different model", async () => {
+    // `high` is valid for the fallback model, which makes this the important
+    // case: it still belongs to the removed model and must not leak across the
+    // model boundary merely because the variant names happen to match.
+    const { service } = makeService([
+      {
+        info: {
+          role: "assistant",
+          providerID: "removed-provider",
+          modelID: "removed-model",
+          variant: "high",
+        },
+        parts: [],
+      },
+    ])
+
+    const loaded = await Effect.runPromise(
+      service.loadSession({ cwd: "/workspace", sessionId: "ses_fallback_load", mcpServers: [] }),
+    )
+    const resumed = await Effect.runPromise(
+      service.resumeSession({ cwd: "/workspace", sessionId: "ses_fallback_resume", mcpServers: [] }),
+    )
+    const forked = await Effect.runPromise(
+      service.forkSession({ cwd: "/workspace", sessionId: "ses_fallback_parent", mcpServers: [] }),
+    )
+
+    for (const result of [loaded, resumed, forked]) {
+      expect(select(result, "model")?.currentValue).toBe("test/test-model")
+      expect(select(result, "effort")?.currentValue).toBe("default")
+    }
+  })
+
   it("loads a session and restores model variant and mode from messages", async () => {
     const { service } = makeService([
       {
@@ -318,6 +578,26 @@ describe("ACP service sessions", () => {
 
     expect(result.configOptions?.find((option) => option.id === "effort")?.currentValue).toBe("high")
     expect(result.configOptions?.find((option) => option.id === "mode")?.currentValue).toBe("plan")
+  })
+
+  it("drops a restored variant that is no longer advertised by the retained model", async () => {
+    const { service } = makeService([
+      {
+        info: {
+          role: "assistant",
+          providerID: "test",
+          modelID: "test-model",
+          variant: "retired-effort",
+        },
+        parts: [],
+      },
+    ])
+
+    const result = await Effect.runPromise(
+      service.loadSession({ cwd: "/workspace", sessionId: "ses_invalid_variant", mcpServers: [] }),
+    )
+
+    expect(select(result, "effort")?.currentValue).toBe("default")
   })
 
   it("replays loaded session transcript chunks", async () => {

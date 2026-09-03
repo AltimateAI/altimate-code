@@ -27,6 +27,7 @@ export namespace Glob {
     "**/vendor/**",
     "**/.git/**",
     "**/.pnpm/**",
+    "**/.yarn/unplugged/**",
     "**/.venv/**",
     "**/.turbo/**",
   ]

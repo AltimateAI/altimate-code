@@ -2,6 +2,10 @@ import { describe, expect, it } from "bun:test"
 import type { AgentSideConnection } from "@agentclientprotocol/sdk"
 import type { Event, Message, OpencodeClient, Part, SessionMessageResponse, ToolPart } from "@opencode-ai/sdk/v2"
 import { Effect, ManagedRuntime } from "effect"
+// altimate_change start — give model-agnostic lifecycle tests a valid ACP model fixture
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+// altimate_change end
 import { ACPEvent } from "@/acp/event"
 import * as ACPService from "@/acp/service"
 import { Directory } from "@/acp/directory"
@@ -366,6 +370,12 @@ describe("acp event routing", () => {
               modes: [],
               defaultModeID: "build",
               commands: [],
+              // altimate_change start — satisfy the fail-closed ACP model boundary
+              defaultModel: {
+                providerID: ProviderV2.ID.make("fixture"),
+                modelID: ModelV2.ID.make("fixture"),
+              },
+              // altimate_change end
             }),
           ),
         refresh: () =>
@@ -376,6 +386,12 @@ describe("acp event routing", () => {
               modes: [],
               defaultModeID: "build",
               commands: [],
+              // altimate_change start — satisfy the fail-closed ACP model boundary
+              defaultModel: {
+                providerID: ProviderV2.ID.make("fixture"),
+                modelID: ModelV2.ID.make("fixture"),
+              },
+              // altimate_change end
             }),
           ),
         variants: Directory.variants,
@@ -471,6 +487,12 @@ describe("acp event routing", () => {
               modes: [],
               defaultModeID: "build",
               commands: [],
+              // altimate_change start — satisfy the fail-closed ACP model boundary
+              defaultModel: {
+                providerID: ProviderV2.ID.make("fixture"),
+                modelID: ModelV2.ID.make("fixture"),
+              },
+              // altimate_change end
             }),
           ),
         refresh: () =>
@@ -481,6 +503,12 @@ describe("acp event routing", () => {
               modes: [],
               defaultModeID: "build",
               commands: [],
+              // altimate_change start — satisfy the fail-closed ACP model boundary
+              defaultModel: {
+                providerID: ProviderV2.ID.make("fixture"),
+                modelID: ModelV2.ID.make("fixture"),
+              },
+              // altimate_change end
             }),
           ),
         variants: Directory.variants,

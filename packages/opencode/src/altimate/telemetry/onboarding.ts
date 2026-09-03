@@ -30,7 +30,7 @@ export const ONBOARDING_STAGES = [
   "started",
   "model_picker",
   "provider_setup",
-  "big_pickle_confirm",
+  "altimate_base_confirm",
   "gateway_auth",
   // NOTE: reaching this stage means the run completed, and emitAbandonedIfIncomplete() returns
   // early on `completed`. So "connected" is a valid funnel position but never a `last_stage` on
@@ -48,8 +48,9 @@ type OnboardingEventInput = Extract<
       | "onboarding_started"
       | "model_picker_shown"
       | "provider_selected"
-      | "big_pickle_confirm_shown"
-      | "big_pickle_choice"
+      | "altimate_base_confirm_shown"
+      | "altimate_base_choice"
+      | "altimate_base_register_result"
       | "gateway_device_code_issued"
       | "gateway_auth_completed"
       | "gateway_auth_failed"
@@ -91,7 +92,7 @@ const STAGE_FOR_EVENT: Partial<Record<OnboardingEventInput["type"], OnboardingSt
   // Any provider choice enters setup. Without this, a user who picks Anthropic and quits during
   // key entry is reported as abandoning at `model_picker` — as if they never chose anything.
   provider_selected: "provider_setup",
-  big_pickle_confirm_shown: "big_pickle_confirm",
+  altimate_base_confirm_shown: "altimate_base_confirm",
   gateway_device_code_issued: "gateway_auth",
   instance_connected: "connected",
   onboarding_completed: "connected",
@@ -103,8 +104,8 @@ const STAGE_FOR_EVENT: Partial<Record<OnboardingEventInput["type"], OnboardingSt
 
 function advance(stage: OnboardingStage) {
   // Only a real first run is in the funnel. Most of the UI that emits funnel events is also
-  // reachable outside onboarding — `/connect` opens the same picker, `/model` opens the same Big
-  // Pickle interstitial — and a returning user doing either would otherwise enter the funnel at
+  // reachable outside onboarding — `/connect` opens the same picker, `/model` opens the same
+  // Altimate Base disclosure — and a returning user doing either would otherwise enter the funnel at
   // `model_picker`, never emit `onboarding_completed`, and be reported as ABANDONED on exit.
   // That would have made abandonment mostly a count of returning users opening `/connect`.
   //

@@ -42,3 +42,7 @@ export const ModelID = modelIdSchema.pipe(
     zod: z.string().pipe(z.custom<ModelID>()),
   })),
 )
+
+// altimate_change start — expose the module through the repository's namespace projection convention
+export * as ProviderSchema from "./schema"
+// altimate_change end

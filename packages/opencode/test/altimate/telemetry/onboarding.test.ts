@@ -87,7 +87,7 @@ describe("onboarding abandonment", () => {
 
     await Onboarding.emit({ type: "onboarding_started" })
     await Onboarding.emit({ type: "gateway_device_code_issued" })
-    await Onboarding.emit({ type: "model_picker_shown", trigger: "big_pickle_back" })
+    await Onboarding.emit({ type: "model_picker_shown", trigger: "altimate_base_back" })
     await Onboarding.emitAbandonedIfIncomplete()
     await settle()
 

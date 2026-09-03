@@ -29,6 +29,9 @@ import { Global } from "../global"
 import path from "path"
 import { Filesystem } from "../util/filesystem"
 import { AltimateApi } from "../altimate/api/client"
+// altimate_change start — managed Altimate Base provider and credential boundary
+import { FreeTier } from "../altimate/free/client"
+// altimate_change end
 
 // Direct imports for bundled providers
 import { createAmazonBedrock, type AmazonBedrockProviderSettings } from "@ai-sdk/amazon-bedrock"
@@ -375,6 +378,23 @@ export namespace Provider {
         await Auth.remove(ProviderID.make("altimate-backend")).catch(() => {})
       }
       return { autoload: false }
+    },
+    "altimate-free": async () => {
+      const creds = await FreeTier.credentialsForLoad().catch((error) => {
+        log.error("failed to read Altimate Base credentials", { error })
+        return undefined
+      })
+      if (!creds) return { autoload: false }
+      return {
+        autoload: true,
+        options: {
+          baseURL: `${creds.baseURL}/v1`,
+          // The real managed credential stays in the dedicated store and is injected only by
+          // authorizedFetch. Provider options are serialized by public provider APIs.
+          apiKey: FreeTier.MANAGED_API_KEY_PLACEHOLDER,
+          fetch: FreeTier.authorizedFetch,
+        },
+      }
     },
     // altimate_change end
     openai: async () => {
@@ -1159,7 +1179,12 @@ export namespace Provider {
 
     log.info("init")
 
-    const configProviders = Object.entries(config.provider ?? {})
+    // altimate_change start — keep project config from steering the managed provider
+    // This managed provider's SDK module, model, headers, and endpoint come only from the client
+    // and registration response. A project config must never steer its stored credential.
+    const configProviders = Object.entries(config.provider ?? {}).filter(([id]) => id !== FreeTier.PROVIDER_ID)
+    const configProviderMap = Object.fromEntries(configProviders)
+    // altimate_change end
 
     // Add GitHub Copilot Enterprise provider that inherits from GitHub Copilot
     if (database["github-copilot"]) {
@@ -1484,6 +1509,44 @@ export namespace Provider {
     }
     // altimate_change end
 
+    // altimate_change start — register hosted Qwen 3.8 under the stable Altimate Base alias
+    // Hosted Qwen 3.8 behind the gateway's stable public model alias. Pinning this record keeps a
+    // models.dev collision from replacing the SDK module or endpoint that receives the free key.
+    const baseModels: Record<string, Model> = {
+      [FreeTier.MODEL_ID]: {
+        id: ModelID.make(FreeTier.MODEL_ID),
+        providerID: ProviderID.make(FreeTier.PROVIDER_ID),
+        name: "Altimate Base",
+        family: "qwen",
+        api: { id: FreeTier.MODEL_ID, url: "", npm: "@ai-sdk/openai-compatible" },
+        status: "active",
+        headers: {},
+        options: {},
+        cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+        limit: { context: 65_536, output: 4_096 },
+        capabilities: {
+          temperature: true,
+          reasoning: true,
+          attachment: false,
+          toolcall: true,
+          input: { text: true, audio: false, image: false, video: false, pdf: false },
+          output: { text: true, audio: false, image: false, video: false, pdf: false },
+          interleaved: false,
+        },
+        release_date: "2026-08-29",
+        variants: {},
+      },
+    }
+    database[FreeTier.PROVIDER_ID] = {
+      id: ProviderID.make(FreeTier.PROVIDER_ID),
+      name: "Altimate",
+      source: "custom",
+      env: [],
+      options: {},
+      models: baseModels,
+    }
+    // altimate_change end
+
     function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
       const existing = providers[providerID]
       if (existing) {
@@ -1625,6 +1688,9 @@ export namespace Provider {
 
     // load apikeys
     for (const [id, provider] of Object.entries(await Auth.all())) {
+      // altimate_change start — the managed provider is hydrated only from its dedicated credential store
+      if (id === FreeTier.PROVIDER_ID) continue
+      // altimate_change end
       const providerID = ProviderID.make(id)
       if (disabled.has(providerID)) continue
       if (provider.type === "api") {
@@ -1684,7 +1750,9 @@ export namespace Provider {
 
     for (const [id, fn] of Object.entries(CUSTOM_LOADERS)) {
       const providerID = ProviderID.make(id)
-      if (disabled.has(providerID)) continue
+      // altimate_change start — apply the same provider allowlist to managed custom loaders
+      if (!isProviderAllowed(providerID)) continue
+      // altimate_change end
       const data = database[providerID]
       if (!data) {
         log.error("Provider does not exist in model list " + providerID)
@@ -1717,7 +1785,9 @@ export namespace Provider {
         continue
       }
 
-      const configProvider = config.provider?.[providerID]
+      // altimate_change start — use the sanitized config map that excludes Altimate Base
+      const configProvider = configProviderMap[providerID]
+      // altimate_change end
 
       for (const [modelID, model] of Object.entries(provider.models)) {
         model.api.id = model.api.id ?? model.id ?? modelID
@@ -2052,7 +2122,9 @@ export namespace Provider {
     return undefined
   }
 
-  const priority = ["gpt-5", "claude-sonnet-4", "big-pickle", "gemini-3-pro"]
+  // altimate_change start — Altimate Base replaces Big Pickle in implicit model sorting
+  const priority = ["gpt-5", "claude-sonnet-4", "altimate-base", "gemini-3-pro"]
+  // altimate_change end
   export function sort<T extends { id: string }>(models: T[]) {
     return sortBy(
       models,
@@ -2062,22 +2134,51 @@ export namespace Provider {
     )
   }
 
+  // altimate_change start — discard malformed persisted model references before use
+  function isModelReference(model: unknown): model is { providerID: ProviderID; modelID: ModelID } {
+    if (!model || typeof model !== "object") return false
+    const value = model as Record<string, unknown>
+    return typeof value.providerID === "string" && typeof value.modelID === "string"
+  }
+  // altimate_change end
+
   export async function defaultModel() {
     const cfg = await Config.get()
     if (cfg.model) return parseModel(cfg.model)
 
     const providers = await list()
+    // altimate_change start — preserve explicit/recent precedence without bypassing managed consent
+    const configuredProviderEntries = Object.keys(cfg.provider ?? {})
+    const hasProviderAllowlist = configuredProviderEntries.length > 0
+    // A provider block is an allowlist for implicit choices. The managed
+    // provider remains consent-gated, so naming it cannot activate it; an
+    // explicit top-level `model` above remains authoritative.
+    const providerAllowed = (id: string) =>
+      !hasProviderAllowlist || (id !== FreeTier.PROVIDER_ID && configuredProviderEntries.includes(id))
+    const baseProviderID = ProviderID.make(FreeTier.PROVIDER_ID)
+    const baseModelID = ModelID.make(FreeTier.MODEL_ID)
+    const baseProvider = providers[baseProviderID]
+    const registeredBaseAvailable = Boolean(baseProvider?.models[baseModelID]) && !hasProviderAllowlist
     const recent = (await Filesystem.readJson<{ recent?: { providerID: ProviderID; modelID: ModelID }[] }>(
       path.join(Global.Path.state, "model.json"),
     )
-      .then((x) => (Array.isArray(x.recent) ? x.recent : []))
+      .then((x) => (Array.isArray(x.recent) ? x.recent.filter(isModelReference) : []))
       .catch(() => [])) as { providerID: ProviderID; modelID: ModelID }[]
     for (const entry of recent) {
+      // A recent entry is the user's own last pick, so it is never rewritten here — not even a
+      // legacy Big Pickle one. The TUI owns the migration because it owns the disclosure, and
+      // `migrateLegacyDefault()` rewrites model.json on accept, so headless follows on the next
+      // launch. Migrating here instead would move a declining user to the request-logging tier
+      // with no prompt and no way to refuse.
       const provider = providers[entry.providerID]
       if (!provider) continue
       if (!provider.models[entry.modelID]) continue
+      // Keep legacy recent-model behavior unchanged for every other provider;
+      // only the consent-gated managed provider must not bypass this project.
+      if (entry.providerID === FreeTier.PROVIDER_ID && !providerAllowed(String(entry.providerID))) continue
       return { providerID: entry.providerID, modelID: entry.modelID }
     }
+    // altimate_change end
 
     // altimate_change start — default to altimate-backend when configured and no model chosen yet
     const altimateProviderID = ProviderID.make("altimate-backend")
@@ -2085,7 +2186,7 @@ export namespace Provider {
     if (
       altimateProvider &&
       altimateProvider.models[ModelID.make("altimate-default")] &&
-      (!cfg.provider || Object.keys(cfg.provider).includes(String(altimateProviderID)))
+      providerAllowed(String(altimateProviderID))
     ) {
       // altimate_change start — log when altimate-backend auto-selected
       log.info("defaulting to altimate-backend/altimate-default (no model configured)")
@@ -2097,14 +2198,31 @@ export namespace Provider {
     }
     // altimate_change end
 
-    const provider = Object.values(providers).find((p) => !cfg.provider || Object.keys(cfg.provider).includes(p.id))
-    if (!provider) throw new Error("no providers found")
-    const [model] = sort(Object.values(provider.models))
-    if (!model) throw new Error("no models found")
-    return {
-      providerID: provider.id,
-      modelID: model.id,
+    // altimate_change start — select registered Altimate Base and never select Big Pickle implicitly
+    // Altimate Base owns the free fallback role that used to belong to Big Pickle, but only as a
+    // LAST resort. Anything the user has actually connected outranks the request-logging tier, so
+    // adding a paid key never silently routes prompts to the free gateway. A project provider
+    // block cannot force the managed model; an explicit `model` setting above remains
+    // authoritative.
+    // Base is excluded from the ordinary scan so it can only be reached by the last-resort branch
+    // below; otherwise it would win here whenever no provider block narrows the candidate list.
+    const candidates = Object.values(providers).filter(
+      (provider) => provider.id !== FreeTier.PROVIDER_ID && providerAllowed(provider.id),
+    )
+    if (candidates.length === 0 && !registeredBaseAvailable) throw new Error("no providers found")
+    for (const provider of candidates) {
+      const model = sort(Object.values(provider.models)).find(
+        (candidate) => !(provider.id === "opencode" && candidate.id === "big-pickle"),
+      )
+      if (model) return { providerID: provider.id, modelID: model.id }
     }
+
+    if (registeredBaseAvailable) {
+      log.info("defaulting to altimate-free/altimate-base (no other connected model)")
+      return { providerID: baseProviderID, modelID: baseModelID }
+    }
+    throw new Error("no models found")
+    // altimate_change end
   }
 
   export function parseModel(model: string) {
@@ -2171,6 +2289,9 @@ export namespace Provider {
   // imperative wrappers (list/getModel/getLanguage/defaultModel/...) remain exported
   // for the fork's synchronous callers.
   export interface Interface {
+    // altimate_change start — expose the full provider database to the public-info handler
+    readonly all: () => Effect.Effect<Record<ProviderID, Info>>
+    // altimate_change end
     readonly list: () => Effect.Effect<Record<ProviderID, Info>>
     readonly getProvider: (providerID: ProviderID) => Effect.Effect<Info>
     readonly getModel: (providerID: ProviderID, modelID: ModelID) => Effect.Effect<Model>
@@ -2201,6 +2322,9 @@ export namespace Provider {
   export const layer = Layer.succeed(
     Service,
     Service.of({
+      // altimate_change start — Effect wrapper for the full provider database
+      all: () => withLegacyInstance(() => all()),
+      // altimate_change end
       list: () => withLegacyInstance(() => list()),
       getProvider: (providerID) => withLegacyInstance(() => getProvider(providerID)),
       getModel: (providerID, modelID) => withLegacyInstance(() => getModel(providerID, modelID)),

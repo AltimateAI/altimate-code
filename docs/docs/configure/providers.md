@@ -46,6 +46,42 @@ For pricing, security, and data handling details, see the [Altimate LLM Gateway 
 !!! tip "Automatic model selection"
     When Altimate credentials are configured and no model is explicitly chosen, the Altimate LLM Gateway is selected automatically. You can override this by setting `model` in your config or by restricting the `provider` section to specific providers only.
 
+## Altimate Base
+
+Altimate Base is the hosted Qwen 3.8 free model. It requires no signup or user-managed API key and
+is subject to rate limits and abuse protection. Requests and responses are logged and may be used
+to improve Altimate products and services. Do not send secrets or confidential code.
+
+Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
+registration request; **No** is selected by default. After registration, the model is available as
+`altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
+explicit model is selected. Big Pickle is no longer selected implicitly, but remains available in
+the full OpenCode model catalog for users who choose it explicitly.
+
+Official release binaries embed the current gateway endpoint at build time. Operators and local
+development can override it without changing code:
+
+```bash
+export ALTIMATE_BASE_GATEWAY_URL=https://your-gateway.example
+altimate
+```
+
+The URL must use HTTPS. Credentials,
+query strings, and fragments in the URL are rejected. `ALTIMATE_FREE_GATEWAY_URL` is retained as a
+legacy fallback, but `ALTIMATE_BASE_GATEWAY_URL` takes precedence. If the configured gateway host
+changes, credentials issued by the previous host are not loaded and the consented registration
+flow must run again.
+
+Altimate Base credentials are stored separately from the shared provider-auth file and are never
+returned to the TUI. The installation secret is hashed before registration; the gateway receives
+the hash, not the local secret.
+
+That hash is stable across launches, so it links this installation's logged requests together —
+it is what enforces the free allowance. `/providers logout` clears the credential but keeps the
+installation identity on purpose, so logging out is not a way to reset the allowance. Each
+inference request additionally carries a session identifier used for rate limiting. See the
+security FAQ for what this means for privacy and how to reset the local identity.
+
 ## Anthropic
 
 ```json

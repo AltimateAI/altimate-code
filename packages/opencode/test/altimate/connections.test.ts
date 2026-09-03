@@ -750,6 +750,7 @@ ch_project:
       port: 8443
       user: default
       password: secret
+      secure: true
       database: analytics
       schema: default
 `,
@@ -763,6 +764,7 @@ ch_project:
       expect(connections[0].config.host).toBe("clickhouse.example.com")
       expect(connections[0].config.port).toBe(8443)
       expect(connections[0].config.user).toBe("default")
+      expect(connections[0].config.secure).toBe(true)
       expect(connections[0].config.database).toBe("analytics")
     } finally {
       fs.rmSync(tmpDir, { recursive: true })

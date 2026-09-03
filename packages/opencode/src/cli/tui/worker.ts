@@ -27,6 +27,10 @@ import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
+// altimate_change start — register Altimate Base only across the private parent/worker RPC boundary
+import { FreeTier } from "@/altimate/free/client"
+import { FreeTierConsent } from "@/altimate/free/consent"
+// altimate_change end
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
 // is enforced by the compiler rather than by a comment.
@@ -62,8 +66,22 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
+// altimate_change start — worker-local, expiring capabilities gate every registration mutation
+const altimateBaseRegistration = FreeTierConsent.createRegistrationConsentGate({
+  register: (consent) => FreeTier.registerAfterConsent(consent),
+  onUnexpectedError: (error) => console.error("[altimate-base] registration failed", error),
+})
+// altimate_change end
 
 export const rpc = {
+  // altimate_change start — install and consume a private capability only after disclosure acceptance
+  setAltimateBaseConsentToken(input: { token: string }) {
+    altimateBaseRegistration.setToken(input)
+  },
+  async registerAltimateBase(input: { token: string }) {
+    return altimateBaseRegistration.register(input)
+  },
+  // altimate_change end
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
     const headers = { ...input.headers }
     const auth = ServerAuth.header()

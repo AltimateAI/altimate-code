@@ -8,6 +8,17 @@ export type EventSource = {
   subscribe: (handler: (event: GlobalEvent) => void) => Promise<() => void>
 }
 
+// altimate_change start — private host operation; credentials never enter the shared SDK context
+export type AltimateBaseRegistration = () => Promise<
+  | { ok: true }
+  | {
+      ok: false
+      result: "rate_limited" | "unavailable" | "network" | "error"
+      message: string
+    }
+>
+// altimate_change end
+
 export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
   name: "SDK",
   init: (props: {
@@ -16,6 +27,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     fetch?: typeof fetch
     headers?: RequestInit["headers"]
     events?: EventSource
+    // altimate_change start — narrow host-injected registration operation; no raw credential/token
+    altimateBaseRegistration?: AltimateBaseRegistration
+    // altimate_change end
   }) => {
     const abort = new AbortController()
     let sse: AbortController | undefined
@@ -194,6 +208,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       event: emitter,
       fetch: props.fetch ?? fetch,
       url: props.url,
+      // altimate_change start — expose only the narrow operation through the TUI SDK context
+      altimateBaseRegistration: props.altimateBaseRegistration,
+      // altimate_change end
     }
   },
 })

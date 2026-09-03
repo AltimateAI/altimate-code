@@ -16,20 +16,29 @@ import { useConnected } from "./use-connected"
 import { useBindings, useOpencodeKeymap } from "../keymap"
 import { useClipboard } from "../context/clipboard"
 import { useLocal } from "../context/local"
-// altimate_change — mark first-run setup complete once the gateway sign-in succeeds
+// altimate_change start — mark first-run setup complete once the gateway sign-in succeeds
 // (used by AutoMethod below); flips useReady() so the first-run chat lock lifts.
-import { markSetupComplete, clearFirstRunActive } from "./altimate-onboarding"
+import {
+  markSetupComplete,
+  clearFirstRunActive,
+  DialogAltimateBaseConfirm,
+  useFirstRunActive,
+} from "./altimate-onboarding"
+// altimate_change end
+// altimate_change start — first-run provider selection telemetry
+import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
+// altimate_change end
 
 export const PROVIDER_PRIORITY: Record<string, number> = {
   // altimate_change start — Part 1 onboarding: Altimate LLM Gateway is the
   // recommended default first; the BYOK providers rank next; OpenCode Zen loses
-  // its "Recommended" tag and drops below. (Big Pickle occupies priority 4, injected
-  // by dialog-model between Google and Zen.)
+  // its "Recommended" tag and drops below. Altimate Base occupies priority 4 and its
+  // consent flow is injected by dialog-model between Google and Zen.
   "altimate-backend": 0,
   anthropic: 1,
   openai: 2,
   google: 3,
-  // 4 reserved for Big Pickle (see dialog-model)
+  "altimate-free": 4,
   opencode: 5,
   "opencode-go": 6,
   "github-copilot": 7,
@@ -82,6 +91,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
+          "altimate-free": "Free · no signup · prompts are logged",
           opencode: "Bring your own Zen key",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],
@@ -112,8 +122,15 @@ export function createDialogProviderOptions() {
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
+  // altimate_change start — only emit this funnel event during an active first run
+  const firstRunActive = useFirstRunActive()
+  const trackOnboarding = useOnboardingTelemetry()
+  // altimate_change end
   // altimate_change start — delegate altimate-backend provider selection to fork credential plugin
   const keymap = useOpencodeKeymap()
+  // altimate_change end
+  // altimate_change start — Base-only submit latch; other providers retain their existing selection flow
+  let altimateBaseActivated = false
   // altimate_change end
 
   async function promptCustomProviderID(): Promise<string | undefined> {
@@ -140,7 +157,13 @@ export function createDialogProviderOptions() {
 
   const options = createMemo(() => {
     return pipe(
-      providerOptions(sync.data.provider_next.all),
+      // altimate_change start — hide Base setup when the host cannot perform private registration
+      // A host without the private registration operation must not advertise Base setup. Already
+      // registered Base models remain available through the READY model list.
+      providerOptions(sync.data.provider_next.all).filter(
+        (provider) => provider.value !== "altimate-free" || Boolean(sdk.altimateBaseRegistration),
+      ),
+      // altimate_change end
       map((provider) => {
         if (provider.type === "custom") {
           return {
@@ -169,6 +192,22 @@ export function createDialogProviderOptions() {
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
           async onSelect() {
             if (consoleManaged) return
+            // altimate_change start — route Altimate Base through its disclosure and consent flow
+            if (providerID === "altimate-free") {
+              if (altimateBaseActivated) return
+              altimateBaseActivated = true
+              if (firstRunActive()) {
+                trackOnboarding({
+                  name: "provider_selected",
+                  providerID: "altimate-free",
+                  modelID: "altimate-base",
+                  via_search: false,
+                })
+              }
+              dialog.replace(() => <DialogAltimateBaseConfirm origin="model" />)
+              return
+            }
+            // altimate_change end
 
             const methods = sync.data.provider_auth[providerID] ?? [
               {

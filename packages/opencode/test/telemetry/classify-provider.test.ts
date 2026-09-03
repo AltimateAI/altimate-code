@@ -17,10 +17,8 @@
 //     Everything else falls through to `{ provider: "other" }` with NO id attached —
 //     that's what keeps a customer-named custom provider from leaking to telemetry.
 //
-//   - The `opencode` + `big-pickle` pair is the one hard-coded case that returns
-//     "big_pickle" rather than one of the curated slugs, and it depends on BOTH
-//     args matching. A regression that ignored modelID would cause every
-//     `providerID="opencode"` to still ship as `big_pickle`, misattributing traffic.
+//   - Altimate Base is a curated, publicly-known provider. Big Pickle remains an
+//     explicitly-selectable upstream model but no longer owns a product funnel category.
 //
 // This file locks each of those three behaviors down.
 
@@ -31,6 +29,7 @@ describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
   describe("curated providers", () => {
     test.each([
       ["altimate-backend", "altimate_gateway"],
+      ["altimate-free", "altimate_base"],
       ["anthropic", "anthropic"],
       ["openai", "openai"],
       ["google", "google"],
@@ -51,7 +50,7 @@ describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
       (key) => {
         const result = Telemetry.classifyProvider(key)
         // The guarantee: a prototype key must not resolve to any curated enum.
-        // `toBe("other")` implies it's none of `altimate_gateway|anthropic|openai|google|big_pickle`,
+        // `toBe("other")` implies it is none of the curated provider values,
         // so no separate `not.toContain` guard is needed.
         expect(result.provider).toBe("other")
       },
@@ -90,22 +89,12 @@ describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
     )
   })
 
-  describe("opencode + big-pickle hard-coded pair", () => {
-    test("both provider and model must match — provider only ≠ big_pickle", () => {
-      const result = Telemetry.classifyProvider("opencode")
-      // opencode is known-not-curated → "other" + id, NOT "big_pickle"
-      expect(result).toEqual({ provider: "other", provider_id: "opencode" })
-    })
-
-    test("both provider and model must match — model only ≠ big_pickle", () => {
-      const result = Telemetry.classifyProvider("anthropic", "big-pickle")
-      // Anthropic-with-a-strange-model is still anthropic, not big_pickle
-      expect(result).toEqual({ provider: "anthropic", provider_id: "anthropic" })
-    })
-
-    test("both matching → big_pickle", () => {
-      const result = Telemetry.classifyProvider("opencode", "big-pickle")
-      expect(result).toEqual({ provider: "big_pickle", provider_id: "opencode" })
+  describe("legacy Big Pickle selection", () => {
+    test("is available as an upstream model but is no longer a curated product choice", () => {
+      expect(Telemetry.classifyProvider("opencode", "big-pickle")).toEqual({
+        provider: "other",
+        provider_id: "opencode",
+      })
     })
   })
 })

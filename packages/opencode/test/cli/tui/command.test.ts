@@ -23,7 +23,10 @@ describe("tui command", () => {
     )
     expect(start).toBeGreaterThan(-1)
 
-    const end = source.indexOf("// altimate_change end", start)
+    const end = source.indexOf(
+      "// altimate_change end — upstream_fix: clean up TUI worker after failed --session validation",
+      start,
+    )
     expect(end).toBeGreaterThan(start)
 
     const block = source.slice(start, end)
