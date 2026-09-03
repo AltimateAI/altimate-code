@@ -71,9 +71,11 @@ async function readContract(cwd: string, dbtRoot: string): Promise<Contract | nu
   const models: string[] = []
   const files: string[] = []
   const modificationModels: string[] = []
+  const modificationFiles: string[] = []
   const modelSet = new Set<string>()
   const fileSet = new Set<string>()
-  const modificationSet = new Set<string>()
+  const modificationModelSet = new Set<string>()
+  const modificationFileSet = new Set<string>()
   let primarySource: RequiredDeliverables["source"] | null = null
   for (const task of await findTaskInstructionFiles(cwd, dbtRoot)) {
     const required = extractRequiredDeliverables(task.content)
@@ -83,14 +85,17 @@ async function readContract(cwd: string, dbtRoot: string): Promise<Contract | nu
     for (const m of required.models) if (!modelSet.has(m)) { modelSet.add(m); models.push(m) }
     for (const f of required.files) if (!fileSet.has(f)) { fileSet.add(f); files.push(f) }
     for (const m of required.modificationModels) {
-      if (!modificationSet.has(m)) { modificationSet.add(m); modificationModels.push(m) }
+      if (!modificationModelSet.has(m)) { modificationModelSet.add(m); modificationModels.push(m) }
+    }
+    for (const f of required.modificationFiles) {
+      if (!modificationFileSet.has(f)) { modificationFileSet.add(f); modificationFiles.push(f) }
     }
   }
   if (taskFiles.length === 0) return null
   return {
     taskFile: taskFiles[0]!,
     taskFiles,
-    required: { models, files, modificationModels, source: primarySource! },
+    required: { models, files, modificationModels, modificationFiles, source: primarySource! },
   }
 }
 

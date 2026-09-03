@@ -536,6 +536,14 @@ export interface RequiredDeliverables {
    * deliverables-section tiers, which carry no verb to read.
    */
   modificationModels: string[]
+  /**
+   * Subset of `files` the task asked to be MODIFIED, same rule as
+   * `modificationModels` but for a literal file path rather than a relation
+   * name — "Update the file `models/schema.yml`" names only a file, never a
+   * model, so the modification signal for it has to live in its own set
+   * rather than piggy-back on `modificationModels`.
+   */
+  modificationFiles: string[]
   /** Which extraction tier produced the names — recorded for telemetry. */
   source: "declaration" | "deliverables-section" | "requirement-lines"
 }
@@ -649,7 +657,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   if (declaration && declaration[1]) {
     const collected = collectDeliverableTokens(declaration[1].split(/[,\s]+/))
     if (collected.models.length > 0 || collected.files.length > 0) {
-      return { ...collected, modificationModels: [], source: "declaration" }
+      return { ...collected, modificationModels: [], modificationFiles: [], source: "declaration" }
     }
   }
 
@@ -671,7 +679,7 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   }
   const section = collectDeliverableTokens(sectionTokens)
   if (section.models.length > 0 || section.files.length > 0) {
-    return { ...section, modificationModels: [], source: "deliverables-section" }
+    return { ...section, modificationModels: [], modificationFiles: [], source: "deliverables-section" }
   }
 
   // Tier 3 — requirement lines in prose.
@@ -702,10 +710,13 @@ export function extractRequiredDeliverables(text: string): RequiredDeliverables 
   }
   const prose = collectDeliverableTokens(proseTokens)
   if (prose.models.length > 0 || prose.files.length > 0) {
-    const modificationSet = new Set(collectDeliverableTokens(modificationTokens).models)
+    const modificationTokenTotals = collectDeliverableTokens(modificationTokens)
+    const modificationModelSet = new Set(modificationTokenTotals.models)
+    const modificationFileSet = new Set(modificationTokenTotals.files)
     return {
       ...prose,
-      modificationModels: prose.models.filter((m) => modificationSet.has(m)),
+      modificationModels: prose.models.filter((m) => modificationModelSet.has(m)),
+      modificationFiles: prose.files.filter((f) => modificationFileSet.has(f)),
       source: "requirement-lines",
     }
   }
@@ -1646,7 +1657,7 @@ function topLevelEqualsIndex(text: string): number {
 }
 
 /** Unquote a config value's raw text, when it is a plain quoted string. */
-function unquoteConfigValue(value: string): string {
+export function unquoteConfigValue(value: string): string {
   const t = value.trim()
   if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
     return t.slice(1, -1)
@@ -1727,14 +1738,41 @@ interface ConfigAxes {
  * matches the same text sitting inside an unrelated string argument (a hook
  * or metadata value that happens to contain `enabled=false`).
  */
+/**
+ * `raw`'s content when it is EXACTLY a single- or double-quoted string
+ * literal (`'table'`, `"incremental"`), or null when it is anything else —
+ * in particular a dynamic Jinja expression (`var('kind', 'ephemeral')`, a
+ * ternary, a macro call). A dynamic value is not a STATIC declaration of
+ * anything; the model's actual materialization for such a value is whatever
+ * the resolved manifest says, which this source-level helper cannot compute.
+ */
+function staticQuotedLiteralValue(raw: string): string | null {
+  const t = raw.trim()
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1)
+  }
+  return null
+}
+
 function readConfigAxes(sql: string): ConfigAxes {
   const out: ConfigAxes = { ephemeral: false, nonEphemeral: false, disabled: false, enabled: false }
   for (const callArgs of dbtConfigCallArgs(sql)) {
     const kv = parseTopLevelConfigAssignments(callArgs)
     const materialized = kv.get("materialized")
     if (materialized !== undefined) {
-      if (/^ephemeral$/i.test(unquoteConfigValue(materialized))) out.ephemeral = true
-      else out.nonEphemeral = true
+      // Only a STATIC literal counts on either side of this axis. Treating a
+      // dynamic value (`materialized=var('kind', 'ephemeral')`) as an
+      // affirmative "not ephemeral" declaration made `dbt-build-green` reject
+      // the manifest's correctly-resolved ephemeral exemption and demand a
+      // `run_results` row dbt was never going to write for a genuinely
+      // ephemeral model — blocking every correct build of it. A dynamic value
+      // says nothing on this axis; the manifest's resolved config is what
+      // speaks for it (see `collectRunResultExemptModels`).
+      const literal = staticQuotedLiteralValue(materialized)
+      if (literal !== null) {
+        if (/^ephemeral$/i.test(literal)) out.ephemeral = true
+        else out.nonEphemeral = true
+      }
     }
     const enabled = kv.get("enabled")
     if (enabled !== undefined) {
@@ -2029,6 +2067,32 @@ const TELEMETRY_PATH_HASH_PREFIX = "path:"
 /** Absolute-path shape: POSIX root, Windows drive letter, or UNC. */
 const ABSOLUTE_PATH_SHAPE_RE = /^(?:\/|[A-Za-z]:[\\/]|\\\\)/
 
+/**
+ * `details` keys across the five dbt completion-gate validators that are
+ * documented to carry a filesystem path — including a RELATIVE one, such as
+ * `required_files: ["models/private_customer_rollup.sql"]` (a project-
+ * relative path parsed out of a task document). The absolute-path shape
+ * check alone misses these: they never start with `/` or a drive letter, so
+ * they read as ordinary strings and passed through unredacted, still
+ * violating the "telemetry never collects file paths" contract for a
+ * relative path. Every string value under one of these keys is hashed
+ * regardless of shape, at any nesting depth.
+ *
+ * Kept as an explicit, exhaustive list rather than a shape heuristic for
+ * relative paths specifically: a shape guess broad enough to catch every
+ * relative path (any string containing `/`?) would also swallow non-path
+ * data that happens to contain a slash, which this lane has no way to tell
+ * apart from a real path without knowing the field's meaning.
+ */
+const PATH_BEARING_DETAIL_KEYS = new Set([
+  "dbt_root",
+  "run_results_path",
+  "task_file",
+  "task_files",
+  "required_files",
+  "missing_files",
+])
+
 /** True when `value` is shaped like an absolute filesystem path. */
 function looksLikeAbsolutePath(value: string): boolean {
   return ABSOLUTE_PATH_SHAPE_RE.test(value)
@@ -2039,14 +2103,22 @@ function hashPathValue(value: string): string {
   return TELEMETRY_PATH_HASH_PREFIX + createHash("sha256").update(value).digest("hex").slice(0, 12)
 }
 
-function sanitizeTelemetryValue(value: unknown): unknown {
+/**
+ * `key` is the enclosing object key this value was read from (null for a
+ * value with no key, e.g. the top level or an array element already inside a
+ * matched key) — carried through the recursion so a nested string still
+ * redacts when its ARRAY's key is in `PATH_BEARING_DETAIL_KEYS`
+ * (`required_files: [...]`, not `required_files[i]`).
+ */
+function sanitizeTelemetryValue(key: string | null, value: unknown): unknown {
   if (typeof value === "string") {
-    return looksLikeAbsolutePath(value) ? hashPathValue(value) : value
+    const forcedPathField = key !== null && PATH_BEARING_DETAIL_KEYS.has(key)
+    return forcedPathField || looksLikeAbsolutePath(value) ? hashPathValue(value) : value
   }
-  if (Array.isArray(value)) return value.map(sanitizeTelemetryValue)
+  if (Array.isArray(value)) return value.map((v) => sanitizeTelemetryValue(key, v))
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = sanitizeTelemetryValue(v)
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = sanitizeTelemetryValue(k, v)
     return out
   }
   return value
@@ -2057,20 +2129,23 @@ function sanitizeTelemetryValue(value: unknown): unknown {
  * handed to telemetry.
  *
  * Every validator's `details` is forwarded to `Telemetry.track` verbatim by
- * the dispatch hook, and several carry absolute paths (`dbt_root`,
- * `run_results_path`, `task_file`, …) for use in `reason`/`fixHint` text.
- * That collects local directory names — and, embedded in them, usernames —
- * despite the documented telemetry contract that file paths are never sent
- * (`docs/docs/reference/telemetry.md`). This walks the object and replaces
- * any string shaped like an absolute path with a short hash, so a path field
- * is still present and stable for dedup/counting without leaking its value.
- * Non-path strings (model names, verdict enums, task_file's SOURCE tier, …)
- * pass through unchanged.
+ * the dispatch hook, and several carry paths — absolute (`dbt_root`,
+ * `run_results_path`, `task_file`) and relative (`required_files`,
+ * `missing_files`, project-relative strings parsed out of a task document) —
+ * for use in `reason`/`fixHint` text. That collects local directory names —
+ * and, embedded in them, usernames — despite the documented telemetry
+ * contract that file paths are never sent (`docs/docs/reference/
+ * telemetry.md`). This walks the object and replaces every string shaped
+ * like an absolute path, AND every string under a key known to carry a path
+ * (`PATH_BEARING_DETAIL_KEYS`, covering the relative case), with a short
+ * hash — the field is still present and stable for dedup/counting without
+ * leaking its value. Non-path strings (model names, verdict enums,
+ * `task_file`'s SOURCE tier, …) pass through unchanged.
  */
 export function sanitizeTelemetryDetails(details: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(details)) {
-    out[key] = sanitizeTelemetryValue(value)
+    out[key] = sanitizeTelemetryValue(key, value)
   }
   return out
 }

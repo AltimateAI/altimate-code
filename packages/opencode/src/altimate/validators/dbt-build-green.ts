@@ -353,14 +353,29 @@ export const DbtBuildGreenValidator: Validator = {
     // every failing node in it is in scope. Otherwise scope is what we edited,
     // and failures elsewhere — including failures of same-named non-model
     // nodes — are recorded but never block.
-    const inScope = new Set(states.map((s) => s.name))
+    //
+    // Scoped by full manifest identity when we have one, same as the status
+    // lookup above: a dependency and the local project can both define
+    // `orders`, and a bare-name scope set would classify the DEPENDENCY's
+    // failed row as in scope, blocking a correctly built local edit on an
+    // unrelated package failure. Bare-name scoping remains only as the
+    // fallback for a touched file the manifest does not resolve at all.
+    const inScopeIds = new Set<string>()
+    const inScopeBareNamesFallback = new Set<string>()
+    for (const s of states) {
+      const uid = nodeIdByPath.get(s.path)
+      if (uid !== undefined) inScopeIds.add(uid)
+      else inScopeBareNamesFallback.add(s.name)
+    }
     const allFailed = fresh.results.filter((r) => isFailedRunStatus(r.status))
     const failedInScope =
       touchedPaths.length === 0
         ? allFailed
-        : allFailed.filter(
-            (r) => r.uniqueId.startsWith("model.") && resultKeys(r).some((k) => inScope.has(k)),
-          )
+        : allFailed.filter((r) => {
+            if (!r.uniqueId.startsWith("model.")) return false
+            if (inScopeIds.has(r.uniqueId)) return true
+            return resultKeys(r).some((k) => inScopeBareNamesFallback.has(k))
+          })
     const failedOutOfScope = allFailed.length - failedInScope.length
 
     // Coverage is assertable when ANY of three evidence sources can speak for

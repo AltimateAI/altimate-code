@@ -283,12 +283,18 @@ export const DbtNothingBuiltValidator: Validator = {
     const existingNodes = hasNamedDeliverables
       ? await collectProducedNodeNames(dbtRoot)
       : new Set<string>()
+    // Same modification/creation split as `modificationModels`: "Update the
+    // file `models/schema.yml`" cannot be satisfied by the file merely
+    // existing from before this session — the task is asking for a change to
+    // its content, and existence proves nothing about whether that happened.
+    const modificationFileSet = new Set(expectation.required?.modificationFiles ?? [])
     const matchedFiles: string[] = []
     for (const file of namedFiles) {
       if (authoredWork.relPaths.has(normalizeRelPath(file))) {
         matchedFiles.push(file)
         continue
       }
+      if (modificationFileSet.has(file)) continue
       // Same existence escape hatch as for named models, and resolved from
       // both roots exactly as `dbt-deliverable-names` does. With the dbt
       // project nested below the workspace, a required `reports/output.yml`

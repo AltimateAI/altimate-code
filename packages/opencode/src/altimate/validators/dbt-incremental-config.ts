@@ -41,27 +41,66 @@ import {
   maskSqlStringLiterals,
   extractJinjaIfBlocks,
   jinjaIfBranchHead,
-  dbtConfigArgs,
+  dbtConfigCallArgs,
+  parseTopLevelConfigAssignments,
+  unquoteConfigValue,
   sanitizeForPrompt,
 } from "./validator-utils"
 
-/** In-model incremental materialisation. */
-const INCREMENTAL_RE = /materiali[sz]ed\s*=\s*['"]incremental['"]/i
-/** Declared incremental strategy. */
-const STRATEGY_RE = /incremental_strategy\s*=\s*['"]([a-z0-9_+]+)['"]/i
 /**
- * A `unique_key=` in the config args with a value dbt can actually match rows
- * on. `unique_key=None`, `unique_key=null` and `unique_key=''` are spelled
- * assignments that leave dbt with no key, so they read as absent.
- *
- * The whitespace before the value lives *inside* the lookahead deliberately. A
- * greedy `\s*` outside it can backtrack to zero width once the lookahead
- * matches, so the lookahead is then re-tested against " None" instead of
- * "None", fails to match, and the negative lookahead wrongly succeeds — which
- * made `unique_key = None` (spaced) read as a real key while the unspaced form
- * was correctly rejected.
+ * `unique_key`/`incremental_strategy`/`materialized` read from the TOP-LEVEL
+ * keys of every `config()` call in a model — never from a regex over the
+ * whole argument blob (`dbtConfigArgs`), which matches the same text sitting
+ * inside an unrelated hook or metadata string. A merge model with an audit
+ * hook containing the literal text `unique_key='id'` must not read as having
+ * a real key configured; only an actual top-level `unique_key=` assignment
+ * counts.
  */
-const UNIQUE_KEY_RE = /unique_key\s*=(?!\s*(?:None|null|''|""|\[\s*\])\s*(?:[,)]|$))/i
+interface IncrementalTopLevelConfig {
+  isIncremental: boolean
+  /** Declared `incremental_strategy`, lowercased, or null when unset/dynamic. */
+  strategy: string | null
+  /** A `unique_key=` assignment with a value dbt can actually match rows on. */
+  hasUniqueKey: boolean
+}
+
+/**
+ * `unique_key=None`, `unique_key=null`, `unique_key=''`/`""` and
+ * `unique_key=[]` are spelled assignments that leave dbt with no key, so they
+ * read as absent — matching the intent of the prior regex-based check.
+ */
+function isMeaningfulUniqueKeyValue(raw: string): boolean {
+  const t = raw.trim()
+  if (t.length === 0) return false
+  if (/^(?:None|null)$/i.test(t)) return false
+  if (t === "''" || t === '""') return false
+  if (/^\[\s*\]$/.test(t)) return false
+  return true
+}
+
+function readIncrementalTopLevelConfig(sql: string): IncrementalTopLevelConfig {
+  let isIncremental = false
+  let strategy: string | null = null
+  let hasUniqueKey = false
+  for (const callArgs of dbtConfigCallArgs(sql)) {
+    const kv = parseTopLevelConfigAssignments(callArgs)
+    const materialized = kv.get("materialized")
+    if (materialized !== undefined && /^incremental$/i.test(unquoteConfigValue(materialized))) {
+      isIncremental = true
+    }
+    const strategyValue = kv.get("incremental_strategy")
+    if (strategyValue !== undefined) {
+      const unquoted = unquoteConfigValue(strategyValue).toLowerCase()
+      if (/^[a-z0-9_+]+$/.test(unquoted)) strategy = unquoted
+    }
+    const uniqueKeyValue = kv.get("unique_key")
+    if (uniqueKeyValue !== undefined && isMeaningfulUniqueKeyValue(uniqueKeyValue)) {
+      hasUniqueKey = true
+    }
+  }
+  return { isIncremental, strategy, hasUniqueKey }
+}
+
 /** `unique_key` mentioned anywhere in `dbt_project.yml`. */
 const PROJECT_UNIQUE_KEY_RE = /^\s*\+?unique_key\s*:/m
 /**
@@ -225,8 +264,30 @@ function nondeterministicCalls(fragment: string): string[] {
   return Array.from(out)
 }
 
-/** True when the task asks for idempotent re-runs and does not disclaim it. */
-function demandsIdempotency(text: string): boolean {
+/** Inline code spans on one line — same shape as `validator-utils`'s, kept local to avoid a public export solely for this file. */
+const IDEMPOTENCY_CODE_SPAN_RE = /`([^`\n]+)`/g
+
+/**
+ * The task's idempotency demand(s), split by scope.
+ *
+ * A demand line that names a model in an inline code span
+ * ("Make `orders` idempotent") is scoped to THAT model; a demand with no
+ * named model ("all models must be idempotent re-runnable") is workspace-
+ * wide, matching the previous behaviour. Without this split, a task that also
+ * asks for a separate, intentionally append-only incremental model (`events`)
+ * had its `orders`-only demand applied workspace-wide, and the lint blocked
+ * the correctly guardless `events` model.
+ */
+interface IdempotencyDemand {
+  /** A demand line named no specific model — applies to every incremental model. */
+  workspaceWide: boolean
+  /** Model names (lowercased) an inline demand line named explicitly. */
+  scopedModels: Set<string>
+}
+
+function readIdempotencyDemand(text: string): IdempotencyDemand {
+  let workspaceWide = false
+  const scopedModels = new Set<string>()
   for (const line of text.split(/\r?\n/)) {
     const m = IDEMPOTENCY_RE.exec(line)
     if (!m) continue
@@ -234,9 +295,19 @@ function demandsIdempotency(text: string): boolean {
     const after = line.slice(m.index + m[0].length)
     if (IDEMPOTENCY_NEGATION_BEFORE_RE.test(before)) continue
     if (IDEMPOTENCY_NEGATION_AFTER_RE.test(after)) continue
-    return true
+    IDEMPOTENCY_CODE_SPAN_RE.lastIndex = 0
+    let named = false
+    let cm: RegExpExecArray | null
+    while ((cm = IDEMPOTENCY_CODE_SPAN_RE.exec(line)) !== null) {
+      const name = cm[1]?.trim().toLowerCase()
+      if (name) {
+        scopedModels.add(name)
+        named = true
+      }
+    }
+    if (!named) workspaceWide = true
   }
-  return false
+  return { workspaceWide, scopedModels }
 }
 
 /** True when `dbt_project.yml` configures a `unique_key` this lint cannot resolve. */
@@ -273,7 +344,12 @@ export const DbtIncrementalConfigValidator: Validator = {
     // idempotency demand would otherwise silence the guard check, while the
     // contract-driven gates correctly read past it.
     const tasks = await findTaskInstructionFiles(ctx.workingDirectory, dbtRoot)
-    const idempotencyDemanded = tasks.some((t) => demandsIdempotency(t.content))
+    const idempotencyDemand: IdempotencyDemand = { workspaceWide: false, scopedModels: new Set() }
+    for (const t of tasks) {
+      const d = readIdempotencyDemand(t.content)
+      if (d.workspaceWide) idempotencyDemand.workspaceWide = true
+      for (const m of d.scopedModels) idempotencyDemand.scopedModels.add(m)
+    }
     // A `unique_key` set in `dbt_project.yml` is inherited by the model, and
     // this lint does not resolve dbt's config inheritance. Rather than report
     // an inconsistency that is not one, the keyed-strategy finding is
@@ -301,15 +377,14 @@ export const DbtIncrementalConfigValidator: Validator = {
       // `'now'` in a projected string cannot produce a blocking finding.
       const sql = stripSqlComments(raw)
       const scanSql = maskSqlStringLiterals(sql)
-      const args = dbtConfigArgs(sql)
-      if (!INCREMENTAL_RE.test(args)) continue
+      const topLevelConfig = readIncrementalTopLevelConfig(sql)
+      if (!topLevelConfig.isIncremental) continue
       incrementalModels++
       const model = modelNameFromPath(path)
 
-      const strategyMatch = STRATEGY_RE.exec(args)
-      const strategy = strategyMatch?.[1]?.toLowerCase() ?? null
+      const strategy = topLevelConfig.strategy
       const keyed = strategy !== null && KEYED_STRATEGIES.has(strategy)
-      const hasUniqueKey = UNIQUE_KEY_RE.test(args) || projectKey
+      const hasUniqueKey = topLevelConfig.hasUniqueKey || projectKey
       if (keyed && !hasUniqueKey) {
         findings.push({
           model,
@@ -327,7 +402,9 @@ export const DbtIncrementalConfigValidator: Validator = {
       // a guard, and counting it suppresses a real finding.
       const hasGuard = IS_INCREMENTAL_RE.test(scanSql)
       const selfIdempotent = strategy !== null && SELF_IDEMPOTENT_STRATEGIES.has(strategy)
-      if (idempotencyDemanded && !hasGuard && !(keyed && hasUniqueKey) && !selfIdempotent) {
+      const idempotencyDemandedForModel =
+        idempotencyDemand.workspaceWide || idempotencyDemand.scopedModels.has(model.toLowerCase())
+      if (idempotencyDemandedForModel && !hasGuard && !(keyed && hasUniqueKey) && !selfIdempotent) {
         findings.push({
           model,
           kind: "missing-is-incremental-guard",
@@ -356,7 +433,9 @@ export const DbtIncrementalConfigValidator: Validator = {
       unreadable_models: unreadable,
       coverage_complete: unreadable.length === 0,
       incremental_models: incrementalModels,
-      idempotency_demanded: idempotencyDemanded,
+      idempotency_demanded: idempotencyDemand.workspaceWide || idempotencyDemand.scopedModels.size > 0,
+      idempotency_demand_workspace_wide: idempotencyDemand.workspaceWide,
+      idempotency_demand_scoped_models: Array.from(idempotencyDemand.scopedModels),
       findings: findings.map((f) => ({ model: f.model, kind: f.kind })),
       advisories,
       project_unique_key: projectKey,
