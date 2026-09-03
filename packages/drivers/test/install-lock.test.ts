@@ -140,16 +140,30 @@ process.exit(0)
     // performInstall unlocked — the concurrent npm mutation the lock exists to
     // prevent. The hold below is deliberately longer than the timeout so the
     // test fails unless the wait is extended each time the lock changes hands.
+    //
+    // Without a start barrier this can pass vacuously: the 600ms budget is
+    // measured from each child's own start, so a ~300ms startup stagger on a
+    // loaded CI box lets a late child acquire within its own budget and the
+    // assertion never sees UNLOCKED even if the handover-extension it exists
+    // to verify is removed. Every child announces itself and waits until all
+    // three are ready, so they contend from the same instant.
     const target = path.join(dir, "drivers")
     fs.mkdirSync(target, { recursive: true })
     const log = path.join(dir, "peers.txt")
+    const ready = path.join(dir, "peers-ready")
+    fs.mkdirSync(ready)
 
     const child = path.join(dir, "peer.ts")
     fs.writeFileSync(
       child,
       `import fs from "node:fs"
 import { withInstallLock } from ${JSON.stringify(resolveModule)}
-const [target, log, id] = process.argv.slice(2)
+const [target, log, ready, id] = process.argv.slice(2)
+fs.writeFileSync(\`\${ready}/\${id}\`, "1")
+const deadline = Date.now() + 20000
+while (fs.readdirSync(ready).length < 3 && Date.now() < deadline) {
+  await new Promise((r) => setTimeout(r, 5))
+}
 await withInstallLock(target, async (acquired) => {
   fs.appendFileSync(log, \`\${acquired ? "locked" : "UNLOCKED"} \${id}\\n\`)
   if (acquired) await new Promise((r) => setTimeout(r, 400))
@@ -159,7 +173,7 @@ process.exit(0)
     )
 
     const kids = Array.from({ length: 3 }, (_, i) =>
-      Bun.spawn(["bun", child, target, log, String(i)], { stdout: "ignore", stderr: "ignore" }),
+      Bun.spawn(["bun", child, target, log, ready, String(i)], { stdout: "ignore", stderr: "ignore" }),
     )
     expect(await Promise.all(kids.map((k) => k.exited))).toEqual([0, 0, 0])
 
@@ -276,6 +290,35 @@ process.exit(0)
       { timeoutMs: 5000, staleAfterMs: 1_000, hardStaleAfterMs: 60_000, pollMs: 20 },
     )
     expect(sawAcquired).toBe(true)
+  })
+
+  test("honors a live owner's declared budget over this contender's own backstop default", async () => {
+    // A caller that explicitly configured a long install timeout for a native
+    // build publishes that as its own budget. A different, default-configured
+    // contender watching the same lock must respect it — its own generic
+    // one-hour backstop must not reclaim an install the holder was told it
+    // could take up to four hours.
+    const target = path.join(dir, "drivers")
+    fs.mkdirSync(target, { recursive: true })
+    const held = plantLock(target, {
+      pid: process.pid,
+      hostname: os.hostname(),
+      startedAt: Date.now() - 90 * 60_000, // 90 minutes old
+      budgetMs: 4 * 60 * 60_000, // owner declared a 4 hour budget
+    })
+
+    let sawAcquired: boolean | undefined
+    await withInstallLock(
+      target,
+      async (acquired) => {
+        sawAcquired = acquired
+      },
+      // This contender's own default backstop (one hour) would reclaim a
+      // 90-minute-old lock; the owner's declared budget must win instead.
+      { timeoutMs: 200, staleAfterMs: 1_000, hardStaleAfterMs: 60 * 60_000, pollMs: 20 },
+    )
+    expect(sawAcquired).toBe(false)
+    expect(fs.existsSync(held)).toBe(true)
   })
 
   test("gives up by the deadline when a stale lock cannot be claimed", async () => {

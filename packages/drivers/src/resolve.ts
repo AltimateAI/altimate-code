@@ -91,11 +91,20 @@ export class DriverNotInstalledError extends Error {
 
   constructor(driver: DriverName, packages: readonly string[], searched: readonly string[]) {
     const label = DRIVER_LABELS[driver]
+    const installDir = driverInstallDir()
+    // `driverSearchRoots()` only returns directories that exist, so a compiled
+    // first run — before anything has ever been installed — can have no
+    // searchable roots at all. The old message then ended in a bare "Searched 0
+    // locations:" with nothing after the colon. Describe only what the empty
+    // list actually proves, and name the managed location users need.
+    const searchedLine = searched.length
+      ? `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`
+      : `No searchable driver locations were found. Expected managed location: ${path.join(installDir, "node_modules")}.`
     super(
       `${label} driver not installed.\n` +
         `Install it with the warehouse_install_driver tool, or run:\n` +
-        `  npm install --prefix ${shellQuote(driverInstallDir())} ${packages.join(" ")}\n` +
-        `Searched ${searched.length} location${searched.length === 1 ? "" : "s"}: ${searched.join(", ")}`,
+        `  npm install --prefix ${shellQuote(installDir)} ${packages.join(" ")}\n` +
+        searchedLine,
     )
     this.name = "DriverNotInstalledError"
     this.driver = driver
@@ -268,37 +277,33 @@ export function enclosingNodeModulesRoots(candidate: string, sep: string = path.
   return roots
 }
 
+/** True when `candidate` is `base` itself, or nested anywhere inside it. */
+function isWithin(base: string, candidate: string): boolean {
+  const rel = path.relative(base, candidate)
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+}
+
 /** True when `root` is workspace-controlled and must not be imported from. */
 function isWorkspaceRoot(root: string, scope: { cwd: string | undefined; ancestors: string[] }): boolean {
   // Real paths on both sides: a symlink pointing into the workspace must not
   // slip past a purely lexical comparison.
   const resolved = realPath(root)
-  if (scope.ancestors.includes(resolved)) return true
+  // Containment, not exact equality. A quoted path often names a *nested*
+  // dependency root — .../node_modules/host/node_modules/duckdb/... — whose
+  // outer node_modules is one of `scope.ancestors` but whose inner one is not:
+  // it is a descendant of that ancestor, not the ancestor itself. Comparing by
+  // equality let that inner root slip past the exclusion when the CLI started
+  // below the project root, admitting workspace-controlled code across the
+  // permission boundary this check exists to enforce.
+  if (scope.ancestors.some((ancestor) => isWithin(ancestor, resolved))) return true
   // Fail closed. With no working directory there is nothing to compare against,
   // and treating that as "not workspace content" would admit every root an error
   // happens to name — turning the one case where the process cannot see its own
   // filesystem into the case with no boundary at all.
   if (!scope.cwd) return true
-  const rel = path.relative(scope.cwd, resolved)
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))
+  return isWithin(scope.cwd, resolved)
 }
 
-/**
- * `node_modules` directories named by an error the runtime raised while trying
- * to resolve a package itself.
- *
- * When ambient resolution fails it often names the exact absolute location it
- * was reaching for. That location is better evidence than anything we can
- * infer, so it is worth searching — after repairing a concatenated working
- * directory, which is the failure this exists for. Returns roots only when they
- * exist on disk, so a nonsense path contributes nothing.
- *
- * Workspace-controlled roots are never returned. `driverSearchRoots()` refuses
- * project and ancestor `node_modules` because importing a matching SDK during a
- * warehouse read/test would bypass the permission boundary and can expose
- * resolved credentials; mining a path out of an error message must not become a
- * way around that invariant.
- */
 /**
  * Absolute paths a runtime quoted inside an error message.
  *
@@ -317,6 +322,22 @@ export function quotedAbsolutePaths(message: string): string[] {
   return found
 }
 
+/**
+ * `node_modules` directories named by an error the runtime raised while trying
+ * to resolve a package itself.
+ *
+ * When ambient resolution fails it often names the exact absolute location it
+ * was reaching for. That location is better evidence than anything we can
+ * infer, so it is worth searching — after repairing a concatenated working
+ * directory, which is the failure this exists for. Returns roots only when they
+ * exist on disk, so a nonsense path contributes nothing.
+ *
+ * Workspace-controlled roots are never returned. `driverSearchRoots()` refuses
+ * project and ancestor `node_modules` because importing a matching SDK during a
+ * warehouse read/test would bypass the permission boundary and can expose
+ * resolved credentials; mining a path out of an error message must not become a
+ * way around that invariant.
+ */
 export function searchRootsFromError(error: unknown): string[] {
   const message = error instanceof Error ? error.message : String(error)
   const scope = workspaceScope()
@@ -485,15 +506,6 @@ function entryFromManifest(pkgDir: string, specifier: string, pkg: string): stri
 }
 
 /**
- * Import an optional warehouse SDK.
- *
- * Tries the ambient resolver first so development, the monorepo, and any
- * already-working install behave exactly as before, then falls back to
- * searching real directories.
- *
- * @throws {DriverNotInstalledError} when the package is genuinely absent.
- */
-/**
  * Load an already-resolved package from its own absolute location.
  *
  * `import(pathToFileURL(abs))` is not enough. The ESM loader reads the
@@ -568,9 +580,18 @@ function requireFromLocation(resolved: string): unknown {
 /** True when a require failed only because the target is an ES module. */
 function isRequireOfEsm(error: unknown): boolean {
   const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined
-  if (code === "ERR_REQUIRE_ESM") return true
+  // Node's synchronous `require()` of ESM handles most modules, but not one
+  // with top-level `await`: that cannot be represented synchronously, so Node
+  // raises this code instead of `ERR_REQUIRE_ESM`. Bun's own message for the
+  // same case is text, not a code. Both mean the same thing this function
+  // exists to detect — the target is ESM, not that the load is broken — so an
+  // otherwise-valid async-ESM-only optional package must still fall through to
+  // the dynamic-import path below rather than being reported as unloadable.
+  if (code === "ERR_REQUIRE_ESM" || code === "ERR_REQUIRE_ASYNC_MODULE") return true
   const message = error instanceof Error ? error.message : String(error)
-  return /require\(\) of ES Module|Cannot use import statement outside a module|Unexpected token 'export'/i.test(message)
+  return /require\(\) of ES Module|Cannot use import statement outside a module|Unexpected token 'export'|require\(\) (?:cannot be used on an ESM graph with top-level await|async module .* is unsupported)/i.test(
+    message,
+  )
 }
 
 /**
@@ -588,6 +609,15 @@ async function loadFromLocation(resolved: string, importer: (spec: string) => Pr
   }
 }
 
+/**
+ * Import an optional warehouse SDK.
+ *
+ * Tries the ambient resolver first so development, the monorepo, and any
+ * already-working install behave exactly as before, then falls back to
+ * searching real directories.
+ *
+ * @throws {DriverNotInstalledError} when the package is genuinely absent.
+ */
 export async function loadOptionalDriver(
   driver: DriverName,
   specifier: string,
@@ -1014,7 +1044,13 @@ function runNpm(
 }
 
 /** @internal — exported only for focused lifecycle and queue unit tests. */
-export const _testing = { killTree, runNpm, runTaskkill, installOptionalDriver: installOptionalDriverInternal }
+export const _testing = {
+  killTree,
+  runNpm,
+  runTaskkill,
+  installOptionalDriver: installOptionalDriverInternal,
+  isRequireOfEsm,
+}
 
 /**
  * Delete `packages` from the managed directory so a reinstall genuinely rebuilds
@@ -1078,6 +1114,13 @@ async function installOptionalDriverInternal(
       // held it has usually just installed the very thing we queued for, so
       // most contenders return "already present" instead of running a second
       // npm over the same tree — which is what produced the ENOTEMPTY races.
+      const npmTimeoutMs = options.timeoutMs ?? 180_000
+      // Outlast one peer's install. A lock wait shorter than the install it is
+      // waiting on means a contender gives up while the holder's npm is still
+      // running and then installs unlocked over the same tree, which is the
+      // race this lock exists to stop. The two timeouts were independent
+      // constants, so raising the install timeout alone silently broke it.
+      const lockTimeoutMs = npmTimeoutMs + 60_000
       return withInstallLock(
         dir,
         async (acquired) => {
@@ -1086,12 +1129,16 @@ async function installOptionalDriverInternal(
           }
           return performInstall(driver, packages, dir, options)
         },
-        // Outlast one peer's install. A lock wait shorter than the install it is
-        // waiting on means a contender gives up while the holder's npm is still
-        // running and then installs unlocked over the same tree, which is the
-        // race this lock exists to stop. The two timeouts were independent
-        // constants, so raising the install timeout alone silently broke it.
-        { timeoutMs: (options.timeoutMs ?? 180_000) + 60_000 },
+        {
+          timeoutMs: lockTimeoutMs,
+          // Published into owner.json for any contender to read: a caller
+          // that raised its own install timeout above the generic one-hour
+          // backstop must not have this holder's lock reclaimed by a
+          // default-configured contender partway through a legitimately long
+          // native build. Without this, `hardStaleAfterMs` stayed a fixed
+          // default independent of the very timeout this call just raised.
+          hardStaleAfterMs: Math.max(lockTimeoutMs, 3_600_000),
+        },
       )
     })
   installsInFlight.set(dir, run)
@@ -1144,14 +1191,20 @@ export function installLockPath(dir: string): string {
  * True when `candidate` — trailing separators already stripped — names a
  * filesystem root rather than a directory inside one.
  *
- * The UNC case is the one that is easy to miss: a share root is a root in
- * exactly the way a drive letter is, and appending `.lock` to it names an
- * unrelated share rather than anything under the directory being locked.
+ * The UNC case is the one that is easy to miss, and it has more than one
+ * spelling: the plain share, its extended-length form (which bypasses
+ * `MAX_PATH` and Windows' own UNC parsing), and the equally valid
+ * forward-slash spelling `ALTIMATE_DRIVER_DIR` can carry. A share root is a
+ * root in exactly the way a drive letter is, and appending `.lock` to any of
+ * these forms names an unrelated share rather than anything under the
+ * directory being locked.
  */
 function isFilesystemRoot(candidate: string): boolean {
   if (candidate === "") return true // POSIX "/" strips to ""
   if (/^[A-Za-z]:$/.test(candidate)) return true // "C:\" strips to "C:"
-  return /^\\\\[^\\/]+\\[^\\/]+$/.test(candidate) // "\\server\share"
+  if (/^\\\\[^\\/]+\\[^\\/]+$/.test(candidate)) return true // "\\server\share"
+  if (/^\\\\\?\\UNC\\[^\\/]+\\[^\\/]+$/i.test(candidate)) return true // "\\?\UNC\server\share"
+  return /^\/\/[^/]+\/[^/]+$/.test(candidate) // "//server/share"
 }
 
 /**
@@ -1175,7 +1228,21 @@ interface LockHolder {
   startedAt?: number
   /** Identifies one acquisition, so a holder only ever releases its own lock. */
   token?: string
+  /**
+   * This holder's own reclaim backstop, in ms from `startedAt` — the
+   * `hardStaleAfterMs` it computed for itself from its own `InstallOptions`.
+   * A contender that never saw that option would otherwise apply its own
+   * default (or its own explicit override) to a lock someone else is holding
+   * for a reason the contender cannot see: a caller that configured a long
+   * install timeout for a native build. Absent means "assume the generic
+   * default" — e.g. a lock planted directly by an older build or a test.
+   */
+  budgetMs?: number
 }
+
+/** Upper bound on a trusted `budgetMs`, so a corrupt or hostile owner record
+ *  cannot wedge the lock directory indefinitely by claiming an absurd one. */
+const MAX_TRUSTED_BUDGET_MS = 24 * 60 * 60_000
 
 function readLockHolder(lockDir: string): LockHolder | undefined {
   try {
@@ -1189,6 +1256,7 @@ function readLockHolder(lockDir: string): LockHolder | undefined {
       hostname: typeof holder.hostname === "string" ? holder.hostname : "",
       startedAt: typeof holder.startedAt === "number" ? holder.startedAt : undefined,
       token: typeof holder.token === "string" ? holder.token : undefined,
+      budgetMs: typeof holder.budgetMs === "number" && holder.budgetMs > 0 ? holder.budgetMs : undefined,
     }
   } catch {
     return undefined
@@ -1227,7 +1295,14 @@ function isStaleLock(
     // live same-host owner is protected, but only up to a backstop far beyond
     // any real npm run — long enough never to interrupt an install, short
     // enough that a recycled pid cannot wedge the directory permanently.
-    return age !== undefined && age > hardMaxAgeMs
+    //
+    // That backstop is normally this contender's own generic default. When the
+    // holder published a longer budget of its own — a caller that explicitly
+    // configured a long install timeout for a native build — that declared
+    // budget wins: a contender shaped by the generic default must not reclaim
+    // an install the holder was explicitly told it could take.
+    const backstop = holder.budgetMs !== undefined ? Math.min(holder.budgetMs, MAX_TRUSTED_BUDGET_MS) : hardMaxAgeMs
+    return age !== undefined && age > backstop
   }
   // No readable owner, or an owner on another host sharing a home directory.
   // Liveness is not decidable, so age is the only signal there is.
@@ -1443,6 +1518,7 @@ export async function withInstallLock<T>(
           hostname: os.hostname(),
           startedAt: Date.now(),
           token,
+          budgetMs: hardStaleAfterMs,
         } satisfies LockHolder),
       )
     } catch {

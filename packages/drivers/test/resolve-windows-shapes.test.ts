@@ -36,6 +36,31 @@ describe("installLockPath keeps a root intact", () => {
   test("a directory deeper than the share root is not treated as a root", () => {
     expect(installLockPath("\\\\server\\share\\a")).toBe("\\\\server\\share\\a.lock")
   })
+
+  test("puts the lock inside an extended-length UNC share root", () => {
+    // "\\?\UNC\server\share" bypasses MAX_PATH and Windows' own UNC parsing,
+    // but it names the same kind of root as the plain "\\server\share" form —
+    // appending ".lock" to the bare path would address a different share.
+    expect(installLockPath("\\\\?\\UNC\\server\\share\\")).toBe("\\\\?\\UNC\\server\\share\\.lock")
+    expect(installLockPath("\\\\?\\UNC\\server\\share")).toBe("\\\\?\\UNC\\server\\share\\.lock")
+  })
+
+  test("a directory deeper than an extended-length UNC root is not treated as a root", () => {
+    expect(installLockPath("\\\\?\\UNC\\server\\share\\a")).toBe("\\\\?\\UNC\\server\\share\\a.lock")
+  })
+
+  test("puts the lock inside a forward-slash UNC share root", () => {
+    // "//server/share" is an equally valid spelling of a UNC share root; only
+    // the separator differs from "\\server\share". Recognizing only the
+    // backslash form means ALTIMATE_DRIVER_DIR=//server/share still gets a
+    // lock addressing a different share.
+    expect(installLockPath("//server/share/")).toBe("//server/share/.lock")
+    expect(installLockPath("//server/share")).toBe("//server/share/.lock")
+  })
+
+  test("a directory deeper than a forward-slash UNC root is not treated as a root", () => {
+    expect(installLockPath("//server/share/a")).toBe("//server/share/a.lock")
+  })
 })
 
 describe("quotedAbsolutePaths covers every absolute shape", () => {

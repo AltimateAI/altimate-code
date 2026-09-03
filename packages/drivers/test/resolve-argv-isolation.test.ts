@@ -65,7 +65,14 @@ function importerThrowingAt(target: string) {
 }
 
 describe("a driver load does not see the host's command line", () => {
-  test("the loaded module cannot observe --dir", async () => {
+  // These three tests share module-level state — process.argv, root, pkgDir —
+  // and each afterEach removes root. Bun runs a file's tests sequentially by
+  // default, so nothing races today, but that is an ambient property of how
+  // this suite happens to be invoked (no `--concurrent` flag anywhere in this
+  // repo), not a guarantee the tests themselves enforce. test.serial pins it,
+  // so a future `bun test --concurrent` cannot make one test's argv mutation
+  // or afterEach cleanup clobber another's.
+  test.serial("the loaded module cannot observe --dir", async () => {
     process.argv = [savedArgv[0], savedArgv[1], "run", "--dir", "/some/project", "--print-logs"]
 
     const loaded: any = await loadOptionalDriver(
@@ -82,7 +89,7 @@ describe("a driver load does not see the host's command line", () => {
     expect(mod.manifestPath.startsWith("/some/project")).toBe(false)
   })
 
-  test("restores the command line afterwards", async () => {
+  test.serial("restores the command line afterwards", async () => {
     const argv = [savedArgv[0], savedArgv[1], "run", "--dir", "/some/project"]
     process.argv = argv
 
@@ -91,7 +98,7 @@ describe("a driver load does not see the host's command line", () => {
     expect(process.argv).toEqual(argv)
   })
 
-  test("restores the command line even when the load throws", async () => {
+  test.serial("restores the command line even when the load throws", async () => {
     fs.writeFileSync(path.join(pkgDir, "index.js"), "throw new Error('broken driver')\n")
     const argv = [savedArgv[0], savedArgv[1], "run", "--dir", "/some/project"]
     process.argv = argv

@@ -6,7 +6,7 @@ import path from "node:path"
 import { createRequire } from "node:module"
 import { pathToFileURL } from "node:url"
 
-import { driverSearchRoots, loadOptionalDriver, resolveOptionalPackage } from "../src/resolve"
+import { driverSearchRoots, loadOptionalDriver, resolveOptionalPackage, searchRootsFromError } from "../src/resolve"
 
 // Specifiers that exist nowhere but the tree each test builds. Asking for a
 // real driver name would let the repo's own `packages/drivers/node_modules`
@@ -42,6 +42,11 @@ function writePackage(dir: string, name: string, main: string, body: string) {
 }
 
 beforeEach(() => {
+  // Each test's starting cwd must not depend on the previous test's afterEach
+  // having run — restore it here too, so a test that fails before reaching its
+  // own afterEach (or a future `.concurrent` run) cannot leave a stale cwd for
+  // the next test.
+  process.chdir(originalCwd)
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "resolve-chdir-")))
   pkgRoot = path.join(root, "lib", "node_modules", "altimate-code")
   nodeModules = path.join(pkgRoot, "node_modules")
@@ -109,9 +114,17 @@ describe("resolution does not depend on the working directory", () => {
     process.chdir(elsewhere)
 
     // The only route to the fixture root is the path named in the ambient
-    // failure, which is how the real failure surfaces it.
-    const named = path.join(pkgDir, "package.json")
-    const ambient = Object.assign(new Error(`ENOENT: no such file or directory, open '${named}'`), {
+    // failure, which is how the real failure surfaces it. Naming the plain
+    // absolute path here would find the fixture regardless of whether
+    // `repairCwdPrefixedPath` works — that path already exists on disk, so
+    // this test would still pass with the repair removed. Instead reproduce
+    // the observed shape exactly: the working directory concatenated onto the
+    // already-absolute manifest path, `<cwd>/usr/lib/.../duckdb/package.json`
+    // — a location that exists only after the `<cwd>` prefix is stripped.
+    const real = path.join(pkgDir, "package.json")
+    const concatenated = elsewhere + real
+    expect(fs.existsSync(concatenated)).toBe(false)
+    const ambient = Object.assign(new Error(`ENOENT: no such file or directory, open '${concatenated}'`), {
       code: "ENOENT",
     })
     const importer = async () => {
@@ -121,6 +134,38 @@ describe("resolution does not depend on the working directory", () => {
     const loaded: any = await loadOptionalDriver("duckdb", FIXTURE, importer)
     const mod = loaded?.default ?? loaded
     expect(mod.dir).toBe(fs.realpathSync(pkgDir))
+  })
+
+  test("excludes a nested dependency root under an ancestor node_modules when cwd starts below the project root", () => {
+    // The CLI can start in a subdirectory that has no node_modules of its own
+    // — cwd = <project>/packages/app — while the hoisted node_modules lives at
+    // the project root above it. A nested dependency there,
+    // <project>/node_modules/host/node_modules/duckdb, is workspace-controlled
+    // through its *outer* node_modules even though it is not itself one of the
+    // exact directories `nodeModulesUpward(cwd)` walks to.
+    const project = path.join(root, "project")
+    const nested = path.join(project, "node_modules", "host", "node_modules", "duckdb")
+    fs.mkdirSync(nested, { recursive: true })
+    fs.writeFileSync(path.join(nested, "package.json"), JSON.stringify({ name: "duckdb", version: "1.0.0" }))
+
+    const cwd = path.join(project, "packages", "app")
+    fs.mkdirSync(cwd, { recursive: true })
+    process.chdir(cwd)
+
+    const named = path.join(nested, "package.json")
+    const ambient = Object.assign(new Error(`ENOENT: no such file or directory, open '${named}'`), {
+      code: "ENOENT",
+    })
+
+    const roots = searchRootsFromError(ambient)
+
+    // Neither the inner nested root nor the outer project node_modules it sits
+    // under may be returned: both are workspace-controlled, and importing from
+    // either during a warehouse read/test would cross the permission boundary
+    // driverSearchRoots() otherwise enforces.
+    expect(roots).not.toContain(fs.realpathSync(nested))
+    expect(roots).not.toContain(fs.realpathSync(path.join(project, "node_modules")))
+    expect(roots).toEqual([])
   })
 
   test("a chdir between resolve and re-resolve does not change the answer", () => {
