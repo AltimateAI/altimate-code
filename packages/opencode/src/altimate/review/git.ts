@@ -164,8 +164,9 @@ export async function defaultBaseRef(cwd: string, head = "HEAD"): Promise<string
       // try next
     }
   }
-  // Fall back to the previous commit.
-  return "HEAD~1"
+  // Fall back to the selected head's parent so a custom `--head` is never
+  // compared against an unrelated checkout commit.
+  return `${head}~1`
 }
 
 /** Compute a short hash of the manifest file for the verdict envelope. */

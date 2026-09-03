@@ -84,6 +84,8 @@ function fnTokensOf(text: string): string[] {
 /** Impact-analysis result, normalized. */
 export interface ImpactResult {
   hasManifest: boolean
+  /** True only when the requested model resolved to a manifest node. */
+  resolved: boolean
   /** SAFE | LOW | MEDIUM | HIGH | BREAKING (from the DAG walk). */
   severity: "SAFE" | "LOW" | "MEDIUM" | "HIGH" | "BREAKING" | "UNKNOWN"
   directCount: number
@@ -1079,10 +1081,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // both SQL sides. This avoids duplicate engine calls and lets tiering see PII.
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
   const ctxByPath = new Map<string, ModelContext>()
-  let anyManifest = false
-  if (input.runner.manifestAvailable) {
-    anyManifest = await input.runner.manifestAvailable().catch(() => false)
-  }
   await Promise.all(
     modelFiles.map(async (file) => {
       const model = modelNameFromPath(file.path)
@@ -1098,15 +1096,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       // fallback. The dbt-patterns lane always uses raw (it needs the Jinja).
       const engineNewSql = compiledNew ?? newSql
       const engineOldSql = compiledOld ?? oldSql
-      const impact = await input.runner.impact(model)
-      if (impact.hasManifest) anyManifest = true
+      const impactResult = await input.runner.impact(model)
+      const impact = { ...impactResult, resolved: impactResult.resolved ?? false }
       const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect)).columns : []
       const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
       ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
     }),
   )
 
-  const lintOnly = modelFiles.length > 0 && !anyManifest
+  const anyResolved = [...ctxByPath.values()].some((ctx) => ctx.impact.resolved)
+  const lintOnly = modelFiles.length > 0 && !anyResolved
   const emptyScope = reviewable.length === 0
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —

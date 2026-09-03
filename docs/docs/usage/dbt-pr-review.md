@@ -144,7 +144,8 @@ Options:
       supplies real column types for lineage and PII analysis.
     - **Base compiled SQL.** In CI, compile the base ref into
       `target-base/compiled`:
-      `git worktree add ../dbt-review-base origin/<base> && (cd ../dbt-review-base && dbt deps && dbt compile --target-path ../<repo>/target-base)`.
+      `git worktree add --detach ../dbt-review-base "$(git merge-base origin/<base> HEAD)" && (cd ../dbt-review-base && dbt deps && dbt compile --target-path ../<repo>/target-base)`.
+      Compile the merge-base (fork point), not the base tip: the review diffs against the merge-base, so base-only commits must not leak into `target-base/compiled`.
       Without `target-base/compiled`, equivalence is undecidable and the review says so.
     - **Working directory.** Run the review from the dbt project root so the
       relative manifest path resolves.
@@ -196,12 +197,15 @@ jobs:
         env:
           DBT_PROFILES_DIR: ${{ github.workspace }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           pip install dbt-core dbt-bigquery
           dbt deps
           dbt compile
           dbt docs generate
-          git worktree add ../dbt-review-base "origin/${PR_BASE_REF}"
+          # Compile the fork point (merge-base), which is what the review compares against.
+          MERGE_BASE=$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}")
+          git worktree add --detach ../dbt-review-base "${MERGE_BASE}"
           (
             cd ../dbt-review-base
             dbt deps

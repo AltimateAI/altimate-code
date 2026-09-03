@@ -64,11 +64,17 @@ jobs:
           SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
           # Route event data through env, never straight into the script.
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           dbt deps
           dbt compile
           dbt docs generate || echo "docs generate skipped — lineage/PII run without catalog column types"
-          git worktree add ../dbt-review-base "origin/${PR_BASE_REF}"
+          # Compile the fork point (merge-base), not the base tip: the review
+          # compares against the merge-base, so base-only commits made after the
+          # fork must not appear in target-base/compiled either.
+          git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+          MERGE_BASE=$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}")
+          git worktree add --detach ../dbt-review-base "${MERGE_BASE}"
           (
             cd ../dbt-review-base
             dbt deps

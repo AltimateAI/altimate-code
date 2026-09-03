@@ -239,6 +239,20 @@ describe("review_run", () => {
     expect((events[0] as any).ai_findings).toBe(0)
   })
 
+  test("undecidable findings fall back to degraded findings for compatibility envelopes", () => {
+    const events = captureEvents()
+    const env = envelope()
+    delete env.summary.undecidableFindings
+    env.findings = [
+      { category: "semantic_change", severity: "warning", degraded: true },
+      { category: "sql_quality", severity: "warning", degraded: false },
+    ]
+
+    emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: env })
+
+    expect((events[0] as any).undecidable_findings).toBe(1)
+  })
+
   test("the tool path carries its session, the CLI path does not", () => {
     const events = captureEvents()
     emitReviewRun({ invocation: "tool", durationMs: 1, sessionID: "ses_abc", envelope: envelope() })

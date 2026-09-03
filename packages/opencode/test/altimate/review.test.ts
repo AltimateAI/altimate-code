@@ -862,7 +862,7 @@ describe("risk-tier", () => {
     const runner: ReviewRunner = {
       async check() { return { issues: [], ran: false } },
       async detectPii() { return { columns: [] } },
-      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async impact() { return { hasManifest: false, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
       async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
       async grade() { return { grade: "A", decided: true } },
     }
@@ -912,7 +912,7 @@ describe("risk-tier", () => {
     const runner: ReviewRunner = {
       async check() { return { issues: [], ran: false } },
       async detectPii() { return { columns: [] } },
-      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async impact() { return { hasManifest: false, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
       async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
       async grade() { return { grade: "A", decided: true } },
     }
@@ -1076,6 +1076,7 @@ describe("orchestrate", () => {
         return (
           opts.impact?.[model] ?? {
             hasManifest: true,
+            resolved: true,
             severity: "SAFE",
             directCount: 0,
             transitiveCount: 0,
@@ -1106,7 +1107,14 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/staging/stg_orders.sql", status: "deleted", diff: "" }]
     const runner = fakeRunner({
       impact: {
-        stg_orders: { hasManifest: true, severity: "BREAKING", directCount: 3, transitiveCount: 8, testCount: 4 },
+        stg_orders: {
+          hasManifest: true,
+          resolved: true,
+          severity: "BREAKING",
+          directCount: 3,
+          transitiveCount: 8,
+          testCount: 4,
+        },
       },
     })
     const env = await runReview({
@@ -1927,7 +1935,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: true, severity: "MEDIUM", directCount: 4, transitiveCount: 2, testCount: 1 }
+        return { hasManifest: true, resolved: true, severity: "MEDIUM", directCount: 4, transitiveCount: 2, testCount: 1 }
       },
       async equivalence() {
         return {
@@ -1959,7 +1967,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, resolved: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
       async equivalence() {
         return { decided: true, equivalent: false, differences: ["filter changed"], confidence: "high" }
@@ -1984,7 +1992,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: true, severity: "HIGH", directCount: 12, transitiveCount: 30, testCount: 5 }
+        return { hasManifest: true, resolved: true, severity: "HIGH", directCount: 12, transitiveCount: 30, testCount: 5 }
       },
     }
     const env = await runReview({
@@ -2523,7 +2531,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, resolved: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
     }
     const env = await runReview({
@@ -2568,7 +2576,7 @@ describe("orchestrate", () => {
     expect(summary).not.toContain("AI reviewer:")
   })
 
-  test("loaded manifest is not marked lint-only when a changed model is absent from it", async () => {
+  test("loaded manifest is lint-only when no changed model resolves", async () => {
     const files: ChangedFile[] = [{ path: "models/staging/new_model.sql", status: "added", diff: "+select 1\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -2576,7 +2584,7 @@ describe("orchestrate", () => {
         return true
       },
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: true, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
     }
     const env = await runReview({
@@ -2587,7 +2595,39 @@ describe("orchestrate", () => {
       runner,
       getContent: content("select 1 as value"),
     })
+    expect(env.summary.degraded).toBe(true)
+    expect(env.summary.lintOnly).toBe(true)
+  })
+
+  test("one resolved changed model keeps a mixed-model run out of lint-only", async () => {
+    const files: ChangedFile[] = [
+      { path: "models/staging/known_model.sql", status: "added", diff: "+select 1\n" },
+      { path: "models/staging/new_model.sql", status: "added", diff: "+select 1\n" },
+    ]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async impact(model) {
+        return {
+          hasManifest: true,
+          resolved: model === "known_model",
+          severity: "SAFE",
+          directCount: 0,
+          transitiveCount: 0,
+          testCount: 0,
+        }
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: content("select 1 as value"),
+    })
+
     expect(env.summary.degraded).toBe(false)
+    expect(env.summary.lintOnly).toBe(false)
   })
 
   test("manifest availability errors degrade safely instead of aborting the review", async () => {
@@ -2598,7 +2638,7 @@ describe("orchestrate", () => {
         throw new Error("manifest unreadable")
       },
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, resolved: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
     }
     const env = await runReview({

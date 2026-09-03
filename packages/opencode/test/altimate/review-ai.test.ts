@@ -38,6 +38,18 @@ function reviewFile(index: number): AiReviewFile {
 }
 
 describe("runAiReview timeout", () => {
+  test("returns timeout when pre-stream setup never resolves", async () => {
+    spyOn(Dispatcher as any, "call").mockImplementation(
+      (() => new Promise(() => {})) as any,
+    )
+    const stream = spyOn(LLM as any, "stream")
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], timeoutMs: 5 })
+
+    expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 0.005s" })
+    expect(stream).not.toHaveBeenCalled()
+  })
+
   test("caps the timeout to the files included in the prompt", async () => {
     stubModelAndPrompt()
     const nativeSetTimeout = globalThis.setTimeout

@@ -30,6 +30,8 @@ export interface AiReviewInput {
   grounding: Finding[]
   prTitle?: string
   prBody?: string
+  /** Override the review deadline (primarily for tests). */
+  timeoutMs?: number
 }
 
 export interface AiReviewResult {
@@ -104,18 +106,30 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
   if (!files.length) return { findings: [], status: "skipped", reason: "no reviewable files" }
 
-  const AI_TIMEOUT_MS = Math.min(180_000, 60_000 + 2_000 * Math.min(files.length, MAX_FILES))
+  const AI_TIMEOUT_MS = input.timeoutMs ?? Math.min(180_000, 60_000 + 2_000 * Math.min(files.length, MAX_FILES))
+  const timeoutReason = `timed out after ${AI_TIMEOUT_MS / 1000}s`
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS)
+  const setupTimedOut = Symbol("setupTimedOut")
+  const abortPromise = new Promise<typeof setupTimedOut>((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(setupTimedOut), { once: true })
+  })
   let streamAborted = false
   try {
-    // Prompt comes from the compiled core, not this file.
-    const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
-    const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
-    if (!system) return { findings: [], status: "skipped", reason: "reviewer prompt unavailable" }
+    const setup = (async () => {
+      // Prompt comes from the compiled core, not this file.
+      const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
+      const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
+      if (!system) return undefined
 
-    const defaultModel = await Provider.defaultModel()
-    const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+      const defaultModel = await Provider.defaultModel()
+      const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+      return { system, model }
+    })()
+    const setupResult = await Promise.race([setup, abortPromise])
+    if (setupResult === setupTimedOut) return { findings: [], status: "timeout", reason: timeoutReason }
+    if (!setupResult) return { findings: [], status: "skipped", reason: "reviewer prompt unavailable" }
+    const { system, model } = setupResult
 
     const agent: Agent.Info = {
       name: "dbt-ai-reviewer",
@@ -153,7 +167,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     }
     const text = await Promise.resolve(stream.text)
     if (controller.signal.aborted || streamAborted) {
-      return { findings: [], status: "timeout", reason: `timed out after ${AI_TIMEOUT_MS / 1000}s` }
+      return { findings: [], status: "timeout", reason: timeoutReason }
     }
     if (!text) return { findings: [], status: "error", reason: "Error: empty response" }
 
@@ -203,7 +217,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     log.error("ai review failed", { error: err })
     if (noModelError(err)) return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
     if (controller.signal.aborted || streamAborted || (err as { name?: unknown } | undefined)?.name === "AbortError") {
-      return { findings: [], status: "timeout", reason: `timed out after ${AI_TIMEOUT_MS / 1000}s` }
+      return { findings: [], status: "timeout", reason: timeoutReason }
     }
     return { findings: [], status: "error", reason: errorReason(err) }
   } finally {
