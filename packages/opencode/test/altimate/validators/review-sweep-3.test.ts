@@ -410,6 +410,36 @@ describe("a rename requirement only demands the destination name", () => {
 })
 
 // ---------------------------------------------------------------------------
+// Thread: detect guard conventions before edits can erase them (packages exclusion)
+// ---------------------------------------------------------------------------
+
+describe("the guard-convention probe does not treat a package's own guard as this project's convention", () => {
+  test("a target.type guard that only exists under the packages install dir does not switch the lint on", async () => {
+    await makeProject()
+    // An unusual but real configuration: the packages install path nests
+    // under the default `macros/` source path, so scanning `macros/`
+    // recursively without excluding `sourcePaths.packages` walks straight
+    // into the installed dependency's own macros.
+    await fs.writeFile(
+      join(dir, "dbt_project.yml"),
+      "name: t\nversion: '1.0'\nconfig-version: 2\nprofile: t\npackages-install-path: macros/dbt_packages\n",
+    )
+    await fs.mkdir(join(dir, "macros", "dbt_packages", "some_dep", "macros"), { recursive: true })
+    await fs.writeFile(
+      join(dir, "macros", "dbt_packages", "some_dep", "macros", "portable.sql"),
+      "{% macro ts() %}{% if target.type == 'duckdb' %}now(){% endif %}{% endmacro %}",
+    )
+    // The ROOT project itself establishes no target.type convention anywhere.
+    // `check()` itself does not re-verify the convention — only `appliesTo`
+    // decides whether the gate runs at all — so the relevant assertion is on
+    // `appliesTo`, matching how the dispatch framework actually uses it.
+    await writeModel("stg_orders", "select iff(a, b, c) as x")
+    const applies = await DbtDialectGuardValidator.appliesTo(ctx())
+    expect(applies).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Thread: mask dollar-quoted SQL literals before dialect matching
 // ---------------------------------------------------------------------------
 
