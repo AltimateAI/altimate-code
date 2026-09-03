@@ -60,6 +60,65 @@ async function waitForPort(
   throw new Error(`Port ${port} not reachable after ${timeoutMs}ms`)
 }
 
+// altimate_change start — retry a flaky setup step, and fail loudly (not silently)
+// once retries are exhausted.
+/**
+ * Run `attempt` up to `maxAttempts` times, with a short backoff between tries,
+ * and return its result on the first success. If every attempt fails, THROW
+ * the last error rather than swallowing it.
+ *
+ * This is the difference between a genuine "not available here" (handled
+ * elsewhere, before this is ever called) and "was available but setup broke":
+ * a caller that catches this and silently leaves some "ready" flag false
+ * recreates the exact vacuous-green failure this file's `probeDuckDB` exists
+ * to prevent, one layer down — every test gated on that flag would then
+ * report as passing via an early `if (!ready) return` instead of failing.
+ */
+async function connectWithRetry<T>(attempt: (attemptNumber: number) => Promise<T>, maxAttempts: number): Promise<T> {
+  let lastError: unknown
+  for (let n = 1; n <= maxAttempts; n++) {
+    try {
+      return await attempt(n)
+    } catch (e) {
+      lastError = e
+      if (n < maxAttempts) await new Promise((r) => setTimeout(r, 100 * n))
+    }
+  }
+  throw new Error(
+    `Setup failed after ${maxAttempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  )
+}
+// altimate_change end
+
+// altimate_change start — unit-test the retry-then-fail-loudly behavior directly,
+// independent of real DuckDB availability, so this regression is caught even in
+// environments where the DuckDB binding isn't installed at all.
+describe("connectWithRetry", () => {
+  test("throws (does not silently resolve) once every attempt is exhausted", async () => {
+    let calls = 0
+    const alwaysFails = async () => {
+      calls++
+      throw new Error("transient setup failure")
+    }
+    await expect(connectWithRetry(alwaysFails, 3)).rejects.toThrow("Setup failed after 3 attempts")
+    await expect(connectWithRetry(alwaysFails, 3)).rejects.toThrow("transient setup failure")
+    expect(calls).toBe(6) // 3 attempts per call above, called twice
+  })
+
+  test("resolves with the first successful attempt's result, retrying past earlier failures", async () => {
+    let calls = 0
+    const succeedsOnThirdTry = async () => {
+      calls++
+      if (calls < 3) throw new Error("not yet")
+      return "connected"
+    }
+    const result = await connectWithRetry(succeedsOnThirdTry, 5)
+    expect(result).toBe("connected")
+    expect(calls).toBe(3)
+  })
+})
+// altimate_change end
+
 // altimate_change start — authoritative DuckDB availability probe.
 // `require("duckdb")` (isDuckDBAvailable) can return true when the native binding
 // is present in the process module cache but actually fails to CONNECT in this
@@ -113,31 +172,27 @@ describe("DuckDB Driver E2E", () => {
   let duckdbReady = false
 
   // altimate_change start — retry DuckDB connection initialization to handle
-  // transient native binding load failures when the full suite runs in parallel
+  // transient native binding load failures when the full suite runs in parallel,
+  // but FAIL (don't silently skip) if it never recovers.
+  //
+  // `probeDuckDB()` above already proved DuckDB is genuinely available and
+  // working in this process. If setup here still fails after retries, that is
+  // a real regression, not "DuckDB isn't available" — every test below still
+  // runs (test.skipIf keys off `duckdbAvailable`, which stays true regardless
+  // of what happens here), and each one used to just `if (!duckdbReady) return`
+  // and report as passing: the same vacuous-green class the driver-e2e
+  // false-skip fix removed, one layer down. Throwing here fails the whole
+  // describe block instead of letting every test silently "pass" via that
+  // early return.
   beforeAll(async () => {
     if (!duckdbAvailable) return
-    const maxAttempts = 3
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const mod = await import("@altimateai/drivers/duckdb")
-        // altimate_change start — requireStorePath() now rejects a missing path
-        connector = await mod.connect({ type: "duckdb", path: ":memory:" })
-        // altimate_change end
-        await connector.connect()
-        duckdbReady = true
-        break
-      } catch (e) {
-        if (attempt < maxAttempts) {
-          // Brief delay before retry to let concurrent native-binding loads settle
-          await new Promise((r) => setTimeout(r, 100 * attempt))
-        } else {
-          console.warn(
-            "DuckDB not available (native binding may be missing); skipping DuckDB tests:",
-            (e as Error).message,
-          )
-        }
-      }
-    }
+    connector = await connectWithRetry(async () => {
+      const mod = await import("@altimateai/drivers/duckdb")
+      const c = await mod.connect({ type: "duckdb", path: ":memory:" })
+      await c.connect()
+      return c
+    }, 3)
+    duckdbReady = true
   })
   // altimate_change end
 

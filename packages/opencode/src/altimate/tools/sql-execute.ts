@@ -122,10 +122,14 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      // altimate_change start — fingerprint a thrown-exception failure too (see the
-      // matching comment on the result-error branch above)
-      emitSqlFingerprint(args.query, ctx.sessionID)
-      // altimate_change end
+      // altimate_change: deliberately NOT fingerprinted. This catch only fires when
+      // `Dispatcher.call` itself throws (dispatcher down, no warehouse configured) —
+      // per the comment on the result-error branch above, `sql.execute` never throws
+      // for a connection/query failure, it returns a result carrying `error`, which
+      // that branch already fingerprints. A query that reaches here never ran against
+      // any warehouse, so fingerprinting it here would fold "never executed" into a
+      // signal meant to measure "executed SQL" (success and result-error), re-biasing
+      // the telemetry this change is meant to correct in the opposite direction.
       // altimate_change — annotate the failure too. A fail-open notice that only rides
       // on success is worse than none: the reason vanishes exactly when the call went
       // wrong, and the `precedence` marker under-counts fail-open in precisely the
@@ -139,9 +143,15 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
   },
 })
 
-// altimate_change start — emit SQL structure fingerprint telemetry on every
-// execution outcome (success, a result-shaped error, or a thrown exception),
-// not only on success. Extracted so all three call sites stay in sync.
+// altimate_change start — emit SQL structure fingerprint telemetry for every
+// outcome where a warehouse actually ran the query: success, and a result-shaped
+// error (sql.execute returns `{ ..., error }` rather than throwing for a
+// connection/query failure — see the result-error branch above). Deliberately
+// NOT called from the thrown-exception catch block: that path only fires when
+// the query never reached a warehouse at all (e.g. dispatcher down), and
+// fingerprinting a never-executed query there would bias this "executed SQL
+// structure" signal toward attempts that never ran. Extracted so the two
+// legitimate call sites stay in sync.
 function emitSqlFingerprint(query: string, sessionID: string): void {
   try {
     const fp = computeSqlFingerprint(query)

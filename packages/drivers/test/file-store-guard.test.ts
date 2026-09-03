@@ -49,6 +49,23 @@ describe("isLocalFilePath", () => {
     expect(isLocalFilePath("C:\\data\\warehouse.duckdb")).toBe(true)
   })
 
+  // altimate_change start — regression: a doubled-slash Windows drive path is a
+  // real local path, not a `scheme://` URI
+  test("treats a doubled-slash Windows drive path as local, not a scheme:// URI", () => {
+    // `C://data/warehouse.duckdb` is a valid (if unusual) absolute Windows path —
+    // path.win32.normalize collapses it to `C:\data\warehouse.duckdb`. The
+    // scheme://-form regex used to accept a single-character scheme, so "C"
+    // matched it exactly like "s3" does in `s3://...`, misclassifying it as
+    // remote and skipping both path resolution and the existence guard. No real
+    // remote/extension scheme is a single letter, so requiring 2+ characters
+    // before "://" fixes this without affecting genuine schemes.
+    expect(isLocalFilePath("C://data/warehouse.duckdb")).toBe(true)
+    expect(isLocalFilePath("D://warehouse.duckdb")).toBe(true)
+    // Genuine two-or-more-character schemes are still excluded.
+    expect(isLocalFilePath("s3://bucket/warehouse.duckdb")).toBe(false)
+  })
+  // altimate_change end
+
   test("only the exact `:memory:` is in-memory — `:memory:name` is a real file", () => {
     // DuckDB writes a file literally named ":memory:named" for this path, and
     // a colon-prefixed name is an ordinary file to both engines. Classifying
@@ -124,6 +141,16 @@ describe("assertStoreExists", () => {
     expect(() => assertStoreExists({ type: "duckdb" }, uri, "DuckDB")).not.toThrow()
   })
 
+  // altimate_change: regression — a `file:////...` URI (4+ leading slashes)
+  // used to be misread as relative by the bounded {1,3}-slash check, so
+  // isLocalFilePath's own file: exclusion made assertStoreExists skip it
+  // entirely and a missing store there opened silently empty.
+  test("throws for a missing `file:////` (4-slash) absolute URI", () => {
+    const missing = path.join(tmp(), "absent.duckdb")
+    const uri = `file:///${missing}` // absoluteFileUriPath sees 4 total slashes after "file:"
+    expect(() => assertStoreExists({ type: "duckdb" }, uri, "DuckDB")).toThrow("not found")
+  })
+
   test("does not existence-check a relative `file:` URI (tracked separately as #1209)", () => {
     // resolveStorePaths leaves relative file: URIs untouched, so guarding
     // existence here would check against whatever the process cwd happens to
@@ -137,7 +164,37 @@ describe("assertStoreExists", () => {
   // altimate_change start — a directory at dbPath is not a valid store
   test("throws when dbPath names a directory, not a file", () => {
     const dir = tmp()
-    expect(() => assertStoreExists({ type: "duckdb" }, dir, "DuckDB")).toThrow("not found")
+    // altimate_change: the message now specifically says "directory" (a more
+    // accurate diagnosis than "not found" — the path DOES exist), since
+    // rejectIfDirectory reports it before the exists/missing check ever runs.
+    expect(() => assertStoreExists({ type: "duckdb" }, dir, "DuckDB")).toThrow("directory")
+  })
+
+  // altimate_change: regression — `create: true` used to bypass the directory
+  // check entirely (the `if (allowCreate) return` ran before it), so a
+  // directory path reached the driver with `create: true` and failed there
+  // with a confusing engine-level error instead of this guard's clear one.
+  // Neither engine can create a database AT a path that is already a
+  // directory, so the directory rejection must fire regardless of `create`.
+  test("throws when dbPath names a directory even with create: true", () => {
+    const dir = tmp()
+    expect(() => assertStoreExists({ type: "duckdb", create: true }, dir, "DuckDB")).toThrow("directory")
+    // A plain "not found" would be misleading here — the path DOES exist, it's
+    // just not a valid store — so the message must say "directory", not "not found".
+    expect(() => assertStoreExists({ type: "duckdb", create: true }, dir, "DuckDB")).not.toThrow("not found")
+  })
+
+  test("still allows creation of a missing FILE with create: true (directory check doesn't over-reject)", () => {
+    const dir = tmp()
+    expect(() =>
+      assertStoreExists({ type: "duckdb", create: true }, path.join(dir, "new.duckdb"), "DuckDB"),
+    ).not.toThrow()
+  })
+
+  test("throws when an absolute `file:` URI names a directory even with create: true", () => {
+    const dir = tmp()
+    const uri = `file://${dir}`
+    expect(() => assertStoreExists({ type: "duckdb", create: true }, uri, "DuckDB")).toThrow("directory")
   })
   // altimate_change end
 })
@@ -150,6 +207,16 @@ describe("absoluteFileUriPath", () => {
   test("returns undefined for a relative `file:` URI", () => {
     expect(absoluteFileUriPath("file:relative/warehouse.duckdb")).toBeUndefined()
   })
+
+  // altimate_change start — regression: 4+ leading slashes (UNC-style shares)
+  // used to be rejected as "not absolute" by a bounded {1,3} slash count; any
+  // number of leading slashes is a valid absolute file: URI form, and
+  // fileURLToPath folds the extra slashes into the resulting path.
+  test("resolves an absolute `file:` URI with four or more leading slashes", () => {
+    expect(absoluteFileUriPath("file:////mnt/share/warehouse.duckdb")).toBe("//mnt/share/warehouse.duckdb")
+    expect(absoluteFileUriPath("file://///mnt/share/warehouse.duckdb")).toBe("///mnt/share/warehouse.duckdb")
+  })
+  // altimate_change end
 
   test("returns undefined for the in-memory/temporary forms", () => {
     expect(absoluteFileUriPath("file:")).toBeUndefined()

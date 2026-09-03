@@ -942,12 +942,17 @@ describe("altimate-core failure isolation", () => {
     }
   })
 
-  test("sql-execute fingerprints every outcome (success, result-error, and thrown exception) via a guarded helper", () => {
+  test("sql-execute fingerprints only executed outcomes (success and result-error), not a never-executed thrown exception", () => {
     // altimate_change: fingerprinting used to run only on the success path, so a
-    // failed query never got fingerprinted at all — biasing sql_fingerprint
-    // telemetry away from exactly the queries most worth seeing. It is now
-    // emitted from all three outcomes through one shared, try/catch-guarded
-    // helper (`emitSqlFingerprint`) so they cannot drift out of sync.
+    // failed-but-executed query (the result-error branch) never got fingerprinted —
+    // biasing sql_fingerprint telemetry away from exactly the queries most worth
+    // seeing. It is now emitted from both outcomes where a warehouse actually ran
+    // the query, through one shared, try/catch-guarded helper (`emitSqlFingerprint`)
+    // so they cannot drift out of sync. It is deliberately NOT called from the
+    // thrown-exception catch block: that path only fires when the query never
+    // reached a warehouse at all (e.g. dispatcher down), so fingerprinting it there
+    // would fold "never executed" into a signal meant to measure "executed SQL",
+    // re-biasing the telemetry in the opposite direction.
     const fs = require("fs")
     const src = fs.readFileSync(
       require("path").join(__dirname, "../../src/altimate/tools/sql-execute.ts"),
@@ -964,9 +969,16 @@ describe("altimate-core failure isolation", () => {
     expect(fpCallInsideHelperIdx).toBeGreaterThan(helperDefIdx)
     expect(guardComment).toBeGreaterThan(fpCallInsideHelperIdx)
 
-    // All three outcomes call the shared helper.
+    // Exactly two outcomes call the shared helper: success and the result-error
+    // branch. The catch block (thrown exception / non-execution) must not.
     const callSites = [...src.matchAll(/emitSqlFingerprint\(args\.query, ctx\.sessionID\)/g)]
-    expect(callSites.length).toBe(3)
+    expect(callSites.length).toBe(2)
+
+    // The catch block itself must not reference the fingerprint helper at all.
+    const catchBlockStart = src.indexOf("} catch (e) {")
+    const catchBlockEnd = src.indexOf("\n    }\n  },\n})", catchBlockStart)
+    const catchBlockBody = src.slice(catchBlockStart, catchBlockEnd)
+    expect(catchBlockBody.includes("emitSqlFingerprint")).toBe(false)
   })
 
   test("crash-resistant SQL inputs all handled safely", () => {
