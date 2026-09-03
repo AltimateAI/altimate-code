@@ -1545,10 +1545,11 @@ export namespace SessionPrompt {
 
       const result = await processor.process({
         user: lastUser,
-        // altimate_change — pass the task-shape-scoped agent (see above): only
-        // `.prompt` may differ from `agent`, and only for a run-mode builder
-        // session confidently classified as having no dbt project.
+        // altimate_change start — pass the task-shape-scoped agent (see above):
+        // only `.prompt` may differ from `agent`, and only for a run-mode
+        // builder session confidently classified as having no dbt project.
         agent: effectiveAgent,
+        // altimate_change end
         abort,
         sessionID,
         system,
