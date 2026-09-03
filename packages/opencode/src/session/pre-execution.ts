@@ -1,6 +1,6 @@
 // Fork-only module — owns the PRE-EXECUTION PROTOCOL SCOPING CONTRACT.
 //
-// The protocol below used to sit statically in `altimate/prompts/builder.txt`.
+// The protocol used to sit statically in `altimate/prompts/builder.txt`.
 // builder is a PRIMARY agent, so a static section there governs every builder
 // surface at once: dbt authoring, interactive chat, and headless
 // question-answering runs. A pre-registered paired ablation (540 trials on a
@@ -28,11 +28,26 @@
 // confidently keeps it too: the cost of keeping it is latency on one workload,
 // the cost of wrongly dropping it is unmeasured.
 //
-// Directive text lives here (not at the call site) so any wording-change review
-// covers ONE file, mirroring session/termination.ts.
+// MECHANISM (reworked onto the pack architecture — `altimate/prompts/profiles.ts`,
+// PR #1217): `builder.txt` no longer exists. The protocol is the `sql-guard`
+// pack, and it ships statically inside the default `builder` agent's `.prompt`
+// (`PromptProfiles.PROMPT_BUILDER`, byte-pinned by
+// `test/altimate/prompt-profiles.test.ts`) so it is present by default in every
+// case. This module no longer INJECTS the text — there is nothing to inject,
+// it is already there. Instead `scopedBuilderPrompt` returns a per-session
+// override prompt (`PromptProfiles.PROMPT_BUILDER_SCOPED`, the same profile
+// with the sql-guard pack excluded) for the one cell the ablation covers, or
+// `undefined` to mean "use the agent's default prompt unchanged". The call
+// site (session/prompt.ts) clones the resolved `Agent.Info` with `.prompt`
+// swapped only when this returns a value — the default static registration in
+// agent.ts, and the byte-identity pin, are never touched.
+//
+// Directive commentary lives here (not at the call site) so any change to the
+// gate's reasoning reviews in ONE file, mirroring session/termination.ts.
 
 import fs from "fs/promises"
 import path from "path"
+import { PromptProfiles } from "../altimate/prompts/profiles"
 import { Log } from "../util/log"
 
 const log = Log.create({ service: "pre-execution-scope" })
@@ -76,31 +91,6 @@ function meansAbsent(err: unknown): boolean {
  * into the same `null`, and this gate turns a directive off on the difference.
  */
 export type WorkspaceShape = "dbt" | "non-dbt" | "unknown"
-
-/**
- * The mandatory pre-execution sequence, verbatim as it shipped in
- * `builder.txt`. Prompt-visible text — changes need extra review.
- *
- * Kept byte-identical to the previous static section so that in every case
- * where the gate injects it, the resolved prompt is unchanged from before.
- */
-export const PRE_EXECUTION_PROTOCOL = [
-  "## Pre-Execution Protocol",
-  "",
-  "Before executing ANY SQL via sql_execute, follow this mandatory sequence:",
-  "",
-  "1. **Analyze first**: Run `sql_analyze` on the query. Check for HIGH severity anti-patterns.",
-  "   - If HIGH severity issues found (SELECT *, cartesian products, missing WHERE on DELETE/UPDATE, full table scans on large tables): FIX THEM before executing. Show the user what you found and the fixed query.",
-  "   - If MEDIUM severity issues found: mention them and proceed unless the user asks to fix.",
-  "",
-  "2. **Validate syntax**: Run `altimate_core_validate` to catch syntax errors and schema issues BEFORE hitting the warehouse.",
-  "",
-  "3. **Execute**: Only after steps 1-2 pass, run `sql_execute`.",
-  "",
-  "This sequence is NOT optional. Skipping it means the user pays for avoidable mistakes. You are the customer's cost advocate — every credit saved is trust earned. If the user explicitly requests skipping the protocol, note the risk and proceed.",
-  "",
-  "For trivial queries (e.g., `SELECT 1`, `SHOW TABLES`), use judgment — skip the full sequence but still validate syntax.",
-].join("\n")
 
 /**
  * Does `dir` itself contain a dbt project file?
@@ -223,35 +213,40 @@ export async function classifyWorkspace(candidates: (string | undefined)[]): Pro
 }
 
 /**
- * The sole gate for injecting the pre-execution protocol into a prompt.
+ * The sole gate for scoping the pre-execution protocol (the `sql-guard` pack)
+ * out of the builder prompt.
  *
- * Returns the protocol text to inject, or `undefined` to drop it. The ONLY
- * dropping case is the one the ablation measured:
+ * Returns a full replacement prompt to use INSTEAD of the agent's default
+ * `.prompt`, or `undefined` to mean "use the default, unchanged" — the
+ * default already carries the protocol, since it ships statically in
+ * `PromptProfiles.PROMPT_BUILDER`. The ONLY case this returns an override is
+ * the one the ablation measured:
  *
  *   run mode (headless / CI, the `run` CLI)  AND
- *   the builder agent (the only prompt that ever carried the section)  AND
+ *   the builder agent (the only profile that ever carried the pack)  AND
  *   a workspace confidently classified as having no dbt project.
  *
- * Everything else keeps it, including `unknown`. Note the asymmetry is
- * deliberate: run mode is not itself a task-shape signal, it is the surface the
- * evidence covers. Widening this to interactive chat needs its own measurement.
+ * Everything else returns `undefined`, including `unknown`. Note the asymmetry
+ * is deliberate: run mode is not itself a task-shape signal, it is the surface
+ * the evidence covers. Widening this to interactive chat needs its own
+ * measurement.
  *
  * Classification is only performed when the cheap conditions already hold, so
  * an interactive session pays no filesystem cost for this gate.
  */
-export async function preExecutionInstruction(input: {
+export async function scopedBuilderPrompt(input: {
   runMode: boolean
   agent: string
   /** Candidate directories to classify — typically the cwd and the worktree root. */
   directories: (string | undefined)[]
 }): Promise<string | undefined> {
-  // Only builder ever carried this section; analyst and reviewer never did.
+  // Only builder ever carried this pack; analyst and reviewer never did.
   if (input.agent !== "builder") return undefined
-  if (!input.runMode) return PRE_EXECUTION_PROTOCOL
+  if (!input.runMode) return undefined
   const shape = await classifyWorkspace(input.directories)
-  if (shape !== "non-dbt") return PRE_EXECUTION_PROTOCOL
+  if (shape !== "non-dbt") return undefined
   log.info("pre-execution protocol scoped out", { agent: input.agent, shape })
-  return undefined
+  return PromptProfiles.PROMPT_BUILDER_SCOPED
 }
 
 export * as SessionPreExecution from "./pre-execution"

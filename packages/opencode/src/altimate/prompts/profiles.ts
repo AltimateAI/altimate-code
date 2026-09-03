@@ -72,12 +72,26 @@ export const BUILDER_PROFILE: readonly FragmentName[] = [
  */
 export const DATA_QA_PROFILE: readonly FragmentName[] = ["core", "legacy-skills-catalogue", "core-training"]
 
+/**
+ * The `builder` profile with the Pre-Execution Protocol (sql-guard) pack
+ * excluded — every other fragment, same order, unchanged. NOT a registered
+ * agent and not selected by default; it exists purely as a per-session
+ * override that `session/pre-execution.ts` swaps in for the `builder` agent's
+ * `.prompt` field when its task-shape gate confidently classifies a run-mode
+ * workspace as having no dbt project (the one cell an internal 540-trial
+ * paired ablation covered: no score effect, 2,805 pre-execution tool calls
+ * removed). Every other case — dbt work, interactive chat, or an
+ * unclassifiable workspace — keeps the default `PROMPT_BUILDER` untouched.
+ */
+export const BUILDER_PROFILE_SCOPED: readonly FragmentName[] = BUILDER_PROFILE.filter((name) => name !== "sql-guard")
+
 export function assemble(profile: readonly FragmentName[]): string {
   return profile.map((name) => FRAGMENTS[name]).join("")
 }
 
 export const PROMPT_BUILDER = assemble(BUILDER_PROFILE)
 export const PROMPT_DATA_QA = assemble(DATA_QA_PROFILE)
+export const PROMPT_BUILDER_SCOPED = assemble(BUILDER_PROFILE_SCOPED)
 
 export * as PromptProfiles from "./profiles"
 // altimate_change end

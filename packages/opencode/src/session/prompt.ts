@@ -1471,23 +1471,26 @@ export namespace SessionPrompt {
         ...(await InstructionPrompt.system()),
         ...hoistedReminders,
       ]
-      // altimate_change start — task-shape-scoped pre-execution protocol. Same
-      // shape as the completion instruction below and for the same reason: the
-      // text used to sit in builder.txt, and builder is a PRIMARY agent, so it
-      // reached every builder surface. A paired ablation measured it as pure
-      // overhead on headless question-answering (2,805 ritual tool calls → 0, no
-      // score effect) but says nothing about dbt work or interactive chat, so
-      // those keep it. See session/pre-execution.ts for the gate and the numbers.
+      // altimate_change start — task-shape-scoped pre-execution protocol.
+      // builder is a PRIMARY agent, so its static prompt (the `sql-guard` pack,
+      // assembled into `.prompt` by altimate/prompts/profiles.ts) reaches every
+      // builder surface: dbt authoring, interactive chat, and headless
+      // question-answering runs. A paired ablation measured it as pure overhead
+      // on headless question-answering (2,805 ritual tool calls → 0, no score
+      // effect) but says nothing about dbt work or interactive chat, so those
+      // keep it. See session/pre-execution.ts for the gate and the numbers.
       //
-      // Injected BEFORE the completion instruction, which says to signal DONE
-      // only once "every requirement above" is satisfied. A mandatory protocol
-      // pushed after it would not be one of those requirements.
-      const preExecutionInstruction = await SessionPreExecution.preExecutionInstruction({
+      // Unlike the completion instruction below, this is not additive text:
+      // the protocol already ships inside `agent.prompt` by default (it is
+      // part of the byte-pinned default builder profile), so scoping it out
+      // means swapping in a pack-excluded prompt variant for THIS session only
+      // — the registered agent and its default `.prompt` are never mutated.
+      const scopedBuilderPrompt = await SessionPreExecution.scopedBuilderPrompt({
         runMode: Flag.ALTIMATE_RUN_MODE,
         agent: agent.name,
         directories: [Instance.directory, Instance.worktree],
       })
-      if (preExecutionInstruction) system.push(preExecutionInstruction)
+      const effectiveAgent = scopedBuilderPrompt ? { ...agent, prompt: scopedBuilderPrompt } : agent
       // altimate_change end
       // altimate_change start — run-mode-only completion instruction. This text
       // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
@@ -1542,7 +1545,10 @@ export namespace SessionPrompt {
 
       const result = await processor.process({
         user: lastUser,
-        agent,
+        // altimate_change — pass the task-shape-scoped agent (see above): only
+        // `.prompt` may differ from `agent`, and only for a run-mode builder
+        // session confidently classified as having no dbt project.
+        agent: effectiveAgent,
         abort,
         sessionID,
         system,

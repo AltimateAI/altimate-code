@@ -111,21 +111,29 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  // The protocol section itself is no longer static in builder.txt — it is
-  // injected per-session by the gate in session/pre-execution.ts, which drops it
-  // only for headless builder runs in a workspace with no dbt project. The
-  // wording is unchanged; see test/session/pre-execution.test.ts for the gate.
-  test("the pre-execution protocol still reaches an interactive builder", async () => {
+  // The protocol section ships statically in the default builder profile (the
+  // `sql-guard` pack, assembled by altimate/prompts/profiles.ts) — every
+  // builder session, interactive or headless, gets it by default. It is
+  // scoped OUT per-session only by the gate in session/pre-execution.ts, which
+  // drops it only for headless builder runs in a workspace with no dbt
+  // project; see test/session/pre-execution.test.ts for that gate.
+  test("the pre-execution protocol reaches an interactive builder", async () => {
     await using tmp = await tmpdir()
-    const instruction = await SessionPreExecution.preExecutionInstruction({
-      runMode: false,
-      agent: "builder",
-      directories: [tmp.path],
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const builder = await Agent.get("builder")
+        expect(builder!.prompt).toContain("Pre-Execution Protocol")
+        // Interactive (runMode: false) never gets an override — the default,
+        // unaltered agent prompt already carries the protocol.
+        const override = await SessionPreExecution.scopedBuilderPrompt({
+          runMode: false,
+          agent: "builder",
+          directories: [tmp.path],
+        })
+        expect(override).toBeUndefined()
+      },
     })
-    expect(instruction).toContain("Pre-Execution Protocol")
-    expect(instruction).toContain("sql_analyze")
-    expect(instruction).toContain("altimate_core_validate")
-    expect(instruction).toContain("sql_execute")
   })
 })
 

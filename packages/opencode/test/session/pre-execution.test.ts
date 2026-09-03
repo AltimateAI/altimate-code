@@ -3,6 +3,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import { SessionPreExecution } from "../../src/session/pre-execution"
+import { PromptProfiles } from "../../src/altimate/prompts/profiles"
 
 async function tmpdir(): Promise<string> {
   return await fs.mkdtemp(path.join(os.tmpdir(), "pre-exec-scope-"))
@@ -162,120 +163,106 @@ describe("workspace classification", () => {
   })
 })
 
+// The reworked mechanism (onto PR #1217's pack architecture): the protocol is
+// the `sql-guard` pack, and it ships INSIDE the default builder profile
+// unconditionally (see test/altimate/prompt-profiles.test.ts for the
+// byte-identity pin). `scopedBuilderPrompt` no longer injects text — it
+// returns a full prompt OVERRIDE (the profile with sql-guard excluded) for the
+// one cell the ablation measured, or `undefined` everywhere else, meaning
+// "use the agent's default `.prompt`, unchanged".
 describe("pre-execution protocol gate", () => {
   // The ONLY combination that drops the protocol is the one the ablation
   // measured: headless, builder, no dbt project in the workspace.
-  test("headless builder in a non-dbt workspace drops the protocol", async () => {
+  test("headless builder in a non-dbt workspace returns the sql-guard-excluded override", async () => {
     const dir = await tmpdir()
-    expect(
-      await SessionPreExecution.preExecutionInstruction({ runMode: true, agent: "builder", directories: [dir] }),
-    ).toBeUndefined()
-  })
-
-  test("headless builder in a dbt workspace keeps it", async () => {
-    const dir = await tmpdir()
-    await fs.writeFile(path.join(dir, "dbt_project.yml"), "name: demo\n")
-    const instruction = await SessionPreExecution.preExecutionInstruction({
+    const override = await SessionPreExecution.scopedBuilderPrompt({
       runMode: true,
       agent: "builder",
       directories: [dir],
     })
-    expect(instruction).toBe(SessionPreExecution.PRE_EXECUTION_PROTOCOL)
+    // Would fail if the gate silently no-ops and returns the default profile.
+    expect(override).toBe(PromptProfiles.PROMPT_BUILDER_SCOPED)
+    expect(override).not.toContain("## Pre-Execution Protocol")
+    expect(override).not.toBe(PromptProfiles.PROMPT_BUILDER)
+  })
+
+  test("headless builder in a dbt workspace keeps the default (no override)", async () => {
+    const dir = await tmpdir()
+    await fs.writeFile(path.join(dir, "dbt_project.yml"), "name: demo\n")
+    expect(
+      await SessionPreExecution.scopedBuilderPrompt({ runMode: true, agent: "builder", directories: [dir] }),
+    ).toBeUndefined()
   })
 
   // Interactive chat is a builder surface the ablation never covered, so it is
   // unchanged from before this PR regardless of what the workspace looks like.
-  test("interactive builder always keeps it, dbt project or not", async () => {
+  test("interactive builder always keeps the default (no override), dbt project or not", async () => {
     const dir = await tmpdir()
     expect(
-      await SessionPreExecution.preExecutionInstruction({ runMode: false, agent: "builder", directories: [dir] }),
-    ).toBe(SessionPreExecution.PRE_EXECUTION_PROTOCOL)
+      await SessionPreExecution.scopedBuilderPrompt({ runMode: false, agent: "builder", directories: [dir] }),
+    ).toBeUndefined()
   })
 
   // Ambiguity keeps the protocol. Wrongly dropping it has an unmeasured cost;
   // wrongly keeping it costs latency on one workload.
-  test("an unclassifiable workspace keeps it", async () => {
+  test("an unclassifiable workspace keeps the default (no override)", async () => {
     const dir = await tmpdir()
     expect(
-      await SessionPreExecution.preExecutionInstruction({
+      await SessionPreExecution.scopedBuilderPrompt({
         runMode: true,
         agent: "builder",
         directories: [path.join(dir, "does-not-exist")],
       }),
-    ).toBe(SessionPreExecution.PRE_EXECUTION_PROTOCOL)
+    ).toBeUndefined()
     expect(
-      await SessionPreExecution.preExecutionInstruction({ runMode: true, agent: "builder", directories: [] }),
-    ).toBe(SessionPreExecution.PRE_EXECUTION_PROTOCOL)
+      await SessionPreExecution.scopedBuilderPrompt({ runMode: true, agent: "builder", directories: [] }),
+    ).toBeUndefined()
   })
 
-  // Only builder.txt ever carried this section, so injecting it for analyst or
-  // reviewer would be a new instruction, not a preserved one.
-  test("no other agent receives the protocol", async () => {
+  // Only the builder profile ever carried this pack, so overriding it for
+  // analyst or reviewer would be a behavior change, not a preserved one.
+  test("no other agent receives an override", async () => {
     const dir = await tmpdir()
     for (const agent of ["analyst", "reviewer", "plan", "general"]) {
       expect(
-        await SessionPreExecution.preExecutionInstruction({ runMode: false, agent, directories: [dir] }),
+        await SessionPreExecution.scopedBuilderPrompt({ runMode: false, agent, directories: [dir] }),
       ).toBeUndefined()
       expect(
-        await SessionPreExecution.preExecutionInstruction({ runMode: true, agent, directories: [dir] }),
+        await SessionPreExecution.scopedBuilderPrompt({ runMode: true, agent, directories: [dir] }),
       ).toBeUndefined()
     }
   })
 })
 
-describe("prompt text fidelity", () => {
-  // The injected text must be byte-identical to what builder.txt shipped, so
-  // that every kept case produces the same resolved prompt as before.
-  test("the injected protocol is verbatim the section that was removed", async () => {
-    const expected = [
-      "## Pre-Execution Protocol",
-      "",
-      "Before executing ANY SQL via sql_execute, follow this mandatory sequence:",
-    ].join("\n")
-    expect(SessionPreExecution.PRE_EXECUTION_PROTOCOL.startsWith(expected)).toBe(true)
-    expect(SessionPreExecution.PRE_EXECUTION_PROTOCOL).toContain("This sequence is NOT optional.")
-    expect(SessionPreExecution.PRE_EXECUTION_PROTOCOL).toContain("altimate_core_validate")
-    expect(SessionPreExecution.PRE_EXECUTION_PROTOCOL).toContain("sql_analyze")
-    expect(SessionPreExecution.PRE_EXECUTION_PROTOCOL.endsWith("still validate syntax.")).toBe(true)
+describe("prompt override composition", () => {
+  // The override must drop ONLY the sql-guard pack — every neighbouring pack
+  // (and the invariant core) must survive untouched, otherwise the gate is
+  // silently scoping more than the protocol.
+  test("PROMPT_BUILDER_SCOPED omits sql-guard and nothing else", () => {
+    expect(PromptProfiles.PROMPT_BUILDER_SCOPED).not.toContain("## Pre-Execution Protocol")
+    expect(PromptProfiles.PROMPT_BUILDER_SCOPED).not.toContain("This sequence is NOT optional.")
+    expect(PromptProfiles.PROMPT_BUILDER_SCOPED).toContain("## dbt Verification Workflow")
+    expect(PromptProfiles.PROMPT_BUILDER_SCOPED).toContain("## Finish Protocol")
+    expect(PromptProfiles.BUILDER_PROFILE_SCOPED).toEqual(
+      PromptProfiles.BUILDER_PROFILE.filter((name) => name !== "sql-guard"),
+    )
   })
 
-  // If the section came back into the static prompt file the gate would be a
-  // no-op and every surface would carry it again.
-  test("the builder prompt file no longer carries the section", async () => {
-    const prompt = await Bun.file(new URL("../../src/altimate/prompts/builder.txt", import.meta.url).pathname).text()
-    expect(prompt).not.toContain("## Pre-Execution Protocol")
-    expect(prompt).not.toContain("This sequence is NOT optional.")
-    // The neighbouring sections must survive — only the one section moved.
-    expect(prompt).toContain("## dbt Verification Workflow")
-    expect(prompt).toContain("## Finish Protocol (mandatory before ending any build/fix task)")
-  })
-
-  // The Finish Protocol is a SECOND mandatory ritual in the same family, added
-  // after the binary the ablation measured was built. It is deliberately left
-  // alone: no measurement covers it, and this PR does not speak to it.
-  test("the Finish Protocol is untouched by this change", async () => {
-    const prompt = await Bun.file(new URL("../../src/altimate/prompts/builder.txt", import.meta.url).pathname).text()
-    expect(prompt).toContain("Re-read the task's literal requirements")
-    expect(prompt).toContain("Run the final build and tests")
+  // Selecting the override must never perturb the default byte-pinned
+  // profile — the two constants are independent, computed once at module load.
+  test("computing the override cannot change the default profile bytes", () => {
+    void PromptProfiles.PROMPT_BUILDER_SCOPED
+    expect(PromptProfiles.PROMPT_BUILDER).toContain("## Pre-Execution Protocol")
   })
 
   test("prompt assembly wires the gate to the run-mode flag and both directories", async () => {
     const prompt = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
     expect(prompt).toMatch(
-      /SessionPreExecution\.preExecutionInstruction\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*agent: agent\.name,\s*directories: \[Instance\.directory, Instance\.worktree\],\s*\}\)/,
+      /SessionPreExecution\.scopedBuilderPrompt\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*agent: agent\.name,\s*directories: \[Instance\.directory, Instance\.worktree\],\s*\}\)/,
     )
-    expect(prompt).toMatch(/if \(preExecutionInstruction\) system\.push\(preExecutionInstruction\)/)
-  })
-
-  // The completion instruction tells the model to signal DONE only once "every
-  // requirement above" is satisfied. A mandatory protocol pushed after it would
-  // sit outside that scope, so ordering here is behavioural, not cosmetic.
-  test("the protocol is pushed before the completion instruction", async () => {
-    const prompt = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
-    const protocolAt = prompt.indexOf("if (preExecutionInstruction) system.push(preExecutionInstruction)")
-    const completionAt = prompt.indexOf("if (completionInstruction) system.push(completionInstruction)")
-    expect(protocolAt).toBeGreaterThan(-1)
-    expect(completionAt).toBeGreaterThan(-1)
-    expect(protocolAt).toBeLessThan(completionAt)
+    // The override must actually reach the model call (via a cloned agent
+    // passed to processor.process), not just be computed and discarded.
+    expect(prompt).toMatch(/effectiveAgent = scopedBuilderPrompt \? \{ \.\.\.agent, prompt: scopedBuilderPrompt \} : agent/)
+    expect(prompt).toMatch(/agent: effectiveAgent,/)
   })
 })
