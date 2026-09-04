@@ -72,7 +72,7 @@ describe("showWelcomeBannerIfNeeded", () => {
     expect(() => showWelcomeBannerIfNeeded()).not.toThrow()
   })
 
-  // altimate_change start — first_launch is the only install metric, and after AI-8448 the curl and
+  // altimate_change start — first_launch is the only install metric, and after the shell-installer counting change (#1096) the curl and
   // PowerShell installers feed it too. These assert the two fields the install dashboard reads.
   describe("first_launch event", () => {
     const dataFiles = (version = "1.2.3", source?: string) => {

@@ -2,6 +2,7 @@
 //
 // Everything that asks the outside world a question: the binary, its
 // version, the workspace allowlist, and the user-facing surfaces.
+import { statSync } from "fs"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { AltimateApi } from "@/altimate/api/client"
@@ -43,6 +44,23 @@ async function readScoped(directory: string): Promise<ScopedBinding | null> {
 
 export function which(cmd: string): string | null {
   return syncInternals.which ? syncInternals.which(cmd) : whichBinary(cmd)
+}
+
+/** Identity of the file behind a PATH hit, cheap enough to ask every turn:
+ * inode, size, mtime and ctime of the target (symlinks followed, so an npm
+ * bin shim whose package was reinstalled reads as changed). A replacement
+ * file has a new inode; a rewrite in place that keeps the length and restores
+ * the mtime still moves the ctime, which nothing in userland can set back —
+ * so an update cannot read as the same file. Null when it cannot be stat'ed;
+ * with nothing to compare, the caller's memo falls back to its TTL. */
+export function fingerprint(bin: string): string | null {
+  if (syncInternals.fingerprint) return syncInternals.fingerprint(bin)
+  try {
+    const stat = statSync(bin)
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+  } catch {
+    return null
+  }
 }
 
 /** `datamate --version`, stdout only. The engine prints its real package
@@ -157,12 +175,36 @@ export async function notify(toast: Toast): Promise<void> {
   }
 }
 
+// altimate_change start — see `printLine`.
+function stripControl(text: string): string {
+  // C0 minus TAB (a tab is harmless here and legitimate in a name), DEL, and
+  // C1 (U+0080-U+009F) — U+009B is CSI, so a terminal decoding C1 from UTF-8
+  // would still act on an escape sequence the C0-only range let through.
+  // (review)
+  // eslint-disable-next-line no-control-regex
+  // U+2028/U+2029 are Unicode line/paragraph separators: not C0 or C1, but they
+  // still break the one-notice-per-line framing this writer depends on. (bot review)
+  return text.replace(/[\u0000-\u0008\u000A-\u001F\u007F-\u009F\u2028\u2029]/g, "")
+}
+// altimate_change end
+
 /** stderr, deliberately: `run --format json` documents stdout as raw JSON
  * events, and this is a status notice, not run output. */
 export function printLine(line: string): void {
-  if (syncInternals.printLine) return syncInternals.printLine(line)
+  // altimate_change — strip BEFORE the test-seam branch. Stripping after it
+  // meant the override path (and therefore anything routed through it) never
+  // got sanitised at all, so the guard covered only one of the two exits.
+  // (review)
+  const safe = stripControl(line)
+  if (syncInternals.printLine) return syncInternals.printLine(safe)
   try {
-    process.stderr.write(line + "\n")
+    // altimate_change — these lines embed the workspace NAME, which is
+    // set server-side and never validated for control characters. Writing it
+    // raw lets a workspace name carrying ANSI escapes repaint or hide
+    // surrounding output — including, in a CI log, the "engine not usable"
+    // notice this function exists to deliver. Strip C0 and DEL; the newline is
+    // added below, so nothing legitimate here needs them. (review)
+    process.stderr.write(safe + "\n")
   } catch {
     // A closed stream must not take down the turn.
   }

@@ -24,8 +24,9 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import open from "open"
-import { createSignal, onMount } from "solid-js"
+import { createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
   ForbiddenError,
@@ -48,6 +49,18 @@ import {
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
 import { readLocalBinding, recordApprovedBinding } from "@/altimate/workspace/state"
+import {
+  describeOffer,
+  installCommand,
+  installEngine,
+  nodeMajor as detectNodeMajor,
+  npmAvailable,
+  MIN_NODE_MAJOR,
+  OFFER_COMMAND,
+  OFFER_SKIP_TTL_MS,
+  type EngineOffer,
+} from "@/altimate/workspace/engine-offer"
+import { useClipboard } from "@opencode-ai/tui/context/clipboard"
 import { AltimateApi } from "@/altimate/api/client"
 import { Log } from "@/altimate/util/log"
 
@@ -1144,6 +1157,413 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Engine install offer. The workspace engine overlay decides there is no usable engine and hands
+// the offer here; this file owns the interaction. Offer, never silently
+// install — the install only ever runs from an explicit "Install now".
+// ─────────────────────────────────────────────────────────────────────────────
+
+const KV_ENGINE_SKIP_PREFIX = "altimate.workspace.engineInstall.skip."
+
+/** Latch key from (tenant, apiUrl, workspace id). Keyed on the workspace so a
+ * "Not now" for one workspace doesn't silence the offer for another, and on
+ * the id rather than the name so a rename doesn't reset it. */
+function engineSkipKey(workspaceId: string, scope: LatchScope | null): string {
+  const scopeString = scope ? `${scope.tenant}|${scope.apiUrl}|` : ""
+  return (
+    KV_ENGINE_SKIP_PREFIX +
+    createHash("sha1")
+      .update(scopeString + workspaceId)
+      .digest("hex")
+  )
+}
+
+/** The KV store starts empty and fills in once the persisted file is read
+ * (`api.kv.ready`). A latch checked before that reads as absent, so an offer
+ * raised on the first message after a restart would ignore a "Not now" that
+ * is still in force. `ready` is a plain getter with nothing to await, so poll
+ * it, bounded by `timeoutMs` (pass `Infinity` to hold until it flips — it
+ * does, on a failed read as well as a successful one). Resolves to whether
+ * the store was ready; the caller decides what a timeout means. */
+const KV_READY_TIMEOUT_MS = 3_000
+/** Upper bound on holding an offer for hydration; see `showEngineInstallOffer`. */
+export const KV_READY_HOLD_MS = 6 * 60_000
+const KV_READY_POLL_MS = 25
+async function awaitKvReady(
+  kv: { readonly ready: boolean },
+  timeoutMs = KV_READY_TIMEOUT_MS,
+  pollMs = KV_READY_POLL_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (!kv.ready) {
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
+  return true
+}
+
+/** Same clock-rewind handling as the post-scan latch; the TTL is the one the
+ * attach side's announce dedupe expires on, so both agree on "7 days". */
+function isEngineSkipActive(
+  api: TuiPluginApi,
+  workspaceId: string,
+  scope: LatchScope | null,
+  nowMs: number,
+): boolean {
+  const rec = api.kv.get<{ skippedAt: number }>(engineSkipKey(workspaceId, scope))
+  if (!rec || typeof rec.skippedAt !== "number") return false
+  const delta = nowMs - rec.skippedAt
+  if (delta < 0) return false
+  return delta < OFFER_SKIP_TTL_MS
+}
+
+function recordEngineSkip(
+  api: TuiPluginApi,
+  workspaceId: string,
+  scope: LatchScope | null,
+  nowMs: number,
+): void {
+  api.kv.set(engineSkipKey(workspaceId, scope), { skippedAt: nowMs })
+}
+
+interface EngineOfferProps {
+  api: TuiPluginApi
+  offer: EngineOffer
+  /** Node major on PATH, or null when Node is absent. Resolved by the caller
+   * so the dialog itself stays sync (same shape as ``browserAvailable``). */
+  nodeMajor: number | null
+  /** Whether npm itself can be invoked. Node 20+ is not enough: several Linux
+   * distributions package node and npm separately. */
+  hasNpm: boolean
+  latchScope: LatchScope | null
+  /** Which raise owns the single-offer latch; only the owner releases it. */
+  generation: number
+}
+
+/** One DialogSelect for every phase — the row set changes, the component never
+ * does. Swapping the top-level dialog component between states tears down and
+ * remounts the dialog, which drops focus and loses the phase signal. Sentinel
+ * rows carry the non-idle phases, and never use ``disabled: true`` (
+ * DialogSelect's ``filtered()`` drops those, leaving an empty list). */
+function EngineInstallOfferDialog(props: EngineOfferProps) {
+  const clipboard = useClipboard()
+  const [phase, setPhase] = createSignal<"idle" | "installing" | "failed">("idle")
+  const [failure, setFailure] = createSignal<string | null>(null)
+  // The install outlives this component: Escape or a click outside dismisses
+  // the dialog while npm keeps running. Signals set after that update nothing
+  // anyone can see — a failed install or the five-minute timeout would be
+  // completely silent — and clearing the dialog stack would close whatever
+  // opened in our place. So completion reports through a toast when we are
+  // gone, and only touches the dialog while we still own it.
+  let mounted = true
+  onCleanup(() => {
+    mounted = false
+    // Release the single-offer latch however this dialog goes away — chosen,
+    // dismissed, or replaced — but only if this dialog still owns it. A
+    // superseded dialog tearing down must not free a slot the newer one holds.
+    if (engineOfferGeneration === props.generation) engineOfferVisible = false
+  })
+  // ``onSelect`` is delivered synchronously per Enter keypress; the install is
+  // a multi-minute await. Without this latch a second Enter starts a second
+  // ``npm i -g`` against the same global prefix.
+  let installing = false
+
+  const command = () => props.offer.command
+  const canInstall = () => canInstallWith(props.nodeMajor, props.hasNpm)
+
+  const title = () => {
+    const n = props.offer.declared
+    const tools = n === undefined ? "its integration tools" : `${n} integration tool${n === 1 ? "" : "s"}`
+    const head =
+      props.offer.reason === "engine-too-old"
+        ? `Workspace "${props.offer.workspaceName}" needs a newer local engine (found ${props.offer.found ?? "unknown"}) — ${tools} unavailable`
+        : n === undefined
+          ? `Workspace "${props.offer.workspaceName}" has integration tools that need the local engine`
+          : `Workspace "${props.offer.workspaceName}" declares ${tools}, which need${n === 1 ? "s" : ""} the local engine`
+    const parts = [head, command()]
+    if (!canInstall()) {
+      parts.push(
+        props.nodeMajor === null
+          ? `(needs Node ${MIN_NODE_MAJOR}+ to install — Node was not found on PATH)`
+          : props.nodeMajor < MIN_NODE_MAJOR
+            ? `(needs Node ${MIN_NODE_MAJOR}+ to install — found Node ${props.nodeMajor})`
+            : `(needs npm to install — npm was not found on PATH)`,
+      )
+    }
+    const err = failure()
+    if (err) parts.push(`(install failed: ${err})`)
+    return parts.join(" · ")
+  }
+
+  const options = () => {
+    switch (phase()) {
+      case "installing":
+        return [{ title: "Installing… this can take a minute.", value: "busy" }]
+      case "failed":
+        return [
+          { title: "Copy command", value: "copy", description: "Run it yourself, then start a new session." },
+          { title: "Close", value: "close" },
+        ]
+      default:
+        return [
+          ...(canInstall()
+            ? [
+                {
+                  title: "Install now",
+                  value: "install",
+                  description: `Runs ${command()} and attaches this session when it finishes.`,
+                },
+              ]
+            : []),
+          {
+            title: "Copy command",
+            value: "copy",
+            description: "Copy the install command to your clipboard.",
+          },
+          {
+            title: "Not now",
+            value: "skip",
+            description: "Won't ask again for this workspace for 7 days.",
+          },
+        ]
+    }
+  }
+
+  const runInstall = async () => {
+    setPhase("installing")
+    engineInstallInFlight = true
+    try {
+      await performInstall()
+    } finally {
+      engineInstallInFlight = false
+    }
+  }
+
+  const performInstall = async () => {
+    const result = await installEngine()
+    if (!result.ok) {
+      installing = false
+      if (!mounted) {
+        // Dismissed mid-install: the failed-phase rows have nowhere to render,
+        // so the error reaches the user as a toast or not at all.
+        props.api.ui.toast({
+          variant: "error",
+          message: `Workspace engine install failed: ${result.error}. Run: ${command()}`,
+          duration: 30_000,
+        })
+        return
+      }
+      setFailure(result.error)
+      setPhase("failed")
+      return
+    }
+    // Only clear a dialog we still own — by now the user may have opened
+    // another, and clearing the stack would take theirs down instead.
+    if (mounted) props.api.ui.dialog.clear()
+    // Deliberately NOT reconciling this session from here. The plugin runtime
+    // loads this file in its own realm, so the overlay module here is not the
+    // one the server consults. Nothing needs to: the turn boundary looks for a
+    // missing engine on PATH again every turn, so the engine just installed is
+    // picked up on the next message without a restart.
+    props.api.ui.toast({
+      variant: "success",
+      message:
+        `Workspace engine installed. Integration tools for "${props.offer.workspaceName}" ` +
+        `attach on your next message.`,
+      duration: 15_000,
+    })
+  }
+
+  const copyCommand = () => {
+    const cmd = command()
+    void (async () => {
+      try {
+        await clipboard.write?.(cmd)
+        // A resolved write is NOT proof of a copy. The host's writer picks
+        // xclip/xsel on Linux and otherwise falls back to clipboardy, and it
+        // swallows backend failures (`.catch(() => undefined)`), so on the many
+        // Linux/WSL boxes with neither tool installed the write silently does
+        // nothing. Read back and compare before claiming success. (Caught by
+        // E2E: the toast said "Copied:" while the clipboard was untouched.)
+        const back = await clipboard.read?.()
+        if (back?.data.trim() === cmd) {
+          props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
+          return
+        }
+      } catch {
+        // Unreadable or unwritable clipboard — fall through and show it.
+      }
+      props.api.ui.toast({
+        variant: "warning",
+        message: `Could not confirm the clipboard. Run: ${cmd}`,
+        duration: 30_000,
+      })
+    })()
+  }
+
+  return (
+    <props.api.ui.DialogSelect
+      title={title()}
+      options={options()}
+      // No filter, and no filter box. The row set changes with the phase, and
+      // a query typed to reach "Install now" would still apply afterwards — the
+      // installing sentinel and the failure rows do not match it, so
+      // `filtered()` would empty and the recovery actions become unreachable.
+      // A fixed three-option dialog gains nothing from filtering anyway, and
+      // the box itself only collects stray keystrokes while the install runs.
+      skipFilter
+      renderFilter={false}
+      current={phase() === "failed" ? "copy" : canInstall() ? "install" : "copy"}
+      onSelect={(option) => {
+        if (option.value === "busy") return
+        if (option.value === "install") {
+          if (installing) return
+          installing = true
+          void runInstall().catch((err) => {
+            const message = err instanceof Error ? err.message : String(err)
+            installing = false
+            if (!mounted) {
+              // Same as a reported failure after dismissal: the rows are gone,
+              // so the error reaches the user as a toast or not at all.
+              props.api.ui.toast({
+                variant: "error",
+                message: `Workspace engine install failed: ${message}. Run: ${command()}`,
+                duration: 30_000,
+              })
+              return
+            }
+            setFailure(message)
+            setPhase("failed")
+          })
+          return
+        }
+        if (option.value === "copy") {
+          copyCommand()
+          props.api.ui.dialog.clear()
+          return
+        }
+        if (option.value === "skip") {
+          recordEngineSkip(props.api, props.offer.workspaceId, props.latchScope, Date.now())
+        }
+        props.api.ui.dialog.clear()
+      }}
+    />
+  )
+}
+
+/** Show the offer unless the 7-day latch suppresses it.
+ *
+ * The overlay raises this as a bare command over the event bus — it cannot hand
+ * us the offer object, because the plugin runtime loads this file in a separate
+ * realm from the attach flow. So the detail is re-derived here, the same way
+ * the post-scan prompt re-derives its own state from the directory. Node
+ * availability and latch scope are resolved before rendering so the dialog
+ * itself stays sync. */
+let engineOfferVisible = false
+/** Identifies which raise owns the latch, so a superseded dialog's teardown
+ * cannot free a slot that a newer dialog is still holding. */
+let engineOfferGeneration = 0
+/** Held for the lifetime of an `npm i -g`, independently of the dialog.
+ *
+ * The install outlives the dialog that started it: dismissing mid-install
+ * tears the component down and frees the offer latch, but npm keeps running.
+ * Without this, the next turn's repair retry raises a fresh offer whose
+ * "Install now" starts a SECOND `npm i -g` against the same global prefix.
+ * The dialog latch answers "is an offer on screen"; this one answers "is an
+ * install still running", and only the second survives dismissal. */
+let engineInstallInFlight = false
+
+async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
+  // The attach re-probes a repairable failure on every turn, so the offer can
+  // be raised again while an earlier one is still up — including mid-install,
+  // where a fresh idle dialog replaces the "Installing…" one and then swallows
+  // the user's keystrokes into its own filter. Observed end-to-end: after a
+  // successful install the pane showed a second offer in its idle phase and
+  // typing went to the dialog rather than the prompt. One offer at a time.
+  //
+  // The slot is reserved BEFORE the first await. Discovery below awaits three
+  // times, and a check-then-act guard placed after them lets two dispatches
+  // that arrive close together both pass — which is worse than the bug it
+  // fixes, because the second dialog can replace an installing one and start a
+  // concurrent global npm install.
+  // `attach <url>` runs this plugin on the CLIENT while the binding, the PATH
+  // that matters and the MCP session all live on the SERVER. Probing PATH here
+  // would describe the wrong machine, and "Install now" would install npm on
+  // the client, leaving the server exactly as it was behind a success toast.
+  // attach.ts recognises that case the same way — the server's directory does
+  // not exist locally — so use it and refuse to act, saying where the fix goes.
+  //
+  // Not a complete answer: a client that happens to have the same path, with a
+  // binding, is still misread. Closing that needs server-side discovery and
+  // install behind an API, which this PR does not add.
+  if (!existsSync(api.state.path.directory)) {
+    log.info("engine install offer suppressed: not the host that owns this workspace")
+    api.ui.toast({
+      variant: "warning",
+      message: `This workspace's engine is missing on the server, not on this machine. Run there: ${installCommand()}`,
+      duration: 30_000,
+    })
+    return
+  }
+  if (engineOfferVisible) return
+  if (engineInstallInFlight) {
+    // An install started from an earlier dialog is still running; offering
+    // again would invite a second concurrent global install.
+    log.info("engine install offer suppressed while an install is in flight")
+    return
+  }
+  engineOfferVisible = true
+  const generation = ++engineOfferGeneration
+  const release = () => {
+    // Only the current owner may free the slot.
+    if (engineOfferGeneration === generation) engineOfferVisible = false
+  }
+  try {
+    // An unhydrated store is not an absent latch: a "Not now" chosen before
+    // this restart is in the file still being read. Hold the offer until the
+    // read settles rather than open a dialog the latch may forbid — and rather
+    // than drop it, which would cost the session its offer (the attach only
+    // re-raises once the latch window has passed). The slot stays reserved
+    // meanwhile, and the offer is derived only afterwards so a long wait
+    // cannot leave it stale.
+    if (!(await awaitKvReady(api.kv))) {
+      log.warn("kv store not hydrated in time; holding the engine install offer until it is")
+      // The hold has a local bound, set above the kv file lock's own timeout
+      // (Flock, five minutes, in the TUI's kv provider) so it only ends a hold
+      // the store itself has already given up on. Past it the slot is freed
+      // and the offer waits for a later raise rather than opening unlatched.
+      if (!(await awaitKvReady(api.kv, KV_READY_HOLD_MS))) {
+        log.warn("kv store still not hydrated; releasing the engine install offer for a later raise")
+        return release()
+      }
+    }
+    const offer = await describeOffer(api.state.path.directory)
+    // Null means the situation resolved between the attach and this dialog — an
+    // engine appeared, or the project is no longer bound. Say nothing.
+    if (!offer) return release()
+    const latchScope = await currentLatchScope()
+    if (isEngineSkipActive(api, offer.workspaceId, latchScope, Date.now())) {
+      log.info("engine install offer suppressed by 7-day latch", { workspaceId: offer.workspaceId })
+      return release()
+    }
+    const major = await detectNodeMajor()
+    const hasNpm = npmAvailable()
+    api.ui.dialog.replace(() => (
+      <EngineInstallOfferDialog
+        api={api}
+        offer={offer}
+        nodeMajor={major}
+        hasNpm={hasNpm}
+        latchScope={latchScope}
+        generation={generation}
+      />
+    ))
+  } catch (err) {
+    release()
+    throw err
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Plugin registration
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1174,6 +1594,17 @@ const tui: TuiPlugin = async (api) => {
         },
       },
       {
+        // Raised by the workspace engine overlay over the event bus when a bound workspace has
+        // no usable engine. Internal: dispatched, never shown in the palette.
+        name: OFFER_COMMAND,
+        title: "Workspace engine install offer",
+        category: "Altimate",
+        namespace: "internal",
+        run() {
+          showEngineInstallOffer(api).catch((err) => reportFlowFailure(api, err))
+        },
+      },
+      {
         name: "altimate.workspace.link",
         title: "Link this project to a workspace",
         category: "Altimate",
@@ -1195,5 +1626,29 @@ export default { id: PLUGIN_ID, tui } satisfies BuiltinTuiPlugin
 // Exported for unit tests only. The shared logic (WorkspaceApi, cache, detect,
 // project-name) lives in `@/altimate/workspace/*` and should be tested there;
 // the plugin owns just the TUI-specific latch semantics.
-export { isSkipActive, recordSkip }
+/** "Install now" is offered only with Node 20+ and npm on PATH — Node is not
+ * enough on its own, npm ships separately on several distributions. */
+export function canInstallWith(nodeMajor: number | null, hasNpm: boolean): boolean {
+  return nodeMajor !== null && nodeMajor >= MIN_NODE_MAJOR && hasNpm
+}
+
+/** Test seam for the raise path's process-wide state. */
+export const engineOfferInternals = {
+  get visible() {
+    return engineOfferVisible
+  },
+  get inFlight() {
+    return engineInstallInFlight
+  },
+  set({ visible, inFlight }: { visible?: boolean; inFlight?: boolean }) {
+    if (visible !== undefined) engineOfferVisible = visible
+    if (inFlight !== undefined) engineInstallInFlight = inFlight
+  },
+  reset() {
+    engineOfferVisible = false
+    engineInstallInFlight = false
+  },
+}
+
+export { isSkipActive, recordSkip, isEngineSkipActive, recordEngineSkip, awaitKvReady, showEngineInstallOffer }
 // altimate_change end

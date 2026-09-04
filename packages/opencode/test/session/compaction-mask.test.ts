@@ -58,7 +58,7 @@ describe("SessionCompaction.createObservationMask", () => {
     expect(mask).toContain("bash(")
     expect(mask).toContain('command: "git status"')
     expect(mask).toContain("3 lines")
-    expect(mask).toContain("— \"On branch main\"")
+    expect(mask).toContain('— "On branch main"')
     // Byte size should be present
     expect(mask).toMatch(/\d+ B/)
   })
@@ -93,7 +93,7 @@ describe("SessionCompaction.createObservationMask", () => {
     const mask = SessionCompaction.createObservationMask(part)
 
     expect(mask).toContain("100 lines")
-    expect(mask).toContain("— \"line 1\"")
+    expect(mask).toContain('— "line 1"')
   })
 
   test("truncates long args with ellipsis", () => {
@@ -152,7 +152,7 @@ describe("SessionCompaction.createObservationMask", () => {
     const mask = SessionCompaction.createObservationMask(part)
 
     expect(mask).toContain("12 B")
-    expect(mask).toContain("— \"你好世界\"")
+    expect(mask).toContain('— "你好世界"')
   })
 
   test("fingerprint is capped at 80 characters", () => {
@@ -165,4 +165,97 @@ describe("SessionCompaction.createObservationMask", () => {
     expect(mask).toContain(`— "${fingerprint80}"`)
     expect(mask).not.toContain("z".repeat(81))
   })
+})
+
+// ─── Mask redaction before replay ───────────────────────────────────────────
+
+// The mask REPLACES cleared tool output and is replayed on every subsequent
+// provider request, so anything it retains outlives the clear and survives a
+// provider switch. Both fields it copies — the serialized arguments and the
+// first output line — previously bypassed the ledger's redaction entirely.
+describe("SessionCompaction.createObservationMask redaction", () => {
+  test("redacts secrets carried in the tool arguments", () => {
+    const cases: Array<[Record<string, any>, string]> = [
+      [{ command: "curl -u alice:dummy-password https://x.com" }, "dummy-password"],
+      [{ command: "export OPENAI_API_KEY=dummy-openai" }, "dummy-openai"],
+      [{ command: "tool --user 1234:dummy-password" }, "dummy-password"],
+      [{ command: "fetch --token dummy-token-value" }, "dummy-token-value"],
+    ]
+    for (const [input, secret] of cases) {
+      const mask = SessionCompaction.createObservationMask(makeCompletedPart({ tool: "bash", input, output: "ok" }))
+      expect(mask).not.toContain(secret)
+    }
+  })
+
+  test("redacts a secret held under a sensitive argument NAME", () => {
+    // Value-level pattern matching cannot see this: an opaque token matches no
+    // shape on its own, so the KEY is what marks it as a credential.
+    const mask = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "fetch", input: { api_key: "sk-abc123opaque", url: "https://x.com" }, output: "ok" }),
+    )
+    expect(mask).not.toContain("sk-abc123opaque")
+    // Nested one level down, too.
+    const nested = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "fetch", input: { headers: { authorization: "Bearer dummy-jwt" } }, output: "ok" }),
+    )
+    expect(nested).not.toContain("dummy-jwt")
+  })
+
+  test("redacts every alias of a shared nested argument object", () => {
+    const shared = { authorization: "Bearer shared-secret-value", label: "ordinary" }
+    const mask = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "fetch", input: { first: shared, second: shared }, output: "ok" }),
+    )
+    expect(mask).not.toContain("shared-secret-value")
+    expect(mask).toContain("ordinary")
+  })
+
+  test("redacts secrets carried in the first output line", () => {
+    const cases = [
+      ["AWS_SECRET_ACCESS_KEY=dummy-assignment\nrest", "dummy-assignment"],
+      ["https://example.com/d?X-Amz-Signature=dummy-signature", "dummy-signature"],
+      ["Authorization: Bearer dummy-bearer", "dummy-bearer"],
+    ]
+    for (const [output, secret] of cases) {
+      const mask = SessionCompaction.createObservationMask(
+        makeCompletedPart({ tool: "bash", input: { command: "echo hi" }, output }),
+      )
+      expect(mask).not.toContain(secret)
+    }
+  })
+
+  // Redaction must not cost the mask its purpose. A first attempt redacted the
+  // JSON and the joined `k: v` text, which collapsed every argument to "?" —
+  // the mask stayed safe and became useless.
+  test("keeps ordinary arguments and fingerprints legible", () => {
+    const mask = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "bash", input: { command: "git status" }, output: "On branch main\nclean" }),
+    )
+    expect(mask).toContain('command: "git status"')
+    expect(mask).toContain("On branch main")
+  })
+
+  // Guards a hang this redaction pass introduced and the suite caught: walking
+  // an arbitrary tool input to redact its string leaves followed the cycle.
+  test("a circular argument still degrades to [unserializable] rather than hanging", () => {
+    const circular: Record<string, any> = { key: "value" }
+    circular.self = circular
+    const mask = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "bash", input: circular, output: "ok" }),
+    )
+    expect(mask).toContain("[unserializable]")
+  })
+
+  // Guards the second hang: redactLedgerDetail cost grows super-linearly
+  // (1 KB 2ms, 10 KB 77ms, 100 KB 6.2s) and tool output can be megabytes, so
+  // redaction runs over a bounded window rather than the whole line.
+  test("a multi-megabyte single-line output masks promptly", () => {
+    const output = "b".repeat(1024 * 1024 + 512 * 1024)
+    const started = Date.now()
+    const mask = SessionCompaction.createObservationMask(
+      makeCompletedPart({ tool: "bash", input: { command: "cat big" }, output }),
+    )
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(mask).toContain("[Tool output cleared")
+  }, 30_000)
 })

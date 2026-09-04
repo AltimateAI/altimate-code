@@ -91,7 +91,7 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
       // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
       // Config.get() resolves during an ordinary browser authorize(). The known
       // exception is `altimate auth login <url>`, which deliberately skips
-      // instance bootstrap (ProvidersLoginCommand `instance: (args) => !args.url`);
+      // instance bootstrap (ProvidersLoginCommand `instance: (args) => !isAuthProviderUrl(args.target)`);
       // on that path this fires. Fail CLOSED — omit the durable machine_id rather
       // than transmit it for a user who may have opted out via config; a missed
       // correlation beats leaking a stable identifier. Log so a low correlation

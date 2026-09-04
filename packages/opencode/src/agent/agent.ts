@@ -18,7 +18,10 @@ import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 // altimate_change start - import custom agent mode prompts
-import PROMPT_BUILDER from "../altimate/prompts/builder.txt"
+// PromptProfiles.PROMPT_BUILDER is assembled from core + pack fragments (byte-identical
+// to the former builder.txt — see profiles.ts and test/altimate/prompt-profiles.test.ts)
+import { PromptProfiles } from "../altimate/prompts/profiles"
+import { Flag } from "@/flag/flag"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
 // altimate_change end
@@ -224,7 +227,7 @@ export const layer = Layer.effect(
           builder: {
             name: "builder",
             description: "Create and modify dbt models, SQL, and data pipelines. Full read/write access.",
-            prompt: PROMPT_BUILDER,
+            prompt: PromptProfiles.PROMPT_BUILDER,
             options: {},
             permission: Permission.merge(
               defaults,
@@ -315,6 +318,43 @@ export const layer = Layer.effect(
             mode: "primary",
             native: true,
           },
+          // Opt-in data-qa profile (workload-adaptive harness PR 1): the invariant
+          // core + skills catalogue + teammate training — omits the Pre-Execution
+          // Protocol (sql-guard) pack and the build-oriented packs (dbt-ops,
+          // dbt-verify, dbt-workflow, pitfalls, self-review, finish). Ships the
+          // same DEFAULT permission ruleset as builder; per-agent config
+          // overrides apply per agent, as for every agent. Registered on any of
+          // three explicit opt-ins: ALTIMATE_DATA_QA_PROFILE=1/true, an
+          // `agent: {"data-qa": {...}}` entry in config (which then overlays the
+          // native profile via the standard merge below), or `default_agent:
+          // "data-qa"` (naming it as the default is itself an explicit
+          // selection — without this arm, defaultInfo() would throw "default
+          // agent \"data-qa\" not found" instead of registering it). Nothing
+          // selects it implicitly otherwise; the default agent stays builder.
+          ...(Flag.truthyEnv("ALTIMATE_DATA_QA_PROFILE") ||
+          cfg.agent?.["data-qa"] != null ||
+          cfg.default_agent === "data-qa"
+            ? {
+                "data-qa": {
+                  name: "data-qa",
+                  description:
+                    "Opt-in data Q&A profile: builder toolset with a slimmer prompt (no dbt build protocols).",
+                  prompt: PromptProfiles.PROMPT_DATA_QA,
+                  options: {},
+                  permission: Permission.merge(
+                    defaults,
+                    Permission.fromConfig({
+                      question: "allow",
+                      plan_enter: "allow",
+                      sql_execute_write: "ask",
+                    }),
+                    userWithSafety,
+                  ),
+                  mode: "primary",
+                  native: true,
+                } satisfies Info,
+              }
+            : {}),
           // reviewer agent: dbt PR review verdict engine
           reviewer: {
             name: "reviewer",

@@ -127,6 +127,7 @@
     "printWidth": 120
   },
   "trustedDependencies": [
+    "duckdb",
     "esbuild",
     "node-pty",
     "protobufjs",

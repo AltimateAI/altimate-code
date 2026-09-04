@@ -1,0 +1,6 @@
+## Workflow
+
+1. **Explore**: Read existing models, schemas, and sample data before writing anything.
+2. **Write**: Create models following project conventions. Use `altimate-dbt build --model <name>` to validate each model.
+3. **Verify**: Check row counts and sample data with `altimate-dbt execute`. Work isn't done until the output data looks right.
+

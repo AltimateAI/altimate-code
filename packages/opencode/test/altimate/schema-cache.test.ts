@@ -644,7 +644,7 @@ describe("SQLite driver PRAGMA handling", () => {
   test("PRAGMA statements work without LIMIT clause error", async () => {
     const { connect } = await import("@altimateai/drivers/sqlite")
     const dbPath = join(tmpDir, "pragma-test.db")
-    const connector = await connect({ type: "sqlite", path: dbPath })
+    const connector = await connect({ type: "sqlite", path: dbPath, create: true })
     await connector.connect()
 
     // These should all work without "near LIMIT: syntax error"
@@ -664,7 +664,7 @@ describe("SQLite driver PRAGMA handling", () => {
   test("SELECT statements still get LIMIT applied", async () => {
     const { connect } = await import("@altimateai/drivers/sqlite")
     const dbPath = join(tmpDir, "limit-test.db")
-    const connector = await connect({ type: "sqlite", path: dbPath })
+    const connector = await connect({ type: "sqlite", path: dbPath, create: true })
     await connector.connect()
 
     await connector.execute("CREATE TABLE nums (n INTEGER)")
@@ -691,7 +691,7 @@ describe("SQLite driver readonly connections", () => {
     const dbPath = join(tmpDir, "readonly-test.db")
 
     // Create a database with data first
-    const writer = await connect({ type: "sqlite", path: dbPath })
+    const writer = await connect({ type: "sqlite", path: dbPath, create: true })
     await writer.connect()
     await writer.execute("CREATE TABLE items (id INTEGER, name TEXT)")
     await writer.execute("INSERT INTO items VALUES (1, 'test')")
@@ -710,7 +710,7 @@ describe("SQLite driver readonly connections", () => {
     const dbPath = join(tmpDir, "readonly-write-test.db")
 
     // Create a database first
-    const writer = await connect({ type: "sqlite", path: dbPath })
+    const writer = await connect({ type: "sqlite", path: dbPath, create: true })
     await writer.connect()
     await writer.execute("CREATE TABLE items (id INTEGER)")
     await writer.close()

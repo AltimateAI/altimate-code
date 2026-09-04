@@ -107,6 +107,13 @@ export const INTEGRATION_TYPE: Readonly<Record<string, string>> = {
 
 const CAPABILITIES: Capability[] = ["sql_execute", "sql_explain", "schema_inspect"]
 
+// altimate_change start — terse capability label for the human-facing surfaces (the
+// toast line and a `warehouse_list` row), where one line is the whole budget. The
+// prompt section uses its own fuller wording: different audiences, deliberately
+// different schemes.
+const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
+// altimate_change end
+
 export interface ShadowEntry {
   /** Engine tool name, without the MCP server prefix. */
   engineTool: string
@@ -141,6 +148,23 @@ export interface Precedence {
    * engine keys, so redirecting its permitted reads would take away the one thing
    * it exists to do. Absent means "unknown", which is treated as reachable. */
   ruleset?: PermissionNext.Ruleset
+}
+
+/** The workspace name as model-visible text: control characters stripped (C0, DEL and
+ * the C1 range — NEL U+0085 is a line break that `\s` does not match), the Unicode
+ * line and paragraph separators too, whitespace collapsed onto one line, length
+ * bounded in code points so a cut never leaves a lone surrogate. Quoting is the
+ * caller's choice — the system-prompt section JSON-quotes it as well — but nothing
+ * that passes through here can start a new line, and so a new heading or role, in
+ * what the model reads. */
+export const MAX_WORKSPACE_NAME_CHARS = 80
+export function inertWorkspaceName(name: string): string {
+  const cleaned = name
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  const points = Array.from(cleaned)
+  return points.length > MAX_WORKSPACE_NAME_CHARS ? points.slice(0, MAX_WORKSPACE_NAME_CHARS - 1).join("") + "…" : cleaned
 }
 
 const EMPTY = (reason: Precedence["disabledReason"], workspaceName = ""): Precedence => ({
@@ -336,7 +360,9 @@ async function announce(line: string): Promise<boolean> {
 
 /** Mechanism 6 — the escape hatch. `--integrations=local` (or the env var) turns
  * shadowing off for the whole process — it is `process.env.ALTIMATE_INTEGRATIONS`,
- * inherited by child processes, and under `serve` it covers every session. */
+ * inherited by child processes, and under `serve` it covers every session. Because it
+ * is process-wide it also reaches projects with no workspace, which is why `derive`
+ * reads it only after establishing that this project has a link at all. */
 export function escapeHatchOn(): boolean {
   return CoreFlag.ALTIMATE_INTEGRATIONS_LOCAL
 }
@@ -480,15 +506,28 @@ async function derive(sessionID: string, tools: Record<string, unknown>): Promis
   // for someone who has switched the pilot off. Without this gate their local
   // warehouse calls would start redirecting.
   if (!isEnabled()) return EMPTY("pilot-off")
-  if (escapeHatchOn()) return EMPTY("escape-hatch")
 
   const read = await currentBinding()
   // An unreadable link is unknown, not opted out: it must reach the result as a stated
   // reason (Claim 1), where a genuinely unbound project runs silently by design.
-  if (read.kind === "unreadable") return EMPTY("binding-unreadable")
   if (read.kind === "unbound") return EMPTY("unbound")
+  // altimate_change start — the hatch is read AFTER the link, not before it. Both
+  // answers disable routing identically, so the order decides only which reason is
+  // reported, and `escape-hatch` is a claim about workspace routing — which an unbound
+  // project has none of. Reported there it puts a workspace toast on screen and a
+  // workspace section in the system prompt of a session that has no workspace at all.
+  // It still outranks `unreadable`: the flag is a fact about this session whatever the
+  // link says, and someone who switched routing off should hear that rather than that
+  // an engine they disabled could not be verified.
+  if (escapeHatchOn()) return EMPTY("escape-hatch")
+  // altimate_change end
+  if (read.kind === "unreadable") return EMPTY("binding-unreadable")
   const binding = read
-  const workspaceName = binding.datamateName
+  // Customer-authored, and it reaches the model through every surface below —
+  // redirect notices, tool descriptions, the `warehouse_list` note, the prompt
+  // section. Made inert once, here, so no downstream interpolation can carry a
+  // newline, a heading or a control character into model-visible text.
+  const workspaceName = inertWorkspaceName(binding.datamateName)
 
   // Mechanism 1a — refuse to engage on an engine we cannot attribute to this binding.
   // Two signals, and both must agree. The attach outcome says the running engine is
@@ -607,6 +646,45 @@ function servedFor(precedence: Precedence, type: string): Capability[] {
     return !!entry && reachable(precedence, entry.modelKey)
   })
 }
+
+// altimate_change start — reachability-filtered projection of what is actually routed,
+// for the system-prompt awareness section. A PROJECTION, not a second derivation: it
+// reads the same snapshot the redirects read and filters through the same `servedFor`,
+// so the section can never advertise a routing that `check()` would not perform, nor
+// one the caller's agent is forbidden to follow.
+export interface ServedType {
+  /** Canonical local driver type the workspace serves, e.g. `snowflake`. */
+  type: string
+  /** Served capabilities, with the model-facing key each one must be called by. */
+  served: { capability: Capability; modelKey: string }[]
+  /** The remaining capabilities, which stay on the local tool. Carried alongside
+   * rather than re-derived at the call site: an execute-only integration must be able
+   * to say so, and computing it here reuses the one `servedFor` pass above. */
+  local: Capability[]
+}
+
+/**
+ * What this caller will really have routed, grouped by type — types in shadow-table
+ * insertion order, capabilities in `CAPABILITIES` order. Empty when precedence is
+ * disabled, or when the caller may reach none of the destinations; both must render
+ * no section at all.
+ */
+export function servedInventory(precedence: Precedence): ServedType[] {
+  if (!precedence.enabled) return []
+  const out: ServedType[] = []
+  for (const [type, byCapability] of precedence.shadowed) {
+    const servedCaps = servedFor(precedence, type)
+    if (servedCaps.length === 0) continue
+    out.push({
+      type,
+      // Non-null is sound: `servedFor` only returns capabilities whose entry exists.
+      served: servedCaps.map((capability) => ({ capability, modelKey: byCapability.get(capability)!.modelKey })),
+      local: CAPABILITIES.filter((c) => !servedCaps.includes(c)),
+    })
+  }
+  return out
+}
+// altimate_change end
 
 function unreachable(workspaceName: string, modelKey: string): Verdict {
   return {
@@ -937,17 +1015,13 @@ export function inventoryLine(precedence: Precedence): string {
         return ""
     }
   }
-  const parts: string[] = []
-  const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
-  for (const type of precedence.shadowed.keys()) {
-    const servedCaps = servedFor(precedence, type)
-    if (servedCaps.length === 0) continue
-    const local = CAPABILITIES.filter((c) => !servedCaps.includes(c)).map(short)
-    parts.push(
-      `${type}: ${servedCaps.map(short).join("/")} via workspace ${precedence.workspaceName}` +
-        (local.length ? `, ${local.join("/")} stay local` : ""),
-    )
-  }
+  // altimate_change - reads the shared projection so this line and the model-facing
+  // section can never disagree about what is served.
+  const parts = servedInventory(precedence).map(
+    ({ type, served, local }) =>
+      `${type}: ${served.map((s) => short(s.capability)).join("/")} via workspace ${precedence.workspaceName}` +
+      (local.length ? `, ${local.map(short).join("/")} stay local` : ""),
+  )
   if (parts.length === 0) return ""
   const shadowedCount = countShadowedConnections(precedence)
   return `Workspace integrations — ${parts.join("; ")}. ${shadowedCount} local connection${shadowedCount === 1 ? "" : "s"} shadowed.`
@@ -964,18 +1038,22 @@ function countShadowedConnections(precedence: Precedence): number {
   }
 }
 
-/** Per-capability note for a `warehouse_list` row, or null when the row is untouched. */
-export function warehouseListNote(precedence: Precedence | undefined, warehouseType: string): string | null {
-  if (!precedence?.enabled) return null
+/** Per-capability note for a `warehouse_list` row, or null when the row is untouched.
+ * `inventory` lets a caller that annotates many rows project the snapshot once. */
+export function warehouseListNote(
+  precedence: Precedence | undefined,
+  warehouseType: string,
+  inventory: ServedType[] | undefined = precedence ? servedInventory(precedence) : undefined,
+): string | null {
+  if (!precedence?.enabled || !inventory) return null
   const type = canonicalType(warehouseType)
   if (!type) return null
-  const servedCaps = servedFor(precedence, type)
-  if (servedCaps.length === 0) return null
-  const short = (c: Capability) => c.replace(/^(sql|schema)_/, "")
-  const served = servedCaps.map(short)
-  const local = CAPABILITIES.filter((c) => !servedCaps.includes(c)).map(short)
+  // altimate_change - same projection as the toast and the prompt section.
+  const entry = inventory.find((e) => e.type === type)
+  if (!entry) return null
   return (
-    `${served.join("/")} via workspace ${precedence.workspaceName}` + (local.length ? `; ${local.join("/")} local` : "")
+    `${entry.served.map((s) => short(s.capability)).join("/")} via workspace ${precedence.workspaceName}` +
+    (entry.local.length ? `; ${entry.local.map(short).join("/")} local` : "")
   )
 }
 
@@ -994,8 +1072,9 @@ export async function warehouseListNotes(
   const precedence = bySession.get(sessionID)
   if (!precedence?.enabled) return notes
   if (!(await snapshotCurrent(precedence))) return notes
+  const inventory = servedInventory(precedence)
   for (const wh of warehouses) {
-    const note = warehouseListNote(precedence, wh.type)
+    const note = warehouseListNote(precedence, wh.type, inventory)
     if (note) notes.set(wh.name, note)
   }
   return notes

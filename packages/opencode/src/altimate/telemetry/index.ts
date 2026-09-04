@@ -208,6 +208,13 @@ export namespace Telemetry {
         attempt: number
       }
     | {
+        type: "compaction_head_truncated"
+        timestamp: number
+        session_id: string
+        dropped_messages: number
+        kept_messages: number
+      }
+    | {
         type: "tool_outputs_pruned"
         timestamp: number
         session_id: string
@@ -300,6 +307,24 @@ export namespace Telemetry {
         session_id: string
         tool_name: string
         repeat_count: number
+      }
+    // Write-starvation breaker + loop detection. In annotate mode every
+    // event is action "would_fire"/"annotated" ("would_annotate" is the
+    // interactive-session telemetry-only shadow — output left untouched);
+    // armed run-mode sessions also emit "registered" (directive handed to the
+    // nudge arbiter), "injected" (arbiter winner delivered to the model), and
+    // "stop" (escalation ladder hard stop).
+    | {
+        type: "starvation_breaker"
+        timestamp: number
+        session_id: string
+        mode: "annotate" | "armed"
+        kind: "starvation" | "repeat_signature" | "doom_loop" | "unchanged_read" | "nudge"
+        action: "would_fire" | "registered" | "injected" | "stop" | "annotated" | "would_annotate"
+        tool_name?: string
+        count?: number
+        escalation?: "nudge" | "status_check" | "stop"
+        turns_without_mutation?: number
       }
     | {
         type: "environment_census"

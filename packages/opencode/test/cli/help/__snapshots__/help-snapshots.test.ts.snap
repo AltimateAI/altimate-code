@@ -179,7 +179,7 @@ manage AI providers and credentials
 
 Commands:
   altimate-code providers list               list providers and credentials            [aliases: ls]
-  altimate-code providers login [url]        log in to a provider
+  altimate-code providers login [target]     log in to a provider
   altimate-code providers logout [provider]  log out from a configured provider
 
 Options:
@@ -624,12 +624,12 @@ Options:
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode providers login --help 1`] = `
-"altimate-code providers login [url]
+"altimate-code providers login [target]
 
 log in to a provider
 
 Positionals:
-  url  altimate auth provider                                                               [string]
+  target  provider id (e.g. openai) or altimate auth provider URL                           [string]
 
 Options:
   -h, --help          show help                                                            [boolean]
@@ -787,7 +787,7 @@ Options:
                       engine serve the types it provides; 'local' keeps every connection on the
                       local drivers                         [string] [choices: "workspace", "local"]
       --event         GitHub mock event to run the agent for                                [string]
-      --token         GitHub personal access token (github_pat_********)                    [string]"
+      --[key]         GitHub personal access token (<redacted example>)                    [string]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode db path --help 1`] = `

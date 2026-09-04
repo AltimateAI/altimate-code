@@ -1,4 +1,5 @@
 import path from "path"
+import { Token } from "@/util/token"
 import { existsSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
@@ -17,6 +18,8 @@ import { familyVendor } from "../provider/family"
 // altimate_change end
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
+import { NudgeArbiter } from "./nudge"
+import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
@@ -30,6 +33,7 @@ import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
 import { DATAMATE_KEY } from "../altimate/datamate-transport"
 import * as Precedence from "../altimate/workspace/precedence"
+import * as Awareness from "../altimate/workspace/awareness"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -82,6 +86,7 @@ import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change start - validator framework (see session/validators/types.ts header)
 import { ValidatorRegistry } from "./validators/registry"
 import { registerAltimateValidators } from "../altimate/validators"
+import { sanitizeTelemetryDetails } from "../altimate/validators/validator-utils"
 // Explicit registration call (not a side-effect import) so bun's --single
 // bundler cannot tree-shake the validator registrations.
 registerAltimateValidators()
@@ -143,6 +148,27 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — testable validator completion gate shared by the dispatch path
+  /** @internal Pure completion-gate predicate used by focused regression tests. */
+  export function shouldDispatchValidators(input: {
+    active: boolean
+    result: SessionProcessor.Result
+    finish?: string
+    hasError: boolean
+    validatorCount: number
+    explicitDone: boolean
+  }): boolean {
+    return (
+      input.active &&
+      input.result !== "compact" &&
+      (input.result !== "stop" || input.explicitDone) &&
+      input.finish === "stop" &&
+      !input.hasError &&
+      input.validatorCount > 0
+    )
+  }
+  // altimate_change end
+
   // altimate_change start (AI-7519) — first-answer latency instrumentation +
   // user-facing phase label.
   //
@@ -159,12 +185,7 @@ export namespace SessionPrompt {
   // The trace span is a sibling of the root (tracing.ts:1009 assigns
   // parentSpanId to rootSpanId), not a nested child — good enough for
   // waterfall correlation via timestamps, and no schema change is required.
-  async function traceSpan<T>(
-    name: string,
-    fn: () => Promise<T>,
-    input?: unknown,
-    sessionID?: SessionID,
-  ): Promise<T> {
+  async function traceSpan<T>(name: string, fn: () => Promise<T>, input?: unknown, sessionID?: SessionID): Promise<T> {
     const startTime = Date.now()
     if (sessionID) void SessionStatus.publishPhase(sessionID, name, true)
     try {
@@ -226,6 +247,10 @@ export namespace SessionPrompt {
         string,
         {
           abort: AbortController
+          // altimate_change start — prevent idle listeners attaching to a closing prompt generation
+          closing?: boolean
+          loopOwned?: boolean
+          // altimate_change end
           callbacks: {
             resolve(input: MessageV2.WithParts): void
             reject(reason?: any): void
@@ -467,7 +492,9 @@ export namespace SessionPrompt {
 
   function start(sessionID: SessionID) {
     const s = state()
-    if (s[sessionID]) return
+    // altimate_change start — replace closing prompt generations instead of reusing their callbacks
+    if (s[sessionID] && !s[sessionID].closing) return
+    // altimate_change end
     const controller = new AbortController()
     s[sessionID] = {
       abort: controller,
@@ -479,6 +506,9 @@ export namespace SessionPrompt {
   function resume(sessionID: SessionID) {
     const s = state()
     if (!s[sessionID]) return
+    // altimate_change start — resume with a fresh generation once cleanup has begun
+    if (s[sessionID].closing) return start(sessionID)
+    // altimate_change end
 
     return s[sessionID].abort.signal
   }
@@ -493,11 +523,26 @@ export namespace SessionPrompt {
       await SessionStatus.set(sessionID, { type: "idle" })
       return
     }
+    // Make the tombstone replaceable before aborting. A replacement prompt may
+    // arrive synchronously after cancel() and must start a fresh generation,
+    // never queue its callback on the signal that was just aborted.
+    match.closing = true
     match.abort.abort()
-    delete s[sessionID]
-    // Do NOT set idle status here — on abort the processor's catch block
-    // publishes session.error THEN sets idle, preserving correct event ordering.
-    // On normal completion, loop() sets idle after the while loop exits (see below).
+    if (!match.loopOwned) {
+      // shell() also uses start(), but it has no loop disposer when no prompt
+      // callbacks are queued. That owner must restore idle directly.
+      if (s[sessionID] === match) delete s[sessionID]
+      await SessionStatus.set(sessionID, { type: "idle" })
+      return
+    }
+    // Keep this exact generation registered until loop()'s generation-scoped
+    // disposer runs. Deleting it here makes the disposer miss its fallback-idle
+    // transition when cancellation lands during bootstrap, compaction, or any
+    // other path outside the processor catch block. The closing tombstone lets
+    // start() install a fresh generation without attaching callbacks to this
+    // aborted one; the old generation-scoped disposer ignores that replacement.
+    // Processor-owned aborts still publish session.error before idle; the
+    // disposer observes that idle and only removes the registry entry.
   }
   // altimate_change end
 
@@ -515,9 +560,42 @@ export namespace SessionPrompt {
         callbacks.push({ resolve, reject })
       })
     }
+    // altimate_change start — bind lifecycle cleanup to this active loop generation
+    const generation = state()[sessionID]
+    if (generation?.abort.signal === abort) generation.loopOwned = true
+    // altimate_change end
 
-    // altimate_change start — cancel() became async (SessionStatus.set is async); use `await using` for async dispose
-    await using _ = defer(() => cancel(sessionID))
+    // altimate_change start — generation-scoped cleanup owns the fallback idle.
+    // Retain this exact loop generation until its missing idle transition has
+    // been published, then remove it without touching any replacement.
+    // Processor errors may already have published error -> idle; in that case
+    // SessionStatus is already idle and cleanup must not publish a stale second
+    // idle into the next generation. Failures outside the processor (notably
+    // the compaction circuit breaker) still get the missing idle transition.
+    await using _ = defer(async () => {
+      const s = state()
+      const match = s[sessionID]
+      if (!match || match.abort.signal !== abort) return
+      // Keep a replaceable tombstone while publishing idle. start() may replace
+      // it immediately when an idle listener begins the next generation, but
+      // will not attach that new prompt to callbacks from this finished loop.
+      match.closing = true
+      match.abort.abort()
+      const status = await SessionStatus.get(sessionID)
+      if (s[sessionID] === match && status.type !== "idle") {
+        await SessionStatus.set(sessionID, { type: "idle" }).catch((error) => {
+          log.warn("failed to restore idle status during prompt-loop cleanup", { sessionID, error })
+        })
+      }
+      if (s[sessionID] === match) delete s[sessionID]
+    })
+    // altimate_change end
+    // A directive is valid only for this active generation. If the loop stops,
+    // aborts, or throws after a detector registers but before the next turn
+    // consumes it, do not leak that stale directive into a later resume.
+    // altimate_change start — scope pending harness nudges to this prompt generation
+    const nudgeGeneration = NudgeArbiter.begin(sessionID)
+    using _nudgeGeneration = defer(() => NudgeArbiter.clear(sessionID, nudgeGeneration))
     // altimate_change end
 
     // Structured output state
@@ -659,7 +737,28 @@ export namespace SessionPrompt {
       // altimate_change end
       log.info("loop", { step, sessionID })
       if (abort.aborted) break
-      let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+      // altimate_change start — when the newest message is a pending
+      // compaction marker, hydrate the stream once and pass that unfiltered
+      // history to the ledger. Previously filterCompacted read the recent view
+      // and process() synchronously hydrated the entire session a second time.
+      const messageStream = MessageV2.stream(sessionID)
+      const firstMessage = messageStream.next()
+      const newestIsCompaction =
+        !firstMessage.done && firstMessage.value.parts.some((part) => part.type === "compaction")
+      let unfilteredCompactionHistory: MessageV2.WithParts[] | undefined
+      let msgs: MessageV2.WithParts[]
+      if (newestIsCompaction) {
+        const newestFirst = [firstMessage.value, ...messageStream]
+        unfilteredCompactionHistory = newestFirst.slice().reverse()
+        msgs = MessageV2.filterCompacted(newestFirst)
+      } else {
+        function* fullStream() {
+          if (!firstMessage.done) yield firstMessage.value
+          yield* messageStream
+        }
+        msgs = MessageV2.filterCompacted(fullStream())
+      }
+      // altimate_change end
 
       let lastUser: MessageV2.User | undefined
       let lastAssistant: MessageV2.Assistant | undefined
@@ -687,10 +786,12 @@ export namespace SessionPrompt {
       // into the next loop instead of terminating the session.
       const lastAssistantHasToolParts =
         lastAssistant !== undefined &&
-        (msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts.some((part) => {
-          if (part.type !== "tool") return false
-          return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
-        }) ??
+        (msgs
+          .find((msg) => msg.info.id === lastAssistant.id)
+          ?.parts.some((part) => {
+            if (part.type !== "tool") return false
+            return !(part.state.status === "error" && part.state.metadata?.interrupted === true)
+          }) ??
           false)
       if (
         lastAssistant?.finish &&
@@ -926,17 +1027,45 @@ export namespace SessionPrompt {
           sessionID,
           auto: task.auto,
           overflow: task.overflow,
+          // altimate_change start — keep nudge delivery scoped to this prompt generation
+          nudgeGeneration,
+          // altimate_change end
+          // altimate_change start — reuse the one-pass full history hydration for the ledger
+          unfilteredMessages: unfilteredCompactionHistory,
+          // altimate_change end
         })
-        if (result === "stop") break
+        // altimate_change start — treat any non-"continue" result as stop: an
+        // undefined/unknown result must never fall through to `continue`, which
+        // re-enters compaction on the same unresolved marker and busy-loops.
+        if (result !== "continue") break
+        // altimate_change end
         continue
       }
 
       // context overflow, needs compaction
+      // altimate_change start — proactive overflow check: the recorded usage is
+      // from the LAST assistant turn; tool results appended since then are not
+      // counted, and one oversized output can jump the session past the window
+      // between checks (a common failure mode for long headless runs). Estimate the
+      // uncounted tail and include it.
+      const uncountedTail = estimateUncountedTail(msgs, lastFinished?.id)
       if (
         lastFinished &&
         lastFinished.summary !== true &&
-        (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
+        (await SessionCompaction.isOverflow({
+          tokens: lastFinished.tokens,
+          // Estimated component passed separately: the safety fraction applies
+          // only to it, never to the provider-reported usage above.
+          estimatedTokens: uncountedTail,
+          model,
+        }))
       ) {
+        // altimate_change end
+        // altimate_change start — task-pin livelock guard: record this
+        // auto-compaction so consecutive threshold-reduction failures halve the
+        // task pin instead of livelocking (fire → cannot reduce → re-fire).
+        SessionCompaction.notePinCompaction(sessionID, msgs)
+        // altimate_change end
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -1113,6 +1242,9 @@ export namespace SessionPrompt {
         sessionID: sessionID,
         model,
         abort,
+        // altimate_change start — keep nudge delivery scoped to this prompt generation
+        nudgeGeneration,
+        // altimate_change end
       })
       using _ = defer(() => InstructionPrompt.clear(processor.message.id))
 
@@ -1319,13 +1451,37 @@ export namespace SessionPrompt {
             sessionID,
           })
       // altimate_change end
+      // altimate_change start — workspace tool awareness.
+      // Reads the snapshot `Precedence.refresh` stored for this turn during tool
+      // resolution, so the section, the tool descriptions and the mid-turn `check()`
+      // verdict all derive from one object. This runs on every step of the loop, not
+      // once per turn, so it stays a cheap pure render. Yields "" unless a bound
+      // workspace's engine is attributed AND its tools materialised — so a session
+      // with no workspace assembles exactly the array it did before this shipped.
+      const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
+      // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
         ...(skills ? [skills] : []),
         ...(knowledgeInjection ? [knowledgeInjection] : []),
+        // altimate_change start — workspace routing directive
+        ...(workspaceAwareness ? [workspaceAwareness] : []),
+        // altimate_change end
         ...(await InstructionPrompt.system()),
         ...hoistedReminders,
       ]
+      // altimate_change start — run-mode-only completion instruction. This text
+      // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
+      // reached interactive chat, where nothing interprets or strips the token
+      // and the user saw a literal DONE on every final answer. Scoped to run
+      // mode AND to builder, which reproduces the previous run-mode behaviour
+      // exactly — builder was the only agent prompt that carried it.
+      const completionInstruction = SessionTermination.completionInstruction({
+        runMode: Flag.ALTIMATE_RUN_MODE,
+        agent: agent.name,
+      })
+      if (completionInstruction) system.push(completionInstruction)
+      // altimate_change end
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1499,19 +1655,43 @@ export namespace SessionPrompt {
       //
       // ALTIMATE_VALIDATORS_SHADOW=1 runs validators WITHOUT enforcement so
       // telemetry can measure "would have fired" rates against historical
-      // traffic, but no subprocess spawns or synthetic-message retries happen
-      // unless this is also set. By default, NEITHER flag is set so
-      // non-opting-in sessions skip the entire dispatch path (no fs scan,
-      // no subprocess spawn, no perf tax).
+      // traffic. Shadow suppresses ONLY the synthetic-message retry: every
+      // applicable validator still executes in full, including the two that
+      // spawn one `altimate-dbt` child per touched model. Shadow is therefore
+      // free of behavioural risk but NOT free of cost — it pays the same
+      // filesystem scans, subprocess time and warehouse work as enforcement,
+      // just without acting on the result. Budget for it accordingly.
+      //
+      // By default NEITHER flag is set, so non-opting-in sessions skip the
+      // entire dispatch path (no fs scan, no subprocess spawn, no perf tax).
+      //
+      // DO NOT set ALTIMATE_VALIDATORS_ENABLED=1 beyond a soak in shadow mode
+      // without first reading the "REQUIRED precondition before enforcement
+      // beyond shadow mode" section in
+      // .github/meta/deterministic-validators-followups.md. Several of the
+      // dbt validators' heuristics (name-matching bare-vs-full-identity,
+      // extension/source-dir filtering, package exclusion, conditional-config
+      // resolution, file-vs-model modification tracking) are duplicated
+      // per-validator rather than shared, and that duplication has already
+      // reintroduced the same bug — including a blocking false positive — in
+      // more than one place across four review-fix rounds. Enforcement mode
+      // acts on a false positive instead of only measuring it, so it should
+      // not ship until those heuristics are consolidated into shared,
+      // tested primitives.
       const validatorsEnabled = process.env.ALTIMATE_VALIDATORS_ENABLED === "1"
       const validatorsShadow = process.env.ALTIMATE_VALIDATORS_SHADOW === "1"
       const validatorsActive = validatorsEnabled || validatorsShadow
       const maxValidatorRetries = Number(process.env.ALTIMATE_VALIDATORS_MAX_RETRIES ?? "3")
       const validatorsDebug = process.env.ALTIMATE_VALIDATORS_DEBUG === "1"
       const validatorCount = ValidatorRegistry.list().length
+      const validatorExplicitDone = SessionTermination.explicitDoneStop({
+        finish: processor.message.finish,
+        hasError: processor.message.error !== undefined,
+        parts: stepParts,
+      })
       // Always emit to opencode's file log. Mirror to stderr only when
       // ALTIMATE_VALIDATORS_DEBUG=1 — needed during framework bring-up so
-      // benchmark harness logs capture the hook signal, but noisy enough
+      // automated harness logs capture the hook signal, but noisy enough
       // that we keep it off by default for normal sessions.
       const diag = {
         kind: "validator_hook_reached",
@@ -1530,12 +1710,14 @@ export namespace SessionPrompt {
         console.error("[altimate-validators] " + JSON.stringify(diag))
       }
       if (
-        validatorsActive &&
-        result !== "stop" &&
-        result !== "compact" &&
-        processor.message.finish === "stop" &&
-        !processor.message.error &&
-        validatorCount > 0
+        shouldDispatchValidators({
+          active: validatorsActive,
+          result,
+          finish: processor.message.finish,
+          hasError: processor.message.error !== undefined,
+          validatorCount,
+          explicitDone: validatorExplicitDone,
+        })
       ) {
         try {
           const vCtx = {
@@ -1549,7 +1731,13 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({ kind: "dispatch_enter", sessionID, step, cwd: vCtx.workingDirectory, sessionStartMs: vCtx.sessionStartMs }),
+                JSON.stringify({
+                  kind: "dispatch_enter",
+                  sessionID,
+                  step,
+                  cwd: vCtx.workingDirectory,
+                  sessionStartMs: vCtx.sessionStartMs,
+                }),
             )
           }
           const checks = await ValidatorRegistry.runAll(vCtx)
@@ -1572,6 +1760,15 @@ export namespace SessionPrompt {
           // rollup. Always emitted, even when the feature flag is off, so we
           // can measure baseline fire rate vs prompt-only enforcement.
           for (const { validator, result: vRes } of checks) {
+            // Several validators' `details` carry absolute filesystem paths
+            // (dbt project root, run_results.json path, discovered task
+            // file, …) for use in `reason`/`fixHint` text. Forwarded
+            // verbatim, that sends local directory names — and the
+            // usernames often embedded in them — to telemetry despite the
+            // documented contract that file paths are never collected
+            // (docs/docs/reference/telemetry.md). sanitizeTelemetryDetails
+            // hashes any absolute-path-shaped string; everything else
+            // (verdict enums, counters, model names) passes through.
             Telemetry.track({
               type: "validator_check",
               timestamp: Date.now(),
@@ -1581,7 +1778,7 @@ export namespace SessionPrompt {
               step,
               retry_count: validatorRetryCount,
               enforced: validatorsEnabled,
-              ...(vRes.details && { details: vRes.details }),
+              ...(vRes.details && { details: sanitizeTelemetryDetails(vRes.details) }),
             } as any)
           }
 
@@ -1619,6 +1816,7 @@ export namespace SessionPrompt {
               messageID: syntheticMessageID,
               sessionID,
               type: "text",
+              synthetic: true,
               text: body,
               time: { start: Date.now(), end: Date.now() },
             })
@@ -1652,7 +1850,12 @@ export namespace SessionPrompt {
             // eslint-disable-next-line no-console
             console.error(
               "[altimate-validators] " +
-                JSON.stringify({ kind: "dispatch_error", sessionID, step, error: e instanceof Error ? e.message : String(e) }),
+                JSON.stringify({
+                  kind: "dispatch_error",
+                  sessionID,
+                  step,
+                  error: e instanceof Error ? e.message : String(e),
+                }),
             )
           }
         }
@@ -1664,6 +1867,10 @@ export namespace SessionPrompt {
         // altimate_change start — track compaction count
         compactionCount++
         // altimate_change end
+        // altimate_change start — task-pin livelock guard (see the
+        // proactive-overflow site above for rationale).
+        SessionCompaction.notePinCompaction(sessionID, msgs)
+        // altimate_change end
         await SessionCompaction.create({
           sessionID,
           agent: lastUser.agent,
@@ -1674,10 +1881,9 @@ export namespace SessionPrompt {
       }
       continue
     }
-    // altimate_change start — set idle on normal loop exit; abort path is handled by processor catch block
-    if (!abort.aborted) {
-      await SessionStatus.set(sessionID, { type: "idle" })
-    }
+    // altimate_change start — the generation-scoped disposer publishes the
+    // sole normal idle transition after removing this loop from state. Abort
+    // and processor-error paths may already be idle; the disposer detects that.
     // altimate_change end
     SessionCompaction.prune({ sessionID })
     // altimate_change start — session end telemetry
@@ -1789,14 +1995,20 @@ export namespace SessionPrompt {
     }
     await Telemetry.shutdown()
     // altimate_change end
+    // altimate_change start — resolve callbacks from this prompt generation only
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
-      const queued = state()[sessionID]?.callbacks ?? []
+      // Resolve only callers queued on THIS loop generation. A cancelled loop
+      // may finish unwinding after a replacement generation has already begun;
+      // looking callbacks up through mutable global state would resolve the
+      // replacement's queue with this stale result.
+      const queued = generation?.callbacks.splice(0) ?? []
       for (const q of queued) {
         q.resolve(item)
       }
       return item
     }
+    // altimate_change end
     throw new Error("Impossible")
   })
 
@@ -1820,48 +2032,56 @@ export namespace SessionPrompt {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
 
-    const context = (args: any, options: ToolCallOptions): Tool.Context => ({
-      sessionID: input.session.id,
-      abort: options.abortSignal!,
-      messageID: input.processor.message.id,
-      callID: options.toolCallId,
-      extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
-      agent: input.agent.name,
-      // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
-      messages: input.messages as unknown as Tool.Context["messages"],
-      // altimate_change end
-      metadata: (val: { title?: string; metadata?: any }) =>
-        // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
-        Effect.promise(async () => {
-          const match = input.processor.partFromToolCall(options.toolCallId)
-          if (match && match.state.status === "running") {
-            await Session.updatePart({
-              ...match,
-              state: {
-                title: val.title,
-                metadata: val.metadata,
-                status: "running",
-                input: args,
-                time: {
-                  start: Date.now(),
+    // altimate_change start — carry tool identity into repeated-id metadata lookup
+    const context = (toolName: string, args: any, options: ToolCallOptions) => {
+      const execution = input.processor.beginToolExecution(options.toolCallId)
+      const ctx: Tool.Context = {
+        sessionID: input.session.id,
+        abort: options.abortSignal!,
+        messageID: input.processor.message.id,
+        callID: options.toolCallId,
+        extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck },
+        agent: input.agent.name,
+        // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
+        messages: input.messages as unknown as Tool.Context["messages"],
+        // altimate_change end
+        metadata: (val: { title?: string; metadata?: any }) =>
+          // altimate_change start — Tool.Context.metadata/ask now return Effect (v1.17.9)
+          Effect.promise(async () => {
+            const match =
+              input.processor.partFromToolExecution(execution) ??
+              input.processor.partFromToolCall(options.toolCallId, { toolName, input: args })
+            if (match && match.state.status === "running") {
+              await Session.updatePart({
+                ...match,
+                state: {
+                  title: val.title,
+                  metadata: val.metadata,
+                  status: "running",
+                  input: args,
+                  time: {
+                    start: Date.now(),
+                  },
                 },
-              },
-            })
-          }
-        }),
-      ask: (req) =>
-        Effect.promise(async () => {
-          // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
-          await PermissionNext.ask({
-            ...req,
-            sessionID: input.session.id,
-            tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-            ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
-          } as Parameters<typeof PermissionNext.ask>[0])
-          // altimate_change end
-        }),
-      // altimate_change end
-    })
+              })
+            }
+          }),
+        ask: (req) =>
+          Effect.promise(async () => {
+            // altimate_change start — core PermissionV1.Request uses readonly arrays; ask() validates the shape at runtime
+            await PermissionNext.ask({
+              ...req,
+              sessionID: input.session.id,
+              tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+              ruleset: PermissionNext.merge(input.agent.permission, input.session.permission ?? []),
+            } as Parameters<typeof PermissionNext.ask>[0])
+            // altimate_change end
+          }),
+        // altimate_change end
+      }
+      return { ctx, execution }
+    }
+    // altimate_change end
 
     // altimate_change start — workspace precedence.
     // Derived once per turn from the LIVE tool map rather than cached at attach:
@@ -1891,48 +2111,56 @@ export namespace SessionPrompt {
         // altimate_change end
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
-          const ctx = context(args, options)
-          await Plugin.trigger(
-            "tool.execute.before",
-            {
-              tool: item.id,
-              sessionID: ctx.sessionID,
-              callID: ctx.callID,
-            },
-            {
-              args,
-            },
-          )
-          // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
-          const result = await AppRuntime.runPromise(item.execute(args, ctx))
+          // altimate_change start — disambiguate repeated concurrent tool-call ids
+          const { ctx, execution } = context(item.id, args, options)
           // altimate_change end
-          const output = {
-            ...result,
-            attachments: result.attachments?.map((attachment) => ({
-              ...attachment,
-              id: PartID.ascending(),
-              sessionID: ctx.sessionID,
-              messageID: input.processor.message.id,
-            })),
-          }
-          // altimate_change start — stamp authoritative tool source so clients render the right
-          // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
-          const stamped = stampRegistryToolSource(output, item)
-          // altimate_change end
-          await Plugin.trigger(
-            "tool.execute.after",
-            {
-              tool: item.id,
-              sessionID: ctx.sessionID,
-              callID: ctx.callID,
-              args,
-            },
-            // altimate_change start — plugins observe the source-stamped output
-            stamped,
+          // altimate_change start — release the execution identity on every exit path
+          try {
+            await Plugin.trigger(
+              "tool.execute.before",
+              {
+                tool: item.id,
+                sessionID: ctx.sessionID,
+                callID: ctx.callID,
+              },
+              {
+                args,
+              },
+            )
+            // altimate_change start — v1.17.9: Tool.Def.execute returns an Effect
+            const result = await AppRuntime.runPromise(item.execute(args, ctx))
             // altimate_change end
-          )
-          // altimate_change start — return the source-stamped output
-          return stamped
+            const output = {
+              ...result,
+              attachments: result.attachments?.map((attachment) => ({
+                ...attachment,
+                id: PartID.ascending(),
+                sessionID: ctx.sessionID,
+                messageID: input.processor.message.id,
+              })),
+            }
+            // altimate_change start — stamp authoritative tool source so clients render the right
+            // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
+            const stamped = stampRegistryToolSource(output, item)
+            // altimate_change end
+            await Plugin.trigger(
+              "tool.execute.after",
+              {
+                tool: item.id,
+                sessionID: ctx.sessionID,
+                callID: ctx.callID,
+                args,
+              },
+              // altimate_change start — plugins observe the source-stamped output
+              stamped,
+              // altimate_change end
+            )
+            // altimate_change start — return the source-stamped output
+            return stamped
+            // altimate_change end
+          } finally {
+            input.processor.finishToolExecution(execution)
+          }
           // altimate_change end
         },
       })
@@ -1954,102 +2182,109 @@ export namespace SessionPrompt {
       item.inputSchema = jsonSchema(transformed)
       // Wrap execute to add plugin hooks and format output
       item.execute = async (args, opts) => {
-        const ctx = context(args, opts)
-
-        await Plugin.trigger(
-          "tool.execute.before",
-          {
-            tool: key,
-            sessionID: ctx.sessionID,
-            callID: opts.toolCallId,
-          },
-          {
-            args,
-          },
-        )
-
-        // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
-        // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
-        // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
-        await AppRuntime.runPromise(
-          ctx.ask({
-            permission: key,
-            metadata: {},
-            patterns: ["*"],
-            always: ["*"],
-          }),
-        )
+        // altimate_change start — disambiguate repeated concurrent tool-call ids
+        const { ctx, execution } = context(key, args, opts)
         // altimate_change end
+        // altimate_change start — release the execution identity on every exit path
+        try {
+          await Plugin.trigger(
+            "tool.execute.before",
+            {
+              tool: key,
+              sessionID: ctx.sessionID,
+              callID: opts.toolCallId,
+            },
+            {
+              args,
+            },
+          )
 
-        const result = await execute(args, opts)
+          // altimate_change start — upstream_fix: ctx.ask is Effect-valued; `await` on it only awaits the
+          // Effect object and NEVER runs PermissionNext.ask, so MCP tools executed with NO permission
+          // check. Run the effect (matches the normal tool path's AppRuntime.runPromise(item.execute)).
+          await AppRuntime.runPromise(
+            ctx.ask({
+              permission: key,
+              metadata: {},
+              patterns: ["*"],
+              always: ["*"],
+            }),
+          )
+          // altimate_change end
 
-        await Plugin.trigger(
-          "tool.execute.after",
-          {
-            tool: key,
-            sessionID: ctx.sessionID,
-            callID: opts.toolCallId,
-            args,
-          },
-          result,
-        )
+          const result = await execute(args, opts)
 
-        const textParts: string[] = []
-        const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
+          await Plugin.trigger(
+            "tool.execute.after",
+            {
+              tool: key,
+              sessionID: ctx.sessionID,
+              callID: opts.toolCallId,
+              args,
+            },
+            result,
+          )
 
-        for (const contentItem of result.content) {
-          if (contentItem.type === "text") {
-            textParts.push(contentItem.text)
-          } else if (contentItem.type === "image") {
-            attachments.push({
-              type: "file",
-              mime: contentItem.mimeType,
-              url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
-            })
-          } else if (contentItem.type === "resource") {
-            const { resource } = contentItem
-            if (resource.text) {
-              textParts.push(resource.text)
-            }
-            if (resource.blob) {
+          const textParts: string[] = []
+          const attachments: Omit<MessageV2.FilePart, "id" | "sessionID" | "messageID">[] = []
+
+          for (const contentItem of result.content) {
+            if (contentItem.type === "text") {
+              textParts.push(contentItem.text)
+            } else if (contentItem.type === "image") {
               attachments.push({
                 type: "file",
-                mime: resource.mimeType ?? "application/octet-stream",
-                url: `data:${resource.mimeType ?? "application/octet-stream"};base64,${resource.blob}`,
-                filename: resource.uri,
+                mime: contentItem.mimeType,
+                url: `data:${contentItem.mimeType};base64,${contentItem.data}`,
               })
+            } else if (contentItem.type === "resource") {
+              const { resource } = contentItem
+              if (resource.text) {
+                textParts.push(resource.text)
+              }
+              if (resource.blob) {
+                attachments.push({
+                  type: "file",
+                  mime: resource.mimeType ?? "application/octet-stream",
+                  url: `data:${resource.mimeType ?? "application/octet-stream"};base64,${resource.blob}`,
+                  filename: resource.uri,
+                })
+              }
             }
           }
-        }
 
-        const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
-        // altimate_change start — authoritative source + readable title from the original client
-        // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
-        const described = describeMcpTool(key, clientName)
+          const truncated = await Truncate.output(textParts.join("\n\n"), {}, input.agent)
+          // altimate_change start — authoritative source + readable title from the original client
+          // name, shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
+          const described = describeMcpTool(key, clientName)
+          // altimate_change end
+          const metadata = {
+            ...(result.metadata ?? {}),
+            truncated: truncated.truncated,
+            ...(truncated.truncated && { outputPath: truncated.outputPath }),
+            // altimate_change start — stamp the authoritative source badge
+            source: described.source,
+            // altimate_change end
+          }
+
+          return {
+            // altimate_change start — MCP tools have no native title; give a readable label
+            title: described.title,
+            // altimate_change end
+            metadata,
+            output: truncated.content,
+            attachments: attachments.map((attachment) => ({
+              ...attachment,
+              id: PartID.ascending(),
+              sessionID: ctx.sessionID,
+              messageID: input.processor.message.id,
+            })),
+            content: result.content, // directly return content to preserve ordering when outputting to model
+          }
+        } finally {
+          input.processor.finishToolExecution(execution)
+        }
         // altimate_change end
-        const metadata = {
-          ...(result.metadata ?? {}),
-          truncated: truncated.truncated,
-          ...(truncated.truncated && { outputPath: truncated.outputPath }),
-          // altimate_change start — stamp the authoritative source badge
-          source: described.source,
-          // altimate_change end
-        }
-
-        return {
-          // altimate_change start — MCP tools have no native title; give a readable label
-          title: described.title,
-          // altimate_change end
-          metadata,
-          output: truncated.content,
-          attachments: attachments.map((attachment) => ({
-            ...attachment,
-            id: PartID.ascending(),
-            sessionID: ctx.sessionID,
-            messageID: input.processor.message.id,
-          })),
-          content: result.content, // directly return content to preserve ordering when outputting to model
-        }
       }
       tools[key] = item
     }
@@ -2527,6 +2762,387 @@ export namespace SessionPrompt {
   }
   // altimate_change end
 
+  // altimate_change start — pin the original task
+  // verbatim through compaction.
+  //
+  // After compaction the model sees only a lossy summary of the task; the
+  // summarizer can drop or mutate literal contract terms
+  // (hallucinated table names, renamed output files). The pin re-injects the
+  // task instruction VERBATIM as a trusted reminder, labeled authoritative over
+  // any summary, and is hoisted into the system prompt on non-Anthropic models
+  // via the trustedReminderParts path below.
+  //
+  // Mode-aware pin selection: run mode (`run` CLI, CI/headless — signaled
+  // by the ALTIMATE_RUN_MODE marker, with ALTIMATE_NON_INTERACTIVE=1 — the same
+  // signal question.ts uses — as a fallback) pins the
+  // FIRST non-synthetic user message (the CLI task). Interactive sessions pin
+  // the MOST RECENT substantive user instruction — users pivot mid-session, and
+  // hoisting message #1 as "authoritative" would fight later redirections in
+  // exactly the long sessions that compact. A RESUMED run (`--continue`,
+  // `--session`, `--fork`) uses the interactive rule too: its history begins
+  // with an earlier invocation's task, so "first" would pin a stale request
+  // over the one this run supplied (see resolvePinRunMode).
+  //
+  // Budget: SessionCompaction.pinBudget — min(4k, ~17.5% of the post-overhead
+  // usable window), hard invariant pin + reserved + ≥2k slack < compaction
+  // threshold, halved by the livelock guard. When a task exceeds the budget we
+  // keep verbatim head+tail plus a deterministic ≤500-token contract card of
+  // regex-extracted literals. Never paraphrase.
+
+  // altimate_change start — extracted from the proactive-overflow check so this
+  // load-bearing context-safety estimate is unit-testable (it had no coverage).
+  /**
+   * Tokens present in the conversation that the provider's reported usage for
+   * `lastFinishedID` does NOT include. The recorded usage is from the last
+   * assistant turn, but tool results are appended to that message AFTER the
+   * generation ends, and further messages accumulate before the next check —
+   * one oversized output can jump the session past the window in between.
+   *
+   * `lastFinished`'s own TOOL parts are counted (uncounted by the provider
+   * figure); its own text is not (already inside `tokens.output`).
+   * Everything after it is counted in full.
+   */
+  export function estimateUncountedTail(msgs: MessageV2.WithParts[], lastFinishedID: MessageID | undefined): number {
+    if (!lastFinishedID) return 0
+    const lastFinished = msgs.find((m) => m.info.id === lastFinishedID)
+    if (!lastFinished) return 0
+    const toolText = (part: MessageV2.ToolPart): string => {
+      if (part.state.status === "completed") {
+        if (!part.state.time.compacted) return part.state.output ?? ""
+        const mask = part.state.metadata?.observation_mask
+        return typeof mask === "string" && mask.length > 0 ? mask : "[Old tool result content cleared]"
+      }
+      if (part.state.status === "error") {
+        const partial = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+        return typeof partial === "string" ? partial : (part.state.error ?? "")
+      }
+      return "[Tool execution was interrupted]"
+    }
+    let tokens = 0
+    for (const part of lastFinished.parts) {
+      if (part.type === "tool") tokens += Token.estimate(toolText(part))
+    }
+    // filterCompacted deliberately reorders retained-tail and summary messages,
+    // so array position is not chronology. IDs are monotonic; select genuinely
+    // newer messages by ID regardless of their rendered position.
+    for (const m of msgs) {
+      if (m.info.id <= lastFinishedID) continue
+      for (const part of m.parts) {
+        if (part.type === "text") tokens += Token.estimate(part.text ?? "")
+        if (part.type === "tool") tokens += Token.estimate(toolText(part))
+      }
+    }
+    return tokens
+  }
+  // altimate_change end
+
+  /** Exported for unit tests. Selects the message whose text gets pinned. */
+  export function selectPinSource(
+    history: MessageV2.WithParts[],
+    runMode: boolean,
+  ): { id: MessageID; text: string } | undefined {
+    const candidates: { id: MessageID; text: string }[] = []
+    for (const msg of history) {
+      if (msg.info.role !== "user") continue
+      if (msg.parts.some((p) => p.type === "compaction")) continue
+      const text = msg.parts
+        .filter((p): p is MessageV2.TextPart => p.type === "text" && !p.synthetic)
+        .map((p) => p.text)
+        .join("\n\n")
+        .trim()
+      if (!SessionCompaction.isPinnableTaskText(text)) continue
+      candidates.push({ id: msg.info.id, text })
+    }
+    if (!candidates.length) return undefined
+    return runMode ? candidates[0] : candidates[candidates.length - 1]
+  }
+
+  // Deterministic contract card: regex-extracted literals from the task text
+  // (paths, identifier-shaped names, code spans, quoted terms, constraint
+  // lines), every entry a verbatim substring of the original — never a
+  // paraphrase. Patterns are GENERIC lexical shapes only; no vertical (dbt/
+  // warehouse) tokens. Budget enforced by tail-truncation:
+  // stop adding once the cap is reached.
+  export function extractContractCard(text: string, capTokens: number): string {
+    if (capTokens <= 0) return ""
+    const seen = new Set<string>()
+    const take = (raw: string | undefined) => {
+      const v = raw?.trim()
+      if (!v || v.length > 200 || seen.has(v)) return undefined
+      seen.add(v)
+      return v
+    }
+    const collect = (re: RegExp, group = 0) => {
+      const out: string[] = []
+      for (const m of text.matchAll(re)) {
+        const v = take(m[group])
+        if (v) out.push(v)
+      }
+      return out
+    }
+    // Paths: contain a slash, or bare filename with a dot-extension.
+    const paths = collect(/(?:[\w.@~-]+\/)+[\w.-]+|\b[\w-]+\.[A-Za-z]\w{0,7}\b/g)
+    // snake_case identifier shape (column/model/variable names) — generic.
+    const identifiers = collect(/\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g)
+    // Inline code spans (commands, expressions).
+    const codeSpans = collect(/`([^`\n]{1,160})`/g, 1)
+    // Quoted terms.
+    const quoted: string[] = []
+    for (const m of text.matchAll(/"([^"\n]{2,120})"|'([^'\n]{2,120})'/g)) {
+      const v = take(m[1] ?? m[2])
+      if (v) quoted.push(v)
+    }
+    // Constraint/prohibition lines, kept verbatim in full.
+    const constraints: string[] = []
+    for (const line of text.split("\n")) {
+      if (
+        /\b(do not|don'?t|never|must(?: not)?|should not|shall not|avoid|only|require[sd]?|forbidden|prohibited)\b/i.test(
+          line,
+        )
+      ) {
+        const v = take(line)
+        if (v) constraints.push(v)
+      }
+    }
+
+    const header = "Contract card — literals extracted verbatim from the task (never paraphrased):"
+    if (Token.estimate(header) > capTokens) return ""
+    const out: string[] = [header]
+    // Budget enforced on the ACTUAL rendered card (labels and separators
+    // included), tail-truncating: stop adding once the cap would be exceeded.
+    const fits = (candidate: string[]) => Token.estimate(candidate.join("\n")) <= capTokens
+    const emitList = (label: string, items: string[]) => {
+      if (!items.length) return
+      let line = ""
+      for (const item of items) {
+        const next = line ? `${line}, ${item}` : `- ${label}: ${item}`
+        if (!fits([...out, next])) break
+        line = next
+      }
+      if (line) out.push(line)
+    }
+    emitList("files/paths", paths)
+    emitList("identifiers", identifiers)
+    emitList("code/commands", codeSpans)
+    emitList("quoted terms", quoted)
+    if (constraints.length) {
+      const kept: string[] = ["- constraints (verbatim lines):"]
+      for (const line of constraints) {
+        const next = [...kept, `  - ${line}`]
+        if (!fits([...out, ...next])) break
+        kept.push(`  - ${line}`)
+      }
+      if (kept.length > 1) out.push(...kept)
+    }
+    if (out.length <= 1) return ""
+    return out.join("\n")
+  }
+
+  /**
+   * Exported for unit tests. Returns the pin body: the task verbatim when it
+   * fits the cap; otherwise verbatim head+tail plus the contract card.
+   */
+  export function buildPinnedTask(input: {
+    text: string
+    capTokens: number
+    cardCapTokens: number
+  }): string | undefined {
+    if (input.capTokens <= 0) return undefined
+    const text = input.text
+    if (Token.estimate(text) <= input.capTokens) return text
+    // Slice by Unicode code points, not UTF-16 code units. Either head/tail
+    // boundary can otherwise bisect a surrogate pair and persist invalid text
+    // in the pinned task.
+    const characters = Array.from(text)
+    // Over cap: middle truncation alone deletes exactly the mid-prompt facts
+    // the evidence shows decaying — pair verbatim head+tail with the card.
+    const cardCap = Math.min(input.cardCapTokens, Math.floor(input.capTokens / 2))
+    const card = extractContractCard(text, cardCap)
+    const marker =
+      "\n\n[... middle of the original task truncated — literal terms preserved in the contract card below ...]\n\n"
+    const bodyBudget = input.capTokens - Token.estimate(card) - Token.estimate(marker) - 8
+    if (bodyBudget <= 0) return card || undefined
+    // Token.estimate is ratio-based; shrink the char budget geometrically until
+    // the assembled result fits. Deterministic for a given input.
+    let charBudget = Math.floor(bodyBudget * 3.7)
+    while (charBudget >= 100) {
+      const half = Math.floor(charBudget / 2)
+      const candidate =
+        characters.slice(0, half).join("") +
+        marker +
+        characters.slice(characters.length - half).join("") +
+        (card ? "\n\n" + card : "")
+      if (Token.estimate(candidate) <= input.capTokens) return candidate
+      charBudget = Math.floor(charBudget * 0.85)
+    }
+    if (card) return card
+    // A positive body budget must always be renderable; otherwise compaction
+    // could omit the task from its summary while the corresponding pin silently
+    // disappears. Fall back to the longest verbatim prefix that fits.
+    let prefixLength = Math.min(characters.length, Math.max(1, Math.ceil(input.capTokens * 4)))
+    while (prefixLength > 0) {
+      const prefix = characters.slice(0, prefixLength).join("")
+      if (Token.estimate(prefix) <= input.capTokens) return prefix
+      prefixLength = Math.floor(prefixLength * 0.75)
+    }
+    return undefined
+  }
+
+  /**
+   * Exported for unit tests (mid-session-redirect case is covered here without
+   * DB fixtures). Pure: assembles the labeled reminder text from the full
+   * chronological history and the currently visible (compaction-filtered)
+   * messages, or returns undefined when no pin should be injected.
+   */
+  export function taskPinText(input: {
+    history: MessageV2.WithParts[]
+    visible: MessageV2.WithParts[]
+    runMode: boolean
+    capTokens: number
+    cardCapTokens: number
+  }): string | undefined {
+    const source = selectPinSource(input.history, input.runMode)
+    if (!source) return undefined
+    return taskPinFromSource({
+      source,
+      visible: input.visible,
+      capTokens: input.capTokens,
+      cardCapTokens: input.cardCapTokens,
+    })
+  }
+
+  function taskPinFromSource(input: {
+    source: { id: MessageID; text: string }
+    visible: MessageV2.WithParts[]
+    capTokens: number
+    cardCapTokens: number
+  }): string | undefined {
+    // Skip while the source message is still in visible context verbatim — the
+    // pin exists to survive compaction, not to duplicate live messages.
+    if (input.visible.some((m) => m.info.id === input.source.id)) return undefined
+    // altimate_change start — the wrapper counts against the cap. The framing
+    // below was previously added AFTER buildPinnedTask had spent the whole
+    // budget, so the rendered reminder exceeded the advertised hard cap and ate
+    // into the reserved working headroom the pin invariant (pin + reserved +
+    // >=2k slack < compaction threshold) depends on. Budget the body against
+    // cap minus the framing, and keep at least a token of body budget so a
+    // tight configured cap degrades to a small pin rather than none.
+    let bodyCap = SessionCompaction.taskPinBodyBudget(input.capTokens)
+    // altimate_change end
+    while (bodyCap > 0) {
+      const body = buildPinnedTask({
+        text: input.source.text,
+        capTokens: bodyCap,
+        cardCapTokens: Math.min(input.cardCapTokens, bodyCap),
+      })
+      if (!body) return undefined
+      const rendered = SessionCompaction.renderTaskPin(body)
+      const estimated = Token.estimate(rendered)
+      if (estimated <= input.capTokens) return rendered
+      // Token.estimate chooses its ratio from the COMPLETE text, so the empty
+      // frame estimate is not additive. Shrink against the actual rendered
+      // reminder until its hard cap is true under the final classification.
+      const over = estimated - input.capTokens
+      const next = Math.min(bodyCap - 1, bodyCap - over, Math.floor(bodyCap * 0.85))
+      if (next >= bodyCap) return undefined
+      bodyCap = Math.max(0, next)
+    }
+    return undefined
+  }
+
+  /**
+   * Run mode = the dedicated ALTIMATE_RUN_MODE marker (set by run.ts, never by
+   * TUI/serve), with ALTIMATE_NON_INTERACTIVE=1 as a fallback signal for
+   * headless drivers that predate the marker. An EXPLICITLY set run-mode value
+   * always wins — a user exporting ALTIMATE_RUN_MODE=0 has opted out of
+   * run-mode semantics and must not be flipped back by the legacy fallback;
+   * the fallback applies only when the marker is undefined/blank.
+   * Exported for unit tests.
+   */
+  export function resolvePinRunMode(env: Record<string, string | undefined> = process.env): boolean {
+    // A resumed run (`--continue` / `--session` / `--fork`, marked by run.ts)
+    // carries earlier invocations' messages, so "first user message" is a
+    // previous task, not this run's. Those sessions use interactive selection —
+    // the latest substantive instruction — which is the request this invocation
+    // actually supplied.
+    if (env["ALTIMATE_RUN_RESUMED"] === "1") return false
+    if (env["ALTIMATE_RUN_MODE"]?.trim()) return Flag.parseRunModeValue(env["ALTIMATE_RUN_MODE"])
+    return env["ALTIMATE_NON_INTERACTIVE"] === "1"
+  }
+
+  const runPinSourceCache = Instance.state(() => new Map<SessionID, { id: MessageID; text: string }>())
+  const RUN_PIN_CACHE_MAX = 128
+
+  function rememberRunPinSource(sessionID: SessionID, source: { id: MessageID; text: string }) {
+    const cache = runPinSourceCache()
+    cache.delete(sessionID)
+    cache.set(sessionID, source)
+    if (cache.size <= RUN_PIN_CACHE_MAX) return
+    const oldest = cache.keys().next().value
+    if (oldest !== undefined) cache.delete(oldest)
+  }
+
+  function pinSourceFromStream(sessionID: SessionID, runMode: boolean) {
+    if (runMode) {
+      const cached = runPinSourceCache().get(sessionID)
+      if (cached) {
+        rememberRunPinSource(sessionID, cached)
+        return cached
+      }
+    }
+
+    let oldest: { id: MessageID; text: string } | undefined
+    // stream() is newest-first. Interactive selection can stop at the first
+    // substantive user message. Fresh run mode needs the oldest source once;
+    // cache that result so later compacted turns do not repeatedly scan all
+    // persisted history.
+    for (const message of MessageV2.stream(sessionID)) {
+      const candidate = selectPinSource([message], runMode)
+      if (!candidate) continue
+      if (!runMode) return candidate
+      oldest = candidate
+    }
+    if (runMode && oldest) rememberRunPinSource(sessionID, oldest)
+    return oldest
+  }
+
+  // Compaction-gated entry point used by insertReminders: fires only when the
+  // visible context already contains a completed summary, the pin budget is
+  // positive, and the pinned source message is no longer visible.
+  async function taskPinReminder(input: {
+    visible: MessageV2.WithParts[]
+    session: Session.Info
+    model: Provider.Model
+  }): Promise<string | undefined> {
+    // Compaction gate FIRST — it is pure message inspection, so never-compacted
+    // sessions (the common path) pay no Config/DB cost here.
+    const compacted = input.visible.some(
+      (m) => m.info.role === "assistant" && m.info.summary && m.info.finish && !m.info.error,
+    )
+    if (!compacted) return undefined
+    // Fail-safe from here on: the pin is an additive reminder — a session that
+    // cannot compute it must still run the turn.
+    try {
+      const cfg = await Config.get()
+      if (!SessionCompaction.pinEnabled(cfg)) return undefined
+      const cap = SessionCompaction.pinBudget({ cfg, model: input.model, sessionID: input.session.id })
+      if (cap <= 0) return undefined
+      const runMode = resolvePinRunMode()
+      const source = pinSourceFromStream(input.session.id, runMode)
+      if (!source) return undefined
+      return taskPinFromSource({
+        source,
+        visible: input.visible,
+        capTokens: cap,
+        cardCapTokens: SessionCompaction.pinCardBudget(cfg),
+      })
+    } catch (e) {
+      log.warn("task pin skipped", { error: e instanceof Error ? e.message : String(e) })
+      return undefined
+    }
+  }
+  // altimate_change end
+
   // altimate_change start — return the trusted reminder parts insertReminders just appended
   // so the caller can hoist them into the system prompt on non-Anthropic models.
   // The returned-parts contract is the trust boundary: only parts that *this function*
@@ -2558,6 +3174,29 @@ export namespace SessionPrompt {
     // altimate_change end
     const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
     if (!userMessage) return { messages: input.messages, trustedReminderParts }
+
+    // altimate_change start — pin the original task
+    // verbatim through compaction, hoisted via the trustedReminderParts path
+    // and labeled "Original task — authoritative over any summary". The pin
+    // text embeds the user's OWN instruction verbatim — the user's directive,
+    // not third-party file/resource content — so promoting it through
+    // trustedReminderParts does not cross the trust boundary documented above.
+    // Not persisted: recomputed per turn, like the plan reminder below.
+    const pinText = await taskPinReminder({ visible: input.messages, session: input.session, model: input.model })
+    if (pinText) {
+      const part: MessageV2.TextPart = {
+        id: PartID.ascending(),
+        messageID: userMessage.info.id,
+        sessionID: userMessage.info.sessionID,
+        type: "text",
+        text: pinText,
+        synthetic: true,
+        ...(nonAnthropic ? { ignored: true } : {}),
+      }
+      userMessage.parts.push(part)
+      trustedReminderParts.push(part)
+    }
+    // altimate_change end
 
     // Original logic when experimental plan mode is disabled
     if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
@@ -2740,11 +3379,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       throw new Session.BusyError(input.sessionID)
     }
 
-    using _ = defer(() => {
+    // altimate_change start — await idle restoration for shell-owned generations
+    await using _ = defer(async () => {
       // If no queued callbacks, cancel (the default)
       const callbacks = state()[input.sessionID]?.callbacks ?? []
       if (callbacks.length === 0) {
-        cancel(input.sessionID)
+        await cancel(input.sessionID)
       } else {
         // Otherwise, trigger the session loop to process queued items
         loop({ sessionID: input.sessionID, resume_existing: true }).catch((error) => {
@@ -2752,6 +3392,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
       }
     })
+    // altimate_change end
 
     const session = await Session.get(input.sessionID)
     if (session.revert) {
@@ -3068,17 +3709,28 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       ): Promise<MessageV2.WithParts> {
         const now = Date.now()
         const assistantMsg: MessageV2.Assistant = {
-          id: MessageID.ascending(), role: "assistant", sessionID: input.sessionID,
-          parentID, modelID: model.modelID, providerID: model.providerID,
-          mode: "builder", agent: "builder",
+          id: MessageID.ascending(),
+          role: "assistant",
+          sessionID: input.sessionID,
+          parentID,
+          modelID: model.modelID,
+          providerID: model.providerID,
+          mode: "builder",
+          agent: "builder",
           path: { cwd: Instance.directory, root: Instance.worktree },
-          cost: 0, tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          finish: "stop", time: { created: now, completed: now },
+          cost: 0,
+          tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          finish: "stop",
+          time: { created: now, completed: now },
         }
         await Session.updateMessage(assistantMsg)
         const textPart: MessageV2.TextPart = {
-          id: PartID.ascending(), sessionID: input.sessionID, messageID: assistantMsg.id,
-          type: "text", text: responseText, time: { start: now, end: now },
+          id: PartID.ascending(),
+          sessionID: input.sessionID,
+          messageID: assistantMsg.id,
+          type: "text",
+          text: responseText,
+          time: { start: now, end: now },
         }
         await Session.updatePart(textPart)
         AppRuntime.runPromise(
@@ -3144,7 +3796,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (managed) {
           return respond(
             userMsg.info.id,
-            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or run without ALTIMATE_WORKSPACE, to manage it by hand.`,
+            `MCP server **${name}** is managed by workspace **${managed.name}** in this project and cannot be ${subCmd}d here. Unlink the project, or restart with ALTIMATE_WORKSPACE unset, to manage it by hand.`,
             model,
           )
         }
@@ -3154,11 +3806,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (!cfg.mcp?.[name]) {
           const known = Object.keys(cfg.mcp ?? {})
           const suffix = known.length ? ` Known servers: ${known.join(", ")}.` : ""
-          return respond(
-            userMsg.info.id,
-            `MCP server **${name}** not found in config.${suffix}`,
-            model,
-          )
+          return respond(userMsg.info.id, `MCP server **${name}** not found in config.${suffix}`, model)
         }
 
         let responseText: string
@@ -3171,7 +3819,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             responseText = `MCP server **${name}** enabled. Status: connected.`
           } else {
             const errSuffix = entry?.status === "failed" ? " — " + entry.error : ""
-          responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
+            responseText = `Attempted to enable MCP server **${name}**. Status: ${entry?.status ?? "unknown"}${errSuffix}.`
           }
         } else {
           await MCP.disconnect(name)

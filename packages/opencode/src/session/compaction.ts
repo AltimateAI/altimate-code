@@ -16,10 +16,22 @@ import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
 import { Telemetry } from "@/telemetry" // altimate_change — telemetry for compaction events
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — summarizer-integrity error
+import { NamedError } from "@opencode-ai/util/error"
+import type { LLM } from "./llm"
+// altimate_change start — completion-aware continue nudge via the nudge arbiter
+import { DEFAULT_SAFETY_FRACTION } from "./tool-result-cap"
+import { NudgeArbiter } from "./nudge"
+import { SessionTermination } from "./termination"
+import { Flag } from "@/flag/flag"
+import { SystemPrompt } from "./system"
+// altimate_change end
+// altimate_change end
 // altimate_change start — Effect Context.Service facade for the upstream runtime
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
+import path from "node:path"
 // altimate_change end
 
 export namespace SessionCompaction {
@@ -32,12 +44,63 @@ export namespace SessionCompaction {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   }
 
+  /**
+   * Redacts the string leaves of an argument value, preserving structure so a
+   * legitimate argument still renders. Non-strings cannot carry a secret in a
+   * form the pattern redactor recognizes and are left alone; a credential held
+   * under a sensitive KEY is handled by the caller instead.
+   */
+  // redactLedgerDetail cost grows super-linearly with input length (measured:
+  // 1 KB 2ms, 10 KB 77ms, 100 KB 6.2s), and tool output can be megabytes. Only
+  // 80 characters of the redacted text are ever retained, so redaction runs
+  // over a bounded window. A secret could in principle be cut at this boundary
+  // and stop matching, but a fragment from position ~1024 can only reach the
+  // first 80 characters if redaction collapsed nearly everything before it, in
+  // which case what shows is redaction markers. Redacting unbounded input
+  // instead hangs compaction outright, which is strictly worse.
+  const MASK_REDACT_WINDOW = 1024
+
+  function redactArgValue(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+    if (typeof value === "string") return redactLedgerDetail(value.slice(0, MASK_REDACT_WINDOW))
+    if (value && typeof value === "object") {
+      // Tool inputs are arbitrary and CAN be circular; walking one without this
+      // guard hangs compaction outright. Track only the active recursion path:
+      // a shared (non-circular) object must be redacted independently at every
+      // alias, never returned raw on its second appearance.
+      if (seen.has(value)) return value
+      seen.add(value)
+      try {
+        if (Array.isArray(value)) return value.map((v) => redactArgValue(v, seen))
+        const out: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(value)) {
+          out[k] = isSensitiveArgName(k) ? "<redacted>" : redactArgValue(v, seen)
+        }
+        return out
+      } finally {
+        seen.delete(value)
+      }
+    }
+    return value
+  }
+
   function truncateArgs(input: Record<string, any> | null | undefined, maxLen: number): string {
     if (!input || typeof input !== "object") return ""
     let str: string
     try {
       str = Object.entries(input)
-        .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
+        // Redact the string LEAVES, not the joined text and not the JSON.
+        // redactLedgerDetail begins with Telemetry.maskString, which collapses
+        // any QUOTED string to "?" — so redacting JSON.stringify(v) would erase
+        // every argument, and redacting the joined `k: v` text would read each
+        // pair as an assignment shape and mask it wholesale. Redaction also
+        // precedes truncation: truncating first can cut a secret mid-token so
+        // it stops matching and then survives into the mask.
+        .map(([k, v]) =>
+          // A sensitive NAME marks its value as a credential whatever its
+          // shape, which value-level redaction alone cannot see: an opaque
+          // token such as { api_key: "sk-abc123" } matches no pattern.
+          isSensitiveArgName(k) ? `${k}: <redacted>` : `${k}: ${JSON.stringify(redactArgValue(v))}`,
+        )
         .join(", ")
     } catch {
       return "[unserializable]"
@@ -59,7 +122,11 @@ export namespace SessionCompaction {
         : {},
       80,
     )
-    const firstLine = output.split("\n")[0]?.slice(0, 80) || ""
+    // The mask REPLACES the cleared output and is replayed on every subsequent
+    // provider request, so anything retained here outlives the clear. Both the
+    // fingerprint and the serialized args go through the same redactor as the
+    // facts ledger; redaction precedes truncation for the reason noted above.
+    const firstLine = redactLedgerDetail(output.slice(0, MASK_REDACT_WINDOW).split("\n")[0] ?? "").slice(0, 80) || ""
     const fingerprint = firstLine ? ` — "${firstLine}"` : ""
     return `[Tool output cleared — ${part.tool}(${args}) returned ${lines} lines, ${formatBytes(bytes)}${fingerprint}]`
   }
@@ -78,7 +145,74 @@ export namespace SessionCompaction {
 
   // altimate_change start — improved isOverflow formula with safety guard and unified headroom
   // See PR #35 — fixes upstream bugs with limit.input models and small-context models
-  export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
+  //
+  // Estimator safety margin: chars-based Token.estimate values substantially
+  // undercount real tokenization of dense SQL/JSON (a request can exceed the
+  // provider limit while the estimate still looks safe). The safety fraction
+  // (context_safety_fraction, default 0.65) corrects for that — but ONLY where
+  // estimates are involved: estimate-derived budgets (fitHead, pin sizing) are
+  // computed against base * fraction, and the estimated component a caller
+  // passes to isOverflow is inflated by 1/fraction. PROVIDER-REPORTED usage is
+  // exact and is always compared against the raw limit minus headroom —
+  // scaling exact counts by the fraction forfeited ~35% of every window for
+  // sessions whose counts contain no estimate at all.
+  // altimate_change start — was a second bare `0.65`, cross-referenced to
+  // `tool-result-cap.ts` by comment only. The two had already drifted once;
+  // a comment cannot keep them equal, so take the exported value. (review)
+  const DEFAULT_CONTEXT_SAFETY_FRACTION = DEFAULT_SAFETY_FRACTION
+  // altimate_change end
+  // Trigger floor for small-context models where the safety fraction would push
+  // the threshold to ~0 tokens — firing on a near-empty session would livelock
+  // compaction. Clamped to the raw threshold so the margin can only ever make
+  // the trigger MORE conservative than the pre-margin formula.
+  const MIN_OVERFLOW_THRESHOLD = 4_000
+
+  export function contextSafetyFraction(cfg?: { compaction?: { context_safety_fraction?: number } }) {
+    // globalThis.process: SessionCompaction.process shadows the Node global here.
+    // Number() over the full trimmed value — parseFloat would accept numeric
+    // prefixes ("0.65junk") and silently override configuration.
+    const raw = globalThis.process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]?.trim()
+    let env = Number.NaN
+    if (raw) {
+      env = Number(raw)
+      if (!Number.isFinite(env)) log.warn("invalid ALTIMATE_CONTEXT_SAFETY_FRACTION ignored", { value: raw })
+    }
+    const value = Number.isFinite(env)
+      ? env
+      : (cfg?.compaction?.context_safety_fraction ?? DEFAULT_CONTEXT_SAFETY_FRACTION)
+    if (!Number.isFinite(value)) return DEFAULT_CONTEXT_SAFETY_FRACTION
+    return Math.min(1, Math.max(0.1, value))
+  }
+
+  /** Portion of a declared token limit treated as usable for estimate-vs-limit decisions. */
+  export function effectiveContextLimit(base: number, fraction: number) {
+    return Math.floor(base * fraction)
+  }
+
+  /**
+   * THE compaction-trigger threshold — the single formula shared by isOverflow
+   * (when to compact) and pinBudget (how much pinned content may survive
+   * compaction). Any consumer computing its own boundary from `base - headroom`
+   * risks admitting more retained content than the trigger allows, which
+   * re-fires compaction immediately (livelock).
+   */
+  export function overflowThreshold(input: { base: number; headroom: number; fraction: number }) {
+    const effectiveBase = effectiveContextLimit(input.base, input.fraction)
+    return Math.min(input.base - input.headroom, Math.max(effectiveBase - input.headroom, MIN_OVERFLOW_THRESHOLD))
+  }
+
+  export async function isOverflow(input: {
+    tokens: MessageV2.Assistant["tokens"]
+    model: Provider.Model
+    /**
+     * Chars-based-estimated tokens included in the decision (e.g. the uncounted
+     * tail appended since the last provider-reported usage reading). The safety
+     * fraction applies ONLY to this component — it is inflated by 1/fraction to
+     * cover worst-case estimator undercount. `tokens` itself is provider-reported
+     * (exact) and is compared against the raw limit minus headroom.
+     */
+    estimatedTokens?: number
+  }) {
     const config = await Config.get()
     if (config.compaction?.auto === false) return false
     const context = input.model.limit.context
@@ -93,7 +227,10 @@ export namespace SessionCompaction {
     const headroom = Math.max(reserved, maxOutput)
     const base = input.model.limit.input ?? context
     if (base <= headroom) return false
-    return count >= base - headroom
+    const estimated = input.estimatedTokens ?? 0
+    const adjusted = estimated > 0 ? count + Math.ceil(estimated / contextSafetyFraction(config)) : count
+    const threshold = overflowThreshold({ base, headroom, fraction: 1 })
+    return adjusted >= threshold
   }
   // altimate_change end
 
@@ -143,19 +280,69 @@ export namespace SessionCompaction {
     })
   }
 
-  function preserveRecentBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
+  // Retained post-compaction content (verbatim tail + state ledger) may never
+  // by itself approach the overflow trigger: on small-window models a tail
+  // sized from the raw limit could exceed the threshold alone, so every
+  // compaction immediately re-triggered (per-turn summarization churn). Cap
+  // tail + ledger at this fraction of the trigger threshold.
+  const MAX_RETAINED_THRESHOLD_FRACTION = 0.5
+
+  /** Ledger/carry budget admitted by the same retention ceiling used for the tail. */
+  export function effectiveLedgerBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
+    const enabled = input.cfg.compaction?.state_ledger !== false || input.cfg.compaction?.summary_carry !== false
+    if (!enabled) return 0
+    const configured = Math.max(0, input.cfg.compaction?.ledger_max_tokens ?? LEDGER_MAX_TOKENS)
+    const context = input.model.limit.context
+    if (context === 0) return configured
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const headroom = Math.max(input.cfg.compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
+    const base = input.model.limit.input ?? context
+    if (base <= headroom) return 0
+    const threshold = overflowThreshold({
+      base,
+      headroom,
+      fraction: contextSafetyFraction(input.cfg),
+    })
+    return Math.min(configured, Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION)))
+  }
+
+  export function preserveRecentBudget(input: { cfg: ConfigInfo; model: Provider.Model }) {
     const context = input.model.limit.context
     if (context === 0) return 0
 
+    // Accept the V2 retained-tail name directly as well as the legacy V1 field.
+    // The main config path currently migrates V1, but callers supplying an
+    // already-V2 object must not silently lose keep.tokens.
+    const compaction = input.cfg.compaction as
+      | (NonNullable<ConfigInfo["compaction"]> & { keep?: { tokens?: number } })
+      | undefined
     const maxOutput = ProviderTransform.maxOutputTokens(input.model)
-    const reserved = input.cfg.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, maxOutput)
+    const reserved = compaction?.reserved ?? Math.min(COMPACTION_BUFFER, maxOutput)
     const usable = input.model.limit.input
       ? Math.max(0, input.model.limit.input - reserved)
       : Math.max(0, context - maxOutput)
-    return (
-      input.cfg.compaction?.preserve_recent_tokens ??
+    const candidate =
+      compaction?.keep?.tokens ??
+      compaction?.preserve_recent_tokens ??
       Math.min(MAX_PRESERVE_RECENT_TOKENS, Math.max(MIN_PRESERVE_RECENT_TOKENS, Math.floor(usable * 0.25)))
-    )
+    // Clamp (applies to explicit config too — the no-churn invariant is
+    // unconditional): tail budget + ledger budget <= fraction of the trigger.
+    const triggerHeadroom = Math.max(compaction?.reserved ?? COMPACTION_BUFFER, maxOutput)
+    const base = input.model.limit.input ?? context
+    if (base <= triggerHeadroom) return candidate // compaction disabled entirely; no trigger to protect
+    const threshold = overflowThreshold({
+      base,
+      headroom: triggerHeadroom,
+      fraction: contextSafetyFraction(input.cfg),
+    })
+    // altimate_change start — reserve the ledger budget only when a ledger or
+    // carry can actually be emitted. With both features off the reservation was
+    // still taken out of the tail budget, and a large `ledger_max_tokens` could
+    // drive the retained tail to zero for text that is never rendered.
+    const ledgerMax = effectiveLedgerBudget(input)
+    // altimate_change end
+    const retainCap = Math.max(0, Math.floor(threshold * MAX_RETAINED_THRESHOLD_FRACTION) - ledgerMax)
+    return Math.min(candidate, retainCap)
   }
 
   function turns(messages: MessageV2.WithParts[]) {
@@ -203,8 +390,60 @@ export namespace SessionCompaction {
     return undefined
   }
 
+  // altimate_change start — head-truncation fallback for un-compactable sessions
+  // A session can overflow so far past the window (huge tool result landing in
+  // one turn) that the summarization request itself no longer fits, which used
+  // to terminate the session with "too large to compact". Summarizing a
+  // truncated head is lossy; killing the session loses everything.
+  export async function fitHead(input: {
+    head: MessageV2.WithParts[]
+    model: Provider.Model
+    fraction?: number
+    /** Estimated tokens for the assembled summarizer prompt, system text, and request framing. */
+    overheadTokens?: number
+  }) {
+    const context = input.model.limit.context
+    if (context === 0) return { head: input.head, dropped: 0 }
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const base = input.model.limit.input ?? context
+    // The summarization-request budget derives from the SAME safety-fraction
+    // helper as the overflow trigger — Token.estimate undercounts dense
+    // code/tool output, and a fallback sized against the raw limit can itself
+    // overflow under that estimator error. Callers assembling a real summary
+    // request pass its measured overhead; 2k remains a conservative default for
+    // direct/test callers.
+    const fraction = input.fraction ?? contextSafetyFraction()
+    const overheadTokens = input.overheadTokens ?? 2_000
+    const budget = Math.max(0, effectiveContextLimit(base, fraction) - maxOutput - overheadTokens)
+    let head = input.head
+    let dropped = 0
+    // A non-positive history budget is the most constrained case, not a reason
+    // to return every message. The boundary-aware loop below safely reduces a
+    // multi-turn head to its newest user-led turn; a single-turn head still
+    // fails closed rather than becoming assistant/tool-led.
+    while (head.length > 1 && (await estimate({ messages: head, model: input.model })) > budget) {
+      const step = Math.max(1, Math.floor(head.length / 8))
+      // Round the cut forward to the next turn boundary: a head that starts
+      // mid-turn (assistant/tool messages with no leading user turn) is
+      // rejected by providers with a 400, defeating the fallback entirely.
+      let cut = step
+      while (cut < head.length && head[cut]!.info.role !== "user") cut++
+      // No user boundary to cut at: fail closed with the current (still
+      // user-leading) head rather than slice mid-turn — an assistant/tool-leading
+      // head is rejected by providers with a 400, defeating the fallback.
+      if (cut >= head.length) break
+      head = head.slice(cut)
+      dropped += cut
+    }
+    return { head, dropped }
+  }
+  // altimate_change end
+
   async function select(input: { messages: MessageV2.WithParts[]; cfg: ConfigInfo; model: Provider.Model }) {
-    const limit = input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
+    const compaction = input.cfg.compaction as
+      | (NonNullable<ConfigInfo["compaction"]> & { keep?: { turns?: number } })
+      | undefined
+    const limit = compaction?.keep?.turns ?? compaction?.tail_turns ?? DEFAULT_TAIL_TURNS
     if (limit <= 0) return { head: input.messages, tail_start_id: undefined }
     const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
     const all = turns(input.messages)
@@ -334,8 +573,664 @@ export namespace SessionCompaction {
     }
   }
 
+  // altimate_change start — post-compaction state ledger (5a),
+  // append-only summary carry (5b), first-person summary reframe (5c).
+  //
+  // 5a: a deterministic, corroborated-facts-only ledger appended to the synthetic
+  // post-compaction continue message. Facts come from harness tool events ONLY:
+  // write/edit/apply_patch completion events (path + event timestamp) and the last N
+  // tool calls with exit codes where recorded. Command-agnostic by design — no
+  // "build/test" classifier, no vertical (dbt/warehouse) token matching.
+  // Bash-mediated file changes produce no edit event, so they are flagged as possible
+  // but unverified rather than guessed at. The re-read directive is advisory and
+  // mtime-anchored, never an absolute prohibition (the model's read-before-edit habit
+  // is load-bearing, and external IDE edits can change disk mid-session).
+  //
+  // Thresholds are config-exposed (compaction.ledger_max_tokens / ledger_recent_calls).
+  // Rationale: the 500-token cap (tail-truncate) keeps the ledger cheaper than the
+  // duplicate re-reads it prevents (a single mid-size file re-read is ~1–3k tokens).
+  // 10 recent calls covers several typical edit→verify cycles without dominating
+  // the budget. Neither is fitted to any one workload.
+  export const LEDGER_MAX_TOKENS = 500
+  export const LEDGER_RECENT_CALLS = 10
+
+  // Harness-corroborated write events: tools whose completion PROVES a file write.
+  // Deliberately excludes bash — shell writes are unverifiable from tool events.
+  const LEDGER_WRITE_TOOLS = new Set(["write", "edit"])
+  const LEDGER_DETAIL_MAX = 100
+
+  // A short acknowledgement can steer the live conversation but is not an
+  // authoritative task specification worth pinning through compaction. Keep
+  // this intentionally narrow: uncertain text remains task-bearing.
+  export function isPinnableTaskText(value: string): boolean {
+    const normalized = value
+      .trim()
+      .replace(/[.!?…]+$/u, "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toLowerCase()
+    if (!normalized) return false
+    return !/^(?:yes|yep|yeah|ok|okay|sure|continue|proceed|go ahead|do it|looks good|sounds good|lgtm|approved|thanks|thank you)$/.test(
+      normalized,
+    )
+  }
+
+  export function hasPinnableTask(messages: MessageV2.WithParts[]): boolean {
+    return messages.some((msg) => {
+      if (msg.info.role !== "user" || msg.parts.some((part) => part.type === "compaction")) return false
+      const text = msg.parts
+        .filter((part): part is MessageV2.TextPart => part.type === "text" && part.synthetic !== true)
+        .map((part) => part.text)
+        .join("\n\n")
+      return isPinnableTaskText(text)
+    })
+  }
+
+  function shellSegmentBefore(value: string, end: number): string {
+    let start = 0
+    let quote: "'" | '"' | undefined
+    let escaped = false
+    for (let i = 0; i < end; i++) {
+      const char = value[i]
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === "\\" && quote !== "'") {
+        escaped = true
+        continue
+      }
+      if (quote) {
+        if (char === quote) quote = undefined
+        continue
+      }
+      if (char === "'" || char === '"') {
+        quote = char
+        continue
+      }
+      if (char === ";" || char === "|" || char === "&" || char === "\n") start = i + 1
+    }
+    return value.slice(start, end)
+  }
+
+  /**
+   * Ledger text is persisted into a later model prompt, so treat every tool
+   * argument as sensitive. This intentionally over-redacts opaque credentials
+   * and signed URL material; losing a diagnostic fragment is safer than
+   * carrying a credential across compaction or provider changes.
+   */
+  const SENSITIVE_NAME =
+    /(?:api[_-]?key|access[_-]?key|access[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|(?:^|[_-])(?:key|token|secret|password|passwd|credential|signature|authorization|cookie)(?:$|[_-]))/i
+
+  /** True when an argument NAME marks its value as a credential regardless of shape. */
+  export function isSensitiveArgName(name: string): boolean {
+    return SENSITIVE_NAME.test(name)
+  }
+
+  export function redactLedgerDetail(value: string): string {
+    const sensitiveName = SENSITIVE_NAME
+    let masked = Telemetry.maskString(value)
+
+    // `-u` is also a benign flag for commands such as `git push -u` and
+    // `python -u`. Redact it as authentication only in the current curl shell
+    // segment, or when the value itself has a user:password shape. Long
+    // `--user` follows the same rule so task literals are not discarded merely
+    // because an unrelated CLI chose that option name.
+    masked = masked.replace(
+      /(^|\s)(--user|-u)(?:(=|\s+)("[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))(?:(\s+)("[^"]*"|'[^']*'|[^\s,;]+))?/gi,
+      (
+        match,
+        lead: string,
+        flag: string,
+        separator: string | undefined,
+        separatedValue: string | undefined,
+        attachedValue: string | undefined,
+        followingSeparator: string | undefined,
+        followingValue: string | undefined,
+        offset: number,
+        whole: string,
+      ) => {
+        // Attached values are valid only for short `-u` (`-ualice:pass`).
+        if (flag.toLowerCase() === "--user" && separator === undefined) return match
+        const rawValue = (separatedValue ?? attachedValue ?? "").replace(/^["']|["']$/g, "")
+        // Windows invokes curl as `curl.exe`, and either platform may reach it
+        // through a path such as /usr/bin/curl or a Windows System32 path.
+        // Missing those spellings left the `-u` VALUE unredacted.
+        const curlContext = /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(shellSegmentBefore(whole, offset + lead.length))
+        // Outside a curl context a colon-shaped value is treated as
+        // user:password. The ONE exemption is an explicitly recognized
+        // all-numeric UID:GID pair (`docker run --user 1000:1000`), which is a
+        // task detail the ledger exists to preserve. Exempting by "no
+        // alphabetic character before the colon" instead would be wrong in the
+        // leaking direction: a numeric username with a real password
+        // (`--user 1234:secret`) is a credential and must still redact.
+        const colonShaped = /^[^:/\s]+:[^/\s]+$/.test(rawValue)
+        const uidGidPair = /^\d+:\d+$/.test(rawValue)
+        const credentialShaped = colonShaped && !uidGidPair
+        if (!curlContext && !credentialShaped) return match
+        const rawFollowing = (followingValue ?? "").replace(/^["']|["']$/g, "")
+        // curl accepts credentials as one `user:password` argument. Be
+        // fail-safe for the common malformed two-token spelling (`-u user
+        // password`) too, but preserve a following option or URL operand so a
+        // normal `-u user https://host` invocation keeps its useful endpoint.
+        const redactFollowing =
+          curlContext &&
+          !colonShaped &&
+          rawFollowing.length > 0 &&
+          !rawFollowing.startsWith("-") &&
+          !URL.canParse(rawFollowing)
+        return (
+          `${lead}${flag}${separator ?? ""}<redacted>` +
+          (followingValue === undefined
+            ? ""
+            : `${followingSeparator ?? ""}${redactFollowing ? "<redacted>" : followingValue}`)
+        )
+      },
+    )
+
+    // Strip URL userinfo and signed/query material before applying structural
+    // command redaction. This works for HTTP-compatible and custom schemes.
+    masked = masked.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, (raw) => {
+      try {
+        const url = new URL(raw)
+        url.username = ""
+        url.password = ""
+        url.search = ""
+        url.hash = ""
+        return url.toString()
+      } catch {
+        return "<redacted-url>"
+      }
+    })
+
+    // Match assignment and flag SHAPES first, then classify the complete name.
+    // This catches provider-prefixed forms such as AWS_SECRET_ACCESS_KEY and
+    // --aws-secret-access-key without turning ordinary words ending in "key"
+    // (for example, "monkey") into secret names.
+    masked = masked
+      .replace(
+        /\b([A-Za-z_][A-Za-z0-9_-]*)(\s*(?:=|:)\s*)(?:("[^"]*")|('[^']*')|([^\s,;]+))/g,
+        (match, name: string, separator: string) =>
+          sensitiveName.test(name) ? `${name}${separator}<redacted>` : match,
+      )
+      .replace(
+        /(--[A-Za-z0-9_-]+)(=|\s+)(?:("[^"]*")|('[^']*')|([^\s,;]+))/g,
+        (match, name: string, separator: string) =>
+          sensitiveName.test(name.slice(2)) ? `${name}${separator}<redacted>` : match,
+      )
+      .replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 <redacted>")
+      .replace(
+        /\b(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g,
+        "<redacted>",
+      )
+      .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<redacted>")
+
+    // Header syntax is too permissive to identify a reliable shell-token end
+    // after quote flattening. Once a sensitive header begins, drop the rest of
+    // this diagnostic detail rather than risk retaining a short scheme tail,
+    // another cookie field, or a following credential.
+    return masked.replace(/\b((?:proxy-)?authorization|(?:set-)?cookie)\s*:[\s\S]*$/i, "$1: <redacted>")
+  }
+
+  export type LedgerWrite = { path: string; mtime: number; tool: string }
+  export type LedgerCall = {
+    tool: string
+    detail: string
+    exit?: number | null
+    errored: boolean
+  }
+  export type Ledger = { writes: LedgerWrite[]; calls: LedgerCall[]; sawBash: boolean }
+
+  function callDetail(input: Record<string, any> | null | undefined): string {
+    if (!input || typeof input !== "object") return ""
+    // Generic primary-argument pick — identical treatment for every tool.
+    const candidate = input.command ?? input.filePath ?? input.path ?? input.pattern ?? ""
+    const str = typeof candidate === "string" ? redactLedgerDetail(candidate.replace(/\s+/g, " ").trim()) : ""
+    return str.length > LEDGER_DETAIL_MAX ? str.slice(0, LEDGER_DETAIL_MAX) + "…" : str
+  }
+
+  /** Deterministic: output depends only on the message list passed in. */
+  // altimate_change start — the ledger must be built from the UNFILTERED session
+  // history. The compaction caller passes the compaction-FILTERED view, so from
+  // the second compaction onward every tool event hidden by an earlier
+  // compaction was already gone: the "session state ledger" forgot the files it
+  // had recorded, precisely when cross-compaction fidelity matters most.
+  // Fail-safe — a read failure falls back to the filtered view rather than
+  // losing the ledger entirely.
+  /** Full chronological history for the ledger; `fallback` on read failure. */
+  export function ledgerHistory(sessionID: SessionID, fallback: MessageV2.WithParts[]): MessageV2.WithParts[] {
+    try {
+      // MessageV2.stream yields newest-first; buildLedger wants chronological.
+      return [...MessageV2.stream(sessionID)].reverse()
+    } catch (e) {
+      log.warn("ledger history read failed, using filtered view", {
+        sessionID,
+        error: e instanceof Error ? e.message : String(e),
+      })
+      return fallback
+    }
+  }
+  // altimate_change end
+
+  function ledgerPathKey(value: string, root?: string): string {
+    const normalized = path.normalize(value)
+    return (root ? path.resolve(root, normalized) : normalized).replaceAll("\\", "/")
+  }
+
+  export function buildLedger(messages: MessageV2.WithParts[], root?: string): Ledger {
+    const writes = new Map<string, LedgerWrite>()
+    const calls: LedgerCall[] = []
+    let sawBash = false
+    for (const msg of messages) {
+      for (const part of msg.parts) {
+        if (part.type !== "tool") continue
+        const state = part.state
+        if (state.status !== "completed" && state.status !== "error") continue
+        const errored = state.status === "error"
+        const metadata: Record<string, any> = state.metadata ?? {}
+        const exit = typeof metadata.exit === "number" || metadata.exit === null ? metadata.exit : undefined
+        calls.push({ tool: part.tool, detail: callDetail(state.input), exit, errored })
+        if (part.tool === "bash") sawBash = true
+        if (errored) continue
+        if (LEDGER_WRITE_TOOLS.has(part.tool)) {
+          const filePath = typeof state.input?.filePath === "string" ? state.input.filePath : undefined
+          // mtime = tool-event completion time, NOT an fs.stat — corroborated facts only.
+          if (filePath)
+            writes.set(ledgerPathKey(filePath, root), { path: filePath, mtime: state.time.end, tool: part.tool })
+        }
+        if (part.tool === "apply_patch") {
+          const files = Array.isArray(metadata.files) ? metadata.files : []
+          for (const f of files) {
+            const source = typeof f?.filePath === "string" ? f.filePath : undefined
+            // A delete wrote nothing — recording it would advertise a file that
+            // no longer exists as freshly written.
+            if (f?.type === "delete") {
+              if (source) writes.delete(ledgerPathKey(source, root))
+              continue
+            }
+            // On a move, `filePath` is the SOURCE and `movePath` is where the
+            // content actually landed; the ledger must name the destination or
+            // it sends the continuing agent back to the path that was removed.
+            if (typeof f?.movePath === "string" && source) writes.delete(ledgerPathKey(source, root))
+            const target = typeof f?.movePath === "string" ? f.movePath : f?.filePath
+            if (typeof target === "string")
+              writes.set(ledgerPathKey(target, root), {
+                path: target,
+                mtime: state.time.end,
+                tool: "apply_patch",
+              })
+          }
+        }
+      }
+    }
+    return {
+      writes: [...writes.values()].sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path)),
+      calls,
+      sawBash,
+    }
+  }
+
+  /**
+   * Render the ledger for the continue message. ≤ maxTokens, tail-truncated:
+   * content is ordered by importance (verified writes → unverified-shell note →
+   * advisory → recent calls newest-first) so truncation drops the oldest calls first.
+   */
+  export function renderLedger(ledger: Ledger, opts?: { maxTokens?: number; recentCalls?: number }): string {
+    const maxTokens = opts?.maxTokens ?? LEDGER_MAX_TOKENS
+    const recentCalls = opts?.recentCalls ?? LEDGER_RECENT_CALLS
+    if (!ledger.writes.length && !ledger.calls.length) return ""
+    const lines: string[] = ["[Session state ledger — harness-recorded facts, generated automatically at compaction]"]
+    if (ledger.writes.length) {
+      lines.push("Files you wrote this session (verified write/edit tool events):")
+      for (const w of ledger.writes) {
+        lines.push(
+          `- ${redactLedgerDetail(w.path)} — last written by you at ${new Date(w.mtime).toISOString()} via ${w.tool}`,
+        )
+      }
+    }
+    if (ledger.sawBash) {
+      lines.push(
+        "Shell commands also ran this session; any file changes they made are possible but unverified (shell writes produce no edit event).",
+      )
+    }
+    lines.push(
+      "Advisory: these files were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it.",
+    )
+    // altimate_change start — `slice(-0)` is `slice(0)`, i.e. EVERY call, so a
+    // configured `ledger_recent_calls: 0` (which the NonNegativeInt schema
+    // accepts) rendered the entire call history instead of none.
+    if (ledger.calls.length && recentCalls > 0) {
+      const recent = ledger.calls.slice(-recentCalls).reverse()
+      // altimate_change end
+      lines.push(`Recent tool calls, newest first (last ${recent.length} of ${ledger.calls.length}):`)
+      for (const c of recent) {
+        const status = c.errored
+          ? "errored"
+          : c.exit === undefined
+            ? "ok"
+            : c.exit === null
+              ? "exit ?"
+              : `exit ${c.exit}`
+        lines.push(`- ${c.tool} (${status})${c.detail ? ` — ${c.detail}` : ""}`)
+      }
+    }
+    // Find the longest fitting prefix in O(n log n); repeatedly joining after
+    // one pop made a many-file ledger quadratic on the recovery hot path.
+    let low = 1
+    let high = lines.length
+    let best = 0
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2)
+      if (Token.estimate(lines.slice(0, mid).join("\n")) <= maxTokens) {
+        best = mid
+        low = mid + 1
+      } else high = mid - 1
+    }
+    // A bare header has no fact content and must not consume the configured cap.
+    return best > 1 ? lines.slice(0, best).join("\n") : ""
+  }
+
+  // ── 5b: append-only summary carry ─────────────────────────────────────────
+  // Previous round's Accomplished items are threaded into the next summarization
+  // as anchors. An item carries as FACT ([verified]) only when a corroborating
+  // ledger event exists (a write/edit event, or a zero-exit command naming the
+  // artifact); otherwise it carries tagged "claimed, unverified". A naive carry
+  // would REMEMBER invented deliverables (summaries can fabricate them) and
+  // propagate them to every later summary and subagent.
+
+  export type CarryStatus = "verified" | "claimed, unverified"
+  export type CarryItem = { text: string; status: CarryStatus }
+
+  const CARRY_TAG_RE = /^\[(verified|claimed, unverified)\]\s*(.*)$/i
+
+  /** Extract bullet items under the "## Accomplished" heading of a summary. */
+  export function extractAccomplished(summary: string): { text: string; priorStatus?: CarryStatus }[] {
+    const out: { text: string; priorStatus?: CarryStatus }[] = []
+    let inSection = false
+    for (const raw of summary.split("\n")) {
+      const line = raw.trim()
+      if (/^#{1,6}\s/.test(line)) {
+        inSection = /^#{1,6}\s*accomplished\b/i.test(line)
+        continue
+      }
+      if (!inSection) continue
+      const m = line.match(/^[-*]\s+(.*\S)\s*$/)
+      if (!m) continue
+      let text = m[1]!
+      let priorStatus: CarryStatus | undefined
+      const tag = text.match(CARRY_TAG_RE)
+      if (tag) {
+        priorStatus = tag[1]!.toLowerCase() as CarryStatus
+        text = tag[2]!
+      }
+      if (text) out.push({ text, priorStatus })
+    }
+    return out
+  }
+
+  /** Path-like tokens (contain a dot or slash) — the artifact names a claim can be checked against. */
+  function artifactTokens(text: string): string[] {
+    // URLs and release identifiers are context, not filesystem evidence. If a
+    // verified claim also mentions its docs URL or runtime version, treating
+    // those tokens as artifacts makes the all-artifacts check demote the claim.
+    const scrubbed = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s<>{}[\]"'`]+/gi, " ")
+    return (scrubbed.match(/[A-Za-z0-9_@-]*[./][A-Za-z0-9_./-]+/g) ?? []).filter(
+      (token) =>
+        token.length >= 3 &&
+        /[A-Za-z]/.test(token) &&
+        !/^v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$/i.test(token) &&
+        !/@v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?$/i.test(token),
+    )
+  }
+
+  function itemCorroborated(text: string, ledger: Ledger): boolean {
+    const artifacts = artifactTokens(text)
+    if (!artifacts.length) return false
+    return artifacts.every((raw) => {
+      // altimate_change start — a summary commonly writes a path as `./src/foo.ts`.
+      // The leading `./` made the token look directory-qualified while matching
+      // no ledger path, so a genuinely written artifact stayed unverified.
+      const token = raw.startsWith("./") ? raw.slice(2) : raw
+      // altimate_change end
+      // Basename fallback only for a bare filename. A directory-qualified token
+      // (`src/index.ts`) must match its own path — otherwise any unrelated
+      // `test/index.ts` write corroborates it, and because carry status is
+      // append-only that wrong [verified] fact survives every later compaction.
+      const base = token.includes("/") ? "" : token
+      for (const w of ledger.writes) {
+        if (w.path === token || w.path.endsWith("/" + token)) return true
+        if (base && w.path.split("/").pop() === base) return true
+      }
+      return false
+    })
+  }
+
+  /**
+   * Append-only status resolution: once [verified], always [verified] — the
+   * corroborating event may have been compacted out of the retained window, so a
+   * prior verified tag is preserved. Unverified claims may be promoted when
+   * evidence appears, never silently demoted or dropped.
+   */
+  export function corroborateCarry(items: { text: string; priorStatus?: CarryStatus }[], ledger: Ledger): CarryItem[] {
+    return items.map((item) => ({
+      text: item.text,
+      status:
+        item.priorStatus === "verified" || itemCorroborated(item.text, ledger)
+          ? "verified"
+          : ("claimed, unverified" as const),
+    }))
+  }
+
+  export function renderCarryAnchors(items: CarryItem[], maxTokens: number = LEDGER_MAX_TOKENS): string {
+    if (!items.length) return ""
+    const header = [
+      "## Previous-summary anchors (append-only carry)",
+      "Earlier compaction rounds recorded these Accomplished items. Carry EVERY item below into the new summary's Accomplished section with its tag verbatim, then append newly accomplished work after them:",
+    ]
+    const footer = [
+      "Items tagged [claimed, unverified] had no corroborating write/edit tool event; keep the tag so later agents do not treat them as established fact. Never promote or remove a tag yourself.",
+    ]
+    let body = items.map((i) => `- [${i.status}] ${i.text}`)
+    // Append-only carry grows monotonically; when over budget drop the OLDEST
+    // items (front of the list) — the freshest anchors are the ones the next
+    // round needs to not lose.
+    while (body.length > 0 && Token.estimate([...header, ...body, ...footer].join("\n")) > maxTokens) {
+      body = body.slice(1)
+    }
+    // Dropping the final oversized item preserves the item's integrity. A
+    // truncated `[verified]` claim could point at the wrong artifact, while an
+    // empty carry safely falls back to the fresh summary.
+    if (!body.length) return ""
+    const rendered = [...header, ...body, ...footer].join("\n")
+    return Token.estimate(rendered) <= maxTokens ? rendered : ""
+  }
+
+  /** Most recent committed summary text, if any (assistant, summary, finished, no error). */
+  export function latestSummaryText(messages: MessageV2.WithParts[]): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i]!
+      if (msg.info.role !== "assistant" || !msg.info.summary || !msg.info.finish || msg.info.error) continue
+      const text = msg.parts
+        .filter((p): p is MessageV2.TextPart => p.type === "text")
+        .map((p) => p.text)
+        .join("\n")
+      return text.trim() ? text : undefined
+    }
+    return undefined
+  }
+
+  // ── 5c: first-person summary reframe — layered as an ADDITION to whatever
+  // summary prompt is active (default or plugin-provided), never a replacement.
+  export const FIRST_PERSON_REFRAME =
+    'Additionally: write the summary in the first person, as your own working memory — you are summarizing YOUR OWN work in progress, and the agent reading it next is you, continuing the same task. Say "I edited…", "I verified…", "I still need to…" rather than describing the work as another agent\'s or the user\'s.'
+  // altimate_change end
+
   // altimate_change start — compaction attempt tracking for loop protection
   const compactionAttempts = new Map<string, number>()
+  // altimate_change end
+
+  // altimate_change start — pin the original task
+  // verbatim through compaction (budget math + livelock guard).
+  //
+  // Threshold rationale (config-exposed defaults, not fitted to any one workload):
+  // - PIN_MAX_TOKENS 4096: task statements rarely exceed ~4k tokens; larger
+  //   ones keep verbatim head+tail plus a contract card.
+  // - PIN_WINDOW_FRACTION 0.175: the pin must stay a small minority of the
+  //   post-overhead usable window so working context dominates.
+  // - PIN_WORKING_SLACK 2000: hard invariant
+  //   `pin + reserved + ≥2k working slack < compaction threshold`. A fixed 4k
+  //   pin on a small window would otherwise produce a compaction livelock
+  //   (fires, cannot reduce below threshold, re-fires). Shrink the pin, never
+  //   violate the invariant.
+  // - PIN_CARD_MAX_TOKENS 500: contract-card budget.
+  export const PIN_MAX_TOKENS = 4_096
+  export const PIN_WINDOW_FRACTION = 0.175
+  export const PIN_WORKING_SLACK = 2_000
+  export const PIN_CARD_MAX_TOKENS = 500
+
+  const TASK_PIN_FRAME = {
+    open: "<system-reminder>",
+    description:
+      "Original task — authoritative over any summary. The conversation above was compacted into a summary; the task below is the user's own instruction, reproduced verbatim. If the summary and this task conflict, this task wins.",
+    close: "</system-reminder>",
+  } as const
+
+  export function renderTaskPin(body: string): string {
+    return [TASK_PIN_FRAME.open, TASK_PIN_FRAME.description, "", body, TASK_PIN_FRAME.close].join("\n")
+  }
+
+  /** Tokens available for the verbatim body after the fixed reminder frame. */
+  export function taskPinBodyBudget(capTokens: number): number {
+    return Math.max(0, capTokens - Token.estimate(renderTaskPin("")))
+  }
+
+  export function pinEnabled(cfg: ConfigInfo) {
+    return cfg.compaction?.pin_task !== false
+  }
+
+  export function pinCardBudget(cfg: ConfigInfo) {
+    return cfg.compaction?.pin_card_max_tokens ?? PIN_CARD_MAX_TOKENS
+  }
+
+  // Dynamic cap: min(pin_max_tokens, pin_window_fraction × post-overhead usable
+  // window), clamped by the livelock invariant and any per-session livelock
+  // halving. Returns 0 when no pin fits — the pin is then skipped entirely.
+  export function pinBudget(input: { cfg: ConfigInfo; model: Provider.Model; sessionID?: string }): number {
+    if (!pinEnabled(input.cfg)) return 0
+    const context = input.model.limit.context
+    if (context === 0) return 0
+    const maxOutput = ProviderTransform.maxOutputTokens(input.model)
+    const reserved = input.cfg.compaction?.reserved ?? COMPACTION_BUFFER
+    const headroom = Math.max(reserved, maxOutput)
+    const base = input.model.limit.input ?? context
+    // The pin capacity derives from the shared overflowThreshold helper, at the
+    // safety-fraction-scaled (estimate-domain) boundary: pin sizes are
+    // Token.estimate values, so they are budgeted conservatively. This is always
+    // <= the raw trigger isOverflow() compares provider-reported usage against,
+    // so an admitted pin (plus reserved buffer and working slack) can never by
+    // itself re-fire compaction immediately after a compaction.
+    if (base <= headroom) return 0
+    const threshold = overflowThreshold({ base, headroom, fraction: contextSafetyFraction(input.cfg) })
+    if (threshold <= 0) return 0
+    const maxTokens = input.cfg.compaction?.pin_max_tokens ?? PIN_MAX_TOKENS
+    const fraction = input.cfg.compaction?.pin_window_fraction ?? PIN_WINDOW_FRACTION
+    // Hard invariant: pin + ≥2k working slack < compaction threshold. The
+    // threshold already excludes the reserved/headroom buffer (overflowThreshold
+    // subtracts it from base), so subtracting `reserved` again here
+    // double-counted it and silently zeroed the pin on smaller windows.
+    const invariantCap = threshold - PIN_WORKING_SLACK
+    const cap = Math.min(maxTokens, Math.floor(threshold * fraction), invariantCap)
+    if (cap <= 0) return 0
+    return Math.max(0, Math.floor(cap * pinScale(input.sessionID)))
+  }
+
+  // Livelock guard: two CONSECUTIVE auto-compactions that failed to get the
+  // session below threshold halve the pin for the rest of the session (and
+  // halve again on each further pair). "Failed to reduce below threshold" is
+  // detected structurally: a new auto-compaction fires while at most one
+  // finished non-summary assistant turn exists after the previous completed
+  // summary — i.e. the session re-overflowed immediately.
+  const pinState = new Map<string, { failures: number; scale: number }>()
+  // altimate_change start — bound the map the way the starvation and nudge
+  // stores added in this same change are bounded. Production never deleted an
+  // entry (`resetPinState` is a test hook), so a long-lived server accumulated
+  // one entry for every session that ever compacted. Least-recently-used is
+  // evicted: an active long session must not lose its livelock state to churn
+  // from short-lived ones. Losing an evicted entry is safe — the guard simply
+  // restarts at scale 1 for that session.
+  const MAX_PIN_STATE_SESSIONS = 128
+
+  function pinStateBucket(sessionID: string): { failures: number; scale: number } {
+    const existing = pinState.get(sessionID)
+    if (existing) {
+      // Refresh recency so Map iteration order tracks last access.
+      pinState.delete(sessionID)
+      pinState.set(sessionID, existing)
+      return existing
+    }
+    if (pinState.size >= MAX_PIN_STATE_SESSIONS) {
+      const oldest = pinState.keys().next().value
+      if (oldest !== undefined) pinState.delete(oldest)
+    }
+    const fresh = { failures: 0, scale: 1 }
+    pinState.set(sessionID, fresh)
+    return fresh
+  }
+  // altimate_change end
+
+  export function pinScale(sessionID?: string): number {
+    if (!sessionID) return 1
+    const state = pinState.get(sessionID)
+    if (!state) return 1
+    pinState.delete(sessionID)
+    pinState.set(sessionID, state)
+    return state.scale
+  }
+
+  /** Test hook: clear livelock state for one session, or all sessions. */
+  export function resetPinState(sessionID?: string) {
+    if (sessionID) pinState.delete(sessionID)
+    else pinState.clear()
+  }
+
+  /** Called by the auto-overflow paths in prompt.ts BEFORE creating a new compaction. */
+  export function notePinCompaction(sessionID: string, msgs: MessageV2.WithParts[]) {
+    const state = pinStateBucket(sessionID)
+    let lastSummary = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const info = msgs[i].info
+      if (info.role === "assistant" && info.summary && info.finish && !info.error) {
+        lastSummary = i
+        break
+      }
+    }
+    let immediate = false
+    if (lastSummary >= 0) {
+      let finished = 0
+      for (let i = lastSummary + 1; i < msgs.length; i++) {
+        const info = msgs[i].info
+        if (info.role === "assistant" && info.finish && !info.summary) finished++
+      }
+      immediate = finished <= 1
+    }
+    state.failures = immediate ? state.failures + 1 : 0
+    if (state.failures >= 2) {
+      state.scale /= 2
+      state.failures = 0
+      log.warn("task pin halved — consecutive compactions failed to reduce below threshold", {
+        sessionID,
+        scale: state.scale,
+      })
+    }
+    pinState.set(sessionID, state)
+  }
+
+  // Summary-template line, layered as an ADDITION to the active summary prompt
+  // (never a replacement — a plugin-supplied custom prompt REPLACES the
+  // platform's preservation prompt, which is exactly the failure mode the plan
+  // warns about; this constant is only ever appended).
+  export const PIN_SUMMARY_ADDITION =
+    "Do NOT restate the original task requirements in the summary — the original task text is pinned separately and stays visible alongside this summary. If anything in this summary conflicts with the pinned original task, the pinned task is authoritative."
   // altimate_change end
 
   export async function process(input: {
@@ -345,6 +1240,12 @@ export namespace SessionCompaction {
     abort: AbortSignal
     auto: boolean
     overflow?: boolean
+    // altimate_change start — keep nudge delivery scoped to the active prompt generation
+    nudgeGeneration?: NudgeArbiter.Generation
+    // altimate_change end
+    // altimate_change start — optional one-pass history hydration from prompt loop
+    unfilteredMessages?: MessageV2.WithParts[]
+    // altimate_change end
   }) {
     // altimate_change start — telemetry, attempt tracking, and circuit breaker
     const attempt = (compactionAttempts.get(input.sessionID) ?? 0) + 1
@@ -364,8 +1265,17 @@ export namespace SessionCompaction {
       attempt,
     })
     if (attempt > 3) {
+      // Returning undefined here made the prompt loop's `continue` re-enter
+      // process() immediately (the pending compaction marker stays unresolved),
+      // hot-spinning with a telemetry event per iteration. Throw a fatal error
+      // so callers cannot report a clean stop; prompt-loop cleanup restores the
+      // session to idle. Clear the counter so a later prompt gets a fresh
+      // bounded set of attempts instead of tripping the breaker instantly.
       log.warn("compaction circuit breaker", { sessionID: input.sessionID, attempt })
-      return
+      compactionAttempts.delete(input.sessionID)
+      throw new NamedError.Unknown({
+        message: `Compaction failed after ${attempt - 1} attempts; refusing to leave the session in an unresolved loop`,
+      })
     }
     // altimate_change end
     const parent = input.messages.findLast((m) => m.info.id === input.parentID)
@@ -404,16 +1314,47 @@ export namespace SessionCompaction {
         await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
       : // altimate_change end
         await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+    // altimate_change start — upstream_fix: the compaction agent may override its
+    // own model (`agent.model` above), but pinBudget must be computed against the
+    // SESSION's model — the pin is re-injected into the session's next turn, not
+    // the compaction agent's. Reuse `model` when they're the same (the common,
+    // no-override case) instead of resolving twice.
+    const sessionModel = agent.model
+      ? await Provider.getModel(userMessage.model.providerID, userMessage.model.modelID)
+      : model
+    // altimate_change end
     // altimate_change start — upstream_fix: restore tail-preserving compaction selection
     const cfg = await Config.get()
+    // altimate_change start — state ledger + summary carry wiring
+    const ledgerEnabled = cfg.compaction?.state_ledger !== false
+    const carryEnabled = cfg.compaction?.summary_carry !== false
+    const firstPersonEnabled = cfg.compaction?.summary_first_person !== false
+    const ledgerMaxTokens = effectiveLedgerBudget({ cfg, model: sessionModel })
+    const ledgerRecentCalls = cfg.compaction?.ledger_recent_calls ?? LEDGER_RECENT_CALLS
+    // altimate_change start — the ledger must be built from the UNFILTERED
+    // session history. `input.messages` is the compaction-filtered view, so on
+    // the second and later compactions every tool event hidden by an earlier
+    // compaction was already gone: the "session state ledger" forgot the files
+    // it had recorded, precisely when cross-compaction fidelity matters most.
+    // Reading the stream directly restores the full record. Fail-safe: a read
+    // failure falls back to the filtered view rather than losing the ledger.
+    const ledger: Ledger =
+      ledgerEnabled || carryEnabled
+        ? buildLedger(input.unfilteredMessages ?? ledgerHistory(input.sessionID, input.messages), Instance.directory)
+        : { writes: [], calls: [], sawBash: false }
+    // altimate_change end
     const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
     const prior = completedCompactions(history)
     const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
     const selected = await select({
       messages: history.filter((_, index) => !hidden.has(index)),
       cfg,
-      model,
+      // The retained tail and state ledger are re-injected into the SESSION
+      // model's next request. Reserve and estimate both against that same model;
+      // a compaction-agent model override may have a different context window.
+      model: sessionModel,
     })
+    // altimate_change end
     // altimate_change end
     const msg = (await Session.updateMessage({
       id: MessageID.ascending(),
@@ -446,6 +1387,9 @@ export namespace SessionCompaction {
       sessionID: input.sessionID,
       model,
       abort: input.abort,
+      // altimate_change start — keep nudge delivery scoped to this prompt generation
+      nudgeGeneration: input.nudgeGeneration,
+      // altimate_change end
     })
     // Allow plugins to inject context or replace compaction prompt
     const compacting = await Plugin.trigger(
@@ -491,30 +1435,128 @@ When constructing the summary, try to stick to this template:
 [Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
 ---`
 
-    const promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
-    const result = await processor.process({
+    // altimate_change start — summary carry + first-person reframe: layered ADDITIONS to whichever
+    // summary prompt is active (default or plugin-provided) — never a replacement.
+    let promptText = compacting.prompt ?? [defaultPrompt, ...compacting.context].join("\n\n")
+    if (carryEnabled) {
+      const previousSummary = latestSummaryText(input.messages)
+      if (previousSummary) {
+        const anchors = renderCarryAnchors(
+          corroborateCarry(extractAccomplished(previousSummary), ledger),
+          ledgerMaxTokens,
+        )
+        if (anchors) promptText += "\n\n" + anchors
+      }
+    }
+    if (firstPersonEnabled) promptText += "\n\n" + FIRST_PERSON_REFRAME
+    // altimate_change end
+    // altimate_change start — when task pinning is
+    // active AND will actually fit a nonzero budget for the session's model,
+    // tell the summarizer not to burn summary tokens restating the task (the
+    // original task is pinned separately and re-injected after compaction).
+    // pinEnabled(cfg) alone doesn't guarantee a pin: pinBudget can return 0 on a
+    // small-window session, which would otherwise tell the summarizer to omit
+    // the task while no pin exists to compensate. Layered as an ADDITION to
+    // whichever summary prompt is active — never a replacement.
+    const taskPinBudget = pinBudget({ cfg, model: sessionModel, sessionID: input.sessionID })
+    if (
+      pinEnabled(cfg) &&
+      taskPinBodyBudget(taskPinBudget) > 0 &&
+      hasPinnableTask(input.unfilteredMessages ?? input.messages)
+    )
+      promptText += "\n\n" + PIN_SUMMARY_ADDITION
+    // altimate_change end
+    // altimate_change start — measure the assembled summarizer request overhead
+    const summaryPromptMessage = {
+      role: "user" as const,
+      content: [{ type: "text" as const, text: promptText }],
+    }
+    // Measure the actual assembled static request overhead. This includes a
+    // plugin-supplied compaction prompt, carry anchors, the session/system
+    // prompt, and the final user framing. Provider transforms may still add a
+    // small amount of protocol metadata, so keep a bounded transport reserve.
+    const summarizerOverheadTokens =
+      Token.estimate(
+        JSON.stringify({
+          system: [
+            ...(agent.prompt ? [agent.prompt] : SystemPrompt.provider(model)),
+            ...(userMessage.system ? [userMessage.system] : []),
+          ],
+          messages: [summaryPromptMessage],
+          tools: {},
+          toolChoice: "none",
+        }),
+      ) + 512
+    // altimate_change end
+    // altimate_change start — summarizer integrity:
+    // hoist the summarizer input so a failed attempt can be retried with identical
+    // input, and pass an explicit toolChoice "none". Previously toolChoice was
+    // undefined, which the AI SDK defaults to "auto" — models could spend the
+    // summary step on a tool call and commit a summary with no text.
+    const summarizerInput: LLM.StreamInput = {
       user: userMessage,
       agent,
       abort: input.abort,
       sessionID: input.sessionID,
       tools: {},
       system: [],
+      toolChoice: "none" as const,
       messages: [
-        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail
-        ...(await MessageV2.toModelMessages(selected.head, model, { stripMedia: true })),
+        // altimate_change start — upstream_fix: summarize only the selected head when preserving recent tail;
+        // trim the head from the front when even the summarization request cannot fit the window
+        ...(await MessageV2.toModelMessages(
+          await (async () => {
+            const fitted = await fitHead({
+              head: selected.head,
+              model,
+              fraction: contextSafetyFraction(cfg),
+              overheadTokens: summarizerOverheadTokens,
+            })
+            if (fitted.dropped > 0) {
+              log.warn("compaction head truncated to fit window", {
+                dropped: fitted.dropped,
+                kept: fitted.head.length,
+              })
+              Telemetry.track({
+                type: "compaction_head_truncated",
+                timestamp: Date.now(),
+                session_id: input.sessionID,
+                dropped_messages: fitted.dropped,
+                kept_messages: fitted.head.length,
+              })
+            }
+            return fitted.head
+          })(),
+          model,
+          { stripMedia: true },
+        )),
         // altimate_change end
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: promptText,
-            },
-          ],
-        },
+        summaryPromptMessage,
       ],
       model,
-    })
+    }
+    // A "continue" result was previously committed regardless of whether the
+    // summary step produced any text — an empty summary erases history (the
+    // post-compaction amnesia signature). Guard the commit: retry ONCE with
+    // identical input, then mark the summary message as errored and stop.
+    const summaryHasText = () =>
+      MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).parts.some(
+        (part) => part.type === "text" && part.text.trim().length > 0,
+      )
+    let result = await processor.process(summarizerInput)
+    if (result === "continue" && !summaryHasText()) {
+      log.warn("compaction summary empty, retrying once", { sessionID: input.sessionID })
+      result = await processor.process(summarizerInput)
+      if (result === "continue" && !summaryHasText()) {
+        processor.message.error = new NamedError.Unknown({
+          message: "Compaction summarizer produced no summary text after retry",
+        }).toObject()
+        processor.message.finish = "error"
+        await Session.updateMessage(processor.message)
+        result = "stop"
+      }
+    }
+    // altimate_change end
 
     if (result === "compact") {
       processor.message.error = new MessageV2.ContextOverflowError({
@@ -524,6 +1566,7 @@ When constructing the summary, try to stick to this template:
       }).toObject()
       processor.message.finish = "error"
       await Session.updateMessage(processor.message)
+      compactionAttempts.delete(input.sessionID) // altimate_change — cleanup on too-large-to-compact stop
       return "stop"
     }
 
@@ -565,6 +1608,25 @@ When constructing the summary, try to stick to this template:
           })
         }
       } else {
+        // altimate_change start — the continue message
+        // carries the original format/tools/system/variant, exactly as the replay
+        // branch above copies them from the original user message. Dropping them made
+        // the first auto-compaction silently reset the session's tool allowlist,
+        // custom system prompt, output format, and variant. The compaction marker
+        // (this branch's userMessage) never carries these fields, so source them from
+        // the most recent real (non-compaction) user message; no-op when never set.
+        const substantiveUsers = messages.filter(
+          (m) =>
+            m.info.role === "user" &&
+            !m.parts.some((p) => p.type === "compaction") &&
+            m.parts.some((p) => !("synthetic" in p) || p.synthetic !== true),
+        )
+        const latestField = <K extends "format" | "tools" | "system" | "variant">(field: K) =>
+          (
+            substantiveUsers.findLast((m) => (m.info as MessageV2.User)[field] !== undefined)?.info as
+              | MessageV2.User
+              | undefined
+          )?.[field]
         const continueMsg = await Session.updateMessage({
           id: MessageID.ascending(),
           role: "user",
@@ -572,12 +1634,51 @@ When constructing the summary, try to stick to this template:
           time: { created: Date.now() },
           agent: userMessage.agent,
           model: userMessage.model,
+          format: latestField("format") ?? userMessage.format,
+          tools: latestField("tools") ?? userMessage.tools,
+          system: latestField("system") ?? userMessage.system,
+          variant: latestField("variant") ?? userMessage.variant,
         })
-        const text =
-          (input.overflow
-            ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
-            : "") +
+        // altimate_change end
+        // altimate_change start — deterministic corroborated-facts-only
+        // state ledger appended to the synthetic continue message (all-modes, compaction-gated).
+        const ledgerText = ledgerEnabled
+          ? renderLedger(ledger, { maxTokens: ledgerMaxTokens, recentCalls: ledgerRecentCalls })
+          : ""
+        // altimate_change end
+        // altimate_change start — completion-aware termination path:
+        // (b) the continue message carries the three-option completion-aware nudge
+        //     (continue / ask for clarification / assert DONE), giving a finished
+        //     session a termination path. Delivered via the NudgeArbiter (Global
+        //     rule 5): this injection point registers its candidate and takes the
+        //     single winner, so pending lower-precedence directives (starvation
+        //     breaker, budget reminder) are consumed here and the injected turn
+        //     never carries two system-authored directive blocks. The termination
+        //     nudge has top precedence, so it always wins at this site.
+        // (d) the overflow notice is mechanism-accurate — the old text falsely
+        //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE).
+        let continuation =
           "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+        if (Flag.ALTIMATE_RUN_MODE) {
+          NudgeArbiter.register(
+            input.sessionID,
+            {
+              source: "termination_challenge",
+              kind: "completion_nudge",
+              text: SessionTermination.COMPLETION_NUDGE,
+            },
+            input.nudgeGeneration,
+          )
+          continuation =
+            NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? SessionTermination.COMPLETION_NUDGE
+        }
+        const text =
+          (input.overflow ? SessionTermination.OVERFLOW_NOTICE + "\n\n" : "") +
+          continuation +
+          // altimate_change end
+          // altimate_change start — state ledger
+          (ledgerText ? "\n\n" + ledgerText : "")
+        // altimate_change end
         await Session.updatePart({
           id: PartID.ascending(),
           messageID: continueMsg.id,

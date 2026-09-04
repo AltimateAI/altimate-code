@@ -58,6 +58,9 @@ import { createGitLab, VERSION as GITLAB_PROVIDER_VERSION } from "gitlab-ai-prov
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers"
 import { GoogleAuth } from "google-auth-library"
 import { ProviderTransform } from "./transform"
+// altimate_change start — make provider/model headers obey HTTP's case-insensitive precedence
+import { mergeRequestHeaders } from "./output-token-budget"
+// altimate_change end
 // altimate_change start — provider fetch timeout errors use typed ProviderError classes
 import { ProviderError } from "./error"
 // altimate_change end
@@ -1817,11 +1820,11 @@ export namespace Provider {
 
       if (baseURL !== undefined) options["baseURL"] = baseURL
       if (options["apiKey"] === undefined && provider.key) options["apiKey"] = provider.key
-      if (model.headers)
-        options["headers"] = {
-          ...options["headers"],
-          ...model.headers,
-        }
+      // altimate_change start — canonical names ensure later per-request headers replace provider defaults
+      if (options["headers"] !== undefined || model.headers) {
+        options["headers"] = mergeRequestHeaders(options["headers"], model.headers)
+      }
+      // altimate_change end
 
       const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options }))
       const existing = s.sdk.get(key)

@@ -114,7 +114,7 @@ export function registerAll(): void {
   register("altimate_core.safety", async (params) => {
     try {
       const raw = core.scanSql(params.sql)
-      const data = toData(raw)
+      const data = EngineCoerce.redactScan(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -229,6 +229,10 @@ export function registerAll(): void {
           // Unscannable base — keep the full head scan (fail open to MORE findings).
         }
       }
+      // Redact AFTER diff-scoping: subtraction must compare raw engine
+      // matched_patterns on both sides (redacting first would rewrite head
+      // multi_statement keys to "<redacted>" and never match the base).
+      safety = EngineCoerce.redactScan(safety)
       // PII exposure for the composite check — the tool has always rendered a
       // PII section; previously nothing populated it. Additive: a PII failure
       // must not fail the whole composite.
@@ -470,7 +474,13 @@ export function registerAll(): void {
     try {
       const schema = schemaOrEmpty(params.schema_path, params.schema_context)
       const raw = await core.evaluate(params.sql, schema)
-      return ok(true, toData(raw))
+      const data = toData(raw)
+      // EvalResult embeds a full safety scan — redact its threat echoes too
+      // (the CLI grade check renders nested threat messages).
+      if (data.safety && typeof data.safety === "object") {
+        data.safety = EngineCoerce.redactScan(data.safety as Record<string, unknown>)
+      }
+      return ok(true, data)
     } catch (e) {
       return fail(e)
     }

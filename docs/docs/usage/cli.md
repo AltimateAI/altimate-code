@@ -32,7 +32,7 @@ altimate --agent analyst
 | `web`       | Start the web UI               |
 | `agent`     | Agent management               |
 | `auth`      | Authentication                 |
-| `mcp`       | Model Context Protocol tools   |
+| `mcp`       | Model Context Protocol tools -- `mcp list` to see configured servers, `mcp status` for each server's real connection state and any drift between discovered and on-disk config |
 | `acp`       | Agent Communication Protocol   |
 | `models`    | List available models          |
 | `stats`     | Usage statistics               |
@@ -54,6 +54,7 @@ altimate --agent analyst
 | `--agent <name>` | Start with a specific agent |
 | `--yolo` | Auto-approve all permission prompts (explicit `deny` rules still enforced) |
 | `--dangerously-skip-permissions` | Same as `--yolo` (alias for upstream compatibility); auto-approves prompts that aren't explicitly denied. `run` subcommand only. |
+| `--integrations <local>` | Use only local warehouse tools instead of routing them through a bound workspace's engine (pilot). Sets `ALTIMATE_INTEGRATIONS` for the process, so child processes inherit it. |
 | `--print-logs` | Print logs to stderr |
 | `--log-level <level>` | Set log level: `DEBUG`, `INFO`, `WARN`, `ERROR` |
 | `--help`, `-h` | Show help |
@@ -85,6 +86,8 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_DISABLE_TERMINAL_TITLE`  | Don't set terminal title             |
 | `ALTIMATE_CLI_DISABLE_PRUNE`           | Disable database pruning             |
 | `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
+| `ALTIMATE_WORKSPACE`                   | Opt into the workspace pilot (`1`). Off by default; nothing about workspaces is active without it |
+| `ALTIMATE_INTEGRATIONS`                | Set to `local` to keep warehouse tools local rather than routing them through a bound workspace's engine |
 
 ### Server & Security
 

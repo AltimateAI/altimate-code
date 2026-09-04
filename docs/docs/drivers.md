@@ -191,6 +191,14 @@ MongoDB supports server versions 3.6 through 8.0. Queries use MQL (MongoDB Query
 |--------|--------------|
 | File | `path: "./my-database.sqlite"` |
 
+For both file-backed drivers, the database must already exist — connecting never
+creates it. Pass `create: true` to create it deliberately. A relative `path`
+resolves against the directory of the config that declares it, not the current
+working directory. A bare `word:target` value (no `//`) is treated as a local
+filename unless `word` is one of the recognized remote bare schemes
+(`md:`, `motherduck:`, `ducklake:`) — use a `scheme://` URI to target any other
+storage extension. See [Warehouses](configure/warehouses.md#duckdb) for the full rules.
+
 ## SSH Tunneling
 
 Connect through a bastion host by adding SSH config to any connection:

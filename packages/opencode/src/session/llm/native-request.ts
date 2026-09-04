@@ -11,6 +11,9 @@ import {
 } from "@opencode-ai/llm/providers"
 import type { ModelMessage } from "ai"
 import type { Provider } from "@/provider/provider"
+// altimate_change start — preserve canonical header precedence through the native route adapter
+import { mergeRequestHeaders } from "@/provider/output-token-budget"
+// altimate_change end
 import { isRecord } from "@/util/record"
 
 type ToolInput = {
@@ -153,10 +156,15 @@ const requireBaseURL = (model: Provider.Model, url: string | undefined) => {
 export const model = (input: Provider.Model | RequestInput, headers?: Record<string, string>) => {
   const model = "model" in input ? input.model : input
   const url = baseURL(input)
+  // altimate_change start — avoid recreating differently-cased duplicates after request canonicalization
+  const requestHeaders = mergeRequestHeaders(model.headers, headers)
+  // altimate_change end
   const options = {
     ...("model" in input && input.apiKey ? { apiKey: input.apiKey } : {}),
     ...(url ? { baseURL: url } : {}),
-    headers: Object.keys({ ...model.headers, ...headers }).length === 0 ? undefined : { ...model.headers, ...headers },
+    // altimate_change start — the later request value wins case-insensitively at the final native boundary
+    headers: Object.keys(requestHeaders).length === 0 ? undefined : requestHeaders,
+    // altimate_change end
     limits: {
       context: model.limit.context,
       output: model.limit.output,

@@ -261,7 +261,36 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `path` | No | Database file path. Omit or use `":memory:"` for in-memory |
+| `path` | Yes | Database file path, or `":memory:"` for in-memory. Cannot be omitted — a missing `path` is rejected rather than silently falling back to `":memory:"` |
+| `create` | No | Create the database file if it is missing (default: `false`) |
+
+!!! warning "The store must already exist"
+    Connecting never creates the database. If the file is missing, the connection
+    fails with an error naming the path it looked for — an empty database would
+    otherwise answer every query with no rows and no error, which reads as a
+    successful query against an empty warehouse. Set `"create": true` only when
+    you intend this store to be created.
+
+!!! note "How a relative `path` is resolved"
+    A relative `path` is resolved once, when the config is loaded, against the
+    directory that declares it:
+
+    - `~/.altimate-code/connections.json` → resolved against `~/.altimate-code`
+    - `<project>/.altimate-code/connections.json` → resolved against `<project>`
+    - `ALTIMATE_CODE_CONN_*` environment variables → resolved against the project root
+
+    It is never resolved against the current working directory, so `--dir` cannot
+    re-point an existing connection at a different file. Absolute paths are always
+    safest.
+
+!!! note "Bare `word:target` values are treated as local files"
+    A `path` shaped like `word:target` with no `//` (for example
+    `data:warehouse.duckdb`) is treated as an ordinary local filename by
+    default. The only exceptions are `md:`, `motherduck:`, and `ducklake:` —
+    these specific bare prefixes are recognized remote storage schemes and
+    are always forwarded as remote targets. To force any other value to be
+    treated as remote, use its full `scheme://` form (`s3://...`,
+    `md://...`) instead of a bare prefix.
 
 !!! note "Concurrent access"
     DuckDB does not support concurrent write access to the same file. If another process holds a write lock, Altimate Code automatically retries the connection in **read-only** mode so you can still query the data. A clear error message is shown if read-only access also fails.
@@ -441,11 +470,17 @@ If you're already authenticated via `gcloud`, omit `credentials_path`:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `path` | No | Database file path. Omit or use `":memory:"` for in-memory |
+| `path` | Yes | Database file path, or `":memory:"` for in-memory. Cannot be omitted — a missing `path` is rejected rather than silently falling back to `":memory:"` |
 | `readonly` | No | Open in read-only mode (default: `false`) |
+| `create` | No | Create the database file if it is missing (default: `false`) |
 
 !!! note
     SQLite uses Bun's built-in `bun:sqlite` driver. WAL journal mode is enabled automatically for writable databases.
+
+!!! warning "The store must already exist"
+    As with DuckDB, connecting never creates the database, and a relative `path`
+    resolves against the directory of the config that declares it — not the current
+    working directory. See the DuckDB section above for the full rules.
 
 ## SQL Server
 

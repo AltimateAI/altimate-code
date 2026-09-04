@@ -18,6 +18,7 @@ import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
+import { createHash } from "node:crypto"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -30,6 +31,25 @@ export namespace MessageV2 {
   export function isMedia(mime: string) {
     return mime.startsWith("image/") || mime === "application/pdf"
   }
+
+  // altimate_change start — deterministic tool-call id sanitation. Some
+  // OpenAI-compatible servers emit non-string (numeric/object) tool-call ids;
+  // providers reject any request whose tool_use/tool_result pair carries a
+  // malformed or mismatched id. Valid non-empty strings pass through untouched.
+  // Anything else is regenerated deterministically (SHA-256 over the JSON form),
+  // so the SAME raw value always maps to the SAME id — the property that keeps
+  // the call half and the result half of a pair consistent whether coerced at
+  // ingestion (processor.ts) or defensively at replay (toModelMessagesEffect).
+  // `salt` (optional; e.g. the processor's assistant message id) is folded into
+  // the hash so regenerated ids for empty/identical malformed raw values do not
+  // collide across processors/steps. Persisted sanitized ids are valid strings
+  // and pass through unchanged on replay, so salting never breaks a stored pair.
+  export function sanitizeToolCallID(id: unknown, salt?: string): string {
+    if (typeof id === "string" && id.length > 0) return id
+    const raw = (salt ?? "") + "\u0000" + (typeof id === "string" ? id : (JSON.stringify(id) ?? String(id)))
+    return "call_" + createHash("sha256").update(raw).digest("hex").slice(0, 32)
+  }
+  // altimate_change end
 
   // altimate_change start — shared synthetic-attachment prompt text. Used both when
   // injecting tool-result media as a user message (below) and by the GitHub Copilot
@@ -781,10 +801,24 @@ export namespace MessageV2 {
             })
           if (part.type === "tool") {
             toolNames.add(part.tool)
+            // altimate_change start — defensive replay-side id coercion. Parts
+            // persisted after the ingestion fix already carry sanitized string ids;
+            // transcripts written before it may hold malformed (non-string) callIDs.
+            // Computing the sanitized id ONCE per tool part and using it for every
+            // rendered half guarantees the tool-call and its paired tool-result emit
+            // identical toolCallId values, so provider pairing validation cannot 400.
+            // Legacy transcripts can contain the SAME malformed raw id on
+            // multiple tool parts. Salt with the persisted part id so each
+            // pair remains stable but distinct during replay.
+            const replayCallID = sanitizeToolCallID(part.callID, part.id)
+            // altimate_change end
             if (part.state.status === "completed") {
               // altimate_change start — toolOutputMaxChars truncates long tool output for compaction
+              const storedMask = part.state.metadata?.observation_mask
               const rawOutputText = part.state.time.compacted
-                ? "[Old tool result content cleared]"
+                ? typeof storedMask === "string" && storedMask.length > 0
+                  ? storedMask
+                  : "[Old tool result content cleared]"
                 : part.state.output
               const maxChars = options?.toolOutputMaxChars
               const outputText =
@@ -816,7 +850,9 @@ export namespace MessageV2 {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-available",
-                toolCallId: part.callID,
+                // altimate_change start — replay-side id coercion
+                toolCallId: replayCallID,
+                // altimate_change end
                 input: part.state.input,
                 output,
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
@@ -829,7 +865,7 @@ export namespace MessageV2 {
                 assistantMessage.parts.push({
                   type: ("tool-" + part.tool) as `tool-${string}`,
                   state: "output-available",
-                  toolCallId: part.callID,
+                  toolCallId: replayCallID,
                   input: part.state.input,
                   output,
                   ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
@@ -838,7 +874,7 @@ export namespace MessageV2 {
                 assistantMessage.parts.push({
                   type: ("tool-" + part.tool) as `tool-${string}`,
                   state: "output-error",
-                  toolCallId: part.callID,
+                  toolCallId: replayCallID,
                   input: part.state.input,
                   errorText: part.state.error,
                   ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
@@ -852,7 +888,9 @@ export namespace MessageV2 {
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
-                toolCallId: part.callID,
+                // altimate_change start — replay-side id coercion
+                toolCallId: replayCallID,
+                // altimate_change end
                 input: part.state.input,
                 errorText: "[Tool execution was interrupted]",
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),

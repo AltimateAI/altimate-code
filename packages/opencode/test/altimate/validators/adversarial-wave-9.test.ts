@@ -142,7 +142,7 @@ describe("BUG: modelsModifiedSince combined symlink + nesting", () => {
     await fs.rm(dir, { recursive: true, force: true })
   })
 
-  test("multiple `models/` directories in different dbt_packages, mtime old vs new", async () => {
+  test("a fresh model under dbt_packages/ is not treated as session work", async () => {
     const past = Date.now() - 100_000
     const future = Date.now() - 1000
 
@@ -160,8 +160,10 @@ describe("BUG: modelsModifiedSince combined symlink + nesting", () => {
     await fs.utimes(newFile, future / 1000, future / 1000)
 
     const result = await modelsModifiedSince(dir, past + 50_000)
-    // Only new.sql should be included.
-    expect(result.some((p) => p.endsWith("new.sql"))).toBe(true)
+    // `new.sql` is fresh but lives under `dbt_packages/`, which is what a
+    // `dbt deps` run looks like — not a model the session edited. Neither
+    // file qualifies: one is stale, the other is vendored.
+    expect(result.some((p) => p.endsWith("new.sql"))).toBe(false)
     expect(result.some((p) => p.endsWith("old.sql"))).toBe(false)
   })
 

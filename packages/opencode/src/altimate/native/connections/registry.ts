@@ -7,14 +7,21 @@
  *   3. ALTIMATE_CODE_CONN_* environment variables
  *
  * Connectors are created lazily via dynamic import of the appropriate driver.
+ *
+ * A relative `path` on a file-backed connection (duckdb, sqlite) is resolved
+ * once at load time against the directory that declared it — the global config
+ * resolves against ~/.altimate-code, a project config and the environment
+ * variables resolve against the project root. It is never re-resolved against
+ * the working directory at connect time, which `--dir` changes.
  */
 
 import * as fs from "fs"
 import * as path from "path"
 import * as os from "os"
+import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
-import { normalizeConfig } from "@altimateai/drivers"
+import { isLocalFilePath, normalizeConfig } from "@altimateai/drivers"
 import { resolveConfig, saveConnection } from "./credential-store"
 import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
 import type { WarehouseInfo } from "../types"
@@ -40,9 +47,95 @@ function globalConfigPath(): string {
   return path.join(os.homedir(), ".altimate-code", "connections.json")
 }
 
-function localConfigPath(): string {
-  return path.join(process.cwd(), ".altimate-code", "connections.json")
+// altimate_change start — the project root, not the process working directory
+/**
+ * The directory the current request is working in.
+ *
+ * A server or `run --attach` session never chdirs: it carries the project in
+ * the instance context and leaves the working directory wherever the server was
+ * launched (server.ts routes every request through `Instance.provide`). Reading
+ * `process.cwd()` there picks up the launch directory, which is somebody else's
+ * project. `Instance.directory` throws synchronously when there is no instance
+ * context — early CLI paths and unit tests — and the working directory is the
+ * right answer in exactly those cases, since `run --dir` has already chdir'd.
+ *
+ * The registry itself is still process-global: `loaded` latches on first
+ * access, so one server process serving two projects keeps the first project's
+ * configs for both. That predates this change — the base was simply the launch
+ * directory for everyone — and making the registry per-instance is a larger
+ * change than this fix. What this does guarantee is that whichever project
+ * loads resolves against itself, not against wherever the server was started.
+ */
+function projectRoot(): string {
+  try {
+    return Instance.directory
+  } catch {
+    return process.cwd()
+  }
 }
+// altimate_change end
+
+function localConfigPath(): string {
+  // altimate_change start — resolve against the project, not the launch cwd
+  return path.join(projectRoot(), ".altimate-code", "connections.json")
+  // altimate_change end
+}
+
+// ---------------------------------------------------------------------------
+// Store path resolution
+// ---------------------------------------------------------------------------
+
+// altimate_change start — resolve file-backed store paths against a stable base
+/** Driver types whose `path` field names a database file on local disk. */
+const FILE_STORE_TYPES = new Set(["duckdb", "sqlite"])
+
+/**
+ * Absolutize the `path` of every file-backed connection in `entries` against
+ * `baseDir`, once, at load time.
+ *
+ * A relative store path must not follow the process working directory. `run`
+ * and `attach` call `process.chdir()` for `--dir` (see cli/cmd/run.ts), so a
+ * path resolved lazily at connect time points somewhere different depending on
+ * how the CLI was invoked — and both file-backed engines answer a miss by
+ * creating an empty database rather than failing.
+ *
+ * The base is the directory that declared the path, which is stable for the
+ * life of the config file:
+ *   - global config  -> ~/.altimate-code (the config file's own directory)
+ *   - project config -> the project root (the parent of its .altimate-code)
+ *   - environment    -> the project root, the only directory an ambient
+ *                       variable can reasonably mean
+ */
+function resolveStorePaths(
+  entries: Record<string, ConnectionConfig>,
+  baseDir: string,
+): Record<string, ConnectionConfig> {
+  const resolved: Record<string, ConnectionConfig> = {}
+  for (const [name, config] of Object.entries(entries)) {
+    const storePath = config?.path
+    const type = typeof config?.type === "string" ? config.type.toLowerCase() : ""
+    // altimate_change start — recognize a Windows-absolute path even when this
+    // process runs on POSIX. path.isAbsolute() is platform-bound: on macOS/Linux
+    // it does not recognize `C:\...`, so a config shared or migrated from a
+    // Windows machine had its already-absolute path re-mangled through
+    // path.resolve(baseDir, ...) below, producing something like
+    // "/project/C:\Users\me\warehouse.duckdb" instead of being left untouched.
+    if (
+      !FILE_STORE_TYPES.has(type) ||
+      typeof storePath !== "string" ||
+      !isLocalFilePath(storePath) ||
+      path.isAbsolute(storePath) ||
+      path.win32.isAbsolute(storePath)
+    ) {
+      // altimate_change end
+      resolved[name] = config
+      continue
+    }
+    resolved[name] = { ...config, path: path.resolve(baseDir, storePath) }
+  }
+  return resolved
+}
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Loading
@@ -85,9 +178,13 @@ function loadFromEnv(): Record<string, ConnectionConfig> {
 export function load(): void {
   configs.clear()
 
-  const global = loadFromFile(globalConfigPath())
-  const local = loadFromFile(localConfigPath())
-  const env = loadFromEnv()
+  // altimate_change start — absolutize store paths against the directory that
+  // declared them, so a later process.chdir() (--dir) cannot move the store.
+  const base = projectRoot()
+  const global = resolveStorePaths(loadFromFile(globalConfigPath()), path.dirname(globalConfigPath()))
+  const local = resolveStorePaths(loadFromFile(localConfigPath()), base)
+  const env = resolveStorePaths(loadFromEnv(), base)
+  // altimate_change end
 
   // Merge: global < local < env
   for (const [name, config] of Object.entries(global)) {
@@ -305,6 +402,30 @@ export function detectAuthMethod(config: ConnectionConfig | null | undefined): s
 export function categorizeConnectionError(e: unknown): string {
   const msg = String(e).toLowerCase()
   if (msg.includes("not installed") || msg.includes("cannot find module")) return "driver_missing"
+  // altimate_change start — categories for local-client faults
+  // Checked before the generic "timeout"/"not found" rules below, which are
+  // about the remote warehouse and would otherwise swallow these.
+  if (msg.includes("did not finish opening")) {
+    // A deadline the connection itself set is the connection's fault, and the
+    // remedy is to raise or drop that setting. Reporting it as a broken client
+    // — "stop and report, nothing about your config is wrong" — is the exact
+    // mirror of the confusion this categorisation exists to remove. Only a
+    // deadline the caller did not choose per-connection is infrastructure.
+    return msg.includes("deadline was set on this connection") ? "config_error" : "driver_open_timeout"
+  }
+  // "locked by another process" is the DuckDB driver's own wrapper. The second
+  // clause is DuckDB's raw text ("Could not set lock on file …: Conflicting
+  // lock is held"), matched here as well so a lock that reaches this function
+  // unwrapped is still classified rather than falling through to "other". Both
+  // halves of that clause are required: "could not set lock" on its own is
+  // generic enough to appear in an unrelated remote error, and claiming it
+  // would tell the user to close a local process over a remote fault.
+  if (
+    msg.includes("locked by another process") ||
+    (msg.includes("could not set lock") && msg.includes("conflicting lock"))
+  )
+    return "store_locked"
+  // altimate_change end
   if (msg.includes("password") || msg.includes("authentication") || msg.includes("unauthorized") || msg.includes("jwt"))
     return "auth_failed"
   if (msg.includes("timeout") || msg.includes("timed out")) return "timeout"
@@ -312,6 +433,31 @@ export function categorizeConnectionError(e: unknown): string {
   if (msg.includes("config") || msg.includes("not found") || msg.includes("missing")) return "config_error"
   return "other"
 }
+
+// altimate_change start — distinguish infrastructure faults from config faults
+/**
+ * Categories where the fault is in this machine, not the connection's config
+ * and not the remote warehouse. A caller cannot fix these by correcting
+ * credentials, and a harness must not score them as a task failure.
+ */
+const INFRASTRUCTURE_CATEGORIES = new Set(["driver_missing", "driver_open_timeout", "store_locked"])
+
+/**
+ * The subset of the above that clears on its own once another process lets go.
+ * Still infrastructure — nothing about the connection's config is wrong — but
+ * the right response is to close the conflicting connection and retry, not to
+ * stop and report a broken install.
+ */
+const RECOVERABLE_CATEGORIES = new Set(["store_locked"])
+
+export function isInfrastructureFailure(category: string): boolean {
+  return INFRASTRUCTURE_CATEGORIES.has(category)
+}
+
+export function isRecoverableFailure(category: string): boolean {
+  return RECOVERABLE_CATEGORIES.has(category)
+}
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -428,7 +574,15 @@ export function list(): { warehouses: WarehouseInfo[] } {
 }
 
 /** Test a connection by running a simple query. */
-export async function test(name: string): Promise<{ connected: boolean; error?: string }> {
+export async function test(
+  name: string,
+): Promise<{
+  connected: boolean
+  error?: string
+  error_category?: string
+  infrastructure?: boolean
+  recoverable?: boolean
+}> {
   try {
     const connector = await get(name)
     const config = configs.get(name)
@@ -445,7 +599,16 @@ export async function test(name: string): Promise<{ connected: boolean; error?: 
     }
     return { connected: true }
   } catch (e) {
-    return { connected: false, error: String(e) }
+    // altimate_change start — report *why* the test failed, not just that it did
+    const category = categorizeConnectionError(e)
+    return {
+      connected: false,
+      error: String(e),
+      error_category: category,
+      infrastructure: isInfrastructureFailure(category),
+      recoverable: isRecoverableFailure(category),
+    }
+    // altimate_change end
   }
 }
 
@@ -459,7 +622,11 @@ export async function add(
 
     // Normalize field names before saving so sensitive fields under alias
     // names (e.g., keyfileJson → credentials_json) are properly detected
-    const normalized = normalizeConfig(config)
+    // altimate_change start — a relative store path means "relative to where
+    // the user typed this"; persist it absolute so the saved global config is
+    // not silently re-pointed by the next invocation's working directory.
+    const normalized = resolveStorePaths({ [name]: normalizeConfig(config) }, projectRoot())[name]
+    // altimate_change end
 
     // Store credentials in keychain, get sanitized config
     const { sanitized, warnings } = await saveConnection(name, normalized)
@@ -539,9 +706,16 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
   }
 }
 
-/** Reload all configs and clear cached connectors. */
-export async function reload(): Promise<void> {
-  // Close all cached connectors
+// altimate_change start — a way to release native handles without reloading
+/**
+ * Close every cached connector and drop it from the cache.
+ *
+ * `reset()` cannot do this: it is synchronous, and `close()` is not. Callers
+ * that create real connectors (tests, and `reload()` below) must await this,
+ * otherwise the native handle behind each connector stays open — on Windows
+ * that also blocks deleting the file underneath it.
+ */
+export async function closeAll(): Promise<void> {
   for (const [, connector] of connectors) {
     try {
       await connector.close()
@@ -550,6 +724,12 @@ export async function reload(): Promise<void> {
     }
   }
   connectors.clear()
+}
+// altimate_change end
+
+/** Reload all configs and clear cached connectors. */
+export async function reload(): Promise<void> {
+  await closeAll()
   loaded = false
   load()
 }
