@@ -1,5 +1,5 @@
 name: "altimate dbt PR review"
-description: "Layered AI code review for dbt/SQL pull requests — a signed verdict backed by lineage, query equivalence, PII, and grade, plus advisory LLM comments."
+description: "Layered AI code review for dbt/SQL pull requests — a signed verdict backed by lineage, query equivalence, PII, and grade, plus an AI reviewer outcome with advisory findings."
 branding:
   icon: "git-pull-request"
   color: "orange"
@@ -18,10 +18,10 @@ inputs:
     required: false
     default: "suggestion"
   base:
-    description: "Base git ref to diff against. Defaults to the merge-base with origin/main."
+    description: "Base git ref to diff against. On pull_request events, defaults to origin/<PR base ref>."
     required: false
   head:
-    description: "Head git ref. Defaults to the checked-out PR head."
+    description: "Head git ref. On pull_request events, defaults to the PR head SHA."
     required: false
   post:
     description: "Post the verdict to the PR (summary comment + inline review)."
@@ -44,11 +44,27 @@ inputs:
     description: "Altimate API base URL."
     required: false
     default: "https://api.myaltimate.com"
+  altimate_gateway_key:
+    description: "Altimate gateway API key → uses the free `altimate-base` model for the advisory lane. Use a repo secret."
+    required: false
+  altimate_gateway_url:
+    description: "HTTPS Altimate gateway base URL. Defaults to the production gateway; override only for a self-hosted gateway."
+    required: false
+    default: "https://altimate-gateway.onealtimate.com"
   model:
     description: "Bring-your-own advisory model as 'provider/model' (e.g. anthropic/claude-sonnet-4-6). Used when `altimate_api_key` is not set."
     required: false
   model_api_key:
     description: "API key for `model`'s provider (e.g. an Anthropic key for an anthropic/* model). Use a repo secret."
+    required: false
+  ai_model:
+    description: "Optional provider/model override within the selected Altimate action route."
+    required: false
+  ai_reasoning:
+    description: "Optional reasoning level for the advisory reviewer: none, minimal, low, medium or high. Unset leaves the model default (altimate-base thinks before answering)."
+    required: false
+  ai_timeout_seconds:
+    description: "Optional AI reviewer timeout in seconds (10..1800). The Altimate gateway route defaults to 900 s."
     required: false
 
 runs:
@@ -112,20 +128,70 @@ runs:
       shell: bash
       run: echo "$HOME/.altimate/bin" >> $GITHUB_PATH
 
-    # Configure the OPTIONAL advisory LLM lane. Two mutually-exclusive routes:
+    - name: Fetch pull request base ref
+      if: ${{ github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        IN_HEAD: ${{ inputs.head }}
+      run: |
+        set -euo pipefail
+        git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+        if [[ -n "${IN_HEAD:-}" ]]; then
+          if [[ "$IN_HEAD" == -* ]]; then
+            echo "::error::Custom head must not start with '-': $IN_HEAD" >&2
+            exit 1
+          fi
+          if git rev-parse --verify --quiet "$IN_HEAD^{commit}" >/dev/null; then
+            echo "HEAD_REF=$IN_HEAD" >> "$GITHUB_ENV"
+          elif git fetch --no-tags origin -- "$IN_HEAD"; then
+            git update-ref refs/altimate/review-head FETCH_HEAD
+            echo "HEAD_REF=refs/altimate/review-head" >> "$GITHUB_ENV"
+          else
+            echo "Unable to fetch custom head '$IN_HEAD' from origin" >&2
+            exit 1
+          fi
+        else
+          git fetch --no-tags origin "$PR_HEAD_SHA"
+        fi
+        if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+          git fetch --no-tags --unshallow origin
+        fi
+
+    # Configure the OPTIONAL advisory LLM lane. Route precedence is:
     #   A) altimate_api_key (+ altimate_instance) → hosted altimate model
-    #   B) model (+ model_api_key)               → bring-your-own provider
-    # Neither set → the LLM lane self-disables and the review is deterministic-only.
+    #   B) model + model_api_key                  → bring-your-own provider
+    #   C) altimate_gateway_key                   → free altimate-base gateway model
+    # No route → the LLM lane self-disables and the review is deterministic-only.
     - name: Configure advisory reviewer model + credentials
       shell: bash
       env:
         IN_ALT_KEY: ${{ inputs.altimate_api_key }}
         IN_ALT_INSTANCE: ${{ inputs.altimate_instance }}
         IN_ALT_URL: ${{ inputs.altimate_url }}
+        IN_GATEWAY_KEY: ${{ inputs.altimate_gateway_key }}
+        IN_GATEWAY_URL: ${{ inputs.altimate_gateway_url }}
         IN_MODEL: ${{ inputs.model }}
         IN_MODEL_API_KEY: ${{ inputs.model_api_key }}
+        IN_AI_MODEL: ${{ inputs.ai_model }}
+        IN_AI_REASONING: ${{ inputs.ai_reasoning }}
+        IN_AI_TIMEOUT_SECONDS: ${{ inputs.ai_timeout_seconds }}
       run: |
         set -euo pipefail
+        AI_REASONING="${IN_AI_REASONING:-}"
+        if [[ -n "$AI_REASONING" && ! "$AI_REASONING" =~ ^(none|minimal|low|medium|high)$ ]]; then
+          echo "::error::ai_reasoning must be one of: none, minimal, low, medium or high."
+          exit 1
+        fi
+        AI_TIMEOUT_SECONDS="${IN_AI_TIMEOUT_SECONDS:-}"
+        if [[ -n "$AI_TIMEOUT_SECONDS" ]]; then
+          if [[ ! "$AI_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] ||
+            (( 10#$AI_TIMEOUT_SECONDS < 10 || 10#$AI_TIMEOUT_SECONDS > 1800 )); then
+            echo "::error::ai_timeout_seconds must be an integer between 10 and 1800."
+            exit 1
+          fi
+        fi
         if [[ -n "${IN_ALT_KEY:-}" ]]; then
           # Route A — hosted altimate model (altimate-backend).
           if [[ -z "${IN_ALT_INSTANCE:-}" ]]; then
@@ -142,25 +208,49 @@ runs:
             --arg inst "$IN_ALT_INSTANCE" \
             '{altimateUrl:$url, altimateInstanceName:$inst, altimateApiKey:$ENV.IN_ALT_KEY}' \
             > "$HOME/.altimate/altimate.json"
-          echo "Advisory lane: hosted altimate model (tenant: $IN_ALT_INSTANCE)."
-        elif [[ -n "${IN_MODEL:-}" ]]; then
+          AI_MODEL="${IN_AI_MODEL:-altimate-backend/altimate-default}"
+          echo "ALTIMATE_ACTION_AI_MODEL=$AI_MODEL" >> "$GITHUB_ENV"
+          echo "Advisory lane: hosted altimate model ($AI_MODEL; tenant: $IN_ALT_INSTANCE)."
+        elif [[ -n "${IN_MODEL:-}" && -n "${IN_MODEL_API_KEY:-}" ]]; then
           # Route B — bring-your-own provider/model via inline opencode config.
           PROVIDER="${IN_MODEL%%/*}"
-          if [[ -n "${IN_MODEL_API_KEY:-}" ]]; then
-            CONTENT=$(jq -nc --arg m "$IN_MODEL" --arg p "$PROVIDER" --arg k "$IN_MODEL_API_KEY" \
-              '{model:$m, provider: {($p): {options: {apiKey:$k}}}}')
-          else
-            CONTENT=$(jq -nc --arg m "$IN_MODEL" '{model:$m}')
-          fi
+          CONTENT=$(jq -nc --arg m "$IN_MODEL" --arg p "$PROVIDER" --arg k "$IN_MODEL_API_KEY" \
+            '{model:$m, provider: {($p): {options: {apiKey:$k}}}}')
           echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
+          echo "ALTIMATE_ACTION_AI_MODEL=$IN_MODEL" >> "$GITHUB_ENV"
           echo "Advisory lane: bring-your-own model ($IN_MODEL)."
-        elif [[ -n "${IN_MODEL_API_KEY:-}" ]]; then
-          # Guard a likely misconfiguration: a key with no model would be silently
-          # ignored and the lane would disable without explanation.
-          echo "::error::model_api_key is set but model is empty — set \`model\` (e.g. anthropic/claude-sonnet-4-6) or use altimate_api_key."
+        elif [[ -n "${IN_GATEWAY_KEY:-}" ]]; then
+          # Route C — Altimate's OpenAI-compatible LiteLLM gateway.
+          if [[ -z "${IN_GATEWAY_URL:-}" ]]; then
+            echo "::error::altimate_gateway_key is set but altimate_gateway_url is empty — provide the HTTPS gateway base URL."
+            exit 1
+          fi
+          if [[ ! "$IN_GATEWAY_URL" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::altimate_gateway_url must be an HTTPS URL."
+            exit 1
+          fi
+          GATEWAY_BASE_URL="${IN_GATEWAY_URL%/}"
+          GATEWAY_BASE_URL="${GATEWAY_BASE_URL%/v1}/v1"
+          CONTENT=$(jq -nc \
+            --arg base_url "$GATEWAY_BASE_URL" \
+            '{provider: {"altimate-gateway": {npm: "@ai-sdk/openai-compatible", name: "Altimate Gateway", options: {baseURL:$base_url, apiKey:$ENV.IN_GATEWAY_KEY}, models: {"altimate-base": {name:"altimate-base"}, "altimate-pro": {name:"altimate-pro"}}}}}')
+          echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
+          AI_MODEL="${IN_AI_MODEL:-altimate-gateway/altimate-base}"
+          # matches the gateway's LiteLLM request_timeout (900 s); raise both together
+          AI_TIMEOUT_SECONDS="${AI_TIMEOUT_SECONDS:-900}"
+          echo "ALTIMATE_ACTION_AI_MODEL=$AI_MODEL" >> "$GITHUB_ENV"
+          echo "Advisory lane: Altimate gateway model ($AI_MODEL)."
+        elif [[ -n "${IN_MODEL:-}" || -n "${IN_MODEL_API_KEY:-}" ]]; then
+          echo "::error::model and model_api_key must be set together for the bring-your-own route."
           exit 1
         else
           echo "Advisory lane: no model/credentials provided — running deterministic-only."
+        fi
+        if [[ -n "$AI_REASONING" ]]; then
+          echo "ALTIMATE_ACTION_AI_REASONING=$AI_REASONING" >> "$GITHUB_ENV"
+        fi
+        if [[ -n "$AI_TIMEOUT_SECONDS" ]]; then
+          echo "ALTIMATE_ACTION_AI_TIMEOUT_SECONDS=$AI_TIMEOUT_SECONDS" >> "$GITHUB_ENV"
         fi
 
     - name: Run dbt PR review
@@ -175,13 +265,40 @@ runs:
         IN_BASE: ${{ inputs.base }}
         IN_HEAD: ${{ inputs.head }}
         IN_POST: ${{ inputs.post }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         GITHUB_TOKEN: ${{ github.token }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_EVENT_PATH: ${{ github.event_path }}
         ALTIMATE_REVIEW_SIGNING_KEY: ${{ inputs.signing_key }}
       run: |
         args=(--mode "$IN_MODE" --manifest "$IN_MANIFEST" --severity "$IN_SEVERITY")
-        [[ -n "$IN_BASE" ]] && args+=(--base "$IN_BASE")
-        [[ -n "$IN_HEAD" ]] && args+=(--head "$IN_HEAD")
+        if [[ -n "$IN_BASE" ]]; then
+          args+=(--base "$IN_BASE")
+        elif [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_REF" ]]; then
+          # Use the fork point for both the file list and old content: base-only
+          # changes after it must never be attributed to this pull request.
+          if MERGE_BASE=$(git merge-base "origin/$PR_BASE_REF" "${HEAD_REF:-$PR_HEAD_SHA}"); then
+            args+=(--base "$MERGE_BASE")
+          else
+            echo "::warning::Could not compute pull request merge-base; falling back to origin/$PR_BASE_REF"
+            args+=(--base "origin/$PR_BASE_REF")
+          fi
+        fi
+        if [[ "$EVENT_NAME" == "pull_request" && -n "${HEAD_REF:-$PR_HEAD_SHA}" ]]; then
+          args+=(--head "${HEAD_REF:-$PR_HEAD_SHA}")
+        elif [[ -n "$IN_HEAD" ]]; then
+          args+=(--head "$IN_HEAD")
+        fi
         [[ "$IN_POST" == "true" ]] && args+=(--post)
+        if [[ -n "${ALTIMATE_ACTION_AI_MODEL:-}" ]]; then
+          args+=(--ai-model "$ALTIMATE_ACTION_AI_MODEL")
+        fi
+        if [[ -n "${ALTIMATE_ACTION_AI_REASONING:-}" ]]; then
+          args+=(--ai-reasoning "$ALTIMATE_ACTION_AI_REASONING")
+        fi
+        if [[ -n "${ALTIMATE_ACTION_AI_TIMEOUT_SECONDS:-}" ]]; then
+          args+=(--ai-timeout "$ALTIMATE_ACTION_AI_TIMEOUT_SECONDS")
+        fi
         altimate review "${args[@]}"

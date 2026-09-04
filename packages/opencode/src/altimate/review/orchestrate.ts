@@ -8,13 +8,21 @@ import {
   dedupe,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, filterChangedFiles } from "./diff-filter"
+import { type ChangedFile, classifyDbtFile, filterChangedFiles } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
-import { type ReviewConfig } from "./config"
-import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
+import { type AiReasoningEffort, type ReviewConfig } from "./config"
+import {
+  type AiReviewSummary,
+  type ReviewMode,
+  type VerdictEnvelope,
+  NO_MODEL_REASON,
+  buildEnvelope,
+  makeReviewPolicySignature,
+  signEnvelope,
+} from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type AiReviewInput } from "./ai-review"
+import type { AiReviewInput, AiReviewResult } from "./ai-review"
 
 /**
  * The deterministic review recipe.
@@ -77,6 +85,8 @@ function fnTokensOf(text: string): string[] {
 /** Impact-analysis result, normalized. */
 export interface ImpactResult {
   hasManifest: boolean
+  /** True only when the requested model resolved to a manifest node. */
+  resolved: boolean
   /** SAFE | LOW | MEDIUM | HIGH | BREAKING (from the DAG walk). */
   severity: "SAFE" | "LOW" | "MEDIUM" | "HIGH" | "BREAKING" | "UNKNOWN"
   directCount: number
@@ -186,9 +196,22 @@ export interface OrchestrateInput {
    * Optional LLM reviewer lane. Injected (not imported) so the orchestrator
    * stays pure/unit-testable: production wires `runAiReview` (harness LLM);
    * tests pass a fake or omit it (the lane is then skipped). Receives the
-   * deterministic findings as grounding and returns ADVISORY findings only.
+   * deterministic findings as grounding and returns ADVISORY findings plus the
+   * lane status.
    */
-  aiReview?: (input: AiReviewInput) => Promise<Finding[]>
+  aiReview?: (input: AiReviewInput) => Promise<AiReviewResult>
+  /** Explicit provider/model for the advisory lane, when configured. */
+  aiModel?: string
+  /** Per-request reasoning level for the advisory lane, when configured. */
+  aiReasoningEffort?: AiReasoningEffort
+  /** Whether this caller may fall back to its current session model. */
+  allowSessionModel?: boolean
+  /** Active provider/model supplied by the interactive tool context. */
+  sessionModel?: string
+  /** Effective advisory reviewer deadline resolved by the entry point. */
+  aiTimeoutMs?: number
+  /** Effective advisory reviewer output budget resolved by the entry point. */
+  aiMaxOutputTokens?: number
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -198,6 +221,8 @@ export interface OrchestrateInput {
   forceTier?: "trivial" | "lite" | "full"
   /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
   staleManifest?: boolean
+  /** Missing dbt build artifacts detected by the entry point. */
+  artifactHints?: string[]
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -300,6 +325,7 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
         (degraded ? "\n\n_Lint-only: no manifest, blast radius unverified._" : ""),
       file: file.path,
       model,
+      groupKey: "lineage_fanout",
       confidence: degraded ? "unknown" : "high",
       degraded,
       evidence: { tool: "impact_analysis", result: impact },
@@ -339,6 +365,7 @@ async function semanticChangeLane(
           ` (no schema, or unsupported SQL). Treat as a potential behavior change and verify with a data-diff.`,
         file: file.path,
         model,
+        groupKey: "equivalence_undecided",
         confidence: "unknown",
         degraded: true,
         evidence: { tool: "altimate_core.equivalence", result: { decided: false } },
@@ -755,6 +782,7 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
         `Add a uniqueness test on the model's grain so the contract is enforced in CI.`,
       file: file.path,
       model,
+      groupKey: "missing_grain_test",
       confidence: "medium",
       evidence: { tool: "dbt.manifest", result: { hasGrainTest: false } },
       ruleKey: "test_coverage:missing-grain-test",
@@ -1056,6 +1084,7 @@ interface ModelContext {
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
+  const changedDbtFileCount = input.changedFiles.filter((file) => classifyDbtFile(file.path) !== "other").length
   const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs)
   const dialect = input.config.dialect
   const getContent = input.getContent
@@ -1066,10 +1095,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // both SQL sides. This avoids duplicate engine calls and lets tiering see PII.
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
   const ctxByPath = new Map<string, ModelContext>()
-  let anyManifest = false
-  if (input.runner.manifestAvailable) {
-    anyManifest = await input.runner.manifestAvailable().catch(() => false)
-  }
   await Promise.all(
     modelFiles.map(async (file) => {
       const model = modelNameFromPath(file.path)
@@ -1085,16 +1110,28 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       // fallback. The dbt-patterns lane always uses raw (it needs the Jinja).
       const engineNewSql = compiledNew ?? newSql
       const engineOldSql = compiledOld ?? oldSql
-      const impact = await input.runner.impact(model)
-      if (impact.hasManifest) anyManifest = true
+      const impactResult = await input.runner.impact(model)
+      const impact = { ...impactResult, resolved: impactResult.resolved ?? false }
       const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect)).columns : []
       const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
       ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
     }),
   )
 
-  // A run is degraded when model files exist but none resolved against a manifest.
-  const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
+  const nonDeletedModelContexts = [...ctxByPath.values()].filter((ctx) => ctx.file.status !== "deleted")
+  const anyResolved = nonDeletedModelContexts.some((ctx) => ctx.impact.resolved)
+  let manifestAvailable = [...ctxByPath.values()].some((ctx) => ctx.impact.hasManifest)
+  if (modelFiles.length > 0 && nonDeletedModelContexts.length === 0 && input.runner.manifestAvailable) {
+    manifestAvailable = await input.runner.manifestAvailable().catch(() => false)
+  }
+  const lintOnly =
+    modelFiles.length > 0 && (nonDeletedModelContexts.length > 0 ? !anyResolved : !manifestAvailable)
+  const emptyScope = reviewable.length === 0
+  const emptyScopeReason = !emptyScope
+    ? undefined
+    : changedDbtFileCount === 0
+      ? "no_dbt_files"
+      : "all_excluded"
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
   // the reviewer core carries no default list. `undefined` when no
@@ -1150,6 +1187,16 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
+  const aiLaneEnabled = input.config.ai !== false && lanes.has("ai_review")
+  const policySignature = makeReviewPolicySignature({
+    severityThreshold: input.config.severityThreshold,
+    enabledReviewers: input.config.reviewers,
+    dialect,
+    rubric: input.rubric,
+    aiEnabled: aiLaneEnabled,
+    aiModel: aiLaneEnabled ? input.aiModel ?? (input.allowSessionModel ? "session" : undefined) : undefined,
+    dataDiff: input.config.dataDiff,
+  })
 
   const all: Finding[][] = []
   // Files where the diff-scoped PII classifier completed (looked at the change),
@@ -1391,7 +1438,15 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // findings are clamped to ≤ warning upstream, so they enrich the review but
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
-  if (lanes.has("ai_review") && input.aiReview) {
+  let aiReviewSummary: AiReviewSummary | undefined
+  if (!emptyScope && lanes.has("ai_review") && !aiLaneEnabled) {
+    aiReviewSummary = {
+      status: "skipped",
+      reason: "disabled by configuration",
+      findings: 0,
+      reasoningEffort: input.aiReasoningEffort,
+    }
+  } else if (!emptyScope && aiLaneEnabled) {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
@@ -1399,17 +1454,57 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       diff: ctx.file.diff,
       sql: ctx.engineNewSql ?? ctx.newSql,
     }))
-    try {
-      const aiFindings = await input.aiReview({
-        files: aiFiles,
-        grounding: merged,
-        prTitle: input.prTitle,
-        prBody: input.prBody,
-      })
-      // Defense in depth: the AI never blocks, regardless of what it returns.
-      for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
-    } catch {
-      // A failed AI lane must never fail the review.
+    if (!input.aiReview) {
+      aiReviewSummary = {
+        status: "skipped",
+        reason: NO_MODEL_REASON,
+        findings: 0,
+        reasoningEffort: input.aiReasoningEffort,
+      }
+    } else {
+      try {
+        const result = await input.aiReview({
+          files: aiFiles,
+          grounding: merged,
+          model: input.aiModel,
+          allowSessionModel: input.allowSessionModel ?? false,
+          sessionModel: input.sessionModel,
+          prTitle: input.prTitle,
+          prBody: input.prBody,
+          timeoutMs: input.aiTimeoutMs,
+          maxOutputTokens: input.aiMaxOutputTokens,
+          reasoningEffort: input.aiReasoningEffort,
+        })
+        aiReviewSummary = {
+          status: result.status,
+          reason: result.reason,
+          findings: 0,
+          model: result.model,
+          reasoningEffort: input.aiReasoningEffort,
+          durationMs: result.durationMs,
+          promptChars: result.promptChars,
+          promptTokens: result.promptTokens,
+          completionTokens: result.completionTokens,
+          reasoningTokens: result.reasoningTokens,
+        }
+        // Defense in depth: normalize provenance and clamp severity so injected
+        // callers cannot make the AI lane authoritative.
+        for (const f of result.findings) {
+          merged.push({
+            ...f,
+            severity: f.severity === "critical" ? "warning" : f.severity,
+            evidence: { tool: "ai-review", result: f.evidence?.result },
+          })
+        }
+      } catch {
+        // A failed injected lane must never fail the review or leak exception text.
+        aiReviewSummary = {
+          status: "error",
+          reason: "AI reviewer failed",
+          findings: 0,
+          reasoningEffort: input.aiReasoningEffort,
+        }
+      }
     }
   }
 
@@ -1421,17 +1516,29 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Sort by severity desc, then file.
   findings.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
 
-  const degraded = runDegraded || findings.some((f) => f.degraded)
+  if (aiReviewSummary) {
+    aiReviewSummary = {
+      ...aiReviewSummary,
+      findings: findings.filter((f) => f.evidence?.tool === "ai-review").length,
+    }
+  }
+
   const envelope = buildEnvelope({
     findings,
     tier,
     mode: input.mode,
+    policySignature,
     rubric: input.rubric,
     engine: { core: input.coreVersion, model: input.modelVersion, cliVersion: input.cliVersion },
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest,
     generatedAt: input.generatedAt,
-    degraded,
+    lintOnly,
+    emptyScope,
+    emptyScopeReason,
+    emptyScopeFileCount: emptyScopeReason === "all_excluded" ? changedDbtFileCount : undefined,
+    artifactHints: input.artifactHints,
+    aiReview: aiReviewSummary,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
     // when a riskTierPathTokens config error was caught above, OR when the
     // classifier lands on `full` tier — a naturally-full run is a customer-

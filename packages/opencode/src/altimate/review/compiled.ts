@@ -40,9 +40,11 @@ export interface CompiledResolverOptions {
   /** dbt project root (the dir containing `dbt_project.yml`). */
   cwd: string
   projectName?: string
-  /** Directory holding HEAD-side compiled SQL (relative to cwd). */
+  /** BASE-side dbt project name. Defaults to projectName. */
+  baseProjectName?: string
+  /** Directory holding HEAD-side compiled SQL (relative to cwd, or absolute). */
   headDir?: string
-  /** Directory holding BASE-side compiled SQL (relative to cwd). */
+  /** Directory holding BASE-side compiled SQL (relative to cwd, or absolute). */
   baseDir?: string
   /** Prefix within the repo-relative file path that maps to `cwd`.
    *  For a monorepo where the dbt project lives at `packages/dbt/`, callers
@@ -58,7 +60,8 @@ export interface CompiledResolverOptions {
  * undefined when no compiled artifact is present.
  */
 export function makeCompiledResolver(opts: CompiledResolverOptions) {
-  const project = opts.projectName
+  const headProject = opts.projectName
+  const baseProject = opts.baseProjectName ?? headProject
   const headDir = opts.headDir ?? "target/compiled"
   const baseDir = opts.baseDir ?? "target-base/compiled"
   // Normalise the prefix so both "" and "." mean "no prefix". Match against
@@ -72,6 +75,7 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
       : ""
 
   return async (file: string, side: "old" | "new"): Promise<string | undefined> => {
+    const project = side === "new" ? headProject : baseProject
     if (!project) return undefined
     // When the dbt project sits inside a subdir of the repo, `file` (from
     // `git diff --name-status`) is repo-root relative and always uses
@@ -80,7 +84,8 @@ export function makeCompiledResolver(opts: CompiledResolverOptions) {
     // this the compiled resolver silently misses in monorepo layouts.
     const rel = prefix && (file === prefix || file.startsWith(prefix + "/")) ? file.slice(prefix.length + 1) : file
     const root = side === "new" ? headDir : baseDir
-    const compiledRoot = path.join(opts.cwd, root, project)
+    const rootAbs = path.isAbsolute(root) ? root : path.join(opts.cwd, root)
+    const compiledRoot = path.join(rootAbs, project)
     // Shared realpath containment check — matches makeContentResolver's
     // symlink-safe read so a future tweak to the containment logic can't
     // leave one call site behind (cubic + kilo suggestion).

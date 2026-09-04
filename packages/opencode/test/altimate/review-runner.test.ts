@@ -38,6 +38,15 @@ describe("review manifest loading", () => {
     expect(await runner.manifestAvailable?.()).toBe(true)
     expect(await runner.impact("orders")).toEqual({
       hasManifest: true,
+      resolved: true,
+      severity: "SAFE",
+      directCount: 0,
+      transitiveCount: 0,
+      testCount: 0,
+    })
+    expect(await runner.impact("missing_model")).toEqual({
+      hasManifest: true,
+      resolved: false,
       severity: "SAFE",
       directCount: 0,
       transitiveCount: 0,

@@ -3,6 +3,8 @@ import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import { Installation } from "../../installation"
+import { Instance } from "../../project/instance"
+import { Telemetry } from "../../altimate/telemetry"
 import { reviewPullRequest } from "../../altimate/review/run"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
@@ -10,6 +12,87 @@ import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/pos
 import { classifyPostOutcome, emitReviewPostOutcome, emitReviewRun } from "../../altimate/review/telemetry"
 import type { ReviewMode } from "../../altimate/review/verdict"
 import type { Severity } from "../../altimate/review/finding"
+import {
+  AI_REASONING_EFFORTS,
+  AiReasoningEffort,
+  type AiReasoningEffort as AiReasoningEffortValue,
+} from "../../altimate/review/config"
+
+const MAX_GITHUB_PR_BODY_CHARS = 4_000
+
+function nonBlank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed || undefined
+}
+
+function boundedInteger(value: unknown, name: string, min: number, max: number): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined
+  const parsed = typeof value === "number" ? value : Number(value)
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`)
+  }
+  return parsed
+}
+
+function parseAiReasoningEffort(value: string | undefined): AiReasoningEffortValue | undefined {
+  const normalized = nonBlank(value)
+  if (normalized === undefined) return undefined
+  const parsed = AiReasoningEffort.safeParse(normalized)
+  if (!parsed.success) {
+    throw new Error(
+      `--ai-reasoning / ALTIMATE_REVIEW_AI_REASONING must be one of: ${AI_REASONING_EFFORTS.join(", ")}`,
+    )
+  }
+  return parsed.data
+}
+
+function requestStatus(err: unknown): number | undefined {
+  const value = err as { status?: unknown; response?: { status?: unknown } } | undefined
+  const status = value?.status ?? value?.response?.status
+  return typeof status === "number" ? status : undefined
+}
+
+async function readGitHubPullRequestMetadata(): Promise<{ prTitle?: string; prBody?: string }> {
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (!eventPath) return {}
+  try {
+    const event = JSON.parse(await fs.readFile(eventPath, "utf8")) as {
+      pull_request?: { title?: unknown; body?: unknown }
+    }
+    const title = event.pull_request?.title
+    const body = event.pull_request?.body
+    return {
+      prTitle: typeof title === "string" ? title : undefined,
+      prBody: typeof body === "string" ? body.slice(0, MAX_GITHUB_PR_BODY_CHARS) : undefined,
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** True when the GitHub event is a pull request from a fork: the job then runs with a
+ *  read-only token and cannot post, so a 401/403 on --post is expected rather than a
+ *  misconfiguration. Anything else (same-repo PR, missing event) is NOT tolerated. */
+async function isForkPullRequestEvent(): Promise<boolean> {
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (!eventPath) return false
+  try {
+    const event = JSON.parse(await fs.readFile(eventPath, "utf8")) as {
+      pull_request?: {
+        head?: { repo?: { fork?: unknown; full_name?: unknown } }
+        base?: { repo?: { full_name?: unknown } }
+      }
+    }
+    const head = event.pull_request?.head?.repo
+    const base = event.pull_request?.base?.repo
+    if (head?.fork === true) return true
+    return (
+      typeof head?.full_name === "string" && typeof base?.full_name === "string" && head.full_name !== base.full_name
+    )
+  } catch {
+    return false
+  }
+}
 
 /**
  * `altimate review` — run the dbt PR review locally or in CI.
@@ -56,6 +139,23 @@ export const ReviewCommand = cmd({
         default: false,
         describe: "disable the advisory LLM reviewer lane (no model calls / cost)",
       })
+      .option("ai-model", {
+        type: "string",
+        describe: "provider/model for the advisory LLM reviewer lane (overrides config)",
+      })
+      .option("ai-reasoning", {
+        type: "string",
+        choices: AI_REASONING_EFFORTS,
+        describe: "AI reviewer reasoning level (overrides environment and config)",
+      })
+      .option("ai-timeout", {
+        type: "number",
+        describe: "AI reviewer timeout in seconds (10..1800; overrides environment and config)",
+      })
+      .option("ai-max-output-tokens", {
+        type: "number",
+        describe: "AI reviewer output budget (512..32768; overrides config)",
+      })
       .option("explain-tier", {
         type: "boolean",
         default: false,
@@ -69,6 +169,22 @@ export const ReviewCommand = cmd({
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
+    const aiTimeoutSeconds = boundedInteger(
+      args.aiTimeout ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS),
+      "--ai-timeout / ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS",
+      10,
+      1800,
+    )
+    const aiReasoningEffort = parseAiReasoningEffort(
+      nonBlank(args.aiReasoning as string | undefined) ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_REASONING),
+    )
+    const aiMaxOutputTokens = boundedInteger(
+      args.aiMaxOutputTokens,
+      "--ai-max-output-tokens",
+      512,
+      32_768,
+    )
+    const prMetadata = await readGitHubPullRequestMetadata()
     if (args.forceTier) {
       process.stderr.write(
         `⚠️  --force-tier=${args.forceTier} is EXPERIMENTAL (bench / debug only). ` +
@@ -76,6 +192,7 @@ export const ReviewCommand = cmd({
       )
     }
     await bootstrap(cwd, async () => {
+      Telemetry.setContext({ sessionId: "", projectId: Instance.project?.id ?? "" })
       // altimate_change — time the engine only. Output writing and posting happen after this and
       // must not be counted as review latency, nor turn a computed review into a failed one.
       const startedAt = Date.now()
@@ -91,8 +208,16 @@ export const ReviewCommand = cmd({
           // With `boolean-negation: false` above, `--no-ai` binds to `noAi` and
           // the historical `--ai=false` programmatic path stays supported.
           noAi: args.noAi === true || args.ai === false,
+          aiModel:
+            nonBlank(args.aiModel as string | undefined) ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_MODEL),
+          aiReasoningEffort,
+          aiTimeoutMs: aiTimeoutSeconds === undefined ? undefined : aiTimeoutSeconds * 1_000,
+          aiMaxOutputTokens,
+          allowSessionModel: false,
           explainTier: args.explainTier === true,
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
+          prTitle: prMetadata.prTitle,
+          prBody: prMetadata.prBody,
           // Stamp the CLI version into engine.cliVersion so an auditor can
           // reconstruct which policy version generated a stored verdict long
           // after the binary that ran it is gone.
@@ -160,18 +285,30 @@ export const ReviewCommand = cmd({
               r = await postGitHubReview(env, target)
             } catch (err) {
               // A throw here means the summary comment itself failed; nothing was published.
-              emitPostOnce("summary_failed", postDuration())
-              throw err
+              const status = requestStatus(err)
+              // Only a fork PR (read-only token) may swallow an auth failure; on a same-repo PR
+              // a 401/403 means a bad token or missing `pull-requests: write` and must fail.
+              if ((status === 401 || status === 403) && (await isForkPullRequestEvent())) {
+                emitPostOnce("forbidden", postDuration())
+                UI.println(`could not post the review: ${status} (fork pull request, read-only token); printing summary instead`)
+                // Keep stdout machine-readable under --json: the human summary goes to stderr.
+                if (args.json) UI.println(renderSummary(env))
+              } else {
+                emitPostOnce("summary_failed", postDuration())
+                throw err
+              }
             }
-            emitPostOnce(classifyPostOutcome(r), postDuration())
-            const where = `${target.owner}/${target.repo}#${target.prNumber}`
-            if (r.postError) {
-              UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
-            } else {
-              UI.println(
-                `Posted review to ${where}` +
-                  (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
-              )
+            if (r) {
+              emitPostOnce(classifyPostOutcome(r), postDuration())
+              const where = `${target.owner}/${target.repo}#${target.prNumber}`
+              if (r.postError) {
+                UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
+              } else {
+                UI.println(
+                  `Posted review to ${where}` +
+                    (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
+                )
+              }
             }
           }
         }

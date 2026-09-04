@@ -1123,10 +1123,26 @@ export namespace Telemetry {
         mode?: string
         tier?: string
         tier_forced?: boolean
-        /** The envelope's fidelity flag: no reviewable files, no usable manifest for the changed
-         *  models, OR a surfaced finding whose engine analysis was undecidable. It does NOT mean
-         *  merely "no warehouse". */
+        /** Compatibility run-level reduced-scope flag (`lint_only` or `empty_scope`). */
         degraded?: boolean
+        /** True when reviewable models exist but no dbt manifest was available. */
+        lint_only?: boolean
+        /** True when no reviewable dbt files remain after filtering. */
+        empty_scope?: boolean
+        /** Count of surfaced findings whose deterministic analysis could not decide. */
+        undecidable_findings?: number
+        /** Advisory AI reviewer outcome when the lane applied. */
+        ai_status?: "ok" | "skipped" | "timeout" | "error"
+        /** Effective provider/model used by the advisory AI reviewer. */
+        ai_model?: string
+        /** Surfaced advisory AI findings after filtering and deduplication. */
+        ai_findings?: number
+        /** Wall-clock duration of the advisory AI lane. */
+        ai_duration_ms?: number
+        /** Character count of the advisory review prompt. */
+        ai_prompt_chars?: number
+        /** Provider-reported reasoning tokens, when available. */
+        ai_reasoning_tokens?: number
         stale_manifest?: boolean
         critical?: number
         warning?: number
@@ -1149,7 +1165,14 @@ export namespace Telemetry {
          *  completed review and the post attempt (a bad `--output` path, a stdout write error).
          *  Emitted from the caller's `finally` so a completed review always carries exactly one
          *  post outcome. */
-        outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed"
+        outcome:
+          | "not_requested"
+          | "not_attempted"
+          | "target_unresolved"
+          | "full"
+          | "partial"
+          | "summary_failed"
+          | "forbidden"
         duration_ms: number
       }
   // altimate_change end

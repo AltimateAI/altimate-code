@@ -20,7 +20,7 @@ a model's opinion:
 
 - **column-lineage / DAG blast radius** — which downstream models a change breaks
 - **query equivalence** — whether a "refactor" provably returns the same rows
-- **PII classification** — columns that newly expose sensitive data
+- **PII classification** — PII columns present in a touched model are flagged; acknowledgement is a follow-up
 - **A–F grade + anti-patterns** — readability, correctness, warehouse-cost issues
 
 !!! warning "The bot posts a COMMENT review — never a formal GitHub *Approve*"
@@ -115,15 +115,19 @@ Options:
 | `--severity <level>` | Minimum severity to surface: `critical`, `warning`, `suggestion`. |
 | `--post` | Post the verdict to the GitHub PR (uses `GITHUB_TOKEN` + the Actions event). |
 | `--no-ai` | Disable the advisory LLM reviewer lane (no model calls / cost) — deterministic-only. |
+| `--ai-model <provider/model>` | Explicit model for the advisory reviewer lane; overrides `ALTIMATE_REVIEW_AI_MODEL` and `aiModel` in `.altimate/review.yml`. |
+| `--ai-reasoning <level>` | AI reviewer reasoning level (`none`, `minimal`, `low`, `medium`, or `high`); overrides `ALTIMATE_REVIEW_AI_REASONING` and `aiReasoningEffort` in `.altimate/review.yml`. |
+| `--ai-timeout <seconds>` | AI reviewer deadline (10–1800 seconds); overrides `ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS` and `aiTimeoutSeconds` in `.altimate/review.yml`. |
+| `--ai-max-output-tokens <tokens>` | AI reviewer output budget (512–32768 tokens); overrides `aiMaxOutputTokens` in `.altimate/review.yml`. |
 | `--explain-tier` | Emit the classifier's tier-reason list on the verdict envelope so you can see why a diff was rated `trivial`, `lite`, or `full`. Reasons already surface in the PR comment for `full`-tier runs — this flag adds them to `trivial`/`lite` for debugging. |
 | `--force-tier <tier>` | **[EXPERIMENTAL / bench debug]** Bypass the classifier and force `trivial` / `lite` / `full`. The verdict envelope carries `tierForced: true` and the classifier's original decision for audit. |
 | `--json` / `--output <file>` | Emit the verdict envelope as JSON. |
 
 > **Full vs lint-only.** With a compiled `manifest.json` present, the reviewer
-> proves lineage and equivalence exactly. Without it (or without a warehouse) it
-> runs **lint-only** and conservatively *warns* on changes it cannot prove safe —
-> clearly labeled, never mistaken for a full verdict. Run `dbt compile` first for
-> the full verdict.
+> can resolve the dbt graph. Without it, it runs **lint-only** and conservatively
+> *warns* on changes it cannot prove safe — clearly labeled, never mistaken for a
+> full verdict. Run `dbt compile` first; the review separately identifies missing
+> catalog or compiled-SQL artifacts that reduce fidelity.
 
 !!! question "Stuck in lint-only mode? It is **not** an API-key problem."
     The deterministic engine (lineage, equivalence, PII, grade) runs fully
@@ -140,6 +144,14 @@ Options:
       on the CLI), or set `manifestPath:` in `.altimate/review.yml`.
     - **Freshness.** A stale manifest that predates the changed models can't
       resolve them. Run `dbt compile` (or `dbt build`) to regenerate it before reviewing.
+    - **Column metadata.** Run `dbt docs generate` so `target/catalog.json`
+      supplies real column types for lineage and PII analysis.
+    - **Base compiled SQL.** In CI, compile the base ref into
+      `target-base/compiled`:
+      `git worktree add --detach ../dbt-review-base "$(git merge-base origin/<base> <head>)" && (cd ../dbt-review-base && dbt deps && dbt compile --target-path ../<repo>/target-base)`,
+      where `<head>` is the same commit you pass to `--head` (the PR head SHA in CI; `HEAD` when reviewing the checked-out branch).
+      Compile the merge-base (fork point), not the base tip: the review diffs against the merge-base, so base-only commits must not leak into `target-base/compiled`.
+      Without `target-base/compiled`, equivalence is undecidable and the review says so.
     - **Working directory.** Run the review from the dbt project root so the
       relative manifest path resolves.
 
@@ -184,10 +196,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      # Produce target/manifest.json for the full verdict (adapter-specific).
-      - run: pip install dbt-core dbt-bigquery && dbt deps && dbt compile
-      - uses: AltimateAI/altimate-code/github/review@v0.8.5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }} # compile the PR head, not the synthetic merge commit
+      # Produce manifest/catalog plus compiled SQL for both sides (adapter-specific).
+      - name: Build dbt review artifacts
+        # Non-fatal so the review still runs (lint-only, naming the missing
+        # artifacts) when compile or docs generate fails; keep a separate dbt
+        # build check if compile failures must fail the PR.
+        continue-on-error: true
+        env:
+          DBT_PROFILES_DIR: ${{ github.workspace }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          pip install dbt-core dbt-bigquery
+          dbt deps
+          dbt compile
+          dbt docs generate || echo "docs generate skipped — lineage/PII run without catalog column types"
+          # Compile the fork point (merge-base), which is what the review compares against.
+          git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
+          MERGE_BASE=$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}")
+          git worktree add --detach ../dbt-review-base "${MERGE_BASE}"
+          (
+            cd ../dbt-review-base
+            dbt deps
+            dbt compile --target-path "${{ github.workspace }}/target-base"
+          )
+      - uses: AltimateAI/altimate-code/github/review@v0.10.0 # exact pin; bump when the release with the gateway inputs ships
         with:
           mode: comment                       # `gate` to block merges
           manifest_path: target/manifest.json
@@ -197,30 +233,98 @@ jobs:
           altimate_instance: ${{ secrets.ALTIMATE_INSTANCE }}
           # …or bring your own:  model: anthropic/claude-sonnet-4-6
           #                      model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # …or use the default free gateway model:
+          # altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
+          # altimate_gateway_url: https://gateway.example.com   # only for a self-hosted gateway; defaults to https://altimate-gateway.onealtimate.com
 ```
 
-### Model & credentials for the advisory lane
+Without `target-base/compiled`, base-vs-head equivalence is undecidable; the
+review reports that explicitly rather than presenting the run as lint-only.
 
-The deterministic engine (lineage, equivalence, PII, grade, lint — the only layer
-that can **block**) runs entirely from the compiled artifacts and needs **no model
-or credentials**. The optional layer-3 **LLM reviewer** does — supply it one of two
-ways, or neither (it self-disables, leaving a deterministic-only review):
+### Choosing the AI reviewer's model
 
-| Route | Action inputs | Result |
-|-------|---------------|--------|
-| **Hosted altimate model** | `altimate_api_key` + `altimate_instance` (+ optional `altimate_url`) | uses the altimate-hosted default model |
-| **Bring-your-own** | `model` (e.g. `anthropic/claude-sonnet-4-6`) + `model_api_key` | uses your provider/model |
+The deterministic engine (lineage, equivalence, PII, grade, and lint) needs no
+model or model credentials. The optional advisory lane always makes its model
+choice explicit in headless runs. Action routes have this precedence:
+**A (`altimate_api_key`) > B (`model` + `model_api_key`) > C
+(`altimate_gateway_key`) > none**. With no selected route and no local
+`aiModel`, the lane is skipped.
 
-Always pass keys as repo **secrets**. Warehouse credentials are consumed by the
-`dbt compile` step (via your `profiles.yml`), **not** by the review step. A
-complete, copy-paste workflow lives at
+Route A uses the hosted Altimate backend and defaults to
+`altimate-backend/altimate-default`. `ai_model` can override that model within
+the route:
+
+```yaml
+with:
+  altimate_api_key: ${{ secrets.ALTIMATE_API_KEY }}
+  altimate_instance: ${{ secrets.ALTIMATE_INSTANCE }}
+  # ai_model: altimate-backend/altimate-default
+```
+
+Route B is an explicit bring-your-own model choice; both inputs are required:
+
+```yaml
+with:
+  model: anthropic/claude-sonnet-4-6
+  model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Route C configures the OpenAI-compatible Altimate gateway. It defaults to the
+free `altimate-base` model; use `ai_model: altimate-gateway/altimate-pro` to
+select the pro model. The gateway URL defaults to the production gateway,
+`https://altimate-gateway.onealtimate.com`; set `altimate_gateway_url` only
+for a self-hosted gateway (it must use HTTPS):
+
+```yaml
+with:
+  altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
+  # altimate_gateway_url: https://gateway.example.com   # self-hosted only
+  # ai_model: altimate-gateway/altimate-pro
+  # ai_reasoning: none
+  # ai_timeout_seconds: 900
+```
+
+Reasoning models such as altimate-base think for two to three minutes before answering; a review takes three to five minutes and needs 6K+ output tokens. To trade depth for speed, set `aiReasoningEffort: none`; the gateway then answers without a thinking phase (roughly 30 s for a typical PR instead of 3–5 min). The gateway route defaults to a 900 s timeout. Set
+`aiTimeoutSeconds` and `aiMaxOutputTokens` in `.altimate/review.yml`, or use
+`--ai-timeout` and `--ai-max-output-tokens` for one run. The timeout also honors
+`ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS`, with precedence **flag > environment >
+repository config > changed-file default**.
+
+Always pass keys as repository **secrets**. Warehouse credentials are consumed
+by the `dbt compile` step (via `profiles.yml`), not by the review step. A full
+workflow lives at
 [`github/review/examples/altimate-ingestion.yml`](https://github.com/AltimateAI/altimate-code/blob/main/github/review/examples/altimate-ingestion.yml).
+
+For local headless use, model precedence is **flag > environment > repository
+config**:
+
+```yaml
+# .altimate/review.yml
+aiModel: altimate-gateway/altimate-base
+```
+
+```bash
+altimate review --ai-model altimate-gateway/altimate-base
+ALTIMATE_REVIEW_AI_MODEL=altimate-gateway/altimate-base altimate review
+```
+
+The selected provider must also be configured in Altimate Code. The in-session
+`dbt_pr_review` tool honors `aiModel` when it is set; otherwise it uses the
+session's current model. The headless CLI never silently borrows a chat model.
+The AI lane never affects the verdict: its findings remain advisory and are
+clamped below `critical`.
 
 Re-pushing commits updates the same summary comment in place; fixed findings are
 dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN` /
 `GITHUB_REPOSITORY` and posts via the GitHub API). On other platforms (e.g. GitLab),
 run with `--json`/`--output` and post the verdict using that platform's own API —
 native GitLab posting is not yet built in.
+
+The summary comment is updated in place only when the reviewer can tell which
+comment is its own. With the default Actions token that is automatic. If you post
+with a **GitHub App installation token**, the API cannot reveal the App's identity,
+so set `ALTIMATE_REVIEW_BOT_LOGIN=<app-slug>[bot]`; otherwise each run creates a
+new summary comment. The reviewer never adopts a marker comment from an unknown bot.
 
 ## Configuration — `.altimate/review.yml`
 
@@ -232,6 +336,10 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
+aiModel: altimate-gateway/altimate-base # optional explicit advisory model
+aiReasoningEffort: none   # optional; none|minimal turn thinking off for altimate-base
+aiTimeoutSeconds: 300        # optional; 10–1800 seconds, otherwise uses changed-file default
+aiMaxOutputTokens: 8192      # 512..32768; includes reasoning tokens
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
@@ -303,7 +411,7 @@ In GitHub Actions, supply the connection from a secret — both sides of the dif
 run against the **same** warehouse (base-compiled vs head-compiled SQL):
 
 ```yaml
-      - uses: AltimateAI/altimate-code/github/review@v0.8.5
+      - uses: AltimateAI/altimate-code/github/review@v0.10.0 # exact pin; bump when the release with the gateway inputs ships
         with:
           mode: comment
           manifest_path: target/manifest.json

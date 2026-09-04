@@ -34,6 +34,7 @@ import {
   parseReviewConfig,
   resolveRubric,
   DEFAULT_REVIEW_CONFIG,
+  NO_MODEL_REASON,
 } from "../../src/altimate/review"
 
 // ---------------------------------------------------------------------------
@@ -199,6 +200,20 @@ describe("verdict", () => {
 
   test("single suggestion → COMMENT", () => {
     expect(computeIdealVerdict([mk("suggestion")], DEFAULT_RUBRIC)).toBe("COMMENT")
+  })
+
+  test("summary keeps lint-only separate from undecidable findings", () => {
+    const undecidable = makeFinding({
+      severity: "warning",
+      category: "semantic_change",
+      title: "could not prove equivalence",
+      body: "compiled SQL is missing",
+      file: "models/m.sql",
+      degraded: true,
+      ruleKey: "undecidable",
+    })
+    const env = buildEnvelope({ findings: [undecidable], tier: "full", mode: "comment", lintOnly: false })
+    expect(env.summary).toMatchObject({ degraded: false, lintOnly: false, undecidableFindings: 1 })
   })
 
   test("the bot NEVER emits a formal APPROVE review event", () => {
@@ -848,7 +863,7 @@ describe("risk-tier", () => {
     const runner: ReviewRunner = {
       async check() { return { issues: [], ran: false } },
       async detectPii() { return { columns: [] } },
-      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async impact() { return { hasManifest: false, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
       async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
       async grade() { return { grade: "A", decided: true } },
     }
@@ -898,7 +913,7 @@ describe("risk-tier", () => {
     const runner: ReviewRunner = {
       async check() { return { issues: [], ran: false } },
       async detectPii() { return { columns: [] } },
-      async impact() { return { hasManifest: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
+      async impact() { return { hasManifest: false, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 } },
       async equivalence() { return { decided: true, equivalent: true } as EquivalenceResult },
       async grade() { return { grade: "A", decided: true } },
     }
@@ -1015,7 +1030,45 @@ describe("config", () => {
   })
 
   test("empty config yields defaults", () => {
-    expect(parseReviewConfig("").mode).toBe("comment")
+    const config = parseReviewConfig("")
+    expect(config.mode).toBe("comment")
+    expect(config.aiTimeoutSeconds).toBeUndefined()
+    expect(config.aiMaxOutputTokens).toBe(8_192)
+  })
+
+  test("aiModel accepts only provider/model identifiers", () => {
+    expect(parseReviewConfig("aiModel: altimate-gateway/altimate-base\n").aiModel).toBe(
+      "altimate-gateway/altimate-base",
+    )
+    expect(parseReviewConfig("aiModel: openrouter/openai/gpt-5\n").aiModel).toBe("openrouter/openai/gpt-5")
+    expect(() => parseReviewConfig("aiModel: altimate-base\n")).toThrow("provider/model")
+    expect(() => parseReviewConfig("aiModel: 'altimate-gateway/model with spaces'\n")).toThrow("provider/model")
+  })
+
+  test("aiReasoningEffort accepts only supported reasoning levels", () => {
+    for (const value of ["none", "minimal", "low", "medium", "high"] as const) {
+      expect(parseReviewConfig(`aiReasoningEffort: ${value}\n`).aiReasoningEffort).toBe(value)
+    }
+    for (const value of ["off", "NONE", "maximum"]) {
+      expect(() => parseReviewConfig(`aiReasoningEffort: ${value}\n`)).toThrow()
+    }
+  })
+
+  test("AI timeout and output budget accept only bounded integers", () => {
+    expect(parseReviewConfig("aiTimeoutSeconds: 10\naiMaxOutputTokens: 512\n")).toMatchObject({
+      aiTimeoutSeconds: 10,
+      aiMaxOutputTokens: 512,
+    })
+    expect(parseReviewConfig("aiTimeoutSeconds: 1800\naiMaxOutputTokens: 32768\n")).toMatchObject({
+      aiTimeoutSeconds: 1800,
+      aiMaxOutputTokens: 32_768,
+    })
+    for (const value of [9, 1801, 10.5]) {
+      expect(() => parseReviewConfig(`aiTimeoutSeconds: ${value}\n`)).toThrow()
+    }
+    for (const value of [511, 32_769, 1_024.5]) {
+      expect(() => parseReviewConfig(`aiMaxOutputTokens: ${value}\n`)).toThrow()
+    }
   })
 
   test("resolveRubric folds exclude globs into rubric", () => {
@@ -1062,6 +1115,7 @@ describe("orchestrate", () => {
         return (
           opts.impact?.[model] ?? {
             hasManifest: true,
+            resolved: true,
             severity: "SAFE",
             directCount: 0,
             transitiveCount: 0,
@@ -1092,7 +1146,14 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/staging/stg_orders.sql", status: "deleted", diff: "" }]
     const runner = fakeRunner({
       impact: {
-        stg_orders: { hasManifest: true, severity: "BREAKING", directCount: 3, transitiveCount: 8, testCount: 4 },
+        stg_orders: {
+          hasManifest: true,
+          resolved: true,
+          severity: "BREAKING",
+          directCount: 3,
+          transitiveCount: 8,
+          testCount: 4,
+        },
       },
     })
     const env = await runReview({
@@ -1585,6 +1646,12 @@ describe("orchestrate", () => {
     expect(topo!.severity).toBe("warning")
     expect(topo!.degraded).toBe(true)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    expect(env.summary).toMatchObject({ degraded: false, lintOnly: false, undecidableFindings: 1 })
+    const summary = renderSummary(env)
+    expect(summary).not.toContain("Lint-only")
+    expect(summary).toContain(
+      "ℹ️ 1 finding could not be decided — compiled SQL missing for base or head, unsupported SQL for this dialect, or no schema — see each finding.",
+    )
   })
 
   test("topology lane: no compiled SQL available → skips (no crash)", async () => {
@@ -1729,6 +1796,36 @@ describe("orchestrate", () => {
     expect(env.findings.some((x) => /no uniqueness\/grain test/.test(x.title))).toBe(false)
   })
 
+  test("missing grain test: multiple new models remain atomic findings", async () => {
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async declaredPrimaryKey() {
+        return undefined
+      },
+    }
+    const env = await runReview({
+      changedFiles: [
+        { path: "models/intermediate/int_new_orders.sql", status: "added", diff: "+select 1\n" },
+        { path: "models/marts/fct_new_orders.sql", status: "added", diff: "+select 1\n" },
+      ],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["test_coverage"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: content("select 1"),
+      generatedAt: "2026-05-29T00:00:00Z",
+    })
+    const findings = env.findings.filter((x) => /no uniqueness\/grain test/.test(x.title))
+    expect(findings).toHaveLength(2)
+    expect(findings.map((finding) => finding.file)).toEqual([
+      "models/intermediate/int_new_orders.sql",
+      "models/marts/fct_new_orders.sql",
+    ])
+    expect(findings.map((finding) => finding.model)).toEqual(["int_new_orders", "fct_new_orders"])
+    expect(findings.every((finding) => finding.groupKey === "missing_grain_test")).toBe(true)
+    expect(new Set(findings.map((finding) => finding.id)).size).toBe(2)
+  })
+
   test("missing grain test: new mart WITH a declared PK → not flagged", async () => {
     const runner: ReviewRunner = { ...fakeRunner({}), async declaredPrimaryKey() { return ["id"] } }
     const env = await runReview({
@@ -1776,33 +1873,54 @@ describe("orchestrate", () => {
       runner: fakeRunner({}),
       getContent: content(sql),
       prTitle: "Add revenue mart",
+      aiModel: "altimate-gateway/altimate-base",
+      aiReasoningEffort: "none",
+      aiTimeoutMs: 180_000,
+      aiMaxOutputTokens: 12_288,
+      allowSessionModel: false,
+      sessionModel: "openrouter/openai/gpt-5",
       // Fake AI reviewer: returns a contextual comment + a (disallowed) critical
       // that must be downgraded — the AI must never block.
       aiReview: async (input) => {
         groundingSeen = input.grounding.length
-        return [
-          makeFinding({
-            severity: "warning",
-            category: "sql_correctness",
-            title: "m: `revenue` may double-count un-deduped orders",
-            body: "If orders has multiple rows per order_id, summing amount inflates revenue.",
-            file: "models/marts/m.sql",
-            model: "m",
-            confidence: "medium",
-            evidence: { tool: "ai-review", result: { confidence: "medium" } },
-            ruleKey: "ai:sql_correctness:revenue-double-count",
-          }),
-          makeFinding({
-            severity: "critical", // disallowed for AI — must be downgraded, must not block
-            category: "sql_correctness",
-            title: "m: bogus critical",
-            body: "AI should never block.",
-            file: "models/marts/m.sql",
-            model: "m",
-            evidence: { tool: "ai-review", result: {} },
-            ruleKey: "ai:sql_correctness:bogus",
-          }),
-        ]
+        expect(input.model).toBe("altimate-gateway/altimate-base")
+        expect(input.reasoningEffort).toBe("none")
+        expect(input.allowSessionModel).toBe(false)
+        expect(input.sessionModel).toBe("openrouter/openai/gpt-5")
+        expect(input.timeoutMs).toBe(180_000)
+        expect(input.maxOutputTokens).toBe(12_288)
+        return {
+          status: "ok",
+          model: "altimate-gateway/altimate-base",
+          durationMs: 142_000,
+          promptChars: 24_000,
+          promptTokens: 6_000,
+          completionTokens: 4_000,
+          reasoningTokens: 3_000,
+          findings: [
+            makeFinding({
+              severity: "warning",
+              category: "sql_correctness",
+              title: "m: `revenue` may double-count un-deduped orders",
+              body: "If orders has multiple rows per order_id, summing amount inflates revenue.",
+              file: "models/marts/m.sql",
+              model: "m",
+              confidence: "medium",
+              evidence: { tool: "ai-review", result: { confidence: "medium" } },
+              ruleKey: "ai:sql_correctness:revenue-double-count",
+            }),
+            makeFinding({
+              severity: "critical", // disallowed for AI — must be downgraded, must not block
+              category: "sql_correctness",
+              title: "m: bogus critical",
+              body: "AI should never block.",
+              file: "models/marts/m.sql",
+              model: "m",
+              evidence: { tool: "spoofed-engine", result: {} },
+              ruleKey: "ai:sql_correctness:bogus",
+            }),
+          ],
+        }
       },
       generatedAt: "2026-05-29T00:00:00Z",
     })
@@ -1813,6 +1931,99 @@ describe("orchestrate", () => {
     // No AI finding survived as critical, and the AI did NOT cause a block.
     expect(env.findings.some((f) => f.evidence?.tool === "ai-review" && f.severity === "critical")).toBe(false)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
+    expect(env.summary.aiReview).toEqual({
+      status: "ok",
+      findings: 2,
+      model: "altimate-gateway/altimate-base",
+      reasoningEffort: "none",
+      durationMs: 142_000,
+      promptChars: 24_000,
+      promptTokens: 6_000,
+      completionTokens: 4_000,
+      reasoningTokens: 3_000,
+    })
+  })
+
+  test("AI reviewer lane: disabled configuration skips without invoking the reviewer", async () => {
+    let aiCalls = 0
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+      aiReview: async () => {
+        aiCalls++
+        return { status: "ok", findings: [] }
+      },
+    })
+
+    expect(aiCalls).toBe(0)
+    expect(env.summary.aiReview).toEqual({
+      status: "skipped",
+      reason: "disabled by configuration",
+      findings: 0,
+    })
+  })
+
+  test("AI reviewer status renders each outcome and never changes the verdict", () => {
+    const cases = [
+      {
+        aiReview: {
+          status: "ok" as const,
+          findings: 2,
+          model: "altimate-gateway/altimate-base",
+          reasoningEffort: "none" as const,
+          durationMs: 142_000,
+        },
+        expected: "🤖 AI reviewer (altimate-gateway/altimate-base, reasoning: none): 2 advisory findings · 142s",
+      },
+      {
+        aiReview: {
+          status: "skipped" as const,
+          reason: NO_MODEL_REASON,
+          findings: 0,
+        },
+        expected: `🤖 AI reviewer: skipped — ${NO_MODEL_REASON}`,
+      },
+      {
+        aiReview: { status: "timeout" as const, reason: "timed out after 74s", findings: 0 },
+        expected: "🤖 AI reviewer: timed out after 74s",
+      },
+      {
+        aiReview: { status: "error" as const, reason: "ProviderError: unavailable", findings: 0 },
+        expected: "🤖 AI reviewer: error — ProviderError: unavailable",
+      },
+    ]
+    for (const { aiReview, expected } of cases) {
+      const env = buildEnvelope({ findings: [], tier: "lite", mode: "gate", aiReview })
+      expect(env.verdict).toBe("APPROVE")
+      expect(renderSummary(env)).toContain(expected)
+    }
+
+    const trivial = buildEnvelope({
+      findings: [],
+      tier: "trivial",
+      mode: "comment",
+      aiReview: { status: "skipped", reason: "no reviewable files", findings: 0 },
+    })
+    expect(renderSummary(trivial)).toContain("🤖 AI reviewer: skipped — no reviewable files")
+
+    const withoutAiReview = buildEnvelope({ findings: [], tier: "trivial", mode: "comment" })
+    expect(renderSummary(withoutAiReview)).not.toContain("AI reviewer:")
+  })
+
+  test("format renders an AI status whenever the envelope contains one", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      aiReview: { status: "ok", findings: 2, model: "altimate-gateway/altimate-base" },
+    })
+    const summary = renderSummary(env)
+
+    expect(summary).toContain("🤖 AI reviewer (altimate-gateway/altimate-base): 2 advisory findings")
   })
 
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {
@@ -1820,7 +2031,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: true, severity: "MEDIUM", directCount: 4, transitiveCount: 2, testCount: 1 }
+        return { hasManifest: true, resolved: true, severity: "MEDIUM", directCount: 4, transitiveCount: 2, testCount: 1 }
       },
       async equivalence() {
         return {
@@ -1852,7 +2063,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, resolved: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
       async equivalence() {
         return { decided: true, equivalent: false, differences: ["filter changed"], confidence: "high" }
@@ -1877,7 +2088,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: true, severity: "HIGH", directCount: 12, transitiveCount: 30, testCount: 5 }
+        return { hasManifest: true, resolved: true, severity: "HIGH", directCount: 12, transitiveCount: 30, testCount: 5 }
       },
     }
     const env = await runReview({
@@ -1891,6 +2102,7 @@ describe("orchestrate", () => {
     })
     const lin = env.findings.find((f) => f.category === "lineage_breakage")
     expect(lin?.severity).toBe("warning")
+    expect(lin?.groupKey).toBe("lineage_fanout")
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
@@ -1958,6 +2170,7 @@ describe("orchestrate", () => {
     expect(sem).toBeDefined()
     expect(sem!.confidence).toBe("unknown")
     expect(sem!.severity).not.toBe("critical")
+    expect(sem!.groupKey).toBe("equivalence_undecided")
   })
 
   test("PII exposure → critical pii_exposure finding", async () => {
@@ -2414,7 +2627,7 @@ describe("orchestrate", () => {
     const runner: ReviewRunner = {
       ...fakeRunner({}),
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, resolved: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
     }
     const env = await runReview({
@@ -2426,10 +2639,47 @@ describe("orchestrate", () => {
       getContent: content("select 1"),
     })
     expect(env.summary.degraded).toBe(true)
+    expect(env.summary.lintOnly).toBe(true)
+    expect(env.summary.emptyScope).toBe(false)
+    expect(renderSummary(env)).toContain(
+      "⚙️ Lint-only run — no changed model resolved against a dbt manifest (missing manifest, or the changed models are not in it). Run `dbt compile` on this branch so lineage/equivalence can run.",
+    )
     expect(["APPROVE", "COMMENT"]).toContain(env.verdict)
   })
 
-  test("loaded manifest is not marked lint-only when a changed model is absent from it", async () => {
+  test("README-only diff with a manifest is empty scope, not lint-only", async () => {
+    let aiCalls = 0
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async manifestAvailable() {
+        return true
+      },
+    }
+    const env = await runReview({
+      changedFiles: [{ path: "README.md", status: "modified", diff: "+docs\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      aiReview: async () => {
+        aiCalls++
+        return { status: "ok", findings: [] }
+      },
+    })
+
+    expect(aiCalls).toBe(0)
+    expect(env.summary.aiReview).toBeUndefined()
+    expect(env.summary).toMatchObject({ degraded: true, lintOnly: false, emptyScope: true })
+    const summary = renderSummary(env)
+    expect(summary).not.toContain("Lint-only")
+    expect(summary).toContain(
+      "⚙️ Nothing to review — no dbt model, schema, or macro files changed in this diff.",
+    )
+    expect(summary).not.toContain("No issues found in the changed dbt models")
+    expect(summary).not.toContain("AI reviewer:")
+  })
+
+  test("loaded manifest is lint-only when no changed model resolves", async () => {
     const files: ChangedFile[] = [{ path: "models/staging/new_model.sql", status: "added", diff: "+select 1\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -2437,7 +2687,7 @@ describe("orchestrate", () => {
         return true
       },
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: true, resolved: false, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
     }
     const env = await runReview({
@@ -2448,7 +2698,117 @@ describe("orchestrate", () => {
       runner,
       getContent: content("select 1 as value"),
     })
+    expect(env.summary.degraded).toBe(true)
+    expect(env.summary.lintOnly).toBe(true)
+  })
+
+  test("deletion-only diffs use manifest availability for lint-only status", async () => {
+    const review = async (manifestAvailable: boolean) =>
+      runReview({
+        changedFiles: [{ path: "models/staging/removed_model.sql", status: "deleted", diff: "" }],
+        config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+        rubric: DEFAULT_RUBRIC,
+        mode: "comment",
+        runner: {
+          ...fakeRunner({}),
+          async manifestAvailable() {
+            return manifestAvailable
+          },
+          async impact() {
+            return {
+              hasManifest: manifestAvailable,
+              resolved: false,
+              severity: "SAFE",
+              directCount: 0,
+              transitiveCount: 0,
+              testCount: 0,
+            }
+          },
+        },
+      })
+
+    expect((await review(true)).summary.lintOnly).toBe(false)
+    expect((await review(false)).summary.lintOnly).toBe(true)
+  })
+
+  test("tier-derived AI lane changes the user review policy signature only when it toggles", async () => {
+    const input = {
+      changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: [] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment" as const,
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+    }
+    const lite = await runReview({ ...input, forceTier: "lite" })
+    const full = await runReview({ ...input, forceTier: "full" })
+    const trivial = await runReview({ ...input, forceTier: "trivial" })
+
+    expect(lite.policySignature).toBe(full.policySignature)
+    expect(trivial.policySignature).not.toBe(lite.policySignature)
+  })
+
+  test("an AI model does not affect policy when the selected reviewers omit the AI lane", async () => {
+    const input = {
+      changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment" as const,
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+    }
+    const first = await runReview({ ...input, aiModel: "altimate-gateway/altimate-base" })
+    const second = await runReview({ ...input, aiModel: "altimate-gateway/altimate-pro" })
+
+    expect(first.policySignature).toBe(second.policySignature)
+  })
+
+  test("AI reasoning effort does not affect the policy signature", async () => {
+    const input = {
+      changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment" as const,
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+      aiModel: "altimate-gateway/altimate-base",
+      aiReview: async () => ({ status: "ok" as const, findings: [] }),
+    }
+    const none = await runReview({ ...input, aiReasoningEffort: "none" })
+    const high = await runReview({ ...input, aiReasoningEffort: "high" })
+
+    expect(none.policySignature).toBe(high.policySignature)
+  })
+
+  test("one resolved changed model keeps a mixed-model run out of lint-only", async () => {
+    const files: ChangedFile[] = [
+      { path: "models/staging/known_model.sql", status: "added", diff: "+select 1\n" },
+      { path: "models/staging/new_model.sql", status: "added", diff: "+select 1\n" },
+    ]
+    const runner: ReviewRunner = {
+      ...fakeRunner({}),
+      async impact(model) {
+        return {
+          hasManifest: true,
+          resolved: model === "known_model",
+          severity: "SAFE",
+          directCount: 0,
+          transitiveCount: 0,
+          testCount: 0,
+        }
+      },
+    }
+    const env = await runReview({
+      changedFiles: files,
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: content("select 1 as value"),
+    })
+
     expect(env.summary.degraded).toBe(false)
+    expect(env.summary.lintOnly).toBe(false)
   })
 
   test("manifest availability errors degrade safely instead of aborting the review", async () => {
@@ -2459,7 +2819,7 @@ describe("orchestrate", () => {
         throw new Error("manifest unreadable")
       },
       async impact() {
-        return { hasManifest: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
+        return { hasManifest: false, resolved: false, severity: "UNKNOWN", directCount: 0, transitiveCount: 0, testCount: 0 }
       },
     }
     const env = await runReview({
@@ -2532,5 +2892,84 @@ describe("orchestrate", () => {
     const inline = inlineComments(env)
     expect(inline.length).toBe(1)
     expect(inline[0]).toMatchObject({ path: "models/x.sql", line: 5, side: "RIGHT" })
+  })
+
+  test("renderSummary groups related model findings while a singleton renders normally", () => {
+    const groupedFindings = [
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model_a: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test for model_a.",
+        file: "models/model_a.sql",
+        model: "model_a",
+        startLine: 1,
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model_b: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test for model_b.",
+        file: "models/model_b.sql",
+        model: "model_b",
+        startLine: 1,
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+    ]
+    const groupedEnv = buildEnvelope({ findings: groupedFindings, tier: "lite", mode: "comment" })
+    const groupedSummary = renderSummary(groupedEnv)
+    expect(groupedSummary).toContain(
+      "- **2 new models have no uniqueness/grain test** — `model_a`, `model_b` · test_coverage",
+    )
+    expect(groupedSummary).not.toContain("Add a uniqueness test for model_a.")
+    expect(inlineComments(groupedEnv)).toHaveLength(2)
+
+    const singletonEnv = buildEnvelope({ findings: [groupedFindings[0]], tier: "lite", mode: "comment" })
+    const singletonSummary = renderSummary(singletonEnv)
+    expect(singletonSummary).toContain("- **model_a: new model has no uniqueness/grain test**")
+    expect(singletonSummary).toContain("Add a uniqueness test for model_a.")
+  })
+
+  test("renderSummary fences grouped model identifiers containing backticks", () => {
+    const findings = [
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model`a: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test.",
+        file: "models/model_a.sql",
+        model: "model`a",
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+      makeFinding({
+        severity: "suggestion",
+        category: "test_coverage",
+        title: "model_b: new model has no uniqueness/grain test",
+        body: "Add a uniqueness test.",
+        file: "models/model_b.sql",
+        model: "model_b",
+        groupKey: "missing_grain_test",
+        ruleKey: "test_coverage:missing-grain-test",
+      }),
+    ]
+
+    const summary = renderSummary(buildEnvelope({ findings, tier: "lite", mode: "comment" }))
+    expect(summary).toContain("``model`a``, `model_b`")
+  })
+
+  test("renderSummary collapses missing artifact hints onto one line", () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "lite",
+      mode: "comment",
+      artifactHints: ["catalog.json (run `dbt docs generate`)", "target-base/compiled (compile the base ref)"],
+    })
+    expect(renderSummary(env)).toContain(
+      "🧩 Missing artifacts: catalog.json (run `dbt docs generate`) · target-base/compiled (compile the base ref) — equivalence and lineage run at reduced fidelity",
+    )
   })
 })
