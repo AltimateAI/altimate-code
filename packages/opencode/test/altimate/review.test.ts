@@ -1898,6 +1898,29 @@ describe("orchestrate", () => {
     })
   })
 
+  test("AI reviewer lane: disabled configuration skips without invoking the reviewer", async () => {
+    let aiCalls = 0
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/m.sql", status: "modified", diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"], ai: false },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+      aiReview: async () => {
+        aiCalls++
+        return { status: "ok", findings: [] }
+      },
+    })
+
+    expect(aiCalls).toBe(0)
+    expect(env.summary.aiReview).toEqual({
+      status: "skipped",
+      reason: "disabled by configuration",
+      findings: 0,
+    })
+  })
+
   test("AI reviewer status renders each outcome and never changes the verdict", () => {
     const cases = [
       {

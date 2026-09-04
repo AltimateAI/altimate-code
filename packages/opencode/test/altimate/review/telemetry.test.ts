@@ -75,6 +75,18 @@ describe("review_run", () => {
     expect(e.empty_scope).toBe(false)
   })
 
+  test("custom provider model ids are hashed before emission", () => {
+    const events = captureEvents()
+    const env = envelope()
+    env.summary.aiReview.model = "private-provider/secret-model"
+
+    emitReviewRun({ invocation: "cli", durationMs: 1, sessionID: "", envelope: env })
+
+    expect((events[0] as any).ai_model).toBe("custom/cd6c5615")
+    expect(JSON.stringify(events[0])).not.toContain("private-provider")
+    expect(JSON.stringify(events[0])).not.toContain("secret-model")
+  })
+
   test("tier_forced normalises absent to false", () => {
     // The schema allows only `true` or absent — `false` is explicitly invalid — so copying the
     // raw field would put `undefined` in the event for the common case.

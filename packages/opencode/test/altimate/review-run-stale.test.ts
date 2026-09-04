@@ -102,6 +102,25 @@ describe("detectArtifactHints", () => {
     }
   })
 
+  test("treats catalog entries without populated columns as unusable", async () => {
+    await using tmp = await tmpdir()
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    const changedModels = [{ path: "models/a.sql", status: "added" as const }]
+    await fs.mkdir(target, { recursive: true })
+    await fs.writeFile(manifest, "{}")
+
+    for (const catalog of [
+      { nodes: { "model.analytics.a": { metadata: { name: "a" } } } },
+      { sources: { "source.analytics.raw": { columns: {} } } },
+    ]) {
+      await fs.writeFile(path.join(target, "catalog.json"), JSON.stringify(catalog))
+      expect(await detectArtifactHints(manifest, tmp.path, changedModels, "analytics")).toContain(
+        "catalog.json unreadable or empty (regenerate with `dbt docs generate`)",
+      )
+    }
+  })
+
   test("reports both missing compiled directories when the catalog exists", async () => {
     await using tmp = await tmpdir()
     const target = path.join(tmp.path, "target")
@@ -339,6 +358,48 @@ describe("review artifact hint scope", () => {
     expect(summary).not.toContain("Missing artifacts")
     expect(summary).not.toContain("No issues found")
     expect(summary).not.toContain("AI reviewer:")
+  })
+
+  test("committed build artifacts without dbt-classified paths report no dbt files", async () => {
+    await using tmp = await tmpdir()
+    await writeDbtArtifacts(tmp.path)
+
+    const env = await reviewPullRequest({
+      cwd: tmp.path,
+      changedFiles: [
+        { path: "target/query.sql", status: "modified", diff: "+select 1\n" },
+        { path: "compiled/output.yml", status: "modified", diff: "+version: 2\n" },
+        { path: "dbt_packages/data.csv", status: "modified", diff: "+1\n" },
+      ],
+      getContent: async () => undefined,
+      noAi: true,
+    })
+
+    expect(env.summary).toMatchObject({
+      emptyScope: true,
+      emptyScopeReason: "no_dbt_files",
+    })
+    expect(env.summary.emptyScopeFileCount).toBeUndefined()
+  })
+
+  test("an excluded extension-only file outside dbt directories reports no dbt files", async () => {
+    await using tmp = await tmpdir()
+    await writeDbtArtifacts(tmp.path)
+    await fs.mkdir(path.join(tmp.path, ".altimate"), { recursive: true })
+    await fs.writeFile(path.join(tmp.path, ".altimate", "review.yml"), "exclude:\n  - queries/report.sql\n")
+
+    const env = await reviewPullRequest({
+      cwd: tmp.path,
+      changedFiles: [{ path: "queries/report.sql", status: "modified", diff: "+select 1\n" }],
+      getContent: async () => undefined,
+      noAi: true,
+    })
+
+    expect(env.summary).toMatchObject({
+      emptyScope: true,
+      emptyScopeReason: "no_dbt_files",
+    })
+    expect(env.summary.emptyScopeFileCount).toBeUndefined()
   })
 
   test("excluded models and tracked compiled output do not produce hints", async () => {

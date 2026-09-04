@@ -199,9 +199,12 @@ export async function detectArtifactHints(
   const hints: string[] = []
   try {
     const catalog = JSON.parse(await readFile(path.join(path.dirname(manifestAbs), "catalog.json"), "utf8"))
-    const nonEmptyObject = (value: unknown) =>
+    const nonEmptyObject = (value: unknown): value is Record<string, unknown> =>
       value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0
-    if (!nonEmptyObject(catalog?.nodes) && !nonEmptyObject(catalog?.sources)) {
+    const hasUsableEntry = (entries: unknown) =>
+      nonEmptyObject(entries) &&
+      Object.values(entries).some((entry) => nonEmptyObject(entry) && nonEmptyObject(entry.columns))
+    if (!hasUsableEntry(catalog?.nodes) && !hasUsableEntry(catalog?.sources)) {
       hints.push("catalog.json unreadable or empty (regenerate with `dbt docs generate`)")
     }
   } catch (error) {

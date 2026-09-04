@@ -7,12 +7,39 @@
 // Caller attribution needs no code: neither event declares a `source` field, so the envelope's
 // process-level `source` (from Flag.ALTIMATE_CLI_CLIENT) passes through untouched. A caller that
 // exports that variable is attributed automatically; one that does not reports `cli`.
+import { createHash } from "node:crypto"
 import { Telemetry } from "../telemetry"
 import { ReviewCategory, type Finding } from "./finding"
 import type { VerdictEnvelope } from "./verdict"
 import type { PostResult } from "./post-github"
 
 export type ReviewInvocation = "cli" | "tool"
+
+const KNOWN_AI_MODEL_PROVIDERS = new Set([
+  "altimate-backend",
+  "altimate-gateway",
+  "openai",
+  "anthropic",
+  "google",
+  "google-vertex",
+  "google-vertex-anthropic",
+  "amazon-bedrock",
+  "github-copilot",
+  "github-copilot-enterprise",
+  "openrouter",
+  "opencode",
+  "opencode-go",
+  "azure",
+  "mistral",
+  "groq",
+  "deepseek",
+  "xai",
+])
+
+function telemetryAiModel(model: string | undefined): string | undefined {
+  if (model === undefined || KNOWN_AI_MODEL_PROVIDERS.has(model.split("/", 1)[0]!)) return model
+  return `custom/${createHash("sha256").update(model).digest("hex").slice(0, 8)}`
+}
 
 /**
  * Count surfaced findings by category, zero-filled across the whole enum.
@@ -117,7 +144,7 @@ export function emitReviewRun(input: {
       undecidable_findings:
         env.summary.undecidableFindings ?? env.findings.filter((finding) => finding.degraded).length,
       ai_status: env.summary.aiReview?.status,
-      ai_model: env.summary.aiReview?.model,
+      ai_model: telemetryAiModel(env.summary.aiReview?.model),
       ai_findings: env.summary.aiReview?.findings ?? 0,
       stale_manifest: env.staleManifest === true,
       critical: env.summary.critical,

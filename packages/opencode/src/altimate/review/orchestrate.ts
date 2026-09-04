@@ -8,7 +8,7 @@ import {
   dedupe,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, filterChangedFiles, hasReviewableDbtExtension } from "./diff-filter"
+import { type ChangedFile, classifyDbtFile, filterChangedFiles } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
@@ -1078,7 +1078,7 @@ interface ModelContext {
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
-  const changedDbtFileCount = input.changedFiles.filter((file) => hasReviewableDbtExtension(file.path)).length
+  const changedDbtFileCount = input.changedFiles.filter((file) => classifyDbtFile(file.path) !== "other").length
   const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs)
   const dialect = input.config.dialect
   const getContent = input.getContent
@@ -1433,7 +1433,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
   let aiReviewSummary: AiReviewSummary | undefined
-  if (!emptyScope && lanes.has("ai_review")) {
+  if (!emptyScope && lanes.has("ai_review") && !aiLaneEnabled) {
+    aiReviewSummary = { status: "skipped", reason: "disabled by configuration", findings: 0 }
+  } else if (!emptyScope && aiLaneEnabled) {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
