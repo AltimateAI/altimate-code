@@ -469,7 +469,7 @@ describe("advisory model configuration", () => {
       expect(configLine).toBeString()
       const config = JSON.parse(configLine!.slice("OPENCODE_CONFIG_CONTENT=".length))
       expect(config.provider["altimate-gateway"].options.baseURL).toBe("https://gateway.example.com/v1")
-      expect(await Bun.file(githubEnv).text()).toContain("ALTIMATE_ACTION_AI_TIMEOUT_SECONDS=300")
+      expect(await Bun.file(githubEnv).text()).toContain("ALTIMATE_ACTION_AI_TIMEOUT_SECONDS=900")
     }
   })
 

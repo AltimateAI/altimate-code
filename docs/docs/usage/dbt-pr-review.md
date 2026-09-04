@@ -116,7 +116,7 @@ Options:
 | `--post` | Post the verdict to the GitHub PR (uses `GITHUB_TOKEN` + the Actions event). |
 | `--no-ai` | Disable the advisory LLM reviewer lane (no model calls / cost) — deterministic-only. |
 | `--ai-model <provider/model>` | Explicit model for the advisory reviewer lane; overrides `ALTIMATE_REVIEW_AI_MODEL` and `aiModel` in `.altimate/review.yml`. |
-| `--ai-timeout <seconds>` | AI reviewer deadline (10–900 seconds); overrides `ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS` and `aiTimeoutSeconds` in `.altimate/review.yml`. |
+| `--ai-timeout <seconds>` | AI reviewer deadline (10–1800 seconds); overrides `ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS` and `aiTimeoutSeconds` in `.altimate/review.yml`. |
 | `--ai-max-output-tokens <tokens>` | AI reviewer output budget (512–32768 tokens); overrides `aiMaxOutputTokens` in `.altimate/review.yml`. |
 | `--explain-tier` | Emit the classifier's tier-reason list on the verdict envelope so you can see why a diff was rated `trivial`, `lite`, or `full`. Reasons already surface in the PR comment for `full`-tier runs — this flag adds them to `trivial`/`lite` for debugging. |
 | `--force-tier <tier>` | **[EXPERIMENTAL / bench debug]** Bypass the classifier and force `trivial` / `lite` / `full`. The verdict envelope carries `tierForced: true` and the classifier's original decision for audit. |
@@ -279,10 +279,10 @@ with:
   altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
   # altimate_gateway_url: https://gateway.example.com   # self-hosted only
   # ai_model: altimate-gateway/altimate-pro
-  # ai_timeout_seconds: 300
+  # ai_timeout_seconds: 900
 ```
 
-Reasoning models such as altimate-base need ~3–5 minutes and 6K+ output tokens per review; the gateway route defaults to a 300 s timeout. Set
+Reasoning models such as altimate-base think for two to three minutes before answering; a review takes three to five minutes and needs 6K+ output tokens. The gateway route defaults to a 900 s timeout. Set
 `aiTimeoutSeconds` and `aiMaxOutputTokens` in `.altimate/review.yml`, or use
 `--ai-timeout` and `--ai-max-output-tokens` for one run. The timeout also honors
 `ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS`, with precedence **flag > environment >
@@ -329,7 +329,7 @@ severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
 aiModel: altimate-gateway/altimate-base # optional explicit advisory model
-aiTimeoutSeconds: 300        # optional; 10..900, otherwise uses changed-file default
+aiTimeoutSeconds: 300        # optional; 10–1800 seconds, otherwise uses changed-file default
 aiMaxOutputTokens: 8192      # 512..32768; includes reasoning tokens
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below

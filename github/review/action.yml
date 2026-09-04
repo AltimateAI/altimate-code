@@ -61,7 +61,7 @@ inputs:
     description: "Optional provider/model override within the selected Altimate action route."
     required: false
   ai_timeout_seconds:
-    description: "Optional AI reviewer timeout in seconds (10..900). The Altimate gateway route defaults to 300."
+    description: "Optional AI reviewer timeout in seconds (10..1800). The Altimate gateway route defaults to 900 s."
     required: false
 
 runs:
@@ -176,9 +176,12 @@ runs:
       run: |
         set -euo pipefail
         AI_TIMEOUT_SECONDS="${IN_AI_TIMEOUT_SECONDS:-}"
-        if [[ -n "$AI_TIMEOUT_SECONDS" && ! "$AI_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
-          echo "::error::ai_timeout_seconds must be an integer between 10 and 900."
-          exit 1
+        if [[ -n "$AI_TIMEOUT_SECONDS" ]]; then
+          if [[ ! "$AI_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] ||
+            (( 10#$AI_TIMEOUT_SECONDS < 10 || 10#$AI_TIMEOUT_SECONDS > 1800 )); then
+            echo "::error::ai_timeout_seconds must be an integer between 10 and 1800."
+            exit 1
+          fi
         fi
         if [[ -n "${IN_ALT_KEY:-}" ]]; then
           # Route A — hosted altimate model (altimate-backend).
@@ -224,7 +227,8 @@ runs:
             '{provider: {"altimate-gateway": {npm: "@ai-sdk/openai-compatible", name: "Altimate Gateway", options: {baseURL:$base_url, apiKey:$ENV.IN_GATEWAY_KEY}, models: {"altimate-base": {name:"altimate-base"}, "altimate-pro": {name:"altimate-pro"}}}}}')
           echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
           AI_MODEL="${IN_AI_MODEL:-altimate-gateway/altimate-base}"
-          AI_TIMEOUT_SECONDS="${AI_TIMEOUT_SECONDS:-300}"
+          # matches the gateway's LiteLLM request_timeout (900 s); raise both together
+          AI_TIMEOUT_SECONDS="${AI_TIMEOUT_SECONDS:-900}"
           echo "ALTIMATE_ACTION_AI_MODEL=$AI_MODEL" >> "$GITHUB_ENV"
           echo "Advisory lane: Altimate gateway model ($AI_MODEL)."
         elif [[ -n "${IN_MODEL:-}" || -n "${IN_MODEL_API_KEY:-}" ]]; then

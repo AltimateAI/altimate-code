@@ -1050,11 +1050,11 @@ describe("config", () => {
       aiTimeoutSeconds: 10,
       aiMaxOutputTokens: 512,
     })
-    expect(parseReviewConfig("aiTimeoutSeconds: 900\naiMaxOutputTokens: 32768\n")).toMatchObject({
-      aiTimeoutSeconds: 900,
+    expect(parseReviewConfig("aiTimeoutSeconds: 1800\naiMaxOutputTokens: 32768\n")).toMatchObject({
+      aiTimeoutSeconds: 1800,
       aiMaxOutputTokens: 32_768,
     })
-    for (const value of [9, 901, 10.5]) {
+    for (const value of [9, 1801, 10.5]) {
       expect(() => parseReviewConfig(`aiTimeoutSeconds: ${value}\n`)).toThrow()
     }
     for (const value of [511, 32_769, 1_024.5]) {

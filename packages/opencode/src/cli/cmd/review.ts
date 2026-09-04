@@ -128,7 +128,7 @@ export const ReviewCommand = cmd({
       })
       .option("ai-timeout", {
         type: "number",
-        describe: "AI reviewer timeout in seconds (10..900; overrides environment and config)",
+        describe: "AI reviewer timeout in seconds (10..1800; overrides environment and config)",
       })
       .option("ai-max-output-tokens", {
         type: "number",
@@ -151,7 +151,7 @@ export const ReviewCommand = cmd({
       args.aiTimeout ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS),
       "--ai-timeout / ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS",
       10,
-      900,
+      1800,
     )
     const aiMaxOutputTokens = boundedInteger(
       args.aiMaxOutputTokens,

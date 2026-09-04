@@ -37,7 +37,7 @@ export const ReviewConfig = z.object({
   // provider parser deliberately splits only on the first slash.
   aiModel: z.string().regex(/^[^\s/]+\/\S+$/, "provider/model").optional(),
   /** Advisory reviewer deadline. Unset uses the changed-file formula. */
-  aiTimeoutSeconds: z.number().int().min(10).max(900).optional(),
+  aiTimeoutSeconds: z.number().int().min(10).max(1800).optional(),
   /** Total output budget, including reasoning tokens for reasoning models. */
   aiMaxOutputTokens: z.number().int().min(512).max(32_768).default(DEFAULT_AI_MAX_OUTPUT_TOKENS),
   /**
