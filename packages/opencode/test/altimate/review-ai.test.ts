@@ -38,16 +38,80 @@ function reviewFile(index: number): AiReviewFile {
   }
 }
 
+describe("runAiReview model selection", () => {
+  test("skips without consulting the session model when no explicit model is configured", async () => {
+    const defaultModel = spyOn(Provider as any, "defaultModel")
+    const getModel = spyOn(Provider as any, "getModel")
+    const dispatcher = spyOn(Dispatcher as any, "call")
+
+    const result = await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      allowSessionModel: false,
+    })
+
+    expect(result).toEqual({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
+    expect(defaultModel).not.toHaveBeenCalled()
+    expect(getModel).not.toHaveBeenCalled()
+    expect(dispatcher).not.toHaveBeenCalled()
+  })
+
+  test("returns an error naming an unavailable configured model without falling back", async () => {
+    const defaultModel = spyOn(Provider as any, "defaultModel")
+    const getModel = spyOn(Provider as any, "getModel").mockRejectedValue(new Error("provider is not configured"))
+    const dispatcher = spyOn(Dispatcher as any, "call")
+    const stream = spyOn(LLM as any, "stream")
+
+    const result = await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      model: "unknown-provider/unknown-model",
+      allowSessionModel: false,
+    })
+
+    expect(result).toEqual({
+      findings: [],
+      status: "error",
+      reason:
+        "configured AI model not available: unknown-provider/unknown-model — Error: provider is not configured",
+      model: "unknown-provider/unknown-model",
+    })
+    expect(getModel).toHaveBeenCalledWith("unknown-provider", "unknown-model")
+    expect(defaultModel).not.toHaveBeenCalled()
+    expect(dispatcher).not.toHaveBeenCalled()
+    expect(stream).not.toHaveBeenCalled()
+  })
+})
+
 describe("runAiReview stream handling", () => {
   test("returns timeout when pre-stream setup never resolves", async () => {
+    spyOn(Provider as any, "defaultModel").mockResolvedValue({
+      providerID: "test-provider",
+      modelID: "test-model",
+    })
+    spyOn(Provider as any, "getModel").mockResolvedValue({
+      providerID: "test-provider",
+      id: "test-model",
+      modelID: "test-model",
+    })
     spyOn(Dispatcher as any, "call").mockImplementation(
       (() => new Promise(() => {})) as any,
     )
     const stream = spyOn(LLM as any, "stream")
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], timeoutMs: 5 })
+    const result = await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      allowSessionModel: true,
+      timeoutMs: 5,
+    })
 
-    expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 0.005s" })
+    expect(result).toEqual({
+      findings: [],
+      status: "timeout",
+      reason: "timed out after 0.005s",
+      model: "test-provider/test-model",
+    })
     expect(stream).not.toHaveBeenCalled()
   })
 
@@ -71,9 +135,10 @@ describe("runAiReview stream handling", () => {
     const result = await runAiReview({
       files: Array.from({ length: 25 }, (_, index) => reviewFile(index)),
       grounding: [],
+      allowSessionModel: true,
     })
 
-    expect(result).toEqual({ findings: [], status: "ok" })
+    expect(result).toEqual({ findings: [], status: "ok", model: "test-provider/test-model" })
     expect(delays).toContain(100_000)
   })
 
@@ -86,9 +151,14 @@ describe("runAiReview stream handling", () => {
       text: Promise.resolve(" \n\t "),
     }))
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({ findings: [], status: "error", reason: "empty response" })
+    expect(result).toEqual({
+      findings: [],
+      status: "error",
+      reason: "empty response",
+      model: "test-provider/test-model",
+    })
     expect(parseCalls()).toBe(0)
   })
 
@@ -110,7 +180,7 @@ describe("runAiReview stream handling", () => {
     })
     const stream = spyOn(LLM as any, "stream")
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
     expect(result).toEqual({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
     expect(stream).not.toHaveBeenCalled()
@@ -142,10 +212,15 @@ describe("runAiReview stream handling", () => {
       }
     })
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
     expect(signal?.aborted).toBe(true)
-    expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 62s" })
+    expect(result).toEqual({
+      findings: [],
+      status: "timeout",
+      reason: "timed out after 62s",
+      model: "test-provider/test-model",
+    })
     expect(parseCalls()).toBe(0)
   })
 
@@ -172,9 +247,14 @@ describe("runAiReview stream handling", () => {
       },
     }))
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 62s" })
+    expect(result).toEqual({
+      findings: [],
+      status: "timeout",
+      reason: "timed out after 62s",
+      model: "test-provider/test-model",
+    })
     expect(textRead).toBe(false)
     expect(parseCalls()).toBe(0)
   })
@@ -197,9 +277,14 @@ describe("runAiReview stream handling", () => {
       },
     }))
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({ findings: [], status: "timeout", reason: "timed out after 62s" })
+    expect(result).toEqual({
+      findings: [],
+      status: "timeout",
+      reason: "timed out after 62s",
+      model: "test-provider/test-model",
+    })
     expect(parseCalls()).toBe(0)
   })
 
@@ -220,12 +305,13 @@ describe("runAiReview stream handling", () => {
       text: Promise.resolve('[{"file":"models/model_0.sql","title":"partial","body":"partial"}]'),
     }))
 
-    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
     expect(result).toEqual({
       findings: [],
       status: "error",
       reason: "Error: upstream failed at <redacted-url> using sk-***",
+      model: "test-provider/test-model",
     })
     expect(parseCalls()).toBe(0)
   })

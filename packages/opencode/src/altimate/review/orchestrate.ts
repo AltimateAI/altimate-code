@@ -200,6 +200,10 @@ export interface OrchestrateInput {
    * lane status.
    */
   aiReview?: (input: AiReviewInput) => Promise<AiReviewResult>
+  /** Explicit provider/model for the advisory lane, when configured. */
+  aiModel?: string
+  /** Whether this caller may fall back to its current session model. */
+  allowSessionModel?: boolean
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -1434,10 +1438,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         const result = await input.aiReview({
           files: aiFiles,
           grounding: merged,
+          model: input.aiModel,
+          allowSessionModel: input.allowSessionModel ?? false,
           prTitle: input.prTitle,
           prBody: input.prBody,
         })
-        aiReviewSummary = { status: result.status, reason: result.reason, findings: 0 }
+        aiReviewSummary = { status: result.status, reason: result.reason, findings: 0, model: result.model }
         // Defense in depth: normalize provenance and clamp severity so injected
         // callers cannot make the AI lane authoritative.
         for (const f of result.findings) {

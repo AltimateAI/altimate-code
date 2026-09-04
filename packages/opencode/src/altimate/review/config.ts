@@ -27,6 +27,12 @@ export const ReviewConfig = z.object({
   /** Enable the advisory LLM reviewer lane (needs a configured model). */
   ai: z.boolean().default(true),
   /**
+   * provider/model for the advisory reviewer lane, e.g.
+   * altimate-gateway/altimate-base; when unset the headless CLI skips the lane
+   * and the in-session tool uses the session's model.
+   */
+  aiModel: z.string().regex(/^[^\s/]+\/\S+$/, "provider/model").optional(),
+  /**
    * Data-diff: actually run base-vs-head against the warehouse (core DataParity)
    * and report row/value deltas. OPT-IN — it costs warehouse compute and needs a
    * configured warehouse connection, so it is OFF by default. Configure

@@ -106,7 +106,11 @@ jobs:
           # model: anthropic/claude-sonnet-4-6
           # model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           #
-          # Omit both routes entirely to run a deterministic-only review (no AI comments).
+          # Route C — default free gateway model (use instead of Routes A/B):
+          # altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
+          # altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}
+          #
+          # Omit all routes entirely to run a deterministic-only review (no AI comments).
 
           # Optional: sign the verdict envelope (tamper-evident, reproducible).
           signing_key: ${{ secrets.ALTIMATE_REVIEW_SIGNING_KEY }}

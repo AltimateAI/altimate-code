@@ -108,6 +108,10 @@ export const ReviewCommand = cmd({
         default: false,
         describe: "disable the advisory LLM reviewer lane (no model calls / cost)",
       })
+      .option("ai-model", {
+        type: "string",
+        describe: "provider/model for the advisory LLM reviewer lane (overrides config)",
+      })
       .option("explain-tier", {
         type: "boolean",
         default: false,
@@ -145,6 +149,8 @@ export const ReviewCommand = cmd({
           // With `boolean-negation: false` above, `--no-ai` binds to `noAi` and
           // the historical `--ai=false` programmatic path stays supported.
           noAi: args.noAi === true || args.ai === false,
+          aiModel: (args.aiModel as string | undefined) ?? process.env.ALTIMATE_REVIEW_AI_MODEL,
+          allowSessionModel: false,
           explainTier: args.explainTier === true,
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
           prTitle: prMetadata.prTitle,

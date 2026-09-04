@@ -157,14 +157,16 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
 
   if (env.summary.aiReview) {
     const ai = env.summary.aiReview
+    // Name the model on every status so a reader can tell which model ran, timed out or failed.
+    const model = ai.model ? ` (${ai.model})` : ""
     if (ai.status === "ok") {
-      lines.push(`🤖 AI reviewer: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")
+      lines.push(`🤖 AI reviewer${model}: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}`, "")
     } else if (ai.status === "skipped") {
-      lines.push(`🤖 AI reviewer: skipped${ai.reason ? ` — ${ai.reason}` : ""}`, "")
+      lines.push(`🤖 AI reviewer${model}: skipped${ai.reason ? ` — ${ai.reason}` : ""}`, "")
     } else if (ai.status === "timeout") {
-      lines.push(`🤖 AI reviewer: ${ai.reason ?? "timed out"}`, "")
+      lines.push(`🤖 AI reviewer${model}: ${ai.reason ?? "timed out"}`, "")
     } else {
-      lines.push(`🤖 AI reviewer: error${ai.reason ? ` — ${ai.reason}` : ""}`, "")
+      lines.push(`🤖 AI reviewer${model}: error${ai.reason ? ` — ${ai.reason}` : ""}`, "")
     }
   }
 

@@ -80,12 +80,15 @@ export type RiskTier = z.infer<typeof RiskTier>
 
 export const AiReviewStatus = z.enum(["ok", "skipped", "timeout", "error"])
 export type AiReviewStatus = z.infer<typeof AiReviewStatus>
-export const NO_MODEL_REASON = "no model configured (set `altimate_api_key` or `model` in the action)"
+export const NO_MODEL_REASON =
+  "no AI model configured (set aiModel in .altimate/review.yml, --ai-model, or the action's model inputs)"
 
 export const AiReviewSummary = z.object({
   status: AiReviewStatus,
   reason: z.string().optional(),
   findings: z.number().int().nonnegative(),
+  /** Effective provider/model used by the advisory lane. */
+  model: z.string().optional(),
 })
 export type AiReviewSummary = z.infer<typeof AiReviewSummary>
 

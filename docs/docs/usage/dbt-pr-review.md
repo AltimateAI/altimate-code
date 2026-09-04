@@ -115,6 +115,7 @@ Options:
 | `--severity <level>` | Minimum severity to surface: `critical`, `warning`, `suggestion`. |
 | `--post` | Post the verdict to the GitHub PR (uses `GITHUB_TOKEN` + the Actions event). |
 | `--no-ai` | Disable the advisory LLM reviewer lane (no model calls / cost) — deterministic-only. |
+| `--ai-model <provider/model>` | Explicit model for the advisory reviewer lane; overrides `ALTIMATE_REVIEW_AI_MODEL` and `aiModel` in `.altimate/review.yml`. |
 | `--explain-tier` | Emit the classifier's tier-reason list on the verdict envelope so you can see why a diff was rated `trivial`, `lite`, or `full`. Reasons already surface in the PR comment for `full`-tier runs — this flag adds them to `trivial`/`lite` for debugging. |
 | `--force-tier <tier>` | **[EXPERIMENTAL / bench debug]** Bypass the classifier and force `trivial` / `lite` / `full`. The verdict envelope carries `tierForced: true` and the classifier's original decision for audit. |
 | `--json` / `--output <file>` | Emit the verdict envelope as JSON. |
@@ -229,27 +230,77 @@ jobs:
           altimate_instance: ${{ secrets.ALTIMATE_INSTANCE }}
           # …or bring your own:  model: anthropic/claude-sonnet-4-6
           #                      model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # …or use the default free gateway model:
+          # altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
+          # altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}
 ```
 
 Without `target-base/compiled`, base-vs-head equivalence is undecidable; the
 review reports that explicitly rather than presenting the run as lint-only.
 
-### Model & credentials for the advisory lane
+### Choosing the AI reviewer's model
 
-The deterministic engine (lineage, equivalence, PII, grade, lint — the only layer
-that can **block**) runs entirely from the compiled artifacts and needs **no model
-or credentials**. The optional layer-3 **LLM reviewer** does — supply it one of two
-ways, or neither (it self-disables, leaving a deterministic-only review):
+The deterministic engine (lineage, equivalence, PII, grade, and lint) needs no
+model or model credentials. The optional advisory lane always makes its model
+choice explicit in headless runs. Action routes have this precedence:
+**A (`altimate_api_key`) > B (`model` + `model_api_key`) > C
+(`altimate_gateway_key`) > none**. With no selected route and no local
+`aiModel`, the lane is skipped.
 
-| Route | Action inputs | Result |
-|-------|---------------|--------|
-| **Hosted altimate model** | `altimate_api_key` + `altimate_instance` (+ optional `altimate_url`) | uses the altimate-hosted default model |
-| **Bring-your-own** | `model` (e.g. `anthropic/claude-sonnet-4-6`) + `model_api_key` | uses your provider/model |
+Route A uses the hosted Altimate backend and defaults to
+`altimate-backend/altimate-default`. `ai_model` can override that model within
+the route:
 
-Always pass keys as repo **secrets**. Warehouse credentials are consumed by the
-`dbt compile` step (via your `profiles.yml`), **not** by the review step. A
-complete, copy-paste workflow lives at
+```yaml
+with:
+  altimate_api_key: ${{ secrets.ALTIMATE_API_KEY }}
+  altimate_instance: ${{ secrets.ALTIMATE_INSTANCE }}
+  # ai_model: altimate-backend/altimate-default
+```
+
+Route B is an explicit bring-your-own model choice; both inputs are required:
+
+```yaml
+with:
+  model: anthropic/claude-sonnet-4-6
+  model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Route C configures the OpenAI-compatible Altimate gateway. It defaults to the
+free `altimate-base` model; use `ai_model: altimate-gateway/altimate-pro` to
+select the pro model. The gateway URL is required, has no default, and must use
+HTTPS:
+
+```yaml
+with:
+  altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
+  altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}
+  # ai_model: altimate-gateway/altimate-pro
+```
+
+Always pass keys as repository **secrets**. Warehouse credentials are consumed
+by the `dbt compile` step (via `profiles.yml`), not by the review step. A full
+workflow lives at
 [`github/review/examples/altimate-ingestion.yml`](https://github.com/AltimateAI/altimate-code/blob/main/github/review/examples/altimate-ingestion.yml).
+
+For local headless use, model precedence is **flag > environment > repository
+config**:
+
+```yaml
+# .altimate/review.yml
+aiModel: altimate-gateway/altimate-base
+```
+
+```bash
+altimate review --ai-model altimate-gateway/altimate-base
+ALTIMATE_REVIEW_AI_MODEL=altimate-gateway/altimate-base altimate review
+```
+
+The selected provider must also be configured in Altimate Code. The in-session
+`dbt_pr_review` tool honors `aiModel` when it is set; otherwise it uses the
+session's current model. The headless CLI never silently borrows a chat model.
+The AI lane never affects the verdict: its findings remain advisory and are
+clamped below `critical`.
 
 Re-pushing commits updates the same summary comment in place; fixed findings are
 dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN` /
@@ -267,6 +318,7 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
+aiModel: altimate-gateway/altimate-base # optional explicit advisory model
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false

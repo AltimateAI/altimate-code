@@ -1,5 +1,6 @@
 // altimate_change - LLM reviewer lane (transport only; prompt + parse live in core)
 import { Provider } from "@/provider/provider"
+import { ModelID, ProviderID } from "@/provider/schema"
 import { LLM } from "@/session/llm"
 import { Agent } from "@/agent/agent"
 import { MessageV2 } from "@/session/message-v2"
@@ -28,6 +29,10 @@ export interface AiReviewInput {
   files: AiReviewFile[]
   /** Deterministic engine findings — grounding the AI must NOT duplicate. */
   grounding: Finding[]
+  /** Explicit provider/model for this advisory lane. */
+  model?: string
+  /** Allow the interactive tool to fall back to the current session model. */
+  allowSessionModel: boolean
   prTitle?: string
   prBody?: string
   /** Override the review deadline (primarily for tests). */
@@ -38,6 +43,8 @@ export interface AiReviewResult {
   findings: Finding[]
   status: AiReviewStatus
   reason?: string
+  /** Effective provider/model used by the advisory lane. */
+  model?: string
 }
 
 /**
@@ -112,6 +119,10 @@ function buildUserMessage(input: AiReviewInput): string {
  * review must never crash because the AI layer is unavailable.
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
+  if (!input.model && !input.allowSessionModel) {
+    return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
+  }
+
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
   if (!files.length) return { findings: [], status: "skipped", reason: "no reviewable files" }
 
@@ -124,20 +135,47 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     controller.signal.addEventListener("abort", () => resolve(setupTimedOut), { once: true })
   })
   let streamAborted = false
+  let effectiveModel: string | undefined
+  const withModel = (result: AiReviewResult): AiReviewResult =>
+    effectiveModel ? { ...result, model: effectiveModel } : result
   try {
     const setup = (async () => {
+      let model: Awaited<ReturnType<typeof Provider.getModel>>
+      if (input.model) {
+        const slash = input.model.indexOf("/")
+        if (slash <= 0 || slash === input.model.length - 1 || /\s/.test(input.model)) {
+          return { modelError: "Error: expected provider/model" }
+        }
+        const providerID = ProviderID.make(input.model.slice(0, slash))
+        const modelID = ModelID.make(input.model.slice(slash + 1))
+        effectiveModel = input.model
+        try {
+          model = await Provider.getModel(providerID, modelID)
+        } catch (err) {
+          return { modelError: errorReason(err) }
+        }
+      } else {
+        const defaultModel = await Provider.defaultModel()
+        model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+      }
+      effectiveModel = `${model.providerID}/${model.id}`
+
       // Prompt comes from the compiled core, not this file.
       const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
       const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
       if (!system) return undefined
-
-      const defaultModel = await Provider.defaultModel()
-      const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
       return { system, model }
     })()
     const setupResult = await Promise.race([setup, abortPromise])
-    if (setupResult === setupTimedOut) return { findings: [], status: "timeout", reason: timeoutReason }
-    if (!setupResult) return { findings: [], status: "skipped", reason: "reviewer prompt unavailable" }
+    if (setupResult === setupTimedOut) return withModel({ findings: [], status: "timeout", reason: timeoutReason })
+    if (!setupResult) return withModel({ findings: [], status: "skipped", reason: "reviewer prompt unavailable" })
+    if ("modelError" in setupResult) {
+      return withModel({
+        findings: [],
+        status: "error",
+        reason: `configured AI model not available: ${input.model} — ${setupResult.modelError}`,
+      })
+    }
     const { system, model } = setupResult
 
     const agent: Agent.Info = {
@@ -174,7 +212,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       abortPromise,
     ])
     if (streamResult === setupTimedOut || controller.signal.aborted) {
-      return { findings: [], status: "timeout", reason: timeoutReason }
+      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
     }
     const stream = streamResult
     const drain = (async () => {
@@ -186,14 +224,14 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     })()
     const drainResult = await Promise.race([drain, abortPromise])
     if (drainResult === setupTimedOut || controller.signal.aborted || streamAborted) {
-      return { findings: [], status: "timeout", reason: timeoutReason }
+      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
     }
     const textResult = await Promise.race([Promise.resolve(stream.text), abortPromise])
     if (textResult === setupTimedOut || controller.signal.aborted) {
-      return { findings: [], status: "timeout", reason: timeoutReason }
+      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
     }
     const text = textResult
-    if (!text?.trim()) return { findings: [], status: "error", reason: "empty response" }
+    if (!text?.trim()) return withModel({ findings: [], status: "error", reason: "empty response" })
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
@@ -205,7 +243,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       abortPromise,
     ])
     if (parseResult === setupTimedOut || controller.signal.aborted) {
-      return { findings: [], status: "timeout", reason: timeoutReason }
+      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
     }
     const parseRes = parseResult
     const parsed = (((parseRes.data ?? {}) as Record<string, unknown>).findings as any[]) ?? []
@@ -243,14 +281,14 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       }
     }
     log.info("ai review complete", { findings: out.length })
-    return { findings: out, status: "ok" }
+    return withModel({ findings: out, status: "ok" })
   } catch (err) {
     log.error("ai review failed", { error: err })
     if (noModelError(err)) return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
     if (controller.signal.aborted || streamAborted || (err as { name?: unknown } | undefined)?.name === "AbortError") {
-      return { findings: [], status: "timeout", reason: timeoutReason }
+      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
     }
-    return { findings: [], status: "error", reason: errorReason(err) }
+    return withModel({ findings: [], status: "error", reason: errorReason(err) })
   } finally {
     clearTimeout(timeout)
   }

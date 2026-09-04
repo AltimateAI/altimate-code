@@ -1,5 +1,5 @@
 name: "altimate dbt PR review"
-description: "Layered AI code review for dbt/SQL pull requests — a signed verdict backed by lineage, query equivalence, PII, and grade, plus advisory LLM comments."
+description: "Layered AI code review for dbt/SQL pull requests — a signed verdict backed by lineage, query equivalence, PII, and grade, plus an AI reviewer outcome with advisory findings."
 branding:
   icon: "git-pull-request"
   color: "orange"
@@ -44,11 +44,20 @@ inputs:
     description: "Altimate API base URL."
     required: false
     default: "https://api.myaltimate.com"
+  altimate_gateway_key:
+    description: "Altimate gateway API key → uses the free `altimate-base` model for the advisory lane. Use a repo secret."
+    required: false
+  altimate_gateway_url:
+    description: "HTTPS Altimate gateway base URL (required when `altimate_gateway_key` is set)."
+    required: false
   model:
     description: "Bring-your-own advisory model as 'provider/model' (e.g. anthropic/claude-sonnet-4-6). Used when `altimate_api_key` is not set."
     required: false
   model_api_key:
     description: "API key for `model`'s provider (e.g. an Anthropic key for an anthropic/* model). Use a repo secret."
+    required: false
+  ai_model:
+    description: "Optional provider/model override within the selected Altimate action route."
     required: false
 
 runs:
@@ -143,18 +152,22 @@ runs:
           git fetch --no-tags --unshallow origin
         fi
 
-    # Configure the OPTIONAL advisory LLM lane. Two mutually-exclusive routes:
+    # Configure the OPTIONAL advisory LLM lane. Route precedence is:
     #   A) altimate_api_key (+ altimate_instance) → hosted altimate model
-    #   B) model (+ model_api_key)               → bring-your-own provider
-    # Neither set → the LLM lane self-disables and the review is deterministic-only.
+    #   B) model + model_api_key                  → bring-your-own provider
+    #   C) altimate_gateway_key                   → free altimate-base gateway model
+    # No route → the LLM lane self-disables and the review is deterministic-only.
     - name: Configure advisory reviewer model + credentials
       shell: bash
       env:
         IN_ALT_KEY: ${{ inputs.altimate_api_key }}
         IN_ALT_INSTANCE: ${{ inputs.altimate_instance }}
         IN_ALT_URL: ${{ inputs.altimate_url }}
+        IN_GATEWAY_KEY: ${{ inputs.altimate_gateway_key }}
+        IN_GATEWAY_URL: ${{ inputs.altimate_gateway_url }}
         IN_MODEL: ${{ inputs.model }}
         IN_MODEL_API_KEY: ${{ inputs.model_api_key }}
+        IN_AI_MODEL: ${{ inputs.ai_model }}
       run: |
         set -euo pipefail
         if [[ -n "${IN_ALT_KEY:-}" ]]; then
@@ -173,22 +186,37 @@ runs:
             --arg inst "$IN_ALT_INSTANCE" \
             '{altimateUrl:$url, altimateInstanceName:$inst, altimateApiKey:$ENV.IN_ALT_KEY}' \
             > "$HOME/.altimate/altimate.json"
-          echo "Advisory lane: hosted altimate model (tenant: $IN_ALT_INSTANCE)."
-        elif [[ -n "${IN_MODEL:-}" ]]; then
+          AI_MODEL="${IN_AI_MODEL:-altimate-backend/altimate-default}"
+          echo "ALTIMATE_ACTION_AI_MODEL=$AI_MODEL" >> "$GITHUB_ENV"
+          echo "Advisory lane: hosted altimate model ($AI_MODEL; tenant: $IN_ALT_INSTANCE)."
+        elif [[ -n "${IN_MODEL:-}" && -n "${IN_MODEL_API_KEY:-}" ]]; then
           # Route B — bring-your-own provider/model via inline opencode config.
           PROVIDER="${IN_MODEL%%/*}"
-          if [[ -n "${IN_MODEL_API_KEY:-}" ]]; then
-            CONTENT=$(jq -nc --arg m "$IN_MODEL" --arg p "$PROVIDER" --arg k "$IN_MODEL_API_KEY" \
-              '{model:$m, provider: {($p): {options: {apiKey:$k}}}}')
-          else
-            CONTENT=$(jq -nc --arg m "$IN_MODEL" '{model:$m}')
-          fi
+          CONTENT=$(jq -nc --arg m "$IN_MODEL" --arg p "$PROVIDER" --arg k "$IN_MODEL_API_KEY" \
+            '{model:$m, provider: {($p): {options: {apiKey:$k}}}}')
           echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
+          echo "ALTIMATE_ACTION_AI_MODEL=$IN_MODEL" >> "$GITHUB_ENV"
           echo "Advisory lane: bring-your-own model ($IN_MODEL)."
-        elif [[ -n "${IN_MODEL_API_KEY:-}" ]]; then
-          # Guard a likely misconfiguration: a key with no model would be silently
-          # ignored and the lane would disable without explanation.
-          echo "::error::model_api_key is set but model is empty — set \`model\` (e.g. anthropic/claude-sonnet-4-6) or use altimate_api_key."
+        elif [[ -n "${IN_GATEWAY_KEY:-}" ]]; then
+          # Route C — Altimate's OpenAI-compatible LiteLLM gateway.
+          if [[ -z "${IN_GATEWAY_URL:-}" ]]; then
+            echo "::error::altimate_gateway_key is set but altimate_gateway_url is empty — provide the HTTPS gateway base URL."
+            exit 1
+          fi
+          if [[ ! "$IN_GATEWAY_URL" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::altimate_gateway_url must be an HTTPS URL."
+            exit 1
+          fi
+          GATEWAY_BASE_URL="${IN_GATEWAY_URL%/}/v1"
+          CONTENT=$(jq -nc \
+            --arg base_url "$GATEWAY_BASE_URL" \
+            '{provider: {"altimate-gateway": {npm: "@ai-sdk/openai-compatible", name: "Altimate Gateway", options: {baseURL:$base_url, apiKey:$ENV.IN_GATEWAY_KEY}, models: {"altimate-base": {name:"altimate-base"}, "altimate-pro": {name:"altimate-pro"}}}}}')
+          echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
+          AI_MODEL="${IN_AI_MODEL:-altimate-gateway/altimate-base}"
+          echo "ALTIMATE_ACTION_AI_MODEL=$AI_MODEL" >> "$GITHUB_ENV"
+          echo "Advisory lane: Altimate gateway model ($AI_MODEL)."
+        elif [[ -n "${IN_MODEL:-}" || -n "${IN_MODEL_API_KEY:-}" ]]; then
+          echo "::error::model and model_api_key must be set together for the bring-your-own route."
           exit 1
         else
           echo "Advisory lane: no model/credentials provided — running deterministic-only."
@@ -233,4 +261,7 @@ runs:
           args+=(--head "$IN_HEAD")
         fi
         [[ "$IN_POST" == "true" ]] && args+=(--post)
+        if [[ -n "${ALTIMATE_ACTION_AI_MODEL:-}" ]]; then
+          args+=(--ai-model "$ALTIMATE_ACTION_AI_MODEL")
+        fi
         altimate review "${args[@]}"

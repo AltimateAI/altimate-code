@@ -8,12 +8,23 @@ import * as ReviewRun from "../../src/altimate/review/run"
 import { ReviewCommand } from "../../src/cli/cmd/review"
 import { buildReviewSchemaContext } from "../../src/altimate/review/schema-context"
 import { Telemetry } from "../../src/altimate/telemetry"
+import { Provider } from "../../src/provider/provider"
+import { ModelID, ProviderID } from "../../src/provider/schema"
+import { Instance } from "../../src/project/instance"
 import { buildEnvelope } from "../../src/altimate/review/verdict"
 import { makeFinding } from "../../src/altimate/review/finding"
 import { REVIEW_MARKER } from "../../src/altimate/review/format"
 import { tmpdir } from "../fixture/fixture"
 
-const ENV_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_PATH", "ALTIMATE_PR_NUMBER"]
+const ENV_KEYS = [
+  "GITHUB_TOKEN",
+  "GH_TOKEN",
+  "GITHUB_REPOSITORY",
+  "GITHUB_EVENT_PATH",
+  "ALTIMATE_PR_NUMBER",
+  "ALTIMATE_REVIEW_AI_MODEL",
+  "OPENCODE_CONFIG_CONTENT",
+]
 const saved: Record<string, string | undefined> = {}
 for (const k of ENV_KEYS) saved[k] = process.env[k]
 const savedExitCode = process.exitCode
@@ -126,6 +137,39 @@ describe("review CLI command", () => {
       prTitle: "Keep customer grain",
       prBody: body.slice(0, 4_000),
     })
+  })
+
+  test("passes the AI model flag ahead of the environment and disables session fallback", async () => {
+    await using tmp = await tmpdir({ git: true })
+    process.env.ALTIMATE_REVIEW_AI_MODEL = "environment/model"
+    const review = spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(
+      buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }),
+    )
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: false,
+      aiModel: "flag/model",
+      explainTier: false,
+    })
+    expect(review.mock.calls[0][0]).toMatchObject({ aiModel: "flag/model", allowSessionModel: false })
+
+    review.mockClear()
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: false,
+      explainTier: false,
+    })
+    expect(review.mock.calls[0][0]).toMatchObject({ aiModel: "environment/model", allowSessionModel: false })
   })
 
   test("prints the summary and exits successfully when GitHub rejects posting with 403", async () => {
@@ -306,6 +350,49 @@ describe("reviewPullRequest head handling", () => {
     expect(action).toContain('echo "Unable to fetch custom head \'$IN_HEAD\' from origin" >&2')
     expect(action).toContain('git merge-base "origin/$PR_BASE_REF" "${HEAD_REF:-$PR_HEAD_SHA}"')
     expect(action).toContain('args+=(--head "${HEAD_REF:-$PR_HEAD_SHA}")')
+  })
+})
+
+describe("advisory model configuration", () => {
+  test("resolves an altimate-gateway provider from OPENCODE_CONFIG_CONTENT without network access", async () => {
+    await using tmp = await tmpdir()
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      provider: {
+        "altimate-gateway": {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Altimate Gateway",
+          options: {
+            baseURL: "https://gateway.example.com/v1",
+            apiKey: "test-gateway-key",
+          },
+          models: {
+            "altimate-base": { name: "altimate-base" },
+            "altimate-pro": { name: "altimate-pro" },
+          },
+        },
+      },
+    })
+    const fetch = spyOn(globalThis as any, "fetch").mockRejectedValue(new Error("unexpected network request"))
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        try {
+          const model = await Provider.getModel(
+            ProviderID.make("altimate-gateway"),
+            ModelID.make("altimate-base"),
+          )
+          expect(String(model.providerID)).toBe("altimate-gateway")
+          expect(String(model.id)).toBe("altimate-base")
+          expect(model.api.npm).toBe("@ai-sdk/openai-compatible")
+          const providers = await Provider.list()
+          expect(providers["altimate-gateway"].options.baseURL).toBe("https://gateway.example.com/v1")
+        } finally {
+          await Instance.dispose()
+        }
+      },
+    })
+    expect(fetch).not.toHaveBeenCalled()
   })
 })
 

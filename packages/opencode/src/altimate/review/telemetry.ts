@@ -117,6 +117,7 @@ export function emitReviewRun(input: {
       undecidable_findings:
         env.summary.undecidableFindings ?? env.findings.filter((finding) => finding.degraded).length,
       ai_status: env.summary.aiReview?.status,
+      ai_model: env.summary.aiReview?.model,
       ai_findings: env.summary.aiReview?.findings ?? 0,
       stale_manifest: env.staleManifest === true,
       critical: env.summary.critical,

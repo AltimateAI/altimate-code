@@ -42,6 +42,10 @@ export interface ReviewPullRequestOptions {
   cliVersion?: string
   /** Disable the LLM reviewer lane (default: enabled; self-degrades if no model). */
   noAi?: boolean
+  /** Override the advisory reviewer provider/model from config. */
+  aiModel?: string
+  /** Allow falling back to the current session model (default: false). */
+  allowSessionModel?: boolean
   /** PR metadata for the AI reviewer's intent check. */
   prTitle?: string
   prBody?: string
@@ -334,6 +338,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
   if (opts.mode) config.mode = opts.mode
   if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  const aiModel = opts.aiModel ?? config.aiModel
+  const allowSessionModel = opts.allowSessionModel ?? false
   const rubric = resolveRubric(config)
 
   // Only resolve a base ref if we actually need git (to collect changed files
@@ -492,6 +498,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       opts.noAi || config.ai === false
         ? async () => ({ findings: [], status: "skipped" as const, reason: "disabled by configuration" })
         : runAiReview,
+    aiModel,
+    allowSessionModel,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,

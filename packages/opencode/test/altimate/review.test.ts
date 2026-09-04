@@ -34,6 +34,7 @@ import {
   parseReviewConfig,
   resolveRubric,
   DEFAULT_REVIEW_CONFIG,
+  NO_MODEL_REASON,
 } from "../../src/altimate/review"
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1033,14 @@ describe("config", () => {
     expect(parseReviewConfig("").mode).toBe("comment")
   })
 
+  test("aiModel accepts only provider/model identifiers", () => {
+    expect(parseReviewConfig("aiModel: altimate-gateway/altimate-base\n").aiModel).toBe(
+      "altimate-gateway/altimate-base",
+    )
+    expect(() => parseReviewConfig("aiModel: altimate-base\n")).toThrow("provider/model")
+    expect(() => parseReviewConfig("aiModel: 'altimate-gateway/model with spaces'\n")).toThrow("provider/model")
+  })
+
   test("resolveRubric folds exclude globs into rubric", () => {
     const cfg = { ...DEFAULT_REVIEW_CONFIG, exclude: ["legacy/old.sql"] }
     const rubric = resolveRubric(cfg)
@@ -1834,12 +1843,17 @@ describe("orchestrate", () => {
       runner: fakeRunner({}),
       getContent: content(sql),
       prTitle: "Add revenue mart",
+      aiModel: "altimate-gateway/altimate-base",
+      allowSessionModel: false,
       // Fake AI reviewer: returns a contextual comment + a (disallowed) critical
       // that must be downgraded — the AI must never block.
       aiReview: async (input) => {
         groundingSeen = input.grounding.length
+        expect(input.model).toBe("altimate-gateway/altimate-base")
+        expect(input.allowSessionModel).toBe(false)
         return {
           status: "ok",
+          model: "altimate-gateway/altimate-base",
           findings: [
             makeFinding({
               severity: "warning",
@@ -1874,22 +1888,26 @@ describe("orchestrate", () => {
     // No AI finding survived as critical, and the AI did NOT cause a block.
     expect(env.findings.some((f) => f.evidence?.tool === "ai-review" && f.severity === "critical")).toBe(false)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
-    expect(env.summary.aiReview).toEqual({ status: "ok", findings: 2 })
+    expect(env.summary.aiReview).toEqual({
+      status: "ok",
+      findings: 2,
+      model: "altimate-gateway/altimate-base",
+    })
   })
 
   test("AI reviewer status renders each outcome and never changes the verdict", () => {
     const cases = [
       {
-        aiReview: { status: "ok" as const, findings: 2 },
-        expected: "🤖 AI reviewer: 2 advisory findings",
+        aiReview: { status: "ok" as const, findings: 2, model: "altimate-gateway/altimate-base" },
+        expected: "🤖 AI reviewer (altimate-gateway/altimate-base): 2 advisory findings",
       },
       {
         aiReview: {
           status: "skipped" as const,
-          reason: "no model configured (set `altimate_api_key` or `model` in the action)",
+          reason: NO_MODEL_REASON,
           findings: 0,
         },
-        expected: "🤖 AI reviewer: skipped — no model configured (set `altimate_api_key` or `model` in the action)",
+        expected: `🤖 AI reviewer: skipped — ${NO_MODEL_REASON}`,
       },
       {
         aiReview: { status: "timeout" as const, reason: "timed out after 74s", findings: 0 },
@@ -1923,11 +1941,11 @@ describe("orchestrate", () => {
       findings: [],
       tier: "lite",
       mode: "comment",
-      aiReview: { status: "ok", findings: 2 },
+      aiReview: { status: "ok", findings: 2, model: "altimate-gateway/altimate-base" },
     })
     const summary = renderSummary(env)
 
-    expect(summary).toContain("🤖 AI reviewer: 2 advisory findings")
+    expect(summary).toContain("🤖 AI reviewer (altimate-gateway/altimate-base): 2 advisory findings")
   })
 
   test("FUSION: proven non-equivalent + downstream → critical → blocks (gate)", async () => {

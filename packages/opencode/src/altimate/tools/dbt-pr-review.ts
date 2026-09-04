@@ -50,6 +50,7 @@ export const DbtPrReviewTool = Tool.define("dbt_pr_review", {
         manifestPath: args.manifest_path,
         mode: args.mode,
         modelVersion: ctx.agent,
+        allowSessionModel: true,
       })
     } catch (err) {
       emitReviewRun({

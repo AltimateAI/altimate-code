@@ -987,6 +987,8 @@ export namespace Telemetry {
         undecidable_findings?: number
         /** Advisory AI reviewer outcome when the lane applied. */
         ai_status?: "ok" | "skipped" | "timeout" | "error"
+        /** Effective provider/model used by the advisory AI reviewer. */
+        ai_model?: string
         /** Surfaced advisory AI findings after filtering and deduplication. */
         ai_findings?: number
         stale_manifest?: boolean
