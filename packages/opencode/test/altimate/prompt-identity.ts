@@ -1,7 +1,6 @@
 // Single source of truth for the builder-prompt byte-identity pin
-// (workload-adaptive harness PR 1). Imported by prompt-profiles.test.ts,
-// agent/data-qa-profile.test.ts, and the subprocess hash helper so the pin can
-// never drift between call sites.
+// (workload-adaptive harness PR 1). Imported by prompt-profiles.test.ts and
+// the subprocess hash helper so the pin can never drift between call sites.
 //
 // EXPECTED_SHA256 / EXPECTED_BYTES describe the pre-split monolithic
 // `src/altimate/prompts/builder.txt` as of the commit that removed it

@@ -286,6 +286,42 @@ it.instance(
 )
 
 it.instance(
+  // Regression for the data-qa agent removal: #1217 shipped `data-qa` as a
+  // config-registerable native profile, so an upgrading user's config may
+  // still carry a leftover `agent: {"data-qa": {...}}` block after this
+  // profile was dropped. That entry now takes the exact same path as any
+  // other user-defined agent name not registered natively (see "custom agent
+  // from config creates new agent" above) — it resolves to a plain generic
+  // agent (mode "all", native: false, no `data-qa`-specific prompt), it does
+  // not crash, and it does not resurrect the removed profile's permissions.
+  "a leftover config `agent.data-qa` entry resolves as a harmless generic custom agent, not a crash",
+  () =>
+    Effect.gen(function* () {
+      const dataQa = yield* load((svc) => svc.get("data-qa"))
+      expect(dataQa).toBeDefined()
+      expect(dataQa?.native).toBe(false)
+      expect(dataQa?.mode).toBe("all")
+      expect(dataQa?.description).toBe("leftover config from an old data-qa opt-in")
+      // No native data-qa prompt exists anymore to resurrect.
+      expect(dataQa?.prompt).toBeUndefined()
+      // The rest of the registry is unaffected.
+      const builder = yield* load((svc) => svc.get("builder"))
+      expect(builder?.native).toBe(true)
+      const fallback = yield* load((svc) => svc.defaultAgent())
+      expect(fallback).toBe("builder")
+    }),
+  {
+    config: {
+      agent: {
+        "data-qa": {
+          description: "leftover config from an old data-qa opt-in",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "agent disable removes agent from list",
   () =>
     Effect.gen(function* () {
@@ -771,6 +807,55 @@ it.instance(
   {
     config: {
       default_agent: "does_not_exist",
+    },
+  },
+)
+
+it.instance(
+  // Regression for the data-qa agent removal: #1217 let `default_agent:
+  // "data-qa"` alone (no `agent.data-qa` config entry) opt into the native
+  // data-qa profile. An upgrading user's persisted config can still set
+  // this. Unlike a generic typo'd/never-valid default_agent (which still
+  // throws — see the test above), this specific removed name must degrade
+  // to a working session instead of stranding the user: it resolves to
+  // `analyst`, the documented replacement for read-only data questions.
+  "defaultAgent migrates a persisted default_agent: \"data-qa\" (no matching agent entry) to analyst instead of throwing",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.defaultAgent())
+      expect(agent).toBe("analyst")
+      const info = yield* load((svc) => svc.defaultInfo())
+      expect(info?.name).toBe("analyst")
+      expect(info?.native).toBe(true)
+    }),
+  {
+    config: {
+      default_agent: "data-qa",
+    },
+  },
+)
+
+it.instance(
+  // A user who ALSO defines their own `agent.data-qa` config entry gets
+  // that legitimate custom agent as their default — the migration above
+  // only kicks in when no agent actually resolves for the name.
+  "defaultAgent respects an explicit agent.data-qa config entry over the analyst migration",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.defaultAgent())
+      expect(agent).toBe("data-qa")
+      const info = yield* load((svc) => svc.defaultInfo())
+      expect(info?.native).toBe(false)
+      expect(info?.description).toBe("my own data-qa agent")
+    }),
+  {
+    config: {
+      default_agent: "data-qa",
+      agent: {
+        "data-qa": {
+          description: "my own data-qa agent",
+        },
+      },
     },
   },
 )
