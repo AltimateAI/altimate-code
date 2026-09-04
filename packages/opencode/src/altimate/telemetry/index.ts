@@ -45,6 +45,7 @@ const log = Log.create({ service: "telemetry" })
  *   | extend err = tostring(customDimensions.error_class)
  *   | summarize count() by err
  */
+
 // altimate_change end
 
 /** True when a test runner is driving the process rather than a real user session.
@@ -63,6 +64,151 @@ function isAutomatedRun(): boolean {
   if (process.env.NODE_ENV === "test") return true
   return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
 }
+
+// altimate_change start — composed path-masking rules (shared fragments)
+// R: one path-run character — anything but whitespace/separators/quotes,
+// plus an apostrophe when a word character follows (O'Connor vs closing ').
+const PM_R = "(?:[^\\s\\/\\\\'\"`]|'(?=[\\p{L}\\p{N}_]))"
+// slash-delimited variant: backslash is path content, not a separator
+const PM_R_P = "(?:[^\\s\\/'\"`]|'(?=[\\p{L}\\p{N}_]))"
+// drive-relative run (`C:file.sql`, `C:dir\x`): PM_R minus the colon — a second
+// colon inside the run is never a path (Snowflake `v:col`, `c::int`, `k:v`),
+// and stopping at it keeps every `x:` anchor of a colon-dense run O(1).
+// The separator-free form (`C:file.sql`) is the weakest evidence of all, so
+// it also requires the canonical uppercase drive letter and no `:` after
+// the extension — `v:geo.city::string` is a VARIANT traversal, not a file.
+const PM_DR = "(?:[^\\s\\/\\\\'\"`:]|'(?=[\\p{L}\\p{N}_]))"
+const PM_WORD = "(?:[\\p{L}\\p{M}\\p{N}_‘’-]|'(?=[\\p{L}\\p{N}_]))"
+const PM_ANCHOR = "(^|[\\s\"'`=(,[{:;<|>)\\]}&])"
+const PM_SP = "[^\\S\\t\\n\\r\\v\\f]"
+const PM_EXT = "\\.[\\p{L}\\p{M}\\p{N}-]{0,29}[\\p{L}\\p{M}\\p{N}]"
+// span char: path content incl. delimiters (, ; ) ] } >) that a later
+// separator — or an attached dotted terminal filename (;draft.sql) —
+// proves is path content — multi-word spaced runs allowed, all
+// quantified units space- or separator-anchored with disjoint inner classes
+// (unambiguous parse => linear time; the nested-quantifier ReDoS shape is
+// banned here).
+const SEP_P = "\\/"
+const SEP_W = "[\\\\\\/]"
+// per-letter case expansion — used instead of the i flag on home/cloud
+// rules: under /iu, conformant engines case-fold \p{Lu}, which would turn
+// the capitalized-tail gate into "match any word" (V8 folds; JSC does not —
+// never rely on the divergence)
+const pmCI = (w: string) => w.split("").map((c) => ("[" + c + c.toUpperCase() + "]")).join("")
+const pmR = (sep: string) => (sep === SEP_P ? PM_R_P : PM_R)
+const PM_WR = "(?:[^\\s\\/\\\\'\"`,;:\\]}>]|'(?=[\\p{L}\\p{N}_]))"
+const PM_WR_P = "(?:[^\\s\\/'\"`,;:\\]}>]|'(?=[\\p{L}\\p{N}_]))"
+const pmWR = (sep: string) => (sep === SEP_P ? PM_WR_P : PM_WR)
+const PM_SEG_L = "(?=[^\\s'\"`]{0,128}[\\p{L}\\p{M}]|[\\s'\"`,;)\\]}>]|$)"
+// Bridge proofs (after spaced words). SEG_B: the FIRST segment past the
+// proving separator carries a letter (no slash-crossing — dates/fractions
+// are all-digit) or the path terminates cleanly. SEG_DEEP: for longer
+// bridges (3-6 words) the continuation must ALSO look like a real path —
+// reach another separator or a dotted extension — so a 4+-word directory
+// component ('/data/my big client folder/models/x.sql') masks while 3+
+// prose words bridging to a lone slashed token ('references missing
+// source raw/orders') do not.
+const PM_SEG_B = "(?=[^\\s\\/\\\\'\"`]{0,64}[\\p{L}\\p{M}]|[\\s'\"`,;)\\]}>]|$)"
+const PM_SEG_DEEP = "(?=[^\\s'\"`]{0,128}(?:[\\/\\\\]|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))"
+// Component-length bounds. Spaced runs are bounded by the filesystem's
+// 255-byte component limit — never by a word count: past a word cap the rest
+// of the component would ship in the clear, the wrong failure mode. pmComp:
+// the rest of this component reaches its proving separator within the
+// limit; PM_COMP_EXT: it ends in a dotted extension within the limit.
+const pmComp = (sep: string) => "(?=[^\\/\\\\\\n]{0,255}" + sep + ")"
+const PM_COMP_EXT = "(?=[^\\/\\\\\\n]{0,255}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))"
+// a spaced bridge + its proving separator: <=2 words with the first-segment
+// proof, or 3+ words (one component) with the deep-continuation proof as well
+const pmBridgeLight = (sep: string) =>
+  "(?:(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B + ")"
+const pmBridge = (sep: string) =>
+  "(?:(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B +
+  "|" + pmComp(sep) + "(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){3,64}" + sep + PM_SEG_B + PM_SEG_DEEP + ")"
+const PM_ANCHOR_HOME = "(^|[\\s\"'`=(,[{:;<|>)\\]}&]|(?<=[^\\s:\\/\\\\])(?=\\/(?:" + pmCI("users") + "|" + pmCI("home") + "[sS]?)\\/))"
+const pmSpan = (sep: string) =>
+  "(?:[^\\s'\"`)\\]},;>]|'(?=[\\p{L}\\p{N}_])|[,;)\\]}>](?=" + pmR(sep) + "{0,256}(?:" + sep + PM_SEG_L + "|(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))|[\"'`](?=" + pmR(sep) + "{1,256}(?:" + sep + PM_SEG_L + "|(?:" + PM_SP + "{1,2}" + pmWR(sep) + "{1,64}){1,2}" + sep + PM_SEG_B + "|" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))))"
+const pmChunks = (sep: string) => "(?:" + pmBridge(sep) + pmSpan(sep) + "*){0,2}"
+// terminal dotted filename: spaced words that END in an extension, bounded
+// by component length (PM_COMP_EXT), not by a word count
+const pmSpFile = (sep: string) => "(?:" + PM_COMP_EXT + "(?:" + PM_SP + "{1,2}" + pmR(sep) + "+){1,64}(?<=" + PM_EXT + "))?"
+// a trailing word is never the drive letter of a following path: `:` ends
+// it only when whitespace or the end follows (`copy C:\\a C:\\b`, `moved
+// C:\\x D:y.sql` keep both paths whole; `at /x/y line: 3` still terminates)
+const PM_TERM_COND = "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?=$|[.,;)\\]}!?]|:(?=$|\\s)))?"
+const PM_TERM_UNC =
+  "(?:(?<!" + PM_EXT + ")" + PM_SP + "{1,2}" + PM_WORD + "+(?:" + PM_SP + "{1,2}(?:[\\p{Lu}\\p{Lo}]" + PM_WORD + "*|(?:v[ao]n|de[nrl]?|d[aiou]|dos|la|les?|los|bin|ibn|al|el|te[nr])(?=" + PM_SP + ")))*(?!:\\S))?"
+const PM_WC = "(?:[\\p{L}\\p{N}_#@().'-]{2,}|[\\p{L}\\p{N}_#@().'+&-]{3,})"
+const PM_WCC = "[\\p{L}\\p{N}_#@().'+&-]+"
+const pmSpFileX = (sep: string) => "(?:" + PM_COMP_EXT + "(?:" + PM_SP + "{1,2}" + pmR(sep) + "{1,64}){1,64}(?<=" + PM_EXT + "))?"
+const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) + pmSpFile(sep) + term
+// an absolute HTTP request target (`GET /api/v1/x`, `route /a/b`) is not a
+// filesystem path — masking it destroys HTTP error identity. Home-rooted
+// targets are still masked by the home rules (which carry no such guard).
+const PM_NOT_ROUTE = "(?<!(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|route|endpoint)\\s)"
+// input cap and the lookahead the rules may see past it (wider than any
+// proof scan — all are bounded at the 255-byte component limit)
+const PM_CAP = 8192
+const PM_LOOKAHEAD = 2048
+// is a `q`-quoted span still open at the end of `s`? Mirrors the quote rules'
+// grammar exactly (`q(?:[^q\\]|\\.)*q`): a backslash escapes only inside a span
+function pmQuoteOpen(s: string, q: string): boolean {
+  let open = false
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (open && c === "\\") i++
+    else if (c === q) open = !open
+  }
+  return open
+}
+// Known-prefix literals — the local user's home and cwd are KNOWN values,
+// replaced by exact match AFTER the structural rules (structure must see the
+// original string: stripping the prefix first orphans terminal spaced
+// components). The literal pass mops up whatever structure missed. Exact
+// matching handles every username shape (spaces, NBSP, unicode) with zero
+// false positives; the structural rules below remain for paths the
+// literals cannot know (other drives, UNC shares, cloud URIs, relative
+// forms, WSL-mounted homes). Variants cover JSON-doubled backslashes and
+// swapped separators. Same approach as Salesforce's telemetry GDPR scrub
+// (os.homedir() literal) and gatsby-telemetry's cleanPaths (cwd prefixes).
+const pmEscape = (v: string) => v.replace(/[-[\]/{}()*+?.\\^$|]/g, "\\$&")
+const pmPrefixVariants = (root: string): RegExp[] => {
+  if (!root || root.length < 4) return []
+  const out: RegExp[] = []
+  for (const v of new Set([root, root.replace(/\\/g, "\\\\"), root.replace(/\\/g, "/")])) {
+    out.push(new RegExp("(?<![\\w.-])" + pmEscape(v), "gi"))
+  }
+  return out
+}
+const PM_HOME_PREFIXES = pmPrefixVariants(os.homedir())
+// The CLI chdirs into the project after this module loads (tui/attach/run),
+// so the cwd literals are rebuilt whenever process.cwd() changes — a stale
+// import-time cwd would miss exactly the shallow, extensionless project root
+// the structural rules cannot mask.
+let pmCwdCache = ""
+let pmCwdPrefixes: RegExp[] = []
+function pmKnownPrefixes(): RegExp[] {
+  let cwd = pmCwdCache
+  try {
+    cwd = process.cwd()
+  } catch {
+    // cwd deleted or inaccessible: masking an error must never raise a
+    // second one — keep the last known prefixes
+  }
+  if (cwd !== pmCwdCache) {
+    pmCwdCache = cwd
+    pmCwdPrefixes = pmPrefixVariants(cwd)
+  }
+  return [...pmCwdPrefixes, ...PM_HOME_PREFIXES]
+}
+const PATH_RULES = {
+  cloud: new RegExp(PM_ANCHOR + "(?:(?:" + [pmCI("gs"), pmCI("s3") + "[anAN]?", pmCI("abfs") + "[sS]?", pmCI("wasb") + "[sS]?", pmCI("adl"), pmCI("dbfs"), pmCI("hdfs")].join("|") + "):\\/\\/|" + pmCI("file") + ":\\/{1,3})" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
+  windowsHome: new RegExp(PM_ANCHOR + "(?:(?:\\\\\\\\\\?\\\\)?[A-Za-z]:" + SEP_W + "{0,2}|(?:\\\\\\\\(?:\\?\\\\" + pmCI("unc") + "\\\\)?|(?<!:)\\/\\/(?=[^\\s\\/\\\\]+" + SEP_W + "))(?:" + PM_R + "{1,256}(?:" + SEP_W + "{1,2}" + PM_SEG_L + "|" + pmBridgeLight(SEP_W) + ")){0,8}|" + SEP_W + "{1,2})(?:" + pmCI("users") + "|" + pmCI("home") + "[sS]?|" + pmCI("documents") + " " + pmCI("and") + " " + pmCI("settings") + ")" + SEP_W + "{1,2}" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+  windows: new RegExp(PM_ANCHOR + "(?:[A-Za-z]:" + SEP_W + "|(?<!:)\\/\\/(?=[^\\s\\/\\\\.]+" + SEP_W + ")|[A-Za-z]:(?=" + PM_DR + "{1,256}(?:" + PM_SP + "{1,2}" + PM_DR + "{1,256}){0,8}\\\\|(?=[^\\s\\/\\\\:]{0,256}[\\p{L}])" + PM_DR + "{1,256}(?:" + PM_SP + "{1,2}" + PM_DR + "{1,256}){0,8}\\/)|[A-Z]:(?=" + PM_DR + "{1,255}(?<=\\.[\\p{L}\\p{M}\\p{N}-]{0,29})(?<=[\\p{L}\\p{M}][\\p{L}\\p{M}\\p{N}-]{0,29})(?=$|[\\s.,;)\\]}!?]))|\\\\\\\\|\\.{1,2}\\\\(?=" + PM_R + "{1,256}(?:" + PM_SP + "{1,2}" + PM_R + "{1,256})*\\\\|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?]))|\\\\(?=(?:" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\){2}|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*\\\\[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])|" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")+\\\\[\\p{L}\\p{N}]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})|[^\\s\\\\]{1,256}" + PM_EXT + "(?=$|[\\s.,;:)\\]}!?])))" + pmSpan(SEP_W) + "+" + pmChunks(SEP_W) + pmSpFile(SEP_W) + PM_TERM_COND, "gu"),
+  posixHome: new RegExp(PM_ANCHOR_HOME + "\\/(?:" + PM_R_P + "{1,256}(?:\\/" + PM_SEG_L + "|" + pmBridgeLight(SEP_P) + "))*(?:" + pmCI("users") + "|" + pmCI("home") + "[sS]?)\\/" + pmTail(SEP_P, PM_TERM_UNC), "gu"),
+  posix: new RegExp(PM_ANCHOR + PM_NOT_ROUTE + "(?:\\.{0,2}\\/(?:" + PM_R_P + "{1,256}(?:\\/" + PM_SEG_L + "|" + pmBridgeLight(SEP_P) + "))+" + pmTail(SEP_P, PM_TERM_COND) + "|(?:\\.{1,2}\\/|\\/(?!\\/))" + pmSpan(SEP_P) + "+" + pmSpFileX(SEP_P) + "(?<=" + PM_EXT + ")(?=$|[\\s.,;:)\\]}!?]))", "gu"),
+  tilde: new RegExp(PM_ANCHOR + "~[\\p{L}\\p{M}\\p{N}_.-]*(?:\\/|\\\\(?=" + PM_WC + "(?:" + PM_SP + "{1,2}" + PM_WCC + ")*[\\\\\\/]|\\.[\\p{L}\\p{N}_-]{2,}[\\\\\\/]|[\\p{L}\\p{N}_-]\\\\(?:[\\p{L}\\p{N}_-]{2,}|\\.[\\p{L}\\p{N}_-]{2,})))" + pmTail(SEP_W, PM_TERM_UNC), "gu"),
+}
+// altimate_change end
 
 export namespace Telemetry {
   const FLUSH_INTERVAL_MS = 5_000
@@ -1411,12 +1557,101 @@ export namespace Telemetry {
   //   Bearer …   Authorization headers leaked in error text
   // Each match replaces with a fixed redaction so length-based fingerprinting
   // can't reconstruct the original token.
+
   export function maskString(s: string): string {
-    return s
+    // Consumers truncate masked output to <= 2000 chars; masking beyond 8 KB
+    // buys nothing, and unbounded input is what turns any super-linear rule
+    // into a stall. Input is cut FIRST so every rule — the linear credential/
+    // quote passes included — does bounded work, and the cut must never fail
+    // a rule open across the boundary. No floor gates any of this: a floor is
+    // a leak past the floor.
+    if (s.length <= PM_CAP) return pmMask(s)
+    // the head ends at whitespace of any kind, so no token straddles it (a
+    // head with no whitespace at all is one token: nothing is emitted)
+    const ws = s.slice(0, PM_CAP).search(/\s\S*$/)
+    const at = ws >= 0 ? ws : 0
+    // a quote the cut left half-open is closed (escape-aware, mirroring the
+    // quote rules, in their order) so the quote rule collapses the value
+    // instead of emitting it verbatim
+    let head = s.slice(0, at)
+    if (pmQuoteOpen(head, "'")) head += "'"
+    if (pmQuoteOpen(head.replace(/'(?:[^'\\]|\\.)*'/g, "?"), '"')) head += '"'
+    // Every rule proves a path by what FOLLOWS it — a spaced component whose
+    // proving separator falls past the cut would otherwise leak its words.
+    // So the head is masked twice: alone, and with the text past the cut in
+    // view. Only the prefix on which both agree is emitted: text the rules
+    // masked the same way with and without the continuation, cut back to
+    // whitespace. Whatever the continuation changes is dropped, never
+    // emitted half-proven.
+    const alone = pmMask(head)
+    const seen = pmMask(s.slice(0, at + PM_LOOKAHEAD))
+    let n = 0
+    while (n < alone.length && alone[n] === seen[n]) n++
+    if (n === alone.length) return alone
+    const back = alone.slice(0, n).search(/\s\S*$/)
+    return back >= 0 ? alone.slice(0, back).trimEnd() : ""
+  }
+
+  // the masking chain proper, on bounded input (see maskString)
+  function pmMask(s: string): string {
+    let out = s
+      // ANSI CSI sequences (colored subprocess stderr) would otherwise split
+      // tokens so neither credential nor path rules can see them
+      .replace(/\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g, "")
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
+      .replace(/'(?:[^'\\]|\\.)*'/g, "?")
+      .replace(/"(?:[^"\\]|\\.)*"/g, "?")
+    // Fast path: a string with no separator cannot contain a path — skip the
+    // whole path stack (most telemetry strings carry no path at all).
+    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Z]:[^\s:\\\/]{1,255}\.[A-Za-z]/.test(out)) {
+      out = out
+      // altimate_change start — mask filesystem paths in error text
+      // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and
+      // ..\, POSIX home, POSIX incl. ./ and ../, ~ incl. ~username), composed from shared
+      // fragments below (PATH_RULES) — one source of truth after repeated
+      // lockstep edits drifted (see PR history). Ordered after the credential
+      // rules and BEFORE the email/internal-host rules so whole URIs mask
+      // before userinfo can fragment into <email>. Public URL interiors are
+      // structurally safe: after "https:" comes "//", which cannot start a
+      // segment chain. Doctrine: over-masking is the correct failure mode.
+      // HOME-ROOTED paths and CLOUD URIs consume one unconditional trailing
+      // word (spaced usernames / object keys — the high-PII classes),
+      // suppressed after a dotted extension so "x.sql was deleted" prose
+      // survives; other rules consume a trailing word only at end-of-string /
+      // before punctuation — except spaced terminal FILENAMES, which may span
+      // interior words when the run ends in a dotted extension (up to 4 words
+      // on deep paths, 12 on explicit shallow ./-style paths). Residue (by design): one prose word may be
+      // over-masked after extensionless home/cloud paths; a non-home,
+      // non-cloud path's terminal spaced component can leak ONE structure
+      // word mid-sentence (no personal names in that class); a delimiter
+      // followed by neither a further separator nor a dotted terminal
+      // filename is a permanent boundary.
+      .replace(/(^|[\s"'`=(,[{:;<|>)\]}&])[\\/]{4,}(?=$|[\s"'`,;)\]}<>|&])/g, "$1<path>")
+      .replace(PATH_RULES.cloud, "$1<path>")
+      // the windows rules carry the widest opener alternation — they cannot
+      // match without a backslash, a boundary drive-colon, or a non-scheme //
+      // both home rules REQUIRE a home-root literal, and they are the two
+      // heaviest patterns: skip them unless one is present
+      const hasHomeRoot = /users|homes?|documents and settings/i.test(out)
+      if (out.includes("\\") || /(?<![A-Za-z0-9])[A-Za-z]:/.test(out) || /(?<!:)\/\//.test(out)) {
+        if (hasHomeRoot) out = out.replace(PATH_RULES.windowsHome, "$1<path>")
+        out = out.replace(PATH_RULES.windows, "$1<path>")
+      }
+      if (hasHomeRoot) out = out.replace(PATH_RULES.posixHome, "$1<path>")
+      out = out
+      .replace(PATH_RULES.posix, "$1<path>")
+        .replace(PATH_RULES.tilde, "$1<path>")
+      for (const re of pmKnownPrefixes()) out = out.replace(re, "<path>")
+      out = out
+        // a literal-prefix mask followed by a structurally-masked remainder
+        // collapses to one marker
+        .replace(/<path>(?:[\\/]?<path>)+/g, "<path>")
+    }
+    return out
+      // altimate_change end
       // Email addresses — providers occasionally echo caller identity in error text.
-      .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
+      .replace(/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "<email>")
       // Internal hostnames in URLs — keeps parity with `parseAPICallError`'s
       // `maskInternalHost` so an error message containing the same URL doesn't
       // leak through telemetry while metadata.url is masked. Covers:
@@ -1435,8 +1670,6 @@ export namespace Telemetry {
         /\bhttps?:\/\/(?:[^\/\s@]+@)?(?:localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|0\.0\.0\.0|\[(?:::1|fc[0-9a-f]{2}:[^\]]*|fd[0-9a-f]{2}:[^\]]*|fe80:[^\]]*)\]|[A-Za-z0-9.-]+\.(?:local|internal|localhost))(?::\d+)?[\w/.?=&%+#,;~!*'()@:-]*/gi,
         "<internal-host>",
       )
-      .replace(/'(?:[^'\\]|\\.)*'/g, "?")
-      .replace(/"(?:[^"\\]|\\.)*"/g, "?")
       .replace(/\s+/g, " ")
       .trim()
   }
