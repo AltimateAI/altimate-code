@@ -795,22 +795,25 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
         ProviderV2.ID,
         Provider.Info
       >
-    // A failed config lookup cannot prove that this project permits the request-logging managed
-    // provider. Keep every other connected provider usable, but fail closed for Altimate Base.
-    const configSafeProviders = configLoaded ? providers : withoutManagedBase()
     const hasProviderAllowlist = Object.keys(config?.provider ?? {}).length > 0
     // `config.provider` is a per-provider CUSTOMIZATION map (apiKey, options, headers) — the docs
     // demonstrate it as a single-entry block. It gates ONLY the consent-gated managed provider,
     // which config must never be able to switch on. Every other connected provider stays
     // advertised, so `provider: { anthropic: {...} }` does not hide the user's other authenticated
     // models from the ACP catalogue or invalidate a restored session pinned to one of them.
+    // A failed config lookup cannot prove that this project permits the request-logging managed
+    // provider either, so it fails closed the same way an explicit allowlist without it does.
     const snapshotProviders = configLoaded && !hasProviderAllowlist ? providers : withoutManagedBase()
     // altimate_change end
     const defaultModelStarted = performance.now()
-    // altimate_change start — omit the managed provider from ACP defaults when config lookup fails
+    // altimate_change start — resolve the default against the SAME filtered snapshot advertised to
+    // the client. Resolving against the unfiltered `providers` map let a project that sets
+    // `model: "altimate-free/altimate-base"` alongside any `provider` allowlist end up with a
+    // `defaultModel` pointing at a provider this snapshot had just excluded — ACP would still
+    // select and route the managed model even though it was hidden from `modelOptions`.
     const defaultModel = defaultModelFromConfig(
       config?.model,
-      configSafeProviders,
+      snapshotProviders,
       config?.provider as Record<string, unknown> | undefined,
     )
     // altimate_change end

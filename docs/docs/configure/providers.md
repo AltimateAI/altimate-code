@@ -77,10 +77,11 @@ returned to the TUI. The installation secret is hashed before registration; the 
 the hash, not the local secret.
 
 That hash is stable across launches, so it links this installation's logged requests together —
-it is what enforces the free allowance. `/providers logout` clears the credential but keeps the
-installation identity on purpose, so logging out is not a way to reset the allowance. Each
-inference request additionally carries a session identifier used for rate limiting. See the
-security FAQ for what this means for privacy and how to reset the local identity.
+it is what enforces the free allowance. Running `altimate providers logout altimate-base` clears
+the credential but keeps the installation identity on purpose, so logging out is not a way to
+reset the allowance. Each inference request additionally carries a session identifier used for
+rate limiting. See the security FAQ for what this means for privacy and how to reset the local
+identity.
 
 ## Anthropic
 

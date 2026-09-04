@@ -22,9 +22,10 @@ separate from anonymous product telemetry.
 **What identifies you to Altimate Base.** Registration sends a SHA-256 hash of a locally generated
 installation secret — the secret itself never leaves your machine. That hash is stable, so logged
 requests from this installation are linked to one another. This is deliberate: it is how the free
-allowance is enforced. `/providers logout` disconnects the provider but **keeps** the installation
-identity, by design, so that logging out and back in cannot mint a fresh allowance. Each inference
-request also carries a session identifier used for rate limiting and abuse control.
+allowance is enforced. Running `altimate providers logout altimate-base` disconnects the provider
+but **keeps** the installation identity, by design, so that logging out and back in cannot mint a
+fresh allowance. Each inference request also carries a session identifier used for rate limiting
+and abuse control.
 
 Altimate Base is therefore pseudonymous, not anonymous. To reset the local identity completely,
 delete `altimate-base.json` from the application data directory — `$XDG_DATA_HOME/altimate-code/`,

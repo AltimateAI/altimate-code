@@ -77,6 +77,18 @@ export function shouldMigrateLegacyDefault(
   if (explicit || !allowsManagedBaseDefault(providerConfig)) return false
   return isExistingBigPickleSelection(current, recent, false)
 }
+
+// A picker-driven selection (`/model`, the provider dialog, onboarding) persists through the same
+// `model`/`recent` fields the retired implicit default used, so `shouldMigrateLegacyDefault` alone
+// cannot tell "the user never chose anything" from "the user deliberately picked Big Pickle again
+// after registering Altimate Base." `explicitDefault` is a separate marker set only by an
+// interactive picker (see `local.tsx`'s `set`); the current selection counts as explicit only when
+// it still matches that marker exactly — if the user has since picked something else, or restored
+// an older session, the marker no longer applies and migration is free to run again.
+export function isConfirmedExplicitSelection(current: unknown, explicitDefault: unknown): boolean {
+  if (!isModelRef(current) || !isModelRef(explicitDefault)) return false
+  return current.providerID === explicitDefault.providerID && current.modelID === explicitDefault.modelID
+}
 // altimate_change end
 
 export function recentModels(
@@ -206,12 +218,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           modelID: string
         }[]
         variant: Record<string, string | undefined>
+        // altimate_change start — the model a user last picked through an interactive picker
+        // (`/model`, the provider dialog, onboarding). Distinguishes a DELIBERATE re-selection of
+        // Big Pickle from the retired implicit default: both persist through `model`/`recent`, but
+        // only this marks "the user chose this on purpose," so legacy-default migration never
+        // silently overwrites it. See `hasExplicitModel` / `shouldMigrateLegacyDefault` below.
+        explicitDefault: ModelRef | undefined
+        // altimate_change end
       }>({
         ready: false,
         model: {},
         recent: [],
         favorite: [],
         variant: {},
+        // altimate_change start — see the `explicitDefault` field declaration above
+        explicitDefault: undefined,
+        // altimate_change end
       })
 
       const filePath = path.join(paths.state, "model.json")
@@ -229,6 +251,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           recent: modelStore.recent,
           favorite: modelStore.favorite,
           variant: modelStore.variant,
+          // altimate_change start — persist the last explicitly-picked model across launches
+          explicitDefault: modelStore.explicitDefault,
+          // altimate_change end
         })
       }
 
@@ -242,6 +267,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
           if (typeof value.variant === "object" && value.variant !== null)
             setModelStore("variant", value.variant as Record<string, string | undefined>)
+          // altimate_change start — restore the last explicitly-picked model
+          if (isModelRef(value.explicitDefault)) setModelStore("explicitDefault", value.explicitDefault)
+          // altimate_change end
         })
         .catch(() => {})
         .finally(() => {
@@ -252,11 +280,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const args = useArgs()
 
       // altimate_change start — distinguish explicit model choices from the retired implicit default
-      // A command-line, project, or agent model is an explicit choice. Legacy migration applies
-      // only to the implicit/persisted default and must never rewrite those settings.
+      // A command-line, project, or agent model is an explicit choice. So is a model the user
+      // picked through an interactive picker (`/model`, the provider dialog, onboarding) that is
+      // STILL the current selection — persisted separately as `explicitDefault` because a picker
+      // choice lands in the same `model`/`recent` fields the old implicit default used, and legacy
+      // migration cannot tell those apart without this. Legacy migration applies only to the
+      // implicit/persisted default and must never rewrite any of these.
       function hasExplicitModel() {
         if (args.model || sync.data.config.model) return true
-        return Boolean(agent.current()?.model)
+        if (agent.current()?.model) return true
+        return isConfirmedExplicitSelection(currentModel(), modelStore.explicitDefault)
       }
 
       function hasExplicitLegacyModel() {
@@ -318,7 +351,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       })
 
       // altimate_change start — share validated selection with legacy-default and session migration
-      function selectModel(model: ModelRef, options?: { recent?: boolean }) {
+      function selectModel(model: ModelRef, options?: { recent?: boolean; explicit?: boolean }) {
         let selected = false
         batch(() => {
           if (!isModelValid(model)) {
@@ -332,10 +365,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           const a = agent.current()
           if (!a) return
           setModelStore("model", a.name, model)
-          if (options?.recent) {
-            setModelStore("recent", recentModels(model, modelStore.recent))
-            save()
-          }
+          if (options?.recent) setModelStore("recent", recentModels(model, modelStore.recent))
+          // A picker-driven selection, as opposed to session restore or programmatic migration —
+          // see `hasExplicitModel` above for why this needs its own persisted marker.
+          if (options?.explicit) setModelStore("explicitDefault", { providerID: model.providerID, modelID: model.modelID })
+          if (options?.recent || options?.explicit) save()
           selected = true
         })
         return selected
@@ -428,9 +462,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           setModelStore("recent", recentModels(next, modelStore.recent))
           save()
         },
-        // altimate_change start — share the validated selection path with default migration
+        // altimate_change start — share the validated selection path with default migration.
+        // Every caller of `set` (the `/model` dialog, the provider dialog, onboarding, and the
+        // `--model` CLI flag) is a deliberate, interactive choice, so it always marks
+        // `explicitDefault` — see `hasExplicitModel` for why that matters for legacy migration.
         set(model: { providerID: string; modelID: string }, options?: { recent?: boolean }) {
-          selectModel(model, options)
+          selectModel(model, { ...options, explicit: true })
         },
         // altimate_change end
         // altimate_change start — migrate Big Pickle defaults after managed-model consent

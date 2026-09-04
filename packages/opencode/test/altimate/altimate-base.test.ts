@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -22,6 +22,7 @@ process.env.OPENCODE_TEST_HOME = temporaryHome
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
 const { FreeTierConsent } = await import("../../src/altimate/free/consent")
+const { FreeTierCapability } = await import("../../src/altimate/free/capability")
 const { Flock } = await import("@opencode-ai/core/util/flock")
 
 const GATEWAY_URL = "https://gateway.test"
@@ -72,13 +73,18 @@ afterAll(() => {
   fs.rmSync(temporaryHome, { recursive: true, force: true })
 })
 
-// A test double for the TUI host: arms a fresh one-shot capability and hands registration the
-// proof it now requires. Registration cannot run without one, which is the property under test.
-function consented() {
-  const capability = new FreeTierConsent.ConsentCapabilityStore()
-  const token = "a".repeat(64)
-  capability.arm(token)
-  return { capability, token }
+// This test file plays the role of the TUI host: it claims `issueArmer()` — the process's ONE
+// arming capability, exactly as `cli/tui/worker.ts` does at boot — and uses it to arm a fresh
+// one-shot token before every registration attempt below. Every `FreeTier.registerAfterConsent`
+// call in this file therefore goes through the SAME path production does; nothing here
+// constructs a private, independent store that `registerAfterConsent` would actually trust (see
+// "unforgeable consent" below for a direct test of that property).
+const armProductionConsent = FreeTierCapability.issueArmer()
+
+function consented(): string {
+  const token = randomBytes(32).toString("hex")
+  armProductionConsent(token)
+  return token
 }
 
 describe("gateway configuration", () => {
@@ -138,27 +144,51 @@ describe("registration", () => {
       gatewayCalls++
       return json(REGISTERED)
     })
-    const capability = new FreeTierConsent.ConsentCapabilityStore()
-    const forged = "f".repeat(64)
+    const forged = randomBytes(32).toString("hex")
 
-    // A caller holding a store but no armed token cannot register, and nothing reaches the
-    // network or the credential file. This is the property the whole consent design rests on.
-    await expect(FreeTier.registerAfterConsent({ capability, token: forged })).rejects.toBeInstanceOf(
-      FreeTier.RegistrationError,
-    )
+    // A token that was never armed through the legitimate path cannot register, and nothing
+    // reaches the network or the credential file. This is the property the whole consent design
+    // rests on.
+    await expect(FreeTier.registerAfterConsent(forged)).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect(gatewayCalls).toBe(0)
     expect(await FreeTierStore.read()).toBeUndefined()
 
-    capability.arm(forged)
-    const result = await FreeTier.registerAfterConsent({ capability, token: forged })
+    const token = consented()
+    const result = await FreeTier.registerAfterConsent(token)
     expect(result.apiKey).toBe(REGISTERED.api_key)
     expect(gatewayCalls).toBe(1)
 
     // One-shot: the same token cannot register a second time.
-    await expect(FreeTier.registerAfterConsent({ capability, token: forged })).rejects.toBeInstanceOf(
-      FreeTier.RegistrationError,
-    )
+    await expect(FreeTier.registerAfterConsent(token)).rejects.toBeInstanceOf(FreeTier.RegistrationError)
     expect(gatewayCalls).toBe(1)
+  })
+
+  test("unforgeable consent: no in-process caller can mint an independent authority", async () => {
+    // `consented()`'s module-scope setup above already claimed the process's ONE armer, exactly
+    // as the TUI worker does at boot; `client.ts` claims the matching ONE redeemer at import
+    // time. This test plays the attacker: it tries to obtain either capability a second time,
+    // and separately proves that a self-constructed, self-armed store is inert against the real
+    // registration function. Both are the properties `registerAfterConsent`'s unforgeability
+    // rests on.
+    expect(() => FreeTierCapability.issueArmer()).toThrow()
+    expect(() => FreeTierCapability.issueRedeemer()).toThrow()
+
+    // Constructing your own store and arming it — exactly the exploit a caller-supplied capability
+    // used to allow — produces a token that only ever validates against ITSELF. The store happily
+    // reports it as consumed, but `registerAfterConsent` no longer accepts a capability argument at
+    // all, only a bare token checked against the private, one-shot-issued authority above, so this
+    // "successfully consumed" forged token still cannot register.
+    let gatewayCalls = 0
+    mockFetch(() => {
+      gatewayCalls++
+      return json(REGISTERED)
+    })
+    const forgedStore = new FreeTierCapability.ConsentCapabilityStore()
+    const forgedToken = randomBytes(32).toString("hex")
+    forgedStore.arm(forgedToken)
+    expect(forgedStore.consume(forgedToken)).toBe(true)
+    await expect(FreeTier.registerAfterConsent(forgedToken)).rejects.toBeInstanceOf(FreeTier.RegistrationError)
+    expect(gatewayCalls).toBe(0)
   })
 
   test("rejects a registration response that redirects credentials to another origin", async () => {
@@ -520,6 +550,25 @@ describe("inference boundary", () => {
     expect((await FreeTierStore.read())?.rejected).toBeUndefined()
   })
 
+  test("a non-401, non-2xx response between 401s also resets the consecutive count", async () => {
+    // A 429/503 (or any other non-401 status) is not an auth rejection either — the gateway would
+    // return 401 specifically for a rejected key. Gating the reset on `response.ok` alone let a
+    // 401 that happened to straddle an unrelated rate-limit or outage response still reach the
+    // persistence threshold and disown a credential the gateway never actually rejected.
+    await seed({ apiKey: "sk-401-mixed-reset" })
+    let status = 401
+    mockFetch(() => new Response("", { status }))
+    const call = () =>
+      FreeTier.authorizedFetch(`${REGISTERED.base_url}/v1/chat/completions`, { method: "POST", body: "{}" })
+
+    await call()
+    status = 429
+    await call()
+    status = 401
+    await call()
+    expect((await FreeTierStore.read())?.rejected).toBeUndefined()
+  })
+
   test("a 401 never triggers background registration", async () => {
     await seed()
     const urls: string[] = []
@@ -598,11 +647,14 @@ describe("consent boundary", () => {
     const first = "a".repeat(64)
     const second = "b".repeat(64)
     let registrations = 0
-    // Mirrors production: the registration operation itself consumes the one-shot proof, so this
-    // asserts the real gating path rather than a stub that trusts its caller.
+    // Exercises the gate's arm/register plumbing in isolation, via its own independent store —
+    // deliberately NOT the production authority `consented()` above uses, since this test is
+    // about the gate's wiring, not about the real unforgeability property (covered separately).
+    const store = new FreeTierCapability.ConsentCapabilityStore()
     const gate = FreeTierConsent.createRegistrationConsentGate({
-      register: async ({ capability, token }) => {
-        if (!capability.consume(token)) throw new FreeTier.RegistrationError("consent expired", "cancelled")
+      arm: (token) => store.arm(token),
+      register: async (token) => {
+        if (!store.consume(token)) throw new FreeTier.RegistrationError("consent expired", "cancelled")
         registrations++
       },
     })
@@ -618,7 +670,7 @@ describe("consent boundary", () => {
 
   test("pending capabilities are bounded and expire", () => {
     let now = 1_000
-    const capabilities = new FreeTierConsent.ConsentCapabilityStore({ maxPending: 2, ttlMs: 50, now: () => now })
+    const capabilities = new FreeTierCapability.ConsentCapabilityStore({ maxPending: 2, ttlMs: 50, now: () => now })
     const first = "a".repeat(64)
     const second = "b".repeat(64)
     const third = "c".repeat(64)
@@ -634,6 +686,7 @@ describe("consent boundary", () => {
   test("only transport failures are surfaced as network failures", async () => {
     const token = "d".repeat(64)
     const network = FreeTierConsent.createRegistrationConsentGate({
+      arm: () => {},
       register: async () => {
         throw new FreeTier.RegistrationError("offline", "network")
       },
@@ -642,6 +695,7 @@ describe("consent boundary", () => {
     expect(await network.register({ token })).toMatchObject({ ok: false, result: "network" })
 
     const invalidResponse = FreeTierConsent.createRegistrationConsentGate({
+      arm: () => {},
       register: async () => {
         throw new FreeTier.RegistrationError("invalid", "response")
       },

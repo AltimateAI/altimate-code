@@ -454,6 +454,39 @@ describe("ACP service sessions", () => {
     expect(models.some((option) => option.value.includes("test-model"))).toBe(true)
   })
 
+  it("does not select or route to a configured Altimate Base model excluded by a provider allowlist", async () => {
+    // The bug this guards: `model: "altimate-free/altimate-base"` set alongside a provider
+    // allowlist that omits "altimate-free" got resolved against the UNFILTERED provider map even
+    // though the SAME allowlist correctly hid Altimate Base from the advertised catalogue (see the
+    // two tests above) — so ACP still selected and routed to it despite it being excluded.
+    const baseProvider = {
+      ...provider,
+      id: ProviderID.make("altimate-free"),
+      name: "Altimate",
+      models: {
+        [ModelID.make("altimate-base")]: {
+          ...provider.models[modelID],
+          id: ModelID.make("altimate-base"),
+          providerID: ProviderID.make("altimate-free"),
+          name: "Altimate Base",
+        },
+      },
+    } satisfies Provider.Info
+    const { service } = makeService([], {
+      providers: [provider, baseProvider],
+      providerConfig: { test: {} },
+      configModel: "altimate-free/altimate-base",
+    })
+
+    const result = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+    const models = flattenSelectOptions(select(result, "model"))
+
+    expect(models.some((option) => option.value.includes("altimate-base"))).toBe(false)
+    expect(select(result, "model")?.currentValue).not.toContain("altimate-base")
+    // Falls through to the allowed provider's own catalogue instead of failing closed entirely.
+    expect(select(result, "model")?.currentValue).toBe("test/test-model")
+  })
+
   it("fails closed for Altimate Base when the project config lookup fails", async () => {
     const baseProvider = {
       ...provider,

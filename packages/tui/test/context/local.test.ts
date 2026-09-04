@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import {
   allowsManagedBaseDefault,
   ALTIMATE_BASE_MODEL,
+  isConfirmedExplicitSelection,
   isExistingBigPickleSelection,
   LEGACY_BIG_PICKLE_MODEL,
   migrateLegacyRecentModels,
@@ -50,6 +51,28 @@ test("honors project provider allowlists during Big Pickle default migration", (
     shouldMigrateLegacyDefault(LEGACY_BIG_PICKLE_MODEL, [LEGACY_BIG_PICKLE_MODEL], false, { openai: {} }),
   ).toBe(false)
   expect(shouldMigrateLegacyDefault(LEGACY_BIG_PICKLE_MODEL, [LEGACY_BIG_PICKLE_MODEL], true, {})).toBe(false)
+})
+
+test("preserves a deliberate re-selection of Big Pickle made through a picker after registration", () => {
+  // A user who already registered Altimate Base can still open `/model` and pick Big Pickle on
+  // purpose. That choice lands in the exact same `model`/`recent` fields the retired implicit
+  // default used, so `isConfirmedExplicitSelection` is the only thing that can tell them apart —
+  // it must be true here, and `shouldMigrateLegacyDefault` must then refuse to overwrite it.
+  const explicit = isConfirmedExplicitSelection(LEGACY_BIG_PICKLE_MODEL, LEGACY_BIG_PICKLE_MODEL)
+  expect(explicit).toBe(true)
+  expect(shouldMigrateLegacyDefault(LEGACY_BIG_PICKLE_MODEL, [LEGACY_BIG_PICKLE_MODEL], explicit, {})).toBe(false)
+})
+
+test("does not confirm an explicit selection once the current model has moved on", () => {
+  // The marker only vouches for the CURRENT selection. Once the user picks something else (or an
+  // older session restores a different model), a stale marker must not immunize whatever is
+  // current now — including a genuinely implicit Big Pickle default.
+  expect(isConfirmedExplicitSelection(LEGACY_BIG_PICKLE_MODEL, ALTIMATE_BASE_MODEL)).toBe(false)
+  expect(isConfirmedExplicitSelection(LEGACY_BIG_PICKLE_MODEL, undefined)).toBe(false)
+  expect(isConfirmedExplicitSelection(undefined, LEGACY_BIG_PICKLE_MODEL)).toBe(false)
+
+  const notExplicit = isConfirmedExplicitSelection(LEGACY_BIG_PICKLE_MODEL, ALTIMATE_BASE_MODEL)
+  expect(shouldMigrateLegacyDefault(LEGACY_BIG_PICKLE_MODEL, [LEGACY_BIG_PICKLE_MODEL], notExplicit, {})).toBe(true)
 })
 
 test("replaces Big Pickle recents while preserving every unrelated model and order", () => {

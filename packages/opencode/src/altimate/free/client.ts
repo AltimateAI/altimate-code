@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
 import { Flock } from "@opencode-ai/core/util/flock"
-import { ConsentCapabilityStore } from "./capability"
+import { FreeTierCapability } from "./capability"
 import { Installation } from "../../installation"
 import { Log } from "../util/log"
 import { FreeTierStore } from "./store"
@@ -27,6 +27,10 @@ const REJECTED_CREDENTIAL_LIMIT = 32
 // the whole free tier offline until every user re-ran the disclosure flow.
 const REJECTED_PERSIST_THRESHOLD = 2
 const unauthorizedCounts = new Map<string, number>()
+// Claimed once, at module load: this module is the ONE place that may redeem an Altimate Base
+// consent token. `issueRedeemer` throws on a second call, so no other in-process code can obtain
+// an equivalent redeemer bound to the same production authority — see capability.ts.
+const redeemConsent = FreeTierCapability.issueRedeemer()
 
 export interface Credentials {
   apiKey: string
@@ -333,19 +337,23 @@ async function registerOnce(
 }
 
 /**
- * Register only after consuming a one-shot consent capability.
+ * Register only after redeeming a one-shot consent token.
  *
- * The capability is a REQUIRED argument and is consumed here, before any network or storage
- * effect, so "registration requires an accepted disclosure" is enforced by this function rather
- * than by the discipline of its callers. A future CLI, HTTP route, or plugin cannot register by
- * importing this: it would have to obtain a capability that only the TUI host arms.
- * Provider discovery and inference never call it.
+ * The token is checked here, before any network or storage effect, against the private consent
+ * authority this module claimed at load time (`redeemConsent`, see capability.ts) — so
+ * "registration requires an accepted disclosure" is enforced by this function itself rather than
+ * by the discipline of its callers. A caller cannot forge a token by constructing their own
+ * `ConsentCapabilityStore`: that class's `arm`/`consume` only ever validate against the instance
+ * you built, and the ONE instance this function actually checks is never exported — the only way
+ * to arm it is `FreeTierCapability.issueArmer()`, claimed once by the TUI worker's consent gate at
+ * boot. A future CLI, HTTP route, or plugin cannot register by importing this: it would have to
+ * obtain a token minted by that gate. Provider discovery and inference never call it.
  */
 export async function registerAfterConsent(
-  consent: { capability: ConsentCapabilityStore; token: string },
+  token: string,
   input: { signal?: AbortSignal } = {},
 ): Promise<Credentials> {
-  if (!consent.capability.consume(consent.token)) {
+  if (!redeemConsent(token)) {
     throw new RegistrationError("Altimate Base consent expired. Reopen setup and try again.", "cancelled")
   }
   const configuredGateway = gatewayUrl()
@@ -446,9 +454,12 @@ export async function authorizedFetch(input: RequestInfo | URL, init?: RequestIn
   // inference path lock-free after its initial credential read.
   //
   // It does, however, prove the credential is not dead right now, so the consecutive-401 counter
-  // resets. Only an unbroken run of 401s disowns a credential on disk.
+  // resets. Only an unbroken run of 401s disowns a credential on disk. Any non-401 response — a
+  // 2xx, or a 429/413/503 the gateway would not return for a rejected key — is equally proof of
+  // life; gating the reset on `response.ok` let a 401 that happened to straddle an unrelated
+  // rate-limit or outage response still reach the persistence threshold.
   if (response.status !== 401) {
-    if (response.ok) clearUnauthorizedCount(active)
+    clearUnauthorizedCount(active)
     return response
   }
   await markCredentialRejected(active)

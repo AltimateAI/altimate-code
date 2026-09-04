@@ -1,8 +1,5 @@
-import { ConsentCapabilityStore } from "./capability"
 import { FreeTier } from "./client"
 import { FreeTierStore } from "./store"
-
-export { ConsentCapabilityStore }
 
 export type RegistrationResult =
   | { ok: true }
@@ -13,19 +10,19 @@ export type RegistrationResult =
     }
 
 export function createRegistrationConsentGate(input: {
-  /** Receives the capability and token so registration itself consumes the one-shot proof. */
-  register: (consent: { capability: ConsentCapabilityStore; token: string }) => Promise<unknown>
-  capabilities?: ConsentCapabilityStore
+  /** Arms the one-shot proof `register` will later be asked to redeem. */
+  arm: (token: string) => void
+  /** Receives the bare token; must itself verify + consume proof of accepted disclosure. */
+  register: (token: string) => Promise<unknown>
   onUnexpectedError?: (error: unknown) => void
 }) {
-  const capabilities = input.capabilities ?? new ConsentCapabilityStore()
   return {
     setToken(value: { token: string }): void {
-      capabilities.arm(value.token)
+      input.arm(value.token)
     },
     async register(value: { token: string }): Promise<RegistrationResult> {
       try {
-        await input.register({ capability: capabilities, token: value.token })
+        await input.register(value.token)
         return { ok: true }
       } catch (error) {
         if (error instanceof FreeTier.RegistrationError && error.kind === "cancelled") {

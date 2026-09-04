@@ -650,13 +650,16 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   let armScanGate = false
   createEffect(() => {
     if (firstRunPickerHandled) return
-    // Decide only once BOTH the plugin host has started AND sync has finished
-    // loading providers. `ready()` alone is plugin-host startup, which can settle
-    // before sync populates `sync.data.provider` — deciding then would transiently
-    // see a returning (connected) user as un-onboarded and re-show the picker +
-    // scan gate (the AI-7774 regression). `sync.status` is the provider-load signal
-    // (same one used for continue/fork above).
-    if (!ready() || sync.status !== "complete") return
+    // Decide only once the plugin host has started, sync has finished loading providers, AND the
+    // persisted model selection has loaded. `ready()` alone is plugin-host startup, which can
+    // settle before sync populates `sync.data.provider` — deciding then would transiently see a
+    // returning (connected) user as un-onboarded and re-show the picker + scan gate (see the
+    // regression this effect guards against, above). `sync.status` is the provider-load signal
+    // (same one used for continue/fork above). `local.model.ready` guards the same race the
+    // migration effect above already does: `model.json`'s read is async, and if provider sync
+    // finishes first, `hasExistingLegacySelection` below would see an empty recent list and
+    // misclassify a returning Big Pickle user as fresh.
+    if (!ready() || sync.status !== "complete" || !local.model.ready) return
     // A Big Pickle selection proves this is an existing user, even though that zero-cost
     // provider does not satisfy useConnected(). The migration effect above owns any consent
     // prompt; never overwrite it with the first-run picker.
