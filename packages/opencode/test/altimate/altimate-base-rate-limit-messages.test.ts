@@ -130,11 +130,16 @@ describe("describeRateLimit — via the fake gateway (every ChatMode failure kno
     // budget_sync.py mirrors the lifetime allowance into LiteLLM's max_budget with no
     // budget_duration). The per-user wallet is a one-time lifetime grant that never renews —
     // unlike the separate global $50/day ceiling (litellm/config.yaml `budget_duration: 1d`),
-    // which genuinely does reset daily and is covered by the budget-global case below.
+    // which genuinely does reset daily and is covered by the budget-global case below. The
+    // message nudges toward the paid Altimate LLM Gateway (app.myaltimate.com) since switching
+    // models is the only other option when a lifetime grant is gone for good.
     expect(described).toEqual({
-      message: "You've used your free Altimate Base allowance. It's a one-time grant and won't renew—switch models to keep going.",
+      message:
+        "You've used your free Altimate Base allowance — it's a one-time grant and won't renew. Sign up at app.myaltimate.com to keep going, or switch models.",
       retryable: false,
     })
+    expect(described?.message).toContain("app.myaltimate.com")
+    expect(described?.message).not.toContain("resets tomorrow")
   })
 
   test("budget-global: shared $50/day ceiling maps to the shared-daily-limit message, non-retryable", async () => {

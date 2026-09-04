@@ -48,15 +48,31 @@ For pricing, security, and data handling details, see the [Altimate LLM Gateway 
 
 ## Altimate Base
 
-Altimate Base is the hosted Qwen 3.8 free model. It requires no signup or user-managed API key and
-is subject to rate limits and abuse protection. Requests and responses are logged and may be used
-to improve Altimate products and services. Do not send secrets or confidential code.
+Altimate Base is a free, hosted model. It's anonymous — no signup, no account, no user-managed API
+key. Accept a one-time consent disclosure and it just works. It supports up to 131K tokens of
+context and up to 65K tokens of output. Requests and responses are logged and may be used to
+improve Altimate products and services. Do not send secrets or confidential code.
 
 Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
 registration request; **No** is selected by default. After registration, the model is available as
 `altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
 explicit model is selected. Big Pickle is no longer selected implicitly, but remains available in
 the full OpenCode model catalog for users who choose it explicitly.
+
+### Usage limits
+
+Altimate Base is fair-use, not unlimited:
+
+- **Your personal allowance** is a one-time grant tied to this installation. It does not renew.
+  Once it's used up, sign up at [app.myaltimate.com](https://app.myaltimate.com) for a paid plan
+  (the Altimate LLM Gateway) to keep going, or switch to another model.
+- **Shared daily capacity** is a pool covering every free-tier user. It resets daily. If it's
+  exhausted, try again tomorrow or switch models in the meantime.
+- **Rate limiting** protects the service from bursts. If you hit it, wait a moment and retry.
+- **Request size limits** apply per request. If a request is rejected as too large, shorten it —
+  start a new session or trim the context — and try again.
+
+Each of these is reported back to you as a specific, actionable error message when it happens.
 
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:
