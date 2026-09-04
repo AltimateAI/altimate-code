@@ -90,7 +90,7 @@ const jsonGuardBlock = [
   "            // Only the page <title> rides on `cause` (\"502 Bad Gateway\", \"Access Denied\", \"Sign in\" — the",
   "            // diagnostic part of a proxy/gateway/CDN page): util/error.ts serializes `cause` into logs,",
   "            // and a page body can echo the request URL (query included) or be a malformed real response.",
-  "            // A title that echoes the request target (any `/ ? = %`) is dropped too.",
+  "            // A title carrying URL syntax (any `/ ? = %`) is dropped so the request target cannot echo through; other title text is kept as the only available diagnostic.",
   "            const title = text.trimStart().startsWith(\"<\") ? /<title>([^<]{1,200})<\\/title>/i.exec(text)?.[1] : undefined",
   "            const body = title && !/[\\/?=%]/.test(title) ? title : undefined",
   "            throw new Error(",

@@ -68,6 +68,29 @@ describe("sdk json guard — live failure shapes", () => {
             status: 200,
             headers: { "content-type": "application/json" },
           })
+        if (p.endsWith("/leaky-title"))
+          // a title with NO URL-syntax characters passes the filter by design:
+          // the guard's guarantee is "the request target cannot echo through",
+          // not "no page text ever reaches logs" (see the guard comment)
+          return new Response(`<!DOCTYPE html><html><head><title>Cannot GET SENTINEL_TITLE_WORD</title></head><body>404</body></html>`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        if (p.endsWith("/empty-title"))
+          return new Response(`<!DOCTYPE html><html><head><title></title></head><body>404</body></html>`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        if (p.endsWith("/unclosed-title"))
+          return new Response(`<!DOCTYPE html><html><head><title>Oops`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
+        if (p.endsWith("/multiline-title"))
+          return new Response(`<!DOCTYPE html><html><head><title>Bad\nGateway</title></head><body>502</body></html>`, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })
         if (p.endsWith("/echo-title-encoded"))
           return new Response(`<!DOCTYPE html><html><head><title>Not found: ${encodeURIComponent(new URL(req.url).pathname + new URL(req.url).search)}</title></head><body>404</body></html>`, {
             status: 200,
@@ -137,6 +160,38 @@ describe("sdk json guard — live failure shapes", () => {
         expect(JSON.stringify(errorData(err))).not.toContain("secret-project")
         expect(JSON.stringify(errorData(err))).not.toContain("directory")
       }
+    })
+
+    it(`${name}: a title WITHOUT URL syntax passes the filter — the guarantee is target-echo prevention, nothing stricter`, async () => {
+      const client = make({ baseUrl: base })
+      const err = await client
+        .get({ url: "/leaky-title" })
+        .then(() => null)
+        .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+      expect(err).not.toBeNull()
+      expect(err!.cause?.body).toBe("Cannot GET SENTINEL_TITLE_WORD")
+    })
+
+    it(`${name}: empty and unclosed <title> tags contribute nothing`, async () => {
+      const client = make({ baseUrl: base })
+      for (const url of ["/empty-title", "/unclosed-title"]) {
+        const err = await client
+          .get({ url })
+          .then(() => null)
+          .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+        expect(err).not.toBeNull()
+        expect(err!.cause?.body).toBeUndefined()
+      }
+    })
+
+    it(`${name}: a multi-line title passes through with its newlines (pinned current behavior)`, async () => {
+      const client = make({ baseUrl: base })
+      const err = await client
+        .get({ url: "/multiline-title" })
+        .then(() => null)
+        .catch((e: unknown) => e as Error & { cause?: { body?: string } })
+      expect(err).not.toBeNull()
+      expect(err!.cause?.body).toBe("Bad\nGateway")
     })
 
     it(`${name}: a malformed REAL JSON body never reaches serialized error data`, async () => {

@@ -146,15 +146,21 @@ jobs:
           drift_rc=0; git diff --exit-code -- src/v2/gen/client/client.gen.ts || drift_rc=$?
           # build.ts ends with `bun tsc`, which fails on a clean main until the
           # types.gen.ts round-trip is fixed (issue #1148). That ONE failure is
-          # whitelisted by its signature in the log, and only when the file was
-          # regenerated AND round-trips (the two assertions above); any other
-          # non-zero build — codegen, a patch, prettier — fails the step.
-          # Remove the whitelist (exit on build_rc) with #1148.
+          # whitelisted by its EXACT diagnostic set — not merely "tsc failed",
+          # which would silently whitelist new type regressions in the
+          # regenerated SDK (script/check-known-tsc-failure.sh, unit-tested) —
+          # and only when the file was regenerated AND round-trips (the two
+          # assertions above); any other non-zero build — codegen, a patch,
+          # prettier — fails the step. Remove the whitelist with #1148.
           if [ "$build_rc" -ne 0 ]; then
-            if grep -q '"tsc" exited with code' build.log; then
-              echo "::warning::build.ts exited $build_rc at tsc on the regenerated tree (#1148); codegen+patch asserted above"
-            else
+            wl_rc=0; bash script/check-known-tsc-failure.sh build.log || wl_rc=$?
+            if [ "$wl_rc" -eq 0 ]; then
+              echo "::warning::build.ts exited $build_rc at tsc with exactly the known #1148 diagnostic (TS2305 FileSystemEntry); codegen+patch asserted above"
+            elif [ "$wl_rc" -eq 2 ]; then
               echo "::error::build.ts exited $build_rc before tsc — not the whitelisted #1148 failure"
+              exit "$build_rc"
+            else
+              echo "::error::tsc failed with diagnostics beyond the whitelisted #1148 set (see output above)"
               exit "$build_rc"
             fi
           fi
