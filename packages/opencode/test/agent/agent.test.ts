@@ -812,6 +812,55 @@ it.instance(
 )
 
 it.instance(
+  // Regression for the data-qa agent removal: #1217 let `default_agent:
+  // "data-qa"` alone (no `agent.data-qa` config entry) opt into the native
+  // data-qa profile. An upgrading user's persisted config can still set
+  // this. Unlike a generic typo'd/never-valid default_agent (which still
+  // throws — see the test above), this specific removed name must degrade
+  // to a working session instead of stranding the user: it resolves to
+  // `analyst`, the documented replacement for read-only data questions.
+  "defaultAgent migrates a persisted default_agent: \"data-qa\" (no matching agent entry) to analyst instead of throwing",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.defaultAgent())
+      expect(agent).toBe("analyst")
+      const info = yield* load((svc) => svc.defaultInfo())
+      expect(info?.name).toBe("analyst")
+      expect(info?.native).toBe(true)
+    }),
+  {
+    config: {
+      default_agent: "data-qa",
+    },
+  },
+)
+
+it.instance(
+  // A user who ALSO defines their own `agent.data-qa` config entry gets
+  // that legitimate custom agent as their default — the migration above
+  // only kicks in when no agent actually resolves for the name.
+  "defaultAgent respects an explicit agent.data-qa config entry over the analyst migration",
+  () =>
+    Effect.gen(function* () {
+      const agent = yield* load((svc) => svc.defaultAgent())
+      expect(agent).toBe("data-qa")
+      const info = yield* load((svc) => svc.defaultInfo())
+      expect(info?.native).toBe(false)
+      expect(info?.description).toBe("my own data-qa agent")
+    }),
+  {
+    config: {
+      default_agent: "data-qa",
+      agent: {
+        "data-qa": {
+          description: "my own data-qa agent",
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "defaultAgent returns plan when build is disabled and default_agent not set",
   () =>
     Effect.gen(function* () {
