@@ -39,6 +39,30 @@ async function readGitHubPullRequestMetadata(): Promise<{ prTitle?: string; prBo
   }
 }
 
+/** True when the GitHub event is a pull request from a fork: the job then runs with a
+ *  read-only token and cannot post, so a 401/403 on --post is expected rather than a
+ *  misconfiguration. Anything else (same-repo PR, missing event) is NOT tolerated. */
+async function isForkPullRequestEvent(): Promise<boolean> {
+  const eventPath = process.env.GITHUB_EVENT_PATH
+  if (!eventPath) return false
+  try {
+    const event = JSON.parse(await fs.readFile(eventPath, "utf8")) as {
+      pull_request?: {
+        head?: { repo?: { fork?: unknown; full_name?: unknown } }
+        base?: { repo?: { full_name?: unknown } }
+      }
+    }
+    const head = event.pull_request?.head?.repo
+    const base = event.pull_request?.base?.repo
+    if (head?.fork === true) return true
+    return (
+      typeof head?.full_name === "string" && typeof base?.full_name === "string" && head.full_name !== base.full_name
+    )
+  } catch {
+    return false
+  }
+}
+
 /**
  * `altimate review` — run the dbt PR review locally or in CI.
  *
@@ -193,12 +217,13 @@ export const ReviewCommand = cmd({
             } catch (err) {
               // A throw here means the summary comment itself failed; nothing was published.
               const status = requestStatus(err)
-              if (status === 401 || status === 403) {
+              // Only a fork PR (read-only token) may swallow an auth failure; on a same-repo PR
+              // a 401/403 means a bad token or missing `pull-requests: write` and must fail.
+              if ((status === 401 || status === 403) && (await isForkPullRequestEvent())) {
                 emitPostOnce("forbidden", postDuration())
-                UI.println(`could not post the review: ${status}; printing summary instead`)
-                // Non-JSON output already printed the rendered summary above. Preserve JSON as
-                // the primary output, but also provide the human summary on this fallback path.
-                if (args.json) process.stdout.write(renderSummary(env) + "\n")
+                UI.println(`could not post the review: ${status} (fork pull request, read-only token); printing summary instead`)
+                // Keep stdout machine-readable under --json: the human summary goes to stderr.
+                if (args.json) UI.println(renderSummary(env))
               } else {
                 emitPostOnce("summary_failed", postDuration())
                 throw err

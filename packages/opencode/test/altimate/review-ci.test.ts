@@ -135,6 +135,15 @@ describe("review CLI command", () => {
     process.env.GITHUB_REPOSITORY = "owner/repo"
     process.env.ALTIMATE_PR_NUMBER = "7"
     process.exitCode = undefined
+    // A fork pull request: the token is read-only, so a 403 on post is expected.
+    const eventPath = path.join(tmp.path, "event.json")
+    await Bun.write(
+      eventPath,
+      JSON.stringify({
+        pull_request: { head: { repo: { fork: true, full_name: "someone/repo" } }, base: { repo: { full_name: "owner/repo" } } },
+      }),
+    )
+    process.env.GITHUB_EVENT_PATH = eventPath
 
     const env = buildEnvelope({ findings: [], tier: "trivial", mode: "comment" })
     spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(env)
@@ -163,10 +172,35 @@ describe("review CLI command", () => {
       explainTier: false,
     })
 
-    expect(stderr.join("")).toContain("could not post the review: 403; printing summary instead")
-    expect(stdout.join("")).toContain(REVIEW_MARKER)
+    expect(stderr.join("")).toContain("could not post the review: 403 (fork pull request, read-only token); printing summary instead")
+    // Under --json stdout stays machine-readable: the human summary goes to stderr.
+    expect(stderr.join("")).toContain(REVIEW_MARKER)
+    expect(stdout.join("")).not.toContain(REVIEW_MARKER)
+    expect(() => JSON.parse(stdout.join("").trim())).not.toThrow()
     expect(events.filter((event) => event.type === "review_post_outcome")).toMatchObject([{ outcome: "forbidden" }])
     expect(process.exitCode ?? 0).toBe(0)
+  })
+
+  test("a 403 on a same-repository pull request is a misconfiguration and still fails", async () => {
+    await using tmp = await tmpdir({ git: true })
+    for (const k of ENV_KEYS) delete process.env[k]
+    delete process.env.GITHUB_EVENT_PATH
+    process.env.GITHUB_TOKEN = "token"
+    process.env.GITHUB_REPOSITORY = "owner/repo"
+    process.env.ALTIMATE_PR_NUMBER = "7"
+    process.exitCode = undefined
+
+    spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }))
+    spyOn(PostGitHub, "postGitHubReview").mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }))
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+    spyOn(process.stderr, "write").mockImplementation(() => true)
+    const events: Telemetry.Event[] = []
+    spyOn(Telemetry, "track").mockImplementation((event) => events.push(event))
+
+    await expect(
+      (ReviewCommand.handler as any)({ cwd: tmp.path, mode: "comment", post: true, json: false, noAi: true, explainTier: false }),
+    ).rejects.toThrow("Forbidden")
+    expect(events.filter((event) => event.type === "review_post_outcome")).toMatchObject([{ outcome: "summary_failed" }])
   })
 
   test("retains the gate verdict exit code when forbidden posting falls back to stdout", async () => {
@@ -187,6 +221,12 @@ describe("review CLI command", () => {
     })
     const env = buildEnvelope({ findings: [blocking], tier: "full", mode: "gate" })
     expect(env.verdict).toBe("REQUEST_CHANGES")
+    const eventPath = path.join(tmp.path, "event.json")
+    await Bun.write(
+      eventPath,
+      JSON.stringify({ pull_request: { head: { repo: { fork: true, full_name: "someone/repo" } }, base: { repo: { full_name: "owner/repo" } } } }),
+    )
+    process.env.GITHUB_EVENT_PATH = eventPath
     spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(env)
     spyOn(PostGitHub, "postGitHubReview").mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }))
     spyOn(process.stdout, "write").mockImplementation(() => true)
@@ -205,7 +245,7 @@ describe("review CLI command", () => {
   })
 })
 
-describe("defaultBaseRef", () => {
+describe("reviewPullRequest head handling", () => {
   test("treats an empty review head as omitted", async () => {
     await using tmp = await tmpdir({ git: true })
     delete process.env.GITHUB_EVENT_PATH
