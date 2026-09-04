@@ -57,7 +57,10 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
+    // altimate_change start — explicit output budget for callers such as the dbt PR review's
+    // AI lane, whose reasoning models spend most of the default budget thinking before answering
     maxOutputTokens?: number
+    // altimate_change end
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
