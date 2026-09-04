@@ -1,6 +1,5 @@
 // altimate_change - LLM reviewer lane (transport only; prompt + parse live in core)
 import { Provider } from "@/provider/provider"
-import { ModelID, ProviderID } from "@/provider/schema"
 import { LLM } from "@/session/llm"
 import { Agent } from "@/agent/agent"
 import { MessageV2 } from "@/session/message-v2"
@@ -33,6 +32,8 @@ export interface AiReviewInput {
   model?: string
   /** Allow the interactive tool to fall back to the current session model. */
   allowSessionModel: boolean
+  /** Active provider/model supplied by the interactive tool context. */
+  sessionModel?: string
   prTitle?: string
   prBody?: string
   /** Override the review deadline (primarily for tests). */
@@ -142,17 +143,28 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     const setup = (async () => {
       let model: Awaited<ReturnType<typeof Provider.getModel>>
       if (input.model) {
-        const slash = input.model.indexOf("/")
-        if (slash <= 0 || slash === input.model.length - 1 || /\s/.test(input.model)) {
+        const parsed = Provider.parseModel(input.model)
+        if (!parsed.providerID.length || !parsed.modelID.length || /\s/.test(input.model)) {
           return { modelError: "Error: expected provider/model" }
         }
-        const providerID = ProviderID.make(input.model.slice(0, slash))
-        const modelID = ModelID.make(input.model.slice(slash + 1))
         effectiveModel = input.model
         try {
-          model = await Provider.getModel(providerID, modelID)
+          model = await Provider.getModel(parsed.providerID, parsed.modelID)
         } catch (err) {
           return { modelError: errorReason(err) }
+        }
+      } else if (input.sessionModel) {
+        const parsed = Provider.parseModel(input.sessionModel)
+        if (!parsed.providerID.length || !parsed.modelID.length || /\s/.test(input.sessionModel)) {
+          const defaultModel = await Provider.defaultModel()
+          model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+        } else {
+          effectiveModel = input.sessionModel
+          try {
+            model = await Provider.getModel(parsed.providerID, parsed.modelID)
+          } catch (err) {
+            return { modelError: errorReason(err) }
+          }
         }
       } else {
         const defaultModel = await Provider.defaultModel()
@@ -173,7 +185,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       return withModel({
         findings: [],
         status: "error",
-        reason: `configured AI model not available: ${input.model} — ${setupResult.modelError}`,
+        reason: `configured AI model not available: ${input.model ?? input.sessionModel} — ${setupResult.modelError}`,
       })
     }
     const { system, model } = setupResult

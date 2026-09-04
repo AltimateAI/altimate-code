@@ -204,6 +204,8 @@ export interface OrchestrateInput {
   aiModel?: string
   /** Whether this caller may fall back to its current session model. */
   allowSessionModel?: boolean
+  /** Active provider/model supplied by the interactive tool context. */
+  sessionModel?: string
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -1179,6 +1181,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     dialect,
     rubric: input.rubric,
     aiEnabled: input.config.ai,
+    aiModel: input.aiModel ?? (input.allowSessionModel ? "session" : undefined),
     dataDiff: input.config.dataDiff,
   })
 
@@ -1440,6 +1443,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           grounding: merged,
           model: input.aiModel,
           allowSessionModel: input.allowSessionModel ?? false,
+          sessionModel: input.sessionModel,
           prTitle: input.prTitle,
           prBody: input.prBody,
         })

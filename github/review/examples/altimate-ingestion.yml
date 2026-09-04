@@ -89,9 +89,11 @@ jobs:
           )
 
       - name: altimate dbt PR review
-        # Pin to the altimate-code release that ships `altimate review`
-        # (the first release cut after the dbt-pr-review feature merges).
-        uses: AltimateAI/altimate-code/github/review@v0.8.5
+        # Pin to a release. The `altimate_gateway_*` and `ai_model` inputs below
+        # need the first release cut after PR #1241 merges (newer than v0.10.0);
+        # on older releases an unknown input is a warning and the lane runs
+        # without it. Keep an exact pin and bump it with Dependabot/Renovate.
+        uses: AltimateAI/altimate-code/github/review@v0.10.0
         with:
           mode: comment # start non-blocking; switch to `gate` once trusted
           manifest_path: target/manifest.json

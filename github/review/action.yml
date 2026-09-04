@@ -207,7 +207,8 @@ runs:
             echo "::error::altimate_gateway_url must be an HTTPS URL."
             exit 1
           fi
-          GATEWAY_BASE_URL="${IN_GATEWAY_URL%/}/v1"
+          GATEWAY_BASE_URL="${IN_GATEWAY_URL%/}"
+          GATEWAY_BASE_URL="${GATEWAY_BASE_URL%/v1}/v1"
           CONTENT=$(jq -nc \
             --arg base_url "$GATEWAY_BASE_URL" \
             '{provider: {"altimate-gateway": {npm: "@ai-sdk/openai-compatible", name: "Altimate Gateway", options: {baseURL:$base_url, apiKey:$ENV.IN_GATEWAY_KEY}, models: {"altimate-base": {name:"altimate-base"}, "altimate-pro": {name:"altimate-pro"}}}}}')

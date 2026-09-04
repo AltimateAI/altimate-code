@@ -46,6 +46,8 @@ export interface ReviewPullRequestOptions {
   aiModel?: string
   /** Allow falling back to the current session model (default: false). */
   allowSessionModel?: boolean
+  /** Active provider/model supplied by an interactive tool invocation. */
+  sessionModel?: string
   /** PR metadata for the AI reviewer's intent check. */
   prTitle?: string
   prBody?: string
@@ -239,10 +241,10 @@ export async function detectArtifactHints(
     resolvedBaseProjectName === undefined
       ? Promise.resolve(0)
       : Promise.all(baseModels.map((file) => getCompiled(file.oldPath ?? file.path, "old"))).then(
-          (contents) => contents.filter((content) => content === undefined).length,
+          (contents) => contents.filter((content) => content === undefined || !content.trim()).length,
         ),
     Promise.all(headModels.map((file) => getCompiled(file.path, "new"))).then(
-      (contents) => contents.filter((content) => content === undefined).length,
+      (contents) => contents.filter((content) => content === undefined || !content.trim()).length,
     ),
   ])
   if (missingBase > 0) {
@@ -500,6 +502,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
         : runAiReview,
     aiModel,
     allowSessionModel,
+    sessionModel: opts.sessionModel,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,

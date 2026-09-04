@@ -1037,6 +1037,7 @@ describe("config", () => {
     expect(parseReviewConfig("aiModel: altimate-gateway/altimate-base\n").aiModel).toBe(
       "altimate-gateway/altimate-base",
     )
+    expect(parseReviewConfig("aiModel: openrouter/openai/gpt-5\n").aiModel).toBe("openrouter/openai/gpt-5")
     expect(() => parseReviewConfig("aiModel: altimate-base\n")).toThrow("provider/model")
     expect(() => parseReviewConfig("aiModel: 'altimate-gateway/model with spaces'\n")).toThrow("provider/model")
   })
@@ -1845,12 +1846,14 @@ describe("orchestrate", () => {
       prTitle: "Add revenue mart",
       aiModel: "altimate-gateway/altimate-base",
       allowSessionModel: false,
+      sessionModel: "openrouter/openai/gpt-5",
       // Fake AI reviewer: returns a contextual comment + a (disallowed) critical
       // that must be downgraded — the AI must never block.
       aiReview: async (input) => {
         groundingSeen = input.grounding.length
         expect(input.model).toBe("altimate-gateway/altimate-base")
         expect(input.allowSessionModel).toBe(false)
+        expect(input.sessionModel).toBe("openrouter/openai/gpt-5")
         return {
           status: "ok",
           model: "altimate-gateway/altimate-base",

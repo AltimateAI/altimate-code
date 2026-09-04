@@ -149,6 +149,33 @@ describe("detectArtifactHints", () => {
     ).toEqual(["target/compiled missing for 1 changed model(s) (run `dbt compile` for the head)"])
   })
 
+  test("treats zero-byte and whitespace-only compiled model files as missing", async () => {
+    await using tmp = await tmpdir()
+    const project = "analytics"
+    const target = path.join(tmp.path, "target")
+    const manifest = path.join(target, "manifest.json")
+    const headModel = path.join(target, "compiled", project, "models", "a.sql")
+    const baseModel = path.join(tmp.path, "target-base", "compiled", project, "models", "a.sql")
+    await fs.mkdir(path.dirname(headModel), { recursive: true })
+    await fs.mkdir(path.dirname(baseModel), { recursive: true })
+    await fs.writeFile(manifest, "{}")
+    await fs.writeFile(path.join(target, "catalog.json"), USABLE_CATALOG)
+    await fs.writeFile(headModel, "")
+    await fs.writeFile(baseModel, " \n\t")
+
+    expect(
+      await detectArtifactHints(
+        manifest,
+        tmp.path,
+        [{ path: "models/a.sql", status: "modified" }],
+        project,
+      ),
+    ).toEqual([
+      "target-base/compiled missing for 1 changed model(s) (compile the base ref)",
+      "target/compiled missing for 1 changed model(s) (run `dbt compile` for the head)",
+    ])
+  })
+
   test("uses compiled SQL beside a custom manifest and prefers its sibling base directory", async () => {
     await using tmp = await tmpdir()
     const project = "analytics"

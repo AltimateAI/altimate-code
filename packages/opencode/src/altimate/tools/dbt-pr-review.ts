@@ -1,11 +1,26 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Instance } from "../../project/instance"
+import { MessageV2 } from "../../session/message-v2"
 import { reviewPullRequest } from "../review/run"
 // altimate_change — review feature telemetry
 import { emitReviewRun } from "../review/telemetry"
 import { renderSummary, verdictHeadline } from "../review/format"
 import { ReviewMode } from "../review/verdict"
+
+export async function sessionModelFromContext(
+  ctx: Pick<Tool.Context, "sessionID" | "messageID">,
+): Promise<string | undefined> {
+  let message: ReturnType<typeof MessageV2.get>
+  try {
+    message = MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID })
+  } catch {
+    return undefined
+  }
+  if (message?.info.role !== "assistant") return undefined
+  if (!message.info.providerID || !message.info.modelID) return undefined
+  return `${message.info.providerID}/${message.info.modelID}`
+}
 
 /**
  * dbt_pr_review — run the full deterministic dbt PR review and return a signed
@@ -43,6 +58,7 @@ export const DbtPrReviewTool = Tool.define("dbt_pr_review", {
     const startedAt = Date.now()
     let env
     try {
+      const sessionModel = await sessionModelFromContext(ctx)
       env = await reviewPullRequest({
         cwd,
         base: args.base,
@@ -51,6 +67,7 @@ export const DbtPrReviewTool = Tool.define("dbt_pr_review", {
         mode: args.mode,
         modelVersion: ctx.agent,
         allowSessionModel: true,
+        sessionModel,
       })
     } catch (err) {
       emitReviewRun({

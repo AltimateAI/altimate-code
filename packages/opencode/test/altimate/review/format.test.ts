@@ -220,6 +220,7 @@ describe("review summary readability", () => {
       dialect: "snowflake",
       rubric,
       aiEnabled: true,
+      aiModel: "altimate-gateway/altimate-base",
       dataDiff: { enabled: false, warehouse: "" },
     }
     const policySignature = makeReviewPolicySignature(policy)
@@ -282,6 +283,10 @@ describe("review summary readability", () => {
       }),
     )
     expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, aiEnabled: false }))
+    expect(policySignature).not.toBe(
+      makeReviewPolicySignature({ ...policy, aiModel: "altimate-gateway/altimate-pro" }),
+    )
+    expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, aiModel: "session" }))
     expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, dialect: "bigquery" }))
     expect(policySignature).not.toBe(
       makeReviewPolicySignature({

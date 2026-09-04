@@ -15,6 +15,7 @@ import { buildEnvelope } from "../../src/altimate/review/verdict"
 import { makeFinding } from "../../src/altimate/review/finding"
 import { REVIEW_MARKER } from "../../src/altimate/review/format"
 import { tmpdir } from "../fixture/fixture"
+import YAML from "yaml"
 
 const ENV_KEYS = [
   "GITHUB_TOKEN",
@@ -170,6 +171,33 @@ describe("review CLI command", () => {
       explainTier: false,
     })
     expect(review.mock.calls[0][0]).toMatchObject({ aiModel: "environment/model", allowSessionModel: false })
+
+    review.mockClear()
+    delete process.env.ALTIMATE_REVIEW_AI_MODEL
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: false,
+      aiModel: " \t ",
+      explainTier: false,
+    })
+    expect(review.mock.calls[0][0]).toMatchObject({ aiModel: undefined, allowSessionModel: false })
+
+    review.mockClear()
+    process.env.ALTIMATE_REVIEW_AI_MODEL = " \n "
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: false,
+      explainTier: false,
+    })
+    expect(review.mock.calls[0][0]).toMatchObject({ aiModel: undefined, allowSessionModel: false })
   })
 
   test("prints the summary and exits successfully when GitHub rejects posting with 403", async () => {
@@ -354,6 +382,54 @@ describe("reviewPullRequest head handling", () => {
 })
 
 describe("advisory model configuration", () => {
+  test("normalizes gateway URLs before appending the OpenAI-compatible /v1 path", async () => {
+    await using tmp = await tmpdir()
+    const actionText = await Bun.file(path.resolve(import.meta.dir, "../../../../github/review/action.yml")).text()
+    const action = YAML.parse(actionText) as { runs: { steps: Array<{ name?: string; run?: string }> } }
+    const script = action.runs.steps.find(
+      (step) => step.name === "Configure advisory reviewer model + credentials",
+    )?.run
+    expect(script).toBeString()
+
+    for (const [index, gatewayUrl] of [
+      "https://gateway.example.com",
+      "https://gateway.example.com/",
+      "https://gateway.example.com/v1",
+      "https://gateway.example.com/v1/",
+    ].entries()) {
+      const githubEnv = path.join(tmp.path, `github-env-${index}`)
+      const proc = Bun.spawn(["bash", "-c", script!], {
+        env: {
+          ...process.env,
+          HOME: tmp.path,
+          GITHUB_ENV: githubEnv,
+          IN_ALT_KEY: "",
+          IN_ALT_INSTANCE: "",
+          IN_ALT_URL: "",
+          IN_GATEWAY_KEY: "gateway-key",
+          IN_GATEWAY_URL: gatewayUrl,
+          IN_MODEL: "",
+          IN_MODEL_API_KEY: "",
+          IN_AI_MODEL: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+      expect({ stdout, stderr, exitCode }).toMatchObject({ exitCode: 0 })
+      const configLine = (await Bun.file(githubEnv).text())
+        .split("\n")
+        .find((line) => line.startsWith("OPENCODE_CONFIG_CONTENT="))
+      expect(configLine).toBeString()
+      const config = JSON.parse(configLine!.slice("OPENCODE_CONFIG_CONTENT=".length))
+      expect(config.provider["altimate-gateway"].options.baseURL).toBe("https://gateway.example.com/v1")
+    }
+  })
+
   test("resolves an altimate-gateway provider from OPENCODE_CONFIG_CONTENT without network access", async () => {
     await using tmp = await tmpdir()
     process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({

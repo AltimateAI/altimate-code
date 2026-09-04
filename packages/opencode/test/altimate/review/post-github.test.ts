@@ -19,9 +19,13 @@ function finding(id: string) {
 function fakeOctokit(
   comments: Array<{ id: number; body: string; user: { login: string; type: string } }>,
   getAuthenticated: () => Promise<{ data: { login: string } }>,
+  getAuthenticatedApp: () => Promise<{ data: { slug: string } }> = async () => {
+    throw new Error("not an app token")
+  },
 ) {
   const calls = {
     authenticated: 0,
+    appAuthenticated: 0,
     updated: [] as Array<{ comment_id: number; body: string }>,
     created: [] as Array<{ body: string }>,
   }
@@ -32,6 +36,12 @@ function fakeOctokit(
         getAuthenticated: async () => {
           calls.authenticated++
           return getAuthenticated()
+        },
+      },
+      apps: {
+        getAuthenticated: async () => {
+          calls.appAuthenticated++
+          return getAuthenticatedApp()
         },
       },
       issues: {
@@ -75,6 +85,7 @@ describe("GitHub sticky review ownership", () => {
     )
 
     expect(calls.authenticated).toBe(1)
+    expect(calls.appAuthenticated).toBe(0)
     expect(calls.updated).toHaveLength(1)
     expect(calls.updated[0].comment_id).toBe(20)
     expect(calls.updated[0].body).toContain("**Since last review:** 1 no longer surfaced · 1 new · 0 unchanged")
@@ -95,7 +106,42 @@ describe("GitHub sticky review ownership", () => {
     await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
 
     expect(calls.authenticated).toBe(1)
+    expect(calls.appAuthenticated).toBe(1)
     expect(calls.updated.map((call) => call.comment_id)).toEqual([20])
     expect(calls.created).toHaveLength(0)
+  })
+
+  test("uses only the authenticated GitHub App slug's bot comment", async () => {
+    const { calls, octo } = fakeOctokit(
+      [
+        { id: 10, body: REVIEW_MARKER, user: { login: "different-app[bot]", type: "Bot" } },
+        { id: 20, body: REVIEW_MARKER, user: { login: "altimate-review[bot]", type: "Bot" } },
+      ],
+      async () => {
+        throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 })
+      },
+      async () => ({ data: { slug: "altimate-review" } }),
+    )
+
+    await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
+
+    expect(calls.appAuthenticated).toBe(1)
+    expect(calls.updated.map((call) => call.comment_id)).toEqual([20])
+    expect(calls.created).toHaveLength(0)
+  })
+
+  test("never adopts a marker comment owned by a different bot", async () => {
+    const { calls, octo } = fakeOctokit(
+      [{ id: 10, body: REVIEW_MARKER, user: { login: "different-app[bot]", type: "Bot" } }],
+      async () => {
+        throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 })
+      },
+    )
+
+    await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
+
+    expect(calls.appAuthenticated).toBe(1)
+    expect(calls.updated).toHaveLength(0)
+    expect(calls.created).toHaveLength(1)
   })
 })

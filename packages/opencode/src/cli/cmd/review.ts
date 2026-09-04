@@ -15,6 +15,11 @@ import type { Severity } from "../../altimate/review/finding"
 
 const MAX_GITHUB_PR_BODY_CHARS = 4_000
 
+function nonBlank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed || undefined
+}
+
 function requestStatus(err: unknown): number | undefined {
   const value = err as { status?: unknown; response?: { status?: unknown } } | undefined
   const status = value?.status ?? value?.response?.status
@@ -149,7 +154,8 @@ export const ReviewCommand = cmd({
           // With `boolean-negation: false` above, `--no-ai` binds to `noAi` and
           // the historical `--ai=false` programmatic path stays supported.
           noAi: args.noAi === true || args.ai === false,
-          aiModel: (args.aiModel as string | undefined) ?? process.env.ALTIMATE_REVIEW_AI_MODEL,
+          aiModel:
+            nonBlank(args.aiModel as string | undefined) ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_MODEL),
           allowSessionModel: false,
           explainTier: args.explainTier === true,
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,

@@ -139,8 +139,15 @@ export async function postGitHubReview(
   try {
     authenticatedLogin = (await octo.rest.users.getAuthenticated()).data.login
   } catch {
-    // GitHub App installation tokens cannot resolve a user. In Actions, prefer
-    // the well-known bot login, then accept another Bot identity.
+    // GitHub App installation tokens cannot resolve a user; derive the exact
+    // bot login from the authenticated app instead.
+    try {
+      const slug = (await octo.rest.apps.getAuthenticated()).data?.slug
+      if (typeof slug === "string" && slug) authenticatedLogin = `${slug}[bot]`
+    } catch {
+      // A plain Actions token may resolve neither endpoint. Its exact fallback
+      // identity is safe to recognize; arbitrary Bot users are not.
+    }
   }
   const existing = await octo.paginate(octo.rest.issues.listComments, {
     owner,
@@ -151,8 +158,7 @@ export async function postGitHubReview(
   const hasMarker = (comment: (typeof existing)[number]) => comment.body?.includes(REVIEW_MARKER)
   const prior = authenticatedLogin
     ? existing.find((comment) => hasMarker(comment) && comment.user?.login === authenticatedLogin)
-    : (existing.find((comment) => hasMarker(comment) && comment.user?.login === "github-actions[bot]") ??
-      existing.find((comment) => hasMarker(comment) && comment.user?.type === "Bot"))
+    : existing.find((comment) => hasMarker(comment) && comment.user?.login === "github-actions[bot]")
   const summary = renderSummary(env, computeFindingDelta(prior?.body, env))
   if (prior) {
     const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })

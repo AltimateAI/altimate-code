@@ -98,6 +98,8 @@ export interface ReviewPolicySignatureInput {
   dialect: string
   rubric: Rubric
   aiEnabled: boolean
+  /** Explicit advisory model, or `session` when the active session is used. */
+  aiModel?: string
   dataDiff: {
     enabled: boolean
     warehouse: string
@@ -139,6 +141,7 @@ export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): st
         thresholds: input.rubric.thresholds,
       },
       aiEnabled: input.aiEnabled,
+      aiModel: input.aiModel,
       dataDiff: input.dataDiff,
     }),
   )

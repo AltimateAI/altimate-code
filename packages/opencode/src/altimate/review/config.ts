@@ -31,6 +31,8 @@ export const ReviewConfig = z.object({
    * altimate-gateway/altimate-base; when unset the headless CLI skips the lane
    * and the in-session tool uses the session's model.
    */
+  // Model ids may themselves contain `/` (for example OpenRouter ids); the
+  // provider parser deliberately splits only on the first slash.
   aiModel: z.string().regex(/^[^\s/]+\/\S+$/, "provider/model").optional(),
   /**
    * Data-diff: actually run base-vs-head against the warehouse (core DataParity)

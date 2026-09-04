@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { Provider } from "@/provider/provider"
 import { LLM } from "@/session/llm"
+import { MessageV2 } from "@/session/message-v2"
 import { Dispatcher } from "@/altimate/native"
 import { runAiReview, type AiReviewFile } from "@/altimate/review/ai-review"
 import { NO_MODEL_REASON } from "@/altimate/review/verdict"
+import { sessionModelFromContext } from "@/altimate/tools/dbt-pr-review"
 
 afterEach(() => mock.restore())
 
@@ -65,7 +67,7 @@ describe("runAiReview model selection", () => {
     const result = await runAiReview({
       files: [reviewFile(0)],
       grounding: [],
-      model: "unknown-provider/unknown-model",
+      model: "openrouter/openai/gpt-5",
       allowSessionModel: false,
     })
 
@@ -73,13 +75,54 @@ describe("runAiReview model selection", () => {
       findings: [],
       status: "error",
       reason:
-        "configured AI model not available: unknown-provider/unknown-model — Error: provider is not configured",
-      model: "unknown-provider/unknown-model",
+        "configured AI model not available: openrouter/openai/gpt-5 — Error: provider is not configured",
+      model: "openrouter/openai/gpt-5",
     })
-    expect(getModel).toHaveBeenCalledWith("unknown-provider", "unknown-model")
+    expect(getModel).toHaveBeenCalledWith("openrouter", "openai/gpt-5")
     expect(defaultModel).not.toHaveBeenCalled()
     expect(dispatcher).not.toHaveBeenCalled()
     expect(stream).not.toHaveBeenCalled()
+  })
+
+  test("uses the active session model without consulting the provider default", async () => {
+    const defaultModel = spyOn(Provider as any, "defaultModel")
+    const getModel = spyOn(Provider as any, "getModel").mockResolvedValue({
+      providerID: "openrouter",
+      id: "openai/gpt-5",
+      modelID: "openai/gpt-5",
+    })
+    spyOn(Dispatcher as any, "call").mockResolvedValue({ data: {} })
+
+    const result = await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      allowSessionModel: true,
+      sessionModel: "openrouter/openai/gpt-5",
+    })
+
+    expect(result).toEqual({
+      findings: [],
+      status: "skipped",
+      reason: "reviewer prompt unavailable",
+      model: "openrouter/openai/gpt-5",
+    })
+    expect(getModel).toHaveBeenCalledWith("openrouter", "openai/gpt-5")
+    expect(defaultModel).not.toHaveBeenCalled()
+  })
+
+  test("reads the active assistant model from the invoking tool context", async () => {
+    const getMessage = spyOn(MessageV2 as any, "get").mockReturnValue({
+      info: {
+        role: "assistant",
+        providerID: "openrouter",
+        modelID: "openai/gpt-5",
+      },
+    })
+
+    const model = await sessionModelFromContext({ sessionID: "session-id", messageID: "message-id" } as any)
+
+    expect(model).toBe("openrouter/openai/gpt-5")
+    expect(getMessage).toHaveBeenCalledWith({ sessionID: "session-id", messageID: "message-id" })
   })
 })
 
