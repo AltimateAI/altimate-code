@@ -1523,7 +1523,14 @@ export namespace Provider {
         headers: {},
         options: {},
         cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-        limit: { context: 65_536, output: 4_096 },
+        // This is the offline/fallback value only — the gateway is the source of truth for what it
+        // actually serves and advertises. Keep it equal to the gateway's advertised
+        // {context: 131072, output: 65536} so the two never disagree; Qwen3.8-27B natively supports
+        // 262144, so 131072 needs no YaRN scaling on the gateway side. Output is a clean half of the
+        // context window (not the max the model could theoretically emit) because this is a
+        // reasoning+coding model — reasoning tokens count toward output — and 65536 still guarantees
+        // >=65536 input room while staying a real free-tier cost guardrail under the 262k ceiling.
+        limit: { context: 131_072, output: 65_536 },
         capabilities: {
           temperature: true,
           reasoning: true,

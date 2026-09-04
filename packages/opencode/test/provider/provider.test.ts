@@ -90,7 +90,7 @@ test("Altimate Base is pinned to the hosted Qwen contract without affecting othe
           url: "",
           npm: "@ai-sdk/openai-compatible",
         })
-        expect(model.limit).toEqual({ context: 65_536, output: 4_096 })
+        expect(model.limit).toEqual({ context: 131_072, output: 65_536 })
         expect(model.capabilities.attachment).toBe(false)
         expect(model.capabilities.toolcall).toBe(true)
         expect(model.capabilities.input).toEqual({
