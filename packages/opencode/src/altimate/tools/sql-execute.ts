@@ -80,6 +80,14 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       const responseError = normalizeError((result as SqlExecuteResult & { error?: unknown }).error)
       if (responseError !== undefined) {
         const msg = responseError.trim() || "SQL execution failed."
+        // altimate_change: deliberately NOT fingerprinted. `sql.execute` returns this
+        // same result shape both for a warehouse query that ran and failed AND for a
+        // pre-execution failure — no warehouse configured, connector setup failed
+        // (see connections/register.ts). This branch alone cannot tell those apart, so
+        // fingerprinting it would mislabel some never-executed queries as "executed
+        // SQL". De-scoped to fingerprint-on-success-only (below) rather than build a
+        // failed-execution-vs-never-executed taxonomy in this cleanup PR; tracked as
+        // altimate-code#1242.
         // altimate_change — annotate this failure too, same as the catch block below:
         // a fail-open notice that only rides on success under-counts fail-open in
         // precisely the cases most likely to fail.
@@ -91,8 +99,11 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       }
       // altimate_change end
 
-      let output = formatResult(result)
-      // altimate_change start — emit SQL structure fingerprint telemetry
+      // altimate_change start — emit SQL structure fingerprint telemetry on the
+      // success path, BEFORE formatting the result. A query that reached this point
+      // genuinely executed against a warehouse; emitting the fingerprint here (rather
+      // than after formatResult()) means a formatting failure below still leaves this
+      // execution counted, instead of silently dropping it from the telemetry.
       try {
         const fp = computeSqlFingerprint(args.query)
         if (fp) {
@@ -114,6 +125,8 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         // Fingerprinting must never break query execution
       }
       // altimate_change end
+
+      let output = formatResult(result)
       // altimate_change start — progressive disclosure suggestions
       const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
       if (suggestion) {
@@ -134,6 +147,9 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
+      // altimate_change: deliberately NOT fingerprinted, same reasoning as the
+      // result-error branch above — this catch only fires when `Dispatcher.call`
+      // itself throws, which never happened after a warehouse actually ran the query.
       // altimate_change — annotate the failure too. A fail-open notice that only rides
       // on success is worse than none: the reason vanishes exactly when the call went
       // wrong, and the `precedence` marker under-counts fail-open in precisely the
