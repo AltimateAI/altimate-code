@@ -86,6 +86,15 @@ export type AiReviewStatus = z.infer<typeof AiReviewStatus>
 export const NO_MODEL_REASON =
   "no AI model configured (set aiModel in .altimate/review.yml, --ai-model, or the action's model inputs)"
 
+/**
+ * Reasoning levels the advisory lane may request per run. Single source of
+ * truth for config, CLI and the envelope; config.ts re-exports it because it
+ * already depends on this module.
+ */
+export const AI_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const
+export const AiReasoningEffort = z.enum(AI_REASONING_EFFORTS)
+export type AiReasoningEffort = z.infer<typeof AiReasoningEffort>
+
 export const AiReviewSummary = z.object({
   status: AiReviewStatus,
   reason: z.string().optional(),
@@ -93,7 +102,7 @@ export const AiReviewSummary = z.object({
   /** Effective provider/model used by the advisory lane. */
   model: z.string().optional(),
   /** Per-request reasoning level used by the advisory lane. */
-  reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high"]).optional(),
+  reasoningEffort: AiReasoningEffort.optional(),
   durationMs: z.number().int().nonnegative().optional(),
   promptChars: z.number().int().nonnegative().optional(),
   promptTokens: z.number().int().nonnegative().optional(),

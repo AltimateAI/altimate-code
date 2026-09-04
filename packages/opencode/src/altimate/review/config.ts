@@ -3,13 +3,13 @@ import path from "node:path"
 import { promises as fs } from "node:fs"
 import YAML from "yaml"
 import { Rubric, DEFAULT_RUBRIC } from "./rubric"
-import { ReviewMode } from "./verdict"
+import { ReviewMode, AiReasoningEffort } from "./verdict"
 import { Severity } from "./finding"
 
 export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 8_192
-export const AI_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const
-export const AiReasoningEffort = z.enum(AI_REASONING_EFFORTS)
-export type AiReasoningEffort = z.infer<typeof AiReasoningEffort>
+// Defined next to the envelope schema so the accepted values and the signed
+// envelope cannot drift; re-exported here for config/CLI callers.
+export { AI_REASONING_EFFORTS, AiReasoningEffort } from "./verdict"
 
 /**
  * Per-repo review configuration, read from `.altimate/review.yml` (the

@@ -266,6 +266,9 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
 
       // Prompt comes from the compiled core, not this file.
       const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
+      // A core that threw is a broken reviewer, not an intentional omission:
+      // surface it as an error so CI does not read it as "skipped by design".
+      if (promptRes.success === false) return { promptError: promptRes.error ?? "core prompt failed" }
       const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
       if (!system) return undefined
       return { system, model }
@@ -273,6 +276,13 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
     const setupResult = await Promise.race([setup, abortPromise])
     if (setupResult === setupTimedOut) return finish({ findings: [], status: "timeout", reason: timeoutReason })
     if (!setupResult) return finish({ findings: [], status: "skipped", reason: "reviewer prompt unavailable" })
+    if ("promptError" in setupResult) {
+      return finish({
+        findings: [],
+        status: "error",
+        reason: `reviewer prompt failed: ${truncateAtWord(setupResult.promptError ?? "core prompt failed", 160)}`,
+      })
+    }
     if ("modelError" in setupResult) {
       return finish({
         findings: [],

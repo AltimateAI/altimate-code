@@ -135,18 +135,17 @@ export async function postGitHubReview(
   // 1. Upsert the summary comment (dedup by marker). Paginate ALL comments —
   //    on a busy PR the prior marker comment can be past the first page, and
   //    missing it would post a duplicate summary on every rerun.
-  let authenticatedLogin: string | undefined
-  try {
-    authenticatedLogin = (await octo.rest.users.getAuthenticated()).data.login
-  } catch {
-    // GitHub App installation tokens cannot resolve a user; derive the exact
-    // bot login from the authenticated app instead.
+  // Identity precedence: explicit override > token's own user > Actions bot.
+  // A GitHub App installation token resolves neither `GET /user` nor `GET /app`
+  // (the latter needs an app JWT), so App users must name their bot login
+  // (`<app-slug>[bot]`) via ALTIMATE_REVIEW_BOT_LOGIN or every rerun would
+  // post a fresh summary. Arbitrary Bot authors are deliberately not trusted.
+  let authenticatedLogin = process.env.ALTIMATE_REVIEW_BOT_LOGIN?.trim() || undefined
+  if (!authenticatedLogin) {
     try {
-      const slug = (await octo.rest.apps.getAuthenticated()).data?.slug
-      if (typeof slug === "string" && slug) authenticatedLogin = `${slug}[bot]`
+      authenticatedLogin = (await octo.rest.users.getAuthenticated()).data.login
     } catch {
-      // A plain Actions token may resolve neither endpoint. Its exact fallback
-      // identity is safe to recognize; arbitrary Bot users are not.
+      // Fall through to the Actions bot fallback below.
     }
   }
   const existing = await octo.paginate(octo.rest.issues.listComments, {

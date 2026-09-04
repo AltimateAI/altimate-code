@@ -106,28 +106,37 @@ describe("GitHub sticky review ownership", () => {
     await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
 
     expect(calls.authenticated).toBe(1)
-    expect(calls.appAuthenticated).toBe(1)
     expect(calls.updated.map((call) => call.comment_id)).toEqual([20])
     expect(calls.created).toHaveLength(0)
   })
 
-  test("uses only the authenticated GitHub App slug's bot comment", async () => {
-    const { calls, octo } = fakeOctokit(
-      [
-        { id: 10, body: REVIEW_MARKER, user: { login: "different-app[bot]", type: "Bot" } },
-        { id: 20, body: REVIEW_MARKER, user: { login: "altimate-review[bot]", type: "Bot" } },
-      ],
-      async () => {
-        throw Object.assign(new Error("Resource not accessible by integration"), { status: 403 })
-      },
-      async () => ({ data: { slug: "altimate-review" } }),
-    )
+  test("adopts only the bot login named by ALTIMATE_REVIEW_BOT_LOGIN for a GitHub App token", async () => {
+    // An installation token resolves neither GET /user nor GET /app, so the
+    // App's own bot login must be configured explicitly.
+    const previous = process.env.ALTIMATE_REVIEW_BOT_LOGIN
+    process.env.ALTIMATE_REVIEW_BOT_LOGIN = "altimate-review[bot]"
+    try {
+      const { calls, octo } = fakeOctokit(
+        [
+          { id: 10, body: REVIEW_MARKER, user: { login: "different-app[bot]", type: "Bot" } },
+          { id: 20, body: REVIEW_MARKER, user: { login: "altimate-review[bot]", type: "Bot" } },
+          { id: 30, body: REVIEW_MARKER, user: { login: "github-actions[bot]", type: "Bot" } },
+        ],
+        async () => {
+          throw new Error("must not be called when the login is configured")
+        },
+      )
 
-    await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
+      await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
 
-    expect(calls.appAuthenticated).toBe(1)
-    expect(calls.updated.map((call) => call.comment_id)).toEqual([20])
-    expect(calls.created).toHaveLength(0)
+      expect(calls.authenticated).toBe(0)
+      expect(calls.appAuthenticated).toBe(0)
+      expect(calls.updated.map((call) => call.comment_id)).toEqual([20])
+      expect(calls.created).toHaveLength(0)
+    } finally {
+      if (previous === undefined) delete process.env.ALTIMATE_REVIEW_BOT_LOGIN
+      else process.env.ALTIMATE_REVIEW_BOT_LOGIN = previous
+    }
   })
 
   test("never adopts a marker comment owned by a different bot", async () => {
@@ -140,7 +149,6 @@ describe("GitHub sticky review ownership", () => {
 
     await postGitHubReview(buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }), target, octo as any)
 
-    expect(calls.appAuthenticated).toBe(1)
     expect(calls.updated).toHaveLength(0)
     expect(calls.created).toHaveLength(1)
   })

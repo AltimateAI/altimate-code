@@ -111,6 +111,36 @@ describe("runAiReview model selection", () => {
     expect(defaultModel).not.toHaveBeenCalled()
   })
 
+  test("reports a core that failed to build the prompt as an error, not a skip", async () => {
+    const defaultModel = spyOn(Provider as any, "defaultModel")
+    spyOn(Provider as any, "getModel").mockResolvedValue({
+      providerID: "openrouter",
+      id: "openai/gpt-5",
+      modelID: "openai/gpt-5",
+    })
+    // The native handler catches its own exception and reports it this way.
+    spyOn(Dispatcher as any, "call").mockResolvedValue({
+      success: false,
+      data: {},
+      error: "prompt template missing",
+    })
+
+    const result = await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      allowSessionModel: true,
+      sessionModel: "openrouter/openai/gpt-5",
+    })
+
+    expect(result).toMatchObject({
+      findings: [],
+      status: "error",
+      reason: "reviewer prompt failed: prompt template missing",
+      model: "openrouter/openai/gpt-5",
+    })
+    expect(defaultModel).not.toHaveBeenCalled()
+  })
+
   test("reads the active assistant model from the invoking tool context", async () => {
     const getMessage = spyOn(MessageV2 as any, "get").mockReturnValue({
       info: {

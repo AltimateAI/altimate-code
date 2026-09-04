@@ -320,6 +320,12 @@ dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN
 run with `--json`/`--output` and post the verdict using that platform's own API —
 native GitLab posting is not yet built in.
 
+The summary comment is updated in place only when the reviewer can tell which
+comment is its own. With the default Actions token that is automatic. If you post
+with a **GitHub App installation token**, the API cannot reveal the App's identity,
+so set `ALTIMATE_REVIEW_BOT_LOGIN=<app-slug>[bot]`; otherwise each run creates a
+new summary comment. The reviewer never adopts a marker comment from an unknown bot.
+
 ## Configuration — `.altimate/review.yml`
 
 Per-repo configuration, the analogue of an `AGENTS.md`. Tune the rubric, choose
