@@ -1011,7 +1011,14 @@ export namespace Telemetry {
          *  completed review and the post attempt (a bad `--output` path, a stdout write error).
          *  Emitted from the caller's `finally` so a completed review always carries exactly one
          *  post outcome. */
-        outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed"
+        outcome:
+          | "not_requested"
+          | "not_attempted"
+          | "target_unresolved"
+          | "full"
+          | "partial"
+          | "summary_failed"
+          | "forbidden"
         duration_ms: number
       }
   // altimate_change end

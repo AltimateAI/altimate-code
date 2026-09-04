@@ -15,6 +15,12 @@ import type { Severity } from "../../altimate/review/finding"
 
 const MAX_GITHUB_PR_BODY_CHARS = 4_000
 
+function requestStatus(err: unknown): number | undefined {
+  const value = err as { status?: unknown; response?: { status?: unknown } } | undefined
+  const status = value?.status ?? value?.response?.status
+  return typeof status === "number" ? status : undefined
+}
+
 async function readGitHubPullRequestMetadata(): Promise<{ prTitle?: string; prBody?: string }> {
   const eventPath = process.env.GITHUB_EVENT_PATH
   if (!eventPath) return {}
@@ -186,18 +192,29 @@ export const ReviewCommand = cmd({
               r = await postGitHubReview(env, target)
             } catch (err) {
               // A throw here means the summary comment itself failed; nothing was published.
-              emitPostOnce("summary_failed", postDuration())
-              throw err
+              const status = requestStatus(err)
+              if (status === 401 || status === 403) {
+                emitPostOnce("forbidden", postDuration())
+                UI.println(`could not post the review: ${status}; printing summary instead`)
+                // Non-JSON output already printed the rendered summary above. Preserve JSON as
+                // the primary output, but also provide the human summary on this fallback path.
+                if (args.json) process.stdout.write(renderSummary(env) + "\n")
+              } else {
+                emitPostOnce("summary_failed", postDuration())
+                throw err
+              }
             }
-            emitPostOnce(classifyPostOutcome(r), postDuration())
-            const where = `${target.owner}/${target.repo}#${target.prNumber}`
-            if (r.postError) {
-              UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
-            } else {
-              UI.println(
-                `Posted review to ${where}` +
-                  (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
-              )
+            if (r) {
+              emitPostOnce(classifyPostOutcome(r), postDuration())
+              const where = `${target.owner}/${target.repo}#${target.prNumber}`
+              if (r.postError) {
+                UI.println(`⚠️  Posted the summary comment to ${where}, but the review event failed: ${r.postError}`)
+              } else {
+                UI.println(
+                  `Posted review to ${where}` +
+                    (r.inlineFellBack ? " (inline comments fell back to summary-only)" : ""),
+                )
+              }
             }
           }
         }

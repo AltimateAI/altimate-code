@@ -79,7 +79,10 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
   }
 
   if (env.summary.lintOnly ?? env.summary.degraded) {
-    lines.push("> ⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)", "")
+    lines.push(
+      "> ⚙️ Lint-only run — no changed model resolved against a dbt manifest (missing manifest, or the changed models are not in it). Run `dbt compile` on this branch so lineage/equivalence can run.",
+      "",
+    )
   }
 
   if (env.summary.emptyScope) {
@@ -283,13 +286,18 @@ function renderSummaryGroup(findings: Finding[], artifactHints?: string[]): stri
   const loc = finding.file + (finding.startLine ? `:${finding.startLine}` : "")
   return (
     `- **${finding.title}**  \n  ${oneLine(finding.body)}  \n  ` +
-    `<sub>\`${loc}\`${finding.degraded ? " · _unverified_" : ""} · ${finding.category}</sub>`
+    `<sub>${codeSpan(loc)}${finding.degraded ? " · _unverified_" : ""} · ${finding.category}</sub>`
   )
 }
 
 function renderGroupedFinding(findings: Finding[], artifactHints?: string[]): string {
   const subjects = findings.map((finding) => codeSpan(finding.model ?? finding.file)).join(", ")
   const categories = [...new Set(findings.map((finding) => finding.category))].join(", ")
+  const files = [...new Set(findings.map((finding) => finding.file))]
+  const locations = files.slice(0, 3).map(codeSpan).join(", ")
+  const more = files.length > 3 ? ` · +${files.length - 3} more` : ""
+  const unverified = findings.some((finding) => finding.degraded) ? " · _unverified_" : ""
+  const metadata = `  \n  <sub>${locations}${more}${unverified}</sub>`
 
   if (findings[0].groupKey === "lineage_fanout") {
     const members = findings
@@ -308,7 +316,7 @@ function renderGroupedFinding(findings: Finding[], artifactHints?: string[]): st
         return `${subject} (${impact.directCount} direct/${impact.transitiveCount} transitive, +${impact.testCount} tests)`
       })
       .join(", ")
-    return `- **Downstream fan-out on ${findings.length} models** (informational) — ${members}`
+    return `- **Downstream fan-out on ${findings.length} models** (informational) — ${members}${metadata}`
   }
 
   if (findings[0].groupKey === "equivalence_undecided") {
@@ -320,7 +328,7 @@ function renderGroupedFinding(findings: Finding[], artifactHints?: string[]): st
       : "Undecidable with the available artifacts — unsupported SQL for this dialect or missing schema; verify with a data-diff."
     return (
       `- **Equivalence could not be decided for ${findings.length} models** — ${sentence} ` +
-      `${remedy} Models: ${subjects}`
+      `${remedy} Models: ${subjects}${metadata}`
     )
   }
 
@@ -340,11 +348,12 @@ function renderGroupedFinding(findings: Finding[], artifactHints?: string[]): st
     if (findings[0].column) remediation = remediation.replace(codeSpan(findings[0].column), "each listed column")
     return (
       `- **${codeSpan(model)}: grain columns without \`not_null\`** — ${columns || subjects} · ${categories}  \n  ` +
-      remediation
+      remediation +
+      metadata
     )
   }
 
-  return `- **${groupedTitle(findings)}** — ${subjects} · ${categories}`
+  return `- **${groupedTitle(findings)}** — ${subjects} · ${categories}${metadata}`
 }
 
 function capitalize(s: string): string {

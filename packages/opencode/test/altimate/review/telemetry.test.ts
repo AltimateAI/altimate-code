@@ -204,6 +204,26 @@ describe("review_run", () => {
           warning: 0,
           suggestion: 0,
           degraded: true,
+          emptyScope: true,
+          undecidableFindings: 0,
+          artifactHints: [],
+        },
+      }),
+    })
+    expect((events[0] as any).lint_only).toBe(false)
+    expect((events[0] as any).empty_scope).toBe(true)
+
+    events.length = 0
+    emitReviewRun({
+      invocation: "cli",
+      durationMs: 1,
+      sessionID: "",
+      envelope: envelope({
+        summary: {
+          critical: 0,
+          warning: 0,
+          suggestion: 0,
+          degraded: true,
           undecidableFindings: 0,
           artifactHints: [],
         },

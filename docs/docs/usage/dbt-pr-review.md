@@ -144,7 +144,8 @@ Options:
       supplies real column types for lineage and PII analysis.
     - **Base compiled SQL.** In CI, compile the base ref into
       `target-base/compiled`:
-      `git worktree add --detach ../dbt-review-base "$(git merge-base origin/<base> HEAD)" && (cd ../dbt-review-base && dbt deps && dbt compile --target-path ../<repo>/target-base)`.
+      `git worktree add --detach ../dbt-review-base "$(git merge-base origin/<base> <head>)" && (cd ../dbt-review-base && dbt deps && dbt compile --target-path ../<repo>/target-base)`,
+      where `<head>` is the same commit you pass to `--head` (the PR head SHA in CI; `HEAD` when reviewing the checked-out branch).
       Compile the merge-base (fork point), not the base tip: the review diffs against the merge-base, so base-only commits must not leak into `target-base/compiled`.
       Without `target-base/compiled`, equivalence is undecidable and the review says so.
     - **Working directory.** Run the review from the dbt project root so the
@@ -196,6 +197,10 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }} # compile the PR head, not the synthetic merge commit
       # Produce manifest/catalog plus compiled SQL for both sides (adapter-specific).
       - name: Build dbt review artifacts
+        # Non-fatal so the review still runs (lint-only, naming the missing
+        # artifacts) when compile or docs generate fails; keep a separate dbt
+        # build check if compile failures must fail the PR.
+        continue-on-error: true
         env:
           DBT_PROFILES_DIR: ${{ github.workspace }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -204,7 +209,7 @@ jobs:
           pip install dbt-core dbt-bigquery
           dbt deps
           dbt compile
-          dbt docs generate
+          dbt docs generate || echo "docs generate skipped — lineage/PII run without catalog column types"
           # Compile the fork point (merge-base), which is what the review compares against.
           git fetch --no-tags origin "+refs/heads/${PR_BASE_REF}:refs/remotes/origin/${PR_BASE_REF}"
           MERGE_BASE=$(git merge-base "origin/${PR_BASE_REF}" "${PR_HEAD_SHA}")

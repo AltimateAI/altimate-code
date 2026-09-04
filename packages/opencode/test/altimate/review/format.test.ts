@@ -27,6 +27,30 @@ function summary(findings: Finding[], options: { lintOnly?: boolean; artifactHin
 }
 
 describe("review summary readability", () => {
+  test("describes every condition that makes a review lint-only", () => {
+    expect(summary([], { lintOnly: true })).toContain(
+      "⚙️ Lint-only run — no changed model resolved against a dbt manifest (missing manifest, or the changed models are not in it). Run `dbt compile` on this branch so lineage/equivalence can run.",
+    )
+  })
+
+  test("escapes singleton locations that contain backticks", () => {
+    const rendered = summary([finding("singleton", { file: "models/odd`name.sql" })])
+
+    expect(rendered).toContain("<sub>``models/odd`name.sql`` · sql_quality</sub>")
+  })
+
+  test("grouped items retain distinct locations and an unverified marker", () => {
+    const rendered = summary([
+      finding("group-a", { file: "models/a.sql", groupKey: "shared" }),
+      finding("group-b", { file: "models/b.sql", groupKey: "shared", degraded: true }),
+      finding("group-a-again", { file: "models/a.sql", groupKey: "shared" }),
+      finding("group-c", { file: "models/c.sql", groupKey: "shared" }),
+      finding("group-d", { file: "models/d.sql", groupKey: "shared" }),
+    ])
+
+    expect(rendered).toContain("<sub>`models/a.sql`, `models/b.sql`, `models/c.sql` · +1 more · _unverified_</sub>")
+  })
+
   test("repetitive families render their member specifics in compact grouped items", () => {
     const equivalenceBody = (model: string) =>
       `The logic of \`${model}\` changed and equivalence could not be decided (no schema, or unsupported SQL). ` +
@@ -339,6 +363,15 @@ describe("review summary readability", () => {
     expect(renderSummary(changedPolicy, changedDelta)).toContain(
       "**Since last review:** 1 no longer surfaced · 1 new · 1 unchanged (review settings changed)",
     )
+  })
+
+  test("omits the rerun delta when both finding sets are empty", () => {
+    const previous = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    const current = buildEnvelope({ findings: [], tier: "lite", mode: "comment" })
+    const delta = computeFindingDelta(renderSummary(previous), current)
+
+    expect(delta).toBeUndefined()
+    expect(renderSummary(current, delta)).not.toContain("Since last review")
   })
 
   test("uses the final footer markers when finding titles contain marker-like lines", () => {

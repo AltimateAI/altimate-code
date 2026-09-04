@@ -2546,7 +2546,7 @@ describe("orchestrate", () => {
     expect(env.summary.lintOnly).toBe(true)
     expect(env.summary.emptyScope).toBe(false)
     expect(renderSummary(env)).toContain(
-      "⚙️ Lint-only run — no dbt manifest was found (run `dbt compile` so lineage/equivalence can run)",
+      "⚙️ Lint-only run — no changed model resolved against a dbt manifest (missing manifest, or the changed models are not in it). Run `dbt compile` on this branch so lineage/equivalence can run.",
     )
     expect(["APPROVE", "COMMENT"]).toContain(env.verdict)
   })

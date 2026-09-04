@@ -2,17 +2,21 @@ import { $ } from "bun"
 import { describe, test, expect, afterEach, mock, spyOn } from "bun:test"
 import path from "node:path"
 import { resolveGitHubTarget } from "../../src/altimate/review/post-github"
+import * as PostGitHub from "../../src/altimate/review/post-github"
 import { defaultBaseRef } from "../../src/altimate/review/git"
 import * as ReviewRun from "../../src/altimate/review/run"
 import { ReviewCommand } from "../../src/cli/cmd/review"
 import { buildReviewSchemaContext } from "../../src/altimate/review/schema-context"
 import { Telemetry } from "../../src/altimate/telemetry"
 import { buildEnvelope } from "../../src/altimate/review/verdict"
+import { makeFinding } from "../../src/altimate/review/finding"
+import { REVIEW_MARKER } from "../../src/altimate/review/format"
 import { tmpdir } from "../fixture/fixture"
 
 const ENV_KEYS = ["GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_PATH", "ALTIMATE_PR_NUMBER"]
 const saved: Record<string, string | undefined> = {}
 for (const k of ENV_KEYS) saved[k] = process.env[k]
+const savedExitCode = process.exitCode
 
 afterEach(() => {
   for (const k of ENV_KEYS) {
@@ -21,6 +25,7 @@ afterEach(() => {
   }
   mock.restore()
   Telemetry.setContext({ sessionId: "", projectId: "" })
+  process.exitCode = savedExitCode
 })
 
 describe("review CLI command", () => {
@@ -122,9 +127,98 @@ describe("review CLI command", () => {
       prBody: body.slice(0, 4_000),
     })
   })
+
+  test("prints the summary and exits successfully when GitHub rejects posting with 403", async () => {
+    await using tmp = await tmpdir({ git: true })
+    for (const k of ENV_KEYS) delete process.env[k]
+    process.env.GITHUB_TOKEN = "token"
+    process.env.GITHUB_REPOSITORY = "owner/repo"
+    process.env.ALTIMATE_PR_NUMBER = "7"
+    process.exitCode = undefined
+
+    const env = buildEnvelope({ findings: [], tier: "trivial", mode: "comment" })
+    spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(env)
+    spyOn(PostGitHub, "postGitHubReview").mockRejectedValue(
+      Object.assign(new Error("Resource not accessible by integration"), { status: 403 }),
+    )
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const events: Telemetry.Event[] = []
+    spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => {
+      stdout.push(String(chunk))
+      return true
+    }) as any)
+    spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      stderr.push(String(chunk))
+      return true
+    }) as any)
+    spyOn(Telemetry, "track").mockImplementation((event) => events.push(event))
+
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      mode: "comment",
+      post: true,
+      json: true,
+      noAi: true,
+      explainTier: false,
+    })
+
+    expect(stderr.join("")).toContain("could not post the review: 403; printing summary instead")
+    expect(stdout.join("")).toContain(REVIEW_MARKER)
+    expect(events.filter((event) => event.type === "review_post_outcome")).toMatchObject([{ outcome: "forbidden" }])
+    expect(process.exitCode ?? 0).toBe(0)
+  })
+
+  test("retains the gate verdict exit code when forbidden posting falls back to stdout", async () => {
+    await using tmp = await tmpdir({ git: true })
+    for (const k of ENV_KEYS) delete process.env[k]
+    process.env.GITHUB_TOKEN = "token"
+    process.env.GITHUB_REPOSITORY = "owner/repo"
+    process.env.ALTIMATE_PR_NUMBER = "7"
+    process.exitCode = undefined
+
+    const blocking = makeFinding({
+      severity: "critical",
+      category: "contract_violation",
+      title: "Breaking contract change",
+      body: "A contracted column was removed.",
+      file: "models/orders.sql",
+      ruleKey: "breaking-contract",
+    })
+    const env = buildEnvelope({ findings: [blocking], tier: "full", mode: "gate" })
+    expect(env.verdict).toBe("REQUEST_CHANGES")
+    spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(env)
+    spyOn(PostGitHub, "postGitHubReview").mockRejectedValue(Object.assign(new Error("Forbidden"), { status: 403 }))
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+    spyOn(process.stderr, "write").mockImplementation(() => true)
+
+    await (ReviewCommand.handler as any)({
+      cwd: tmp.path,
+      mode: "gate",
+      post: true,
+      json: false,
+      noAi: true,
+      explainTier: false,
+    })
+
+    expect(Number(process.exitCode)).toBe(2)
+  })
 })
 
 describe("defaultBaseRef", () => {
+  test("treats an empty review head as omitted", async () => {
+    await using tmp = await tmpdir({ git: true })
+    delete process.env.GITHUB_EVENT_PATH
+    await Bun.write(path.join(tmp.path, "README.md"), "before\n")
+    await $`git add README.md`.cwd(tmp.path).quiet()
+    await $`git commit -m fixture`.cwd(tmp.path).quiet()
+    await Bun.write(path.join(tmp.path, "README.md"), "after\n")
+
+    const env = await ReviewRun.reviewPullRequest({ cwd: tmp.path, head: "", noAi: true })
+
+    expect(env.summary.emptyScope).toBe(true)
+  })
+
   test("uses the pull request base ref from GITHUB_EVENT_PATH when it resolves", async () => {
     await using tmp = await tmpdir({ git: true })
     await $`git update-ref refs/remotes/origin/release HEAD`.cwd(tmp.path).quiet()

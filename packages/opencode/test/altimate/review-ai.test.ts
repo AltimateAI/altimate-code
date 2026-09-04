@@ -3,6 +3,7 @@ import { Provider } from "@/provider/provider"
 import { LLM } from "@/session/llm"
 import { Dispatcher } from "@/altimate/native"
 import { runAiReview, type AiReviewFile } from "@/altimate/review/ai-review"
+import { NO_MODEL_REASON } from "@/altimate/review/verdict"
 
 afterEach(() => mock.restore())
 
@@ -74,6 +75,45 @@ describe("runAiReview stream handling", () => {
 
     expect(result).toEqual({ findings: [], status: "ok" })
     expect(delays).toContain(100_000)
+  })
+
+  test("treats whitespace-only model output as an empty response", async () => {
+    const parseCalls = stubModelAndPrompt()
+    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {},
+      },
+      text: Promise.resolve(" \n\t "),
+    }))
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+
+    expect(result).toEqual({ findings: [], status: "error", reason: "empty response" })
+    expect(parseCalls()).toBe(0)
+  })
+
+  test("classifies typed provider model errors as an unconfigured model", async () => {
+    spyOn(Provider as any, "defaultModel").mockImplementation(async () => ({
+      providerID: "test-provider",
+      modelID: "missing-model",
+    }))
+    spyOn(Provider as any, "getModel").mockRejectedValue(
+      new Provider.ModelNotFoundError({
+        providerID: "test-provider" as any,
+        modelID: "missing-model" as any,
+        suggestions: [],
+      }),
+    )
+    spyOn(Dispatcher as any, "call").mockImplementation(async (method: string) => {
+      if (method === "altimate_core.review_ai_prompt") return { data: { prompt: "Review the change." } }
+      throw new Error(`unexpected dispatcher method: ${method}`)
+    })
+    const stream = spyOn(LLM as any, "stream")
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [] })
+
+    expect(result).toEqual({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
+    expect(stream).not.toHaveBeenCalled()
   })
 
   test("returns timeout without parsing partial text when the signal aborts before the stream resolves", async () => {

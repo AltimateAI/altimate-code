@@ -341,8 +341,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // `getContent` (e.g. a non-git CI integration) must not be forced through a
   // git lookup that can fail when there's no usable history.
   const needGit = !opts.changedFiles || !opts.getContent
-  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd, opts.head ?? "HEAD") : "")
-  const changedFiles = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
+  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd, opts.head || "HEAD") : "")
+  const changedFiles =
+    opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head || undefined, cwd: opts.cwd }))
   // Resolve the repo top-level once; used to root working-tree FS reads, the
   // stale-manifest existence check, and the compiled-SQL resolver's path
   // mapping. Falls back to opts.cwd when we couldn't resolve it (non-git or
@@ -355,7 +356,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
   )
   const getContent =
-    opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
+    opts.getContent ?? makeContentResolver({ base, head: opts.head || undefined, cwd: opts.cwd, renames, gitRoot })
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
   // binary's process.cwd() — otherwise a relative path silently misses when the

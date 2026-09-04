@@ -58,17 +58,26 @@ function errorReason(err: unknown): string {
     err instanceof Error ? (err.name && err.name !== "Error" ? err.name : err.constructor.name || "Error") : "Error"
   const message = err instanceof Error ? err.message : String(err)
   const raw = message && message !== name ? `${name}: ${message}` : name
-  return raw
+  const clean = raw
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<redacted-url>")
     .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
     .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 120)
+  return truncateAtWord(clean, 120)
+}
+
+/** Cut at the last word boundary before `max` and mark the cut, so a rendered
+ *  reason never ends mid-word ("…able to ac"). */
+function truncateAtWord(s: string, max: number): string {
+  if (s.length <= max) return s
+  const cut = s.lastIndexOf(" ", max - 1)
+  return `${s.slice(0, cut > max / 2 ? cut : max - 1).trimEnd()}…`
 }
 
 function noModelError(err: unknown): boolean {
   if (!(err instanceof Error)) return false
+  if (err instanceof Provider.ModelNotFoundError || err instanceof Provider.NoModelsError) return true
   return err.message === "no providers found" || err.message === "no models found"
 }
 
@@ -184,7 +193,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       return { findings: [], status: "timeout", reason: timeoutReason }
     }
     const text = textResult
-    if (!text) return { findings: [], status: "error", reason: "Error: empty response" }
+    if (!text?.trim()) return { findings: [], status: "error", reason: "empty response" }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.

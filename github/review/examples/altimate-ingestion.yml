@@ -53,9 +53,12 @@ jobs:
       # sanitized/synthetic data and a role scoped to it, never at production.
       # Keep the trigger on `pull_request` (not `pull_request_target`): PRs from
       # forks then receive no secrets, so this step fails. `continue-on-error`
-      # lets the review step still run lint-only for such PRs; the summary
-      # names the missing artifacts so the reduced fidelity is visible. Drop
-      # `continue-on-error` if you would rather have fork PRs fail the job.
+      # lets the review step still run for such PRs; with a read-only fork
+      # token it cannot post, so it prints the summary to the job log instead.
+      # Trade-off: `continue-on-error` also makes a genuine compile failure on
+      # a same-repo PR non-fatal here (the review then runs lint-only and says
+      # which artifacts are missing). Keep a separate `dbt build`/`dbt compile`
+      # check job if compile failures must fail the PR.
       - name: Build dbt review artifacts
         continue-on-error: true
         env:

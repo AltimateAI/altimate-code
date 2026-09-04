@@ -101,6 +101,7 @@ export function computeFindingDelta(
   const previousIds = parseFindingIds(previousBody)
   if (!previousIds) return undefined
   const currentIds = new Set(current.findings.map((finding) => finding.id))
+  if (previousIds.size === 0 && currentIds.size === 0) return undefined
   const previousPolicySignature = parsePolicySignature(previousBody)
   const previousTier = parseTier(previousBody)
   const reviewSettingsChanged =
@@ -123,21 +124,35 @@ export function computeFindingDelta(
   }
 }
 
-export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarget): Promise<PostResult> {
-  const octo = new Octokit({ auth: target.token })
+export async function postGitHubReview(
+  env: VerdictEnvelope,
+  target: GitHubTarget,
+  octo: Octokit = new Octokit({ auth: target.token }),
+): Promise<PostResult> {
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
 
   // 1. Upsert the summary comment (dedup by marker). Paginate ALL comments —
   //    on a busy PR the prior marker comment can be past the first page, and
   //    missing it would post a duplicate summary on every rerun.
+  let authenticatedLogin: string | undefined
+  try {
+    authenticatedLogin = (await octo.rest.users.getAuthenticated()).data.login
+  } catch {
+    // GitHub App installation tokens cannot resolve a user. In Actions, prefer
+    // the well-known bot login, then accept another Bot identity.
+  }
   const existing = await octo.paginate(octo.rest.issues.listComments, {
     owner,
     repo,
     issue_number: prNumber,
     per_page: 100,
   })
-  const prior = existing.find((c) => c.body?.includes(REVIEW_MARKER))
+  const hasMarker = (comment: (typeof existing)[number]) => comment.body?.includes(REVIEW_MARKER)
+  const prior = authenticatedLogin
+    ? existing.find((comment) => hasMarker(comment) && comment.user?.login === authenticatedLogin)
+    : (existing.find((comment) => hasMarker(comment) && comment.user?.login === "github-actions[bot]") ??
+      existing.find((comment) => hasMarker(comment) && comment.user?.type === "Bot"))
   const summary = renderSummary(env, computeFindingDelta(prior?.body, env))
   if (prior) {
     const r = await octo.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body: summary })

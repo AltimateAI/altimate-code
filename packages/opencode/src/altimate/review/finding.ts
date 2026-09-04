@@ -83,7 +83,8 @@ export const Finding = z.object({
   /** Stable presentation key for collapsing related findings in summaries. */
   groupKey: z.string().optional(),
   confidence: Confidence.default("high"),
-  /** True when this finding's deterministic analysis could not decide. */
+  /** True when analysis ran without a manifest/warehouse (lint-only; blast radius unverified),
+   *  or deterministic analysis could not decide (undecidable equivalence). */
   degraded: z.boolean().default(false),
   evidence: Evidence.optional(),
 })

@@ -112,7 +112,7 @@ export function emitReviewRun(input: {
       // Compatibility field: degraded covers either run-level reduced scope,
       // never an individual undecidable finding.
       degraded: env.summary.degraded,
-      lint_only: env.summary.lintOnly ?? env.summary.degraded,
+      lint_only: env.summary.lintOnly ?? (env.summary.degraded && !env.summary.emptyScope),
       empty_scope: env.summary.emptyScope ?? false,
       undecidable_findings:
         env.summary.undecidableFindings ?? env.findings.filter((finding) => finding.degraded).length,
@@ -138,7 +138,7 @@ export function emitReviewRun(input: {
  * once-ness with a latch plus a `finally`; see cli/cmd/review.ts.
  */
 export function emitReviewPostOutcome(input: {
-  outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed"
+  outcome: "not_requested" | "not_attempted" | "target_unresolved" | "full" | "partial" | "summary_failed" | "forbidden"
   durationMs: number
   sessionID: string
 }): void {
