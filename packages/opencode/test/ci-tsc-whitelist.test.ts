@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "bun:test"
 import { spawnSync } from "node:child_process"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -17,14 +17,27 @@ const TSC_TAIL = `error: "tsc" exited with code 2`
 
 function run(log: string): number {
   const dir = mkdtempSync(join(tmpdir(), "tsc-wl-"))
-  const p = join(dir, "build.log")
-  writeFileSync(p, log)
-  return spawnSync("bash", [script, p]).status ?? -1
+  try {
+    const p = join(dir, "build.log")
+    writeFileSync(p, log)
+    return spawnSync("bash", [script, p]).status ?? -1
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 }
 
 describe("check-known-tsc-failure.sh", () => {
   it("accepts a log whose only diagnostic is the known #1148 error", () => {
     expect(run(`${KNOWN}\n${TSC_TAIL}\n`)).toBe(0)
+  })
+
+  it("accepts the REAL log shape: raw diagnostic plus build.ts's JSON-stringified echo of it", () => {
+    // build.ts dumps the failing command's stdout/stderr as escaped JSON —
+    // the same diagnostic appears twice in different quoting. Only the
+    // column-0 tsc-emitted line may count, or the exact-set check double-fails.
+    const echo = `   stdout: "src/v2/client.ts(2,15): error TS2305: Module '\\"./gen/types.gen.js\\"' has no exported member 'FileSystemEntry'.\\n",`
+    const echo2 = `   stderr: "error: \\"tsc\\" exited with code 2\\n",`
+    expect(run(`${KNOWN}\n${TSC_TAIL}\n${echo}\n${echo2}\n`)).toBe(0)
   })
 
   it("accepts line-number drift on the known diagnostic", () => {

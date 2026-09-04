@@ -13,7 +13,11 @@ if ! grep -q '"tsc" exited with code' "$log"; then
   echo "not a tsc-stage failure" >&2
   exit 2
 fi
-actual="$(grep -oE 'error TS[0-9]+: .*' "$log" | sed 's/[[:space:]]*$//' | sort -u)"
+# Only genuine tsc-emitted lines count: they start at column 0 with a
+# file(line,col) prefix. build.ts also ECHOES the diagnostics inside a
+# JSON-stringified error dump (indented, quote-escaped) — counting those
+# would double every diagnostic and fail the exact-set comparison.
+actual="$(grep -E '^[^[:space:]"]+\([0-9]+,[0-9]+\): error TS[0-9]+: ' "$log" | sed -E 's/^[^(]*\([0-9]+,[0-9]+\): //; s/[[:space:]]*$//' | sort -u)"
 expected="error TS2305: Module '\"./gen/types.gen.js\"' has no exported member 'FileSystemEntry'."
 if [ "$actual" != "$expected" ]; then
   {
