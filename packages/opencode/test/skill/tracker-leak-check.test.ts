@@ -111,6 +111,23 @@ describe("Atlassian URL regex", () => {
   })
 })
 
+describe("Internal hostname regex — public gateway allowlist", () => {
+  // Built from parts so this file never contains the apex literally.
+  const APEX = "oneal" + "timate.com"
+  const hostRule = RULES.find((r) => r.name.startsWith("Internal hostname"))!
+
+  test("flags the bare apex and arbitrary subdomains", () => {
+    expect(matches(hostRule.pattern, `see https://${APEX}/x`)).toEqual([APEX])
+    expect(matches(hostRule.pattern, `dashboard.${APEX}`)).toEqual([APEX])
+    expect(matches(hostRule.pattern, `altimate-gateway-staging.${APEX}`)).toEqual([APEX])
+  })
+
+  test("allows the public LLM gateway hostname (a documented action default)", () => {
+    expect(matches(hostRule.pattern, `https://altimate-gateway.${APEX}/v1`)).toEqual([])
+    expect(matches(hostRule.pattern, `default: "https://altimate-gateway.${APEX}"`)).toEqual([])
+  })
+})
+
 // altimate_change — bot-review fix: end-to-end coverage of the scanner's git
 // behaviour, not just its regexes. These run the real script against throwaway
 // repositories, because the failures the reviewers found were all in how the

@@ -48,8 +48,9 @@ inputs:
     description: "Altimate gateway API key → uses the free `altimate-base` model for the advisory lane. Use a repo secret."
     required: false
   altimate_gateway_url:
-    description: "HTTPS Altimate gateway base URL (required when `altimate_gateway_key` is set). Altimate provides the URL with the key; store it as a repository variable."
+    description: "HTTPS Altimate gateway base URL. Defaults to the production gateway; override only for a self-hosted gateway."
     required: false
+    default: "https://altimate-gateway.onealtimate.com"
   model:
     description: "Bring-your-own advisory model as 'provider/model' (e.g. anthropic/claude-sonnet-4-6). Used when `altimate_api_key` is not set."
     required: false
