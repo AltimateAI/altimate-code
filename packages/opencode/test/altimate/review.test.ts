@@ -2656,7 +2656,7 @@ describe("orchestrate", () => {
     expect((await review(false)).summary.lintOnly).toBe(true)
   })
 
-  test("tier-derived lanes do not change the user review policy signature", async () => {
+  test("tier-derived AI lane changes the user review policy signature only when it toggles", async () => {
     const input = {
       changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
       config: { ...DEFAULT_REVIEW_CONFIG, reviewers: [] },
@@ -2667,8 +2667,25 @@ describe("orchestrate", () => {
     }
     const lite = await runReview({ ...input, forceTier: "lite" })
     const full = await runReview({ ...input, forceTier: "full" })
+    const trivial = await runReview({ ...input, forceTier: "trivial" })
 
     expect(lite.policySignature).toBe(full.policySignature)
+    expect(trivial.policySignature).not.toBe(lite.policySignature)
+  })
+
+  test("an AI model does not affect policy when the selected reviewers omit the AI lane", async () => {
+    const input = {
+      changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["sql_quality"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment" as const,
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+    }
+    const first = await runReview({ ...input, aiModel: "altimate-gateway/altimate-base" })
+    const second = await runReview({ ...input, aiModel: "altimate-gateway/altimate-pro" })
+
+    expect(first.policySignature).toBe(second.policySignature)
   })
 
   test("one resolved changed model keeps a mixed-model run out of lint-only", async () => {

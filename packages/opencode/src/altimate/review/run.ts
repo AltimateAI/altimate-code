@@ -340,6 +340,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
   if (opts.mode) config.mode = opts.mode
   if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  // Treat --no-ai as an effective config override so the policy signature
+  // cannot depend on a model that this invocation will never use.
+  if (opts.noAi) config.ai = false
   const aiModel = opts.aiModel ?? config.aiModel
   const allowSessionModel = opts.allowSessionModel ?? false
   const rubric = resolveRubric(config)

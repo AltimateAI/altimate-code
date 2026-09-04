@@ -8,7 +8,7 @@ import {
   dedupe,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, filterChangedFiles } from "./diff-filter"
+import { type ChangedFile, filterChangedFiles, hasReviewableDbtExtension } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
@@ -1078,6 +1078,7 @@ interface ModelContext {
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
+  const changedDbtFileCount = input.changedFiles.filter((file) => hasReviewableDbtExtension(file.path)).length
   const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs)
   const dialect = input.config.dialect
   const getContent = input.getContent
@@ -1120,6 +1121,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const lintOnly =
     modelFiles.length > 0 && (nonDeletedModelContexts.length > 0 ? !anyResolved : !manifestAvailable)
   const emptyScope = reviewable.length === 0
+  const emptyScopeReason = !emptyScope
+    ? undefined
+    : changedDbtFileCount === 0
+      ? "no_dbt_files"
+      : "all_excluded"
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
   // the reviewer core carries no default list. `undefined` when no
@@ -1175,13 +1181,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
+  const aiLaneEnabled = input.config.ai !== false && lanes.has("ai_review")
   const policySignature = makeReviewPolicySignature({
     severityThreshold: input.config.severityThreshold,
     enabledReviewers: input.config.reviewers,
     dialect,
     rubric: input.rubric,
-    aiEnabled: input.config.ai,
-    aiModel: input.aiModel ?? (input.allowSessionModel ? "session" : undefined),
+    aiEnabled: aiLaneEnabled,
+    aiModel: aiLaneEnabled ? input.aiModel ?? (input.allowSessionModel ? "session" : undefined) : undefined,
     dataDiff: input.config.dataDiff,
   })
 
@@ -1491,6 +1498,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     generatedAt: input.generatedAt,
     lintOnly,
     emptyScope,
+    emptyScopeReason,
+    emptyScopeFileCount: emptyScopeReason === "all_excluded" ? changedDbtFileCount : undefined,
     artifactHints: input.artifactHints,
     aiReview: aiReviewSummary,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,

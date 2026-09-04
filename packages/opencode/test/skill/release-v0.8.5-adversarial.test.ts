@@ -238,9 +238,18 @@ describe("v0.8.5 adversarial - composite action", () => {
     const changelog = await fs.readFile(path.join(repoRoot, "CHANGELOG.md"), "utf8")
     expect(changelog).toContain(`## [${version}]`)
 
+    // The docs may move the pin forward as releases ship (they do — the review
+    // gained inputs after 0.8.5); the gate is that they never point at or
+    // below the broken tag. Assert every pin is a release >= 0.8.5.
+    const atLeast085 = (v: string) => {
+      const [a, b, c] = v.split(".").map(Number)
+      return a > 0 || b > 8 || (b === 8 && c >= 5)
+    }
     for (const relative of ["docs/docs/usage/dbt-pr-review.md", "github/review/examples/altimate-ingestion.yml"]) {
       const content = await fs.readFile(path.join(repoRoot, relative), "utf8")
-      expect(content).toContain(`AltimateAI/altimate-code/github/review@v${version}`)
+      const pins = [...content.matchAll(/AltimateAI\/altimate-code\/github\/review@v(\d+\.\d+\.\d+)/g)].map((m) => m[1])
+      expect(pins.length).toBeGreaterThan(0)
+      for (const pin of pins) expect(atLeast085(pin)).toBe(true)
       expect(content).not.toContain("AltimateAI/altimate-code/github/review@v0.8.4")
     }
   })

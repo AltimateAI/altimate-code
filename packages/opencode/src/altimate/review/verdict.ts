@@ -78,6 +78,9 @@ export function applyMode(verdict: Verdict, mode: ReviewMode): Verdict {
 export const RiskTier = z.enum(["trivial", "lite", "full"])
 export type RiskTier = z.infer<typeof RiskTier>
 
+export const EmptyScopeReason = z.enum(["no_dbt_files", "all_excluded"])
+export type EmptyScopeReason = z.infer<typeof EmptyScopeReason>
+
 export const AiReviewStatus = z.enum(["ok", "skipped", "timeout", "error"])
 export type AiReviewStatus = z.infer<typeof AiReviewStatus>
 export const NO_MODEL_REASON =
@@ -97,6 +100,7 @@ export interface ReviewPolicySignatureInput {
   enabledReviewers: string[]
   dialect: string
   rubric: Rubric
+  /** Whether the advisory AI lane is effectively enabled for this run. */
   aiEnabled: boolean
   /** Explicit advisory model, or `session` when the active session is used. */
   aiModel?: string
@@ -140,8 +144,7 @@ export function makeReviewPolicySignature(input: ReviewPolicySignatureInput): st
         warningPatternThreshold: input.rubric.warningPatternThreshold,
         thresholds: input.rubric.thresholds,
       },
-      aiEnabled: input.aiEnabled,
-      aiModel: input.aiModel,
+      ai: input.aiEnabled ? { model: input.aiModel } : "ai:off",
       dataDiff: input.dataDiff,
     }),
   )
@@ -158,6 +161,10 @@ const ReviewSummary = z.object({
   lintOnly: z.boolean().optional(),
   /** True when the diff contains no reviewable dbt files. */
   emptyScope: z.boolean().optional(),
+  /** Why the review scope is empty. */
+  emptyScopeReason: EmptyScopeReason.optional(),
+  /** Number of changed dbt files removed by path/configuration filters. */
+  emptyScopeFileCount: z.number().int().positive().optional(),
   /** Surfaced findings whose deterministic analysis could not decide. */
   undecidableFindings: z.number().int().nonnegative().optional(),
   /** Missing dbt artifacts that reduce lineage/equivalence fidelity. */
@@ -257,6 +264,10 @@ export interface BuildEnvelopeInput {
   lintOnly?: boolean
   /** Run-level empty-review-scope flag. */
   emptyScope?: boolean
+  /** Why the review scope is empty. */
+  emptyScopeReason?: EmptyScopeReason
+  /** Number of changed dbt files removed by path/configuration filters. */
+  emptyScopeFileCount?: number
   /** Compatibility input alias for lintOnly. */
   degraded?: boolean
   artifactHints?: string[]
@@ -276,6 +287,8 @@ function summarize(
   findings: Finding[],
   lintOnly: boolean,
   emptyScope: boolean | undefined,
+  emptyScopeReason: EmptyScopeReason | undefined,
+  emptyScopeFileCount: number | undefined,
   artifactHints: string[],
   aiReview?: AiReviewSummary,
 ): VerdictEnvelope["summary"] {
@@ -288,6 +301,8 @@ function summarize(
     degraded: lintOnly || emptyScope === true,
     lintOnly,
     emptyScope,
+    emptyScopeReason,
+    emptyScopeFileCount,
     undecidableFindings: findings.filter((f) => f.degraded).length,
     artifactHints,
     aiReview,
@@ -311,7 +326,15 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
     findings: input.findings,
-    summary: summarize(input.findings, lintOnly, input.emptyScope, input.artifactHints ?? [], input.aiReview),
+    summary: summarize(
+      input.findings,
+      lintOnly,
+      input.emptyScope,
+      input.emptyScopeReason,
+      input.emptyScopeFileCount,
+      input.artifactHints ?? [],
+      input.aiReview,
+    ),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,

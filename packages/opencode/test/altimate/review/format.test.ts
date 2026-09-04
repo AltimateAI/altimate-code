@@ -283,6 +283,13 @@ describe("review summary readability", () => {
       }),
     )
     expect(policySignature).not.toBe(makeReviewPolicySignature({ ...policy, aiEnabled: false }))
+    expect(makeReviewPolicySignature({ ...policy, aiEnabled: false })).toBe(
+      makeReviewPolicySignature({
+        ...policy,
+        aiEnabled: false,
+        aiModel: "altimate-gateway/altimate-pro",
+      }),
+    )
     expect(policySignature).not.toBe(
       makeReviewPolicySignature({ ...policy, aiModel: "altimate-gateway/altimate-pro" }),
     )

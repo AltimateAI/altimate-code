@@ -220,7 +220,7 @@ jobs:
             dbt deps
             dbt compile --target-path "${{ github.workspace }}/target-base"
           )
-      - uses: AltimateAI/altimate-code/github/review@v0.8.5
+      - uses: AltimateAI/altimate-code/github/review@v0.10.0 # exact pin; bump when the release with the gateway inputs ships
         with:
           mode: comment                       # `gate` to block merges
           manifest_path: target/manifest.json
@@ -390,7 +390,7 @@ In GitHub Actions, supply the connection from a secret — both sides of the dif
 run against the **same** warehouse (base-compiled vs head-compiled SQL):
 
 ```yaml
-      - uses: AltimateAI/altimate-code/github/review@v0.8.5
+      - uses: AltimateAI/altimate-code/github/review@v0.10.0 # exact pin; bump when the release with the gateway inputs ships
         with:
           mode: comment
           manifest_path: target/manifest.json

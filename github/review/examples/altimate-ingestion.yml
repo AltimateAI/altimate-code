@@ -89,10 +89,10 @@ jobs:
           )
 
       - name: altimate dbt PR review
-        # Pin to a release. The `altimate_gateway_*` and `ai_model` inputs below
-        # need the first release cut after PR #1241 merges (newer than v0.10.0);
-        # on older releases an unknown input is a warning and the lane runs
-        # without it. Keep an exact pin and bump it with Dependabot/Renovate.
+        # Exact pin to the current release; bump it with Dependabot/Renovate.
+        # The `altimate_gateway_*` and `ai_model` inputs ship in the release
+        # after v0.10.0 — on v0.10.0 they are ignored with a warning, so move
+        # the pin forward when that release is out if you use Route C.
         uses: AltimateAI/altimate-code/github/review@v0.10.0
         with:
           mode: comment # start non-blocking; switch to `gate` once trusted

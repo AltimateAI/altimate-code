@@ -334,6 +334,7 @@ describe("review artifact hint scope", () => {
     })
     const summary = renderSummary(env)
 
+    expect(env.summary.emptyScopeReason).toBe("no_dbt_files")
     expect(summary).toContain("Nothing to review")
     expect(summary).not.toContain("Missing artifacts")
     expect(summary).not.toContain("No issues found")
@@ -357,6 +358,33 @@ describe("review artifact hint scope", () => {
     })
 
     expect(env.summary.artifactHints).toEqual([])
+    expect(env.summary).toMatchObject({
+      emptyScope: true,
+      emptyScopeReason: "all_excluded",
+      emptyScopeFileCount: 2,
+    })
+    expect(renderSummary(env)).toContain(
+      "⚙️ Nothing to review — all 2 changed dbt files are excluded by the review configuration (`exclude` globs)",
+    )
+  })
+
+  test("--no-ai excludes an unused configured model from the policy signature", async () => {
+    await using tmp = await tmpdir()
+    await writeDbtArtifacts(tmp.path)
+
+    const review = (aiModel: string) =>
+      reviewPullRequest({
+        cwd: tmp.path,
+        changedFiles: [{ path: "models/new_model.sql", status: "added", diff: "+select 1\n" }],
+        getContent: async () => "select 1",
+        noAi: true,
+        aiModel,
+      })
+
+    const first = await review("altimate-gateway/altimate-base")
+    const second = await review("altimate-gateway/altimate-pro")
+
+    expect(first.policySignature).toBe(second.policySignature)
   })
 
   test("a changed Python model is included in compiled artifact hints", async () => {

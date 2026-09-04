@@ -86,7 +86,17 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
   }
 
   if (env.summary.emptyScope) {
-    lines.push("> ⚙️ Nothing to review — no dbt model, schema, or macro files changed in this diff.", "")
+    if (
+      env.summary.emptyScopeReason === "all_excluded" &&
+      env.summary.emptyScopeFileCount !== undefined
+    ) {
+      lines.push(
+        `> ⚙️ Nothing to review — all ${env.summary.emptyScopeFileCount} changed dbt files are excluded by the review configuration (\`exclude\` globs)`,
+        "",
+      )
+    } else {
+      lines.push("> ⚙️ Nothing to review — no dbt model, schema, or macro files changed in this diff.", "")
+    }
   }
 
   const undecidableFindings =
