@@ -510,8 +510,12 @@ export function describeRateLimit(
   }
   if (kind === "budget_exceeded") {
     if (detail.includes("ExceededBudget: User=")) {
+      // The per-user wallet (GRANT_NEW_PRINCIPAL_USD) is a one-time lifetime grant with no
+      // budget_duration — it never resets. Only the shared global ceiling below resets daily.
+      // See altimate-gateway issuer/config.py (grant_budget_duration, validate()) and
+      // accounting_db.py's one-time registration grant.
       return {
-        message: "You've used today's free Altimate Base allowance. It resets tomorrow—switch models to keep going.",
+        message: "You've used your free Altimate Base allowance. It's a one-time grant and won't renew—switch models to keep going.",
         retryable: false,
       }
     }
