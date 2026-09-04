@@ -599,8 +599,8 @@ export const layer = Layer.effect(
         const defaultInfo = Effect.fnUntraced(function* () {
           const c = yield* config.get()
           if (c.default_agent) {
-            let agent = agents[c.default_agent]
             // altimate_change start — migrate the removed data-qa default to analyst
+            let agent = agents[c.default_agent]
             // #1217 let `default_agent: "data-qa"` alone (no matching `agent.data-qa`
             // config entry) opt into the native data-qa profile. That profile is now
             // removed, so a persisted `default_agent: "data-qa"` would otherwise throw
