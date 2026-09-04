@@ -92,6 +92,11 @@ export const AiReviewSummary = z.object({
   findings: z.number().int().nonnegative(),
   /** Effective provider/model used by the advisory lane. */
   model: z.string().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  promptChars: z.number().int().nonnegative().optional(),
+  promptTokens: z.number().int().nonnegative().optional(),
+  completionTokens: z.number().int().nonnegative().optional(),
+  reasoningTokens: z.number().int().nonnegative().optional(),
 })
 export type AiReviewSummary = z.infer<typeof AiReviewSummary>
 

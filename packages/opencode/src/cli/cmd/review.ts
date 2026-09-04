@@ -20,6 +20,15 @@ function nonBlank(value: string | undefined): string | undefined {
   return trimmed || undefined
 }
 
+function boundedInteger(value: unknown, name: string, min: number, max: number): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined
+  const parsed = typeof value === "number" ? value : Number(value)
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`)
+  }
+  return parsed
+}
+
 function requestStatus(err: unknown): number | undefined {
   const value = err as { status?: unknown; response?: { status?: unknown } } | undefined
   const status = value?.status ?? value?.response?.status
@@ -117,6 +126,14 @@ export const ReviewCommand = cmd({
         type: "string",
         describe: "provider/model for the advisory LLM reviewer lane (overrides config)",
       })
+      .option("ai-timeout", {
+        type: "number",
+        describe: "AI reviewer timeout in seconds (10..900; overrides environment and config)",
+      })
+      .option("ai-max-output-tokens", {
+        type: "number",
+        describe: "AI reviewer output budget (512..32768; overrides config)",
+      })
       .option("explain-tier", {
         type: "boolean",
         default: false,
@@ -130,6 +147,18 @@ export const ReviewCommand = cmd({
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
+    const aiTimeoutSeconds = boundedInteger(
+      args.aiTimeout ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS),
+      "--ai-timeout / ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS",
+      10,
+      900,
+    )
+    const aiMaxOutputTokens = boundedInteger(
+      args.aiMaxOutputTokens,
+      "--ai-max-output-tokens",
+      512,
+      32_768,
+    )
     const prMetadata = await readGitHubPullRequestMetadata()
     if (args.forceTier) {
       process.stderr.write(
@@ -156,6 +185,8 @@ export const ReviewCommand = cmd({
           noAi: args.noAi === true || args.ai === false,
           aiModel:
             nonBlank(args.aiModel as string | undefined) ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_MODEL),
+          aiTimeoutMs: aiTimeoutSeconds === undefined ? undefined : aiTimeoutSeconds * 1_000,
+          aiMaxOutputTokens,
           allowSessionModel: false,
           explainTier: args.explainTier === true,
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,

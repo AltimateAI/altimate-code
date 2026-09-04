@@ -6,6 +6,8 @@ import { Rubric, DEFAULT_RUBRIC } from "./rubric"
 import { ReviewMode } from "./verdict"
 import { Severity } from "./finding"
 
+export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 8_192
+
 /**
  * Per-repo review configuration, read from `.altimate/review.yml` (the
  * analogue of Cloudflare's AGENTS.md). Lets each team tune the rubric, choose
@@ -34,6 +36,10 @@ export const ReviewConfig = z.object({
   // Model ids may themselves contain `/` (for example OpenRouter ids); the
   // provider parser deliberately splits only on the first slash.
   aiModel: z.string().regex(/^[^\s/]+\/\S+$/, "provider/model").optional(),
+  /** Advisory reviewer deadline. Unset uses the changed-file formula. */
+  aiTimeoutSeconds: z.number().int().min(10).max(900).optional(),
+  /** Total output budget, including reasoning tokens for reasoning models. */
+  aiMaxOutputTokens: z.number().int().min(512).max(32_768).default(DEFAULT_AI_MAX_OUTPUT_TOKENS),
   /**
    * Data-diff: actually run base-vs-head against the warehouse (core DataParity)
    * and report row/value deltas. OPT-IN — it costs warehouse compute and needs a

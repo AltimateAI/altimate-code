@@ -60,6 +60,9 @@ inputs:
   ai_model:
     description: "Optional provider/model override within the selected Altimate action route."
     required: false
+  ai_timeout_seconds:
+    description: "Optional AI reviewer timeout in seconds (10..900). The Altimate gateway route defaults to 300."
+    required: false
 
 runs:
   using: "composite"
@@ -169,8 +172,14 @@ runs:
         IN_MODEL: ${{ inputs.model }}
         IN_MODEL_API_KEY: ${{ inputs.model_api_key }}
         IN_AI_MODEL: ${{ inputs.ai_model }}
+        IN_AI_TIMEOUT_SECONDS: ${{ inputs.ai_timeout_seconds }}
       run: |
         set -euo pipefail
+        AI_TIMEOUT_SECONDS="${IN_AI_TIMEOUT_SECONDS:-}"
+        if [[ -n "$AI_TIMEOUT_SECONDS" && ! "$AI_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+          echo "::error::ai_timeout_seconds must be an integer between 10 and 900."
+          exit 1
+        fi
         if [[ -n "${IN_ALT_KEY:-}" ]]; then
           # Route A — hosted altimate model (altimate-backend).
           if [[ -z "${IN_ALT_INSTANCE:-}" ]]; then
@@ -215,6 +224,7 @@ runs:
             '{provider: {"altimate-gateway": {npm: "@ai-sdk/openai-compatible", name: "Altimate Gateway", options: {baseURL:$base_url, apiKey:$ENV.IN_GATEWAY_KEY}, models: {"altimate-base": {name:"altimate-base"}, "altimate-pro": {name:"altimate-pro"}}}}}')
           echo "OPENCODE_CONFIG_CONTENT=$CONTENT" >> "$GITHUB_ENV"
           AI_MODEL="${IN_AI_MODEL:-altimate-gateway/altimate-base}"
+          AI_TIMEOUT_SECONDS="${AI_TIMEOUT_SECONDS:-300}"
           echo "ALTIMATE_ACTION_AI_MODEL=$AI_MODEL" >> "$GITHUB_ENV"
           echo "Advisory lane: Altimate gateway model ($AI_MODEL)."
         elif [[ -n "${IN_MODEL:-}" || -n "${IN_MODEL_API_KEY:-}" ]]; then
@@ -222,6 +232,9 @@ runs:
           exit 1
         else
           echo "Advisory lane: no model/credentials provided — running deterministic-only."
+        fi
+        if [[ -n "$AI_TIMEOUT_SECONDS" ]]; then
+          echo "ALTIMATE_ACTION_AI_TIMEOUT_SECONDS=$AI_TIMEOUT_SECONDS" >> "$GITHUB_ENV"
         fi
 
     - name: Run dbt PR review
@@ -265,5 +278,8 @@ runs:
         [[ "$IN_POST" == "true" ]] && args+=(--post)
         if [[ -n "${ALTIMATE_ACTION_AI_MODEL:-}" ]]; then
           args+=(--ai-model "$ALTIMATE_ACTION_AI_MODEL")
+        fi
+        if [[ -n "${ALTIMATE_ACTION_AI_TIMEOUT_SECONDS:-}" ]]; then
+          args+=(--ai-timeout "$ALTIMATE_ACTION_AI_TIMEOUT_SECONDS")
         fi
         altimate review "${args[@]}"

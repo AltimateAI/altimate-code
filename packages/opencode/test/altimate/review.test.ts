@@ -1030,7 +1030,10 @@ describe("config", () => {
   })
 
   test("empty config yields defaults", () => {
-    expect(parseReviewConfig("").mode).toBe("comment")
+    const config = parseReviewConfig("")
+    expect(config.mode).toBe("comment")
+    expect(config.aiTimeoutSeconds).toBeUndefined()
+    expect(config.aiMaxOutputTokens).toBe(8_192)
   })
 
   test("aiModel accepts only provider/model identifiers", () => {
@@ -1040,6 +1043,23 @@ describe("config", () => {
     expect(parseReviewConfig("aiModel: openrouter/openai/gpt-5\n").aiModel).toBe("openrouter/openai/gpt-5")
     expect(() => parseReviewConfig("aiModel: altimate-base\n")).toThrow("provider/model")
     expect(() => parseReviewConfig("aiModel: 'altimate-gateway/model with spaces'\n")).toThrow("provider/model")
+  })
+
+  test("AI timeout and output budget accept only bounded integers", () => {
+    expect(parseReviewConfig("aiTimeoutSeconds: 10\naiMaxOutputTokens: 512\n")).toMatchObject({
+      aiTimeoutSeconds: 10,
+      aiMaxOutputTokens: 512,
+    })
+    expect(parseReviewConfig("aiTimeoutSeconds: 900\naiMaxOutputTokens: 32768\n")).toMatchObject({
+      aiTimeoutSeconds: 900,
+      aiMaxOutputTokens: 32_768,
+    })
+    for (const value of [9, 901, 10.5]) {
+      expect(() => parseReviewConfig(`aiTimeoutSeconds: ${value}\n`)).toThrow()
+    }
+    for (const value of [511, 32_769, 1_024.5]) {
+      expect(() => parseReviewConfig(`aiMaxOutputTokens: ${value}\n`)).toThrow()
+    }
   })
 
   test("resolveRubric folds exclude globs into rubric", () => {
@@ -1845,6 +1865,8 @@ describe("orchestrate", () => {
       getContent: content(sql),
       prTitle: "Add revenue mart",
       aiModel: "altimate-gateway/altimate-base",
+      aiTimeoutMs: 180_000,
+      aiMaxOutputTokens: 12_288,
       allowSessionModel: false,
       sessionModel: "openrouter/openai/gpt-5",
       // Fake AI reviewer: returns a contextual comment + a (disallowed) critical
@@ -1854,9 +1876,16 @@ describe("orchestrate", () => {
         expect(input.model).toBe("altimate-gateway/altimate-base")
         expect(input.allowSessionModel).toBe(false)
         expect(input.sessionModel).toBe("openrouter/openai/gpt-5")
+        expect(input.timeoutMs).toBe(180_000)
+        expect(input.maxOutputTokens).toBe(12_288)
         return {
           status: "ok",
           model: "altimate-gateway/altimate-base",
+          durationMs: 142_000,
+          promptChars: 24_000,
+          promptTokens: 6_000,
+          completionTokens: 4_000,
+          reasoningTokens: 3_000,
           findings: [
             makeFinding({
               severity: "warning",
@@ -1895,6 +1924,11 @@ describe("orchestrate", () => {
       status: "ok",
       findings: 2,
       model: "altimate-gateway/altimate-base",
+      durationMs: 142_000,
+      promptChars: 24_000,
+      promptTokens: 6_000,
+      completionTokens: 4_000,
+      reasoningTokens: 3_000,
     })
   })
 
@@ -1924,8 +1958,13 @@ describe("orchestrate", () => {
   test("AI reviewer status renders each outcome and never changes the verdict", () => {
     const cases = [
       {
-        aiReview: { status: "ok" as const, findings: 2, model: "altimate-gateway/altimate-base" },
-        expected: "🤖 AI reviewer (altimate-gateway/altimate-base): 2 advisory findings",
+        aiReview: {
+          status: "ok" as const,
+          findings: 2,
+          model: "altimate-gateway/altimate-base",
+          durationMs: 142_000,
+        },
+        expected: "🤖 AI reviewer (altimate-gateway/altimate-base): 2 advisory findings · 142s",
       },
       {
         aiReview: {

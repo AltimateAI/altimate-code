@@ -44,6 +44,10 @@ export interface ReviewPullRequestOptions {
   noAi?: boolean
   /** Override the advisory reviewer provider/model from config. */
   aiModel?: string
+  /** Override the advisory reviewer deadline. */
+  aiTimeoutMs?: number
+  /** Override the advisory reviewer output budget. */
+  aiMaxOutputTokens?: number
   /** Allow falling back to the current session model (default: false). */
   allowSessionModel?: boolean
   /** Active provider/model supplied by an interactive tool invocation. */
@@ -347,6 +351,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // cannot depend on a model that this invocation will never use.
   if (opts.noAi) config.ai = false
   const aiModel = opts.aiModel ?? config.aiModel
+  const aiTimeoutMs =
+    opts.aiTimeoutMs ?? (config.aiTimeoutSeconds === undefined ? undefined : config.aiTimeoutSeconds * 1_000)
+  const aiMaxOutputTokens = opts.aiMaxOutputTokens ?? config.aiMaxOutputTokens
   const allowSessionModel = opts.allowSessionModel ?? false
   const rubric = resolveRubric(config)
 
@@ -507,6 +514,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
         ? async () => ({ findings: [], status: "skipped" as const, reason: "disabled by configuration" })
         : runAiReview,
     aiModel,
+    aiTimeoutMs,
+    aiMaxOutputTokens,
     allowSessionModel,
     sessionModel: opts.sessionModel,
     prTitle: opts.prTitle,

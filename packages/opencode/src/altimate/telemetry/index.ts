@@ -991,6 +991,12 @@ export namespace Telemetry {
         ai_model?: string
         /** Surfaced advisory AI findings after filtering and deduplication. */
         ai_findings?: number
+        /** Wall-clock duration of the advisory AI lane. */
+        ai_duration_ms?: number
+        /** Character count of the advisory review prompt. */
+        ai_prompt_chars?: number
+        /** Provider-reported reasoning tokens, when available. */
+        ai_reasoning_tokens?: number
         stale_manifest?: boolean
         critical?: number
         warning?: number

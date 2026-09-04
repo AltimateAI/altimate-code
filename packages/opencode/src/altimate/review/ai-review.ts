@@ -8,6 +8,7 @@ import { Log } from "@/altimate/util/log"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
 import { NO_MODEL_REASON, type AiReviewStatus } from "./verdict"
+import { DEFAULT_AI_MAX_OUTPUT_TOKENS } from "./config"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -38,6 +39,8 @@ export interface AiReviewInput {
   prBody?: string
   /** Override the review deadline (primarily for tests). */
   timeoutMs?: number
+  /** Total output budget, including reasoning tokens. */
+  maxOutputTokens?: number
 }
 
 export interface AiReviewResult {
@@ -46,6 +49,11 @@ export interface AiReviewResult {
   reason?: string
   /** Effective provider/model used by the advisory lane. */
   model?: string
+  durationMs?: number
+  promptChars?: number
+  promptTokens?: number
+  completionTokens?: number
+  reasoningTokens?: number
 }
 
 /**
@@ -89,6 +97,71 @@ function noModelError(err: unknown): boolean {
   return err.message === "no providers found" || err.message === "no models found"
 }
 
+interface AiUsage {
+  promptTokens?: number
+  completionTokens?: number
+  reasoningTokens?: number
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined
+}
+
+function findTokenCount(value: unknown, keys: ReadonlySet<string>, seen = new Set<unknown>()): number | undefined {
+  if (!value || typeof value !== "object" || seen.has(value)) return undefined
+  seen.add(value)
+  for (const [key, item] of Object.entries(value)) {
+    if (keys.has(key)) {
+      const count = tokenCount(item)
+      if (count !== undefined) return count
+    }
+  }
+  for (const item of Object.values(value)) {
+    const count = findTokenCount(item, keys, seen)
+    if (count !== undefined) return count
+  }
+  return undefined
+}
+
+function readUsage(usage: unknown, providerMetadata: unknown): AiUsage {
+  const normalized = usage && typeof usage === "object" ? (usage as Record<string, unknown>) : undefined
+  const details =
+    normalized?.outputTokenDetails && typeof normalized.outputTokenDetails === "object"
+      ? (normalized.outputTokenDetails as Record<string, unknown>)
+      : undefined
+  const sources = { usage, providerMetadata }
+  return {
+    promptTokens:
+      tokenCount(normalized?.inputTokens) ??
+      findTokenCount(sources, new Set(["promptTokens", "prompt_tokens", "input_tokens"])),
+    completionTokens:
+      tokenCount(normalized?.outputTokens) ??
+      findTokenCount(sources, new Set(["completionTokens", "completion_tokens", "output_tokens"])),
+    reasoningTokens:
+      tokenCount(details?.reasoningTokens) ??
+      tokenCount(normalized?.reasoningTokens) ??
+      findTokenCount(sources, new Set(["reasoningTokens", "reasoning_tokens"])),
+  }
+}
+
+function mergeUsage(current: AiUsage, next: AiUsage): AiUsage {
+  return {
+    promptTokens: next.promptTokens ?? current.promptTokens,
+    completionTokens: next.completionTokens ?? current.completionTokens,
+    reasoningTokens: next.reasoningTokens ?? current.reasoningTokens,
+  }
+}
+
+function isLengthFinishReason(reason: unknown): boolean {
+  return reason === "length" || reason === "max_tokens" || reason === "max_output_tokens"
+}
+
+function suggestedFindingCount(text: string): number {
+  return text.match(/["']file["']\s*:/g)?.length ?? 0
+}
+
 /** Assemble the user message (mechanical formatting — not IP). */
 function buildUserMessage(input: AiReviewInput): string {
   const parts: string[] = []
@@ -120,25 +193,42 @@ function buildUserMessage(input: AiReviewInput): string {
  * review must never crash because the AI layer is unavailable.
  */
 export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
+  const startedAt = Date.now()
+  let effectiveModel: string | undefined
+  let promptChars = 0
+  let usage: AiUsage = {}
+  const finish = (result: AiReviewResult): AiReviewResult => ({
+    ...result,
+    ...(effectiveModel ? { model: effectiveModel } : {}),
+    durationMs: Math.max(0, Date.now() - startedAt),
+    promptChars,
+    ...(usage.promptTokens !== undefined ? { promptTokens: usage.promptTokens } : {}),
+    ...(usage.completionTokens !== undefined ? { completionTokens: usage.completionTokens } : {}),
+    ...(usage.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
+  })
   if (!input.model && !input.allowSessionModel) {
-    return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
+    return finish({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
   }
 
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
-  if (!files.length) return { findings: [], status: "skipped", reason: "no reviewable files" }
+  if (!files.length) return finish({ findings: [], status: "skipped", reason: "no reviewable files" })
 
-  const AI_TIMEOUT_MS = input.timeoutMs ?? Math.min(180_000, 60_000 + 2_000 * Math.min(files.length, MAX_FILES))
-  const timeoutReason = `timed out after ${AI_TIMEOUT_MS / 1000}s`
+  const userMessage = buildUserMessage({ ...input, files })
+  promptChars = userMessage.length
+  const aiTimeoutMs =
+    input.timeoutMs ?? Math.min(300, 120 + 4 * Math.min(files.length, MAX_FILES)) * 1_000
+  const maxOutputTokens = input.maxOutputTokens ?? DEFAULT_AI_MAX_OUTPUT_TOKENS
+  const timeoutReason = `timed out after ${aiTimeoutMs / 1000}s (raise aiTimeoutSeconds / --ai-timeout)`
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), aiTimeoutMs)
   const setupTimedOut = Symbol("setupTimedOut")
   const abortPromise = new Promise<typeof setupTimedOut>((resolve) => {
     controller.signal.addEventListener("abort", () => resolve(setupTimedOut), { once: true })
   })
   let streamAborted = false
-  let effectiveModel: string | undefined
-  const withModel = (result: AiReviewResult): AiReviewResult =>
-    effectiveModel ? { ...result, model: effectiveModel } : result
+  let finishReason: unknown
+  let rawFinishReason: unknown
+  let providerMetadata: unknown
   try {
     const setup = (async () => {
       let model: Awaited<ReturnType<typeof Provider.getModel>>
@@ -179,10 +269,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       return { system, model }
     })()
     const setupResult = await Promise.race([setup, abortPromise])
-    if (setupResult === setupTimedOut) return withModel({ findings: [], status: "timeout", reason: timeoutReason })
-    if (!setupResult) return withModel({ findings: [], status: "skipped", reason: "reviewer prompt unavailable" })
+    if (setupResult === setupTimedOut) return finish({ findings: [], status: "timeout", reason: timeoutReason })
+    if (!setupResult) return finish({ findings: [], status: "skipped", reason: "reviewer prompt unavailable" })
     if ("modelError" in setupResult) {
-      return withModel({
+      return finish({
         findings: [],
         status: "error",
         reason: `configured AI model not available: ${input.model ?? input.sessionModel} — ${setupResult.modelError}`,
@@ -219,12 +309,15 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
         abort: controller.signal,
         sessionID: user.sessionID,
         retries: 1,
-        messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
+        messages: [{ role: "user", content: userMessage }],
+        // Reasoning models spend from the same budget before emitting the JSON
+        // array, so the advisory lane must reserve enough for both phases.
+        maxOutputTokens,
       }),
       abortPromise,
     ])
     if (streamResult === setupTimedOut || controller.signal.aborted) {
-      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
+      return finish({ findings: [], status: "timeout", reason: timeoutReason })
     }
     const stream = streamResult
     const drain = (async () => {
@@ -232,33 +325,82 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
         // drain to avoid SDK hangs
         if (event.type === "abort") streamAborted = true
         if (event.type === "error") throw event.error
+        if (event.type === "finish-step") {
+          finishReason = event.finishReason ?? finishReason
+          rawFinishReason = event.rawFinishReason ?? rawFinishReason
+          providerMetadata = event.providerMetadata ?? providerMetadata
+          usage = mergeUsage(usage, readUsage(event.usage, providerMetadata))
+        }
+        if (event.type === "finish") {
+          finishReason = event.finishReason ?? finishReason
+          rawFinishReason = event.rawFinishReason ?? rawFinishReason
+          usage = mergeUsage(usage, readUsage(event.totalUsage, providerMetadata))
+        }
       }
     })()
     const drainResult = await Promise.race([drain, abortPromise])
     if (drainResult === setupTimedOut || controller.signal.aborted || streamAborted) {
-      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
+      return finish({ findings: [], status: "timeout", reason: timeoutReason })
     }
-    const textResult = await Promise.race([Promise.resolve(stream.text), abortPromise])
-    if (textResult === setupTimedOut || controller.signal.aborted) {
-      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
+    const resultDetails = await Promise.race([
+      Promise.all([
+        Promise.resolve(stream.text),
+        Promise.resolve(stream.finishReason),
+        Promise.resolve(stream.rawFinishReason),
+        Promise.resolve(stream.totalUsage),
+        Promise.resolve(stream.providerMetadata),
+      ]),
+      abortPromise,
+    ])
+    if (resultDetails === setupTimedOut || controller.signal.aborted) {
+      return finish({ findings: [], status: "timeout", reason: timeoutReason })
     }
-    const text = textResult
-    if (!text?.trim()) return withModel({ findings: [], status: "error", reason: "empty response" })
+    const [text, streamFinishReason, streamRawFinishReason, streamUsage, streamProviderMetadata] = resultDetails
+    finishReason = streamFinishReason ?? finishReason
+    rawFinishReason = streamRawFinishReason ?? rawFinishReason
+    providerMetadata = streamProviderMetadata ?? providerMetadata
+    usage = mergeUsage(usage, readUsage(streamUsage, providerMetadata))
+    const outputTruncated = isLengthFinishReason(finishReason) || isLengthFinishReason(rawFinishReason)
+    const truncated = (): AiReviewResult =>
+      finish({
+        findings: [],
+        status: "error",
+        reason: `output truncated at ${usage.completionTokens ?? maxOutputTokens} tokens (raise aiMaxOutputTokens)`,
+      })
+    if (!text?.trim()) {
+      return outputTruncated ? truncated() : finish({ findings: [], status: "error", reason: "empty response" })
+    }
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
-    const parseResult = await Promise.race([
-      Dispatcher.call("altimate_core.review_ai_parse", {
-        text,
-        valid_files: files.map((f) => f.path),
-      }),
-      abortPromise,
-    ])
+    let parseResult: Awaited<ReturnType<typeof Dispatcher.call>> | typeof setupTimedOut
+    try {
+      parseResult = await Promise.race([
+        Dispatcher.call("altimate_core.review_ai_parse", {
+          text,
+          valid_files: files.map((f) => f.path),
+        }),
+        abortPromise,
+      ])
+    } catch (err) {
+      if (outputTruncated) return truncated()
+      throw err
+    }
     if (parseResult === setupTimedOut || controller.signal.aborted) {
-      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
+      return finish({ findings: [], status: "timeout", reason: timeoutReason })
     }
     const parseRes = parseResult
-    const parsed = (((parseRes.data ?? {}) as Record<string, unknown>).findings as any[]) ?? []
+    if (parseRes.success === false) {
+      if (outputTruncated) return truncated()
+      throw new Error(parseRes.error ?? "AI response parse failed")
+    }
+    const parsedValue = ((parseRes.data ?? {}) as Record<string, unknown>).findings
+    if (!Array.isArray(parsedValue)) {
+      if (outputTruncated) return truncated()
+      throw new Error("AI response parse failed")
+    }
+    const parsed = parsedValue as any[]
+    if (outputTruncated && parsed.length < suggestedFindingCount(text)) return truncated()
     const byFile = new Map(files.map((f) => [f.path, f]))
 
     const out: Finding[] = []
@@ -292,15 +434,15 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
         log.warn("skipping malformed ai finding", { error: err })
       }
     }
-    log.info("ai review complete", { findings: out.length })
-    return withModel({ findings: out, status: "ok" })
+    log.info("ai review complete", { findings: out.length, ...usage })
+    return finish({ findings: out, status: "ok" })
   } catch (err) {
     log.error("ai review failed", { error: err })
-    if (noModelError(err)) return { findings: [], status: "skipped", reason: NO_MODEL_REASON }
+    if (noModelError(err)) return finish({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
     if (controller.signal.aborted || streamAborted || (err as { name?: unknown } | undefined)?.name === "AbortError") {
-      return withModel({ findings: [], status: "timeout", reason: timeoutReason })
+      return finish({ findings: [], status: "timeout", reason: timeoutReason })
     }
-    return withModel({ findings: [], status: "error", reason: errorReason(err) })
+    return finish({ findings: [], status: "error", reason: errorReason(err) })
   } finally {
     clearTimeout(timeout)
   }

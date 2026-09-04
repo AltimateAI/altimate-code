@@ -206,6 +206,10 @@ export interface OrchestrateInput {
   allowSessionModel?: boolean
   /** Active provider/model supplied by the interactive tool context. */
   sessionModel?: string
+  /** Effective advisory reviewer deadline resolved by the entry point. */
+  aiTimeoutMs?: number
+  /** Effective advisory reviewer output budget resolved by the entry point. */
+  aiMaxOutputTokens?: number
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -1455,8 +1459,20 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           sessionModel: input.sessionModel,
           prTitle: input.prTitle,
           prBody: input.prBody,
+          timeoutMs: input.aiTimeoutMs,
+          maxOutputTokens: input.aiMaxOutputTokens,
         })
-        aiReviewSummary = { status: result.status, reason: result.reason, findings: 0, model: result.model }
+        aiReviewSummary = {
+          status: result.status,
+          reason: result.reason,
+          findings: 0,
+          model: result.model,
+          durationMs: result.durationMs,
+          promptChars: result.promptChars,
+          promptTokens: result.promptTokens,
+          completionTokens: result.completionTokens,
+          reasoningTokens: result.reasoningTokens,
+        }
         // Defense in depth: normalize provenance and clamp severity so injected
         // callers cannot make the AI lane authoritative.
         for (const f of result.findings) {

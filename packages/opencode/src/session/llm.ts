@@ -57,6 +57,7 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
+    maxOutputTokens?: number
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
@@ -153,9 +154,10 @@ export namespace LLM {
         topP: input.agent.topP ?? ProviderTransform.topP(input.model),
         topK: ProviderTransform.topK(input.model),
         maxOutputTokens:
-          isCodex || provider.id.includes("github-copilot")
+          input.maxOutputTokens ??
+          (isCodex || provider.id.includes("github-copilot")
             ? undefined
-            : ProviderTransform.maxOutputTokens(input.model),
+            : ProviderTransform.maxOutputTokens(input.model)),
         options,
       },
     )

@@ -40,7 +40,14 @@ function envelope(over: Record<string, any> = {}) {
       lintOnly: false,
       undecidableFindings: 0,
       artifactHints: [],
-      aiReview: { status: "ok", findings: 2, model: "altimate-gateway/altimate-base" },
+      aiReview: {
+        status: "ok",
+        findings: 2,
+        model: "altimate-gateway/altimate-base",
+        durationMs: 142_000,
+        promptChars: 24_000,
+        reasoningTokens: 3_000,
+      },
     },
     findings: [
       { category: "join_risk", severity: "critical" },
@@ -70,6 +77,9 @@ describe("review_run", () => {
     expect(e.ai_status).toBe("ok")
     expect(e.ai_model).toBe("altimate-gateway/altimate-base")
     expect(e.ai_findings).toBe(2)
+    expect(e.ai_duration_ms).toBe(142_000)
+    expect(e.ai_prompt_chars).toBe(24_000)
+    expect(e.ai_reasoning_tokens).toBe(3_000)
     expect(e.undecidable_findings).toBe(0)
     expect(e.lint_only).toBe(false)
     expect(e.empty_scope).toBe(false)

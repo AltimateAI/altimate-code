@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "GITHUB_EVENT_PATH",
   "ALTIMATE_PR_NUMBER",
   "ALTIMATE_REVIEW_AI_MODEL",
+  "ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS",
   "OPENCODE_CONFIG_CONTENT",
 ]
 const saved: Record<string, string | undefined> = {}
@@ -37,7 +38,9 @@ afterEach(() => {
   }
   mock.restore()
   Telemetry.setContext({ sessionId: "", projectId: "" })
-  process.exitCode = savedExitCode
+  // Bun retains a previously assigned numeric exit code when it is reset to
+  // undefined, so explicitly restore the successful process default.
+  process.exitCode = savedExitCode ?? 0
 })
 
 describe("review CLI command", () => {
@@ -198,6 +201,44 @@ describe("review CLI command", () => {
       explainTier: false,
     })
     expect(review.mock.calls[0][0]).toMatchObject({ aiModel: undefined, allowSessionModel: false })
+  })
+
+  test("passes AI timeout precedence and the explicit output budget", async () => {
+    await using tmp = await tmpdir({ git: true })
+    process.env.ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS = "240"
+    const review = spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(
+      buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }),
+    )
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+
+    const baseArgs = {
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: false,
+      explainTier: false,
+    }
+    await (ReviewCommand.handler as any)({
+      ...baseArgs,
+      aiTimeout: 180,
+      aiMaxOutputTokens: 12_288,
+    })
+    expect(review.mock.calls[0][0]).toMatchObject({
+      aiTimeoutMs: 180_000,
+      aiMaxOutputTokens: 12_288,
+    })
+
+    review.mockClear()
+    await (ReviewCommand.handler as any)(baseArgs)
+    expect(review.mock.calls[0][0]).toMatchObject({ aiTimeoutMs: 240_000 })
+    expect(review.mock.calls[0][0].aiMaxOutputTokens).toBeUndefined()
+
+    review.mockClear()
+    delete process.env.ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS
+    await (ReviewCommand.handler as any)(baseArgs)
+    expect(review.mock.calls[0][0].aiTimeoutMs).toBeUndefined()
   })
 
   test("prints the summary and exits successfully when GitHub rejects posting with 403", async () => {
@@ -378,6 +419,7 @@ describe("reviewPullRequest head handling", () => {
     expect(action).toContain('echo "Unable to fetch custom head \'$IN_HEAD\' from origin" >&2')
     expect(action).toContain('git merge-base "origin/$PR_BASE_REF" "${HEAD_REF:-$PR_HEAD_SHA}"')
     expect(action).toContain('args+=(--head "${HEAD_REF:-$PR_HEAD_SHA}")')
+    expect(action).toContain('args+=(--ai-timeout "$ALTIMATE_ACTION_AI_TIMEOUT_SECONDS")')
   })
 })
 
@@ -427,6 +469,7 @@ describe("advisory model configuration", () => {
       expect(configLine).toBeString()
       const config = JSON.parse(configLine!.slice("OPENCODE_CONFIG_CONTENT=".length))
       expect(config.provider["altimate-gateway"].options.baseURL).toBe("https://gateway.example.com/v1")
+      expect(await Bun.file(githubEnv).text()).toContain("ALTIMATE_ACTION_AI_TIMEOUT_SECONDS=300")
     }
   })
 

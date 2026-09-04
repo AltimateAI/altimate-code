@@ -9,7 +9,7 @@ import { sessionModelFromContext } from "@/altimate/tools/dbt-pr-review"
 
 afterEach(() => mock.restore())
 
-function stubModelAndPrompt() {
+function stubModelAndPrompt(parseResult: any = { data: { findings: [] } }) {
   let parseCalls = 0
   spyOn(Provider as any, "defaultModel").mockImplementation(async () => ({
     providerID: "test-provider",
@@ -24,7 +24,7 @@ function stubModelAndPrompt() {
     if (method === "altimate_core.review_ai_prompt") return { data: { prompt: "Review the change." } }
     if (method === "altimate_core.review_ai_parse") {
       parseCalls++
-      return { data: { findings: [] } }
+      return parseResult
     }
     throw new Error(`unexpected dispatcher method: ${method}`)
   })
@@ -52,7 +52,8 @@ describe("runAiReview model selection", () => {
       allowSessionModel: false,
     })
 
-    expect(result).toEqual({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
+    expect(result).toMatchObject({ findings: [], status: "skipped", reason: NO_MODEL_REASON, promptChars: 0 })
+    expect(result.durationMs).toBeGreaterThanOrEqual(0)
     expect(defaultModel).not.toHaveBeenCalled()
     expect(getModel).not.toHaveBeenCalled()
     expect(dispatcher).not.toHaveBeenCalled()
@@ -71,7 +72,7 @@ describe("runAiReview model selection", () => {
       allowSessionModel: false,
     })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "error",
       reason:
@@ -100,7 +101,7 @@ describe("runAiReview model selection", () => {
       sessionModel: "openrouter/openai/gpt-5",
     })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "skipped",
       reason: "reviewer prompt unavailable",
@@ -149,10 +150,10 @@ describe("runAiReview stream handling", () => {
       timeoutMs: 5,
     })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "timeout",
-      reason: "timed out after 0.005s",
+      reason: "timed out after 0.005s (raise aiTimeoutSeconds / --ai-timeout)",
       model: "test-provider/test-model",
     })
     expect(stream).not.toHaveBeenCalled()
@@ -168,7 +169,7 @@ describe("runAiReview stream handling", () => {
         return nativeSetTimeout(callback, delay, ...args)
       }) as any,
     )
-    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+    const stream = spyOn(LLM as any, "stream").mockImplementation(async () => ({
       fullStream: {
         async *[Symbol.asyncIterator]() {},
       },
@@ -181,8 +182,123 @@ describe("runAiReview stream handling", () => {
       allowSessionModel: true,
     })
 
-    expect(result).toEqual({ findings: [], status: "ok", model: "test-provider/test-model" })
-    expect(delays).toContain(100_000)
+    expect(result).toMatchObject({ findings: [], status: "ok", model: "test-provider/test-model" })
+    const request = stream.mock.calls[0][0] as { messages: Array<{ content: string }> }
+    expect(result.promptChars).toBe(request.messages[0]!.content.length)
+    expect(delays).toContain(200_000)
+    expect(stream.mock.calls[0][0]).toMatchObject({ maxOutputTokens: 8_192 })
+  })
+
+  test("passes an explicit output budget to the LLM stream", async () => {
+    stubModelAndPrompt()
+    const stream = spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {},
+      },
+      text: Promise.resolve("[]"),
+    }))
+
+    await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      allowSessionModel: true,
+      maxOutputTokens: 12_288,
+    })
+
+    expect(stream.mock.calls[0][0]).toMatchObject({ maxOutputTokens: 12_288 })
+  })
+
+  test("reports provider usage, including reasoning tokens from provider metadata", async () => {
+    stubModelAndPrompt()
+    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "finish-step",
+            finishReason: "stop",
+            rawFinishReason: "stop",
+            usage: { inputTokens: 321, outputTokens: 144 },
+            providerMetadata: {
+              openai: { usage: { completion_tokens_details: { reasoning_tokens: 89 } } },
+            },
+          }
+          yield {
+            type: "finish",
+            finishReason: "stop",
+            rawFinishReason: "stop",
+            totalUsage: { inputTokens: 321, outputTokens: 144 },
+          }
+        },
+      },
+      text: Promise.resolve("[]"),
+    }))
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
+
+    expect(result).toMatchObject({
+      status: "ok",
+      promptTokens: 321,
+      completionTokens: 144,
+      reasoningTokens: 89,
+    })
+  })
+
+  test("reports a truncation error instead of partial findings", async () => {
+    const parseCalls = stubModelAndPrompt()
+    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "finish",
+            finishReason: "length",
+            rawFinishReason: "max_tokens",
+            totalUsage: { inputTokens: 500, outputTokens: 4_096 },
+          }
+        },
+      },
+      text: Promise.resolve('[{"file":"models/model_0.sql","title":"partial","body":"partial"}]'),
+    }))
+
+    const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
+
+    expect(result).toMatchObject({
+      findings: [],
+      status: "error",
+      reason: "output truncated at 4096 tokens (raise aiMaxOutputTokens)",
+      completionTokens: 4_096,
+    })
+    expect(parseCalls()).toBe(1)
+  })
+
+  test("reports max_tokens truncation when the core parser fails", async () => {
+    const parseCalls = stubModelAndPrompt({ success: false, data: {}, error: "invalid JSON" })
+    spyOn(LLM as any, "stream").mockImplementation(async () => ({
+      fullStream: {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "finish-step",
+            finishReason: "other",
+            rawFinishReason: "max_tokens",
+            usage: {},
+          }
+        },
+      },
+      text: Promise.resolve("["),
+    }))
+
+    const result = await runAiReview({
+      files: [reviewFile(0)],
+      grounding: [],
+      allowSessionModel: true,
+      maxOutputTokens: 6_144,
+    })
+
+    expect(result).toMatchObject({
+      findings: [],
+      status: "error",
+      reason: "output truncated at 6144 tokens (raise aiMaxOutputTokens)",
+    })
+    expect(parseCalls()).toBe(1)
   })
 
   test("treats whitespace-only model output as an empty response", async () => {
@@ -196,7 +312,7 @@ describe("runAiReview stream handling", () => {
 
     const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "error",
       reason: "empty response",
@@ -225,7 +341,7 @@ describe("runAiReview stream handling", () => {
 
     const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
+    expect(result).toMatchObject({ findings: [], status: "skipped", reason: NO_MODEL_REASON })
     expect(stream).not.toHaveBeenCalled()
   })
 
@@ -258,10 +374,10 @@ describe("runAiReview stream handling", () => {
     const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
     expect(signal?.aborted).toBe(true)
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "timeout",
-      reason: "timed out after 62s",
+      reason: "timed out after 124s (raise aiTimeoutSeconds / --ai-timeout)",
       model: "test-provider/test-model",
     })
     expect(parseCalls()).toBe(0)
@@ -292,10 +408,10 @@ describe("runAiReview stream handling", () => {
 
     const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "timeout",
-      reason: "timed out after 62s",
+      reason: "timed out after 124s (raise aiTimeoutSeconds / --ai-timeout)",
       model: "test-provider/test-model",
     })
     expect(textRead).toBe(false)
@@ -322,10 +438,10 @@ describe("runAiReview stream handling", () => {
 
     const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "timeout",
-      reason: "timed out after 62s",
+      reason: "timed out after 124s (raise aiTimeoutSeconds / --ai-timeout)",
       model: "test-provider/test-model",
     })
     expect(parseCalls()).toBe(0)
@@ -350,7 +466,7 @@ describe("runAiReview stream handling", () => {
 
     const result = await runAiReview({ files: [reviewFile(0)], grounding: [], allowSessionModel: true })
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       findings: [],
       status: "error",
       reason: "Error: upstream failed at <redacted-url> using sk-***",
