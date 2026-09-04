@@ -4,26 +4,19 @@
 // of the six planned implementer suites — see
 // docs/internal/2026-09-04-altimate-base-e2e-harness-plan.md, Deliverable 3, for that partition.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { randomBytes } from "node:crypto"
-import { isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
+import { consented, isolateAltimateBaseHome, resetGatewayEnv } from "./_fixtures/altimate-base-harness"
 import { FakeGateway, GATEWAY_URL } from "./_fixtures/fake-gateway"
 
 isolateAltimateBaseHome("altimate-base-harness-smoke")
 
 const { FreeTier } = await import("../../src/altimate/free/client")
 const { FreeTierStore } = await import("../../src/altimate/free/store")
-const { FreeTierCapability } = await import("../../src/altimate/free/capability")
 
-// This file plays the role of the TUI host, exactly like `altimate-base.test.ts` does: it claims
-// the process's ONE arming capability once, at module scope, and uses it to mint a fresh one-shot
-// consent token before every registration below.
-const armProductionConsent = FreeTierCapability.issueArmer()
-function consented(): string {
-  const token = randomBytes(32).toString("hex")
-  armProductionConsent(token)
-  return token
-}
-
+// This file plays the role of the TUI host, exactly like `altimate-base.test.ts` does. Minting a
+// consent token goes through the shared `consented()` helper in `_fixtures/altimate-base-harness.ts`,
+// which claims the process's ONE arming capability lazily and caches it — see that file for why
+// (running multiple suite files in one `bun test` worker process means only the first call to
+// `issueArmer()` may succeed).
 const gateway = new FakeGateway()
 
 beforeEach(async () => {

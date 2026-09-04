@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { consented } from "./_fixtures/altimate-base-harness"
 
 const isolatedEnvironment = [
   "XDG_DATA_HOME",
@@ -73,19 +74,14 @@ afterAll(() => {
   fs.rmSync(temporaryHome, { recursive: true, force: true })
 })
 
-// This test file plays the role of the TUI host: it claims `issueArmer()` — the process's ONE
-// arming capability, exactly as `cli/tui/worker.ts` does at boot — and uses it to arm a fresh
-// one-shot token before every registration attempt below. Every `FreeTier.registerAfterConsent`
-// call in this file therefore goes through the SAME path production does; nothing here
-// constructs a private, independent store that `registerAfterConsent` would actually trust (see
-// "unforgeable consent" below for a direct test of that property).
-const armProductionConsent = FreeTierCapability.issueArmer()
-
-function consented(): string {
-  const token = randomBytes(32).toString("hex")
-  armProductionConsent(token)
-  return token
-}
+// This test file plays the role of the TUI host: minting a consent token goes through the shared
+// `consented()` helper in `_fixtures/altimate-base-harness.ts`, which claims `issueArmer()` — the
+// process's ONE arming capability, exactly as `cli/tui/worker.ts` does at boot — lazily and caches
+// it, so every suite file sharing this process gets the SAME armer instead of each one claiming it
+// independently (which would throw on the second file). Every `FreeTier.registerAfterConsent` call
+// in this file therefore goes through the SAME path production does; nothing here constructs a
+// private, independent store that `registerAfterConsent` would actually trust (see "unforgeable
+// consent" below for a direct test of that property).
 
 describe("gateway configuration", () => {
   test("requires source-mode configuration and prefers the new override", () => {
