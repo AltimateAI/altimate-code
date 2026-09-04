@@ -251,16 +251,27 @@ export namespace SystemPrompt {
    * `Project.fromDirectory` reports `/` as the worktree for a directory belonging to no git
    * project — a sentinel meaning "no project", not a tree to search. Matching against it
    * auto-loads a skill because an unrelated file exists elsewhere on the machine: an empty
-   * directory picked up the dbt skills from any `dbt_project.yml` anywhere on disk. Fall back
-   * to the directory the session is actually running in.
+   * directory picked up the dbt skills from any `dbt_project.yml` anywhere on disk.
+   *
+   * `/` is only that sentinel when there is no VCS. A git repository genuinely rooted at `/`
+   * reports the same worktree but with `vcs: "git"`, and must keep scanning from its root —
+   * the same distinction `fromDirectory` itself draws when it chooses the value.
+   *
+   * The fallback deliberately narrows to at-or-below the session directory. Outside a repo
+   * there is no project boundary to walk up to, so anything wider is a guess about which of
+   * the machine's files are "this project"; the previous behaviour made that guess and got it
+   * wrong. A marker file above the cwd no longer auto-loads its skill in that case, which is
+   * the intended trade against loading skills from unrelated directories.
    */
-  export function autoLoadScanRoot(worktree: string, directory: string): string {
-    return worktree === "/" ? directory : worktree
+  export function autoLoadScanRoot(worktree: string, directory: string, vcs: string | undefined): string {
+    return worktree === "/" && !vcs ? directory : worktree
   }
 
   async function anyMatchInWorktree(globs: string[]): Promise<boolean> {
-    // Search from worktree root so a skill that wants `dbt_project.yml`
-    // catches the file no matter how deep the user's cwd is.
+    // Search from the worktree root, so a skill that wants `dbt_project.yml` catches the file
+    // no matter how deep the user's cwd is — within a project. Outside one there is no root to
+    // search and `autoLoadScanRoot` falls back to the session directory; see its docstring for
+    // why that narrowing is deliberate.
     // Errors propagate to the caller's try/catch (collectAutoLoadedSkills)
     // so the warning log there actually fires.
     // `Glob.exists` rather than `scan(...).length > 0`: this only needs to know whether any
@@ -268,7 +279,7 @@ export namespace SystemPrompt {
     // paid once per `applyPaths` skill — two ship builtin — and the root is the worktree, which
     // is `/` for a directory outside any git repo. Measured from such a directory, the two
     // scans were ~45s of a ~51s startup, all of it before the first token.
-    const root = autoLoadScanRoot(Instance.worktree, Instance.directory)
+    const root = autoLoadScanRoot(Instance.worktree, Instance.directory, Instance.project.vcs)
     for (const g of globs) {
       if (
         await Glob.exists(g, {
