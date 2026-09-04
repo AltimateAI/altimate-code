@@ -241,6 +241,19 @@ export namespace SystemPrompt {
     return v.filter((s) => typeof s === "string" && s.length > 0)
   }
 
+  /**
+   * Directory an `applyPaths` glob is matched against.
+   *
+   * `Project.fromDirectory` reports `/` as the worktree for a directory belonging to no git
+   * project — a sentinel meaning "no project", not a tree to search. Matching against it
+   * auto-loads a skill because an unrelated file exists elsewhere on the machine: an empty
+   * directory picked up the dbt skills from any `dbt_project.yml` anywhere on disk. Fall back
+   * to the directory the session is actually running in.
+   */
+  export function autoLoadScanRoot(worktree: string, directory: string): string {
+    return worktree === "/" ? directory : worktree
+  }
+
   async function anyMatchInWorktree(globs: string[]): Promise<boolean> {
     // Search from worktree root so a skill that wants `dbt_project.yml`
     // catches the file no matter how deep the user's cwd is.
@@ -251,7 +264,7 @@ export namespace SystemPrompt {
     // paid once per `applyPaths` skill — two ship builtin — and the root is the worktree, which
     // is `/` for a directory outside any git repo. Measured from such a directory, the two
     // scans were ~45s of a ~51s startup, all of it before the first token.
-    const root = Instance.worktree
+    const root = autoLoadScanRoot(Instance.worktree, Instance.directory)
     for (const g of globs) {
       if (
         await Glob.exists(g, {
