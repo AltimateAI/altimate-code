@@ -45,6 +45,11 @@ describe("check-known-tsc-failure.sh", () => {
     expect(run(`${drifted}\n${TSC_TAIL}\n`)).toBe(0)
   })
 
+  it("rejects the identical diagnostic text surfacing in a SECOND file (filename stays in the set)", () => {
+    const secondFile = KNOWN.replace("src/v2/client.ts", "src/v2/gen/sdk.gen.ts")
+    expect(run(`${KNOWN}\n${secondFile}\n${TSC_TAIL}\n`)).toBe(3)
+  })
+
   it("rejects the known diagnostic accompanied by a NEW one", () => {
     const extra = `src/v2/other.ts(1,1): error TS2551: Property 'x' does not exist on type 'Y'.`
     expect(run(`${KNOWN}\n${extra}\n${TSC_TAIL}\n`)).toBe(3)
