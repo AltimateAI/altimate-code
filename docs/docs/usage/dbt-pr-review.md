@@ -232,7 +232,7 @@ jobs:
           #                      model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # …or use the default free gateway model:
           # altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
-          # altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}
+          # altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}   # provided with the key
 ```
 
 Without `target-base/compiled`, base-vs-head equivalence is undecidable; the
@@ -268,8 +268,8 @@ with:
 
 Route C configures the OpenAI-compatible Altimate gateway. It defaults to the
 free `altimate-base` model; use `ai_model: altimate-gateway/altimate-pro` to
-select the pro model. The gateway URL is required, has no default, and must use
-HTTPS:
+select the pro model. Altimate provides the gateway URL together with the key;
+store it as a repository variable. It must use HTTPS:
 
 ```yaml
 with:

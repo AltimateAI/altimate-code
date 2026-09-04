@@ -110,7 +110,7 @@ jobs:
           #
           # Route C — default free gateway model (use instead of Routes A/B):
           # altimate_gateway_key: ${{ secrets.ALTIMATE_GATEWAY_KEY }}
-          # altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}
+          # altimate_gateway_url: ${{ vars.ALTIMATE_GATEWAY_URL }}   # provided with the key
           #
           # Omit all routes entirely to run a deterministic-only review (no AI comments).
 

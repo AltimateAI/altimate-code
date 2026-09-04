@@ -138,6 +138,9 @@ Replies on a finding open an altimate-code session with the finding, compiled SQ
 - Make the compiled resolver use the artifact directories the fidelity probe accepted when an integration supplies a custom `getContent` (`run.ts`).
 - Check core parse success before reporting the AI lane as `ok` (`ai-review.ts`).
 
+## 7a. Gateway route status (2026-09-04)
+The gateway now has a production hostname (staging is deprecated; the hostname is internal and is recorded in the private ops notes, not in this public repo). The action keeps `altimate_gateway_url` as an input with no default; the URL is provided with the key and stored as a repository variable. **Blocker found on 2026-09-04:** the production hostname was pointed at the former staging VM, whose nginx still serves the certificate issued for the staging name, so every verifying HTTPS client refuses the production name; the issuer and LiteLLM answer correctly behind it. Reissue the certificate for the production name (and update the VM's TLS env and `PUBLIC_GATEWAY_URL`, then force-recreate the containers) before anyone enables Route C. A live AI review through the gateway has therefore not been run.
+
 ## 8. Not verified
 - The wrong-PR posting in #1320: the base-ref bug is confirmed; PR-number resolution reads the event correctly, so the misdirection needs a repro against the dogfood workflow's exact trigger.
 - The AI layer's output quality: no run in this investigation had credentials for it.
