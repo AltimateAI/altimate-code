@@ -1558,14 +1558,20 @@ export namespace Telemetry {
   // Each match replaces with a fixed redaction so length-based fingerprinting
   // can't reconstruct the original token.
 
-  export function maskString(s: string): string {
+  // altimate_change start — maskPaths opt-out for callers that redact on their
+  // own terms (see compaction.ts::redactLedgerDetail). Default true keeps
+  // every existing caller's behavior byte-for-byte unchanged; only a caller
+  // that explicitly passes maskPaths:false skips the #1117 path-masking pass,
+  // and every other rule (api keys, bearer tokens, emails, internal hosts,
+  // quote collapsing) still applies.
+  export function maskString(s: string, opts?: { maskPaths?: boolean }): string {
     // Consumers truncate masked output to <= 2000 chars; masking beyond 8 KB
     // buys nothing, and unbounded input is what turns any super-linear rule
     // into a stall. Input is cut FIRST so every rule — the linear credential/
     // quote passes included — does bounded work, and the cut must never fail
     // a rule open across the boundary. No floor gates any of this: a floor is
     // a leak past the floor.
-    if (s.length <= PM_CAP) return pmMask(s)
+    if (s.length <= PM_CAP) return pmMask(s, opts)
     // the head ends at whitespace of any kind, so no token straddles it (a
     // head with no whitespace at all is one token: nothing is emitted)
     const ws = s.slice(0, PM_CAP).search(/\s\S*$/)
@@ -1583,17 +1589,18 @@ export namespace Telemetry {
     // masked the same way with and without the continuation, cut back to
     // whitespace. Whatever the continuation changes is dropped, never
     // emitted half-proven.
-    const alone = pmMask(head)
-    const seen = pmMask(s.slice(0, at + PM_LOOKAHEAD))
+    const alone = pmMask(head, opts)
+    const seen = pmMask(s.slice(0, at + PM_LOOKAHEAD), opts)
     let n = 0
     while (n < alone.length && alone[n] === seen[n]) n++
     if (n === alone.length) return alone
     const back = alone.slice(0, n).search(/\s\S*$/)
     return back >= 0 ? alone.slice(0, back).trimEnd() : ""
   }
+  // altimate_change end
 
   // the masking chain proper, on bounded input (see maskString)
-  function pmMask(s: string): string {
+  function pmMask(s: string, opts?: { maskPaths?: boolean }): string {
     let out = s
       // ANSI CSI sequences (colored subprocess stderr) would otherwise split
       // tokens so neither credential nor path rules can see them
@@ -1604,7 +1611,13 @@ export namespace Telemetry {
       .replace(/"(?:[^"\\]|\\.)*"/g, "?")
     // Fast path: a string with no separator cannot contain a path — skip the
     // whole path stack (most telemetry strings carry no path at all).
-    if (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Z]:[^\s:\\\/]{1,255}\.[A-Za-z]/.test(out)) {
+    // altimate_change — maskPaths:false (see maskString) skips this whole
+    // pass; every other rule in pmMask still runs.
+    const maskPaths = opts?.maskPaths ?? true
+    if (
+      maskPaths &&
+      (out.includes("/") || out.includes("\\") || /(?<![A-Za-z0-9])[A-Z]:[^\s:\\\/]{1,255}\.[A-Za-z]/.test(out))
+    ) {
       out = out
       // altimate_change start — mask filesystem paths in error text
       // Six masking rules (cloud URIs, Windows home, Windows/UNC incl. .\ and

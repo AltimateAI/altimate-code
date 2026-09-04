@@ -439,6 +439,25 @@ describe("SessionCompaction.renderLedger", () => {
     expect(SessionCompaction.redactLedgerDetail("curlywurly -u alice script.py")).toBe("curlywurly -u alice script.py")
   })
 
+  test("does not leak credentials via a path-qualified curl and the space-separated -u idiom (regression, #1117)", () => {
+    // #1117 added a filesystem-path masking rule to Telemetry.maskString.
+    // redactLedgerDetail used to call maskString BEFORE its own curl-context
+    // lookback, so `/usr/bin/curl` collapsed to `<path>` first. The `curl`
+    // token was gone by the time the lookback ran: curlContext came back
+    // false, `-u alice hunter2` (space-separated, non-colon-shaped) isn't
+    // credentialShaped either, and the credential passed through untouched
+    // into ledger text that later gets persisted into a model prompt across
+    // compaction. This is the exact adversarial shape of that leak.
+    for (const command of [
+      "/usr/bin/curl -u alice hunter2 https://example.com",
+      "/usr/local/bin/curl.exe -u alice hunter2 https://example.com",
+    ]) {
+      const detail = SessionCompaction.redactLedgerDetail(command)
+      expect(detail).not.toContain("alice")
+      expect(detail).not.toContain("hunter2")
+    }
+  })
+
   test("keeps non-credential colon-shaped values outside a curl context", () => {
     // `1000:1000` has no alphabetic character before the colon, so it is a
     // UID:GID pair rather than user:password and must survive in the ledger.

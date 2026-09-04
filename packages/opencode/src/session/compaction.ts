@@ -667,9 +667,49 @@ export namespace SessionCompaction {
     return SENSITIVE_NAME.test(name)
   }
 
+  // altimate_change — the flag+value regex used both to redact `-u`/`--user`
+  // below and (via redactLedgerDetail's raw-value precomputation) to locate
+  // the same occurrences in the pre-mask text. Shared so the two passes stay
+  // in lockstep by construction instead of by copy-pasted duplication.
+  const USER_FLAG_RE =
+    /(^|\s)(--user|-u)(?:(=|\s+)("[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))(?:(\s+)("[^"]*"|'[^']*'|[^\s,;]+))?/gi
+
+  function isCurlContext(segment: string): boolean {
+    // Windows invokes curl as `curl.exe`, and either platform may reach it
+    // through a path such as /usr/bin/curl or a Windows System32 path.
+    // Missing those spellings left the `-u` VALUE unredacted.
+    return /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(segment)
+  }
+
   export function redactLedgerDetail(value: string): string {
     const sensitiveName = SENSITIVE_NAME
-    let masked = Telemetry.maskString(value)
+    // altimate_change — keep the filesystem-path masking pass OFF here. Left
+    // on, it collapses a path-qualified command like `/usr/bin/curl` down to
+    // `<path>` before the curlContext lookback below ever runs, which both
+    // destroys the write paths this ledger exists to report AND — the actual
+    // security bug — erases the `curl` token the lookback needs, so a
+    // path-qualified `curl -u user password` credential slips through
+    // unredacted. Every other telemetry mask (api keys, bearer tokens,
+    // emails, internal hosts, quote collapsing) still applies.
+    let masked = Telemetry.maskString(value, { maskPaths: false })
+
+    // altimate_change start — belt-and-suspenders curl detection. Derive
+    // curlContext for each `-u`/`--user` occurrence from the RAW, pre-mask
+    // `value` as well as from `masked`. maskPaths:false above is what keeps
+    // the `curl` token intact today; this makes detection structurally
+    // independent of that single flag, so a future masking rule that happens
+    // to eat the command-name token can't quietly reopen this leak. The two
+    // occurrence lists are correlated by ordinal position (same regex, same
+    // match order); if a prior mask ever changes how many times the pattern
+    // matches, this safely falls back to the masked-only signal — no worse
+    // than before this change.
+    const rawCurlByOrdinal = [...value.matchAll(USER_FLAG_RE)].map((m) =>
+      isCurlContext(shellSegmentBefore(value, m.index + m[1].length)),
+    )
+    const maskedOccurrenceCount = [...masked.matchAll(USER_FLAG_RE)].length
+    const ordinalsAligned = maskedOccurrenceCount === rawCurlByOrdinal.length
+    let ordinal = 0
+    // altimate_change end
 
     // `-u` is also a benign flag for commands such as `git push -u` and
     // `python -u`. Redact it as authentication only in the current curl shell
@@ -677,7 +717,7 @@ export namespace SessionCompaction {
     // `--user` follows the same rule so task literals are not discarded merely
     // because an unrelated CLI chose that option name.
     masked = masked.replace(
-      /(^|\s)(--user|-u)(?:(=|\s+)("[^"]*"|'[^']*'|[^\s,;]+)|([^\s,;]+))(?:(\s+)("[^"]*"|'[^']*'|[^\s,;]+))?/gi,
+      USER_FLAG_RE,
       (
         match,
         lead: string,
@@ -690,13 +730,17 @@ export namespace SessionCompaction {
         offset: number,
         whole: string,
       ) => {
+        // altimate_change — capture and advance the ordinal before any early
+        // return so it always tracks this callback's position in `masked`'s
+        // match sequence, matching how rawCurlByOrdinal was built.
+        const currentOrdinal = ordinal++
         // Attached values are valid only for short `-u` (`-ualice:pass`).
         if (flag.toLowerCase() === "--user" && separator === undefined) return match
         const rawValue = (separatedValue ?? attachedValue ?? "").replace(/^["']|["']$/g, "")
-        // Windows invokes curl as `curl.exe`, and either platform may reach it
-        // through a path such as /usr/bin/curl or a Windows System32 path.
-        // Missing those spellings left the `-u` VALUE unredacted.
-        const curlContext = /(?:^|[\s/\\])curl(?:\.exe)?(?=\s|$)/i.test(shellSegmentBefore(whole, offset + lead.length))
+        const maskedCurlContext = isCurlContext(shellSegmentBefore(whole, offset + lead.length))
+        // altimate_change — OR in the raw-value signal (see block above).
+        const curlContext =
+          maskedCurlContext || (ordinalsAligned && (rawCurlByOrdinal[currentOrdinal] ?? false))
         // Outside a curl context a colon-shaped value is treated as
         // user:password. The ONE exemption is an explicitly recognized
         // all-numeric UID:GID pair (`docker run --user 1000:1000`), which is a
