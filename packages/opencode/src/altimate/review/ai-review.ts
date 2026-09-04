@@ -76,13 +76,19 @@ function errorReason(err: unknown): string {
     err instanceof Error ? (err.name && err.name !== "Error" ? err.name : err.constructor.name || "Error") : "Error"
   const message = err instanceof Error ? err.message : String(err)
   const raw = message && message !== name ? `${name}: ${message}` : name
+  return redactReason(raw, 120)
+}
+
+/** Every reason that can reach a PR comment passes through here: URLs, API
+ *  keys and bearer tokens are masked and whitespace collapsed before the cut. */
+function redactReason(raw: string, max: number): string {
   const clean = raw
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<redacted-url>")
     .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
     .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
     .replace(/\s+/g, " ")
     .trim()
-  return truncateAtWord(clean, 120)
+  return truncateAtWord(clean, max)
 }
 
 /** Cut at the last word boundary before `max` and mark the cut, so a rendered
@@ -280,7 +286,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
       return finish({
         findings: [],
         status: "error",
-        reason: `reviewer prompt failed: ${truncateAtWord(setupResult.promptError ?? "core prompt failed", 160)}`,
+        reason: `reviewer prompt failed: ${redactReason(setupResult.promptError ?? "core prompt failed", 160)}`,
       })
     }
     if ("modelError" in setupResult) {

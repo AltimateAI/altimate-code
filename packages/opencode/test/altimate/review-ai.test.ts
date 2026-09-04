@@ -119,10 +119,12 @@ describe("runAiReview model selection", () => {
       modelID: "openai/gpt-5",
     })
     // The native handler catches its own exception and reports it this way.
+    // The message may carry internal URLs; it must be redacted like every
+    // other reason that reaches a PR comment.
     spyOn(Dispatcher as any, "call").mockResolvedValue({
       success: false,
       data: {},
-      error: "prompt template missing",
+      error: "prompt template missing at https://core.internal/prompts/review?token=abc123",
     })
 
     const result = await runAiReview({
@@ -135,7 +137,7 @@ describe("runAiReview model selection", () => {
     expect(result).toMatchObject({
       findings: [],
       status: "error",
-      reason: "reviewer prompt failed: prompt template missing",
+      reason: "reviewer prompt failed: prompt template missing at <redacted-url>",
       model: "openrouter/openai/gpt-5",
     })
     expect(defaultModel).not.toHaveBeenCalled()
