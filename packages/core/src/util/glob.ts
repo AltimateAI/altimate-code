@@ -1,4 +1,4 @@
-import { glob, globSync, type GlobOptions } from "glob"
+import { glob, globSync, globIterate, type GlobOptions } from "glob"
 import { minimatch } from "minimatch"
 
 export namespace Glob {
@@ -61,6 +61,16 @@ export namespace Glob {
       // altimate_change end
     }
   }
+
+  // altimate_change start — upstream_fix: existence check that stops at the first match.
+  // `scan` resolves only once the whole walk is done, so a caller asking "does anything
+  // match?" pays for the entire tree even when the first directory answers it. `globIterate`
+  // yields lazily, so this abandons the walk as soon as one path matches.
+  export async function exists(pattern: string, options: Options = {}): Promise<boolean> {
+    for await (const _ of globIterate(pattern, toGlobOptions(options))) return true
+    return false
+  }
+  // altimate_change end
 
   export async function scan(pattern: string, options: Options = {}): Promise<string[]> {
     return glob(pattern, toGlobOptions(options)) as Promise<string[]>
