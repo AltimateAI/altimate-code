@@ -92,6 +92,8 @@ export const AiReviewSummary = z.object({
   findings: z.number().int().nonnegative(),
   /** Effective provider/model used by the advisory lane. */
   model: z.string().optional(),
+  /** Per-request reasoning level used by the advisory lane. */
+  reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high"]).optional(),
   durationMs: z.number().int().nonnegative().optional(),
   promptChars: z.number().int().nonnegative().optional(),
   promptTokens: z.number().int().nonnegative().optional(),

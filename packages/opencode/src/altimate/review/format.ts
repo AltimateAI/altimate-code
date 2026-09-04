@@ -167,20 +167,21 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
 
   if (env.summary.aiReview) {
     const ai = env.summary.aiReview
-    // Name the model on every status so a reader can tell which model ran, timed out or failed.
-    const model = ai.model ? ` (${ai.model})` : ""
+    // Name the model and configured reasoning on every status so a reader can tell what ran.
+    const details = [ai.model, ai.reasoningEffort ? `reasoning: ${ai.reasoningEffort}` : undefined].filter(Boolean)
+    const context = details.length ? ` (${details.join(", ")})` : ""
     const duration = ai.durationMs === undefined ? "" : ` · ${Math.round(ai.durationMs / 1_000)}s`
     if (ai.status === "ok") {
       lines.push(
-        `🤖 AI reviewer${model}: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}${duration}`,
+        `🤖 AI reviewer${context}: ${ai.findings} advisory finding${ai.findings === 1 ? "" : "s"}${duration}`,
         "",
       )
     } else if (ai.status === "skipped") {
-      lines.push(`🤖 AI reviewer${model}: skipped${ai.reason ? ` — ${ai.reason}` : ""}${duration}`, "")
+      lines.push(`🤖 AI reviewer${context}: skipped${ai.reason ? ` — ${ai.reason}` : ""}${duration}`, "")
     } else if (ai.status === "timeout") {
-      lines.push(`🤖 AI reviewer${model}: ${ai.reason ?? "timed out"}${duration}`, "")
+      lines.push(`🤖 AI reviewer${context}: ${ai.reason ?? "timed out"}${duration}`, "")
     } else {
-      lines.push(`🤖 AI reviewer${model}: error${ai.reason ? ` — ${ai.reason}` : ""}${duration}`, "")
+      lines.push(`🤖 AI reviewer${context}: error${ai.reason ? ` — ${ai.reason}` : ""}${duration}`, "")
     }
   }
 

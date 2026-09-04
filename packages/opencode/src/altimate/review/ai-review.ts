@@ -8,7 +8,7 @@ import { Log } from "@/altimate/util/log"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
 import { NO_MODEL_REASON, type AiReviewStatus } from "./verdict"
-import { DEFAULT_AI_MAX_OUTPUT_TOKENS } from "./config"
+import { DEFAULT_AI_MAX_OUTPUT_TOKENS, type AiReasoningEffort } from "./config"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -41,6 +41,8 @@ export interface AiReviewInput {
   timeoutMs?: number
   /** Total output budget, including reasoning tokens. */
   maxOutputTokens?: number
+  /** Per-request model reasoning level. Unset preserves the model default. */
+  reasoningEffort?: AiReasoningEffort
 }
 
 export interface AiReviewResult {
@@ -313,6 +315,7 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
         // Reasoning models spend from the same budget before emitting the JSON
         // array, so the advisory lane must reserve enough for both phases.
         maxOutputTokens,
+        reasoningEffort: input.reasoningEffort,
       }),
       abortPromise,
     ])

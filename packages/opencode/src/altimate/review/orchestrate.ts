@@ -11,7 +11,7 @@ import {
 import { type ChangedFile, classifyDbtFile, filterChangedFiles } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
-import { type ReviewConfig } from "./config"
+import { type AiReasoningEffort, type ReviewConfig } from "./config"
 import {
   type AiReviewSummary,
   type ReviewMode,
@@ -202,6 +202,8 @@ export interface OrchestrateInput {
   aiReview?: (input: AiReviewInput) => Promise<AiReviewResult>
   /** Explicit provider/model for the advisory lane, when configured. */
   aiModel?: string
+  /** Per-request reasoning level for the advisory lane, when configured. */
+  aiReasoningEffort?: AiReasoningEffort
   /** Whether this caller may fall back to its current session model. */
   allowSessionModel?: boolean
   /** Active provider/model supplied by the interactive tool context. */
@@ -1438,7 +1440,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // headless-without-model) — the review degrades to deterministic-only.
   let aiReviewSummary: AiReviewSummary | undefined
   if (!emptyScope && lanes.has("ai_review") && !aiLaneEnabled) {
-    aiReviewSummary = { status: "skipped", reason: "disabled by configuration", findings: 0 }
+    aiReviewSummary = {
+      status: "skipped",
+      reason: "disabled by configuration",
+      findings: 0,
+      reasoningEffort: input.aiReasoningEffort,
+    }
   } else if (!emptyScope && aiLaneEnabled) {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
@@ -1448,7 +1455,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       sql: ctx.engineNewSql ?? ctx.newSql,
     }))
     if (!input.aiReview) {
-      aiReviewSummary = { status: "skipped", reason: NO_MODEL_REASON, findings: 0 }
+      aiReviewSummary = {
+        status: "skipped",
+        reason: NO_MODEL_REASON,
+        findings: 0,
+        reasoningEffort: input.aiReasoningEffort,
+      }
     } else {
       try {
         const result = await input.aiReview({
@@ -1461,12 +1473,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           prBody: input.prBody,
           timeoutMs: input.aiTimeoutMs,
           maxOutputTokens: input.aiMaxOutputTokens,
+          reasoningEffort: input.aiReasoningEffort,
         })
         aiReviewSummary = {
           status: result.status,
           reason: result.reason,
           findings: 0,
           model: result.model,
+          reasoningEffort: input.aiReasoningEffort,
           durationMs: result.durationMs,
           promptChars: result.promptChars,
           promptTokens: result.promptTokens,
@@ -1484,7 +1498,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         }
       } catch {
         // A failed injected lane must never fail the review or leak exception text.
-        aiReviewSummary = { status: "error", reason: "AI reviewer failed", findings: 0 }
+        aiReviewSummary = {
+          status: "error",
+          reason: "AI reviewer failed",
+          findings: 0,
+          reasoningEffort: input.aiReasoningEffort,
+        }
       }
     }
   }

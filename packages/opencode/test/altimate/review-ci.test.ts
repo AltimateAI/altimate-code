@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "GITHUB_EVENT_PATH",
   "ALTIMATE_PR_NUMBER",
   "ALTIMATE_REVIEW_AI_MODEL",
+  "ALTIMATE_REVIEW_AI_REASONING",
   "ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS",
   "OPENCODE_CONFIG_CONTENT",
 ]
@@ -241,6 +242,41 @@ describe("review CLI command", () => {
     expect(review.mock.calls[0][0].aiTimeoutMs).toBeUndefined()
   })
 
+  test("passes AI reasoning with flag, environment, config fallback precedence and validates values", async () => {
+    await using tmp = await tmpdir({ git: true })
+    process.env.ALTIMATE_REVIEW_AI_REASONING = "low"
+    const review = spyOn(ReviewRun, "reviewPullRequest").mockResolvedValue(
+      buildEnvelope({ findings: [], tier: "trivial", mode: "comment" }),
+    )
+    spyOn(process.stdout, "write").mockImplementation(() => true)
+    const baseArgs = {
+      cwd: tmp.path,
+      base: "HEAD",
+      mode: "comment",
+      post: false,
+      json: true,
+      noAi: false,
+      explainTier: false,
+    }
+
+    await (ReviewCommand.handler as any)({ ...baseArgs, aiReasoning: "high" })
+    expect(review.mock.calls[0][0].aiReasoningEffort).toBe("high")
+
+    review.mockClear()
+    await (ReviewCommand.handler as any)({ ...baseArgs, aiReasoning: " \t " })
+    expect(review.mock.calls[0][0].aiReasoningEffort).toBe("low")
+
+    review.mockClear()
+    process.env.ALTIMATE_REVIEW_AI_REASONING = " \n "
+    await (ReviewCommand.handler as any)(baseArgs)
+    // Undefined delegates to reviewPullRequest's repository-config fallback.
+    expect(review.mock.calls[0][0].aiReasoningEffort).toBeUndefined()
+
+    await expect((ReviewCommand.handler as any)({ ...baseArgs, aiReasoning: "maximum" })).rejects.toThrow(
+      "--ai-reasoning / ALTIMATE_REVIEW_AI_REASONING must be one of: none, minimal, low, medium, high",
+    )
+  })
+
   test("prints the summary and exits successfully when GitHub rejects posting with 403", async () => {
     await using tmp = await tmpdir({ git: true })
     for (const k of ENV_KEYS) delete process.env[k]
@@ -420,10 +456,70 @@ describe("reviewPullRequest head handling", () => {
     expect(action).toContain('git merge-base "origin/$PR_BASE_REF" "${HEAD_REF:-$PR_HEAD_SHA}"')
     expect(action).toContain('args+=(--head "${HEAD_REF:-$PR_HEAD_SHA}")')
     expect(action).toContain('args+=(--ai-timeout "$ALTIMATE_ACTION_AI_TIMEOUT_SECONDS")')
+    expect(action).toContain('args+=(--ai-reasoning "$ALTIMATE_ACTION_AI_REASONING")')
   })
 })
 
 describe("advisory model configuration", () => {
+  test("declares, validates, and exports the optional AI reasoning input without a default", async () => {
+    await using tmp = await tmpdir()
+    const actionText = await Bun.file(path.resolve(import.meta.dir, "../../../../github/review/action.yml")).text()
+    const action = YAML.parse(actionText) as {
+      inputs: Record<string, { description: string; required: boolean; default?: string }>
+      runs: { steps: Array<{ name?: string; run?: string }> }
+    }
+    expect(action.inputs.ai_reasoning).toEqual({
+      description:
+        "Optional reasoning level for the advisory reviewer: none, minimal, low, medium or high. Unset leaves the model default (altimate-base thinks before answering).",
+      required: false,
+    })
+    const script = action.runs.steps.find(
+      (step) => step.name === "Configure advisory reviewer model + credentials",
+    )?.run
+    expect(script).toBeString()
+
+    const run = async (reasoning: string, index: string) => {
+      const githubEnv = path.join(tmp.path, `github-env-reasoning-${index}`)
+      const proc = Bun.spawn(["bash", "-c", script!], {
+        env: {
+          ...process.env,
+          HOME: tmp.path,
+          GITHUB_ENV: githubEnv,
+          IN_ALT_KEY: "",
+          IN_ALT_INSTANCE: "",
+          IN_ALT_URL: "",
+          IN_GATEWAY_KEY: "",
+          IN_GATEWAY_URL: "",
+          IN_MODEL: "",
+          IN_MODEL_API_KEY: "",
+          IN_AI_MODEL: "",
+          IN_AI_REASONING: reasoning,
+          IN_AI_TIMEOUT_SECONDS: "",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+      return { githubEnv, stdout, stderr, exitCode }
+    }
+
+    for (const value of ["none", "minimal", "low", "medium", "high"]) {
+      const result = await run(value, value)
+      expect(result.exitCode).toBe(0)
+      expect(await Bun.file(result.githubEnv).text()).toContain(`ALTIMATE_ACTION_AI_REASONING=${value}`)
+    }
+
+    const invalid = await run("maximum", "invalid")
+    expect(invalid.exitCode).toBe(1)
+    expect(invalid.stdout + invalid.stderr).toContain(
+      "::error::ai_reasoning must be one of: none, minimal, low, medium or high.",
+    )
+  })
+
   test("normalizes gateway URLs before appending the OpenAI-compatible /v1 path", async () => {
     await using tmp = await tmpdir()
     const actionText = await Bun.file(path.resolve(import.meta.dir, "../../../../github/review/action.yml")).text()

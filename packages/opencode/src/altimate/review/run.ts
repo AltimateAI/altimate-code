@@ -1,7 +1,7 @@
 import path from "node:path"
 import { readFile, readdir, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
-import { loadReviewConfig, resolveRubric } from "./config"
+import { loadReviewConfig, resolveRubric, type AiReasoningEffort } from "./config"
 import type { Severity } from "./finding"
 import { collectChangedFiles, makeContentResolver, defaultBaseRef, gitRepoRoot, manifestHash } from "./git"
 import { makeCompiledResolver, dbtProjectName } from "./compiled"
@@ -44,6 +44,8 @@ export interface ReviewPullRequestOptions {
   noAi?: boolean
   /** Override the advisory reviewer provider/model from config. */
   aiModel?: string
+  /** Override the advisory reviewer reasoning level from config. */
+  aiReasoningEffort?: AiReasoningEffort
   /** Override the advisory reviewer deadline. */
   aiTimeoutMs?: number
   /** Override the advisory reviewer output budget. */
@@ -351,6 +353,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // cannot depend on a model that this invocation will never use.
   if (opts.noAi) config.ai = false
   const aiModel = opts.aiModel ?? config.aiModel
+  const aiReasoningEffort = opts.aiReasoningEffort ?? config.aiReasoningEffort
   const aiTimeoutMs =
     opts.aiTimeoutMs ?? (config.aiTimeoutSeconds === undefined ? undefined : config.aiTimeoutSeconds * 1_000)
   const aiMaxOutputTokens = opts.aiMaxOutputTokens ?? config.aiMaxOutputTokens
@@ -514,6 +517,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
         ? async () => ({ findings: [], status: "skipped" as const, reason: "disabled by configuration" })
         : runAiReview,
     aiModel,
+    aiReasoningEffort,
     aiTimeoutMs,
     aiMaxOutputTokens,
     allowSessionModel,

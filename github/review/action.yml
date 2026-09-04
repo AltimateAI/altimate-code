@@ -60,6 +60,9 @@ inputs:
   ai_model:
     description: "Optional provider/model override within the selected Altimate action route."
     required: false
+  ai_reasoning:
+    description: "Optional reasoning level for the advisory reviewer: none, minimal, low, medium or high. Unset leaves the model default (altimate-base thinks before answering)."
+    required: false
   ai_timeout_seconds:
     description: "Optional AI reviewer timeout in seconds (10..1800). The Altimate gateway route defaults to 900 s."
     required: false
@@ -172,9 +175,15 @@ runs:
         IN_MODEL: ${{ inputs.model }}
         IN_MODEL_API_KEY: ${{ inputs.model_api_key }}
         IN_AI_MODEL: ${{ inputs.ai_model }}
+        IN_AI_REASONING: ${{ inputs.ai_reasoning }}
         IN_AI_TIMEOUT_SECONDS: ${{ inputs.ai_timeout_seconds }}
       run: |
         set -euo pipefail
+        AI_REASONING="${IN_AI_REASONING:-}"
+        if [[ -n "$AI_REASONING" && ! "$AI_REASONING" =~ ^(none|minimal|low|medium|high)$ ]]; then
+          echo "::error::ai_reasoning must be one of: none, minimal, low, medium or high."
+          exit 1
+        fi
         AI_TIMEOUT_SECONDS="${IN_AI_TIMEOUT_SECONDS:-}"
         if [[ -n "$AI_TIMEOUT_SECONDS" ]]; then
           if [[ ! "$AI_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] ||
@@ -237,6 +246,9 @@ runs:
         else
           echo "Advisory lane: no model/credentials provided — running deterministic-only."
         fi
+        if [[ -n "$AI_REASONING" ]]; then
+          echo "ALTIMATE_ACTION_AI_REASONING=$AI_REASONING" >> "$GITHUB_ENV"
+        fi
         if [[ -n "$AI_TIMEOUT_SECONDS" ]]; then
           echo "ALTIMATE_ACTION_AI_TIMEOUT_SECONDS=$AI_TIMEOUT_SECONDS" >> "$GITHUB_ENV"
         fi
@@ -282,6 +294,9 @@ runs:
         [[ "$IN_POST" == "true" ]] && args+=(--post)
         if [[ -n "${ALTIMATE_ACTION_AI_MODEL:-}" ]]; then
           args+=(--ai-model "$ALTIMATE_ACTION_AI_MODEL")
+        fi
+        if [[ -n "${ALTIMATE_ACTION_AI_REASONING:-}" ]]; then
+          args+=(--ai-reasoning "$ALTIMATE_ACTION_AI_REASONING")
         fi
         if [[ -n "${ALTIMATE_ACTION_AI_TIMEOUT_SECONDS:-}" ]]; then
           args+=(--ai-timeout "$ALTIMATE_ACTION_AI_TIMEOUT_SECONDS")

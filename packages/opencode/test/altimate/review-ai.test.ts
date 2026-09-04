@@ -189,7 +189,7 @@ describe("runAiReview stream handling", () => {
     expect(stream.mock.calls[0][0]).toMatchObject({ maxOutputTokens: 8_192 })
   })
 
-  test("passes an explicit output budget to the LLM stream", async () => {
+  test("passes an explicit output budget and reasoning level to the LLM stream", async () => {
     stubModelAndPrompt()
     const stream = spyOn(LLM as any, "stream").mockImplementation(async () => ({
       fullStream: {
@@ -203,9 +203,13 @@ describe("runAiReview stream handling", () => {
       grounding: [],
       allowSessionModel: true,
       maxOutputTokens: 12_288,
+      reasoningEffort: "minimal",
     })
 
-    expect(stream.mock.calls[0][0]).toMatchObject({ maxOutputTokens: 12_288 })
+    expect(stream.mock.calls[0][0]).toMatchObject({
+      maxOutputTokens: 12_288,
+      reasoningEffort: "minimal",
+    })
   })
 
   test("reports provider usage, including reasoning tokens from provider metadata", async () => {

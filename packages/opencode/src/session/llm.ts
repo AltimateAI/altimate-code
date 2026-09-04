@@ -57,9 +57,11 @@ export namespace LLM {
     tools: Record<string, Tool>
     retries?: number
     toolChoice?: "auto" | "required" | "none"
-    // altimate_change start — explicit output budget for callers such as the dbt PR review's
+    // altimate_change start — explicit request controls for callers such as the dbt PR review's
     // AI lane, whose reasoning models spend most of the default budget thinking before answering
     maxOutputTokens?: number
+    /** Provider reasoning level for this request; unset preserves the model default. */
+    reasoningEffort?: string
     // altimate_change end
   }
 
@@ -134,6 +136,9 @@ export namespace LLM {
     if (isCodex) {
       options.instructions = SystemPrompt.instructions()
     }
+    // altimate_change start — let advisory callers override reasoning for one request
+    if (input.reasoningEffort !== undefined) options.reasoningEffort = input.reasoningEffort
+    // altimate_change end
 
     // altimate_change start — pass maxOutputTokens INTO chat.params hook so plugins
     // (codex, github-copilot, third-party) can override it. Upstream PRs #21220 + #21225

@@ -1045,6 +1045,15 @@ describe("config", () => {
     expect(() => parseReviewConfig("aiModel: 'altimate-gateway/model with spaces'\n")).toThrow("provider/model")
   })
 
+  test("aiReasoningEffort accepts only supported reasoning levels", () => {
+    for (const value of ["none", "minimal", "low", "medium", "high"] as const) {
+      expect(parseReviewConfig(`aiReasoningEffort: ${value}\n`).aiReasoningEffort).toBe(value)
+    }
+    for (const value of ["off", "NONE", "maximum"]) {
+      expect(() => parseReviewConfig(`aiReasoningEffort: ${value}\n`)).toThrow()
+    }
+  })
+
   test("AI timeout and output budget accept only bounded integers", () => {
     expect(parseReviewConfig("aiTimeoutSeconds: 10\naiMaxOutputTokens: 512\n")).toMatchObject({
       aiTimeoutSeconds: 10,
@@ -1865,6 +1874,7 @@ describe("orchestrate", () => {
       getContent: content(sql),
       prTitle: "Add revenue mart",
       aiModel: "altimate-gateway/altimate-base",
+      aiReasoningEffort: "none",
       aiTimeoutMs: 180_000,
       aiMaxOutputTokens: 12_288,
       allowSessionModel: false,
@@ -1874,6 +1884,7 @@ describe("orchestrate", () => {
       aiReview: async (input) => {
         groundingSeen = input.grounding.length
         expect(input.model).toBe("altimate-gateway/altimate-base")
+        expect(input.reasoningEffort).toBe("none")
         expect(input.allowSessionModel).toBe(false)
         expect(input.sessionModel).toBe("openrouter/openai/gpt-5")
         expect(input.timeoutMs).toBe(180_000)
@@ -1924,6 +1935,7 @@ describe("orchestrate", () => {
       status: "ok",
       findings: 2,
       model: "altimate-gateway/altimate-base",
+      reasoningEffort: "none",
       durationMs: 142_000,
       promptChars: 24_000,
       promptTokens: 6_000,
@@ -1962,9 +1974,10 @@ describe("orchestrate", () => {
           status: "ok" as const,
           findings: 2,
           model: "altimate-gateway/altimate-base",
+          reasoningEffort: "none" as const,
           durationMs: 142_000,
         },
-        expected: "🤖 AI reviewer (altimate-gateway/altimate-base): 2 advisory findings · 142s",
+        expected: "🤖 AI reviewer (altimate-gateway/altimate-base, reasoning: none): 2 advisory findings · 142s",
       },
       {
         aiReview: {
@@ -2748,6 +2761,23 @@ describe("orchestrate", () => {
     const second = await runReview({ ...input, aiModel: "altimate-gateway/altimate-pro" })
 
     expect(first.policySignature).toBe(second.policySignature)
+  })
+
+  test("AI reasoning effort does not affect the policy signature", async () => {
+    const input = {
+      changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["ai_review"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment" as const,
+      runner: fakeRunner({}),
+      getContent: content("select 1"),
+      aiModel: "altimate-gateway/altimate-base",
+      aiReview: async () => ({ status: "ok" as const, findings: [] }),
+    }
+    const none = await runReview({ ...input, aiReasoningEffort: "none" })
+    const high = await runReview({ ...input, aiReasoningEffort: "high" })
+
+    expect(none.policySignature).toBe(high.policySignature)
   })
 
   test("one resolved changed model keeps a mixed-model run out of lint-only", async () => {

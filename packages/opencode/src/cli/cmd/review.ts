@@ -12,6 +12,11 @@ import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/pos
 import { classifyPostOutcome, emitReviewPostOutcome, emitReviewRun } from "../../altimate/review/telemetry"
 import type { ReviewMode } from "../../altimate/review/verdict"
 import type { Severity } from "../../altimate/review/finding"
+import {
+  AI_REASONING_EFFORTS,
+  AiReasoningEffort,
+  type AiReasoningEffort as AiReasoningEffortValue,
+} from "../../altimate/review/config"
 
 const MAX_GITHUB_PR_BODY_CHARS = 4_000
 
@@ -27,6 +32,18 @@ function boundedInteger(value: unknown, name: string, min: number, max: number):
     throw new Error(`${name} must be an integer between ${min} and ${max}`)
   }
   return parsed
+}
+
+function parseAiReasoningEffort(value: string | undefined): AiReasoningEffortValue | undefined {
+  const normalized = nonBlank(value)
+  if (normalized === undefined) return undefined
+  const parsed = AiReasoningEffort.safeParse(normalized)
+  if (!parsed.success) {
+    throw new Error(
+      `--ai-reasoning / ALTIMATE_REVIEW_AI_REASONING must be one of: ${AI_REASONING_EFFORTS.join(", ")}`,
+    )
+  }
+  return parsed.data
 }
 
 function requestStatus(err: unknown): number | undefined {
@@ -126,6 +143,11 @@ export const ReviewCommand = cmd({
         type: "string",
         describe: "provider/model for the advisory LLM reviewer lane (overrides config)",
       })
+      .option("ai-reasoning", {
+        type: "string",
+        choices: AI_REASONING_EFFORTS,
+        describe: "AI reviewer reasoning level (overrides environment and config)",
+      })
       .option("ai-timeout", {
         type: "number",
         describe: "AI reviewer timeout in seconds (10..1800; overrides environment and config)",
@@ -152,6 +174,9 @@ export const ReviewCommand = cmd({
       "--ai-timeout / ALTIMATE_REVIEW_AI_TIMEOUT_SECONDS",
       10,
       1800,
+    )
+    const aiReasoningEffort = parseAiReasoningEffort(
+      nonBlank(args.aiReasoning as string | undefined) ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_REASONING),
     )
     const aiMaxOutputTokens = boundedInteger(
       args.aiMaxOutputTokens,
@@ -185,6 +210,7 @@ export const ReviewCommand = cmd({
           noAi: args.noAi === true || args.ai === false,
           aiModel:
             nonBlank(args.aiModel as string | undefined) ?? nonBlank(process.env.ALTIMATE_REVIEW_AI_MODEL),
+          aiReasoningEffort,
           aiTimeoutMs: aiTimeoutSeconds === undefined ? undefined : aiTimeoutSeconds * 1_000,
           aiMaxOutputTokens,
           allowSessionModel: false,

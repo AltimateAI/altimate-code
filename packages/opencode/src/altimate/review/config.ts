@@ -7,6 +7,9 @@ import { ReviewMode } from "./verdict"
 import { Severity } from "./finding"
 
 export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 8_192
+export const AI_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const
+export const AiReasoningEffort = z.enum(AI_REASONING_EFFORTS)
+export type AiReasoningEffort = z.infer<typeof AiReasoningEffort>
 
 /**
  * Per-repo review configuration, read from `.altimate/review.yml` (the
@@ -36,6 +39,8 @@ export const ReviewConfig = z.object({
   // Model ids may themselves contain `/` (for example OpenRouter ids); the
   // provider parser deliberately splits only on the first slash.
   aiModel: z.string().regex(/^[^\s/]+\/\S+$/, "provider/model").optional(),
+  /** Per-request reasoning level. Unset leaves the model default unchanged. */
+  aiReasoningEffort: AiReasoningEffort.optional(),
   /** Advisory reviewer deadline. Unset uses the changed-file formula. */
   aiTimeoutSeconds: z.number().int().min(10).max(1800).optional(),
   /** Total output budget, including reasoning tokens for reasoning models. */
