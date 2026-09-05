@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "traceId": "019f1c56-a293-7000-8065-579ad0ff4de1",
+  "sessionId": "ses_0e3a95d6bffexTX5KtOaS4FOT9",
+  "startedAt": "2026-07-01T06:21:07.603Z",
+  "endedAt": "2026-07-01T06:22:06.692Z",
+  "metadata": {
+    "title": "\"say PONG\"\n",
+    "model": "google-vertex/claude-sonnet-4-6@default",
+    "providerId": "google-vertex",
+    "agent": "builder",
+    "prompt": "\"say PONG\"\n"
+  },
+  "spans": [
+    {
+      "spanId": "019f1c56-a296-7000-8ee0-1acd5c438ed6",
+      "parentSpanId": null,
+      "name": "ses_0e3a95d6bffexTX5KtOaS4FOT9",
+      "kind": "session",
+      "startTime": 1782886867603,
+      "status": "error",
+      "input": "\"say PONG\"\n",
+      "endTime": 1782886926692,
+      "statusMessage": "Process interrupted"
+    }
+  ],
+  "summary": {
+    "totalTokens": 0,
+    "totalCost": 0,
+    "totalToolCalls": 0,
+    "totalGenerations": 0,
+    "duration": 59089,
+    "status": "crashed",
+    "error": "Process interrupted",
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  }
+}

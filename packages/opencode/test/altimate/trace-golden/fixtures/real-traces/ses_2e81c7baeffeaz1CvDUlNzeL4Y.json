@@ -1,0 +1,115 @@
+{
+  "version": 2,
+  "traceId": "019d17e3-83bb-7000-8242-e9ed595a696e",
+  "sessionId": "ses_2e81c7baeffeaz1CvDUlNzeL4Y",
+  "startedAt": "2026-03-22T23:31:19.611Z",
+  "endedAt": "2026-03-22T23:31:27.387Z",
+  "metadata": {
+    "title": "\"search for TODO in tracing.ts\"\n",
+    "prompt": "\"search for TODO in tracing.ts\"\n"
+  },
+  "spans": [
+    {
+      "spanId": "019d17e3-8465-7000-88f1-3e5bb1c8764f",
+      "parentSpanId": null,
+      "name": "ses_2e81c7baeffeaz1CvDUlNzeL4Y",
+      "kind": "session",
+      "startTime": 1774222279611,
+      "status": "error",
+      "input": "\"search for TODO in tracing.ts\"\n",
+      "endTime": 1774222287387,
+      "statusMessage": "Budget exceeded: reached 1 assistant turn limit",
+      "output": "Error: Budget exceeded: reached 1 assistant turn limit"
+    },
+    {
+      "spanId": "019d17e3-8625-7000-9b54-a0a1ec98fb55",
+      "parentSpanId": "019d17e3-8465-7000-88f1-3e5bb1c8764f",
+      "name": "system-prompt",
+      "kind": "span",
+      "startTime": 1774222280229,
+      "endTime": 1774222280229,
+      "status": "ok",
+      "input": {
+        "agent": "builder",
+        "step": 1
+      },
+      "output": {
+        "parts": 4,
+        "content": "You are powered by the model named claude-sonnet-4-6. The exact model ID is anthropic/claude-sonnet-4-6\nHere is some useful information about the environment you are running in:\n<env>\n  Working directory: /home/developer/codebase/altimate-code/.claude/worktrees/openui/packages/opencode\n  Workspace root folder: /home/developer/codebase/altimate-code/.claude/worktrees/openui\n  Is directory a git repo: yes\n  Platform: darwin\n  Today's date: Sun Mar 22 2026\n</env>\n<directories>\n  \n</directories>\n\nSkills provide specialized instructions and workflows for specific tasks.\nUse the skill tool to load a skill when a task matches its description.\n<available_skills>\n  <skill>\n    <name>teach</name>\n    <description>Teach your AI teammate a pattern by showing it an example file from your codebase</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/teach/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>training-status</name>\n    <description>Show what your AI teammate has learned — patterns, rules, glossary, and standards</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/training-status/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>pii-audit</name>\n    <description>Classify schema columns for PII (SSN, email, phone, name, address, credit card) and check whether queries expose them. Use for GDPR/CCPA/HIPAA compliance audits.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/pii-audit/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>cost-report</name>\n    <description>Analyze Snowflake query costs and identify optimization opportunities</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/cost-report/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>data-viz</name>\n    <description>Build modern, interactive data visualizations and dashboards using code-based component libraries (shadcn/ui, Recharts, Tremor, Nivo, D3, Victory, visx). Use this skill whenever the user asks to visualize data, build dashboards, create analytics views, chart metrics, tell a data story, build a reporting interface, create KPI cards, plot graphs, or explore a dataset — even if they mention PowerBI, Tableau, Streamlit, Metabase, Looker, Grafana, or similar tools. Also trigger when the user says \"make a dashboard\", \"show me the data\", \"chart this\", \"visualize trends\", \"build an analytics page\", \"data story\", or anything involving turning raw data into interactive visual interfaces. If the task involves presenting data visually — this is the skill. Always prefer building a real, interactive, code-based UI over exporting to or recommending a BI platform.\n</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/data-viz/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>sql-review</name>\n    <description>Pre-merge SQL quality gate — lint 26 anti-patterns, grade readability/performance A-F, validate syntax, and scan for injection threats. Use before committing or reviewing SQL changes.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/sql-review/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>dbt-troubleshoot</name>\n    <description>Debug dbt errors — compilation failures, runtime database errors, test failures, wrong data, and performance issues. Use when something is broken, producing wrong results, or failing to build. Powered by altimate-dbt.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/dbt-troubleshoot/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>altimate-setup</name>\n    <description>Configure Altimate platform credentials for datamate and API access</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/altimate-setup/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>dbt-docs</name>\n    <description>Document dbt models and columns in schema.yml with business context — model descriptions, column definitions, and doc blocks. Use when adding or improving documentation for discoverability. Powered by altimate-dbt.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/dbt-docs/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>dbt-analyze</name>\n    <description>Analyze downstream impact of dbt model changes using column-level lineage and the dependency graph. Use when evaluating the blast radius of a change before shipping. Powered by altimate-dbt.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/dbt-analyze/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>lineage-diff</name>\n    <description>Compare column-level lineage between two versions of a SQL query to show added, removed, and changed data flow edges.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/lineage-diff/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>dbt-develop</name>\n    <description>Create and modify dbt models — staging, intermediate, marts, incremental, medallion architecture. Use when building new SQL models, extending existing ones, scaffolding YAML configs, or reorganizing project structure. Powered by altimate-dbt.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/dbt-develop/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>train</name>\n    <description>Train your AI teammate on team standards from a document or style guide</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/train/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>sql-translate</name>\n    <description>Translate SQL queries between database dialects (Snowflake, BigQuery, PostgreSQL, MySQL, etc.)</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/sql-translate/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>schema-migration</name>\n    <description>Analyze DDL migrations for data loss risks — type narrowing, missing defaults, dropped constraints, breaking column changes. Use before applying schema changes to production.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/schema-migration/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>query-optimize</name>\n    <description>Analyze and optimize SQL queries for better performance</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/query-optimize/SKILL.md</location>\n  </skill>\n  <skill>\n    <name>dbt-test</name>\n    <description>Add schema tests, unit tests, and data quality checks to dbt models. Use when validating data integrity, adding test definitions to schema.yml, writing unit tests, or practicing test-driven development in dbt. Powered by altimate-dbt.</description>\n    <location>file:///home/developer/codebase/altimate-code/.claude/worktrees/openui/.opencode/skills/dbt-test/SKILL.md</location>\n  </skill>\n</available_skills>\n\n## Altimate Knowledge\n\nKnowledge from previous sessions and team training. Apply it consistently.\n\n### Learned Rules\n_Always follow these rules. They were taught by the user through corrections and explicit instruction._\n\n#### no-positional-group-by (applied 24x)\n## Never use positional GROUP BY\n\n**Rule:** Always use explicit column names in GROUP BY. Never use positional references (`GROUP BY 1, 2, 3`).\n\n**Why:** Positional GROUP BY is fragile. Adding, removing, or reordering a SELECT column silently shifts which columns are grouped — the query still runs but produces wrong aggregations with no error.\n\n**Wrong:**\n```sql\nselect\n    order_date,\n    order_channel,\n    sum(revenue) as revenue\nfrom orders\ngroup by 1, 2\n```\n\n**Right:**\n```sql\nselect\n    order_date,\n    order_channel,\n    sum(revenue) as revenue\nfrom orders\ngroup by order_date, order_channel\n```\n\n**Edge case — computed expressions:** When grouping by an expression (e.g. `date_trunc`, `date_part`), repeat the full expression in GROUP BY rather than using a positional alias:\n\n```sql\n-- Wrong\nselect date_trunc('month', order_date) as month, sum(revenue)\nfrom orders\ngroup by 1\n\n-- Right\nselect date_trunc('month', order_date) as month, sum(revenue)\nfrom orders\ngroup by date_trunc('month', order_date)\n```\n\n**Applies to:** All SQL written in dbt models, ad-hoc queries, CTEs, subqueries, and window function PARTITION BY clauses.\n\n\nInstructions from: /home/developer/codebase/altimate-code/.claude/worktrees/openui/packages/opencode/AGENTS.md\n# opencode database guide\n\n## Database\n\n- **Schema**: Drizzle schema lives in `src/**/*.sql.ts`.\n- **Naming**: tables and columns use snake*case; join columns are `<entity>_id`; indexes are `<table>*<column>\\_idx`.\n- **Migrations**: generated by Drizzle Kit using `drizzle.config.ts` (schema: `./src/**/*.sql.ts`, output: `./migration`).\n- **Command**: `bun run db generate --name <slug>`.\n- **Output**: creates `migration/<timestamp>_<slug>/migration.sql` and `snapshot.json`.\n- **Tests**: migration tests should read the per-folder layout (no `_journal.json`).\n\n# opencode Effect guide\n\nInstructions to follow when writing Effect.\n\n## Schemas\n\n- Use `Schema.Class` for data types with multiple fields.\n- Use branded schemas (`Schema.brand`) for single-value types.\n\n## Services\n\n- Services use `ServiceMap.Service<ServiceName, ServiceName.Service>()(\"@console/<Name>\")`.\n- In `Layer.effect`, always return service implementations with `ServiceName.of({ ... })`, never a plain object.\n\n## Errors\n\n- Use `Schema.TaggedErrorClass` for typed errors.\n- For defect-like causes, use `Schema.Defect` instead of `unknown`.\n- In `Effect.gen`, prefer `yield* new MyError(...)` over `yield* Effect.fail(new MyError(...))` for direct early-failure branches.\n\n## Effects\n\n- Use `Effect.gen(function* () { ... })` for composition.\n- Use `Effect.fn(\"ServiceName.method\")` for named/traced effects and `Effect.fnUntraced` for internal helpers.\n- `Effect.fn` / `Effect.fnUntraced` accept pipeable operators as extra arguments, so avoid unnecessary `flow` or outer `.pipe()` wrappers.\n\n## Time\n\n- Prefer `DateTime.nowAsDate` over `new Date(yield* Clock.currentTimeMillis)` when you need a `Date`.\n\n## Errors\n\n- In `Effect.gen/fn`, prefer `yield* new MyError(...)` over `yield* Effect.fail(new MyError(...))` for direct early-failure branches.\n"
+      }
+    },
+    {
+      "spanId": "019d17e3-9641-7000-9262-42114a2e7b1b",
+      "parentSpanId": "019d17e3-8465-7000-88f1-3e5bb1c8764f",
+      "name": "generation-prt_d17e3963f0019phZk4S6WbDjPO",
+      "kind": "generation",
+      "startTime": 1774222284353,
+      "status": "ok",
+      "model": {},
+      "endTime": 1774222284660,
+      "output": "[tool calls: grep]",
+      "finishReason": "tool-calls",
+      "cost": 0,
+      "tokens": {
+        "input": 2,
+        "output": 75,
+        "reasoning": 0,
+        "cacheRead": 0,
+        "cacheWrite": 35783,
+        "total": 35860
+      }
+    },
+    {
+      "spanId": "019d17e3-974f-7000-a2ee-96f70b3afab5",
+      "parentSpanId": "019d17e3-9641-7000-9262-42114a2e7b1b",
+      "name": "grep",
+      "kind": "tool",
+      "startTime": 1774222284614,
+      "endTime": 1774222284622,
+      "status": "ok",
+      "tool": {
+        "callId": "toolu_01WHbaFUKGbeYje5zF6KjR2x",
+        "durationMs": 8
+      },
+      "input": {
+        "pattern": "TODO",
+        "include": "tracing.ts"
+      },
+      "output": "No files found"
+    },
+    {
+      "spanId": "019d17e3-a13d-7000-8b9b-cdf289571ac6",
+      "parentSpanId": "019d17e3-8465-7000-88f1-3e5bb1c8764f",
+      "name": "generation-prt_d17e3a13b0014RBZod3U6600JE",
+      "kind": "generation",
+      "startTime": 1774222287165,
+      "status": "ok",
+      "model": {},
+      "input": "[grep] No files found"
+    }
+  ],
+  "summary": {
+    "totalTokens": 35860,
+    "totalCost": 0,
+    "totalToolCalls": 1,
+    "totalGenerations": 2,
+    "duration": 7776,
+    "status": "error",
+    "error": "Budget exceeded: reached 1 assistant turn limit",
+    "tokens": {
+      "input": 2,
+      "output": 75,
+      "reasoning": 0,
+      "cacheRead": 0,
+      "cacheWrite": 35783
+    },
+    "topTools": [
+      {
+        "name": "grep",
+        "count": 1,
+        "totalDuration": 8
+      }
+    ],
+    "narrative": "Failed after 7.8s. Made 2 LLM calls using 1 tools (grep). Total cost: $0.0000."
+  }
+}

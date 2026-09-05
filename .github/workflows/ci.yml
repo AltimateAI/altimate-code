@@ -204,7 +204,7 @@ jobs:
           #    pass is isolated from the 11k main-suite tests so 2-per-worker is plenty bounded.
           # (Bun 1.3.x can segfault during cleanup after all tests pass — we parse the summary, not the
           # exit code. --timeout 90000 gives headroom for slow fs/spawn tests.)
-          SUBPROCESS_PATHS="test/cli/acp/ test/cli/smokes/ test/cli/serve/ test/cli/run/run-process.test.ts test/cli/mcp-add.test.ts test/cli/help/help-snapshots.test.ts"
+          SUBPROCESS_PATHS="test/cli/acp/ test/cli/smokes/ test/cli/serve/ test/cli/run/run-process.test.ts test/cli/mcp-add.test.ts test/cli/help/help-snapshots.test.ts test/altimate/trace-golden/"
 
           OPENCODE_SKIP_SUBPROCESS=1 bun test --timeout 90000 > /tmp/test-main.txt 2>&1 || true
           bun test --timeout 90000 --max-concurrency=2 $SUBPROCESS_PATHS > /tmp/test-sub.txt 2>&1 || true
