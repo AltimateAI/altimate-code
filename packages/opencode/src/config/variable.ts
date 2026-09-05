@@ -32,20 +32,55 @@ type SubstituteInput = ParseSource & {
 // An unresolved bare `${VAR}` is left LITERAL above on purpose, so it stays visible and is not
 // recorded here. `{env:VAR}` has no such deferral — it becomes "" and the config parses clean, so
 // a missing `{env:SNOWFLAKE_PASSWORD}` launches an MCP server with a blank credential and fails
-// later with an error naming neither the variable nor this file. Keyed by config source; the
-// newest parse of a file replaces its entry so a fixed variable stops being reported.
+// later with an error naming neither the variable nor this file.
 const _blankedEnv = new Map<string, Set<string>>()
 
-/** Drop `src`'s record so a load starts clean; substitution then unions within that load. */
-export function resetBlankedEnvVars(src: string) {
+/**
+ * Who a config source belongs to: a project directory, or SHARED for one every instance loads.
+ *
+ * Declared by the loader rather than guessed from the path. An earlier attempt inferred it —
+ * "under this project, or under $HOME/the config dir, is mine" — which is wrong in the ordinary
+ * case, because projects live under $HOME: `/Users/me/code/projB/altimate-code.json` was
+ * classified as shared and leaked into project A's diagnostics. The loader always knows; the
+ * path never reliably tells you.
+ */
+const _sourceOwner = new Map<string, string>()
+
+/** Marker for a config every instance in the process loads: global config, OPENCODE_CONFIG, managed. */
+export const SHARED_CONFIG = "\u0000shared"
+
+/**
+ * Drop `src`'s record so a load starts clean, and declare who it belongs to.
+ *
+ * `owner` is the project directory being loaded, or `SHARED_CONFIG`. Substitution then unions
+ * into the source within that load.
+ */
+export function resetBlankedEnvVars(src: string, owner: string) {
   _blankedEnv.delete(src)
+  _sourceOwner.set(src, owner)
 }
 
-/** Variable names that silently became "" during config substitution, grouped by config source. */
-export function blankedEnvVars(): { source: string; names: string[] }[] {
+/**
+ * Variable names that silently became "" while loading `projectDir`, grouped by config source.
+ *
+ * Returns this project's own sources plus the shared ones. A source whose owner was never
+ * declared is omitted: a diagnostic that cannot be attributed is not worth showing to the wrong
+ * session, and every loader in this file declares one.
+ */
+export function blankedEnvVars(projectDir: string): { source: string; names: string[] }[] {
   return [..._blankedEnv.entries()]
+    .filter(([src]) => {
+      const owner = _sourceOwner.get(src)
+      return owner === projectDir || owner === SHARED_CONFIG
+    })
     .map(([src, names]) => ({ source: src, names: [...names].sort() }))
     .sort((a, b) => a.source.localeCompare(b.source))
+}
+
+/** Test seam — forget every source's ownership and recorded names. */
+export function resetAllBlankedEnvVars() {
+  _blankedEnv.clear()
+  _sourceOwner.clear()
 }
 // altimate_change end
 

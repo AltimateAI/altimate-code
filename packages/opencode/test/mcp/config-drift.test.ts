@@ -1,6 +1,6 @@
 // altimate_change start — upstream_fix (#878): discovery skipped already-configured servers
 // without a word, so a changed .vscode/mcp.json never surfaced. These pin what counts as drift.
-import { describe, expect, test, beforeEach } from "bun:test"
+import { describe, expect, test, beforeEach, afterEach } from "bun:test"
 import { driftFields, setConfigDrift, configDrift, resetConfigDrift } from "../../src/mcp/discover"
 
 describe("driftFields", () => {
@@ -34,20 +34,46 @@ describe("driftFields", () => {
 })
 
 describe("configDrift record", () => {
+  // The record is per project now, so every call names the directory it belongs to.
+  const PROJECT = "/tmp/project-a"
   beforeEach(() => resetConfigDrift())
+  // `_drift` is module-level: the cross-project cases below deliberately leave OTHER populated,
+  // so clear everything afterwards rather than letting the next test in this worker observe it.
+  afterEach(() => resetConfigDrift())
 
   test("records only servers that actually differ", () => {
-    setConfigDrift("datamate", ".vscode/mcp.json", ["environment.ALTIMATE_EXTENSION_RPC"])
-    setConfigDrift("clean", ".vscode/mcp.json", [])
-    expect(configDrift()).toEqual([
+    setConfigDrift("datamate", ".vscode/mcp.json", ["environment.ALTIMATE_EXTENSION_RPC"], PROJECT)
+    setConfigDrift("clean", ".vscode/mcp.json", [], PROJECT)
+    expect(configDrift(PROJECT)).toEqual([
       { server: "datamate", source: ".vscode/mcp.json", fields: ["environment.ALTIMATE_EXTENSION_RPC"] },
     ])
   })
 
   test("a server that stops drifting is dropped from the report", () => {
-    setConfigDrift("datamate", ".vscode/mcp.json", ["url"])
-    setConfigDrift("datamate", ".vscode/mcp.json", [])
-    expect(configDrift()).toEqual([])
+    setConfigDrift("datamate", ".vscode/mcp.json", ["url"], PROJECT)
+    setConfigDrift("datamate", ".vscode/mcp.json", [], PROJECT)
+    expect(configDrift(PROJECT)).toEqual([])
+  })
+
+  test("one project's drift is invisible to another", () => {
+    // `datamate` is written into every project by the extension sync, so a name-only record
+    // meant two open workspaces reported each other's drift.
+    const OTHER = "/tmp/project-b"
+    setConfigDrift("datamate", ".vscode/mcp.json", ["url"], PROJECT)
+    setConfigDrift("datamate", ".cursor/mcp.json", ["command"], OTHER)
+
+    expect(configDrift(PROJECT)).toEqual([{ server: "datamate", source: ".vscode/mcp.json", fields: ["url"] }])
+    expect(configDrift(OTHER)).toEqual([{ server: "datamate", source: ".cursor/mcp.json", fields: ["command"] }])
+  })
+
+  test("clearing one project leaves the other intact", () => {
+    const OTHER = "/tmp/project-b"
+    setConfigDrift("datamate", ".vscode/mcp.json", ["url"], PROJECT)
+    setConfigDrift("datamate", ".cursor/mcp.json", ["command"], OTHER)
+
+    resetConfigDrift(PROJECT)
+    expect(configDrift(PROJECT)).toEqual([])
+    expect(configDrift(OTHER)).toHaveLength(1)
   })
 })
 // altimate_change end

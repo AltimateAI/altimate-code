@@ -19,7 +19,7 @@ const log = Log.create({ service: "mcp.discover" })
 // here, rather than twice.
 function resolveServerEnvVars(
   obj: Record<string, unknown>,
-  context: { server: string; source: string; field: "env" | "headers" },
+  context: { server: string; source: string; field: "env" | "headers"; projectDir: string },
 ): Record<string, string> {
   const out: Record<string, string> = {}
   const stats = ConfigPaths.newEnvSubstitutionStats()
@@ -39,9 +39,10 @@ function resolveServerEnvVars(
     // credential, failing later with something that names neither the variable nor the config
     // file. The log line already had the answer; nobody reads it. Recorded here so `/mcps` can
     // say so. Mirrors the `setDiscoveryResult` handoff below.
-    const seen = _unresolvedEnv.get(context.server) ?? new Set<string>()
+    const b = bucket(_unresolvedEnv, context.projectDir)
+    const seen = b.get(context.server) ?? new Set<string>()
     for (const name of stats.unresolvedNames) seen.add(name)
-    _unresolvedEnv.set(context.server, seen)
+    b.set(context.server, seen)
     // altimate_change end
   }
   return out
@@ -49,8 +50,18 @@ function resolveServerEnvVars(
 // altimate_change end
 
 // altimate_change start — upstream_fix: unresolved-variable record for the user surface (#701).
-/** Server name -> variable names that resolved to "" during discovery. */
-const _unresolvedEnv = new Map<string, Set<string>>()
+/** projectDir -> server name -> variable names that resolved to "" during discovery. */
+const _unresolvedEnv = new Map<string, Map<string, Set<string>>>()
+
+/** Per-project bucket, created on demand. Keyed by the directory discovery ran for. */
+function bucket<V>(store: Map<string, Map<string, V>>, projectDir: string): Map<string, V> {
+  let b = store.get(projectDir)
+  if (!b) {
+    b = new Map<string, V>()
+    store.set(projectDir, b)
+  }
+  return b
+}
 
 /**
  * Variable names that silently became "" for `server`, from the most recent discovery.
@@ -62,16 +73,23 @@ const _unresolvedEnv = new Map<string, Set<string>>()
  * `unresolvedNames.length > 0` guard, so a clean run never touched it), and `/mcps` went on
  * telling the user to set a variable that already resolved.
  *
- * Only the latest run's servers are present, so a daemon that discovers for a second project
- * replaces the first project's entries rather than mixing the two under a shared server name.
+ * Scoped to `projectDir`, because one process serves more than one project: a global record
+ * meant a second project's discovery erased the first's answers, and two projects reusing a
+ * server name (`datamate`, which the extension sync writes everywhere) overwrote each other.
+ * Clearing now touches only the project being rediscovered.
  */
-export function unresolvedEnvVars(server: string): string[] {
-  return [...(_unresolvedEnv.get(server) ?? [])].sort()
+export function unresolvedEnvVars(server: string, projectDir: string): string[] {
+  return [...(_unresolvedEnv.get(projectDir)?.get(server) ?? [])].sort()
 }
 
-/** Drop the previous run's records. Called once per `discoverExternalMcp`. */
-function resetUnresolvedEnv() {
-  _unresolvedEnv.clear()
+/**
+ * Drop this project's records. Called once per `discoverExternalMcp`.
+ *
+ * Deletes the bucket rather than clearing it: a long-lived server visits many directories, and
+ * keeping an empty Map per directory it has ever served is a slow leak with no cleanup path.
+ */
+function resetUnresolvedEnv(projectDir: string) {
+  _unresolvedEnv.delete(projectDir)
 }
 // altimate_change end
 
@@ -80,7 +98,7 @@ function resetUnresolvedEnv() {
 // outright and a changed `.vscode/mcp.json` (a new ALTIMATE_EXTENSION_RPC port, a moved command)
 // is never mentioned. Overwriting the user's own config would be worse than the silence, so the
 // differing field names are recorded and a user surface reports them; the user decides.
-const _drift = new Map<string, { source: string; fields: string[] }>()
+const _drift = new Map<string, Map<string, { source: string; fields: string[] }>>()
 
 /**
  * Fields whose difference is expected and not worth reporting.
@@ -139,30 +157,32 @@ export function driftFields(discovered: Record<string, any>, configured: Record<
   return fields.sort()
 }
 
-/** Record that `server` is configured differently from what discovery found in `source`. */
-export function setConfigDrift(server: string, source: string, fields: string[]) {
-  if (fields.length > 0) _drift.set(server, { source, fields })
-  else _drift.delete(server)
+/** Record that `server` in `projectDir` is configured differently from what discovery found. */
+export function setConfigDrift(server: string, source: string, fields: string[], projectDir: string) {
+  const b = bucket(_drift, projectDir)
+  if (fields.length > 0) b.set(server, { source, fields })
+  else b.delete(server)
 }
 
-/** Servers whose configured definition differs from the discovered one. */
-export function configDrift(): { server: string; source: string; fields: string[] }[] {
-  return [..._drift.entries()]
+/** Servers in `projectDir` whose configured definition differs from the discovered one. */
+export function configDrift(projectDir: string): { server: string; source: string; fields: string[] }[] {
+  return [...(_drift.get(projectDir)?.entries() ?? [])]
     .map(([server, info]) => ({ server, ...info }))
     .sort((a, b) => a.server.localeCompare(b.server))
 }
 
-/** Server name -> the file that actually defined it, for drift attribution. */
-const _discoveredSource = new Map<string, string>()
+/** projectDir -> server name -> the file that actually defined it, for drift attribution. */
+const _discoveredSource = new Map<string, Map<string, string>>()
 
 /** The config file a discovered server came from, or undefined if it was not discovered. */
-export function discoveredSource(server: string): string | undefined {
-  return _discoveredSource.get(server)
+export function discoveredSource(server: string, projectDir: string): string | undefined {
+  return _discoveredSource.get(projectDir)?.get(server)
 }
 
-/** Test seam — drift accumulates at module level. */
-export function resetConfigDrift() {
-  _drift.clear()
+/** Test seam — clears one project's drift, or every project's when no directory is given. */
+export function resetConfigDrift(projectDir?: string) {
+  if (projectDir === undefined) _drift.clear()
+  else _drift.delete(projectDir)
 }
 // altimate_change end
 interface ExternalMcpSource {
@@ -198,7 +218,7 @@ const SOURCES: ExternalMcpSource[] = [
 function transform(
   entry: Record<string, any>,
   // altimate_change start — context for env-var resolution warnings
-  context: { server: string; source: string },
+  context: { server: string; source: string; projectDir: string },
   // altimate_change end
 ): ConfigMCPV1.Info | undefined {
   // Remote server — handle both "url" and Claude Code's "type: http" format
@@ -308,6 +328,7 @@ function addServersFromFile(
   sourceLabel: string,
   result: Record<string, ConfigMCPV1.Info>,
   contributingSources: string[],
+  projectDir: string,
   projectScoped = false,
 ) {
   if (!servers || typeof servers !== "object") return
@@ -322,6 +343,7 @@ function addServersFromFile(
     const transformed = transform(entry as Record<string, any>, {
       server: name,
       source: sourceLabel,
+      projectDir,
     })
     if (transformed) {
       // Project-scoped servers are discovered but disabled by default for security.
@@ -332,7 +354,7 @@ function addServersFromFile(
       result[name] = transformed
       // altimate_change start — upstream_fix (#878): attribute drift to the file that defined
       // this server, not to every file that contributed something to the run.
-      _discoveredSource.set(name, sourceLabel)
+      bucket(_discoveredSource, projectDir).set(name, sourceLabel)
       // altimate_change end
       added++
     }
@@ -368,6 +390,7 @@ async function discoverClaudeCode(
   worktree: string,
   result: Record<string, ConfigMCPV1.Info>,
   contributingSources: string[],
+  projectDir: string,
 ) {
   const claudeJsonPath = path.join(os.homedir(), ".claude.json")
   const parsed = await readJsonSafe(claudeJsonPath)
@@ -382,13 +405,14 @@ async function discoverClaudeCode(
         `~/.claude.json (${path.basename(worktree)})`,
         result,
         contributingSources,
+        projectDir,
       )
     }
   }
 
   // Global-level mcpServers (lower priority — project-specific already added)
   if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
-    addServersFromFile(parsed.mcpServers, "~/.claude.json (global)", result, contributingSources)
+    addServersFromFile(parsed.mcpServers, "~/.claude.json (global)", result, contributingSources, projectDir)
   }
 }
 
@@ -433,12 +457,12 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
   // Start from a clean slate so a variable fixed since the last run stops being reported.
-  resetUnresolvedEnv()
+  resetUnresolvedEnv(projectDir)
   // Same for drift: a server removed from the external config, or a reload that resolved the
   // difference, otherwise left a stale entry and `mcp status` reported a mismatch that no
   // longer existed. The setConfigDrift calls after this run repopulate it.
-  resetConfigDrift()
-  _discoveredSource.clear()
+  resetConfigDrift(projectDir)
+  _discoveredSource.delete(projectDir)
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()
@@ -490,7 +514,7 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
     const parsed = await readJsonSafe(file)
     if (!parsed || typeof parsed !== "object") continue
     const label = toRel(file) || path.basename(file)
-    addServersFromFile(mergeServerKeys(parsed), label, result, contributingSources, true)
+    addServersFromFile(mergeServerKeys(parsed), label, result, contributingSources, projectDir, true)
   }
 
   // Non-"mcp.json" config files (not matched by the glob above), in project and/or home.
@@ -510,12 +534,12 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
 
       const isProjectScoped = dir === projectDir
       const servers = parsed[source.key]
-      addServersFromFile(servers, label, result, contributingSources, isProjectScoped)
+      addServersFromFile(servers, label, result, contributingSources, projectDir, isProjectScoped)
     }
   }
 
   // Claude Code has a unique config structure — handle separately
-  await discoverClaudeCode(projectDir, result, contributingSources)
+  await discoverClaudeCode(projectDir, result, contributingSources, projectDir)
 
   const serverNames = Object.keys(result)
   if (serverNames.length > 0) {

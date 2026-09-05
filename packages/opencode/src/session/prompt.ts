@@ -3759,19 +3759,22 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const rows = Object.entries(statusMap)
           .map(
             ([srv, s]) =>
-              "| `" + srv + "` | " + formatMcpStatusForDisplay(srv, s, McpDiscover.unresolvedEnvVars(srv)) + " |",
+              "| `" +
+              srv +
+              "` | " +
+              formatMcpStatusForDisplay(srv, s, McpDiscover.unresolvedEnvVars(srv, Instance.directory)) +
+              " |",
           )
           .join("\n")
-        // altimate_change start — upstream_fix (#701): `/mcps` showed only the per-server
-        // unresolved variables from discovery, while `mcp list` also reported file-scoped blanks.
-        // A server templated as `"url": "https://{env:MY_HOST}/mcp"` records against the config
-        // file rather than the server, so it appeared in the CLI and not here — in the session
-        // view, which is where someone is when a server will not connect.
-        const blanked = formatBlankedEnvForDisplay(ConfigVariable.blankedEnvVars())
-        const drift = formatConfigDriftForDisplay(McpDiscover.configDrift())
+        // upstream_fix (#701): `/mcps` showed only the per-server unresolved variables from
+        // discovery, while `mcp list` also reported file-scoped blanks. A server templated as
+        // `"url": "https://{env:MY_HOST}/mcp"` records against the config file rather than the
+        // server, so it appeared in the CLI and not here — in the session view, which is where
+        // someone is when a server will not connect. (Inside the enclosing block's markers.)
+        const blanked = formatBlankedEnvForDisplay(ConfigVariable.blankedEnvVars(Instance.directory))
+        const drift = formatConfigDriftForDisplay(McpDiscover.configDrift(Instance.directory))
         const table = rows ? "MCP servers:\n\n| Server | Status |\n|---|---|\n" + rows : "No MCP servers configured."
         const responseText = [table, drift, blanked].filter(Boolean).join("\n\n")
-        // altimate_change end
 
         return respond(userMsg.info.id, responseText, model)
       }
