@@ -48,10 +48,16 @@ For pricing, security, and data handling details, see the [Altimate LLM Gateway 
 
 ## Altimate Base
 
-Altimate Base is a free, hosted model. It's anonymous — no signup, no account, no user-managed API
+Altimate Base is a free, hosted model — no signup, no account, no user-managed API
 key. Accept a one-time consent disclosure and it just works. It supports up to 131K tokens of
-context and up to 65K tokens of output. Requests and responses are logged and may be used to
-improve Altimate products and services. Do not send secrets or confidential code.
+context and up to 65K tokens of output.
+
+Requests and responses are logged and may be used to improve Altimate's products, including the
+model. Secrets are automatically masked before storage, but don't rely on it — avoid sending
+secrets or confidential code. Altimate Base is pseudonymous, not anonymous: a stable
+per-installation identifier links your requests across launches and `altimate providers logout
+altimate-base` does not reset it (see the [security FAQ](../reference/security-faq.md)). Usage is
+rate limited.
 
 Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
 registration request; **No** is selected by default. After registration, the model is available as

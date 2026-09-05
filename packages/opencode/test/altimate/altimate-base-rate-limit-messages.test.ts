@@ -138,8 +138,6 @@ describe("describeRateLimit — via the fake gateway (every ChatMode failure kno
         "You've used your free Altimate Base allowance — it's a one-time grant and won't renew. Sign up at app.myaltimate.com to keep going, or switch models.",
       retryable: false,
     })
-    expect(described?.message).toContain("app.myaltimate.com")
-    expect(described?.message).not.toContain("resets tomorrow")
   })
 
   test("budget-global: shared $50/day ceiling maps to the shared-daily-limit message, non-retryable", async () => {
