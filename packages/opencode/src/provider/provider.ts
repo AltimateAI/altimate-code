@@ -1509,8 +1509,8 @@ export namespace Provider {
     }
     // altimate_change end
 
-    // altimate_change start — register hosted Qwen 3.8 under the stable Altimate Base alias
-    // Hosted Qwen 3.8 behind the gateway's stable public model alias. Pinning this record keeps a
+    // altimate_change start — register the hosted model under the stable Altimate Base alias
+    // The hosted model behind the gateway's stable public model alias. Pinning this record keeps a
     // models.dev collision from replacing the SDK module or endpoint that receives the free key.
     const baseModels: Record<string, Model> = {
       [FreeTier.MODEL_ID]: {
@@ -1525,11 +1525,12 @@ export namespace Provider {
         cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
         // This is the offline/fallback value only — the gateway is the source of truth for what it
         // actually serves and advertises. Keep it equal to the gateway's advertised
-        // {context: 131072, output: 65536} so the two never disagree; Qwen3.8-27B natively supports
-        // 262144, so 131072 needs no YaRN scaling on the gateway side. Output is a clean half of the
-        // context window (not the max the model could theoretically emit) because this is a
-        // reasoning+coding model — reasoning tokens count toward output — and 65536 still guarantees
-        // >=65536 input room while staying a real free-tier cost guardrail under the 262k ceiling.
+        // {context: 131072, output: 65536} so the two never disagree; the served model natively
+        // supports a larger context window, so 131072 needs no scaling tricks on the gateway side.
+        // Output is a clean half of the context window (not the max the model could theoretically
+        // emit) because this is a reasoning+coding model — reasoning tokens count toward output —
+        // and 65536 still guarantees >=65536 input room while staying a real free-tier cost
+        // guardrail under the model's native ceiling.
         limit: { context: 131_072, output: 65_536 },
         capabilities: {
           temperature: true,

@@ -25,7 +25,7 @@ On a fresh install, a welcome panel appears with a curated 6-provider picker:
 
 - **Altimate LLM Gateway** *(recommended)* — 10M tokens free, no API keys. Routes to the best model per task across Sonnet, Opus, GPT-5, and more. Sign-in opens a browser tab; complete Google or email signup and you're back in the TUI. If your terminal can't open a browser (SSH / tmux / WSL), the CLI prints the URL — paste it into a browser on your desktop.
 - **Anthropic** / **OpenAI** / **Google** — paste an API key or OAuth in.
-- **Altimate Base** — hosted Qwen 3.8, free and rate limited, with no signup or API key. Requests and responses are logged and may be used to improve Altimate products and services, so do not send secrets or confidential code. Registration happens only after an explicit confirmation that defaults to **No**.
+- **Altimate Base** — a hosted open model, free and rate limited, with no signup or API key. Requests and responses may be logged and used to improve Altimate's products, so do not send secrets or confidential code. Registration happens only after an explicit confirmation that defaults to **No**.
 - **Search all providers…** — full picker if you need Bedrock, Databricks AI Gateway, Cloudflare AI Gateway, Snowflake Cortex, DigitalOcean Inference, etc.
 
 Or set an environment variable and skip the picker:

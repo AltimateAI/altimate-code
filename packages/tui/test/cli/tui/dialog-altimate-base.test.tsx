@@ -203,9 +203,9 @@ test.serial("Altimate Base shows the privacy disclosure before registration and 
   const confirm = await mountConfirm()
   try {
     const frame = confirm.app.captureCharFrame()
-    expect(confirm.disclosure).toContain("Requests and responses are logged")
+    expect(confirm.disclosure).toContain("Requests and responses may be logged")
     expect(frame).toContain("Use Altimate Base?")
-    expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses are logged and may be used")
+    expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses may be logged and used")
     expect(frame).toContain("No — pick something else")
     expect(frame).toContain("(default)")
     expect(confirm.registrations()).toHaveLength(0)
@@ -219,8 +219,8 @@ test.serial("the Big Pickle migration reuses consent, stays out of first-run tel
   const confirm = await mountConfirm({ origin: "migration" })
   try {
     const frame = confirm.app.captureCharFrame()
-    expect(frame).toContain("No — keep Big Pickle")
-    expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses are logged and may be used")
+    expect(frame).toContain("No — pick something else")
+    expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses may be logged and used")
     expect(confirm.events).toEqual([])
 
     confirm.app.mockInput.pressKey("n")
@@ -232,7 +232,7 @@ test.serial("the Big Pickle migration reuses consent, stays out of first-run tel
   }
 })
 
-test.serial("declining Altimate Base makes no registration request", async () => {
+test.serial("declining Altimate Base makes no registration request, and Big Pickle is not offered as a new pick", async () => {
   const confirm = await mountConfirm()
   try {
     confirm.app.mockInput.pressKey("n")
@@ -241,22 +241,10 @@ test.serial("declining Altimate Base makes no registration request", async () =>
     expect(confirm.registrations()).toHaveLength(0)
     confirm.app.mockInput.pressKey("/")
     await confirm.app.renderOnce()
-    expect(confirm.app.captureCharFrame()).toContain("Big Pickle")
-    confirm.app.mockInput.pressArrow("down")
-    await confirm.app.renderOnce()
-    confirm.app.mockInput.pressEnter()
-    await waitUntil(() =>
-      confirm.events.some(
-        (event) =>
-          event.name === "provider_selected" && event.providerID === "opencode" && event.modelID === "big-pickle",
-      ),
-    )
-    expect(confirm.events).toContainEqual({
-      name: "provider_selected",
-      providerID: "opencode",
-      modelID: "big-pickle",
-      via_search: true,
-    })
+    // altimate_change — Big Pickle is retired as a NEW selectable option: the full catalog opened
+    // via search must not offer it, even though the fixture still wires up an "opencode" provider
+    // (used elsewhere to prove the migration path still recognizes a legacy selection).
+    expect(confirm.app.captureCharFrame()).not.toContain("Big Pickle")
     expect(confirm.registrations()).toHaveLength(0)
   } finally {
     confirm.cleanup()

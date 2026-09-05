@@ -182,7 +182,7 @@ export function DialogModelWelcome(props: {
       ? [
           {
             name: "Altimate Base",
-            note: "free · no signup · prompts are logged",
+            note: "free · no signup · rate limited",
             tone: "warning" as const,
             providerID: "altimate-free",
             modelID: "altimate-base",
@@ -342,12 +342,12 @@ export function DialogModelWelcome(props: {
   )
 }
 
-// altimate_change start — "/providers logout" is not a TUI slash command (only /logout exists,
-// and it signs out of the paid Altimate Gateway, not Altimate Base). Name the CLI command that
-// actually clears the Base credential: `altimate providers logout altimate-base`, run from a
-// terminal.
+// altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate before any Base
+// credential is minted. Keep this terse gate text in sync with the fuller "Data handling" note in
+// docs/docs/configure/providers.md (the docs carry the extra detail — e.g. the permanent per-install
+// identifier — that would make this on-screen disclosure too long).
 export const ALTIMATE_BASE_DISCLOSURE =
-  "Altimate Base is free and requires no signup. Requests and responses are logged and may be used to improve Altimate's products and services. Those logs are linked to a permanent identifier for this installation, which running `altimate providers logout altimate-base` in a terminal does not reset. Don't send secrets or confidential code. Usage is rate limited."
+  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Usage is rate limited."
 // altimate_change end
 
 type RegisterOutcome =
@@ -487,7 +487,7 @@ export function DialogAltimateBaseConfirm(props: {
 
   const options = [
     {
-      label: props.origin === "migration" ? "No — keep Big Pickle" : "No — pick something else",
+      label: props.origin === "migration" ? "No — pick something else" : "No — pick something else",
       hint: "(default)",
       run: no,
     },

@@ -91,7 +91,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
-          "altimate-free": "Free · no signup · prompts are logged",
+          "altimate-free": "Free · no signup · rate limited",
           opencode: "Bring your own Zen key",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],

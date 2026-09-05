@@ -127,43 +127,11 @@ export function DialogModel(props: {
       ),
     )
 
-    // Big Pickle remains an explicit legacy choice even when the user has no
-    // paid OpenCode Zen key. Altimate Base replaces it only as the implicit
-    // free/default model; hiding this row would turn a still-usable free model
-    // into a provider-connection prompt.
-    const openCode = sync.data.provider.find((provider) => provider.id === "opencode")
-    const bigPickle = openCode?.models["big-pickle"]
-    if (
-      openCode &&
-      bigPickle &&
-      bigPickle.status !== "deprecated" &&
-      !providerReady("opencode") &&
-      (!props.providerID || props.providerID === "opencode")
-    ) {
-      readyOptions.push({
-        value: { providerID: "opencode", modelID: "big-pickle" },
-        title: bigPickle.name ?? "Big Pickle",
-        description: openCode.name,
-        category: "READY",
-        footer: favorites.some((favorite) => favorite.providerID === "opencode" && favorite.modelID === "big-pickle")
-          ? "★"
-          : undefined,
-        onSelect() {
-          if (activated) return
-          activated = true
-          if (firstRunActive()) {
-            trackOnboarding({
-              name: "provider_selected",
-              providerID: "opencode",
-              modelID: "big-pickle",
-              via_search: props.viaSearch ?? false,
-            })
-          }
-          onSelect("opencode", "big-pickle")
-          markSetupComplete()
-        },
-      })
-    }
+    // altimate_change — Big Pickle is retired as a NEW selectable option: Altimate Base is now the
+    // free/default model, and a fresh pick of Big Pickle from this catalogue would just recreate the
+    // account this release is retiring. Users already on Big Pickle are unaffected — they are
+    // detected on launch (see `isExistingBigPickleSelection` in ../context/local) and offered the
+    // Altimate Base consent gate through the migration path, which this removal does not touch.
 
     // NEEDS SETUP — providers without valid credentials (selecting routes into their
     // auth flow first), plus the Altimate Base disclosure. Hidden when scoped to one
@@ -207,7 +175,7 @@ export function DialogModel(props: {
           const altimateBase = {
             value: "altimate-base" as { providerID: string; modelID: string } | string,
             title: "Altimate Base",
-            description: "free, no signup — prompts are logged",
+            description: "free, no signup — rate limited",
             category: "NEEDS SETUP",
             footer: undefined as string | undefined,
             onSelect() {

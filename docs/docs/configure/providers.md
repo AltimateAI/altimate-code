@@ -48,15 +48,26 @@ For pricing, security, and data handling details, see the [Altimate LLM Gateway 
 
 ## Altimate Base
 
-Altimate Base is the hosted Qwen 3.8 free model. It requires no signup or user-managed API key and
-is subject to rate limits and abuse protection. Requests and responses are logged and may be used
-to improve Altimate products and services. Do not send secrets or confidential code.
+Altimate Base is Altimate's own hosted free model. It requires no signup or user-managed API key
+and is subject to rate limits and abuse protection.
+
+**Data handling:** Requests and responses are logged and may be used to improve Altimate's products,
+including the model. Secrets are automatically masked before storage, but don't rely on it — avoid
+sending secrets or confidential code. Altimate Base is pseudonymous, not anonymous: a stable
+per-installation identifier links your requests across launches and `altimate providers logout
+altimate-base` does not reset it (see the [security FAQ](../reference/security-faq.md)). Usage is
+rate limited.
+
+If you need stronger guarantees — no training on your data, metadata-only retention — use the
+[Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)
+instead.
 
 Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
 registration request; **No** is selected by default. After registration, the model is available as
 `altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
-explicit model is selected. Big Pickle is no longer selected implicitly, but remains available in
-the full OpenCode model catalog for users who choose it explicitly.
+explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the
+picker or the full model catalog for users choosing a model for the first time. Users already on
+Big Pickle are still detected on launch and offered Altimate Base through the same consent gate.
 
 Official release binaries embed the current gateway endpoint at build time. Operators and local
 development can override it without changing code:
