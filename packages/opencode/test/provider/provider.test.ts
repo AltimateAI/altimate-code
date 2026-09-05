@@ -44,7 +44,7 @@ function provideProviderTestInstance<R>(input: {
   )
 }
 
-test("Altimate Base is pinned to the hosted Qwen contract without affecting other providers", async () => {
+test("Altimate Base is pinned to the hosted model contract without affecting other providers", async () => {
   const credentials = spyOn(FreeTier, "credentialsForLoad").mockResolvedValue({
     apiKey: "sk-altimate-base",
     baseURL: ALTIMATE_BASE_GATEWAY_URL,
@@ -84,7 +84,7 @@ test("Altimate Base is pinned to the hosted Qwen contract without affecting othe
 
         const model = base.models[FreeTier.MODEL_ID]
         expect(model.name).toBe("Altimate Base")
-        expect(model.family).toBe("qwen")
+        expect(model.family).toBe("altimate")
         expect(model.api).toEqual({
           id: FreeTier.MODEL_ID,
           url: "",

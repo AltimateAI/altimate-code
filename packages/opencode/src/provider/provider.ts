@@ -1517,7 +1517,11 @@ export namespace Provider {
         id: ModelID.make(FreeTier.MODEL_ID),
         providerID: ProviderID.make(FreeTier.PROVIDER_ID),
         name: "Altimate Base",
-        family: "qwen",
+        // altimate_change — providerID is "altimate-free" (not "altimate-backend"), so this never
+        // reaches the family-based vendor switch in session/system.ts; prompt selection falls
+        // through to the api.id check there, and familyVendor() maps this value to no vendor either
+        // way. Purely descriptive metadata, so it does not need to name the underlying model.
+        family: "altimate",
         api: { id: FreeTier.MODEL_ID, url: "", npm: "@ai-sdk/openai-compatible" },
         status: "active",
         headers: {},

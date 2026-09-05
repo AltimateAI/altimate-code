@@ -78,7 +78,7 @@ async function mountConfirm(
     id: "altimate-base",
     providerID: "altimate-free",
     name: "Altimate Base",
-    family: "qwen",
+    family: "altimate",
     status: "active",
     capabilities: {},
     cost: { input: 0, output: 0 },
