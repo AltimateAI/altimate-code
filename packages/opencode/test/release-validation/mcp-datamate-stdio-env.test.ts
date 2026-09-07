@@ -572,6 +572,27 @@ describe("review hardening: allowlist, validation, provenance, bounded root, nes
     }
   })
 
+  test("resolveDatamateSyncRoot: home reached through a symlink is still rejected as a project root", async () => {
+    await using tmp = await tmpdir()
+    const realHome = path.join(tmp.path, "real-home")
+    await mkdir(path.join(realHome, ".git"), { recursive: true })
+    const deep = path.join(realHome, "code", "proj")
+    await mkdir(deep, { recursive: true })
+    const linkHome = path.join(tmp.path, "linked-home")
+    const { symlink } = await import("fs/promises")
+    await symlink(realHome, linkHome)
+    const prev = process.env.OPENCODE_TEST_HOME
+    // HOME is the symlink; the walk from inside real-home finds .git at the
+    // canonical home — a string compare would accept it as a project root.
+    process.env.OPENCODE_TEST_HOME = linkHome
+    try {
+      expect(await resolveDatamateSyncRoot(deep)).toBe(deep)
+    } finally {
+      if (prev === undefined) delete process.env.OPENCODE_TEST_HOME
+      else process.env.OPENCODE_TEST_HOME = prev
+    }
+  })
+
   test("resolveDatamateSyncRoot: a .git FILE (worktree/submodule) marks the nearest project root", async () => {
     await using tmp = await tmpdir()
     await mkdir(path.join(tmp.path, ".git"), { recursive: true })

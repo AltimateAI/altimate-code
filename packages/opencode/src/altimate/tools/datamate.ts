@@ -32,10 +32,11 @@ export function slugify(name: string): string {
     .replace(/^-|-$/g, "")
 }
 
-// Scans .vscode/mcp.json, .cursor/mcp.json, .github/copilot/mcp.json in projectRootDir
-// so this works in Cursor, Copilot, and other IDEs that write their own MCP config file.
-// Returns the exact command from the IDE config so altimate-code reuses the same process
-// the extension already manages rather than spawning a second one.
+// Scans the extension-written IDE configs (.vscode/mcp.json, .cursor/mcp.json —
+// the only locations the extension writes; .github/copilot/mcp.json is generic
+// discovery territory, see mcp/discover.ts) and returns the exact command so
+// altimate-code reuses the process the extension already manages rather than
+// spawning a second one.
 
 export const DatamateManagerTool = Tool.define("datamate_manager", {
   description:
@@ -287,6 +288,25 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           log.info("handleAdd: already connected, skipping add", {
             serverName: DATAMATE_KEY,
           })
+          // The live client stays untouched, but the provenance stamp must still
+          // be persisted: without it a legacy (pre-provenance) entry can never be
+          // repaired by the boot heal, and the explicit-add remedy would be a
+          // no-op exactly when the entry happens to be connected. Disk-only
+          // update; the fresh transport applies from the next session.
+          const existingOnDisk = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
+          const onDisk = (existingOnDisk ?? {}) as Record<string, unknown>
+          if (onDisk["managedBy"] !== DATAMATE_PROVENANCE || onDisk["sourceMcpJson"] !== transport.source) {
+            const restamped: Record<string, unknown> = {}
+            for (const [k, v] of Object.entries(onDisk)) {
+              if (!TRANSPORT_IDENTITY_FIELDS.has(k) && k !== "enabled") restamped[k] = v
+            }
+            Object.assign(restamped, mcpConfig, { enabled: true }, updatedAtField, provenanceFields)
+            await addMcpToConfig(DATAMATE_KEY, restamped as Parameters<typeof addMcpToConfig>[1], configPath)
+            log.info("handleAdd: stamped provenance on connected entry (disk only)", {
+              serverName: DATAMATE_KEY,
+              configPath,
+            })
+          }
           const mcpTools = await MCP.tools()
           const toolCount = Object.keys(mcpTools).filter((k) =>
             k.startsWith(DATAMATE_KEY + "_"),

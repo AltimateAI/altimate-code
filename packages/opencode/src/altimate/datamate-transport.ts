@@ -1,4 +1,4 @@
-import { readFile } from "fs/promises"
+import { readFile, realpath } from "fs/promises"
 import path from "path"
 import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk, findProjectConfigPaths, findGlobalConfigPaths } from "../mcp/config"
@@ -103,6 +103,28 @@ export function parseIdeTransport(entry: unknown, source: string): DatamateTrans
  * a session launched from a subdirectory would otherwise scan the subtree and
  * miss both the IDE config and the persisted entry it needs to repair.
  */
+/**
+ * Path identity for the home-root rejection: canonicalize both sides so a
+ * symlinked launch path (or differing drive/case on Windows) cannot smuggle
+ * `$HOME` past a string comparison and turn the whole home tree into the
+ * "project". realpath failures fall back to the lexical paths.
+ */
+async function isSamePath(a: string, b: string): Promise<boolean> {
+  const canon = async (p: string) => {
+    try {
+      return await realpath(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  let [ca, cb] = await Promise.all([canon(a), canon(b)])
+  if (process.platform === "win32") {
+    ca = ca.toLowerCase()
+    cb = cb.toLowerCase()
+  }
+  return ca === cb
+}
+
 export async function resolveDatamateSyncRoot(directory: string): Promise<string> {
   try {
     // Bounded at the home directory: an unbounded walk reaches `/`, and a home
@@ -117,7 +139,7 @@ export async function resolveDatamateSyncRoot(directory: string): Promise<string
     await matches.return()
     if (dotgit) {
       const root = path.dirname(dotgit)
-      if (root !== home) return root
+      if (!(await isSamePath(root, home))) return root
     }
   } catch {
     // fall through to the directory itself
