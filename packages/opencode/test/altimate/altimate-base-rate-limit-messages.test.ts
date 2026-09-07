@@ -124,14 +124,18 @@ describe("describeRateLimit — via the fake gateway (every ChatMode failure kno
     expect(response.status).toBe(429)
 
     const described = FreeTier.describeRateLimit({ body: await response.text() })
-    // Pinning today's message as written. Flagged ambiguity (plan Deliverable 1, Suite E /
-    // Summary #2): "It resets tomorrow" is arguably inaccurate for the wallet case — the
-    // per-principal grant (GRANT_NEW_PRINCIPAL_USD) has no budget_duration and never resets; only
-    // the separate global daily ceiling actually resets daily. This test asserts current
-    // behavior, not the plan's suggested fix, per the plan's explicit instruction not to
-    // silently "correct" it.
+    // Confirmed against altimate-gateway (issuer/config.py `grant_budget_duration` defaults to
+    // "" and `validate()` refuses to boot if it's ever set; issuer/accounting_db.py grants a
+    // one-time registration credit with "without later top-ups" in the docstring; issuer/
+    // budget_sync.py mirrors the lifetime allowance into LiteLLM's max_budget with no
+    // budget_duration). The per-user wallet is a one-time lifetime grant that never renews —
+    // unlike the separate global $50/day ceiling (litellm/config.yaml `budget_duration: 1d`),
+    // which genuinely does reset daily and is covered by the budget-global case below. The
+    // message nudges toward the paid Altimate LLM Gateway (app.myaltimate.com) since switching
+    // models is the only other option when a lifetime grant is gone for good.
     expect(described).toEqual({
-      message: "You've used today's free Altimate Base allowance. It resets tomorrow—switch models to keep going.",
+      message:
+        "You've used your free Altimate Base allowance — it's a one-time grant and won't renew. Sign up at app.myaltimate.com to keep going, or switch models.",
       retryable: false,
     })
   })
