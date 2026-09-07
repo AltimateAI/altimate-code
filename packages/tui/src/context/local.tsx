@@ -321,13 +321,25 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
         }
 
+        // altimate_change start — apply the same managed-provider policy `Provider.defaultModel()`
+        // enforces server-side: a project provider allowlist that excludes Altimate Base must not
+        // let this implicit TUI fallback reintroduce it either, whether through a persisted recent
+        // entry or the first-live-provider selection below. An explicit `--model`/config `model`
+        // above remains authoritative regardless, matching the server.
+        const managedBaseAllowed = allowsManagedBaseDefault(sync.data.config.provider)
+        const isManagedBaseModel = (model: ModelRef) =>
+          model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
+
         for (const item of modelStore.recent) {
-          if (isModelValid(item)) {
+          if (isModelValid(item) && (managedBaseAllowed || !isManagedBaseModel(item))) {
             return item
           }
         }
 
-        const provider = sync.data.provider[0]
+        const provider = sync.data.provider.find(
+          (candidate) => managedBaseAllowed || candidate.id !== ALTIMATE_BASE_MODEL.providerID,
+        )
+        // altimate_change end
         if (!provider) return undefined
         const defaultModel = sync.data.provider_default[provider.id]
         const firstModel = Object.values(provider.models)[0]
@@ -456,11 +468,11 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           const next = favorites[index]
           if (!next) return
-          const a = agent.current()
-          if (!a) return
-          setModelStore("model", a.name, { ...next })
-          setModelStore("recent", recentModels(next, modelStore.recent))
-          save()
+          // altimate_change — a deliberate favorite-cycle pick is as explicit as `/model`; route
+          // through `selectModel` so it marks `explicitDefault` too (see `hasExplicitModel` above),
+          // otherwise this persists through the same fields the retired implicit default used and
+          // legacy migration silently overwrites it on the next launch.
+          selectModel(next, { recent: true, explicit: true })
         },
         // altimate_change start — share the validated selection path with default migration.
         // Every caller of `set` (the `/model` dialog, the provider dialog, onboarding, and the

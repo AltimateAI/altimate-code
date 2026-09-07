@@ -481,7 +481,14 @@ export async function authorizedFetch(input: RequestInfo | URL, init?: RequestIn
     return response
   }
   const retryResponse = await retried
-  if (retryResponse.status === 401) await markCredentialRejected(next)
+  // altimate_change — mirror the initial response's reset above: a non-401 retry is equally proof
+  // of life for the rotated credential, so a prior 401 recorded against it elsewhere must not
+  // survive to later cross the rejection threshold on its own.
+  if (retryResponse.status !== 401) {
+    clearUnauthorizedCount(next)
+    return retryResponse
+  }
+  await markCredentialRejected(next)
   return retryResponse
 }
 

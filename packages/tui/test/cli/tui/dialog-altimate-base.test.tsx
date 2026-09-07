@@ -215,22 +215,32 @@ test.serial("Altimate Base shows the privacy disclosure before registration and 
   }
 })
 
-test.serial("the Big Pickle migration reuses consent, stays out of first-run telemetry, and honors No", async () => {
-  const confirm = await mountConfirm({ origin: "migration" })
-  try {
-    const frame = confirm.app.captureCharFrame()
-    expect(frame).toContain("No — pick something else")
-    expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses may be logged and used")
-    expect(confirm.events).toEqual([])
+test.serial(
+  "the Big Pickle migration reuses consent, stays out of first-run telemetry, and routes No to the picker",
+  async () => {
+    const confirm = await mountConfirm({ origin: "migration" })
+    try {
+      const frame = confirm.app.captureCharFrame()
+      expect(frame).toContain("No — pick something else")
+      expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses may be logged and used")
+      expect(confirm.events).toEqual([])
 
-    confirm.app.mockInput.pressKey("n")
-    await waitUntil(() => confirm.declines().length === 1)
-    expect(confirm.registrations()).toHaveLength(0)
-    expect(confirm.events).toEqual([])
-  } finally {
-    confirm.cleanup()
-  }
-})
+      confirm.app.mockInput.pressKey("n")
+      await waitUntil(() => confirm.declines().length === 1)
+      expect(confirm.registrations()).toHaveLength(0)
+      // altimate_change — "No — pick something else" must actually route somewhere: Big Pickle is
+      // retired, so declining the migration prompt lands the user in the curated picker instead of
+      // silently leaving the dialog cleared (the label used to promise a re-pick that never
+      // happened).
+      await waitUntil(() => confirm.events.some((event) => event.name === "model_picker_shown"))
+      expect(confirm.events).toEqual([{ name: "model_picker_shown", trigger: "altimate_base_back" }])
+      await confirm.app.renderOnce()
+      expect(confirm.app.captureCharFrame()).toContain("Altimate LLM Gateway")
+    } finally {
+      confirm.cleanup()
+    }
+  },
+)
 
 test.serial("declining Altimate Base makes no registration request, and Big Pickle is not offered as a new pick", async () => {
   const confirm = await mountConfirm()

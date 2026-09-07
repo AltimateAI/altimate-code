@@ -425,16 +425,15 @@ export function DialogAltimateBaseConfirm(props: {
     if (decided || busy()) return
     decided = true
     recordChoice("cancel")
-    if (props.origin === "migration") {
-      props.onDecline?.()
-      dialog.clear()
-      return
-    }
+    // altimate_change — a migration decline no longer just leaves the dialog cleared: Big Pickle
+    // is retired, so "pick something else" must actually route somewhere. `onDecline` still
+    // persists the refusal first, so this prompt is not shown again on a later launch.
+    if (props.origin === "migration") props.onDecline?.()
     dialog.replace(() =>
-      props.origin === "welcome" ? (
-        <DialogModelWelcome trigger="altimate_base_back" />
-      ) : (
+      props.origin === "model" ? (
         <DialogModel viaSearch={props.viaSearch} />
+      ) : (
+        <DialogModelWelcome trigger="altimate_base_back" />
       ),
     )
   }
@@ -487,7 +486,7 @@ export function DialogAltimateBaseConfirm(props: {
 
   const options = [
     {
-      label: props.origin === "migration" ? "No — pick something else" : "No — pick something else",
+      label: "No — pick something else",
       hint: "(default)",
       run: no,
     },
