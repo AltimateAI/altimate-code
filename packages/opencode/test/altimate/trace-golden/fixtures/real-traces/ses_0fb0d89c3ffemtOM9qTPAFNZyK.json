@@ -1,0 +1,77 @@
+{
+  "version": 2,
+  "traceId": "019f04f2-7649-7000-b924-561e89551e38",
+  "sessionId": "ses_0fb0d89c3ffemtOM9qTPAFNZyK",
+  "startedAt": "2026-06-26T17:20:26.697Z",
+  "endedAt": "2026-06-26T17:20:50.782Z",
+  "metadata": {
+    "title": "New session - 2026-06-26T17:20:26.684Z",
+    "model": "azure/gpt-5.5",
+    "providerId": "azure",
+    "agent": "builder",
+    "prompt": "what is 6 times 7? number only"
+  },
+  "spans": [
+    {
+      "spanId": "019f04f2-766d-7000-b828-e9820b0dbf80",
+      "parentSpanId": null,
+      "name": "ses_0fb0d89c3ffemtOM9qTPAFNZyK",
+      "kind": "session",
+      "startTime": 1782494426697,
+      "status": "ok",
+      "endTime": 1782494450782,
+      "output": "1 generations, 0 tool calls, 29113 tokens, $0.1462"
+    },
+    {
+      "spanId": "019f04f2-766d-7001-ae86-f55aded28564",
+      "parentSpanId": "019f04f2-766d-7000-b828-e9820b0dbf80",
+      "name": "user-message",
+      "kind": "user-message",
+      "startTime": 1782494426733,
+      "endTime": 1782494426733,
+      "status": "ok",
+      "input": "what is 6 times 7? number only"
+    },
+    {
+      "spanId": "019f04f2-7d45-7000-91a2-c81a9ee63800",
+      "parentSpanId": "019f04f2-766d-7000-b828-e9820b0dbf80",
+      "name": "generation-prt_f04f27d43001415BAYpKBBs1wu",
+      "kind": "generation",
+      "startTime": 1782494428485,
+      "status": "ok",
+      "model": {
+        "modelId": "azure/gpt-5.5",
+        "providerId": "azure"
+      },
+      "endTime": 1782494430222,
+      "output": "42",
+      "finishReason": "stop",
+      "cost": 0.14624,
+      "tokens": {
+        "input": 29086,
+        "output": 17,
+        "reasoning": 10,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "total": 29113
+      }
+    }
+  ],
+  "summary": {
+    "totalTokens": 29113,
+    "totalCost": 0.14624,
+    "totalToolCalls": 0,
+    "totalGenerations": 1,
+    "duration": 24085,
+    "status": "completed",
+    "tokens": {
+      "input": 29086,
+      "output": 17,
+      "reasoning": 10,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "topTools": [],
+    "narrative": "Completed in 24.1s. Made 1 LLM call. Total cost: $0.1462."
+  }
+}

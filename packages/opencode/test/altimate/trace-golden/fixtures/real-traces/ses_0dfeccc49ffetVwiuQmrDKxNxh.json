@@ -1,0 +1,43 @@
+{
+  "version": 2,
+  "traceId": "019f2013-33b6-7000-a830-5b15e10fa1d9",
+  "sessionId": "ses_0dfeccc49ffetVwiuQmrDKxNxh",
+  "startedAt": "2026-07-01T23:45:57.174Z",
+  "endedAt": "2026-07-01T23:47:29.963Z",
+  "metadata": {
+    "title": "\"Reply with exactly one word: PONG\"\n",
+    "model": "anthropic/claude-haiku-4-5-20251001",
+    "providerId": "anthropic",
+    "agent": "builder",
+    "prompt": "\"Reply with exactly one word: PONG\"\n"
+  },
+  "spans": [
+    {
+      "spanId": "019f2013-33ba-7000-9c73-319b78aa7686",
+      "parentSpanId": null,
+      "name": "ses_0dfeccc49ffetVwiuQmrDKxNxh",
+      "kind": "session",
+      "startTime": 1782949557174,
+      "status": "error",
+      "input": "\"Reply with exactly one word: PONG\"\n",
+      "endTime": 1782949649963,
+      "statusMessage": "Process interrupted"
+    }
+  ],
+  "summary": {
+    "totalTokens": 0,
+    "totalCost": 0,
+    "totalToolCalls": 0,
+    "totalGenerations": 0,
+    "duration": 92789,
+    "status": "crashed",
+    "error": "Process interrupted",
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    }
+  }
+}

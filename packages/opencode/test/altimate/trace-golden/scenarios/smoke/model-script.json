@@ -1,0 +1,11 @@
+[
+  {
+    "kind": "tool",
+    "toolName": "read",
+    "toolInput": { "filePath": "<HOME>/smoke.txt" }
+  },
+  {
+    "kind": "text",
+    "text": "The file contains a short greeting from the trace-golden smoke scenario."
+  }
+]
