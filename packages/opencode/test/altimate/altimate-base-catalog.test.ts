@@ -83,7 +83,9 @@ describe("model catalog: altimate-free/altimate-base", () => {
         const model = base.models[FreeTier.MODEL_ID]
         expect(model).toBeDefined()
         expect(model.name).toBe("Altimate Base")
-        expect(model.family).toBe("qwen")
+        // altimate_change — family is scrubbed to the generic "altimate" brand (bec2ae37c1); the
+        // served model's underlying family is never disclosed publicly.
+        expect(model.family).toBe("altimate")
         // This is the number this suite exists to guard: the offline/fallback contract must stay
         // equal to what the gateway currently serves (131072/65536), not drift silently.
         expect(model.limit).toEqual({ context: 131_072, output: 65_536 })
