@@ -19,6 +19,7 @@ import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 import { walkInputs } from "./stamp-inputs"
 import { assertUsableCatalog, catalogDiagnosticOrigin, formatCatalogSummary } from "./models-catalog"
+import { FreeTierUrl } from "../src/altimate/free/url"
 
 // Python engine has been eliminated — all methods run natively in TypeScript.
 // ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
@@ -27,6 +28,21 @@ import { assertUsableCatalog, catalogDiagnosticOrigin, formatCatalogSummary } fr
 const changelogPath = path.resolve(dir, "../../CHANGELOG.md")
 const changelog = fs.existsSync(changelogPath) ? await Bun.file(changelogPath).text() : ""
 console.log(`Loaded CHANGELOG.md (${changelog.length} chars)`)
+
+// altimate_change start — inject the official Altimate Base endpoint at release time
+const rawAltimateBaseGatewayUrl = process.env.ALTIMATE_BASE_GATEWAY_URL?.trim() ?? ""
+const altimateBaseGatewayUrl = rawAltimateBaseGatewayUrl
+  ? FreeTierUrl.normalizeGatewayUrl(rawAltimateBaseGatewayUrl)
+  : undefined
+if (rawAltimateBaseGatewayUrl && !altimateBaseGatewayUrl) {
+  console.error("error: ALTIMATE_BASE_GATEWAY_URL must be HTTPS and contain no credentials, query, or fragment")
+  process.exit(1)
+}
+if (Script.release && !altimateBaseGatewayUrl) {
+  console.error("error: release builds require ALTIMATE_BASE_GATEWAY_URL")
+  process.exit(1)
+}
+// altimate_change end
 
 const modelsUrlOverride = process.env.OPENCODE_MODELS_URL || undefined
 const modelsUrl = modelsUrlOverride ?? "https://models.dev"
@@ -608,6 +624,8 @@ for (const item of targets) {
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
+      // altimate_change — official default is release configuration; runtime env can still override it
+      ALTIMATE_BASE_DEFAULT_GATEWAY_URL: JSON.stringify(altimateBaseGatewayUrl ?? ""),
       // ALTIMATE_ENGINE_VERSION removed — Python engine eliminated
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),

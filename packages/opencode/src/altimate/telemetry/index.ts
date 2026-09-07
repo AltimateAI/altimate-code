@@ -966,7 +966,7 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         /** the picker mounts from several paths — without this the event over-counts first runs */
-        trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+        trigger: "first_run" | "connect_command" | "altimate_base_back" | "prompt_gate"
       }
     | {
         type: "provider_selected"
@@ -975,7 +975,7 @@ export namespace Telemetry {
         /** `search_all` means the user opened the full catalogue; the provider they then chose
          *  arrives as a second event with `via_search`. `other` is any provider outside the
          *  curated five. */
-        provider: "altimate_gateway" | "anthropic" | "openai" | "google" | "big_pickle" | "search_all" | "other"
+        provider: "altimate_gateway" | "altimate_base" | "anthropic" | "openai" | "google" | "search_all" | "other"
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */
@@ -985,16 +985,22 @@ export namespace Telemetry {
         via_search?: boolean
       }
     | {
-        type: "big_pickle_confirm_shown"
+        type: "altimate_base_confirm_shown"
         timestamp: number
         session_id: string
         origin: "welcome" | "model"
       }
     | {
-        type: "big_pickle_choice"
+        type: "altimate_base_choice"
         timestamp: number
         session_id: string
         choice: "accept" | "cancel"
+      }
+    | {
+        type: "altimate_base_register_result"
+        timestamp: number
+        session_id: string
+        result: "success" | "rate_limited" | "unavailable" | "network" | "error"
       }
     | {
         type: "gateway_device_code_issued"
@@ -1162,6 +1168,7 @@ export namespace Telemetry {
   // not on this list is reported as `other` with no raw value attached.
   const KNOWN_PROVIDER_IDS = new Set([
     "altimate-backend",
+    "altimate-free",
     "anthropic",
     "openai",
     "google",
@@ -1194,6 +1201,7 @@ export namespace Telemetry {
   // this function exists to enforce.
   const CURATED_PROVIDER_ENUM: Record<string, string> = Object.assign(Object.create(null), {
     "altimate-backend": "altimate_gateway",
+    "altimate-free": "altimate_base",
     anthropic: "anthropic",
     openai: "openai",
     google: "google",
@@ -1205,7 +1213,6 @@ export namespace Telemetry {
     providerID: string,
     modelID?: string,
   ): { provider: string; provider_id?: string } {
-    if (providerID === "opencode" && modelID === "big-pickle") return { provider: "big_pickle", provider_id: providerID }
     const curated = CURATED_PROVIDER_ENUM[providerID]
     if (curated) return { provider: curated, provider_id: providerID }
     return KNOWN_PROVIDER_IDS.has(providerID) ? { provider: "other", provider_id: providerID } : { provider: "other" }

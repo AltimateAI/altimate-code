@@ -3,9 +3,9 @@ import path from "path"
 import { parse as parseJsonc } from "jsonc-parser"
 import { Log } from "../util/log"
 import { Filesystem } from "../util/filesystem"
-import { Glob } from "../util/glob"
 import { ConfigPaths } from "../config/paths"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+import { DiscoveryFiles } from "./discovery-files"
 
 const log = Log.create({ service: "mcp.discover" })
 
@@ -450,67 +450,51 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   // dedup is deterministic and keeps the historical .vscode > .cursor > copilot order
   // (a plain alphabetical sort would let .cursor override .vscode).
   const IDE_PRECEDENCE = [".vscode/mcp.json", ".cursor/mcp.json", ".github/copilot/mcp.json"]
-  const toRel = (abs: string) => path.relative(projectDir, abs).split(path.sep).join("/")
-  let mcpJsonFiles: string[] = []
+  let mcpJsonFiles: DiscoveryFiles.ProjectMcpFile[] = []
   try {
-    // altimate_change start — prune dependency/build trees during traversal.
-    // Filtering results after an unrestricted `**/mcp.json` walk still reads
-    // every directory in the project: on a monorepo with node_modules present
-    // that costs ~6 CPU-seconds per invocation, spread across the whole runtime
-    // I/O thread pool. The post-filter stays as defence in depth.
-    const IGNORE_GLOBS = [...Glob.DEFAULT_IGNORE]
-    const scanned = (
-      await Glob.scan("**/mcp.json", {
-        cwd: projectDir,
-        absolute: true,
-        dot: true,
-        ignore: IGNORE_GLOBS,
-      })
-    ).filter((abs) => {
-      const rel = toRel(abs)
-      return !IGNORE_GLOBS.some((pattern) => Glob.match(pattern, rel))
-    })
-    // altimate_change end
-    const rank = (abs: string) => {
-      const i = IDE_PRECEDENCE.indexOf(toRel(abs))
+    const scanned = await DiscoveryFiles.scanProjectMcpJsonFiles(projectDir)
+    const rank = (file: DiscoveryFiles.ProjectMcpFile) => {
+      const i = IDE_PRECEDENCE.indexOf(file.relative)
       return i === -1 ? IDE_PRECEDENCE.length : i
     }
     mcpJsonFiles = scanned.sort((a, b) => {
       const ra = rank(a)
       const rb = rank(b)
       if (ra !== rb) return ra - rb
-      const relA = toRel(a)
-      const relB = toRel(b)
-      return relA < relB ? -1 : relA > relB ? 1 : 0
+      return a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0
     })
   } catch {
     log.warn("mcp.json glob scan failed", { cwd: projectDir })
   }
   for (const file of mcpJsonFiles) {
-    const parsed = await readJsonSafe(file)
+    const parsed = await readJsonSafe(file.path)
     if (!parsed || typeof parsed !== "object") continue
-    const label = toRel(file) || path.basename(file)
+    const label = file.relative
     addServersFromFile(mergeServerKeys(parsed), label, result, contributingSources, true)
   }
 
   // Non-"mcp.json" config files (not matched by the glob above), in project and/or home.
   for (const source of SOURCES) {
-    const dirs: Array<{ dir: string; label: string }> = []
+    const dirs: Array<{ dir: string; label: string; projectScoped: boolean }> = []
     if (source.scope === "project" || source.scope === "both") {
-      dirs.push({ dir: projectDir, label: source.file })
+      dirs.push({ dir: projectDir, label: source.file, projectScoped: true })
     }
     if ((source.scope === "home" || source.scope === "both") && projectDir !== homedir) {
-      dirs.push({ dir: homedir, label: `~/${source.file}` })
+      dirs.push({ dir: homedir, label: `~/${source.file}`, projectScoped: false })
     }
 
-    for (const { dir, label } of dirs) {
-      const filePath = path.join(dir, source.file)
+    for (const { dir, label, projectScoped } of dirs) {
+      const candidate = path.join(dir, source.file)
+      const resolved = projectScoped
+        ? await DiscoveryFiles.resolveProjectDiscoveryFile(projectDir, candidate)
+        : undefined
+      if (projectScoped && !resolved) continue
+      const filePath = resolved?.path ?? candidate
       const parsed = await readJsonSafe(filePath)
       if (!parsed || typeof parsed !== "object") continue
 
-      const isProjectScoped = dir === projectDir
       const servers = parsed[source.key]
-      addServersFromFile(servers, label, result, contributingSources, isProjectScoped)
+      addServersFromFile(servers, label, result, contributingSources, projectScoped)
     }
   }
 

@@ -2,6 +2,9 @@ import { APICallError } from "ai"
 import { STATUS_CODES } from "http"
 import { iife } from "@/util/iife"
 import type { ProviderID } from "./schema"
+// altimate_change start — translate managed Altimate Base gateway errors
+import { FreeTier } from "@/altimate/free/client"
+// altimate_change end
 
 export namespace ProviderError {
   // altimate_change start — restore upstream v1.17.9 error classes dropped during
@@ -326,6 +329,23 @@ export namespace ProviderError {
     // Check responseBody for context_length_exceeded code (e.g., OpenAI-style errors)
     const bodyParsed = json(input.error.responseBody)
     const codeFromBody = bodyParsed?.error?.code
+    // altimate_change start — distinguish the gateway byte cap from context overflow
+    // The gateway's fixed request-byte cap is not a context overflow. Retrying compaction can
+    // never help when system instructions and tool schemas alone exceed it.
+    if (String(input.providerID) === FreeTier.PROVIDER_ID && input.error.statusCode === 413) {
+      const described = FreeTier.describeRequestTooLarge(input.error.responseBody)
+      if (described) {
+        return {
+          type: "api_error",
+          message: described,
+          statusCode: 413,
+          isRetryable: false,
+          responseHeaders: input.error.responseHeaders,
+          metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+        }
+      }
+    }
+    // altimate_change end
     if (isOverflow(m) || input.error.statusCode === 413 || codeFromBody === "context_length_exceeded") {
       return {
         type: "context_overflow",
@@ -335,6 +355,25 @@ export namespace ProviderError {
         // altimate_change end
       }
     }
+
+    // altimate_change start — surface Altimate Base quota and burst limits without leaking internals
+    if (String(input.providerID) === FreeTier.PROVIDER_ID && input.error.statusCode === 429) {
+      const described = FreeTier.describeRateLimit({
+        body: input.error.responseBody,
+        retryAfter: input.error.responseHeaders?.["retry-after"],
+      })
+      if (described) {
+        return {
+          type: "api_error",
+          message: described.message,
+          statusCode: 429,
+          isRetryable: described.retryable,
+          responseHeaders: input.error.responseHeaders,
+          metadata: input.error.url ? { url: maskInternalHost(input.error.url) } : undefined,
+        }
+      }
+    }
+    // altimate_change end
 
     // altimate_change start — append a `models` discoverability hint when the
     // error code is model_not_found. Pairs with the retry-storm carve-out in

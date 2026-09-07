@@ -74,6 +74,33 @@ describe("ClickHouse driver unit tests", () => {
       expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:8443")
     })
 
+    test("dbt secure defaults to HTTPS and the secure HTTP port", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", secure: true })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:8443")
+    })
+
+    for (const [flag, value] of [
+      ["tls", "false"],
+      ["ssl", " false "],
+      ["secure", "FALSE"],
+    ] as const) {
+      test(`treats serialized ${flag}: ${JSON.stringify(value)} as disabled`, async () => {
+        const plaintext = await connect({ type: "clickhouse", host: "plain.example", [flag]: value })
+        await plaintext.connect()
+
+        expect(mockClientConfigs.at(-1).url).toBe("http://plain.example:8123")
+      })
+    }
+
+    test("treats serialized dbt secure true as enabled", async () => {
+      const secure = await connect({ type: "clickhouse", host: "secure.example", secure: "true" })
+      await secure.connect()
+
+      expect(mockClientConfigs.at(-1).url).toBe("https://secure.example:8443")
+    })
+
     test("an HTTPS protocol defaults to the secure HTTP port", async () => {
       const secure = await connect({ type: "clickhouse", host: "secure.example", protocol: "https" })
       await secure.connect()
@@ -109,6 +136,19 @@ describe("ClickHouse driver unit tests", () => {
         type: "clickhouse",
         connection_string: "http://secure.example:8123",
         tls: true,
+        user: "analyst",
+        password: "secret",
+      })
+
+      await expect(insecure.connect()).rejects.toThrow("connection_string is not https://")
+      expect(mockClientConfigs).toHaveLength(1)
+    })
+
+    test("rejects an explicit plaintext connection string when dbt secure is requested", async () => {
+      const insecure = await connect({
+        type: "clickhouse",
+        connection_string: "http://secure.example:8123",
+        secure: true,
         user: "analyst",
         password: "secret",
       })

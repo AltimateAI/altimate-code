@@ -1,8 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
-import { mkdtemp, rm, mkdir, writeFile } from "fs/promises"
+import { mkdtemp, rm, mkdir, symlink, writeFile } from "fs/promises"
 import os, { tmpdir } from "os"
 import path from "path"
 import { discoverExternalMcp, unresolvedEnvVars } from "../../src/mcp/discover"
+import { DiscoveryFiles } from "../../src/mcp/discovery-files"
+
+const testSymlink = process.platform === "win32" ? test.skip : test
 
 let tempDir: string
 let homeDir: string
@@ -25,6 +28,16 @@ afterEach(async () => {
 })
 
 describe("discoverExternalMcp", () => {
+  test("sorts authored config paths by code unit instead of host locale", async () => {
+    for (const directory of ["z-config", "ä-config"]) {
+      await mkdir(path.join(tempDir, directory), { recursive: true })
+      await writeFile(path.join(tempDir, directory, "mcp.json"), "{}")
+    }
+
+    const files = await DiscoveryFiles.scanProjectMcpJsonFiles(tempDir)
+    expect(files.map((file) => file.relative)).toEqual(["z-config/mcp.json", "ä-config/mcp.json"])
+  })
+
   test("parses .vscode/mcp.json with servers key", async () => {
     await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
     await writeFile(
@@ -469,6 +482,11 @@ describe("discoverExternalMcp", () => {
       path.join(tempDir, "dist/mcp.json"),
       JSON.stringify({ servers: { built: { command: "should-not-appear" } } }),
     )
+    await mkdir(path.join(tempDir, ".yarn/unplugged/some-pkg"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".yarn/unplugged/some-pkg/mcp.json"),
+      JSON.stringify({ servers: { unplugged: { command: "should-not-appear" } } }),
+    )
     await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
     await writeFile(
       path.join(tempDir, ".vscode/mcp.json"),
@@ -478,7 +496,32 @@ describe("discoverExternalMcp", () => {
     const { servers: result } = await discoverExternalMcp(tempDir)
     expect(result["vendored"]).toBeUndefined()
     expect(result["built"]).toBeUndefined()
+    expect(result["unplugged"]).toBeUndefined()
     expect(result["real"]).toMatchObject({ type: "local", command: ["real-cmd"] })
+  })
+
+  testSymlink("dependency configs cannot bypass exclusions through project symlink aliases", async () => {
+    const target = path.join(tempDir, "node_modules/some-pkg/mcp.json")
+    await mkdir(path.dirname(target), { recursive: true })
+    await writeFile(
+      target,
+      JSON.stringify({
+        servers: { aliased: { command: "should-not-appear" } },
+        mcpServers: { exact: { command: "no" } },
+      }),
+    )
+    await mkdir(path.join(tempDir, ".vscode"), { recursive: true })
+    await symlink(target, path.join(tempDir, ".vscode/mcp.json"))
+    await symlink(target, path.join(tempDir, ".mcp.json"))
+    await mkdir(path.join(tempDir, ".cursor"), { recursive: true })
+    await writeFile(
+      path.join(tempDir, ".cursor/mcp.json"),
+      JSON.stringify({ servers: { authored: { command: "safe-dev-server" } } }),
+    )
+
+    const { servers, sources } = await discoverExternalMcp(tempDir)
+    expect(Object.keys(servers)).toEqual(["authored"])
+    expect(sources).toEqual([".cursor/mcp.json"])
   })
   // altimate_change end
 })

@@ -18,6 +18,7 @@ import { Plugin } from "../../plugin"
 import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
+import { FreeTier } from "@/altimate/free/client"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
 
@@ -578,21 +579,49 @@ export const ProvidersLogoutCommand = effectCmd({
 
     UI.empty()
     const credentials: Array<[string, Auth.Info]> = Object.entries(yield* Effect.orDie(authSvc.all()))
+    // altimate_change start — integrate the dedicated managed Base store with normal provider logout
+    const requestedProvider = args.provider?.toLowerCase()
+    const requestsAltimateBase =
+      requestedProvider === FreeTier.PROVIDER_ID ||
+      requestedProvider === FreeTier.MODEL_ID ||
+      requestedProvider === "altimate base"
+    const hasAltimateBaseCredential = yield* Effect.tryPromise(() => FreeTier.credentials()).pipe(
+      Effect.map((value) => value !== undefined),
+      // Keep malformed credential state visible so logout reports the storage error instead of
+      // silently claiming there is nothing configured.
+      Effect.orElseSucceed(() => true),
+    )
+    const hasAltimateBaseState = requestsAltimateBase
+      ? yield* Effect.tryPromise(() => FreeTier.hasStoredRegistrationState()).pipe(
+          Effect.orElseSucceed(() => true),
+        )
+      : false
     yield* Prompt.intro("Remove credential")
-    if (credentials.length === 0) {
+    const database = yield* modelsDev.get()
+    const hasLegacyAltimateBaseCredential = credentials.some(([key]) => key === FreeTier.PROVIDER_ID)
+    const options = credentials
+      .filter(([key]) => key !== FreeTier.PROVIDER_ID)
+      .map(([key, value]) => ({
+        label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
+        value: key,
+      }))
+    if (hasAltimateBaseCredential || hasLegacyAltimateBaseCredential || hasAltimateBaseState) {
+      options.push({
+        label: "Altimate Base" + UI.Style.TEXT_DIM + " (managed)",
+        value: FreeTier.PROVIDER_ID,
+      })
+    }
+    if (options.length === 0) {
       yield* Prompt.log.error("No credentials found")
       return
     }
-    const database = yield* modelsDev.get()
-    const options = credentials.map(([key, value]) => ({
-      label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
-      value: key,
-    }))
     const provider = args.provider
       ? options.find(
           (option) =>
             option.value === args.provider ||
-            database[option.value]?.name?.toLowerCase() === args.provider?.toLowerCase(),
+            database[option.value]?.name?.toLowerCase() === requestedProvider ||
+            (option.value === FreeTier.PROVIDER_ID &&
+              (requestedProvider === FreeTier.MODEL_ID || requestedProvider === "altimate base")),
         )?.value
       : yield* promptValue(
           yield* Prompt.autocomplete({
@@ -602,6 +631,14 @@ export const ProvidersLogoutCommand = effectCmd({
           }),
         )
     if (!provider) return yield* fail(`Unknown configured provider "${args.provider}"`)
+    if (provider === FreeTier.PROVIDER_ID) {
+      yield* cliTry("Failed to remove Altimate Base credential: ", () => FreeTier.logout())
+      // Remove any stale entry created by pre-managed Base builds without touching other providers.
+      yield* Effect.orDie(authSvc.remove(FreeTier.PROVIDER_ID))
+      yield* Prompt.outro("Logout successful")
+      return
+    }
+    // altimate_change end
     yield* Effect.orDie(authSvc.remove(provider))
     yield* Prompt.outro("Logout successful")
   }),

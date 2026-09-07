@@ -61,6 +61,20 @@ export namespace LLM {
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
 
+  // altimate_change start — Altimate Base gateway session-scoped abuse control
+  export function withManagedSessionHeaders(
+    providerID: string,
+    sessionID: string,
+    headers: Record<string, string | undefined>,
+  ): Record<string, string | undefined> {
+    if (providerID !== "altimate-free") return headers
+    return {
+      ...Object.fromEntries(Object.entries(headers).filter(([key]) => key.toLowerCase() !== "x-session-id")),
+      "X-Session-Id": sessionID,
+    }
+  }
+  // altimate_change end
+
   export async function stream(input: StreamInput) {
     const l = log
       .clone()
@@ -297,8 +311,8 @@ export namespace LLM {
       maxOutputTokens,
       // altimate_change end
       abortSignal: input.abort,
-      // altimate_change start — send the canonical headers used by the budget estimator
-      headers: requestHeaders,
+      // altimate_change start — send the canonical headers used by the budget estimator, bound to the current Altimate Base session
+      headers: withManagedSessionHeaders(input.model.providerID, input.sessionID, requestHeaders),
       // altimate_change end
       maxRetries: input.retries ?? 0,
       messages: [

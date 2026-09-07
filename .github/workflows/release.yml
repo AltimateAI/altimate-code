@@ -97,6 +97,8 @@ jobs:
           # a plain tag (v0.9.0) goes to `latest`. Prevents a beta tag from bricking the whole user base.
           OPENCODE_CHANNEL: ${{ contains(github.ref_name, '-') && 'beta' || 'latest' }}
           OPENCODE_RELEASE: "1"
+          # altimate_change — embed the operator-controlled Base endpoint without publishing it in source
+          ALTIMATE_BASE_GATEWAY_URL: ${{ vars.ALTIMATE_BASE_GATEWAY_URL }}
           GH_REPO: ${{ env.GH_REPO }}
           # altimate_change — MODELS_DEV_API_JSON is deliberately NOT set here.
           # Pointing it at test/tool/fixtures/models-api.json (as ci.yml does, where

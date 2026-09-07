@@ -25,7 +25,7 @@ On a fresh install, a welcome panel appears with a curated 6-provider picker:
 
 - **Altimate LLM Gateway** *(recommended)* — 10M tokens free, no API keys. Routes to the best model per task across Sonnet, Opus, GPT-5, and more. Sign-in opens a browser tab; complete Google or email signup and you're back in the TUI. If your terminal can't open a browser (SSH / tmux / WSL), the CLI prints the URL — paste it into a browser on your desktop.
 - **Anthropic** / **OpenAI** / **Google** — paste an API key or OAuth in.
-- **Big Pickle** — free tier, chats work but many data tasks fail; useful for kicking tires.
+- **Altimate Base** — a hosted open model, free and rate limited, with no signup or API key. Requests and responses may be logged and used to improve Altimate's products, so do not send secrets or confidential code. Registration happens only after an explicit confirmation that defaults to **No**.
 - **Search all providers…** — full picker if you need Bedrock, Databricks AI Gateway, Cloudflare AI Gateway, Snowflake Cortex, DigitalOcean Inference, etc.
 
 Or set an environment variable and skip the picker:
@@ -36,7 +36,7 @@ altimate
 ```
 
 !!! tip "Don't want to manage API keys?"
-    The [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) is the top row of the picker — 10M free tokens, and altimate-code auto-selects the right model per task. First-run sign-in uses a loopback OAuth on `127.0.0.1:7317-7325` (falls back if the preferred port is taken).
+    Choose **Altimate Base** for the no-signup, rate-limited model. Choose the [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) for 10M free tokens and automatic model routing. Gateway sign-in uses a loopback OAuth on `127.0.0.1:7317-7325` (falls back if the preferred port is taken).
 
 ---
 
