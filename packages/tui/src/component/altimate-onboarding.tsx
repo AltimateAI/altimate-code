@@ -13,6 +13,9 @@ import { createDialogProviderOptions } from "./dialog-provider"
 import { DialogModel } from "./dialog-model"
 import { useConnected } from "./use-connected"
 import { useSDK } from "../context/sdk"
+// altimate_change — the consent-gated registration operation lives outside the public SDK
+// context; see context/altimate-base-consent.tsx.
+import { useAltimateBaseConsent, type AltimateBaseRegistration } from "../context/altimate-base-consent"
 import { useSync } from "../context/sync"
 import { useToast } from "../ui/toast"
 // altimate_change — onboarding funnel telemetry seam
@@ -343,11 +346,12 @@ export function DialogModelWelcome(props: {
 }
 
 // altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate before any Base
-// credential is minted. Keep this terse gate text in sync with the fuller "Data handling" note in
-// docs/docs/configure/providers.md (the docs carry the extra detail — e.g. the permanent per-install
-// identifier — that would make this on-screen disclosure too long).
+// credential is minted. This is the text a user actually consents against before any registration
+// request, so it must disclose that requests are linkable across launches — not defer that to
+// docs/docs/configure/providers.md, which a user never sees before accepting. Keep this in sync
+// with that fuller "Data handling" note.
 export const ALTIMATE_BASE_DISCLOSURE =
-  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Usage is rate limited."
+  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Logs are linked to a persistent per-installation identifier. Usage is rate limited."
 // altimate_change end
 
 type RegisterOutcome =
@@ -356,8 +360,7 @@ type RegisterOutcome =
 
 const REGISTER_FAILURE_MESSAGE = "Could not set up Altimate Base. Try again, or pick another provider."
 
-async function registerAltimateBase(sdk: ReturnType<typeof useSDK>): Promise<RegisterOutcome> {
-  const register = sdk.altimateBaseRegistration
+async function registerAltimateBase(register: AltimateBaseRegistration | undefined): Promise<RegisterOutcome> {
   if (!register) return { ok: false, result: "error", message: REGISTER_FAILURE_MESSAGE }
   try {
     const data = await register()
@@ -384,6 +387,9 @@ export function DialogAltimateBaseConfirm(props: {
   const dialog = useDialog()
   const local = useLocal()
   const sdk = useSDK()
+  // altimate_change — the actual registration call, read from its own dedicated context rather
+  // than the public SDK context; see context/altimate-base-consent.tsx.
+  const altimateBaseConsent = useAltimateBaseConsent()
   const sync = useSync()
   const toast = useToast()
   const [selected, setSelected] = createSignal(0) // 0 = No (default)
@@ -443,7 +449,7 @@ export function DialogAltimateBaseConfirm(props: {
     recordChoice("accept")
     setBusy(true)
     setError(undefined)
-    const outcome = await registerAltimateBase(sdk)
+    const outcome = await registerAltimateBase(altimateBaseConsent)
     if (disposed) return
     if (firstRunActive() && props.origin !== "migration") {
       trackOnboarding({

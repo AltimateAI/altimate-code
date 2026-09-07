@@ -468,11 +468,12 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           }
           const next = favorites[index]
           if (!next) return
-          // altimate_change — a deliberate favorite-cycle pick is as explicit as `/model`; route
-          // through `selectModel` so it marks `explicitDefault` too (see `hasExplicitModel` above),
-          // otherwise this persists through the same fields the retired implicit default used and
-          // legacy migration silently overwrites it on the next launch.
+          // altimate_change start — a deliberate favorite-cycle pick is as explicit as `/model`;
+          // route through `selectModel` so it marks `explicitDefault` too (see `hasExplicitModel`
+          // above), otherwise this persists through the same fields the retired implicit default
+          // used and legacy migration silently overwrites it on the next launch.
           selectModel(next, { recent: true, explicit: true })
+          // altimate_change end
         },
         // altimate_change start — share the validated selection path with default migration.
         // Every caller of `set` (the `/model` dialog, the provider dialog, onboarding, and the

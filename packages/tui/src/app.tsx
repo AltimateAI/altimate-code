@@ -100,7 +100,11 @@ import {
   useOpencodeKeymap,
 } from "./keymap"
 
-import type { AltimateBaseRegistration, EventSource } from "./context/sdk"
+import type { EventSource } from "./context/sdk"
+// altimate_change start — consent-gated registration operation lives outside the public SDK
+// context; see context/altimate-base-consent.tsx for why.
+import { AltimateBaseConsentProvider, useAltimateBaseConsent, type AltimateBaseRegistration } from "./context/altimate-base-consent"
+// altimate_change end
 import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
@@ -343,8 +347,12 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                           fetch={input.fetch}
                                           headers={input.headers}
                                           events={input.events}
-                                          altimateBaseRegistration={input.altimateBaseRegistration}
                                         >
+                                          {/* altimate_change start — consent-gated registration kept
+                                              out of SDKProvider/useSDK(); see
+                                              context/altimate-base-consent.tsx */}
+                                          <AltimateBaseConsentProvider value={input.altimateBaseRegistration}>
+                                          {/* altimate_change end */}
                                           <ProjectProvider>
                                             <SyncProvider>
                                               <DataProvider>
@@ -371,6 +379,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                               </DataProvider>
                                             </SyncProvider>
                                           </ProjectProvider>
+                                          </AltimateBaseConsentProvider>
                                         </SDKProvider>
                                       </PluginRuntimeProvider>
                                     </TuiConfigProvider>
@@ -415,6 +424,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const keymap = useOpencodeKeymap()
   const event = useEvent()
   const sdk = useSDK()
+  // altimate_change start — read the consent-gated registration operation from its own dedicated
+  // context, not from the shared SDK context; see context/altimate-base-consent.tsx.
+  const altimateBaseConsent = useAltimateBaseConsent()
+  // altimate_change end
   const toast = useToast()
   const themeState = useTheme()
   const { theme, mode, setMode, locked, lock, unlock } = themeState
@@ -623,7 +636,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       return
     }
 
-    if (!sdk.altimateBaseRegistration) {
+    // altimate_change — the registration operation lives in its own dedicated context now, not on
+    // `sdk`; see context/altimate-base-consent.tsx.
+    if (!altimateBaseConsent) {
       legacyModelMigrationHandled = true
       return
     }

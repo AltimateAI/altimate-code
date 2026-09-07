@@ -4,6 +4,9 @@ import { map, pipe, sortBy } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
 import { useSDK } from "../context/sdk"
+// altimate_change — availability check only; the callable registration operation itself lives
+// outside the public SDK context. See context/altimate-base-consent.tsx.
+import { useAltimateBaseConsent } from "../context/altimate-base-consent"
 import { DialogPrompt } from "../ui/dialog-prompt"
 import { Link } from "../ui/link"
 import { useTheme } from "../context/theme"
@@ -119,6 +122,8 @@ export function createDialogProviderOptions() {
   const sync = useSync()
   const dialog = useDialog()
   const sdk = useSDK()
+  // altimate_change — availability only; see context/altimate-base-consent.tsx.
+  const altimateBaseConsent = useAltimateBaseConsent()
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
@@ -161,7 +166,7 @@ export function createDialogProviderOptions() {
       // A host without the private registration operation must not advertise Base setup. Already
       // registered Base models remain available through the READY model list.
       providerOptions(sync.data.provider_next.all).filter(
-        (provider) => provider.value !== "altimate-free" || Boolean(sdk.altimateBaseRegistration),
+        (provider) => provider.value !== "altimate-free" || Boolean(altimateBaseConsent),
       ),
       // altimate_change end
       map((provider) => {

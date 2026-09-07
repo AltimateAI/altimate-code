@@ -44,6 +44,7 @@ async function mountConfirm(
     { TuiConfigProvider },
     { ToastProvider },
     { SDKProvider },
+    { AltimateBaseConsentProvider },
     { ProjectProvider },
     { SyncProvider },
     { LocalProvider },
@@ -60,6 +61,9 @@ async function mountConfirm(
     import("../../../src/config"),
     import("../../../src/ui/toast"),
     import("../../../src/context/sdk"),
+    // altimate_change — the registration operation is provided through this dedicated context,
+    // not through SDKProvider; see context/altimate-base-consent.tsx.
+    import("../../../src/context/altimate-base-consent"),
     import("../../../src/context/project"),
     import("../../../src/context/sync"),
     import("../../../src/context/local"),
@@ -139,35 +143,33 @@ async function mountConfirm(
                 <KVProvider>
                   <ToastProvider>
                     <RouteProvider>
-                      <SDKProvider
-                        url="http://test"
-                        directory={directory}
-                        fetch={inner.fetch}
-                        events={source.source}
-                        altimateBaseRegistration={async () => {
-                          registrations.push(true)
-                          return typeof input.registration === "function"
-                            ? input.registration()
-                            : (input.registration ?? { ok: true })
-                        }}
-                      >
-                        <ProjectProvider>
-                          <SyncProvider>
-                            <ThemeProvider mode="dark">
-                              <LocalProvider>
-                                <OnboardingTelemetryProvider
-                                  track={(event) => {
-                                    events.push(event)
-                                  }}
-                                >
-                                  <DialogProvider>
-                                    <OpenConfirm />
-                                  </DialogProvider>
-                                </OnboardingTelemetryProvider>
-                              </LocalProvider>
-                            </ThemeProvider>
-                          </SyncProvider>
-                        </ProjectProvider>
+                      <SDKProvider url="http://test" directory={directory} fetch={inner.fetch} events={source.source}>
+                        <AltimateBaseConsentProvider
+                          value={async () => {
+                            registrations.push(true)
+                            return typeof input.registration === "function"
+                              ? input.registration()
+                              : (input.registration ?? { ok: true })
+                          }}
+                        >
+                          <ProjectProvider>
+                            <SyncProvider>
+                              <ThemeProvider mode="dark">
+                                <LocalProvider>
+                                  <OnboardingTelemetryProvider
+                                    track={(event) => {
+                                      events.push(event)
+                                    }}
+                                  >
+                                    <DialogProvider>
+                                      <OpenConfirm />
+                                    </DialogProvider>
+                                  </OnboardingTelemetryProvider>
+                                </LocalProvider>
+                              </ThemeProvider>
+                            </SyncProvider>
+                          </ProjectProvider>
+                        </AltimateBaseConsentProvider>
                       </SDKProvider>
                     </RouteProvider>
                   </ToastProvider>
