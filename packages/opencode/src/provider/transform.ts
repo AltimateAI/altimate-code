@@ -474,9 +474,10 @@ export namespace ProviderTransform {
     if (id.includes("north-mini-code")) return 1.0
     // altimate_change end
     if (id.includes("qwen")) return 0.55
-    // altimate_change — the model served behind this stable alias needs the same tuning as the
-    // row above; the gateway does not force sampling params on its own.
+    // altimate_change start — the model served behind this stable alias needs the same tuning as
+    // the row above; the gateway does not force sampling params on its own.
     if (id.includes("altimate-base")) return 0.55
+    // altimate_change end
     if (id.includes("claude")) return undefined
     if (id.includes("gemini")) return 1.0
     if (id.includes("glm-4.6")) return 1.0
@@ -495,8 +496,9 @@ export namespace ProviderTransform {
   export function topP(model: Provider.Model) {
     const id = model.id.toLowerCase()
     if (id.includes("qwen")) return 1
-    // altimate_change — same served-model reasoning as temperature() above.
+    // altimate_change start — same served-model reasoning as temperature() above.
     if (id.includes("altimate-base")) return 1
+    // altimate_change end
     if (["minimax-m2", "gemini", "kimi-k2.5", "kimi-k2p5", "kimi-k2-5"].some((s) => id.includes(s))) {
       return 0.95
     }
