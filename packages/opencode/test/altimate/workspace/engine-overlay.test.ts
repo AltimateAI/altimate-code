@@ -425,6 +425,21 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.toasts[0].message).toBe("2 integration tools available.")
   })
 
+  test("extension tools a live bridge serves are announced; absent ones are expected, not missing", async () => {
+    const h = install({
+      tools: { datamate_dbt_build_model: {}, datamate_dbt_compile_model: {}, datamate_get_projects: {} },
+      declared: { keys: ["dbt_build_model", "dbt_compile_model"], extensionKeys: ["get_projects", "run_model"] },
+    })
+    await beforeTurn("s1")
+    // `run_model` is declared extension-type but no bridge serves it: that is
+    // the normal no-IDE case, so the outcome stays clean and unwarned.
+    expect(settledOutcome("s1")).toEqual({ kind: "attached", available: 3, declared: 2, missing: [] })
+    expect(h.toasts[0].message).toBe(
+      "2 of 2 declared integration tools available. Plus 1 extension tool via the connected VS Code window.",
+    )
+    expect(h.toasts[0].variant).toBe("info")
+  })
+
   test("the inventory is announced per session, not per process", async () => {
     const h = install({})
     await beforeTurn("s1")

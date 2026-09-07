@@ -214,6 +214,14 @@ export function describeMissing(missing: string[]): string {
   return ` Declared but not available: ${shown}${more}.`
 }
 
+/** Extension-declared tools a connected IDE bridge is actually serving. Zero
+ * is the normal no-IDE case and says nothing — absent extension tools are
+ * expected, not missing, so they never join `describeMissing`. */
+export function describeExtensionServed(count: number): string {
+  if (count === 0) return ""
+  return ` Plus ${count} extension tool${count === 1 ? "" : "s"} via the connected VS Code window.`
+}
+
 /** What each outcome MEANS, as tables over the whole union: a new variant
  * fails to compile until every table names it, and the safe answer is false. */
 export const SERVING: Record<Outcome["kind"], boolean> = {

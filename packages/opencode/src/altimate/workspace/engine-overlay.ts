@@ -43,6 +43,7 @@ import {
   REPAIRABLE,
   TOOL_PREFIX,
   clearsFloor,
+  describeExtensionServed,
   describeMissing,
   describeRefusal,
   engineEntry,
@@ -650,6 +651,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   // tools beyond the allowlist (knowledge, memory) when the workspace enables
   // them, so the "N of M declared" line counts only the declared ones present.
   const served = declared ? declared.keys.length - (missing?.length ?? 0) : present.size
+  // Extension-declared tools appear in `present` only while the engine holds a
+  // live IDE bridge; when they do they are real capability and the line names
+  // them, but their absence is the normal no-IDE case, never `missing`.
+  const extServed = declared ? declared.extensionKeys.filter((k) => present.has(k)).length : 0
   const outcome: Outcome = {
     kind: "attached",
     available: present.size,
@@ -658,7 +663,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   const rec = record(sessionID, outcome)
   // Keyed on the workspace too: a re-link with an identical inventory is still
   // a new verdict the user should hear.
-  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}`
+  // extServed is part of what the user hears, so it is part of the signature:
+  // an equal-count tool swap that changes only the extension share must still
+  // re-announce. (bot review)
+  const signature = `attached:${workspace.key}:${outcome.available}:${outcome.declared ?? "?"}:${(missing ?? []).join(",")}:${extServed}`
   if (rec.announced === signature) return
   rec.announced = signature
   log.info("workspace engine attached", {
@@ -671,7 +679,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   await notify({
     title: `Workspace "${workspace.name}"`,
     message: declared
-      ? `${served} of ${declared.keys.length} declared integration tools available.${describeMissing(missing ?? [])}`
+      ? `${served} of ${declared.keys.length} declared integration tools available.${describeMissing(missing ?? [])}${describeExtensionServed(extServed)}`
       : `${outcome.available} integration tools available.`,
     variant: missing && missing.length > 0 ? "warning" : "info",
   })

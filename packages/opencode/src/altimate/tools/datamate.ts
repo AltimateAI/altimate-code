@@ -1,3 +1,4 @@
+import path from "path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { AltimateApi } from "../api/client"
@@ -15,6 +16,8 @@ import { Log } from "@/altimate/util/log"
 import { DATAMATE_KEY, readDatamateTransportFromIde } from "../datamate-transport"
 // altimate_change - workspace mode owns the datamate key
 import { managedWorkspaceLoaded } from "../workspace/engine-overlay"
+// altimate_change - extension-type rows depend on a live IDE bridge
+import { liveBridge } from "../workspace/engine-probes"
 
 const log = Log.create({ service: "datamate" })
 
@@ -138,37 +141,67 @@ async function handleList() {
   }
 }
 
+// altimate_change start — the cwd the shared datamate entry would be spawned
+// with, mirroring connectLocal: a local entry's `cwd` resolved against the
+// instance directory, else the instance directory. Runtime-added entries win
+// over file config (MCP.entry uses the connect path's own precedence). Falls
+// back to the instance directory when no MCP runtime is up — that is
+// connectLocal's default too.
+async function engineSpawnCwd(): Promise<string> {
+  try {
+    const entry = await MCP.entry(DATAMATE_KEY)
+    if (entry && entry.type === "local" && entry.cwd) return path.resolve(Instance.directory, entry.cwd)
+  } catch (e) {
+    log.warn("could not read the datamate MCP entry for the bridge probe", { error: String(e) })
+  }
+  return Instance.directory
+}
+// altimate_change end
+
 async function handleListIntegrations() {
   try {
     const catalog = await AltimateApi.listIntegrations()
     // altimate_change start — extension-type integrations are RPC into a live VS
-    // Code host and cannot work from the CLI. Hide them from this surface (the
-    // workspace UI still offers them) and say how many were hidden.
-    const integrations = catalog.filter((i) => i.type !== "extension")
+    // Code host. With a bridge running for this project they serve from the CLI
+    // like any other integration, so list them; without one, keep them out of
+    // the table and say how they come back — not that they never can. E2E
+    // (2026-09-03) proved the full chain: compile_model/run_model over the
+    // bridge materialized a model on the warehouse from a headless run.
+    const extension = catalog.filter((i) => i.type === "extension")
+    // Probe with the cwd the engine is actually spawned with: connectLocal
+    // resolves a local entry's `cwd` against the instance directory and falls
+    // back to the instance directory itself — not the Git root projectRoot()
+    // returns. Probing anything else diverged whenever the effective spawn cwd
+    // and the probe input straddled different sidecars. (codex review, r1+r2)
+    const bridged = extension.length > 0 && liveBridge(await engineSpawnCwd())
+    const integrations = bridged ? catalog : catalog.filter((i) => i.type !== "extension")
     const hidden = catalog.length - integrations.length
-    const omitted =
-      hidden > 0
-        ? `${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they require a live VS Code bridge and are not available from the CLI.`
+    const footer = bridged
+      ? `${extension.length} extension-type integration${extension.length === 1 ? " is" : "s are"} served via the connected VS Code window.`
+      : hidden > 0
+        ? `${hidden} extension-type integration${hidden === 1 ? " was" : "s were"} omitted — they serve while VS Code with the Altimate extension is open on this project.`
         : ""
     if (integrations.length === 0) {
       return {
         title: hidden > 0 ? `Integrations: none available on the CLI (${hidden} hidden)` : "Integrations: none found",
-        metadata: { count: 0, hidden },
-        output: omitted ? `No integrations available. ${omitted}` : "No integrations available.",
+        metadata: { count: 0, hidden, bridge: bridged },
+        output: footer ? `No integrations available. ${footer}` : "No integrations available.",
       }
     }
+    const extensionIds = new Set(extension.map((i) => i.id))
     // altimate_change end
     const lines = ["ID | Name | Tools", "---|------|------"]
     for (const i of integrations) {
       const tools = i.tools?.map((t) => t.key).join(", ") ?? "none"
-      lines.push(`${i.id} | ${i.name} | ${tools}`)
+      // altimate_change — mark the rows the IDE bridge serves
+      lines.push(`${i.id} | ${i.name}${extensionIds.has(i.id) ? " (via VS Code)" : ""} | ${tools}`)
     }
     // altimate_change start
-    if (omitted) lines.push("", `(${omitted})`)
+    if (footer) lines.push("", `(${footer})`)
     // altimate_change end
     return {
       title: `Integrations: ${integrations.length} available`,
-      metadata: { count: integrations.length, hidden },
+      metadata: { count: integrations.length, hidden, bridge: bridged },
       output: lines.join("\n"),
     }
   } catch (e) {
