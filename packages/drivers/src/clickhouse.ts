@@ -8,10 +8,24 @@
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
 
+function tlsFlagEnabled(value: unknown): boolean {
+  if (typeof value !== "string") return Boolean(value)
+  const normalized = value.trim().toLowerCase()
+  if (["", "0", "false", "no", "off"].includes(normalized)) return false
+  return true
+}
+
+function tlsRequested(config: ConnectionConfig): boolean {
+  return [config.tls, config.ssl, config.secure].some(tlsFlagEnabled)
+}
+
 function connectionUrl(config: ConnectionConfig): string {
-  const tlsRequested = Boolean(config.tls || config.ssl)
+  // `secure` is dbt-clickhouse's standard TLS flag. Enforce it here at the
+  // driver boundary as well as preserving it through profile normalization,
+  // because direct driver consumers can bypass the dbt importer.
+  const requested = tlsRequested(config)
   const configuredProtocol = typeof config.protocol === "string" ? config.protocol.trim().toLowerCase() : ""
-  const secureIntent = tlsRequested || configuredProtocol === "https"
+  const secureIntent = requested || configuredProtocol === "https"
   const configured = typeof config.connection_string === "string" ? config.connection_string.trim() : ""
 
   if (configured) {
@@ -29,11 +43,11 @@ function connectionUrl(config: ConnectionConfig): string {
     return configured
   }
 
-  if (tlsRequested && configuredProtocol && configuredProtocol !== "https") {
+  if (requested && configuredProtocol && configuredProtocol !== "https") {
     throw new Error("ClickHouse TLS was requested, but protocol is not https")
   }
 
-  const protocol = configuredProtocol || (tlsRequested ? "https" : "http")
+  const protocol = configuredProtocol || (requested ? "https" : "http")
   const defaultPort = protocol === "https" ? 8443 : 8123
   const hasExplicitPort = config.port !== undefined && config.port !== null
   const parsedPort =
@@ -76,9 +90,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       if (config.password) clientConfig.password = config.password as string
       if (config.database) clientConfig.database = config.database as string
 
-      // TLS/SSL support — detect HTTPS from URL, protocol config, or explicit tls/ssl flags
+      // TLS/SSL support — detect HTTPS from URL, protocol config, or an explicit secure flag
       const isHttps = typeof url === "string" && url.startsWith("https://")
-      if (config.tls || config.ssl || (config.protocol as string) === "https" || isHttps) {
+      if (tlsRequested(config) || (config.protocol as string) === "https" || isHttps) {
         const tls: Record<string, unknown> = {}
         if (config.tls_ca_cert) tls.ca_cert = config.tls_ca_cert
         if (config.tls_cert) tls.cert = config.tls_cert

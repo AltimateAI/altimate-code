@@ -39,6 +39,7 @@ import { DialogProvider, useDialog } from "./ui/dialog"
 // + /logout commands
 import { DialogAltimateAuth } from "./component/dialog-provider"
 import {
+  DialogAltimateBaseConfirm,
   DialogModelWelcome,
   useReady,
   useSetupComplete,
@@ -100,6 +101,10 @@ import {
 } from "./keymap"
 
 import type { EventSource } from "./context/sdk"
+// altimate_change start — consent-gated registration operation lives outside the public SDK
+// context; see context/altimate-base-consent.tsx for why.
+import { AltimateBaseConsentProvider, useAltimateBaseConsent, type AltimateBaseRegistration } from "./context/altimate-base-consent"
+// altimate_change end
 import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
@@ -108,6 +113,10 @@ import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 // altimate_change start — fix: pure helper extracted to terminal-detection for test coverage (#704)
 import { detectModeFromCOLORFGBG } from "./terminal-detection"
+// altimate_change end
+
+// altimate_change start — remember an explicit migration decline without suppressing later manual setup
+const ALTIMATE_BASE_MIGRATION_DECLINED_KEY = "altimate_base_big_pickle_migration_declined_v1"
 // altimate_change end
 
 const appGlobalBindingCommands = [
@@ -173,6 +182,9 @@ export type TuiInput = {
   headers?: RequestInit["headers"]
   events?: EventSource
   pluginHost: TuiPluginHost
+  // altimate_change start — host-injected Altimate Base registration operation
+  altimateBaseRegistration?: AltimateBaseRegistration
+  // altimate_change end
   // altimate_change start — onboarding funnel telemetry, injected by the host (packages/tui cannot
   // reach the Telemetry module). Optional: absent means no tracking, not an error.
   onTelemetry?: TrackOnboarding
@@ -336,6 +348,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                           headers={input.headers}
                                           events={input.events}
                                         >
+                                          {/* altimate_change start — consent-gated registration kept
+                                              out of SDKProvider/useSDK(); see
+                                              context/altimate-base-consent.tsx */}
+                                          <AltimateBaseConsentProvider value={input.altimateBaseRegistration}>
+                                          {/* altimate_change end */}
                                           <ProjectProvider>
                                             <SyncProvider>
                                               <DataProvider>
@@ -362,6 +379,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                               </DataProvider>
                                             </SyncProvider>
                                           </ProjectProvider>
+                                          </AltimateBaseConsentProvider>
                                         </SDKProvider>
                                       </PluginRuntimeProvider>
                                     </TuiConfigProvider>
@@ -406,6 +424,10 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const keymap = useOpencodeKeymap()
   const event = useEvent()
   const sdk = useSDK()
+  // altimate_change start — read the consent-gated registration operation from its own dedicated
+  // context, not from the shared SDK context; see context/altimate-base-consent.tsx.
+  const altimateBaseConsent = useAltimateBaseConsent()
+  // altimate_change end
   const toast = useToast()
   const themeState = useTheme()
   const { theme, mode, setMode, locked, lock, unlock } = themeState
@@ -574,7 +596,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
 
   // altimate_change start — connection + onboarding readiness. `connected` tracks a
   // paid/BYOK provider; `onboardingReady` also counts a completed first-run setup pick
-  // (e.g. Big Pickle) and gates first-run chat/tips (see component/altimate-onboarding.tsx).
+  // (e.g. Altimate Base) and gates first-run chat/tips (see component/altimate-onboarding.tsx).
   // Distinct from the plugin-host `ready` signal above (line ~408), which tracks TUI
   // plugin startup, not onboarding state.
   const connected = useConnected()
@@ -583,6 +605,52 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const setupComplete = useSetupComplete()
   // altimate_change — onboarding funnel tracker (no-op when the host injected none)
   const trackOnboarding = useOnboardingTelemetry()
+  // altimate_change end
+
+  // altimate_change start — move the retired Big Pickle default to Altimate Base
+  // Already-registered users migrate immediately. Everyone else sees the existing logging
+  // disclosure first; an explicit No is remembered and leaves their model untouched.
+  let legacyModelMigrationHandled = false
+  createEffect(() => {
+    if (legacyModelMigrationHandled) return
+    if (!ready() || sync.status !== "complete" || !local.model.ready) return
+    if (!local.model.usesLegacyDefault()) {
+      legacyModelMigrationHandled = true
+      return
+    }
+
+    // A previous decline is checked FIRST, before registration state. Registering Altimate Base
+    // for one task is not consent to move a Big Pickle default that the user already refused to
+    // move; without this the decline is silently overridden on every later launch.
+    if (kv.get(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, false)) {
+      legacyModelMigrationHandled = true
+      return
+    }
+
+    const altimateBaseAvailable = sync.data.provider.some(
+      (provider) => provider.id === "altimate-free" && Boolean(provider.models?.["altimate-base"]),
+    )
+    if (altimateBaseAvailable) {
+      legacyModelMigrationHandled = true
+      local.model.migrateLegacyDefault()
+      return
+    }
+
+    // altimate_change — the registration operation lives in its own dedicated context now, not on
+    // `sdk`; see context/altimate-base-consent.tsx.
+    if (!altimateBaseConsent) {
+      legacyModelMigrationHandled = true
+      return
+    }
+
+    legacyModelMigrationHandled = true
+    dialog.replace(() => (
+      <DialogAltimateBaseConfirm
+        origin="migration"
+        onDecline={() => kv.set(ALTIMATE_BASE_MIGRATION_DECLINED_KEY, true)}
+      />
+    ))
+  })
   // altimate_change end
 
   // altimate_change start — AI-7774: first-run onboarding gate. On a fresh launch
@@ -597,13 +665,23 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   let armScanGate = false
   createEffect(() => {
     if (firstRunPickerHandled) return
-    // Decide only once BOTH the plugin host has started AND sync has finished
-    // loading providers. `ready()` alone is plugin-host startup, which can settle
-    // before sync populates `sync.data.provider` — deciding then would transiently
-    // see a returning (connected) user as un-onboarded and re-show the picker +
-    // scan gate (the AI-7774 regression). `sync.status` is the provider-load signal
-    // (same one used for continue/fork above).
-    if (!ready() || sync.status !== "complete") return
+    // Decide only once the plugin host has started, sync has finished loading providers, AND the
+    // persisted model selection has loaded. `ready()` alone is plugin-host startup, which can
+    // settle before sync populates `sync.data.provider` — deciding then would transiently see a
+    // returning (connected) user as un-onboarded and re-show the picker + scan gate (see the
+    // regression this effect guards against, above). `sync.status` is the provider-load signal
+    // (same one used for continue/fork above). `local.model.ready` guards the same race the
+    // migration effect above already does: `model.json`'s read is async, and if provider sync
+    // finishes first, `hasExistingLegacySelection` below would see an empty recent list and
+    // misclassify a returning Big Pickle user as fresh.
+    if (!ready() || sync.status !== "complete" || !local.model.ready) return
+    // A Big Pickle selection proves this is an existing user, even though that zero-cost
+    // provider does not satisfy useConnected(). The migration effect above owns any consent
+    // prompt; never overwrite it with the first-run picker.
+    if (local.model.hasExistingLegacySelection()) {
+      firstRunPickerHandled = true
+      return
+    }
     firstRunPickerHandled = true
     if (onboardingReady()) {
       // Not necessarily a returning user. The prompt gate (component/prompt/index.tsx) opens the
@@ -653,7 +731,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   //    submitted, so every activation event was unreachable for BYOK users while
   //    `onboarding_completed` and `scan_gate_shown` were still reported for a gate nobody saw.
   //
-  // setupComplete is only set once a model is genuinely chosen (dialog-model.tsx, the Big Pickle
+  // setupComplete is only set once a model is genuinely chosen (dialog-model.tsx, the Altimate Base
   // accept path, and the gateway auto-select), which is what this gate and the spec both mean.
   // `prev === false` still requires a genuine transition. We do NOT auto-scan — the gate asks.
   let scanGateShown = false
@@ -947,7 +1025,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       // altimate_change start — /connect opens the curated welcome picker (Gateway + top
-      // BYOK providers + Big Pickle) instead of the full provider list; "Search all
+      // BYOK providers + Altimate Base) instead of the full provider list; "Search all
       // providers…" still hands off to the full DialogModel catalog.
       {
         name: "provider.connect",

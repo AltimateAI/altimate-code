@@ -392,8 +392,12 @@ export function Prompt(props: PromptProps) {
         // Keep command line --agent if specified.
         if (!args.agent) local.agent.set(msg.agent)
         if (msg.model) {
-          local.model.set(msg.model)
-          local.model.variant.set(msg.model.variant)
+          // altimate_change start — restore the recorded model, and its effort only if that model
+          // was actually applied (an invalid/unavailable model must not keep a stale variant)
+          if (local.model.restoreSession(msg.model)) {
+            local.model.variant.set(msg.model.variant)
+          }
+          // altimate_change end
         }
       }
     }

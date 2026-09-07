@@ -586,6 +586,7 @@ jobs:
         env:
           OPENCODE_VERSION: 0.0.0-sanity-${{ github.sha }}
           OPENCODE_RELEASE: "1"
+          ALTIMATE_BASE_GATEWAY_URL: https://gateway.test
           MODELS_DEV_API_JSON: test/tool/fixtures/models-api.json
 
       - name: Build dbt-tools

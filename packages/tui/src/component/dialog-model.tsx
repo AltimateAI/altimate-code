@@ -18,16 +18,16 @@ import {
 import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
-// altimate_change — onboarding helpers (readiness state, welcome picker, Big Pickle
-// interstitial) live in the altimate-owned ./altimate-onboarding to keep this
-// upstream file's rebase surface small. markSetupComplete / DialogBigPickleConfirm
+// altimate_change — onboarding helpers (readiness state, welcome picker, Altimate Base
+// disclosure) live in the altimate-owned ./altimate-onboarding to keep this
+// upstream file's rebase surface small. markSetupComplete / DialogAltimateBaseConfirm
 // are used by the restructured DialogModel below.
-import { markSetupComplete, useFirstRunActive, DialogBigPickleConfirm } from "./altimate-onboarding"
+import { markSetupComplete, useFirstRunActive, DialogAltimateBaseConfirm } from "./altimate-onboarding"
 // altimate_change — funnel: provider identity for a pick made from the full catalogue
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 
 // altimate_change start — DialogModel restructured from the upstream flat
-// favorites/recent/provider list into READY / NEEDS-SETUP sections with a Big Pickle
+// favorites/recent/provider list into READY / NEEDS-SETUP sections with an Altimate Base
 // fallback. This is an in-place rewrite of the upstream component; on an upstream
 // merge, expect a conflict here and re-apply the READY/NEEDS-SETUP shaping.
 export function DialogModel(props: {
@@ -127,13 +127,21 @@ export function DialogModel(props: {
       ),
     )
 
+    // altimate_change — Big Pickle is retired as a NEW selectable option: Altimate Base is now the
+    // free/default model, and a fresh pick of Big Pickle from this catalogue would just recreate the
+    // account this release is retiring. Users already on Big Pickle are unaffected — they are
+    // detected on launch (see `isExistingBigPickleSelection` in ../context/local) and offered the
+    // Altimate Base consent gate through the migration path, which this removal does not touch.
+
     // NEEDS SETUP — providers without valid credentials (selecting routes into their
-    // auth flow first), plus the free Big Pickle option. Hidden when scoped to one
+    // auth flow first), plus the Altimate Base disclosure. Hidden when scoped to one
     // provider (post-connect model list).
     const setupOptions = props.providerID
       ? []
       : (() => {
+          const baseProvider = providers().find((option) => option.value === "altimate-free")
           const list = providers()
+            .filter((option) => option.value !== "altimate-free")
             .filter((o) => !providerReady(o.value))
             .map((o) => ({
               value: o.value as { providerID: string; modelID: string } | string,
@@ -164,32 +172,32 @@ export function DialogModel(props: {
                 return o.onSelect?.()
               },
             }))
-          const bigPickle = {
-            value: "big-pickle" as { providerID: string; modelID: string } | string,
-            title: "Big Pickle",
-            description: "free, no signup — slower, unreliable tool-calling",
+          const altimateBase = {
+            value: "altimate-base" as { providerID: string; modelID: string } | string,
+            title: "Altimate Base",
+            description: "free, no signup — rate limited",
             category: "NEEDS SETUP",
             footer: undefined as string | undefined,
-            async onSelect() {
-              if (activated) return
+            onSelect() {
+              if (activated) return undefined
               activated = true
-              // altimate_change — Big Pickle reached through the catalogue emitted its confirm
-              // events but never a provider_selected, so the choice was invisible.
               if (firstRunActive()) {
                 trackOnboarding({
                   name: "provider_selected",
-                  providerID: "opencode",
-                  modelID: "big-pickle",
+                  providerID: "altimate-free",
+                  modelID: "altimate-base",
                   via_search: props.viaSearch ?? false,
                 })
               }
-              dialog.replace(() => <DialogBigPickleConfirm origin="model" viaSearch={props.viaSearch} />)
+              dialog.replace(() => <DialogAltimateBaseConfirm origin="model" viaSearch={props.viaSearch} />)
+              return undefined
             },
           }
-          // Big Pickle sits at priority 4 — just above OpenCode Zen (priority 5).
           const zenIdx = list.findIndex((o) => o.value === "opencode")
-          if (zenIdx === -1) list.push(bigPickle)
-          else list.splice(zenIdx, 0, bigPickle)
+          if (baseProvider && !providerReady("altimate-free")) {
+            if (zenIdx === -1) list.push(altimateBase)
+            else list.splice(zenIdx, 0, altimateBase)
+          }
           return list
         })()
 
@@ -245,7 +253,7 @@ export function DialogModel(props: {
           hidden: !connected(),
           onTrigger: (option) => {
             // altimate_change — NEEDS-SETUP rows carry plain string values (provider
-            // ids / "big-pickle"); only real {providerID, modelID} rows are favoritable.
+            // ids / "altimate-base"); only real {providerID, modelID} rows are favoritable.
             if (typeof option.value === "string") return
             local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
           },

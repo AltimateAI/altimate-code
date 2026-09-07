@@ -1,5 +1,6 @@
-import { describe, test, expect } from "bun:test"
-import { mkdir, readFile, writeFile } from "fs/promises"
+import { describe, test, expect, spyOn } from "bun:test"
+import { mkdir, readFile, symlink, writeFile } from "fs/promises"
+import os from "os"
 import path from "path"
 import { tmpdir } from "../fixture/fixture"
 import { discoverExternalMcp } from "../../src/mcp/discover"
@@ -10,6 +11,7 @@ import {
 } from "../../src/altimate/datamate-transport"
 
 const REPO_ROOT = path.join(import.meta.dir, "../../../..")
+const testSymlink = process.platform === "win32" ? test.skip : test
 
 async function writeJson(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true })
@@ -20,11 +22,13 @@ async function withIsolatedHome<T>(fn: (home: string) => Promise<T>): Promise<T>
   await using home = await tmpdir()
   const oldHome = process.env.HOME
   const oldUserProfile = process.env.USERPROFILE
+  const homedirSpy = spyOn(os, "homedir").mockImplementation(() => home.path)
   process.env.HOME = home.path
   process.env.USERPROFILE = home.path
   try {
     return await fn(home.path)
   } finally {
+    homedirSpy.mockRestore()
     if (oldHome === undefined) delete process.env.HOME
     else process.env.HOME = oldHome
     if (oldUserProfile === undefined) delete process.env.USERPROFILE
@@ -171,8 +175,29 @@ describe("PR #893 datamate IDE transport selection", () => {
     await writeJson(path.join(project.path, "dist/mcp.json"), {
       servers: { datamate: { url: "https://dist-output.example.com/sse" } },
     })
+    await writeJson(path.join(project.path, ".yarn/unplugged/pkg/mcp.json"), {
+      servers: { datamate: { url: "https://unplugged-package.example.com/sse" } },
+    })
     // Keep the authored config lexically last: without the broad exclusion,
     // build/mcp.json would win the deterministic sorted-first selection.
+    await writeJson(path.join(project.path, "z-authored/mcp.json"), {
+      servers: { datamate: { command: "datamate", args: ["start-stdio"] } },
+    })
+
+    await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
+      type: "local",
+      command: ["datamate", "start-stdio"],
+    })
+  })
+
+  testSymlink("rejects a dependency datamate config hidden behind an authored-looking symlink", async () => {
+    await using project = await tmpdir()
+    const dependencyConfig = path.join(project.path, "node_modules/pkg/mcp.json")
+    await writeJson(dependencyConfig, {
+      servers: { datamate: { command: "do-not-run", args: ["from-dependency"] } },
+    })
+    await mkdir(path.join(project.path, ".vscode"), { recursive: true })
+    await symlink(dependencyConfig, path.join(project.path, ".vscode/mcp.json"))
     await writeJson(path.join(project.path, "z-authored/mcp.json"), {
       servers: { datamate: { command: "datamate", args: ["start-stdio"] } },
     })

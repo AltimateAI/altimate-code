@@ -16,12 +16,14 @@ beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "glob-ignore-"))
   await mkdir(path.join(root, "src"), { recursive: true })
   await mkdir(path.join(root, "node_modules", "pkg", ".vscode"), { recursive: true })
+  await mkdir(path.join(root, ".yarn", "unplugged", "pkg"), { recursive: true })
   await mkdir(path.join(root, "vendor"), { recursive: true })
   await mkdir(path.join(root, "dist"), { recursive: true })
   await mkdir(path.join(root, ".vscode"), { recursive: true })
   await writeFile(path.join(root, ".vscode", "mcp.json"), "{}")
   await writeFile(path.join(root, "src", "mcp.json"), "{}")
   await writeFile(path.join(root, "node_modules", "pkg", ".vscode", "mcp.json"), "{}")
+  await writeFile(path.join(root, ".yarn", "unplugged", "pkg", "mcp.json"), "{}")
   await writeFile(path.join(root, "vendor", "mcp.json"), "{}")
   await writeFile(path.join(root, "dist", "mcp.json"), "{}")
 })
@@ -37,6 +39,7 @@ describe("Glob.scan ignore", () => {
     const found = (await Glob.scan("**/mcp.json", { cwd: root, absolute: true, dot: true })).map(rel).sort()
     expect(found).toEqual([
       ".vscode/mcp.json",
+      ".yarn/unplugged/pkg/mcp.json",
       "dist/mcp.json",
       "node_modules/pkg/.vscode/mcp.json",
       "src/mcp.json",
@@ -105,7 +108,7 @@ describe("Glob.DEFAULT_IGNORE", () => {
   })
 
   test("covers the package-manager, VCS and build output directories", () => {
-    for (const dir of ["node_modules", ".git", "dist", "build", "target", ".venv"]) {
+    for (const dir of ["node_modules", ".git", ".yarn/unplugged", "dist", "build", "target", ".venv"]) {
       expect(Glob.DEFAULT_IGNORE).toContain(`**/${dir}/**`)
     }
   })

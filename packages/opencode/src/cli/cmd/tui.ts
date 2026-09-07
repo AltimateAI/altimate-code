@@ -1,6 +1,8 @@
 import { cmd } from "@/cli/cmd/cmd"
 import { Rpc } from "@/util/rpc"
 import { type rpc } from "../tui/worker"
+// altimate_change — mint a short-lived capability for each accepted Base registration attempt
+import { randomBytes } from "node:crypto"
 import path from "path"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
@@ -174,7 +176,6 @@ export const TuiThreadCommand = cmd({
       const reload = () => {
         client.call("reload", undefined).catch(() => {})
       }
-      process.on("SIGUSR2", reload)
 
       let stopped = false
       const stop = async () => {
@@ -190,6 +191,8 @@ export const TuiThreadCommand = cmd({
 
       // altimate_change start — upstream_fix: clean up TUI worker after failed --session validation
       try {
+        process.on("SIGUSR2", reload)
+
         const prompt = await input(args.prompt)
         const config = await TuiConfig.get()
 
@@ -244,6 +247,14 @@ export const TuiThreadCommand = cmd({
             },
             config,
             pluginHost: createLegacyTuiPluginHost(),
+            // Keep Base registration on the private worker RPC even when the TUI itself is
+            // connected to an externally bound HTTP server. The token is minted only when the
+            // accepted disclosure invokes this host operation, then consumed once in the worker.
+            altimateBaseRegistration: async () => {
+              const token = randomBytes(32).toString("hex")
+              await client.call("setAltimateBaseConsentToken", { token })
+              return client.call("registerAltimateBase", { token })
+            },
             // altimate_change — onboarding funnel seam. Deliberately a single-line marker, not a
             // start/end pair: this sits inside the "clean up TUI worker after failed --session
             // validation" region, and a nested closing marker truncates the block that
@@ -310,7 +321,7 @@ export const TuiThreadCommand = cmd({
       } finally {
         await stop()
       }
-      // altimate_change end
+      // altimate_change end — upstream_fix: clean up TUI worker after failed --session validation
     } finally {
       try {
         unguard?.()
