@@ -23,7 +23,6 @@ import { Bus } from "@/bus"
 import { Session } from "@/session"
 import { Discovery } from "./discovery"
 import { Glob } from "../util/glob"
-import { pathToFileURL } from "url"
 import type { Agent } from "@/agent/agent"
 import { PermissionNext } from "@/permission/next"
 
@@ -302,25 +301,14 @@ export namespace Skill {
     return list.filter((skill) => PermissionNext.evaluate("skill", skill.name, agent.permission).action !== "deny")
   }
 
-  export function fmt(list: Info[], opts: { verbose: boolean }) {
-    if (list.length === 0) {
-      return "No skills are currently available."
-    }
-    if (opts.verbose) {
-      return [
-        "<available_skills>",
-        ...list.flatMap((skill) => [
-          `  <skill>`,
-          `    <name>${skill.name}</name>`,
-          `    <description>${skill.description}</description>`,
-          // altimate_change start — handle builtin: protocol for embedded skills
-          `    <location>${skill.location.startsWith("builtin:") ? skill.location : pathToFileURL(skill.location).href}</location>`,
-          // altimate_change end
-          `  </skill>`,
-        ]),
-        "</available_skills>",
-      ].join("\n")
-    }
-    return ["## Available Skills", ...list.flatMap((skill) => `- **${skill.name}**: ${skill.description}`)].join("\n")
-  }
+  // altimate_change start — `fmt` removed. This module carried a second,
+  // near-identical `<available_skills>` renderer that no production code called
+  // (`session/system.ts` calls `Skill.fmt` from `./index.ts`; `tool/skill.ts`
+  // builds its own listing inline from the same shared helpers),
+  // and it was the copy WITHOUT the wrapper-tag escaping that synced, remote
+  // skill text requires. Only `test/skill/fmt.test.ts` referenced it, so the
+  // suite was covering the dead copy while the live renderer went untested.
+  // Deleted rather than fixed: two renderers is how the escape came to be
+  // applied to one and not the other. Use `Skill.fmt` from `./index.ts`. (review)
+  // altimate_change end
 }

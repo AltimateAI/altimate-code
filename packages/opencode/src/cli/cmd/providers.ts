@@ -1,5 +1,8 @@
 import type { Argv } from "yargs"
 import { Auth } from "../../auth"
+// altimate_change start — surface OAuth plan/account in `auth list`
+import { OAuthClaims } from "../../auth/oauth-claims"
+// altimate_change end
 import { cmd } from "./cmd"
 import { CliError, effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
@@ -15,6 +18,7 @@ import { Plugin } from "../../plugin"
 import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
+import { FreeTier } from "@/altimate/free/client"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
 
@@ -209,6 +213,45 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
   return false
 })
 
+// altimate_change start — `auth login <provider>` used to be fed straight into a
+// fetch() for well-known auth metadata, so the natural `auth login openai` died on
+// "fetch() URL is invalid". Only an actual http(s) URL takes the well-known path;
+// anything else is treated as a provider id, exactly like `--provider`.
+export function isAuthProviderUrl(value: string | undefined): value is string {
+  if (!value) return false
+  try {
+    const { protocol } = new URL(value)
+    return protocol === "http:" || protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
+export type LoginTarget =
+  /** Self-hosted auth provider: fetch its `.well-known/opencode` metadata. */
+  | { kind: "url"; url: string }
+  /** A provider id/name — same path the interactive picker resolves to. */
+  | { kind: "provider"; provider: string }
+  /** Nothing specified: prompt with the provider list. */
+  | { kind: "picker" }
+
+/**
+ * Decide which login path an invocation takes. A URL positional keeps the
+ * well-known behavior it always had; anything else is a provider id, so
+ * `auth login openai` works like `auth login --provider openai` rather than
+ * being handed to fetch(). A URL positional always wins — it is the only way to
+ * reach the well-known path, and it is what pre-existing invocations pass. When
+ * the positional is not a URL, an explicit `--provider` flag takes precedence
+ * over it, following the usual flag-beats-positional convention.
+ */
+export function resolveLoginTarget(args: { target?: string; provider?: string }): LoginTarget {
+  if (isAuthProviderUrl(args.target)) return { kind: "url", url: args.target.replace(/\/+$/, "") }
+  const provider = args.provider ?? args.target
+  if (provider) return { kind: "provider", provider }
+  return { kind: "picker" }
+}
+// altimate_change end
+
 export function resolvePluginProviders(input: {
   hooks: Hooks[]
   existingProviders: Record<string, unknown>
@@ -265,7 +308,16 @@ export const ProvidersListCommand = effectCmd({
 
     for (const [providerID, result] of results) {
       const name = database[providerID]?.name || providerID
-      yield* Prompt.log.info(`${name} ${UI.Style.TEXT_DIM}${result.type}`)
+      // altimate_change start — show which account/plan an OAuth credential belongs to,
+      // so a wrong-account login is visible here instead of surfacing later as an
+      // unexplained model error. Only non-secret claims are decoded, and the account id
+      // is truncated; the token itself is never rendered. `result.accountId` (stored at
+      // login) is the fallback for credentials whose access token never carries the
+      // account claim — see `describeOAuthIdentity`.
+      const identity =
+        result.type === "oauth" ? OAuthClaims.describeOAuthIdentity(result.access, result.accountId) : undefined
+      yield* Prompt.log.info(`${name} ${UI.Style.TEXT_DIM}${result.type}${identity ? ` (${identity})` : ""}`)
+      // altimate_change end
     }
 
     yield* Prompt.outro(`${results.length} credentials`)
@@ -297,18 +349,19 @@ export const ProvidersListCommand = effectCmd({
 })
 
 export const ProvidersLoginCommand = effectCmd({
-  command: "login [url]",
+  // altimate_change start — the positional accepts a provider id as well as a URL
+  command: "login [target]",
   describe: "log in to a provider",
   // URL login skips instance bootstrap, which would load remote config with the stale token and crash before re-auth.
-  instance: (args) => !args.url,
+  // A provider id goes down the picker path instead, which needs the instance.
+  instance: (args) => resolveLoginTarget(args).kind !== "url",
   builder: (yargs: Argv) =>
     yargs
-      .positional("url", {
-        // altimate_change start — branding
-        describe: "altimate auth provider",
-        // altimate_change end
+      .positional("target", {
+        describe: "provider id (e.g. openai) or altimate auth provider URL",
         type: "string",
       })
+      // altimate_change end
       .option("provider", {
         alias: ["p"],
         describe: "provider id or name to log in to (skips provider selection)",
@@ -324,8 +377,11 @@ export const ProvidersLoginCommand = effectCmd({
 
     UI.empty()
     yield* Prompt.intro("Add credential")
-    if (args.url) {
-      const url = args.url.replace(/\/+$/, "")
+    // altimate_change start — only real http(s) URLs take the well-known path
+    const target = resolveLoginTarget(args)
+    if (target.kind === "url") {
+      const url = target.url
+      // altimate_change end
       const wellknown = (yield* cliTry(`Failed to load auth provider metadata from ${url}: `, () =>
         fetch(`${url}/.well-known/opencode`).then((x) => x.json()),
       )) as {
@@ -417,13 +473,20 @@ export const ProvidersLoginCommand = effectCmd({
     ]
 
     let provider: string
-    if (args.provider) {
-      const input = args.provider
+    // altimate_change start — a non-URL positional is a provider id, same as --provider
+    if (target.kind === "provider") {
+      const input = target.provider
+      // altimate_change end
       const byID = options.find((x) => x.value === input)
       const byName = options.find((x) => x.label.toLowerCase() === input.toLowerCase())
       const match = byID ?? byName
       if (!match) {
-        return yield* fail(`Unknown provider "${input}"`)
+        // altimate_change start — say what to do next instead of just rejecting
+        return yield* fail(
+          `Unknown provider "${input}". Run \`altimate-code auth login\` with no arguments to pick from the list, ` +
+            `or pass a full auth provider URL including https://.`,
+        )
+        // altimate_change end
       }
       provider = match.value
     } else {
@@ -516,21 +579,49 @@ export const ProvidersLogoutCommand = effectCmd({
 
     UI.empty()
     const credentials: Array<[string, Auth.Info]> = Object.entries(yield* Effect.orDie(authSvc.all()))
+    // altimate_change start — integrate the dedicated managed Base store with normal provider logout
+    const requestedProvider = args.provider?.toLowerCase()
+    const requestsAltimateBase =
+      requestedProvider === FreeTier.PROVIDER_ID ||
+      requestedProvider === FreeTier.MODEL_ID ||
+      requestedProvider === "altimate base"
+    const hasAltimateBaseCredential = yield* Effect.tryPromise(() => FreeTier.credentials()).pipe(
+      Effect.map((value) => value !== undefined),
+      // Keep malformed credential state visible so logout reports the storage error instead of
+      // silently claiming there is nothing configured.
+      Effect.orElseSucceed(() => true),
+    )
+    const hasAltimateBaseState = requestsAltimateBase
+      ? yield* Effect.tryPromise(() => FreeTier.hasStoredRegistrationState()).pipe(
+          Effect.orElseSucceed(() => true),
+        )
+      : false
     yield* Prompt.intro("Remove credential")
-    if (credentials.length === 0) {
+    const database = yield* modelsDev.get()
+    const hasLegacyAltimateBaseCredential = credentials.some(([key]) => key === FreeTier.PROVIDER_ID)
+    const options = credentials
+      .filter(([key]) => key !== FreeTier.PROVIDER_ID)
+      .map(([key, value]) => ({
+        label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
+        value: key,
+      }))
+    if (hasAltimateBaseCredential || hasLegacyAltimateBaseCredential || hasAltimateBaseState) {
+      options.push({
+        label: "Altimate Base" + UI.Style.TEXT_DIM + " (managed)",
+        value: FreeTier.PROVIDER_ID,
+      })
+    }
+    if (options.length === 0) {
       yield* Prompt.log.error("No credentials found")
       return
     }
-    const database = yield* modelsDev.get()
-    const options = credentials.map(([key, value]) => ({
-      label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
-      value: key,
-    }))
     const provider = args.provider
       ? options.find(
           (option) =>
             option.value === args.provider ||
-            database[option.value]?.name?.toLowerCase() === args.provider?.toLowerCase(),
+            database[option.value]?.name?.toLowerCase() === requestedProvider ||
+            (option.value === FreeTier.PROVIDER_ID &&
+              (requestedProvider === FreeTier.MODEL_ID || requestedProvider === "altimate base")),
         )?.value
       : yield* promptValue(
           yield* Prompt.autocomplete({
@@ -540,6 +631,14 @@ export const ProvidersLogoutCommand = effectCmd({
           }),
         )
     if (!provider) return yield* fail(`Unknown configured provider "${args.provider}"`)
+    if (provider === FreeTier.PROVIDER_ID) {
+      yield* cliTry("Failed to remove Altimate Base credential: ", () => FreeTier.logout())
+      // Remove any stale entry created by pre-managed Base builds without touching other providers.
+      yield* Effect.orDie(authSvc.remove(FreeTier.PROVIDER_ID))
+      yield* Prompt.outro("Logout successful")
+      return
+    }
+    // altimate_change end
     yield* Effect.orDie(authSvc.remove(provider))
     yield* Prompt.outro("Logout successful")
   }),

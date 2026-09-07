@@ -19,12 +19,24 @@ import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
 // altimate_change end
+// altimate_change start — write-starvation breaker + loop detection (fork-only
+// modules) and the run-mode flag that gates armed behavior.
+import { SessionStarvation } from "./starvation"
+import { NudgeArbiter } from "./nudge"
+// completion-token contract for the explicit-DONE stop path
+import { SessionTermination } from "./termination"
+import { Flag } from "@/flag/flag"
+// altimate_change end
+// altimate_change start — per-tool-result dispatch cap (fork-only module)
+import { ToolResultCap } from "./tool-result-cap"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so the upstream Effect runtime
 // (app-runtime AppLayer + httpapi server LayerNode list) can compose SessionProcessor as
 // a Service. The fork keeps the imperative `create()` namespace function below; this is a
 // thin delegating facade that preserves behavior exactly.
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
+import { isDeepStrictEqual } from "node:util"
 // altimate_change end
 
 export namespace SessionProcessor {
@@ -39,15 +51,221 @@ export namespace SessionProcessor {
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
+  // altimate_change start — per-processor tool-call id coercer. Malformed
+  // (non-string) ids from OpenAI-compatible servers are regenerated deterministically
+  // via MessageV2.sanitizeToolCallID; the raw→sanitized alias map (keyed on the JSON
+  // form) makes the propagation to paired tool-result/tool-error events atomic — even
+  // when the provider flips the value's type mid-pair (numeric call id, string result
+  // id), both halves resolve to the SAME sanitized id. A regenerated call id with an
+  // un-regenerated result id would 400 every subsequent provider request.
+  // Exported as a factory so the ingestion half is unit-testable against the replay
+  // half in message-v2.ts (they must produce identical output for a pair).
+  // The alias table is a Map, never a plain object: adversarial ids like
+  // "__proto__"/"constructor"/"toString" hit inherited Object.prototype members
+  // on a plain-object index and return non-strings as the "sanitized id",
+  // erroring the stream loop. `salt` (per processor/step) keeps regenerated
+  // ids for empty/duplicate malformed raw values from colliding across steps.
+  // altimate_change start — the step-finish outcome ordering, extracted so the
+  // production path and its unit gate share ONE implementation. The previous
+  // test re-implemented this ladder locally, so it stayed green no matter how
+  // processor.ts changed — false confidence on the termination ordering three
+  // benchmark runs depend on.
+  //
+  // Ordering rationale (unchanged):
+  //  1. An errorless turn that asserts completion terminates EVEN under
+  //     overflow. Returning "compact" there is the termination-impossibility
+  //     triangle: the finished session gets summarized and the post-compaction
+  //     continue message breeds further turns.
+  //  2. Terminal outcomes (blocked / errored / doom-loop stop) must actually
+  //     stop; returning "compact" first made them no-ops under overflow.
+  //  3. Deferring compaction is safe in every mode — prompt.ts's pre-dispatch
+  //     overflow check compacts before the next request is sent.
+  export type FinishOutcome = "stop" | "compact" | "continue"
+
+  export function resolveFinishOutcome(state: {
+    needsCompaction: boolean
+    /** errorless turn that finished with "stop" AND asserted completion; never the summarizer. */
+    explicitDone: boolean
+    blocked: boolean
+    error: boolean
+    starvationStop: boolean
+  }): FinishOutcome {
+    if (state.needsCompaction && state.explicitDone) return "stop"
+    if (state.blocked) return "stop"
+    if (state.error) return "stop"
+    if (state.starvationStop) return "stop"
+    if (state.needsCompaction) return "compact"
+    return "continue"
+  }
+  // altimate_change end
+
+  // A provider may repeat one malformed raw tool-call id for concurrent calls.
+  // FIFO is correct only when those calls settle in start order; use the
+  // tool-name/input identity carried by execution and result events to select
+  // the one unambiguous running part. Returning undefined is deliberate:
+  // silently attaching an output to the wrong call corrupts the transcript.
+  export type ToolCallIdentity = { toolName?: string; input?: unknown }
+  export type ToolExecution = { raw: unknown; occurrence: number }
+
+  /** @internal Exported for focused pairing tests. */
+  export function matchToolCallID(
+    candidates: readonly string[],
+    identity: ToolCallIdentity,
+    parts: ReadonlyMap<string, MessageV2.ToolPart>,
+  ): string | undefined {
+    if (candidates.length <= 1) return candidates[0]
+    const matches = candidates.filter((id) => {
+      const part = parts.get(id)
+      if (!part || part.state.status !== "running") return false
+      if (identity.toolName !== undefined && part.tool !== identity.toolName) return false
+      return identity.input === undefined || isDeepStrictEqual(part.state.input, identity.input)
+    })
+    return matches.length === 1 ? matches[0] : undefined
+  }
+
+  export function createToolCallIDCoercer(salt?: string) {
+    const aliases = new Map<string, string>()
+    const owners = new Map<string, string>()
+    const used = new Set<string>()
+    const occurrences = new Map<string, number>()
+    const allocated = new Map<string, string[]>()
+    const started = new Map<string, string[]>()
+    const awaitingResult = new Map<string, string[]>()
+    const executionOccurrences = new Map<string, number>()
+    const settledExecutions = new Map<string, number[]>()
+    const keyOf = (raw: unknown) => (typeof raw === "string" ? raw : (JSON.stringify(raw) ?? String(raw)))
+    const stable = (raw: unknown): string => {
+      const key = keyOf(raw)
+      const existing = aliases.get(key)
+      if (existing !== undefined) return existing
+      const base = MessageV2.sanitizeToolCallID(raw, salt)
+      let sanitized = base
+      for (
+        let suffix = 1;
+        (owners.has(sanitized) && owners.get(sanitized) !== key) ||
+        (used.has(sanitized) && owners.get(sanitized) !== key);
+        suffix++
+      ) {
+        sanitized = `${base}_${suffix}`
+      }
+      aliases.set(key, sanitized)
+      owners.set(sanitized, key)
+      return sanitized
+    }
+    const allocate = (raw: unknown) => {
+      const key = keyOf(raw)
+      const base = stable(raw)
+      let occurrence = occurrences.get(key) ?? 0
+      let candidate = occurrence === 0 ? base : `${base}_${occurrence}`
+      while (used.has(candidate)) candidate = `${base}_${++occurrence}`
+      occurrences.set(key, occurrence + 1)
+      used.add(candidate)
+      const ids = allocated.get(key) ?? []
+      ids.push(candidate)
+      allocated.set(key, ids)
+      return candidate
+    }
+    const enqueue = (table: Map<string, string[]>, raw: unknown, value: string) => {
+      const key = keyOf(raw)
+      const queue = table.get(key) ?? []
+      queue.push(value)
+      table.set(key, queue)
+    }
+    const dequeue = (table: Map<string, string[]>, raw: unknown, expected?: string) => {
+      const key = keyOf(raw)
+      const queue = table.get(key)
+      const value = (() => {
+        if (!queue) return undefined
+        if (expected === undefined) return queue.shift()
+        const index = queue.indexOf(expected)
+        if (index < 0) return undefined
+        return queue.splice(index, 1)[0]
+      })()
+      if (queue?.length === 0) table.delete(key)
+      return value
+    }
+    // The callable preserves the original stable raw→sanitized contract used
+    // by replay tests. Phase methods add occurrence-aware FIFO pairing for a
+    // provider that repeats the same malformed ID within one response.
+    return Object.assign(stable, {
+      start(raw: unknown) {
+        const id = allocate(raw)
+        enqueue(started, raw, id)
+        return id
+      },
+      call(raw: unknown) {
+        const id = dequeue(started, raw) ?? allocate(raw)
+        enqueue(awaitingResult, raw, id)
+        return id
+      },
+      result(raw: unknown, expected?: string) {
+        return dequeue(awaitingResult, raw, expected) ?? expected ?? stable(raw)
+      },
+      peek(raw: unknown) {
+        return awaitingResult.get(keyOf(raw))?.[0] ?? stable(raw)
+      },
+      pending(raw: unknown) {
+        return [...(awaitingResult.get(keyOf(raw)) ?? [])]
+      },
+      beginExecution(raw: unknown): ToolExecution {
+        const key = keyOf(raw)
+        const occurrence = executionOccurrences.get(key) ?? 0
+        executionOccurrences.set(key, occurrence + 1)
+        return { raw, occurrence }
+      },
+      finishExecution(execution: ToolExecution) {
+        const key = keyOf(execution.raw)
+        const queue = settledExecutions.get(key) ?? []
+        queue.push(execution.occurrence)
+        settledExecutions.set(key, queue)
+      },
+      settled(raw: unknown) {
+        const key = keyOf(raw)
+        const queue = settledExecutions.get(key)
+        const occurrence = queue?.shift()
+        if (queue?.length === 0) settledExecutions.delete(key)
+        if (occurrence === undefined) return undefined
+        return allocated.get(key)?.[occurrence]
+      },
+      executionID(execution: ToolExecution) {
+        return allocated.get(keyOf(execution.raw))?.[execution.occurrence]
+      },
+    })
+  }
+  // altimate_change end
+
   export function create(input: {
     assistantMessage: MessageV2.Assistant
     sessionID: SessionID
     model: Provider.Model
     abort: AbortSignal
+    // altimate_change start — keep nudge delivery scoped to the active prompt generation
+    nudgeGeneration?: NudgeArbiter.Generation
+    // altimate_change end
   }) {
-    const toolcalls: Record<string, MessageV2.ToolPart> = {}
-    // altimate_change start — per-tool call counter for varied-input loop detection
-    const toolCallCounts: Record<string, number> = {}
+    // altimate_change start — Map (not plain object) so adversarial ids can
+    // never resolve to inherited Object.prototype members.
+    const toolcalls = new Map<string, MessageV2.ToolPart>()
+    // coerce malformed tool-call ids at ingestion; sanitized ids are used as
+    // BOTH the persisted callID and the pairing key. Salted per processor so
+    // regenerated ids for empty/duplicate raw values cannot collide across steps.
+    const coerceToolCallID = createToolCallIDCoercer(input.assistantMessage.id)
+    const consumeToolCallID = (raw: unknown, identity: ToolCallIdentity) => {
+      // Local tool wrappers preserve the exact execution occurrence through
+      // settlement, even when the provider repeats one malformed raw ID and
+      // omits input from tool-result/tool-error. Prefer that association over
+      // heuristic identity matching; provider-executed tools fall back below.
+      const executed = coerceToolCallID.settled(raw)
+      if (executed !== undefined) return coerceToolCallID.result(raw, executed)
+      const candidates = coerceToolCallID.pending(raw)
+      const matched = matchToolCallID(candidates, identity, toolcalls)
+      if (candidates.length > 1 && matched === undefined) {
+        throw new Error("Cannot safely pair an out-of-order result for a repeated malformed tool-call id")
+      }
+      return coerceToolCallID.result(raw, matched)
+    }
+    // per-tool call counter for varied-input loop detection
+    const toolCallCounts = new Map<string, number>()
     // altimate_change end
     let snapshot: string | undefined
     let blocked = false
@@ -69,13 +287,123 @@ export namespace SessionProcessor {
       get message() {
         return input.assistantMessage
       },
-      partFromToolCall(toolCallID: string) {
-        return toolcalls[toolCallID]
+      // altimate_change start — disambiguate repeated concurrent tool-call ids
+      partFromToolCall(toolCallID: string, identity: ToolCallIdentity = {}) {
+        // Tool metadata may arrive out of order too. Skip an ambiguous update
+        // instead of mutating a different concurrent call's persisted part.
+        const candidates = coerceToolCallID.pending(toolCallID)
+        const matched = matchToolCallID(candidates, identity, toolcalls)
+        if (candidates.length > 1 && matched === undefined) return undefined
+        return toolcalls.get(matched ?? coerceToolCallID.peek(toolCallID))
       },
+      beginToolExecution(toolCallID: string) {
+        return coerceToolCallID.beginExecution(toolCallID)
+      },
+      finishToolExecution(execution: ToolExecution) {
+        coerceToolCallID.finishExecution(execution)
+      },
+      partFromToolExecution(execution: ToolExecution) {
+        const id = coerceToolCallID.executionID(execution)
+        return id === undefined ? undefined : toolcalls.get(id)
+      },
+      // altimate_change end
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
-        const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
+        // altimate_change start — resolve breaker config + arm state once per step.
+        // ANNOTATE-ONLY by default (mode "annotate"): directives and the hard stop
+        // require mode "armed" AND run mode. Skipped entirely for plan/review-class
+        // agents (read-only deliverables are their normal outcome). Interactive
+        // TUI/serve sessions never set ALTIMATE_RUN_MODE, so they can at most
+        // receive informational annotations — never directives or stops.
+        const processConfig = await Config.get()
+        const shouldBreak = processConfig.experimental?.continue_loop_on_deny !== true
+        const sbConfig = SessionStarvation.resolveConfig(
+          processConfig.experimental?.starvation_breaker as SessionStarvation.ConfigShape | undefined,
+        )
+        const runMode = Flag.ALTIMATE_RUN_MODE
+        // The compaction summarizer runs through this same processor under the
+        // session's OWN id, so it would otherwise share the working agent's
+        // per-session tracker: its single mutation-free step increments
+        // `turnsWithoutMutation`, inflating the real agent's counter (spurious
+        // would-fire telemetry in annotate mode, a premature directive in armed
+        // mode). It can only produce a summary, so it is exempt from starvation
+        // accounting entirely — the same reason it is excluded from directive
+        // delivery below.
+        const sbGate = SessionStarvation.resolveGate({
+          config: sbConfig,
+          runMode,
+          agent: input.assistantMessage.agent,
+          summary: input.assistantMessage.summary === true,
+        })
+        const starvation = sbGate.tracks ? SessionStarvation.forSession(input.sessionID, sbConfig) : undefined
+        const sbArmed = sbGate.armed
+        // A directive may have been registered on the previous step while the
+        // breaker was armed. If this working turn is now off, annotate-only, or
+        // agent-exempt, discard only that stale source; compaction summaries
+        // intentionally leave all pending directives for the next working turn.
+        if (!input.assistantMessage.summary && !sbArmed) {
+          NudgeArbiter.discardSource(input.sessionID, "starvation_breaker", input.nudgeGeneration)
+        }
+        const sbMode = sbConfig.mode === "armed" ? ("armed" as const) : ("annotate" as const)
+        let starvationStop = false
+        // altimate_change start — per-tool-result dispatch cap, resolved once
+        // per step. Hard bound on the token estimate any single tool result may
+        // contribute to the conversation — closes the observed bypass where one
+        // giant query dump jumped a ~4K-token session past a 65K window in one step.
+        const toolResultCapTokens = ToolResultCap.resolve({
+          config: processConfig,
+          model: input.model,
+          safetyFraction: SessionCompaction.contextSafetyFraction(processConfig),
+        })
+        // altimate_change end
+        // Nudge arbiter delivery: at most ONE system-authored
+        // directive block per injected turn, highest precedence wins. Run-mode-only.
+        // altimate_change start — upstream_fix: never let the compaction summarizer
+        // consume a pending nudge/starvation/doom-loop directive — it can only
+        // produce a summary and cannot act on it, so the real working turn right
+        // after compaction would silently never see the breaker/loop nudge.
+        let effectiveStreamInput = streamInput
+        if (runMode && !input.assistantMessage.summary) {
+          const directive = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)
+          // altimate_change end
+          if (directive) {
+            // Attribute the injection to the DIRECTIVE that won arbitration,
+            // not a hardcoded "nudge" — otherwise every injected doom-loop
+            // status-check, starvation, and repeat-signature directive is
+            // indistinguishable in telemetry.
+            const telemetryKind = (() => {
+              if (directive.kind.startsWith("doom_loop")) return "doom_loop" as const
+              if (directive.kind === "repeat_signature") return "repeat_signature" as const
+              if (directive.kind === "starvation") return "starvation" as const
+              return "nudge" as const
+            })()
+            Telemetry.track({
+              type: "starvation_breaker",
+              timestamp: Date.now(),
+              session_id: input.sessionID,
+              mode: sbMode,
+              kind: telemetryKind,
+              action: "injected",
+            })
+            log.info("nudge arbiter directive injected", {
+              sessionID: input.sessionID,
+              source: directive.source,
+              kind: directive.kind,
+            })
+            effectiveStreamInput = {
+              ...streamInput,
+              messages: [
+                ...streamInput.messages,
+                {
+                  role: "user" as const,
+                  content: `<system-directive source="${directive.source}">\n${directive.text}\n</system-directive>`,
+                },
+              ],
+            }
+          }
+        }
+        // altimate_change end
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
@@ -85,7 +413,9 @@ export namespace SessionProcessor {
               // before the LLM stream can execute provider-side tools.
               snapshot = await Snapshot.track()
             }
-            const stream = await LLM.stream(streamInput)
+            // altimate_change start — stream with the (possibly directive-augmented) input
+            const stream = await LLM.stream(effectiveStreamInput)
+            // altimate_change end
 
             for await (const value of stream.fullStream) {
               input.abort.throwIfAborted()
@@ -145,22 +475,26 @@ export namespace SessionProcessor {
                   }
                   break
 
-                case "tool-input-start":
+                // altimate_change start — sanitize the incoming id before it becomes the persisted callID and pairing key; braced so the consts do not leak into sibling clauses
+                case "tool-input-start": {
+                  const inputStartCallID = coerceToolCallID.start(value.id)
                   const part = await Session.updatePart({
-                    id: toolcalls[value.id]?.id ?? PartID.ascending(),
+                    id: toolcalls.get(inputStartCallID)?.id ?? PartID.ascending(),
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "tool",
                     tool: value.toolName,
-                    callID: value.id,
+                    callID: inputStartCallID,
                     state: {
                       status: "pending",
                       input: {},
                       raw: "",
                     },
                   })
-                  toolcalls[value.id] = part as MessageV2.ToolPart
+                  toolcalls.set(inputStartCallID, part as MessageV2.ToolPart)
                   break
+                }
+                // altimate_change end
 
                 case "tool-input-delta":
                   break
@@ -169,7 +503,10 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-call": {
-                  const match = toolcalls[value.toolCallId]
+                  // altimate_change start — resolve the pair via the coerced id
+                  const toolCallCallID = coerceToolCallID.call(value.toolCallId)
+                  const match = toolcalls.get(toolCallCallID)
+                  // altimate_change end
                   if (match) {
                     const part = await Session.updatePart({
                       ...match,
@@ -190,110 +527,344 @@ export namespace SessionProcessor {
                         : value.providerMetadata,
                       // altimate_change end
                     })
-                    toolcalls[value.toolCallId] = part as MessageV2.ToolPart
+                    // altimate_change start — key by the coerced id
+                    toolcalls.set(toolCallCallID, part as MessageV2.ToolPart)
+                    // altimate_change end
                     // altimate_change start — session has now tool-called; suppresses plan refusal warning
                     sessionToolCallsMade++
                     // altimate_change end
 
-                    const parts = await MessageV2.parts(input.assistantMessage.id)
-                    const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
+                    // altimate_change start — doom-loop guard re-keyed + escalation ladder.
+                    // Interactive sessions keep the existing (toolName + identical args)
+                    // permission ask EXACTLY as before. Run mode with the ladder ARMED
+                    // replaces the permission channel with the ladder below (nudge →
+                    // forced status-check → stop; never straight to stop). Run mode with
+                    // the ladder NOT armed (default annotate mode) KEEPS the legacy ask:
+                    // yolo auto-approves it (no-op there), but a non-yolo headless run
+                    // auto-rejects it — the hard brake that previously converted an
+                    // identical-args loop into a stop, which must not regress to
+                    // telemetry-only during the annotate validation period.
+                    if (!runMode || !sbArmed) {
+                      const parts = await MessageV2.parts(input.assistantMessage.id)
+                      const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
 
-                    if (
-                      lastThree.length === DOOM_LOOP_THRESHOLD &&
-                      lastThree.every(
-                        (p) =>
-                          p.type === "tool" &&
-                          p.tool === value.toolName &&
-                          p.state.status !== "pending" &&
-                          JSON.stringify(p.state.input) === JSON.stringify(value.input),
-                      )
-                    ) {
-                      const agent = await Agent.get(input.assistantMessage.agent)
-                      await PermissionNext.ask({
-                        permission: "doom_loop",
-                        patterns: [value.toolName],
-                        sessionID: input.assistantMessage.sessionID,
-                        metadata: {
-                          tool: value.toolName,
-                          input: value.input,
-                        },
-                        always: [value.toolName],
-                        ruleset: agent.permission,
-                      })
+                      if (
+                        lastThree.length === DOOM_LOOP_THRESHOLD &&
+                        lastThree.every(
+                          (p) =>
+                            p.type === "tool" &&
+                            p.tool === value.toolName &&
+                            p.state.status !== "pending" &&
+                            JSON.stringify(p.state.input) === JSON.stringify(value.input),
+                        )
+                      ) {
+                        const agent = await Agent.get(input.assistantMessage.agent)
+                        await PermissionNext.ask({
+                          permission: "doom_loop",
+                          patterns: [value.toolName],
+                          sessionID: input.assistantMessage.sessionID,
+                          metadata: {
+                            tool: value.toolName,
+                            input: value.input,
+                          },
+                          always: [value.toolName],
+                          ruleset: agent.permission,
+                        })
+                      }
                     }
+                    // altimate_change end
 
-                    // altimate_change start — per-tool repeat counter (catches varied-input loops like todowrite 2,080x)
-                    // Counter is scoped to the processor lifetime (create() call), so it accumulates
-                    // across multiple process() invocations within a session. This is intentional:
-                    // cross-turn accumulation catches slow-burn loops that stay under the threshold
-                    // per-turn but add up over the session.
-                    toolCallCounts[value.toolName] = (toolCallCounts[value.toolName] ?? 0) + 1
-                    if (toolCallCounts[value.toolName] >= TOOL_REPEAT_THRESHOLD) {
+                    // altimate_change start — per-tool repeat counter, DEMOTED to telemetry only.
+                    // The per-NAME counter (30 calls of any kind per tool) was crossed by
+                    // legitimate multi-step work — attaching any hard consequence to it would
+                    // kill ~half of legitimate work. It remains as telemetry; consequences
+                    // hang off the (toolName + normalized args) ladder below instead.
+                    toolCallCounts.set(value.toolName, (toolCallCounts.get(value.toolName) ?? 0) + 1)
+                    if ((toolCallCounts.get(value.toolName) ?? 0) >= TOOL_REPEAT_THRESHOLD) {
                       Telemetry.track({
                         type: "doom_loop_detected",
                         timestamp: Date.now(),
                         session_id: input.sessionID,
                         tool_name: value.toolName,
-                        repeat_count: toolCallCounts[value.toolName],
+                        repeat_count: toolCallCounts.get(value.toolName) ?? 0,
                       })
-                      const agent = await Agent.get(input.assistantMessage.agent)
-                      await PermissionNext.ask({
-                        permission: "doom_loop",
-                        patterns: [value.toolName],
-                        sessionID: input.assistantMessage.sessionID,
-                        metadata: {
+                      toolCallCounts.set(value.toolName, 0)
+                    }
+                    // altimate_change end
+
+                    // altimate_change start — (toolName + normalized args) escalation ladder.
+                    // Polling patterns (sleep/watch/status probes) get a raised threshold
+                    // inside the tracker. Annotate mode only logs would-fire events; armed
+                    // run mode registers outcome-neutral directives via the nudge arbiter
+                    // and hard-stops only at the ladder's final rung.
+                    if (starvation) {
+                      const call = starvation.onToolCall({ tool: value.toolName, input: value.input })
+                      if (call.doomLoop) {
+                        const wouldStop = call.doomLoop.escalation === "stop"
+                        // The stream can keep yielding calls after the first
+                        // terminal rung. Record one logical stop per step; the
+                        // tracker may start a new ladder before this stream
+                        // drains, but that is not a new generation.
+                        if (sbArmed && starvationStop && wouldStop) break
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "doom_loop",
+                          action: sbArmed ? (wouldStop ? "stop" : "registered") : "would_fire",
+                          tool_name: value.toolName,
+                          count: call.doomLoop.count,
+                          escalation: call.doomLoop.escalation,
+                        })
+                        log.warn("doom-loop ladder rung crossed", {
+                          sessionID: input.sessionID,
                           tool: value.toolName,
-                          input: value.input,
-                          repeat_count: toolCallCounts[value.toolName],
-                        },
-                        always: [value.toolName],
-                        ruleset: agent.permission,
-                      })
-                      toolCallCounts[value.toolName] = 0
+                          count: call.doomLoop.count,
+                          escalation: call.doomLoop.escalation,
+                          armed: sbArmed,
+                        })
+                        if (sbArmed) {
+                          if (wouldStop) {
+                            starvationStop = true
+                            const stopMessage =
+                              `altimate-code: stopping — the same \`${value.toolName}\` call with identical ` +
+                              `arguments was repeated ${call.doomLoop.count} times despite a nudge and a ` +
+                              `forced status-check (doom-loop escalation ladder, run mode).`
+                            // A harness hard stop is a failed run, not an
+                            // ordinary model stop. Persist and publish the
+                            // error so RunAccounting emits rc=1 and
+                            // why_harness_stopped="error".
+                            input.assistantMessage.error = MessageV2.fromError(new Error(stopMessage), {
+                              providerID: input.model.providerID,
+                            })
+                            input.assistantMessage.finish = "error"
+                            await Bus.publish(Session.Event.Error, {
+                              sessionID: input.assistantMessage.sessionID,
+                              error: input.assistantMessage.error,
+                            })
+                            await Session.updatePart({
+                              id: PartID.ascending(),
+                              messageID: input.assistantMessage.id,
+                              sessionID: input.assistantMessage.sessionID,
+                              type: "text",
+                              synthetic: true,
+                              text: stopMessage,
+                              time: { start: Date.now(), end: Date.now() },
+                            })
+                          } else {
+                            NudgeArbiter.register(
+                              input.sessionID,
+                              {
+                                source: "starvation_breaker",
+                                kind:
+                                  call.doomLoop.escalation === "nudge" ? "doom_loop_nudge" : "doom_loop_status_check",
+                                text: call.doomLoop.directive,
+                              },
+                              input.nudgeGeneration,
+                            )
+                          }
+                        }
+                      }
                     }
                     // altimate_change end
                   }
                   break
                 }
                 case "tool-result": {
-                  const match = toolcalls[value.toolCallId]
+                  // altimate_change start — resolve the pair via the coerced id
+                  const toolResultCallID = consumeToolCallID(value.toolCallId, {
+                    toolName: value.toolName,
+                    input: value.input,
+                  })
+                  const match = toolcalls.get(toolResultCallID)
+                  // altimate_change end
                   if (match && match.state.status === "running") {
+                    // altimate_change start — unchanged-read annotation (content hash
+                    // at read time; annotate, NEVER suppress — generated paths exempt) and
+                    // repeat-signature loop detection on successful results. The annotation
+                    // is appended to the persisted output in run mode only (interactive
+                    // sessions get a telemetry-only shadow); the loop directive is
+                    // arbiter-registered only when armed (run mode).
+                    let toolResultOutput = value.output.output
+                    if (starvation) {
+                      const resultInput = value.input ?? match.state.input
+                      const touched = (resultInput as any)?.filePath
+                      const outcome = starvation.onToolResult({
+                        tool: match.tool,
+                        input: resultInput,
+                        output: typeof toolResultOutput === "string" ? toolResultOutput : undefined,
+                        touchedFiles: typeof touched === "string" ? [touched] : undefined,
+                      })
+                      if (outcome.readAnnotation && typeof toolResultOutput === "string") {
+                        // Persisted-output mutation is run-mode-only: interactive
+                        // (TUI/serve) sessions keep tool output byte-identical and
+                        // get a telemetry-only shadow event instead.
+                        toolResultOutput = SessionStarvation.applyReadAnnotation(
+                          toolResultOutput,
+                          outcome.readAnnotation,
+                          runMode,
+                        )
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "unchanged_read",
+                          action: runMode ? "annotated" : "would_annotate",
+                          tool_name: match.tool,
+                        })
+                      }
+                      if (outcome.repeatLoop) {
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "repeat_signature",
+                          action: sbArmed ? "registered" : "would_fire",
+                          tool_name: match.tool,
+                          count: outcome.repeatLoop.count,
+                        })
+                        if (sbArmed) {
+                          NudgeArbiter.register(
+                            input.sessionID,
+                            {
+                              source: "starvation_breaker",
+                              kind: "repeat_signature",
+                              text: outcome.repeatLoop.directive,
+                            },
+                            input.nudgeGeneration,
+                          )
+                        }
+                      }
+                    }
+                    // altimate_change end
+                    // altimate_change start — hard per-result dispatch cap. Every
+                    // completed tool result is bounded here regardless of which tool
+                    // path produced it — the tool-level truncation service can be
+                    // bypassed, and one uncapped result overflows the whole window.
+                    let toolResultAttachments = value.output.attachments
+                    if (typeof toolResultOutput === "string") {
+                      const capped = ToolResultCap.applyWithAttachments(
+                        toolResultOutput,
+                        toolResultAttachments,
+                        toolResultCapTokens,
+                      )
+                      if (capped.truncated) {
+                        toolResultOutput = capped.content
+                        log.info("tool result capped at dispatch", {
+                          tool: match.tool,
+                          capTokens: toolResultCapTokens,
+                          droppedAttachments: capped.droppedAttachments,
+                        })
+                      }
+                      toolResultAttachments = capped.attachments
+                    }
+                    // altimate_change end
                     await Session.updatePart({
                       ...match,
                       state: {
                         status: "completed",
                         input: value.input ?? match.state.input,
-                        output: value.output.output,
+                        // altimate_change start — annotated output (append-only)
+                        output: toolResultOutput,
+                        // altimate_change end
                         metadata: value.output.metadata,
                         title: value.output.title,
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
-                        attachments: value.output.attachments,
+                        // altimate_change start — persist only dispatch-capped attachments
+                        attachments: toolResultAttachments,
+                        // altimate_change end
                       },
                     })
 
-                    delete toolcalls[value.toolCallId]
+                    // altimate_change start — delete by the coerced id
+                    toolcalls.delete(toolResultCallID)
+                    // altimate_change end
                   }
                   break
                 }
 
                 case "tool-error": {
-                  const match = toolcalls[value.toolCallId]
+                  // altimate_change start — resolve the pair via the coerced id
+                  const toolErrorCallID = consumeToolCallID(value.toolCallId, {
+                    toolName: value.toolName,
+                    input: value.input,
+                  })
+                  const match = toolcalls.get(toolErrorCallID)
+                  // altimate_change end
                   if (match && match.state.status === "running") {
+                    // altimate_change start — repeat-signature loop detection on
+                    // failures — hash(tool + normalized args + touched files + failure
+                    // message). Catches edit-verify-fail-revert-reedit loops that mutate
+                    // files every turn but make no progress.
+                    if (starvation) {
+                      const errorInput = value.input ?? match.state.input
+                      const touched = (errorInput as any)?.filePath
+                      const outcome = starvation.onToolResult({
+                        tool: match.tool,
+                        input: errorInput,
+                        failureMessage: (value.error as any)?.toString?.() ?? String(value.error),
+                        touchedFiles: typeof touched === "string" ? [touched] : undefined,
+                      })
+                      if (outcome.repeatLoop) {
+                        Telemetry.track({
+                          type: "starvation_breaker",
+                          timestamp: Date.now(),
+                          session_id: input.sessionID,
+                          mode: sbMode,
+                          kind: "repeat_signature",
+                          action: sbArmed ? "registered" : "would_fire",
+                          tool_name: match.tool,
+                          count: outcome.repeatLoop.count,
+                        })
+                        if (sbArmed) {
+                          NudgeArbiter.register(
+                            input.sessionID,
+                            {
+                              source: "starvation_breaker",
+                              kind: "repeat_signature",
+                              text: outcome.repeatLoop.directive,
+                            },
+                            input.nudgeGeneration,
+                          )
+                        }
+                      }
+                    }
+                    // altimate_change end
+                    // altimate_change start — the dispatch cap applies to FAILED
+                    // results too. It was enforced only on the success branch,
+                    // so a failed MCP or shell call with very large stderr still
+                    // entered the conversation unbounded — the same single-result
+                    // overflow the cap exists to prevent.
+                    const toolErrorText = (() => {
+                      const raw = (value.error as any).toString()
+                      if (typeof raw !== "string") return raw
+                      const capped = ToolResultCap.apply(raw, toolResultCapTokens, { outcome: "error" })
+                      if (capped.truncated)
+                        log.info("tool error capped at dispatch", {
+                          tool: match.tool,
+                          capTokens: toolResultCapTokens,
+                        })
+                      return capped.content
+                    })()
                     await Session.updatePart({
                       ...match,
                       state: {
                         status: "error",
                         input: value.input ?? match.state.input,
-                        error: (value.error as any).toString(),
+                        error: toolErrorText, // altimate_change — dispatch-capped (see above)
                         time: {
                           start: match.state.time.start,
                           end: Date.now(),
                         },
                       },
                     })
+                    // altimate_change end
 
                     if (
                       value.error instanceof PermissionNext.RejectedError ||
@@ -301,7 +872,9 @@ export namespace SessionProcessor {
                     ) {
                       blocked = shouldBreak
                     }
-                    delete toolcalls[value.toolCallId]
+                    // altimate_change start — delete by the coerced id
+                    toolcalls.delete(toolErrorCallID)
+                    // altimate_change end
                   }
                   break
                 }
@@ -451,6 +1024,11 @@ export namespace SessionProcessor {
                     cost: usage.cost,
                   })
                   await Session.updateMessage(input.assistantMessage)
+                  // altimate_change start — capture the snapshot diff as the generic,
+                  // command-agnostic mutation ground truth (also catches bash-mediated
+                  // writes like `sed -i`/heredocs, which emit no edit event).
+                  let stepPatchFiles: string[] = []
+                  // altimate_change end
                   if (snapshot) {
                     const patch = await Snapshot.patch(snapshot)
                     if (patch.files.length) {
@@ -463,8 +1041,46 @@ export namespace SessionProcessor {
                         files: patch.files,
                       })
                     }
+                    // altimate_change start
+                    stepPatchFiles = [...patch.files]
+                    // altimate_change end
                     snapshot = undefined
                   }
+                  // altimate_change start — per-step write-starvation evaluation.
+                  // Annotate mode only logs a would-fire event; armed run mode registers
+                  // the outcome-neutral directive (with its DONE alternative) via the
+                  // nudge arbiter for delivery on the next generation.
+                  if (starvation) {
+                    const stepOutcome = starvation.onStepFinish({ mutatedFiles: stepPatchFiles })
+                    if (stepOutcome.starvation) {
+                      Telemetry.track({
+                        type: "starvation_breaker",
+                        timestamp: Date.now(),
+                        session_id: input.sessionID,
+                        mode: sbMode,
+                        kind: "starvation",
+                        action: sbArmed ? "registered" : "would_fire",
+                        turns_without_mutation: stepOutcome.turnsWithoutMutation,
+                      })
+                      log.warn("write-starvation breaker", {
+                        sessionID: input.sessionID,
+                        turnsWithoutMutation: stepOutcome.turnsWithoutMutation,
+                        armed: sbArmed,
+                      })
+                      if (sbArmed) {
+                        NudgeArbiter.register(
+                          input.sessionID,
+                          {
+                            source: "starvation_breaker",
+                            kind: "starvation",
+                            text: stepOutcome.starvation.directive,
+                          },
+                          input.nudgeGeneration,
+                        )
+                      }
+                    }
+                  }
+                  // altimate_change end
                   SessionSummary.summarize({
                     sessionID: input.sessionID,
                     messageID: input.assistantMessage.parentID,
@@ -539,7 +1155,9 @@ export namespace SessionProcessor {
                   })
                   continue
               }
-              if (needsCompaction) break
+              // altimate_change start — an armed doom-loop stop must terminate the stream immediately
+              if (needsCompaction || starvationStop) break
+              // altimate_change end
             }
           } catch (e: any) {
             log.error("process", {
@@ -595,10 +1213,15 @@ export namespace SessionProcessor {
               }
               // altimate_change end
               input.assistantMessage.error = error
-              Bus.publish(Session.Event.Error, {
+              // altimate_change start — order terminal error before idle publication
+              // Publish the error before idle. The run harness drains this
+              // generation through idle before opening a challenge stream; an
+              // unawaited publish can otherwise arrive on that fresh stream.
+              await Bus.publish(Session.Event.Error, {
                 sessionID: input.assistantMessage.sessionID,
                 error: input.assistantMessage.error,
               })
+              // altimate_change end
               // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
               // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
               // APIError (provider failures after retry exhaustion), AuthError, and any other streaming error.
@@ -635,7 +1258,9 @@ export namespace SessionProcessor {
             if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
               // altimate_change start — upstream_fix: mark aborted tools so partial output is replayed correctly.
               const metadata =
-                part.state.status === "running" ? { ...part.state.metadata, interrupted: true } : { interrupted: true }
+                part.state.status === "running"
+                  ? ToolResultCap.capInterruptedMetadata(part.state.metadata, toolResultCapTokens)
+                  : { interrupted: true }
               // altimate_change end
               await Session.updatePart({
                 ...part,
@@ -658,10 +1283,41 @@ export namespace SessionProcessor {
           }
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
-          if (needsCompaction) return "compact"
-          if (blocked) return "stop"
-          if (input.assistantMessage.error) return "stop"
-          return "continue"
+          // altimate_change start — explicit model DONE is the PRIMARY
+          // termination path. A turn that finished with "stop", has no error, and
+          // asserts completion (trailing DONE token per the SessionTermination
+          // contract) terminates the session EVEN IF overflow was detected.
+          // Returning "compact" here is the termination-impossibility triangle:
+          // the finished session gets summarized and the post-compaction continue
+          // message breeds further turns. Deferring compaction is safe in every
+          // mode — prompt.ts's pre-dispatch overflow check compacts before the
+          // next request. Never bare finishReason "stop" (that ends nearly every
+          // ordinary text turn), and never for the compaction summarizer itself.
+          const explicitDone =
+            !input.assistantMessage.summary &&
+            SessionTermination.explicitDoneStop({
+              finish: input.assistantMessage.finish,
+              hasError: input.assistantMessage.error !== undefined,
+              parts: p,
+            })
+          if (needsCompaction && explicitDone) {
+            log.info("explicit DONE with pending compaction — terminating instead of compacting", {
+              sessionID: input.sessionID,
+              messageID: input.assistantMessage.id,
+            })
+          }
+          // altimate_change end
+          // altimate_change start — the ordering itself lives in the exported
+          // `resolveFinishOutcome` so the unit gate can exercise the REAL
+          // decision instead of a hand-written copy of it (PR #1171 review).
+          return resolveFinishOutcome({
+            needsCompaction,
+            explicitDone,
+            blocked,
+            error: input.assistantMessage.error !== undefined,
+            starvationStop,
+          })
+          // altimate_change end
         }
       },
     }

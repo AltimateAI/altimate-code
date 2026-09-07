@@ -74,6 +74,13 @@ function init() {
 
   const renderer = useRenderer()
   const modeStack = useOpencodeModeStack()
+  // altimate_change start — allow a modal to veto every dialog replacement/close path
+  let closeGuard: (() => boolean) | undefined
+
+  function canClose() {
+    return closeGuard?.() ?? true
+  }
+  // altimate_change end
 
   createEffect(() => {
     if (store.stack.length === 0) return
@@ -99,6 +106,17 @@ function init() {
     }, 1)
   }
 
+  // altimate_change start — centralize guarded single-dialog close behavior
+  function closeTop() {
+    if (!canClose()) return false
+    const current = store.stack.at(-1)
+    current?.onClose?.()
+    setStore("stack", store.stack.slice(0, -1))
+    refocus()
+    return true
+  }
+  // altimate_change end
+
   useBindings(() => ({
     enabled: store.stack.length > 0 && !renderer.getSelection()?.getSelectedText(),
     bindings: [
@@ -107,13 +125,12 @@ function init() {
         desc: "Close dialog",
         group: "Dialog",
         cmd: () => {
+          // altimate_change start — preserve selection when the active close guard vetoes Escape
+          if (!closeTop()) return
           if (renderer.getSelection()) {
             renderer.clearSelection()
           }
-          const current = store.stack.at(-1)
-          current?.onClose?.()
-          setStore("stack", store.stack.slice(0, -1))
-          refocus()
+          // altimate_change end
         },
       },
       {
@@ -121,13 +138,12 @@ function init() {
         desc: "Close dialog",
         group: "Dialog",
         cmd: () => {
+          // altimate_change start — preserve selection when the active close guard vetoes Ctrl-C
+          if (!closeTop()) return
           if (renderer.getSelection()) {
             renderer.clearSelection()
           }
-          const current = store.stack.at(-1)
-          current?.onClose?.()
-          setStore("stack", store.stack.slice(0, -1))
-          refocus()
+          // altimate_change end
         },
       },
     ],
@@ -135,6 +151,8 @@ function init() {
 
   return {
     clear() {
+      // altimate_change start — guard and report bulk dialog closure
+      if (!canClose()) return false
       for (const item of store.stack) {
         if (item.onClose) item.onClose()
       }
@@ -143,8 +161,12 @@ function init() {
         setStore("stack", [])
       })
       refocus()
+      return true
+      // altimate_change end
     },
     replace(input: any, onClose?: () => void) {
+      // altimate_change start — replacement is a close path and must obey the same guard
+      if (!canClose()) return false
       if (store.stack.length === 0) {
         focus = renderer.currentFocusedRenderable
         focus?.blur()
@@ -159,6 +181,8 @@ function init() {
           onClose,
         },
       ])
+      return true
+      // altimate_change end
     },
     get stack() {
       return store.stack
@@ -169,6 +193,14 @@ function init() {
     setSize(size: "medium" | "large" | "xlarge") {
       setStore("size", size)
     },
+    // altimate_change start — install and safely dispose the active close guard
+    guardClose(guard: () => boolean) {
+      closeGuard = guard
+      return () => {
+        if (closeGuard === guard) closeGuard = undefined
+      }
+    },
+    // altimate_change end
   }
 }
 

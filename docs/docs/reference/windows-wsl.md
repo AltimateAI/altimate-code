@@ -1,3 +1,7 @@
+---
+title: "Windows & WSL Support — Altimate Code"
+description: "Install and run Altimate Code on Windows natively or via WSL (Windows Subsystem for Linux)."
+---
 # Windows / WSL
 
 altimate runs on Windows both natively (via Node.js on Windows) and through WSL (Windows Subsystem for Linux). WSL 2 is recommended for the best experience, but it is not required.

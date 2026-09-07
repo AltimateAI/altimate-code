@@ -1,3 +1,8 @@
+---
+title: Themes — Altimate Code TUI
+description: "Choose from 12+ built-in color themes or create a custom theme for the Altimate Code terminal interface."
+---
+
 # Themes
 
 altimate includes 12+ built-in themes and supports custom themes.

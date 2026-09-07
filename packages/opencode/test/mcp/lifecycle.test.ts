@@ -526,6 +526,34 @@ it.instance(
   },
 )
 
+// altimate_change start — remove forgets the runtime config
+it.instance(
+  "remove forgets the key entirely, so it no longer reports as disabled",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "rm-server"
+        getOrCreateClientState("rm-server")
+
+        yield* mcp.add("rm-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+        expect((yield* mcp.status())["rm-server"]?.status).toBe("connected")
+
+        yield* mcp.remove("rm-server")
+
+        // A retained runtime config would have status() synthesise "disabled"
+        // for the rest of the process, and connect() re-spawn the removed entry.
+        expect((yield* mcp.status())["rm-server"]).toBeUndefined()
+        const tools = yield* mcp.tools()
+        expect(Object.keys(tools).some((k) => k.startsWith("rm-server"))).toBe(false)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+// altimate_change end
+
 it.instance(
   "connect() after disconnect() re-establishes the server",
   () =>

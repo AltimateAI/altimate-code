@@ -34,6 +34,8 @@ import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
 import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
+// altimate_change - workspace mode owns the datamate key
+import { managedWorkspaceLoaded } from "../altimate/workspace/engine-overlay"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { findAllConfigPaths } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
@@ -110,6 +112,10 @@ export namespace Server {
           if (err instanceof NotFoundError) status = 404
           else if (err instanceof Provider.ModelNotFoundError) status = 400
           else if (err.name.startsWith("Worktree")) status = 400
+          // altimate_change start — a malformed search regex is bad user input, not a
+          // server fault; without this it surfaced from /find as a 500.
+          else if (err.name === "RipgrepInvalidPatternError") status = 400
+          // altimate_change end
           else status = 500
           return c.json(err.toObject(), { status })
         }
@@ -118,6 +124,9 @@ export namespace Server {
           let status: ContentfulStatusCode
           if (err.name === "NotFoundError") status = 404
           else if (err.name.startsWith("Worktree")) status = 400
+          // altimate_change start — see above: an invalid search pattern is a client error.
+          else if (err.name === "RipgrepInvalidPatternError") status = 400
+          // altimate_change end
           else status = 500
           return c.json(err.toObject(), { status })
         }
@@ -678,6 +687,16 @@ export namespace Server {
       .post("/altimate/mcp/reload-datamate", async (c) => {
         try {
           const directory = Instance.directory
+          // In workspace mode the `datamate` key is the bound workspace's own engine,
+          // derived at config load; an IDE reload must not replace it under a turn.
+          const managed = await managedWorkspaceLoaded()
+          if (managed) {
+            log.info("reload-datamate: refused, key is managed by a workspace", { workspace: managed.id })
+            return c.json(
+              { ok: false, error: `The datamate MCP server is managed by workspace "${managed.name}" in this project.` },
+              409,
+            )
+          }
           log.info("reload-datamate: syncing IDE MCP config", { directory })
 
           // Sync IDE MCP config → altimate-code.json; returns updated server names.

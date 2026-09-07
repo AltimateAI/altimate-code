@@ -1,5 +1,6 @@
 ---
 title: Altimate Code
+description: "Altimate Code is the open-source data engineering harness with 100+ deterministic tools for SQL, dbt, and warehouse automation."
 hide:
   - toc
 ---
@@ -21,8 +22,8 @@ hide:
 
 <p class="hero-actions" markdown>
 
-[Get Started](quickstart.md){ .md-button .md-button--primary }
-[See Examples](../examples/index.md){ .md-button }
+[Get Started](/getting-started/quickstart/){ .md-button .md-button--primary }
+[See Examples](/examples/){ .md-button }
 [View on GitHub :material-github:](https://github.com/AltimateAI/altimate-code){ .md-button }
 
 </p>
@@ -40,43 +41,103 @@ npm install -g altimate-code
 ---
 
 <h2 class="section-heading">Why Altimate Code?</h2>
-<p class="section-sub">Every major data platform is building AI agents — but they're all locked to one ecosystem. Your data stack isn't.</p>
+<p class="section-sub">Every major data platform is building AI agents, but they're all locked to one ecosystem. Your data stack isn't. Altimate Code connects to your <strong>entire</strong> stack and lets you bring <strong>any LLM</strong>. No vendor lock-in, no platform tax.</p>
 
-Your transformation logic is in dbt. Your orchestration is in Airflow or Dagster. Your warehouses span Snowflake and BigQuery (and maybe that Redshift cluster nobody wants to talk about). Your governance requirements cross every platform boundary.
+<div class="nt-cards nt-grid cols-3" markdown>
 
-Altimate Code goes the other direction. It connects to your **entire** stack and lets you bring **any LLM** you want. No vendor lock-in. No platform tax.
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-2.45-8.28A6.5 6.5 0 0 0 4 13.5a4.5 4.5 0 0 0 4.5 4.5h9z"/></svg>
+</div>
 
-<div class="grid cards" markdown>
+### [Bring Your Own LLM](/configure/providers/)
 
--   :material-open-source-initiative:{ .lg .middle } **Open source & auditable**
+Works with Anthropic, OpenAI, Google, AWS Bedrock, Azure, Ollama, and 10+ more providers. Swap models without swapping your harness. No vendor lock-in.
 
-    ---
+</div>
+</div>
 
-    Every tool, every agent prompt, every analysis rule is inspectable, extensible, and auditable. For data teams in regulated industries, that's not a nice-to-have — it's a requirement.
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+</div>
 
--   :material-connection:{ .lg .middle } **Cross-platform, not single-vendor**
+### [Cross-Platform](/usage/tui/)
 
-    ---
+Claude Code, Cursor, Windsurf, VS Code, and any MCP-compatible client. Terminal, IDE, CI, or web. One install, everywhere.
 
-    Optimize a Snowflake query in the morning. Migrate a SQL Server pipeline to BigQuery in the afternoon. Same agent, same tools. No warehouse subscription required. First-class support for :material-snowflake: Snowflake, :material-google-cloud: BigQuery, :simple-databricks: Databricks, :material-elephant: PostgreSQL, :material-aws: Redshift, :material-database: Trino, :material-database: ClickHouse, :material-duck: DuckDB, :material-database: MySQL, :material-microsoft: SQL Server, and :material-leaf: MongoDB.
+</div>
+</div>
 
--   :material-cloud-outline:{ .lg .middle } **Works with any LLM**
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4l-7 7 2 2 7-7a4 4 0 0 0 5.4-5.4l-3 3-2-2 3-3z"/></svg>
+</div>
 
-    ---
+### [100+ Deterministic Tools](/configure/tools/)
 
-    Model-agnostic — bring your own provider, use your existing subscription, or run locally. Swap models without swapping your harness. Supports :material-cloud: Anthropic, :material-creation: OpenAI, :material-google: Google Gemini, :material-google: Google Vertex AI, :material-aws: AWS Bedrock, :material-microsoft-azure: Azure OpenAI, :material-server: Ollama, :material-router-wireless: OpenRouter, :material-cog: Mistral, :material-lightning-bolt: Groq, :material-head-snowflake-outline: DeepInfra, :material-brain: Cerebras, :material-message-text: Cohere, :material-group: Together AI, :material-compass: Perplexity, :material-alpha-x-circle: xAI, and :material-github: GitHub Copilot.
+SQL analysis, column-level lineage, dbt integration, FinOps, warehouse connectivity. Purpose-built for data work, not hallucinated by a model.
 
--   :material-puzzle:{ .lg .middle } **Customizable to your workflow**
+</div>
+</div>
 
-    ---
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+</div>
 
-    Bring your own rules, agents, skills, and tools. Customize the framework to match your company's data conventions, naming standards, and testing patterns.
+### [Validation Layer](/data-engineering/validators/)
 
--   :material-shield-check:{ .lg .middle } **Governed by design — five agent modes**
+SQL, lineage, and equivalence checks run in compiled Rust, not the model. 100% F1 across 1,077 anti-pattern queries, ~2 ms each, zero tokens.
 
-    ---
+</div>
+</div>
 
-    Three agent modes — Builder, Analyst, and Plan — each with tool-level permissions you can `allow`, `ask`, or `deny` per agent. Create custom agents for specialized workflows. Layer on project rules via `AGENTS.md`, automatic context compaction for long sessions, and auto-formatting on every edit. Governance enforced by the harness.
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+</div>
+
+### [Token Efficiency](/configure/context-management/)
+
+Context compaction trims the schema payload per task. The model gateway routes each call to the cheapest model that clears your accuracy bar.
+
+</div>
+</div>
+
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+</div>
+
+### [Data Governance](/configure/governance/)
+
+Built-in PII detection, policy enforcement, and compliance validation across your data stack. Three agent modes — Builder, Analyst, Plan — with tool-level permissions.
+
+</div>
+</div>
+
+</div>
+
+<div class="ak-needs-rows ak-needs-rows--orange" markdown>
+
+<a href="https://github.com/AltimateAI/altimate-code" class="ak-need-row ak-need-row--orange" target="_blank" rel="noopener">
+<span class="ak-need-row-ico ak-need-row-ico--orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg></span>
+<span class="ak-need-row-body"><strong>Open source &amp; auditable</strong><span>Every tool, prompt and rule is inspectable on GitHub. A requirement for regulated industries, not a nice-to-have.</span></span>
+<svg class="ak-need-row-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+</a>
+
+<a href="/configure/agents/" class="ak-need-row ak-need-row--orange">
+<span class="ak-need-row-ico ak-need-row-ico--orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+<span class="ak-need-row-body"><strong>Customizable to your workflow</strong><span>Bring your own rules, agents, skills and tools. Match your company's data conventions and testing patterns.</span></span>
+<svg class="ak-need-row-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+</a>
 
 </div>
 
@@ -85,43 +146,85 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 <h2 class="section-heading">100+ specialized tools</h2>
 <p class="section-sub">Unlike general-purpose coding agents, every tool is purpose-built for data engineering workflows.</p>
 
-<div class="grid cards" markdown>
+<div class="nt-cards nt-grid cols-3" markdown>
 
--   :material-database-search:{ .lg .middle } **SQL Anti-Pattern Detection**
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+</div>
 
-    ---
+### [SQL Anti-Pattern Detection](/data-engineering/tools/sql-tools/)
 
-    19 rules with confidence scoring. Catches SELECT *, missing filters, cartesian joins, non-sargable predicates, and more. 100% accuracy across 1,077 benchmark queries.
+19 rules with confidence scoring. Catches SELECT *, missing filters, cartesian joins, non-sargable predicates, and more. 100% accuracy across 1,077 benchmark queries.
 
--   :material-graph-outline:{ .lg .middle } **Live Column-Level Lineage**
+</div>
+</div>
 
-    ---
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6"/><path d="M9 18h6"/><path d="M9 6h6a3 3 0 0 1 3 3v6"/></svg>
+</div>
 
-    Real-time lineage extraction from SQL. Trace any column back through joins, CTEs, and subqueries to its source. Not a cached graph — a living lineage that updates with every change.
+### [Live Column-Level Lineage](/data-engineering/tools/lineage-tools/)
 
--   :material-cash-multiple:{ .lg .middle } **FinOps & Cost Analysis**
+Real-time lineage extraction from SQL. Trace any column back through joins, CTEs, and subqueries to its source. Not a cached graph — a living lineage that updates with every change.
 
-    ---
+</div>
+</div>
 
-    Credit analysis, expensive query detection, warehouse right-sizing, and unused resource cleanup. Specific optimization recommendations with estimated savings.
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+</div>
 
--   :material-translate:{ .lg .middle } **Cross-Dialect Translation**
+### [FinOps & Cost Analysis](/data-engineering/tools/finops-tools/)
 
-    ---
+Credit analysis, expensive query detection, warehouse right-sizing, and unused resource cleanup. Specific optimization recommendations with estimated savings.
 
-    Deterministic engine translating SQL between Snowflake, BigQuery, Databricks, Redshift, PostgreSQL, MySQL, SQL Server, and DuckDB with lineage verification.
+</div>
+</div>
 
--   :material-shield-lock-outline:{ .lg .middle } **PII Detection & Safety**
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+</div>
 
-    ---
+### [Cross-Dialect Translation](/data-engineering/tools/sql-tools/)
 
-    Automatic column scanning across 15+ PII categories. Safety checks and policy enforcement before every query touches production.
+Deterministic engine translating SQL between Snowflake, BigQuery, Databricks, Redshift, PostgreSQL, MySQL, SQL Server, and DuckDB with lineage verification.
 
--   :material-pipe:{ .lg .middle } **dbt Native**
+</div>
+</div>
 
-    ---
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+</div>
 
-    Manifest parsing, test generation, model scaffolding, incremental model detection, and lineage-aware refactoring. Builds models that fit your project conventions.
+### [PII Detection & Safety](/configure/governance/)
+
+Automatic column scanning across 15+ PII categories. Safety checks and policy enforcement before every query touches production.
+
+</div>
+</div>
+
+<div class="nt-card" markdown>
+<div class="nt-card-content" markdown>
+<div class="ak-card-icon">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/></svg>
+</div>
+
+### [dbt Native](/data-engineering/tools/dbt-tools/)
+
+Manifest parsing, test generation, model scaffolding, incremental model detection, and lineage-aware refactoring. Builds models that fit your project conventions.
+
+</div>
+</div>
 
 </div>
 
@@ -157,7 +260,7 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 > Debug this Airflow DAG failure: <DAG id or error log>
 ```
 
-<p class="section-sub" markdown>[:octicons-arrow-right-24: Browse more examples](../examples/index.md)</p>
+<p class="section-sub" markdown>[:octicons-arrow-right-24: Browse more examples](/examples/)</p>
 
 ---
 
@@ -177,6 +280,6 @@ Altimate Code goes the other direction. It connects to your **entire** stack and
 
 <div class="doc-links" markdown>
 
-**Learn More** — [Quickstart](quickstart.md) | [Examples](../examples/index.md) | [Use](../data-engineering/agent-modes.md) | [Configure](../configure/index.md) | [Interfaces](../usage/tui.md) | [Reference](../reference/security-faq.md)
+**Learn More** — [Quickstart](/getting-started/quickstart/) | [Examples](/examples/) | [Use](/data-engineering/agent-modes/) | [Configure](/configure/) | [Interfaces](/usage/tui/) | [Reference](/reference/security-faq/)
 
 </div>

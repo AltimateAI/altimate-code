@@ -1,3 +1,8 @@
+---
+title: Rules (AGENTS.md / CLAUDE.md) — Altimate Code
+description: "Provide persistent behavior instructions to Altimate Code agents via AGENTS.md or CLAUDE.md rule files."
+---
+
 # Rules
 
 Rules are instructions that guide agent behavior. They are loaded automatically from well-known file patterns and merged into the agent's system prompt.

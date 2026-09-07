@@ -3,14 +3,11 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let pg: any
-  try {
-    pg = await import("pg")
-  } catch {
-    throw new Error("PostgreSQL driver not installed. Run: npm install pg @types/pg")
-  }
+  pg = await loadOptionalDriver("postgres", "pg")
 
   const Pool = pg.default?.Pool ?? pg.Pool
   let pool: any

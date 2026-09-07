@@ -26,6 +26,18 @@ describe("formatCheckTitle", () => {
     expect(result).toContain("PII detected")
   })
 
+  test("reports 'PII check skipped' (not PASS) when the PII check abstained", () => {
+    const data = {
+      validation: { valid: true },
+      lint: { clean: true, findings: [] },
+      safety: { safe: true },
+      pii: { accesses_pii: false, pii_columns: [], parse_error: "Syntax error" },
+    }
+    const result = formatCheckTitle(data)
+    expect(result).toContain("PII check skipped")
+    expect(result).not.toBe("PASS")
+  })
+
   test("treats missing sections as failures (undefined is falsy)", () => {
     // When data is empty, !undefined is true, so each section looks like a failure
     const data = {} as Record<string, any>
@@ -120,21 +132,37 @@ describe("formatCheck", () => {
     expect(output).toContain("[critical] sql_injection: Tautology detected: 1=1")
   })
 
-  test("formats PII findings with column and confidence", () => {
+  test("formats PII exposures from the engine PiiQueryResult shape", () => {
     const data = {
       validation: { valid: true },
       lint: { clean: true },
       safety: { safe: true },
       pii: {
-        findings: [
-          { column: "ssn", category: "SSN", confidence: "high" },
-          { column: "email", category: "EMAIL", confidence: "medium" },
+        accesses_pii: true,
+        risk_level: "High",
+        pii_columns: [
+          { table: "customers", column: "ssn", classification: "SSN", query_targets: [], suggested_masking: "'***'" },
+          { table: "customers", column: "email", classification: { Custom: "WorkEmail" }, query_targets: ["contact"], suggested_masking: null },
         ],
       },
     }
     const output = formatCheck(data)
-    expect(output).toContain("ssn: SSN (high confidence)")
-    expect(output).toContain("email: EMAIL (medium confidence)")
+    expect(output).toContain("customers.ssn: SSN (masking: '***')")
+    // { Custom: string } classifications must not render as [object Object]
+    expect(output).toContain("customers.email: WorkEmail")
+    expect(output).not.toContain("[object Object]")
+  })
+
+  test("formats PII findings via the legacy findings fallback", () => {
+    const data = {
+      validation: { valid: true },
+      lint: { clean: true },
+      safety: { safe: true },
+      pii: { findings: [{ column: "ssn", category: "SSN", confidence: "high" }] },
+    }
+    const output = formatCheck(data)
+    expect(output).toContain("ssn: SSN")
+    expect(output).not.toContain("No PII detected")
   })
 
   test("handles empty/missing sections without crashing", () => {

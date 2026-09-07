@@ -6,6 +6,13 @@ import { Global } from "@opencode-ai/core/global"
 import { Instance } from "@/project/instance"
 import { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE, MemoryBlockSchema, type MemoryBlock, type Citation } from "./types"
 import { Telemetry } from "@/altimate/telemetry"
+// altimate_change start - workspace memory mirror. Additive: local files stay
+// authoritative and every call below is fire-and-forget.
+import { archiveBlock, mirrorBlock } from "@/altimate/workspace/memory-sync"
+import { Log } from "@/altimate/util/log"
+
+const mirrorLog = Log.create({ service: "altimate-memory-mirror" })
+// altimate_change end
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/
 
@@ -16,8 +23,8 @@ function globalDir(): string {
 // altimate_change start - use .altimate-code (primary) with .opencode (fallback)
 // Cache keyed by Instance.directory to avoid stale paths when context changes
 const _projectDirCache = new Map<string, string>()
-function projectDir(): string {
-  const dir = Instance.directory
+function projectDir(directory?: string): string {
+  const dir = directory ?? Instance.directory
   const cached = _projectDirCache.get(dir)
   if (cached) return cached
   const primary = path.join(dir, ".altimate-code", "memory")
@@ -35,12 +42,21 @@ function projectDir(): string {
 }
 // altimate_change end
 
-function dirForScope(scope: "global" | "project"): string {
-  return scope === "global" ? globalDir() : projectDir()
+/** The current instance directory, or undefined outside an instance context. */
+function safeDirectory(): string | undefined {
+  try {
+    return Instance.directory
+  } catch {
+    return undefined
+  }
 }
 
-function blockPath(scope: "global" | "project", id: string): string {
-  const base = dirForScope(scope)
+function dirForScope(scope: "global" | "project", directory?: string): string {
+  return scope === "global" ? globalDir() : projectDir(directory)
+}
+
+function blockPath(scope: "global" | "project", id: string, directory?: string): string {
+  const base = dirForScope(scope, directory)
   const result = path.join(base, ...id.split("/").slice(0, -1), `${id.split("/").pop()}.md`)
   // Defense-in-depth: verify the resolved path stays within the memory directory
   const resolved = path.resolve(result)
@@ -119,8 +135,12 @@ function auditEntry(action: string, id: string, scope: string, extra?: string): 
 }
 
 export namespace MemoryStore {
-  export async function read(scope: "global" | "project", id: string): Promise<MemoryBlock | undefined> {
-    const filepath = blockPath(scope, id)
+  export async function read(
+    scope: "global" | "project",
+    id: string,
+    directory?: string,
+  ): Promise<MemoryBlock | undefined> {
+    const filepath = blockPath(scope, id, directory)
     let raw: string
     try {
       raw = await fs.readFile(filepath, "utf-8")
@@ -156,8 +176,15 @@ export namespace MemoryStore {
     return validated.data
   }
 
-  export async function list(scope: "global" | "project", opts?: { includeExpired?: boolean }): Promise<MemoryBlock[]> {
-    const dir = dirForScope(scope)
+  /** ``opts.directory`` resolves project scope explicitly instead of from the
+   * ambient instance. Callers outside an instance context — the ``link``
+   * subcommand is one — have no ambient directory, and reading project scope
+   * without it throws. */
+  export async function list(
+    scope: "global" | "project",
+    opts?: { includeExpired?: boolean; directory?: string },
+  ): Promise<MemoryBlock[]> {
+    const dir = dirForScope(scope, opts?.directory)
     const blocks: MemoryBlock[] = []
 
     async function scanDir(currentDir: string, prefix: string) {
@@ -176,7 +203,7 @@ export namespace MemoryStore {
         } else if (entry.name.endsWith(".md")) {
           const baseName = entry.name.slice(0, -3)
           const id = prefix ? `${prefix}/${baseName}` : baseName
-          const block = await read(scope, id)
+          const block = await read(scope, id, opts?.directory)
           if (block) {
             if (!opts?.includeExpired && isExpired(block)) continue
             blocks.push(block)
@@ -190,8 +217,25 @@ export namespace MemoryStore {
     return blocks
   }
 
-  export async function listAll(opts?: { includeExpired?: boolean }): Promise<MemoryBlock[]> {
-    const [global, project] = await Promise.all([list("global", opts), list("project", opts)])
+  /** One scope failing must not take the other down with it: a caller with no
+   * usable project directory should still get global blocks. */
+  export async function listAll(opts?: { includeExpired?: boolean; directory?: string }): Promise<MemoryBlock[]> {
+    const [globalResult, projectResult] = await Promise.allSettled([
+      list("global", opts),
+      list("project", opts),
+    ])
+    if (globalResult.status === "rejected") {
+      Log.create({ service: "memory.store" }).warn("could not read global memory", {
+        err: String(globalResult.reason),
+      })
+    }
+    if (projectResult.status === "rejected") {
+      Log.create({ service: "memory.store" }).warn("could not read project memory", {
+        err: String(projectResult.reason),
+      })
+    }
+    const global = globalResult.status === "fulfilled" ? globalResult.value : []
+    const project = projectResult.status === "fulfilled" ? projectResult.value : []
     const all = [...project, ...global]
     all.sort((a, b) => b.updated.localeCompare(a.updated))
     return all
@@ -264,6 +308,25 @@ export namespace MemoryStore {
       tags_count: block.tags.length,
     })
 
+    // altimate_change start - mirror to the bound workspace. The local file is
+    // already durable here, so a cloud failure must not surface as a failed
+    // memory write. No-ops unless the pilot flag is on, the project is bound,
+    // and the workspace has memory enabled.
+    // The directory is captured HERE, while the writing context is still
+    // current. `mirrorBlock` is fire-and-forget, so by the time it runs the
+    // ambient instance may be a different project -- and the mirror's
+    // local-existence check would then look for this block in the wrong tree
+    // and skip it as deleted.
+    const owningDirectory = safeDirectory()
+    void mirrorBlock(block, owningDirectory).catch((e) => {
+      mirrorLog.warn("failed to mirror memory block to workspace", {
+        id: block.id,
+        scope: block.scope,
+        err: String(e),
+      })
+    })
+    // altimate_change end
+
     // Auto-clean expired blocks AFTER successful write to avoid data loss
     if (needsCleanup) {
       const expiredBlocks = allBlocks.filter((b) => isExpired(b))
@@ -291,6 +354,20 @@ export namespace MemoryStore {
         duplicate_count: 0,
         tags_count: 0,
       })
+      // altimate_change start - archive rather than delete the cloud record so
+      // the workspace keeps the history. Fire-and-forget, as with write, so the
+      // deleting project's directory is captured here while its context is
+      // still current — otherwise the archive resolves another project's
+      // binding and can hit that workspace's same-id record.
+      const deletingDirectory = safeDirectory()
+      void archiveBlock(scope, id, deletingDirectory).catch((e) => {
+        mirrorLog.warn("failed to archive workspace memory record", {
+          id,
+          scope,
+          err: String(e),
+        })
+      })
+      // altimate_change end
       return true
     } catch (e: any) {
       if (e.code === "ENOENT") return false

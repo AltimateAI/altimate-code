@@ -1,3 +1,8 @@
+---
+title: Tools Reference — Altimate Code
+description: "Complete reference for 100+ specialized data engineering tools in Altimate Code, organized by category."
+---
+
 # Tools Reference
 
 Altimate Code has 100+ specialized tools organized by function.

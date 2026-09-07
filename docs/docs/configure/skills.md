@@ -1,3 +1,8 @@
+---
+title: Agent Skills — Reusable Prompt Templates
+description: "Create reusable SKILL.md prompt templates to give Altimate Code agents repeatable, shareable capabilities."
+---
+
 # Agent Skills
 
 Skills are reusable prompt templates that extend agent capabilities.
@@ -9,7 +14,7 @@ Skills are markdown files named `SKILL.md`:
 ```markdown
 ---
 name: cost-review
-description: Review SQL queries for cost optimization
+description: "Review SQL queries for cost optimization"
 ---
 
 Analyze the SQL query for cost optimization opportunities:
@@ -48,7 +53,7 @@ name: dbt-develop
 applyPaths:
   - "dbt_project.yml"        # matches if any dbt_project.yml exists in the worktree
   - "**/dbt_project.yml"
-description: ...
+description: "..."
 ---
 ```
 
@@ -58,7 +63,7 @@ or, for unconditional loading:
 ---
 name: house-rules
 alwaysApply: true
-description: ...
+description: "..."
 ---
 ```
 
@@ -240,7 +245,7 @@ A skill references its paired CLI tool through bash code blocks:
 ```markdown
 ---
 name: freshness-check
-description: Check data freshness across tables
+description: "Check data freshness across tables"
 ---
 
 # Freshness Check
@@ -266,7 +271,7 @@ You can also create skills as plain prompt templates:
 ```markdown
 ---
 name: cost-review
-description: Review SQL queries for cost optimization
+description: "Review SQL queries for cost optimization"
 ---
 
 Analyze the SQL query for cost optimization opportunities.

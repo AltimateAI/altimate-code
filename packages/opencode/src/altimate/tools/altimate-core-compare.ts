@@ -18,12 +18,21 @@ export const AltimateCoreCompareTool = Tool.define("altimate_core_compare", {
         dialect: args.dialect ?? "",
       })
       const data = (result.data ?? {}) as Record<string, any>
-      const diffCount = data.differences?.length ?? 0
+      // Engine CompareResult: { identical, diff_count, diffs } — `differences`
+      // never existed, so every comparison used to render IDENTICAL.
+      const diffs = (data.diffs ?? data.differences ?? []) as any[]
+      const diffCount = data.diff_count ?? diffs.length
       const error = result.error ?? data.error
+      // Never render IDENTICAL when the engine call itself failed.
+      const title = error
+        ? "Compare: ERROR"
+        : data.identical === false || diffCount > 0
+          ? `Compare: ${diffCount} difference(s)`
+          : "Compare: IDENTICAL"
       return {
-        title: `Compare: ${diffCount === 0 ? "IDENTICAL" : `${diffCount} difference(s)`}`,
+        title,
         metadata: { success: result.success, difference_count: diffCount, ...(error && { error }) },
-        output: formatCompare(data),
+        output: error ? `Error: ${error}` : formatCompare(data),
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -38,10 +47,12 @@ export const AltimateCoreCompareTool = Tool.define("altimate_core_compare", {
 
 function formatCompare(data: Record<string, any>): string {
   if (data.error) return `Error: ${data.error}`
-  if (!data.differences?.length) return "Queries are structurally identical."
+  // Engine DiffEntry: { change_type, description }.
+  const diffs = (data.diffs ?? data.differences ?? []) as any[]
+  if (!diffs.length) return "Queries are structurally identical."
   const lines = ["Structural differences:\n"]
-  for (const d of data.differences) {
-    lines.push(`  [${d.type ?? "change"}] ${d.description ?? d.message ?? d}`)
+  for (const d of diffs) {
+    lines.push(`  [${d.change_type ?? d.type ?? "change"}] ${d.description ?? d.message ?? d}`)
   }
   return lines.join("\n")
 }

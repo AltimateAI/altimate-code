@@ -1,3 +1,7 @@
+---
+title: MCP Servers — Altimate Code
+description: "Configure Model Context Protocol (MCP) servers in Altimate Code to connect external tool providers."
+---
 # MCP Servers
 
 altimate supports the Model Context Protocol (MCP) for connecting to external tool servers.

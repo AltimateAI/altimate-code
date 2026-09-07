@@ -44,7 +44,10 @@ export async function testSqlLocal(params: LocalTestParams): Promise<LocalTestRe
   let localConnector: any
   try {
     const duckdbDriver = await import("@altimateai/drivers/duckdb")
-    localConnector = await duckdbDriver.connect({ type: "duckdb", path: targetPath })
+    // altimate_change start — this tool materializes a local scratch store,
+    // so it opts in explicitly to create-on-open.
+    localConnector = await duckdbDriver.connect({ type: "duckdb", path: targetPath, create: true })
+    // altimate_change end
     await localConnector.connect()
   } catch {
     return {

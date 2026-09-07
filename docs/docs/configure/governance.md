@@ -1,3 +1,8 @@
+---
+title: Governance & Permissions — Altimate Code
+description: "Task-scoped permissions and deterministic tool guards that keep Altimate Code safe in production data environments."
+---
+
 # Governance
 
 Most people think of governance as a cost — something you bolt on for compliance. In practice, governance makes agents produce **better results**, not just safer ones.

@@ -30,7 +30,21 @@ const keys = new Set([
 
 export function isV1(input: unknown) {
   if (typeof input !== "object" || input === null || Array.isArray(input)) return false
-  return Object.keys(input).some((key) => keys.has(key))
+  // altimate_change start — detect renamed nested V1 compaction keys
+  if (Object.keys(input).some((key) => keys.has(key))) return true
+  const compaction = (input as Record<string, unknown>).compaction
+  if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction)) return false
+  // A document with an explicit V2 compaction shape stays V2 even when a
+  // stale legacy key remains beside it. Sending that mixed object through the
+  // V1 decoder drops keep/buffer before migrate() can see them.
+  if (["keep", "buffer"].some((key) => Object.prototype.hasOwnProperty.call(compaction, key))) return false
+  // These nested V1 keys were renamed in V2. A config containing only shared
+  // top-level fields plus one of them must still enter migration; otherwise
+  // excess-property decoding silently drops the value and restores defaults.
+  return ["tail_turns", "preserve_recent_tokens", "reserved"].some((key) =>
+    Object.prototype.hasOwnProperty.call(compaction, key),
+  )
+  // altimate_change end
 }
 
 export function migrate(info: typeof ConfigV1.Info.Type) {
@@ -57,8 +71,24 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
       prune: info.compaction.prune,
       keep: {
         tokens: info.compaction.preserve_recent_tokens,
+        // altimate_change start — carry the verbatim-tail turn count (tail_turns:
+        // 0 disables the tail; dropping it silently restores the default).
+        turns: info.compaction.tail_turns,
+        // altimate_change end
       },
       buffer: info.compaction.reserved,
+      // altimate_change start — carry the fork compaction keys (same names in V2)
+      context_safety_fraction: info.compaction.context_safety_fraction,
+      state_ledger: info.compaction.state_ledger,
+      ledger_max_tokens: info.compaction.ledger_max_tokens,
+      ledger_recent_calls: info.compaction.ledger_recent_calls,
+      summary_carry: info.compaction.summary_carry,
+      summary_first_person: info.compaction.summary_first_person,
+      pin_task: info.compaction.pin_task,
+      pin_max_tokens: info.compaction.pin_max_tokens,
+      pin_window_fraction: info.compaction.pin_window_fraction,
+      pin_card_max_tokens: info.compaction.pin_card_max_tokens,
+      // altimate_change end
     },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],
     commands: info.command,
@@ -67,7 +97,15 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     plugins: info.plugin?.map((plugin) =>
       typeof plugin === "string" ? plugin : { package: plugin[0], options: plugin[1] },
     ),
-    experimental: info.experimental?.policies && { policies: info.experimental.policies },
+    // altimate_change start — carry starvation_breaker alongside policies
+    experimental:
+      info.experimental?.policies || info.experimental?.starvation_breaker
+        ? {
+            policies: info.experimental?.policies,
+            starvation_breaker: info.experimental?.starvation_breaker,
+          }
+        : undefined,
+    // altimate_change end
     providers: providers(info.provider),
   }
 }

@@ -1,3 +1,8 @@
+---
+title: "Network & Proxy Configuration — Altimate Code"
+description: "Configure Altimate Code for proxied or restricted network environments using HTTP_PROXY and related environment variables."
+---
+
 # Network
 
 Configure network settings for proxied or restricted environments.
@@ -36,6 +41,7 @@ altimate needs outbound HTTPS access to:
 | Destination | Purpose |
 |-------------|---------|
 | Your LLM provider API | Model inference (Anthropic, OpenAI, etc.) |
+| Official Altimate Base gateway (embedded in release), or the host set by `ALTIMATE_BASE_GATEWAY_URL` | Altimate Base registration and inference when you explicitly enable Altimate Base |
 | `registry.npmjs.org` | Package updates |
 | `models.dev` | Model catalog (can be disabled) |
 | Your warehouse endpoints | Database connections |

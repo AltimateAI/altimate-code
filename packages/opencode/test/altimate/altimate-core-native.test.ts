@@ -839,12 +839,13 @@ describe("core 0.5.1 dialect forwarding + decidable", () => {
       { name: "x", type: "INT" }, { name: "payload", type: "VARIANT" },
     ] } },
   }
-  // Snowflake semi-structured access `payload:f` is a hard PARSE error in the
-  // default dialect (the ':' is rejected) but parses under the snowflake dialect.
-  // The validation-error TEXT therefore differs by dialect — a syntax error only
-  // when the hint is dropped. Pre-fix (dialect not forwarded) BOTH would be syntax
-  // errors; this asserts they diverge, proving the arg reaches the parser.
-  const colonSql = "select payload:f::int as v from t"
+  // Snowflake time-travel `AT(OFFSET => -60)` is a hard PARSE error in the
+  // default dialect but parses under the snowflake dialect. (Since core@0.7.0
+  // the default dialect accepts the former fixture `payload:f`, so time travel
+  // is the discriminating construct now.) Pre-fix (dialect not forwarded) BOTH
+  // would be syntax errors; this asserts they diverge, proving the arg reaches
+  // the parser.
+  const colonSql = "select x from t at(offset => -60)"
   const equivCall = (dialect?: string) =>
     Dispatcher.call("altimate_core.equivalence", { sql1: colonSql, sql2: colonSql, schema_context: variantSchema, dialect })
   const hasSyntaxError = (data: any) =>

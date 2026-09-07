@@ -4,19 +4,32 @@
  */
 
 import { Database } from "bun:sqlite"
+import { allowsCreate, assertStoreExists, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
-  const dbPath = (config.path as string) ?? ":memory:"
+  // altimate_change start — a missing path must fail loudly, not become :memory:
+  const dbPath = requireStorePath(config, "SQLite")
+  // altimate_change end
   let db: Database | null = null
 
   return {
     async connect() {
       const isReadonly = config.readonly === true
+      // altimate_change start — never conjure an empty store on open.
+      // A read-only connection never creates, so `create: true` cannot excuse a
+      // missing file there; the guard is told the effective decision.
+      const willCreate = !isReadonly && allowsCreate(config)
+      assertStoreExists(config, dbPath, "SQLite", willCreate)
       db = new Database(dbPath, {
         readonly: isReadonly,
-        create: !isReadonly,
+        // `create` alone is no longer implied by "not readonly", so the
+        // read-write flag has to be explicit — bun:sqlite rejects an options
+        // object that sets no open flag at all.
+        readwrite: !isReadonly,
+        create: willCreate,
       })
+      // altimate_change end
       if (!isReadonly) {
         db.exec("PRAGMA journal_mode = WAL")
       }

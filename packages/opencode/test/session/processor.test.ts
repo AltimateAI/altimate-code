@@ -1,6 +1,9 @@
 // @ts-nocheck
 import { describe, test, expect, beforeEach, mock } from "bun:test"
 import { Telemetry } from "../../src/telemetry"
+// altimate_change — the finish-ordering suite below exercises the real exported
+// decision function rather than a local copy (PR #1171 review).
+import { SessionProcessor } from "../../src/session/processor"
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -883,5 +886,46 @@ describe("processor state tracking", () => {
     attempt++
     expect(retryStartTime).toBe(firstRetryStart)
     expect(attempt).toBe(2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Finish-outcome ordering (mirrors the decision block at the end of
+// processor.ts finish handling). Terminal outcomes (blocked / error /
+// doom-loop stop) must win over "compact"; explicit DONE with a pending
+// compaction still stops. If the ordering in processor.ts changes, update
+// this mirror to match.
+// ---------------------------------------------------------------------------
+describe("finish outcome ordering", () => {
+  // altimate_change start — PR #1171 review: this suite used to re-implement the
+  // ordering locally, so it passed regardless of what processor.ts did. It now
+  // calls the SAME exported function the production step-finish path calls.
+  const resolveOutcome = SessionProcessor.resolveFinishOutcome
+  // altimate_change end
+
+  const base = { needsCompaction: false, explicitDone: false, blocked: false, error: false, starvationStop: false }
+
+  test("explicit DONE overrides a pending compaction", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, explicitDone: true })).toBe("stop")
+  })
+
+  test("blocked wins over compact", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, blocked: true })).toBe("stop")
+  })
+
+  test("error wins over compact", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, error: true })).toBe("stop")
+  })
+
+  test("doom-loop stop wins over compact", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true, starvationStop: true })).toBe("stop")
+  })
+
+  test("plain overflow still compacts", () => {
+    expect(resolveOutcome({ ...base, needsCompaction: true })).toBe("compact")
+  })
+
+  test("nothing pending continues", () => {
+    expect(resolveOutcome(base)).toBe("continue")
   })
 })

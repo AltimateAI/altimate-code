@@ -1,3 +1,8 @@
+---
+title: "Terminal UI (TUI) — Altimate Code"
+description: "Altimate Code's terminal user interface: message panel, input area, and sidebar for session and context management."
+---
+
 # TUI
 
 altimate launches a terminal-based user interface (TUI) by default.

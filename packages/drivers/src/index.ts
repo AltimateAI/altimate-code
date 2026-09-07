@@ -4,6 +4,9 @@ export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from 
 // Re-export config normalization
 export { normalizeConfig, sanitizeConnectionString } from "./normalize"
 
+// Re-export file-backed store guards
+export { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
+
 // Re-export driver connect functions
 export { connect as connectPostgres } from "./postgres"
 export { connect as connectSnowflake } from "./snowflake"

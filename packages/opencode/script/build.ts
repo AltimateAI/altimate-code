@@ -6,6 +6,8 @@ import path from "path"
 import { fileURLToPath } from "url"
 import { createRequire } from "node:module"
 import solidPlugin from "@opentui/solid/bun-plugin"
+// altimate_change — #1052 D10: sha256 for the per-target build-inputs stamp.
+import { createHash } from "node:crypto"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -15,6 +17,9 @@ process.chdir(dir)
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+import { walkInputs } from "./stamp-inputs"
+import { assertUsableCatalog, catalogDiagnosticOrigin, formatCatalogSummary } from "./models-catalog"
+import { FreeTierUrl } from "../src/altimate/free/url"
 
 // Python engine has been eliminated — all methods run natively in TypeScript.
 // ALTIMATE_ENGINE_VERSION is no longer needed at runtime.
@@ -24,11 +29,110 @@ const changelogPath = path.resolve(dir, "../../CHANGELOG.md")
 const changelog = fs.existsSync(changelogPath) ? await Bun.file(changelogPath).text() : ""
 console.log(`Loaded CHANGELOG.md (${changelog.length} chars)`)
 
-const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
-// Fetch and generate models.dev snapshot
-const modelsData = process.env.MODELS_DEV_API_JSON
-  ? await Bun.file(process.env.MODELS_DEV_API_JSON).text()
-  : await fetch(`${modelsUrl}/api.json`).then((x) => x.text())
+// altimate_change start — inject the official Altimate Base endpoint at release time
+const rawAltimateBaseGatewayUrl = process.env.ALTIMATE_BASE_GATEWAY_URL?.trim() ?? ""
+const altimateBaseGatewayUrl = rawAltimateBaseGatewayUrl
+  ? FreeTierUrl.normalizeGatewayUrl(rawAltimateBaseGatewayUrl)
+  : undefined
+if (rawAltimateBaseGatewayUrl && !altimateBaseGatewayUrl) {
+  console.error("error: ALTIMATE_BASE_GATEWAY_URL must be HTTPS and contain no credentials, query, or fragment")
+  process.exit(1)
+}
+if (Script.release && !altimateBaseGatewayUrl) {
+  console.error("error: release builds require ALTIMATE_BASE_GATEWAY_URL")
+  process.exit(1)
+}
+// altimate_change end
+
+const modelsUrlOverride = process.env.OPENCODE_MODELS_URL || undefined
+const modelsUrl = modelsUrlOverride ?? "https://models.dev"
+
+const CATALOG_FETCH_TIMEOUT_MS = 60_000
+// The hard backstop must lose the race to `AbortSignal.timeout` in every case the
+// signal CAN handle, or it fires first and replaces the precise per-stage message
+// ("fetch failed", "body read failed") with its own generic one. The margin is
+// what makes it a backstop rather than the primary timeout.
+const CATALOG_HARD_DEADLINE_MS = CATALOG_FETCH_TIMEOUT_MS + 15_000
+
+/** Fetch the models.dev catalog, failing loudly rather than hanging or
+ * returning an error page.
+ *
+ * `fetch` resolves for 4xx/5xx, so without the `res.ok` check a load-balancer
+ * error page flows straight into the snapshot. An HTML body would at least break
+ * the build at parse time, but a JSON error body (`{"error": ...}`) is valid
+ * TypeScript and would ship as a catalog with no providers in it. */
+async function fetchModelsCatalog(url: string, diagnosticOrigin: string): Promise<string> {
+  // Backstop for the case where the abort signal fires but the fetch promise never
+  // settles, so the `catch` below is never reached. `AbortSignal.timeout` cannot
+  // cancel a blocked `getaddrinfo()` — documented in src/provider/models.ts
+  // (#1052 D14), where a sandboxed-network DNS blackhole outlived the signal.
+  //
+  // HONEST LIMIT: this is a timer on the event loop, so it cannot preempt a
+  // genuinely blocked main thread either. If `getaddrinfo` blocks the loop
+  // outright, neither the signal nor this fires and the workflow `timeout-minutes`
+  // stays the real backstop. What this does cover is the more common shape — the
+  // loop still ticking while a request hangs unresolved — turning a silent
+  // full-length job timeout into a fast, labelled failure. Either way the build
+  // fails; it never falls through to a stale catalog.
+  const deadline = setTimeout(() => {
+    console.error(
+      `error: models.dev fetch from ${diagnosticOrigin} did not settle within ${CATALOG_HARD_DEADLINE_MS}ms ` +
+        `(host unreachable or unresolvable); failing the build`,
+    )
+    process.exit(1)
+  }, CATALOG_HARD_DEADLINE_MS)
+  try {
+    let res: Response
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS) })
+    } catch {
+      throw new Error(
+        `models.dev fetch from ${diagnosticOrigin} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`,
+      )
+    }
+    if (!res.ok)
+      throw new Error(`models.dev fetch failed: HTTP ${res.status} ${res.statusText} from ${diagnosticOrigin}`)
+    try {
+      // Inside its own try: a host that sends headers promptly then stalls
+      // mid-body aborts here, and an uncaught abort surfaces as a bare
+      // AbortError carrying none of the context above.
+      return await res.text()
+    } catch {
+      throw new Error(
+        `models.dev body read from ${diagnosticOrigin} failed or timed out after ${CATALOG_FETCH_TIMEOUT_MS}ms`,
+      )
+    }
+  } finally {
+    clearTimeout(deadline)
+  }
+}
+
+async function readModelsCatalog(file: string, diagnosticOrigin: string): Promise<string> {
+  try {
+    return await Bun.file(file).text()
+  } catch {
+    throw new Error(`models.dev catalog read from ${diagnosticOrigin} failed`)
+  }
+}
+
+// Fetch and generate models.dev snapshot. MODELS_DEV_API_JSON pins the catalog to
+// a local file for hermetic builds (ci.yml, pre-release-check.ts); release builds
+// leave it unset so the shipped binary embeds a release-time catalog.
+// `|| undefined` rather than `??`: an env var that is SET BUT EMPTY has to read as
+// unset, or the origin keeps "" while the data branch falls through to the fetch
+// and the build dies on `fetch("")` with ERR_INVALID_URL.
+const modelsFile = process.env.MODELS_DEV_API_JSON || undefined
+const modelsOrigin = modelsFile ?? `${modelsUrl}/api.json`
+const modelsDiagnosticOrigin = catalogDiagnosticOrigin(modelsOrigin, modelsFile ? "file" : "url")
+const modelsData = modelsFile
+  ? await readModelsCatalog(modelsFile, modelsDiagnosticOrigin)
+  : await fetchModelsCatalog(modelsOrigin, modelsDiagnosticOrigin)
+// A release is held to the full floor however its catalog was sourced, so pointing
+// a release build at a custom catalog cannot quietly skip the size and
+// required-provider checks.
+const strictCatalog = !!process.env.OPENCODE_RELEASE || (!modelsFile && !modelsUrlOverride)
+const catalogSummary = assertUsableCatalog(modelsData, modelsDiagnosticOrigin, strictCatalog)
+console.log(formatCatalogSummary(catalogSummary, modelsDiagnosticOrigin))
 await Bun.write(
   path.join(dir, "src/provider/models-snapshot.ts"),
   `// Auto-generated by build.ts - do not edit\nexport const snapshot = ${modelsData.trim()} as const\n`,
@@ -145,43 +249,49 @@ const allTargets: {
 ]
 
 // If --targets is provided, filter to only matching OS values
-const validOsValues = new Set(allTargets.map(t => t.os))
-const targetsFlag = process.argv.find(a => a.startsWith('--targets='))?.split('=')[1]?.split(',')
+const validOsValues = new Set(allTargets.map((t) => t.os))
+const targetsFlag = process.argv
+  .find((a) => a.startsWith("--targets="))
+  ?.split("=")[1]
+  ?.split(",")
 if (targetsFlag) {
-  const invalid = targetsFlag.filter(t => !validOsValues.has(t))
+  const invalid = targetsFlag.filter((t) => !validOsValues.has(t))
   if (invalid.length > 0) {
-    console.error(`error: invalid --targets value(s): ${invalid.join(', ')}. Valid values: ${[...validOsValues].join(', ')}`)
+    console.error(
+      `error: invalid --targets value(s): ${invalid.join(", ")}. Valid values: ${[...validOsValues].join(", ")}`,
+    )
     process.exit(1)
   }
 }
 
 // --target-index=N builds a single target by index (for parallel CI matrix)
-const targetIndexFlag = process.argv.find(a => a.startsWith('--target-index='))?.split('=')[1]
+const targetIndexFlag = process.argv.find((a) => a.startsWith("--target-index="))?.split("=")[1]
 
-const targets = targetIndexFlag !== undefined
-  ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
-  : singleFlag
-  ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
-        return false
-      }
+const targets =
+  targetIndexFlag !== undefined
+    ? [allTargets[parseInt(targetIndexFlag, 10)]].filter(Boolean)
+    : singleFlag
+      ? allTargets.filter((item) => {
+          if (item.os !== process.platform || item.arch !== process.arch) {
+            return false
+          }
 
-      // When building for the current platform, prefer a single native binary by default.
-      // Baseline binaries require additional Bun artifacts and can be flaky to download.
-      if (item.avx2 === false) {
-        return baselineFlag
-      }
+          // When building for the current platform, prefer a single native binary by default.
+          // Baseline binaries require additional Bun artifacts and can be flaky to download.
+          if (item.avx2 === false) {
+            return baselineFlag
+          }
 
-      // also skip abi-specific builds for the same reason
-      if (item.abi !== undefined) {
-        return false
-      }
+          // also skip abi-specific builds for the same reason
+          if (item.abi !== undefined) {
+            return false
+          }
 
-      return true
-    })
-  : targetsFlag
-    ? allTargets.filter(t => targetsFlag.includes(t.os))
-    : allTargets
+          return true
+        })
+      : targetsFlag
+        ? allTargets.filter((t) => targetsFlag.includes(t.os))
+        : allTargets
 
 // Defense in depth: refuse to produce no artifacts at all, and refuse to build
 // the glibc target on a musl host where the binary would crash at startup.
@@ -194,13 +304,14 @@ const targets = targetIndexFlag !== undefined
 //     `linux-x64` (glibc), produces a glibc binary that the musl host can't
 //     load, and dies later with a cryptic linker error.
 if (targets.length === 0) {
-  const reason = targetIndexFlag !== undefined
-    ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
-    : singleFlag
-      ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
-      : targetsFlag
-        ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
-        : "allTargets is empty."
+  const reason =
+    targetIndexFlag !== undefined
+      ? `--target-index=${targetIndexFlag} is out of range (allTargets has ${allTargets.length} entries — musl/win32-arm64 were removed).`
+      : singleFlag
+        ? `--single found no entry in allTargets matching ${process.platform}/${process.arch} (host may be excluded — see allTargets at the top of build.ts).`
+        : targetsFlag
+          ? `--targets=${targetsFlag.join(",")} matched nothing in allTargets.`
+          : "allTargets is empty."
   console.error(`error: no build targets selected. ${reason}`)
   process.exit(1)
 }
@@ -219,8 +330,12 @@ if (singleFlag && process.platform === "linux") {
     return false
   })()
   if (isMuslHost) {
-    console.error("error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.")
-    console.error("       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.")
+    console.error(
+      "error: --single on a musl-linux host would build the glibc target and produce a binary the host cannot run.",
+    )
+    console.error(
+      "       altimate-core has no NAPI prebuild for musl yet. Build on a glibc host, or install via `apk add gcompat` + the npm wrapper.",
+    )
     process.exit(1)
   }
 }
@@ -237,11 +352,29 @@ await $`rm -rf dist`
 // without bloating it with 5 platforms' worth of native addons.
 const requiredExternals: string[] = []
 const optionalExternals = [
-  // Database drivers — native addons, users install on demand per warehouse
-  "pg", "snowflake-sdk", "@google-cloud/bigquery", "@databricks/sql",
-  "mysql2", "mssql", "oracledb", "duckdb",
-  // Optional infra packages — native addons or heavy optional deps
-  "keytar", "ssh2", "dockerode",
+  // Database drivers — native addons, users install on demand per warehouse.
+  // Must stay in step with DRIVER_PACKAGES in packages/drivers/src/resolve.ts:
+  // a driver package that is missing here gets bundled into the binary, so the
+  // on-demand install path never runs for it and the bundled copy is frozen at
+  // whatever version built the release.
+  "pg",
+  "snowflake-sdk",
+  "@google-cloud/bigquery",
+  "@databricks/sql",
+  "mysql2",
+  "mssql",
+  "oracledb",
+  "duckdb",
+  "mongodb",
+  "@clickhouse/client",
+  "trino-client",
+  // Optional infra packages — native addons or heavy optional deps.
+  // @azure/identity is dynamically imported by the sqlserver driver for Azure
+  // AD auth; it resolves through the same on-disk loader as the drivers.
+  "keytar",
+  "ssh2",
+  "dockerode",
+  "@azure/identity",
 ]
 
 const binaries: Record<string, string> = {}
@@ -265,7 +398,9 @@ function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?
   platformTag: string
 } {
   if (item.abi === "musl") {
-    throw new Error(`No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`)
+    throw new Error(
+      `No @altimateai/altimate-core prebuild for linux-${item.arch}-musl; this target should not be in allTargets.`,
+    )
   }
   if (item.os === "darwin") {
     const tag = `darwin-${item.arch}`
@@ -280,7 +415,9 @@ function altimateCorePlatformFor(item: { os: string; arch: "arm64" | "x64"; abi?
       const tag = "win32-x64-msvc"
       return { pkg: `@altimateai/altimate-core-${tag}`, nodeFile: `altimate-core.${tag}.node`, platformTag: tag }
     }
-    throw new Error(`No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`)
+    throw new Error(
+      `No @altimateai/altimate-core prebuild for win32-${item.arch}; this target should not be in allTargets.`,
+    )
   }
   throw new Error(`Unsupported build target: ${item.os}-${item.arch}`)
 }
@@ -297,9 +434,7 @@ const altimateCoreLoaderDir = fs.realpathSync(path.dirname(altimateCoreLoaderPkg
 // .node into today's release archive.
 {
   const expected = pkg.dependencies["@altimateai/altimate-core"]
-  const resolvedVersion = JSON.parse(
-    fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8"),
-  ).version
+  const resolvedVersion = JSON.parse(fs.readFileSync(path.join(altimateCoreLoaderDir, "package.json"), "utf8")).version
   if (resolvedVersion !== expected) {
     throw new Error(
       `build.ts: resolved @altimateai/altimate-core version ${resolvedVersion} ` +
@@ -475,6 +610,10 @@ for (const item of targets) {
       autoloadBunfig: false,
       autoloadDotenv: false,
       autoloadTsconfig: true,
+      // Load-bearing for the optional drivers above: it is what lets the
+      // compiled binary resolve an `external` package from node_modules on
+      // disk at runtime. Verified by compiling with and without it — without
+      // it every driver import fails inside bunfs, whatever NODE_PATH says.
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
       outfile: `dist/${name}/bin/altimate`,
@@ -485,6 +624,8 @@ for (const item of targets) {
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
+      // altimate_change — official default is release configuration; runtime env can still override it
+      ALTIMATE_BASE_DEFAULT_GATEWAY_URL: JSON.stringify(altimateBaseGatewayUrl ?? ""),
       // ALTIMATE_ENGINE_VERSION removed — Python engine eliminated
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "undefined",
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
@@ -518,11 +659,140 @@ for (const item of targets) {
         version: Script.version,
         os: [item.os],
         cpu: [item.arch],
+        // altimate_change start — do not publish the orphaned sourcemaps.
+        // `Bun.build` above runs with `sourcemap: "external"`, so it writes
+        // `index.js.map` / `worker.js.map` next to the binary — but the bundles
+        // they describe are compiled INTO the executable, so the package shipped
+        // `.map` files with no `.js` companion: unusable by any consumer that
+        // follows `sourceMappingURL`, and not read by the binary at runtime
+        // (verified — it runs and reports errors normally with them deleted).
+        // They cost 20MB of a 191MB tarball against npm's ~200MB E413 ceiling.
+        // Keep emitting them for local debugging of `dist/`; keep them out of
+        // what we publish.
+        // `**` because `*` does not descend: a `.map` emitted under a
+        // `bin/<subdir>/` would still ship. Note the allowlist also means any
+        // future artifact added OUTSIDE `bin/` is silently dropped from the
+        // published package. (review)
+        files: ["bin", "!bin/**/*.map"],
+        // altimate_change end
       },
       null,
       2,
     ),
   )
+
+  // altimate_change start — #1052 D10: emit a build-inputs stamp so the
+  // smoke-test staleness guard can compare against ALL binary-embedded inputs,
+  // not just src/ + script/ mtimes.
+  //
+  // The previous guard (m5) walked src/ + script/ for the newest mtime — good
+  // for the common case but blind to changes in CHANGELOG.md, migrations,
+  // bundled skills, the models.dev snapshot, the parser worker, and the
+  // per-platform altimate-core prebuild. Editing any of those without touching
+  // a .ts file would leave the guard silent and the binary silently stale.
+  //
+  // Stamp format: JSON with one entry per input, sha256 of file content. Read
+  // side rehashes each listed path and compares; any mismatch → stale. Paths
+  // are REPO_ROOT-relative so entries under packages/tui, packages/core, the
+  // workspace-root package.json, bun.lock, etc. resolve without munging.
+  const REPO_ROOT = path.resolve(dir, "../..")
+  const stampInputs: Array<{ path: string; sha256: string }> = []
+  const addFile = (absPath: string) => {
+    try {
+      const buf = fs.readFileSync(absPath)
+      const rel = path.relative(REPO_ROOT, absPath)
+      const hash = createHash("sha256").update(buf).digest("hex")
+      stampInputs.push({ path: rel, sha256: hash })
+    } catch {
+      // Missing file: silently skip. The stamp only covers what actually
+      // shipped; a file the build didn't need doesn't invalidate the guard.
+    }
+  }
+  // CHANGELOG.md
+  addFile(changelogPath)
+  // Migrations
+  for (const m of migrationDirs) addFile(path.join(dir, "migration", m, "migration.sql"))
+  // Skills bundled via .opencode/skills/
+  for (const entry of skillEntries) addFile(path.join(skillsRoot, entry.name, "SKILL.md"))
+  // Generated models snapshot (build.ts rewrote it before we got here)
+  addFile(path.join(dir, "src/provider/models-snapshot.ts"))
+  // opentui parser worker
+  addFile(parserWorker)
+  // Per-target altimate-core NAPI prebuild
+  addFile(platformNodeSrc)
+  // altimate_change — #1052 D10 review-fix (M2): package.json + bun.lock cover
+  // dependency-version bumps that change what Bun.build embeds. Without these,
+  // `bun install` bumping a bundled dep would leave the stamp reporting fresh.
+  // Sibling workspace manifests are added in the packages walk below; this
+  // package's own manifest is added here, because that walk skips `opencode`
+  // (its src/ and script/ trees are already covered) and would otherwise leave
+  // `imports`, `exports` and other bundler-relevant fields unstamped.
+  addFile(path.join(REPO_ROOT, "package.json"))
+  addFile(path.join(REPO_ROOT, "bun.lock"))
+  addFile(path.join(dir, "package.json"))
+  // Also include tsconfig files that affect compiled output shape
+  // (bot review: tsconfig changes can flip target/moduleResolution).
+  addFile(path.join(dir, "tsconfig.json"))
+  // src/ + script/ TypeScript tree — hash every file the compiler actually saw.
+  // The walk rules live in ./build-inputs so the smoke-test guard can
+  // re-enumerate with identical rules and notice files ADDED after the build.
+  const walkedRoots: string[] = []
+  const walk = (root: string): void => {
+    if (!fs.existsSync(root)) return
+    walkedRoots.push(path.relative(REPO_ROOT, root))
+    for (const file of walkInputs(root)) addFile(file)
+  }
+  walk(path.join(dir, "src"))
+  walk(path.join(dir, "script"))
+  // altimate_change — #1052 D10 review-fix (M2): also hash every workspace
+  // package's src/ tree. `packages/opencode/src` imports from
+  // `@opencode-ai/{core,tui,util,plugin,sdk,server,cli,...}` and
+  // `@altimateai/{dbt-tools,drivers}` — Bun.build follows these imports and
+  // bundles them into the binary transitively. The original stamp walked only
+  // packages/opencode, so edits under any sibling workspace package would leave
+  // the binary silently stale. Enumerate `packages/*/src` at build time (rather
+  // than hard-coding names) so new packages get covered automatically.
+  const packagesRoot = path.resolve(REPO_ROOT, "packages")
+  try {
+    for (const pkg of fs.readdirSync(packagesRoot, { withFileTypes: true })) {
+      if (!pkg.isDirectory() || pkg.name.startsWith(".")) continue
+      // Skip packages/opencode — already covered by the walks above.
+      if (pkg.name === "opencode") continue
+      const pkgSrc = path.join(packagesRoot, pkg.name, "src")
+      if (fs.existsSync(pkgSrc)) walk(pkgSrc)
+      // Each workspace package.json influences its resolution/exports and could
+      // change what ends up in the binary even when its src/ files are unchanged.
+      const pkgJson = path.join(packagesRoot, pkg.name, "package.json")
+      if (fs.existsSync(pkgJson)) addFile(pkgJson)
+    }
+  } catch {
+    // packages/ missing (unlikely at build time) — skip; addFile() ignores non-existent paths anyway.
+  }
+  // Deterministic order so the aggregate hash is stable across build runs.
+  stampInputs.sort((a, b) => a.path.localeCompare(b.path))
+  const aggregate = createHash("sha256")
+    .update(stampInputs.map((i) => `${i.path}\t${i.sha256}`).join("\n"))
+    .digest("hex")
+  await Bun.file(`dist/${name}/bin/build-inputs.json`).write(
+    JSON.stringify(
+      {
+        target: name,
+        version: Script.version,
+        aggregate,
+        // Roots the walk covered, so the read side can detect files added after
+        // the build rather than only rehashing what was present at build time.
+        roots: [...new Set(walkedRoots)].sort(),
+        // Glob form so the read side notices a package added AFTER this build;
+        // concrete roots only describe what existed while it ran.
+        rootGlobs: ["packages/*/src"],
+        inputs: stampInputs,
+      },
+      null,
+      2,
+    ),
+  )
+  // altimate_change end
+
   binaries[name] = Script.version
 }
 

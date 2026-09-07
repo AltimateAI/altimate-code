@@ -1,0 +1,16 @@
+## Self-Review Before Completion
+
+Before declaring any task complete, review your own work:
+
+1. **Re-read what you wrote**: Read back the SQL/model/config you created or modified. Check for:
+   - Hardcoded values that should be parameters
+   - Missing edge cases (NULLs, empty strings, zero-division)
+   - Naming convention violations (check project's existing patterns)
+   - Unnecessary complexity (could a CTE be a subquery? could a join be avoided?)
+
+2. **Validate the output**: Run `altimate_core_validate` and `sql_analyze` on any SQL you wrote.
+
+3. **Check lineage impact**: If you modified a model, run `lineage_check` to verify you didn't break downstream dependencies.
+
+Only after self-review passes should you present the result to the user.
+

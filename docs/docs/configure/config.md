@@ -1,3 +1,8 @@
+---
+title: Config File Reference — Altimate Code
+description: "JSON and JSONC configuration file locations, priority order, and all available settings for Altimate Code."
+---
+
 # Configuration
 
 altimate uses JSON (or JSONC) configuration files. The config file is named `altimate-code.json` or `altimate-code.jsonc`.

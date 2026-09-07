@@ -173,8 +173,13 @@ export async function detectGit(): Promise<GitInfo> {
  * SSH-form remotes (`git@github.com:owner/repo.git`) have no userinfo
  * concept and are left untouched. URLs we can't parse are dropped to
  * undefined (better to lose the breadcrumb than leak creds).
+ *
+ * Exported so the workspace TuiPlugin (packages/opencode/src/plugin/tui/
+ * altimate/workspace.tsx) can reuse the exact same scrubbing rules when
+ * deriving the project's git remote for the post-scan prompt — the alt
+ * of duplicating the logic risks the two callers drifting.
  */
-function stripGitRemoteCredentials(url: string): string | undefined {
+export function stripGitRemoteCredentials(url: string): string | undefined {
   if (!url) return undefined
   // SSH form: `git@host:path` — no creds to strip.
   if (/^[\w.-]+@[\w.-]+:/.test(url) && !url.includes("://")) return url

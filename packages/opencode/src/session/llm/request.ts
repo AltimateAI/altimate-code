@@ -8,6 +8,15 @@ import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "../message-v2"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
+// altimate_change start — size and clamp the finalized provider request
+import {
+  clampOutputTokens,
+  clampReasoningBudget,
+  effectiveContextWindow,
+  estimateInputTokens,
+  mergeRequestHeaders,
+} from "@/provider/output-token-budget"
+// altimate_change end
 import { SystemPrompt } from "../system"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Effect, Record } from "effect"
@@ -168,30 +177,66 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
+  // altimate_change start — canonicalize the exact outgoing header precedence before budgeting
+  const requestHeaders = mergeRequestHeaders(
+    input.model.providerID.startsWith("opencode")
+      ? {
+          ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
+          "x-opencode-session": input.sessionID,
+          "x-opencode-request": input.user.id,
+          "x-opencode-client": input.flags.client,
+          "User-Agent": USER_AGENT,
+        }
+      : {
+          "x-session-affinity": input.sessionID,
+          "X-Session-Id": input.sessionID,
+          ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+          "User-Agent": USER_AGENT,
+        },
+    input.model.headers,
+    headers,
+  )
+  // altimate_change end
+
+  // altimate_change start — clamp after tools, headers, and plugin options are finalized.
+  const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
+  const maxOutputTokens = clampOutputTokens({
+    model: input.model,
+    requested: params.maxOutputTokens,
+    context: effectiveContextWindow({
+      model: input.model,
+      // Provider defaults are lower precedence than the exact case-normalized outgoing record.
+      headerSources: [input.provider.options, requestHeaders],
+    }),
+    inputTokens: () =>
+      estimateInputTokens({
+        // OAuth carries this prompt in instructions; workflows deliberately omit it. Count the
+        // generated system prompt only when this request prepends it to the outgoing messages.
+        system: isOpenaiOauth || input.isWorkflow ? [] : system,
+        messages: ProviderTransform.messagesForInputEstimate(input.messages, input.model),
+        tools: sortedTools,
+        instructions: params.options.instructions,
+      }),
+  })
+  const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
+  const clampedParams = {
+    ...params,
+    maxOutputTokens,
+    options: requestOptions,
+  }
+  // altimate_change end
+
   return {
     system,
     messages,
-    tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
-    params,
-    messageTransformOptions: options,
-    headers: {
-      ...(input.model.providerID.startsWith("opencode")
-        ? {
-            ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
-            "x-opencode-session": input.sessionID,
-            "x-opencode-request": input.user.id,
-            "x-opencode-client": input.flags.client,
-            "User-Agent": USER_AGENT,
-          }
-        : {
-            "x-session-affinity": input.sessionID,
-            "X-Session-Id": input.sessionID,
-            ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-            "User-Agent": USER_AGENT,
-          }),
-      ...input.model.headers,
-      ...headers,
-    },
+    // altimate_change start — return the finalized tools and context-window-clamped request values
+    tools: sortedTools,
+    params: clampedParams,
+    messageTransformOptions: requestOptions,
+    // altimate_change end
+    // altimate_change start — return the canonical headers used by the budget estimator
+    headers: requestHeaders,
+    // altimate_change end
   }
 })
 

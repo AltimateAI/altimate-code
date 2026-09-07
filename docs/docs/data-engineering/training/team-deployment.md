@@ -1,3 +1,8 @@
+---
+title: "Deploying Team Training — Altimate Code"
+description: "Create and share team-wide training entries using /teach or /train to standardize agent behavior across your organization."
+---
+
 # Deploying Team Training
 
 Get every teammate's AI automatically applying the same SQL conventions, naming standards, and anti-pattern rules. Achieved by committing `.altimate-code/memory/` to git so that teammates inherit your training on `git pull`.

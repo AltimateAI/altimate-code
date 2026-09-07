@@ -20,6 +20,11 @@ const runtimeDependencies: Record<string, string> = {
   "@altimateai/altimate-core": altimateCoreDep,
 }
 
+// Optional peer deps so `npm ls` and IDEs know which SDK versions a warehouse
+// needs, without npm installing any of them. Keys must cover every package in
+// DRIVER_PACKAGES (packages/drivers/src/resolve.ts); the driver-catalogue test
+// asserts that, because a package missing here is one users are never told
+// about. `mongodb` was absent until v0.9.6 for exactly that reason.
 const driverPeerDependencies: Record<string, string> = {
   pg: ">=8",
   "snowflake-sdk": ">=1",
@@ -29,6 +34,7 @@ const driverPeerDependencies: Record<string, string> = {
   mssql: ">=11",
   oracledb: ">=6",
   duckdb: ">=1",
+  mongodb: ">=6",
   "@clickhouse/client": ">=1",
   "trino-client": ">=0.2",
 }

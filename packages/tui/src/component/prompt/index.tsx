@@ -211,6 +211,13 @@ export function Prompt(props: PromptProps) {
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
+  // altimate_change start - yolo mode hint on the chat panel
+  const yoloShortcut = useCommandShortcut("session.yolo.toggle")
+  // Pass sessionID through even when undefined: on the welcome screen the mode can
+  // already be on (pending adoption by the session about to be created), and the hint
+  // must reflect that rather than always reading "off".
+  const yoloEnabled = createMemo(() => sync.yolo.enabled(props.sessionID))
+  // altimate_change end
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
@@ -385,8 +392,12 @@ export function Prompt(props: PromptProps) {
         // Keep command line --agent if specified.
         if (!args.agent) local.agent.set(msg.agent)
         if (msg.model) {
-          local.model.set(msg.model)
-          local.model.variant.set(msg.model.variant)
+          // altimate_change start — restore the recorded model, and its effort only if that model
+          // was actually applied (an invalid/unavailable model must not keep a stale variant)
+          if (local.model.restoreSession(msg.model)) {
+            local.model.variant.set(msg.model.variant)
+          }
+          // altimate_change end
         }
       }
     }
@@ -1125,6 +1136,11 @@ export function Prompt(props: PromptProps) {
       }
 
       sessionID = res.data.id
+      // altimate_change start — yolo mode: bind a welcome-screen choice to the session it
+      // was actually meant for, at the moment of creation. Doing this on route change
+      // instead would also fire when resuming an existing conversation.
+      sync.yolo.adopt(sessionID)
+      // altimate_change end
     }
 
     // altimate_change start — restore auto-enhance-before-submit for normal prompts
@@ -1777,6 +1793,24 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
+                  {/* altimate_change start - yolo mode hint + live state on the chat panel.
+                      Warning-coloured once on, so the enabled state is visible right where
+                      the user types rather than only in the footer. */}
+                  <Show when={yoloShortcut()}>
+                    <Show
+                      when={yoloEnabled()}
+                      fallback={
+                        <text fg={theme.text}>
+                          {yoloShortcut()} <span style={{ fg: theme.textMuted }}>yolo</span>
+                        </text>
+                      }
+                    >
+                      <text fg={theme.warning}>
+                        {yoloShortcut()} <span style={{ fg: theme.warning }}>△ YOLO ON</span>
+                      </text>
+                    </Show>
+                  </Show>
+                  {/* altimate_change end */}
                 </Match>
                 <Match when={store.mode === "shell"}>
                   <text fg={theme.text}>

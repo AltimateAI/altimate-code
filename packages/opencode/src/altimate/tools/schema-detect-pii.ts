@@ -19,6 +19,21 @@ export const SchemaDetectPiiTool = Tool.define("schema_detect_pii", {
         table: args.table,
       })
 
+      // Fail closed: detectPii reports success:false when any column scan
+      // failed — never render "no findings" for a scan that didn't complete.
+      if (result.success === false) {
+        return {
+          title: "PII Scan: ERROR",
+          metadata: {
+            success: false,
+            finding_count: result.finding_count,
+            columns_scanned: result.columns_scanned,
+            error: "PII scan failed for one or more columns — results are incomplete",
+          },
+          output: `PII scan failed for one or more columns — results are incomplete (${result.finding_count} finding(s) before failure).${result.finding_count ? `\n\n${formatPii(result)}` : ""}`,
+        }
+      }
+
       if (result.finding_count === 0) {
         return {
           title: `PII Scan: no findings (${result.columns_scanned} columns)`,

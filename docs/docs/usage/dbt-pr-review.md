@@ -1,3 +1,7 @@
+---
+title: "dbt PR Review — Altimate Code"
+description: "Live dbt pull request reviews with zero-secret DuckDB, blocking findings backed by Altimate's deterministic SQL engine."
+---
 # dbt PR Review
 
 [**See live review PRs**](https://github.com/AltimateAI/dbt-pr-review-demo/pulls)

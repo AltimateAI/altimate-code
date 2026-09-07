@@ -8,6 +8,7 @@ import { lazy } from "@/util/lazy"
 import { Filesystem } from "../util/filesystem"
 import { Flock } from "@/util/flock"
 import { Hash } from "@/util/hash"
+import { ModelsCatalog } from "./models-catalog"
 
 // Try to import bundled snapshot (generated at build time)
 // Falls back to undefined in dev mode when snapshot doesn't exist
@@ -108,9 +109,18 @@ export namespace ModelsDev {
     return { ok: result.ok, text: await result.text() }
   }
 
+  // altimate_change start — bot-review fix: catalog validation lives in
+  // ./models-catalog so it can be tested directly; see that file for why it is
+  // structural rather than schema-based.
+  const isCatalog = ModelsCatalog.isCatalog
+  const parseCatalog = ModelsCatalog.parseCatalog
+  // altimate_change end
+
   export const Data = lazy(async () => {
-    const result = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
-    if (result) return result
+    // Bot-review fix: a cache poisoned by an older build must not be trusted on
+    // read either, or the bad entry survives until the TTL expires.
+    const cached: unknown = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
+    if (isCatalog(cached)) return cached
     // @ts-ignore
     const snapshot = await import("./models-snapshot.js")
       .then((m) => m.snapshot as Record<string, unknown>)
@@ -118,15 +128,33 @@ export namespace ModelsDev {
     if (snapshot) return snapshot
     if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
     return Flock.withLock(`models-dev:${filepath}`, async () => {
-      const result = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
-      if (result) return result
+      const cachedUnderLock: unknown = await Filesystem.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).catch(() => {})
+      if (isCatalog(cachedUnderLock)) return cachedUnderLock
       const result2 = await fetchApi()
-      if (result2.ok) {
-        await Filesystem.write(filepath, result2.text).catch((e) => {
-          log.error("Failed to write models cache", { error: e })
-        })
+      // altimate_change — #1052 D14 review-fix (M3): fetchApi returning a non-2xx
+      // (e.g. 5xx with an HTML error body) previously fell through to
+      // `JSON.parse(<HTML>)` and crashed with SyntaxError. Return an empty
+      // catalog instead — callers already tolerate empty results (Provider.state
+      // just yields no models.dev-derived providers, which is the same UX as
+      // running with OPENCODE_DISABLE_MODELS_FETCH=1). Pre-D14 this rarely
+      // fired because the eager refresh usually warmed the disk cache; post-D14
+      // more first-calls fall through to fetch, so more chances to hit the crash.
+      //
+      // Bot-review follow-up: a 2xx can still carry HTML or truncated JSON
+      // (proxies, load-balancer error pages that respond 200, mid-stream
+      // truncation). Try to parse first; only cache + return on success. On
+      // parse failure, log and return empty — same graceful-degradation path
+      // as the non-2xx branch, and we don't poison the disk cache with junk.
+      if (!result2.ok) return {}
+      const parsed = parseCatalog(result2.text)
+      if (!parsed) {
+        log.error("models.dev body is not a catalog; not caching", { firstBytes: result2.text.slice(0, 120) })
+        return {}
       }
-      return JSON.parse(result2.text)
+      await Filesystem.write(filepath, result2.text).catch((e) => {
+        log.error("Failed to write models cache", { error: e })
+      })
+      return parsed
     })
   })
 
@@ -141,6 +169,15 @@ export namespace ModelsDev {
       if (skip(force)) return ModelsDev.Data.reset()
       const result = await fetchApi()
       if (!result.ok) return
+      // Bot-review fix: this path wrote the body straight to the cache with no
+      // validation at all, so the hourly refresh could poison a cache the
+      // cold-fetch path was careful to protect.
+      if (!parseCatalog(result.text)) {
+        log.error("models.dev refresh body is not a catalog; not caching", {
+          firstBytes: result.text.slice(0, 120),
+        })
+        return
+      }
       await Filesystem.write(filepath, result.text)
       ModelsDev.Data.reset()
     }).catch((e) => {
@@ -152,18 +189,42 @@ export namespace ModelsDev {
 }
 
 if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-  // altimate_change start — upstream_fix: bridge merge removed the setTimeout(...,0)
-  // wrapper. Defer the initial refresh past the current microtask so that
-  // Installation.USER_AGENT (used inside refresh()) is fully initialized — we hit
-  // a circular-dep issue on cold start without this. See altimate commit 980efaab64.
-  setTimeout(() => {
-    ModelsDev.refresh()
-    setInterval(
-      async () => {
-        await ModelsDev.refresh()
-      },
-      60 * 1000 * 60,
-    ).unref()
-  }, 0)
+  // altimate_change start — #1052 D14: drop the eager import-time ModelsDev.refresh().
+  //
+  // The previous `setTimeout(() => ModelsDev.refresh(), 0)` fired a fetch to
+  // https://models.dev/api.json at module import. Its `AbortSignal.timeout(10000)`
+  // cannot cancel a synchronous `getaddrinfo()` — under Linux `unshare --net`
+  // (Verdaccio sanity Phase 3 [10/10] on Ubuntu CI runners) the DNS call blocked
+  // long enough that the pending fetch held the event loop past command
+  // completion and SIGTERM landed before any bytes flushed. That blocked the
+  // v0.9.4 release.
+  //
+  // Callers that need model data use `ModelsDev.Data()`, which resolves in this
+  // priority order: (1) local disk cache, (2) bundled snapshot at
+  // `models-snapshot.ts` (embedded in release binaries — regenerated at each
+  // build; dev-mode builds without the snapshot fall through to fetch), (3)
+  // `Flock.withLock(...) → fetchApi()` only when both are absent. Release
+  // binaries therefore have release-time model metadata even on a cold-start
+  // with no network. Long-running processes (TUI, serve) still receive updates
+  // via the hourly `setInterval` below (`.unref()`'d so it never blocks exit).
+  //
+  // Trade-off: without an eager fetch, models added to models.dev between
+  // releases do not appear until a long-running process's hourly interval
+  // fires, or until the disk cache expires and a caller loads on demand. That
+  // is accepted deliberately.
+  //
+  // An earlier revision tried to narrow that window with
+  // `Promise.resolve().then(() => ModelsDev.refresh())`, reasoning that a
+  // microtask cannot keep Bun alive. The microtask cannot — but the `fetch()`
+  // it starts can, and that is the whole failure. On a cold cache `refresh()`
+  // reaches `fetchApi()`, whose `AbortSignal.timeout(10000)` still cannot
+  // cancel a blocking `getaddrinfo()`. That is the D14 shape exactly, so the
+  // eager refresh is gone rather than rescheduled.
+  setInterval(
+    async () => {
+      await ModelsDev.refresh()
+    },
+    60 * 60 * 1000,
+  ).unref()
   // altimate_change end
 }

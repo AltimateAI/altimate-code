@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
@@ -463,6 +463,23 @@ function autocontinue(enabled: boolean) {
 }
 
 describe("session.compaction.isOverflow", () => {
+  // These tests pin the RAW-limit boundary math, so disable the estimator
+  // safety margin (fraction 1 = raw limit). Default-margin behavior is covered
+  // in compaction-safety-fraction.test.ts.
+  // altimate_change start — save and RESTORE the prior value. Unconditionally
+  // deleting it wiped a value the surrounding environment (CI, a dev shell) had
+  // set, silently changing compaction behaviour for everything that ran after.
+  let priorSafetyFraction: string | undefined
+  beforeAll(() => {
+    priorSafetyFraction = process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+    process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = "1"
+  })
+  afterAll(() => {
+    if (priorSafetyFraction === undefined) delete process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"]
+    else process.env["ALTIMATE_CONTEXT_SAFETY_FRACTION"] = priorSafetyFraction
+  })
+  // altimate_change end
+
   it.live(
     "returns true when token count exceeds usable context",
     provideTmpdirInstance(() =>
@@ -1057,7 +1074,7 @@ describe("session.compaction.process", () => {
         metadata: { compaction_continue: true },
       })
       if (last?.parts[0]?.type === "text") {
-        expect(last.parts[0].text).toContain("Continue if you have next steps")
+        expect(last.parts[0].text).toContain("reply with DONE")
       }
     }),
   )
@@ -1248,7 +1265,7 @@ describe("session.compaction.process", () => {
           (msg) =>
             msg.info.role === "user" &&
             msg.parts.some(
-              (part) => part.type === "text" && part.synthetic && part.text.includes("Continue if you have next steps"),
+              (part) => part.type === "text" && part.synthetic && part.text.includes("reply with DONE"),
             ),
         ),
       ).toBe(false)

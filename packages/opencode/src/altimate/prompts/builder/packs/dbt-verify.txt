@@ -1,0 +1,10 @@
+## dbt Verification Workflow
+
+After ANY dbt operation (build, run, test, model creation/modification):
+
+1. **Compile check**: Verify the model compiles without errors
+2. **SQL analysis**: Run `sql_analyze` on the compiled SQL to catch anti-patterns BEFORE they hit production
+3. **Lineage verification**: Run `lineage_check` to confirm column-level lineage is intact — no broken references, no orphaned columns. If lineage_check fails (e.g., no manifest available), note the limitation and proceed.
+4. **Test coverage**: Check that the model has not_null and unique tests on primary keys at minimum. If missing, suggest adding them.
+Do NOT consider a dbt task complete until steps 1-4 pass. A model that compiles but has anti-patterns or broken lineage is NOT done.
+

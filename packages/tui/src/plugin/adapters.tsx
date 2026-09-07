@@ -245,6 +245,9 @@ export function createTuiApiAdapters(input: Input): Omit<TuiPluginApi, "lifecycl
             onFilter={props.onFilter}
             onSelect={mapOptionCb(props.onSelect)}
             skipFilter={props.skipFilter}
+            // altimate_change start — pass the filter-box switch through to the component
+            renderFilter={props.renderFilter}
+            // altimate_change end
             current={props.current}
           />
         )

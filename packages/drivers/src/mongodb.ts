@@ -15,6 +15,7 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 /** Supported MQL commands. */
 type MqlCommand =
@@ -130,12 +131,8 @@ function extractFields(docs: Record<string, unknown>[]): Map<string, Set<string>
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let mongoModule: any
-  try {
-    mongoModule = await import("mongodb")
-    mongoModule = mongoModule.default || mongoModule
-  } catch {
-    throw new Error("MongoDB driver not installed. Run: npm install mongodb")
-  }
+  mongoModule = await loadOptionalDriver("mongodb", "mongodb")
+  mongoModule = mongoModule.default || mongoModule
 
   const MongoClient = mongoModule.MongoClient
 

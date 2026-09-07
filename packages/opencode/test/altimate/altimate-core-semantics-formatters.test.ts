@@ -43,12 +43,20 @@ describe("formatSemantics", () => {
     expect(formatSemantics(data)).toBe("No semantic issues found.")
   })
 
-  test("shows issues header when data.valid is false even with empty issues", () => {
-    // This tests the degenerate case: valid=false but no issues array
-    const data = { valid: false }
+  test("findings-driven: no findings renders clean regardless of valid flag", () => {
+    // `valid` means "plannable", not "clean" — rendering is driven by the
+    // findings list. valid:false with no findings surfaces its detail via
+    // validation_errors (the error path), not a bare issues header.
+    expect(formatSemantics({ valid: false })).toBe("No semantic issues found.")
+  })
+
+  test("findings render even when valid is true (cartesian returns valid:true + findings)", () => {
+    const data = {
+      valid: true,
+      findings: [{ severity: "error", rule: "missing_join_condition", message: "Cartesian product detected" }],
+    }
     const output = formatSemantics(data)
-    expect(output).toContain("Semantic issues:")
-    // No actual issue lines since data.issues is undefined
+    expect(output).toContain("[error] missing_join_condition: Cartesian product detected")
   })
 
   test("lists issues with severity and rule", () => {

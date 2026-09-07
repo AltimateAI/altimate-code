@@ -12,6 +12,112 @@
 // session loop.
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+// altimate_change start — AI-8398 workspaces trigger. Reaches into the same
+// EventV2 bridge the server/routes/tui.ts uses to publish TuiEvent.CommandExecute
+// so the workspace TuiPlugin (packages/opencode/src/plugin/tui/altimate/workspace.tsx)
+// runs its post-scan flow. Feature-flagged via Flag.ALTIMATE_WORKSPACE.
+import { Effect } from "effect"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { AltimateApi } from "@/altimate/api/client"
+import { AppRuntime } from "@/effect/app-runtime"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { TuiEvent } from "@/server/tui-event"
+import { Event as SessionEvent } from "@/session/status"
+import { Log } from "@/altimate/util/log"
+
+const workspaceLog = Log.create({ service: "altimate-workspace" })
+
+/**
+ * Publish the workspace-postScan command AFTER the session goes idle, not on
+ * `project_scan`'s tool.execute.after. Rationale: project_scan tool RETURNS while
+ * the LLM is still generating the activation-menu text; the dialog paints in
+ * that window but user interactions queue behind the streaming. Waiting for
+ * session.idle costs a few seconds of latency but sidesteps the race entirely —
+ * the dialog appears once things are quiet.
+ *
+ * One-shot per sessionID: pending sessions live in a Set, and when a session
+ * emits idle its id is removed. When the Set drains, the EventV2 listener is
+ * torn down via the unsubscribe returned by ``events.listen()`` so a
+ * permanently-installed no-op handler isn't left behind for the process
+ * lifetime (m4 in the consensus review). A pending arm is dropped if a
+ * second project_scan fires in the same session.
+ */
+const pendingWorkspacePromptSessions = new Set<string>()
+/** The unsubscribe returned by ``events.listen()`` is an Effect (not a plain
+ * function) — running it removes the listener. Store the Effect and execute
+ * it through ``AppRuntime.runPromise`` on teardown; earlier code cast it to
+ * ``() => void`` and called it directly, which threw because Effects are not
+ * callable as functions. (cubic-dev-ai round 3.) */
+let workspacePromptUnsubscribe: Effect.Effect<void, never, never> | null = null
+// Guard against two concurrent scans passing the ``!workspacePromptUnsubscribe``
+// check before either install completes — both would then install a listener
+// and the later assignment would overwrite the first disposer, leaking the
+// first listener for the process lifetime. Store the in-flight install as a
+// shared promise so concurrent callers await the same result. (CR round 2.)
+let workspacePromptInstall: Promise<void> | null = null
+
+async function armWorkspacePromptOnSessionIdle(sessionID: string): Promise<void> {
+  pendingWorkspacePromptSessions.add(sessionID)
+  if (workspacePromptUnsubscribe) return
+  if (workspacePromptInstall) return workspacePromptInstall
+
+  workspacePromptInstall = (async () => {
+    try {
+      const unsubscribe = await AppRuntime.runPromise(
+        EventV2Bridge.Service.use((events) =>
+          events.listen((event) =>
+            Effect.gen(function* () {
+              // Subscribe to ``Event.Status`` (session/status.ts:42, defined
+              // via ``EventV2.define``) rather than ``Event.Idle`` — the
+              // latter is marked ``// deprecated`` at session/status.ts:49
+              // and is only kept around for the legacy Bus SSE mirror at
+              // session/status.ts:176. Filtering ``event.data.status.type
+              // === "idle"`` gives us the same trigger without riding the
+              // deprecated event. (harness-bot round 8.)
+              if (event.type !== SessionEvent.Status.type) return
+              const data = event.data as
+                | { sessionID?: string; status?: { type?: string } }
+                | undefined
+              if (data?.status?.type !== "idle") return
+              const sid = data.sessionID
+              if (!sid || !pendingWorkspacePromptSessions.has(sid)) return
+              pendingWorkspacePromptSessions.delete(sid)
+              yield* events.publish(TuiEvent.CommandExecute, {
+                command: "altimate.workspace.postScan",
+              })
+              // Once the Set drains, tear the listener down. A later scan
+              // that adds a new pending session re-arms it from scratch.
+              // ``teardown`` is an Effect — run it through the app runtime,
+              // don't call it as a function. (cubic round 3.)
+              if (pendingWorkspacePromptSessions.size === 0 && workspacePromptUnsubscribe) {
+                const teardown = workspacePromptUnsubscribe
+                workspacePromptUnsubscribe = null
+                AppRuntime.runPromise(teardown).catch((err) => {
+                  workspaceLog.warn("session-idle listener teardown failed", {
+                    err: String(err),
+                  })
+                })
+              }
+            }),
+          ),
+        ),
+      )
+      workspacePromptUnsubscribe = unsubscribe
+    } catch (err) {
+      // Install failed — drain EVERY pending session, not just the ones
+      // snapshotted at install-time. A late-arriving ``armWorkspacePromptOn
+      // SessionIdle`` between the snapshot and the failure would otherwise
+      // be a permanent orphan (its sessionID stays in the pending set but
+      // no listener will ever fire for it). (harness-bot round 8.)
+      pendingWorkspacePromptSessions.clear()
+      workspaceLog.warn("session-idle listener install failed", { err: String(err) })
+    } finally {
+      workspacePromptInstall = null
+    }
+  })()
+  return workspacePromptInstall
+}
+// altimate_change end
 
 const ONBOARD_CONNECT = "onboard-connect"
 
@@ -134,6 +240,14 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
           },
           input.sessionID,
         )
+        // altimate_change start — AI-8398 workspaces post-scan prompt trigger.
+        // ARM (don't publish yet) — the dialog fires when the session goes idle,
+        // not the moment project_scan returns. See armWorkspacePromptOnSessionIdle
+        // above for why the immediate publish raced the LLM's ongoing streaming.
+        if (Flag.ALTIMATE_WORKSPACE && (await AltimateApi.isConfigured().catch(() => false))) {
+          void armWorkspacePromptOnSessionIdle(input.sessionID)
+        }
+        // altimate_change end
         return
       }
 

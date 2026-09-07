@@ -19,6 +19,12 @@ export const ServeCommand = effectCmd({
   // need for an ambient project InstanceContext at startup.
   instance: false,
   handler: Effect.fn("Cli.serve")(function* (args) {
+    // altimate_change start — mark the extension-host surface. Workspace mode is
+    // terminal-only: under `serve` the extension runs its own engine and bridge
+    // under the `datamate` key, and the overlay must leave it alone. An env var
+    // because it must be readable from every module realm.
+    process.env["ALTIMATE_CODE_SERVE"] = "1"
+    // altimate_change end
     const { Server } = yield* Effect.promise(() => import("../../server/server"))
     if (!Flag.OPENCODE_SERVER_PASSWORD) {
       console.log("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")

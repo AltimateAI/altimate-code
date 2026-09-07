@@ -102,6 +102,9 @@ export const Definitions = {
   session_child_cycle_reverse: keybind("left", "Go to previous child session"),
   session_parent: keybind("up", "Go to parent session"),
   session_pin_toggle: keybind("ctrl+f", "Pin or unpin session in the session list"),
+  // altimate_change start — yolo mode: enabling asks for confirmation, disabling is immediate
+  session_yolo_toggle: keybind("ctrl+y", "Toggle YOLO mode for this session"),
+  // altimate_change end
   session_quick_switch_1: keybind("<leader>1", "Switch to session in quick slot 1"),
   session_quick_switch_2: keybind("<leader>2", "Switch to session in quick slot 2"),
   session_quick_switch_3: keybind("<leader>3", "Switch to session in quick slot 3"),
@@ -310,6 +313,9 @@ export const CommandMap = {
   session_child_cycle_reverse: "session.child.previous",
   session_parent: "session.parent",
   session_pin_toggle: "session.pin.toggle",
+  // altimate_change start — yolo mode
+  session_yolo_toggle: "session.yolo.toggle",
+  // altimate_change end
   session_quick_switch_1: "session.quick_switch.1",
   session_quick_switch_2: "session.quick_switch.2",
   session_quick_switch_3: "session.quick_switch.3",

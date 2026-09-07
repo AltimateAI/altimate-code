@@ -6,6 +6,7 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 type QueryResult = {
   columns?: Array<{ name: string; type: string }>
@@ -87,12 +88,7 @@ function trinoError(result: QueryResult): Error | null {
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let Trino: any
   let BasicAuth: any
-  let mod: any
-  try {
-    mod = await import("trino-client")
-  } catch {
-    throw new Error("Trino driver not installed. Run: npm install trino-client")
-  }
+  const mod: any = await loadOptionalDriver("trino", "trino-client")
   Trino = mod.Trino ?? mod.default?.Trino ?? mod.default
   BasicAuth = mod.BasicAuth ?? mod.default?.BasicAuth
   if (!Trino?.create) {

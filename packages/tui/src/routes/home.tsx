@@ -19,7 +19,7 @@ import { useTheme } from "../context/theme"
 // one-line "Get started: /connect ... /discover ..." hint below, which duplicated the
 // same guidance the panel's "Tips for getting started" section now covers.
 import { WelcomePanel } from "../component/welcome-panel"
-import { PANEL_VERTICAL_RESERVE } from "../component/welcome-panel-utils"
+import { homeAvailable } from "../component/welcome-panel-utils"
 // altimate_change end
 
 let once = false
@@ -68,6 +68,11 @@ export function Home() {
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
     return configured ?? 75
   })
+  // altimate_change start — WelcomePanel responsive sizing (#1067): the panel's
+  // available space = terminal minus this route's padding + vertical reserve.
+  // Shared arithmetic in welcome-panel-utils so the tests exercise it.
+  const panelAvailable = createMemo(() => homeAvailable(dimensions().width, dimensions().height))
+  // altimate_change end
   let sent = false
 
   onMount(() => {
@@ -109,13 +114,10 @@ export function Home() {
         <box height={2} flexShrink={0} />
         <box width="100%" flexShrink={0}>
           <pluginRuntime.Slot name="home_logo" mode="replace">
-            {/* Size to the panel's real space, not the whole terminal (#1067):
-                -4 for this column's paddingLeft/Right; -PANEL_VERTICAL_RESERVE for
-                the top spacer + prompt + footer that share the height. */}
-            <WelcomePanel
-              availableWidth={dimensions().width - 4}
-              availableHeight={dimensions().height - PANEL_VERTICAL_RESERVE}
-            />
+            {/* Size to the panel's real space, not the whole terminal (#1067).
+                homeAvailable() subtracts this column's padding and the top
+                spacer + prompt + home_bottom + footer reserve. */}
+            <WelcomePanel availableWidth={panelAvailable().width} availableHeight={panelAvailable().height} />
           </pluginRuntime.Slot>
         </box>
         <box flexGrow={1} minHeight={0} />

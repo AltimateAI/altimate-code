@@ -4,6 +4,7 @@
  */
 
 import * as core from "@altimateai/altimate-core"
+import { EngineCoerce } from "../engine-coerce"
 import { getCache } from "./cache"
 import * as Registry from "../connections/registry"
 import type {
@@ -11,6 +12,9 @@ import type {
   PiiDetectResult,
   PiiFinding,
 } from "../types"
+
+/** Re-exported for tests and legacy importers; lives in engine-coerce. */
+export const piiColumnsFromReport = EngineCoerce.piiColumnsFromReport
 
 /**
  * Detect PII in cached schema metadata by running altimate-core's
@@ -43,6 +47,7 @@ export async function detectPii(params: PiiDetectParams): Promise<PiiDetectResul
 
   const findings: PiiFinding[] = []
   let columnsScanned = 0
+  let scanErrors = 0
   const tablesWithPii = new Set<string>()
 
   for (const wh of targetWarehouses) {
@@ -72,22 +77,25 @@ export async function detectPii(params: PiiDetectParams): Promise<PiiDetectResul
         const result = core.classifyPii(schema)
         const piiData = JSON.parse(JSON.stringify(result))
 
-        if (piiData && piiData.findings && piiData.findings.length > 0) {
-          for (const finding of piiData.findings) {
-            findings.push({
-              warehouse: col.warehouse,
-              schema: col.schema_name,
-              table: col.table,
-              column: col.name,
-              data_type: col.data_type,
-              pii_category: finding.category || finding.pii_type || "UNKNOWN",
-              confidence: finding.confidence || "medium",
-            })
-            tablesWithPii.add(`${col.warehouse}.${col.schema_name}.${col.table}`)
-          }
+        // Engine PiiReport: { columns, pii_count, risk_level, total_columns };
+        // every column gets a row — classification "None" means not PII.
+        const piiColumns = EngineCoerce.piiColumnsFromReport(piiData)
+        for (const piiCol of piiColumns) {
+          findings.push({
+            warehouse: col.warehouse,
+            schema: col.schema_name,
+            table: col.table,
+            column: col.name,
+            data_type: col.data_type,
+            pii_category: EngineCoerce.classificationToString(piiCol.classification, "UNKNOWN"),
+            confidence: EngineCoerce.bandConfidence(piiCol.confidence),
+          })
+          tablesWithPii.add(`${col.warehouse}.${col.schema_name}.${col.table}`)
         }
       } catch {
-        // classifyPii may not find PII — that is expected
+        // classifyPii threw or returned a malformed report — record it so the
+        // scan fails closed instead of silently reporting fewer findings.
+        scanErrors++
       }
     }
   }
@@ -99,7 +107,7 @@ export async function detectPii(params: PiiDetectParams): Promise<PiiDetectResul
   }
 
   return {
-    success: true,
+    success: scanErrors === 0,
     findings,
     finding_count: findings.length,
     columns_scanned: columnsScanned,
@@ -134,6 +142,7 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
 
     const findings: PiiFinding[] = []
     let columnsScanned = 0
+    let scanErrors = 0
     const tablesWithPii = new Set<string>()
 
     for (const schemaName of schemas) {
@@ -165,22 +174,24 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
           const result = core.classifyPii(schema)
           const piiData = JSON.parse(JSON.stringify(result))
 
-          if (piiData?.findings) {
-            for (const finding of piiData.findings) {
-              findings.push({
-                warehouse: params.warehouse!,
-                schema: schemaName,
-                table: tableInfo.name,
-                column: finding.column || "",
-                data_type: finding.data_type,
-                pii_category: finding.category || finding.pii_type || "UNKNOWN",
-                confidence: finding.confidence || "medium",
-              })
-              tablesWithPii.add(`${params.warehouse}.${schemaName}.${tableInfo.name}`)
-            }
+          // Engine PiiReport: { columns, … } with a row per column; "None" = not PII.
+          const piiColumns = EngineCoerce.piiColumnsFromReport(piiData)
+          for (const piiCol of piiColumns) {
+            findings.push({
+              warehouse: params.warehouse!,
+              schema: schemaName,
+              table: tableInfo.name,
+              column: piiCol.column || "",
+              data_type: columns.find((c) => c.name === piiCol.column)?.data_type,
+              pii_category: EngineCoerce.classificationToString(piiCol.classification, "UNKNOWN"),
+              confidence: EngineCoerce.bandConfidence(piiCol.confidence),
+            })
+            tablesWithPii.add(`${params.warehouse}.${schemaName}.${tableInfo.name}`)
           }
         } catch {
-          // ignore
+          // classifyPii threw or returned a malformed report — record it so
+          // the scan fails closed instead of silently reporting fewer findings.
+          scanErrors++
         }
       }
     }
@@ -191,7 +202,7 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
     }
 
     return {
-      success: true,
+      success: scanErrors === 0,
       findings,
       finding_count: findings.length,
       columns_scanned: columnsScanned,
@@ -209,3 +220,5 @@ async function detectPiiLive(params: PiiDetectParams): Promise<PiiDetectResult> 
     }
   }
 }
+
+export * as PiiDetector from "./pii-detector"

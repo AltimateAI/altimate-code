@@ -1,3 +1,8 @@
+---
+title: "Agent Modes — Builder, Analyst, and Plan"
+description: "Altimate Code offers three agent modes: Builder (full tool access), Analyst (read-only), and Plan (planning only)."
+---
+
 # Agent Modes
 
 altimate runs in one of three specialized modes. Each mode has different permissions, tool access, and behavioral guardrails.
@@ -5,7 +10,7 @@ altimate runs in one of three specialized modes. Each mode has different permiss
 | Mode | Access | Purpose |
 |---|---|---|
 | **Builder** | Read/Write | Create and modify data pipelines |
-| **Analyst** | Read-only | Safe exploration and cost analysis |
+| **Analyst** | Read-only | Answering questions about your data — safe exploration and cost analysis |
 | **Plan** | Minimal | Planning only, no edits or execution |
 
 ## Builder
@@ -73,7 +78,7 @@ I'll create a staging model with proper typing, deduplication, and column naming
 
 ## Analyst
 
-**Read-only access. Safe for production environments.**
+**Read-only access. The agent for asking questions about your data and exploring it safely — use it whenever you just want answers, not changes. Safe for production environments.**
 
 ```bash
 altimate --agent analyst

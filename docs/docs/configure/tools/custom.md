@@ -1,3 +1,7 @@
+---
+title: Custom Tools Guide — CLI and Plugin Approaches
+description: "Two ways to add custom tools to Altimate Code: CLI tools (recommended) and TypeScript plugin tools."
+---
 # Custom Tools
 
 There are two ways to extend altimate-code with custom tools:

@@ -3,16 +3,11 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let BigQueryModule: any
-  try {
-    BigQueryModule = await import("@google-cloud/bigquery")
-  } catch {
-    throw new Error(
-      "BigQuery driver not installed. Run: npm install @google-cloud/bigquery",
-    )
-  }
+  BigQueryModule = await loadOptionalDriver("bigquery", "@google-cloud/bigquery")
 
   const BigQuery = BigQueryModule.BigQuery ?? BigQueryModule.default?.BigQuery
   let client: any

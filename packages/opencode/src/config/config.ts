@@ -33,6 +33,9 @@ import { ConfigPluginV1 } from "@opencode-ai/core/v1/config/plugin"
 import { ConfigAgent } from "./agent"
 import { ConfigCommand } from "./command"
 import { ConfigManaged } from "./managed"
+// altimate_change start — the workspace engine overlay yields to managed config for this key
+import { DATAMATE_KEY } from "../altimate/datamate-transport"
+// altimate_change end
 import { ConfigParse } from "./parse"
 import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
@@ -156,6 +159,10 @@ async function substituteWellKnownRemoteConfig(input: {
 }) {
   if (!isRecord(input.value) || typeof input.value.url !== "string") return undefined
 
+  // altimate_change start — upstream_fix (#701): the url and every header below publish under
+  // this same source, so clear once here and let those calls union into one record.
+  ConfigVariable.resetBlankedEnvVars(input.source)
+  // altimate_change end
   const url = await ConfigVariable.substitute({
     text: input.value.url,
     type: "virtual",
@@ -338,6 +345,14 @@ export const layer = Layer.effect(
 
     const loadFile = Effect.fnUntraced(function* (filepath: string, env?: Record<string, string>) {
       yield* Effect.logInfo("loading", { path: filepath })
+      // altimate_change start — upstream_fix (#701): substitution unions now, so whoever begins a
+      // load clears this source first. Before the empty-file return, not after: a config that is
+      // deleted or emptied must drop the names it recorded while it still had a `{env:VAR}`,
+      // otherwise `mcp list` warns about a variable that appears in no config at all.
+      // Deliberately NOT inside loadConfig — the well-known flow records url/header blanks under
+      // the same source before calling it, and a reset in there threw those names away.
+      ConfigVariable.resetBlankedEnvVars(filepath)
+      // altimate_change end
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
       return yield* loadConfig(text, { path: filepath }, env)
@@ -595,6 +610,9 @@ export const layer = Layer.effect(
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
+          // altimate_change start — upstream_fix (#701): clear before this load.
+          ConfigVariable.resetBlankedEnvVars(source)
+          // altimate_change end
           const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
             dir: ctx.directory,
             source,
@@ -622,6 +640,9 @@ export const layer = Layer.effect(
 
             if (Option.isSome(configOpt)) {
               const source = `${url}/api/config`
+              // altimate_change start — upstream_fix (#701): clear before this load.
+              ConfigVariable.resetBlankedEnvVars(source)
+              // altimate_change end
               const next = yield* loadConfig(JSON.stringify(configOpt.value), {
                 dir: path.dirname(source),
                 source,
@@ -641,6 +662,9 @@ export const layer = Layer.effect(
           )
         }
 
+        // altimate_change start — whether organisation-managed config sets the datamate MCP key
+        let managedOwnsDatamate = false
+        // altimate_change end
         const managedDir = ConfigManaged.managedConfigDir()
         if (existsSync(managedDir)) {
           // altimate_change start - support altimate-code.json config filename
@@ -654,20 +678,28 @@ export const layer = Layer.effect(
           ]) {
             // altimate_change end
             const source = path.join(managedDir, file)
-            yield* merge(source, yield* loadFile(source), "global")
+            // altimate_change start — note a managed datamate key before merging
+            const managedFile = yield* loadFile(source)
+            if (managedFile?.mcp && DATAMATE_KEY in managedFile.mcp) managedOwnsDatamate = true
+            yield* merge(source, managedFile, "global")
+            // altimate_change end
           }
         }
 
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything
         const managed = yield* Effect.promise(() => ConfigManaged.readManagedPreferences())
         if (managed) {
-          result = mergeConfigConcatArrays(
-            result,
-            yield* loadConfig(managed.text, {
-              dir: path.dirname(managed.source),
-              source: managed.source,
-            }),
-          )
+          // altimate_change start — upstream_fix (#701): clear before this load.
+          ConfigVariable.resetBlankedEnvVars(managed.source)
+          // altimate_change end
+          // altimate_change start — note a managed datamate key before merging
+          const managedPrefs = yield* loadConfig(managed.text, {
+            dir: path.dirname(managed.source),
+            source: managed.source,
+          })
+          if (managedPrefs.mcp && DATAMATE_KEY in managedPrefs.mcp) managedOwnsDatamate = true
+          result = mergeConfigConcatArrays(result, managedPrefs)
+          // altimate_change end
         }
 
         for (const [name, mode] of Object.entries(result.mode ?? {})) {
@@ -724,7 +756,10 @@ export const layer = Layer.effect(
         const autoMcpDiscovery = (result.experimental as { auto_mcp_discovery?: boolean } | undefined)
           ?.auto_mcp_discovery
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG && autoMcpDiscovery !== false) {
-          const { discoverExternalMcp, setDiscoveryResult } = yield* Effect.promise(() => import("../mcp/discover"))
+          const { discoverExternalMcp, setDiscoveryResult, driftFields, setConfigDrift, discoveredSource } =
+            yield* Effect.promise(
+            () => import("../mcp/discover"),
+          )
           const { servers: externalMcp, sources } = yield* Effect.promise(() => discoverExternalMcp(ctx.directory))
           if (Object.keys(externalMcp).length > 0) {
             result.mcp ??= {}
@@ -733,10 +768,32 @@ export const layer = Layer.effect(
               if (!(name in result.mcp)) {
                 ;(result.mcp as Record<string, any>)[name] = server
                 added.push(name)
+              } else {
+                // altimate_change — upstream_fix (#878): the user's config still wins, but the
+                // difference is recorded so a surface can report it rather than silently skipping.
+                const configured = (result.mcp as Record<string, any>)[name]
+                setConfigDrift(
+                  name,
+                  discoveredSource(name) ?? sources.join(", "),
+                  driftFields(server as Record<string, any>, configured),
+                )
               }
             }
             setDiscoveryResult(added, sources)
           }
+        }
+        // altimate_change end
+
+        // altimate_change start — workspace engine overlay. When the pilot is on and
+        // this directory is bound to a workspace, the `datamate` MCP entry is the
+        // workspace's pinned local engine — derived here, after discovery, so it has
+        // the last word over IDE-written, hosted and stale entries, and never written
+        // to any file. See altimate/workspace/engine-overlay.ts.
+        if (Flag.ALTIMATE_WORKSPACE) {
+          const { overlay } = yield* Effect.promise(() => import("../altimate/workspace/engine-overlay"))
+          yield* Effect.promise(() =>
+            overlay(ctx.directory, result as { mcp?: Record<string, unknown> }, { managed: managedOwnsDatamate }),
+          )
         }
         // altimate_change end
 

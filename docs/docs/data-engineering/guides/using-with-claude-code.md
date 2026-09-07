@@ -1,3 +1,8 @@
+---
+title: "Using Altimate with Claude Code"
+description: "Run Altimate's data engineering tools alongside Claude Code via the /altimate command or MCP server integration."
+---
+
 # Using altimate with Claude Code
 
 altimate can work alongside Claude Code. While Claude Code handles general coding tasks, altimate provides specialized data engineering capabilities that Claude Code doesn't have.

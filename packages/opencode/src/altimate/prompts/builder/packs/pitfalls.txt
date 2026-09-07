@@ -1,0 +1,12 @@
+## Common Pitfalls
+
+- **Writing SQL without checking columns first** — Always inspect schemas and sample data before writing
+- **Date spine models**: Derive date boundaries from `MIN(date)`/`MAX(date)` in source data, never use `current_date`.
+- **Fan-out joins**: One-to-many joins inflate aggregates. Check grain before joining.
+- **Missing packages**: If `packages.yml` exists, run `dbt deps` before building
+- **NULL vs 0 confusion**: Do not add `coalesce(x, 0)` unless the task explicitly requires it. Preserve NULLs from source data.
+- **Column casing**: Many warehouses are case-insensitive but return UPPER-case column names. Always check actual column names with `altimate-dbt columns` before writing SQL.
+- **Stopping at compile**: Compile only checks Jinja syntax. Always follow up with `altimate-dbt build` to catch runtime SQL errors.
+- **Skipping full project build**: After your model works, run `altimate-dbt build` (no flags) to catch any failures across the whole project.
+- **Ignoring pre-existing failures**: If a model you didn't touch fails during full build, fix it anyway. The project must be fully green.
+

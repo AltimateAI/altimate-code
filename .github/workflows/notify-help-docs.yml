@@ -1,0 +1,83 @@
+name: Notify help-docs (docs changed)
+
+# When a push to the default branch changes published docs, tell the help-docs
+# hub to promote the change up (product -> help-docs) as a review PR. Requires
+# the shared docs-sync GitHub App as repo secrets: DOCS_SYNC_APP_ID and
+# DOCS_SYNC_APP_PRIVATE_KEY — if either is unset the job skips (no red run).
+# The loop guard checks every commit in the push for the [docs-sync] marker, so
+# it holds across squash, rebase, and merge-commit strategies.
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/docs/**"]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  notify:
+    if: ${{ !contains(toJSON(github.event.commits.*.message), '[docs-sync]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check docs-sync App is configured
+        id: config
+        env:
+          APP_ID: ${{ secrets.DOCS_SYNC_APP_ID }}
+          APP_KEY: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$APP_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::docs-sync App not configured — skipping dispatch."
+          fi
+
+      - name: Resolve merged PR (author for notifications)
+        id: src
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          J="$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls --jq '.[0] // {}' 2>/dev/null || echo '{}')"
+          {
+            echo "num=$(echo "$J" | jq -r '.number // ""')"
+            echo "login=$(echo "$J" | jq -r '.user.login // ""')"
+            echo "url=$(echo "$J" | jq -r '.html_url // ""')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build dispatch payload
+        id: payload
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          SRC_PR: ${{ steps.src.outputs.num }}
+          SRC_AUTHOR: ${{ steps.src.outputs.login }}
+          SRC_URL: ${{ steps.src.outputs.url }}
+        run: |
+          JSON="$(jq -cn --arg product code \
+            --arg before "$BEFORE" --arg after "$AFTER" \
+            --arg source_pr "$SRC_PR" --arg source_author "$SRC_AUTHOR" --arg source_url "$SRC_URL" \
+            '{product:$product,before:$before,after:$after,source_pr:$source_pr,source_author:$source_author,source_url:$source_url}')"
+          echo "json=$JSON" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: tok
+        if: steps.config.outputs.enabled == 'true'
+        with:
+          app-id: ${{ secrets.DOCS_SYNC_APP_ID }}
+          private-key: ${{ secrets.DOCS_SYNC_APP_PRIVATE_KEY }}
+          owner: AltimateAI
+          repositories: help-docs
+          permission-contents: write
+
+      - uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0 # v3
+        if: steps.config.outputs.enabled == 'true'
+        with:
+          token: ${{ steps.tok.outputs.token }}
+          repository: AltimateAI/help-docs
+          event-type: promote-from-product
+          client-payload: ${{ steps.payload.outputs.json }}

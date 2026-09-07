@@ -43,6 +43,156 @@ import { Telemetry } from "../../../telemetry"
 /** Cached dbt adapter (lazily created on first use). */
 let dbtAdapter: any | null | undefined = undefined
 
+// altimate_change start — single-flight adapter creation.
+// Two concurrent `warehouse`-less calls used to construct the adapter twice, and
+// construction is expensive: it spawns a detached Python bridge, rebuilds the
+// manifest and starts file watchers. Share one in-flight promise instead. The
+// permanent negative cache (`dbtAdapter === null`) is unchanged — a project that
+// becomes valid mid-session is still not retried.
+let dbtAdapterInflight: Promise<any | null> | undefined
+
+/** Test seams for the single-flight. Production leaves `readConfig` unset. */
+export const dbtAdapterInternals: {
+  /** Replaces the dbt config read, so a test can hold an attempt open. */
+  readConfig?: () => Promise<unknown>
+  /** Adapter creation attempts since the last reset — what single-flight bounds. */
+  attempts: number
+  /** Cache writes since the last reset: only the attempt that owns the slot writes. */
+  writes: number
+  /** Whether an attempt is currently in flight. */
+  inflight: () => boolean
+} = { attempts: 0, writes: 0, inflight: () => dbtAdapterInflight !== undefined }
+
+/**
+ * Resolve the dbt adapter for this project, or null when there is no usable dbt
+ * project. Idempotent, single-flight, and permanently negative once it has failed.
+ */
+async function ensureDbtAdapter(): Promise<any | null> {
+  if (dbtAdapter !== undefined) return dbtAdapter
+  if (dbtAdapterInflight) return dbtAdapterInflight
+
+  // The slot is released only by the attempt that owns it: `resetDbtAdapter()` mid-flight
+  // lets a second attempt start, and the first one's settle must not clear the second's
+  // slot — that would hand the next caller a third adapter behind the second's back.
+  let mine: Promise<any | null> | undefined
+  // Likewise the cache: a superseded attempt returns its result to the callers that
+  // awaited it but must not publish it, or it would overwrite what the newer attempt
+  // stored. Every write goes through here.
+  const publish = (value: any | null): any | null => {
+    if (dbtAdapterInflight === mine) {
+      dbtAdapter = value
+      dbtAdapterInternals.writes += 1
+    }
+    return value
+  }
+  mine = (async () => {
+    dbtAdapterInternals.attempts += 1
+    try {
+      // Check if dbt config exists
+      const { read: readDbtConfig } = await import(
+        "../../../../../dbt-tools/src/config"
+      )
+      const dbtConfig = dbtAdapterInternals.readConfig
+        ? ((await dbtAdapterInternals.readConfig()) as Awaited<ReturnType<typeof readDbtConfig>>)
+        : await readDbtConfig()
+      if (!dbtConfig) return publish(null)
+
+      // Check if dbt_project.yml exists
+      const fs = await import("fs")
+      const path = await import("path")
+      if (
+        !fs.existsSync(path.join(dbtConfig.projectRoot, "dbt_project.yml"))
+      ) {
+        return publish(null)
+      }
+
+      // Create the adapter
+      const { create } = await import("../../../../../dbt-tools/src/adapter")
+      return publish(await create(dbtConfig))
+    } catch {
+      // dbt-tools not available or config invalid — fall back to native
+      return publish(null)
+    } finally {
+      if (dbtAdapterInflight === mine) dbtAdapterInflight = undefined
+    }
+  })()
+  dbtAdapterInflight = mine
+  return mine
+}
+
+/** Where a `warehouse`-less call would actually go. */
+export type DefaultTarget =
+  | {
+      source: "dbt"
+      type?: string
+      /** Where execution actually lands if the dbt attempt yields nothing. `sql.execute`
+       * falls back to the registry not only when dbt is absent, but whenever
+       * `tryExecuteViaDbt` returns null — an unrecognised result shape, or any throw.
+       * A caller deciding anything about this call has to consider both targets. */
+      fallback?: { type: string; name: string }
+    }
+  | { source: "registry"; type: string; name: string }
+  | { source: "none" }
+
+/**
+ * Resolve the target a call with no `warehouse` would reach, mirroring the resolution
+ * the handler for `op` performs itself — so a caller inspecting the target ahead of
+ * time cannot disagree with where execution actually lands.
+ *
+ * Only `sql.execute` consults dbt. `sql.explain` and `schema.inspect` are
+ * registry-only, and must stay that way: resolving them through dbt would drag
+ * adapter construction (Python bridge, manifest rebuild, file watchers) onto paths
+ * that never touch dbt today.
+ *
+ * For the dbt path the reported `type` is the project's adapter type, which is what
+ * decides *which* warehouse the profile reaches. It is left undefined when it cannot
+ * be established — the adapter coalesces an unknown type to the string "unknown", and
+ * the call can throw before initialisation completes.
+ */
+export async function resolveDefaultTarget(
+  op: "sql.execute" | "sql.explain" | "schema.inspect",
+): Promise<DefaultTarget> {
+  if (op === "sql.execute") {
+    const adapter = await ensureDbtAdapter()
+    if (adapter) {
+      let type: string | undefined
+      try {
+        const reported = adapter.getAdapterType?.()
+        if (typeof reported === "string" && reported && reported.toLowerCase() !== "unknown") type = reported
+      } catch {
+        // Adapter not initialised far enough to answer; leave the type undetermined.
+      }
+      if (!type) type = await adapterTypeFromManifest()
+      const warehouses = Registry.list().warehouses
+      const fallback = warehouses.length > 0 ? { type: warehouses[0].type, name: warehouses[0].name } : undefined
+      return { source: "dbt", type, fallback }
+    }
+  }
+
+  const warehouses = Registry.list().warehouses
+  if (warehouses.length === 0) return { source: "none" }
+  return { source: "registry", type: warehouses[0].type, name: warehouses[0].name }
+}
+
+/** Fallback adapter type: the dbt manifest records it as `metadata.adapter_type`. */
+async function adapterTypeFromManifest(): Promise<string | undefined> {
+  try {
+    const { read: readDbtConfig } = await import("../../../../../dbt-tools/src/config")
+    const dbtConfig = await readDbtConfig()
+    if (!dbtConfig) return undefined
+    const fs = await import("fs")
+    const path = await import("path")
+    const manifestPath = path.join(dbtConfig.projectRoot, "target", "manifest.json")
+    if (!fs.existsSync(manifestPath)) return undefined
+    const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    const adapter = String(raw?.metadata?.adapter_type ?? "").toLowerCase()
+    return adapter || undefined
+  } catch {
+    return undefined
+  }
+}
+// altimate_change end
+
 /**
  * Try to execute SQL via dbt's adapter (which uses profiles.yml for connection).
  * Returns null if dbt is not available or not configured — caller should fall back
@@ -55,45 +205,16 @@ async function tryExecuteViaDbt(
   sql: string,
   limit?: number,
 ): Promise<SqlExecuteResult | null> {
-  // Only attempt dbt once — if it's not configured, don't retry on every query
-  if (dbtAdapter === null) return null
-
-  if (dbtAdapter === undefined) {
-    try {
-      // Check if dbt config exists
-      const { read: readDbtConfig } = await import(
-        "../../../../../dbt-tools/src/config"
-      )
-      const dbtConfig = await readDbtConfig()
-      if (!dbtConfig) {
-        dbtAdapter = null
-        return null
-      }
-
-      // Check if dbt_project.yml exists
-      const fs = await import("fs")
-      const path = await import("path")
-      if (
-        !fs.existsSync(path.join(dbtConfig.projectRoot, "dbt_project.yml"))
-      ) {
-        dbtAdapter = null
-        return null
-      }
-
-      // Create the adapter
-      const { create } = await import("../../../../../dbt-tools/src/adapter")
-      dbtAdapter = await create(dbtConfig)
-    } catch {
-      // dbt-tools not available or config invalid — fall back to native
-      dbtAdapter = null
-      return null
-    }
-  }
+  // altimate_change start — share the single-flight creation path with resolveDefaultTarget;
+  // execute on the adapter this call was handed, not on a global a reset may have moved.
+  const adapter = await ensureDbtAdapter()
+  if (!adapter) return null
+  // altimate_change end
 
   try {
     const raw = limit
-      ? await dbtAdapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
-      : await dbtAdapter.immediatelyExecuteSQL(sql, "")
+      ? await adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
+      : await adapter.immediatelyExecuteSQL(sql, "")
 
     // QueryExecutionResult has: { columnNames, columnTypes, data, rawSql, compiledSql }
     // where data is Record<string, unknown>[] (array of row objects)
@@ -146,6 +267,11 @@ async function tryExecuteViaDbt(
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
+  // altimate_change — drop any in-flight creation too, or a test that resets mid-flight
+  // would still receive the previous adapter.
+  dbtAdapterInflight = undefined
+  dbtAdapterInternals.attempts = 0
+  dbtAdapterInternals.writes = 0
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +495,21 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
   const startTime = Date.now()
   const warehouseType = getWarehouseType(params.warehouse)
   try {
+    // altimate_change start — resolve the fallback connection before the dbt attempt.
+    // `tryExecuteViaDbt` awaits, and the registry is mutable: re-reading it afterwards
+    // could pick a different connection than the one the caller's routing decision was
+    // computed against (a concurrent `warehouse.add` can change which name sorts first).
+    // Reading once here pins the fallback across the dbt await. It narrows, not
+    // closes, the decision/execution window: `Precedence.check()` reads the registry
+    // independently before this handler runs. The dbt-first ordering is unchanged.
+    const fallbackName = params.warehouse || Registry.list().warehouses[0]?.name
+    // Pinning the name is not enough on its own: the same name can be re-added against a
+    // different warehouse while this call is suspended, and the routing decision made for
+    // it is a function of that connection's canonical type. Pin the type too, so a
+    // replacement is caught rather than executed under a decision that never covered it.
+    const fallbackType = fallbackName ? Registry.canonicalType(Registry.getConfig(fallbackName)?.type) : undefined
+    // altimate_change end
+
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
     if (!params.warehouse) {
@@ -376,22 +517,20 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       if (dbtResult) return dbtResult
     }
 
-    const warehouseName = params.warehouse
-    let result: SqlExecuteResult
-    if (!warehouseName) {
-      const warehouses = Registry.list().warehouses
-      if (warehouses.length === 0) {
-        throw new Error(
-          "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
-        )
-      }
-      // Use the first warehouse as default
-      const connector = await Registry.get(warehouses[0].name)
-      result = await connector.execute(params.sql, params.limit)
-    } else {
-      const connector = await Registry.get(warehouseName)
-      result = await connector.execute(params.sql, params.limit)
+    if (!fallbackName) {
+      throw new Error(
+        "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
+      )
     }
+    // altimate_change start — refuse rather than execute under a stale decision.
+    if (Registry.canonicalType(Registry.getConfig(fallbackName)?.type) !== fallbackType) {
+      throw new Error(
+        `Connection "${fallbackName}" changed while this query was being prepared, so the routing decided for it no longer applies. Re-run the query.`,
+      )
+    }
+    // altimate_change end
+    const connector = await Registry.get(fallbackName)
+    const result: SqlExecuteResult = await connector.execute(params.sql, params.limit)
     try {
       Telemetry.track({
         type: "warehouse_query",

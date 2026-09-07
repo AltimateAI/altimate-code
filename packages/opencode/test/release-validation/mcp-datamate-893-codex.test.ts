@@ -1,5 +1,6 @@
-import { describe, test, expect } from "bun:test"
-import { mkdir, readFile, writeFile } from "fs/promises"
+import { describe, test, expect, spyOn } from "bun:test"
+import { mkdir, readFile, symlink, writeFile } from "fs/promises"
+import os from "os"
 import path from "path"
 import { tmpdir } from "../fixture/fixture"
 import { discoverExternalMcp } from "../../src/mcp/discover"
@@ -10,6 +11,7 @@ import {
 } from "../../src/altimate/datamate-transport"
 
 const REPO_ROOT = path.join(import.meta.dir, "../../../..")
+const testSymlink = process.platform === "win32" ? test.skip : test
 
 async function writeJson(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true })
@@ -20,11 +22,13 @@ async function withIsolatedHome<T>(fn: (home: string) => Promise<T>): Promise<T>
   await using home = await tmpdir()
   const oldHome = process.env.HOME
   const oldUserProfile = process.env.USERPROFILE
+  const homedirSpy = spyOn(os, "homedir").mockImplementation(() => home.path)
   process.env.HOME = home.path
   process.env.USERPROFILE = home.path
   try {
     return await fn(home.path)
   } finally {
+    homedirSpy.mockRestore()
     if (oldHome === undefined) delete process.env.HOME
     else process.env.HOME = oldHome
     if (oldUserProfile === undefined) delete process.env.USERPROFILE
@@ -166,19 +170,54 @@ describe("PR #893 datamate IDE transport selection", () => {
     })
   })
 
-  test("ignores vendored datamate mcp.json entries during transport selection", async () => {
+  test("ignores dependency and generated datamate configs before transport selection", async () => {
     await using project = await tmpdir()
-    await writeJson(path.join(project.path, "node_modules/pkg/mcp.json"), {
+    // IDE-shaped but inside a dependency tree — pruned by DiscoveryFiles.
+    await writeJson(path.join(project.path, "node_modules/pkg/.vscode/mcp.json"), {
       servers: { datamate: { url: "https://vendored.example.com/sse" } },
     })
-    await writeJson(path.join(project.path, ".vscode/mcp.json"), {
+    // Not extension-written locations — rejected by the IDE-location filter
+    // regardless of directory pruning.
+    await writeJson(path.join(project.path, "build/mcp.json"), {
+      servers: { datamate: { url: "https://build-output.example.com/sse" } },
+    })
+    await writeJson(path.join(project.path, "dist/mcp.json"), {
+      servers: { datamate: { url: "https://dist-output.example.com/sse" } },
+    })
+    await writeJson(path.join(project.path, ".yarn/unplugged/pkg/mcp.json"), {
+      servers: { datamate: { url: "https://unplugged-package.example.com/sse" } },
+    })
+    // Authored config in an extension-written location, lexically last so a
+    // regression in either exclusion would win sorted-first selection instead.
+    await writeJson(path.join(project.path, "z-authored/.vscode/mcp.json"), {
       servers: { datamate: { command: "datamate", args: ["start-stdio"] } },
     })
 
     await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
       type: "local",
       command: ["datamate", "start-stdio"],
-      source: path.join(project.path, ".vscode", "mcp.json"),
+      source: path.join(project.path, "z-authored", ".vscode", "mcp.json"),
+    })
+  })
+
+  testSymlink("rejects a dependency datamate config hidden behind an authored-looking symlink", async () => {
+    await using project = await tmpdir()
+    const dependencyConfig = path.join(project.path, "node_modules/pkg/mcp.json")
+    await writeJson(dependencyConfig, {
+      servers: { datamate: { command: "do-not-run", args: ["from-dependency"] } },
+    })
+    await mkdir(path.join(project.path, ".vscode"), { recursive: true })
+    await symlink(dependencyConfig, path.join(project.path, ".vscode/mcp.json"))
+    await writeJson(path.join(project.path, "z-authored/.vscode/mcp.json"), {
+      servers: { datamate: { command: "datamate", args: ["start-stdio"] } },
+    })
+
+    // The symlinked .vscode/mcp.json is IDE-shaped but canonicalizes into
+    // node_modules — rejected; the authored entry in the next IDE location wins.
+    await expect(readDatamateTransportFromIde(project.path)).resolves.toEqual({
+      type: "local",
+      command: ["datamate", "start-stdio"],
+      source: path.join(project.path, "z-authored", ".vscode", "mcp.json"),
     })
   })
 })

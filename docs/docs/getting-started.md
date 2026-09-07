@@ -1,6 +1,11 @@
+---
+title: Getting Started with Altimate Code
+description: "Overview of Altimate Code — the open-source data engineering harness with 100+ deterministic tools for dbt, SQL, and warehouse workflows."
+---
+
 # Getting Started
 
-> **New to altimate?** [Start with the 5-minute quickstart](quickstart.md) to go from install to your first analysis in minutes.
+> **New to altimate?** [Start with the 5-minute quickstart](getting-started/quickstart.md) to go from install to your first analysis in minutes.
 
 ## Why altimate?
 
@@ -138,7 +143,7 @@ altimate offers specialized agent modes for different workflows:
 
 | What do you want to do? | Use this agent mode |
 |---|---|
-| Analyzing data without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
+| Asking questions about your data, or analyzing it without risk of changes | **Analyst** for read-only queries, cost analysis, data profiling. SQL writes are blocked entirely. |
 | Building or generating dbt models | **Builder** for model scaffolding, SQL generation, ref() wiring. SQL writes prompt for approval. |
 | Planning before acting | **Plan** for outlining an approach before switching to builder to execute it |
 

@@ -21,6 +21,11 @@ import { EffectBridge } from "@/effect/bridge"
 // altimate_change start — shared tool-source stamping so this resolver can't drift from prompt.ts
 import { stampRegistryToolSource, describeMcpTool } from "@/altimate/tool-source"
 // altimate_change end
+// altimate_change start — workspace precedence, shared with prompt.ts resolveTools so the
+// two resolvers cannot describe the same tool differently. This resolver has no caller in
+// the fork today; keeping it in step is insurance against that changing silently.
+import * as Precedence from "@/altimate/workspace/precedence"
+// altimate_change end
 // altimate_change start — upstream_fix: ToolRegistry expects fork-branded model ids here
 import { ModelID } from "@/provider/schema"
 // altimate_change end
@@ -75,6 +80,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         .pipe(Effect.orDie),
   })
 
+  // altimate_change start — workspace precedence, derived once per turn from the live map
+  const mcpTools = yield* mcp.tools()
+  const precedence = yield* Effect.promise(() =>
+    Precedence.refresh(
+      input.session.id,
+      mcpTools,
+      Permission.merge(input.agent.permission, input.session.permission ?? []),
+    ),
+  )
+  // altimate_change end
+
   for (const item of yield* registry.tools({
     // altimate_change start — upstream_fix: re-brand API model id for ToolRegistry resolution
     modelID: ModelID.make(input.model.api.id),
@@ -84,7 +100,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({
-      description: item.description,
+      // altimate_change start — name the workspace on the native side too
+      description: Precedence.describeNativeTool(item.id, item.description, precedence),
+      // altimate_change end
       inputSchema: jsonSchema(schema),
       execute(args, options) {
         return run.promise(
@@ -129,8 +147,11 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
 
   // altimate_change start — split the original client name off the model-facing tool object so
   // it's used only for source classification and never leaks into the schema sent to the model.
-  for (const [key, entry] of Object.entries(yield* mcp.tools())) {
+  for (const [key, entry] of Object.entries(mcpTools)) {
     const { client: clientName, ...item } = entry
+    // altimate_change end
+    // altimate_change start — mark the engine tools that now serve a shadowed capability
+    item.description = Precedence.describeEngineTool(key, item.description ?? "", precedence)
     // altimate_change end
     const execute = item.execute
     if (!execute) continue

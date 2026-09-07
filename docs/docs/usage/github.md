@@ -1,3 +1,8 @@
+---
+title: "GitHub Actions Integration — Altimate Code"
+description: "Integrate Altimate Code with GitHub Actions for automated PR reviews, issue handling, and CI/CD data workflows."
+---
+
 # GitHub
 
 altimate integrates with GitHub for automated code review and issue handling.

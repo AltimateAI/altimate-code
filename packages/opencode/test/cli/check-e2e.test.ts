@@ -3,7 +3,7 @@
 // IMPORTANT: This file uses Dispatcher.register() / Dispatcher.reset() instead
 // of mock.module("@/altimate/native") to avoid Bun's mock.module leaking across
 // test files and breaking Glob/Dispatcher for all subsequent tests in CI.
-import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test"
 import * as fs from "fs/promises"
 import path from "path"
 import os from "os"
@@ -16,6 +16,7 @@ import {
   formatText,
   buildCheckOutput,
   VALID_CHECKS,
+  isSqlFile,
   type Finding,
   type CheckCategoryResult,
 } from "../../src/cli/cmd/check-helpers"
@@ -152,6 +153,11 @@ beforeEach(async () => {
 afterEach(async () => {
   process.exit = origExit
   process.exitCode = 0
+  // Restore all spies (process.stdout.write, process.stderr.write,
+  // console.error) — Bun doesn't auto-restore spyOn mocks across test
+  // files, so without this the mocks leak into subsequent files' output.
+  // (coderabbit MAJOR on v0.9.6 hotfix.)
+  mock.restore()
   // Restore Dispatcher: clear our mocks and re-enable lazy registration
   Dispatcher.reset()
   // Re-install the registration hook so subsequent tests get real handlers
@@ -205,6 +211,19 @@ function parseJson(stdout: string): any {
 // ===========================================================================
 
 describe("check command E2E", () => {
+  test("default discovery keeps output-directory SQL while pruning dependencies", async () => {
+    await writeSql(tmpDir.dir, "build/model.sql", "SELECT 1;")
+    await writeSql(tmpDir.dir, "out/schema.ddl", "CREATE TABLE t (id INT);")
+    await writeSql(tmpDir.dir, "node_modules/pkg/vendored.sql", "SELECT 2;")
+    await writeSql(tmpDir.dir, "vendor/pkg/vendored.sql", "SELECT 3;")
+
+    const r = await runHandler(baseArgs({ files: [], checks: "lint" }))
+    const j = parseJson(r.stdout)
+
+    expect(j.files_checked).toBe(2)
+    expect(r.stderr).toContain("Found 2 SQL file(s)")
+  })
+
   test("runs lint on a single SQL file — JSON output", async () => {
     const file = await writeSql(tmpDir.dir, "model.sql", "SELECT * FROM users;")
 
@@ -589,8 +608,185 @@ describe("check command E2E", () => {
 
     const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
     const j = parseJson(r.stdout)
-    expect(j.results.safety.findings).toHaveLength(1)
+    // success:false envelope adds a fail-closed error finding alongside the threat.
+    expect(j.results.safety.findings).toHaveLength(2)
     expect(j.results.safety.findings[0].rule).toBe("sql-injection")
+    expect(j.results.safety.findings[1].rule).toBe("safety-error")
+    expect(j.results.safety.findings[1].severity).toBe("error")
+  })
+
+  test("safety envelope failure with only sub-error threats still fails closed", async () => {
+    // success:false + partial warning-severity threats must not let
+    // --fail-on=error pass — an error-severity envelope finding is appended.
+    const file = await writeSql(tmpDir.dir, "partial.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.safety", () => ({
+      success: false,
+      error: "scanner crashed midway",
+      data: {
+        safe: false,
+        threats: [{ rule: "multi_statement", severity: "medium", message: "Multiple statements" }],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "safety", "fail-on": "error", failOn: "error" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.safety.findings).toHaveLength(2)
+    expect(j.results.safety.findings.some((f: any) => f.severity === "error")).toBe(true)
+    expect(j.summary.pass).toBe(false)
+  })
+
+  test("safety check surfaces engine ThreatFinding shape (threats/rule/message/detail)", async () => {
+    // Real core@0.7.0 scanSql shape: threats[], each { rule, severity, message, detail }.
+    // Regression guard: the consumer previously only read issues/findings, so
+    // real threats (e.g. the 0.6.0 unbalanced_quote rule) rendered as a generic warning.
+    // Engine-faithful fixture: a dangling quote genuinely emits the
+    // unbalanced_quote rule at runtime (verified against the live 0.7.0
+    // binary; the rule is only missing from the stale SafetyRule union in
+    // index.d.ts — filed upstream as altimate-core-internal#764).
+    const file = await writeSql(tmpDir.dir, "breakout.sql", "SELECT * FROM users WHERE name = 'x'';")
+    setDispatcherResponse("altimate_core.safety", () => ({
+      success: true,
+      data: {
+        safe: false,
+        risk_score: 0.9,
+        statement_count: 1,
+        statement_types: ["SELECT"],
+        threats: [
+          {
+            rule: "unbalanced_quote",
+            severity: "high",
+            message: "Unbalanced quote suggests injection breakout",
+            detail: "Quote count is odd within a single statement",
+            // Real engine semantics: [byteOffset, byteLength] — the 'x' literal.
+            location: [33, 3],
+            matched_pattern: "'",
+          },
+        ],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.safety.findings).toHaveLength(1)
+    expect(j.results.safety.findings[0].rule).toBe("unbalanced_quote")
+    // ThreatFinding.location is [byteOffset, byteLength] — rendered as an INCLUSIVE byte range.
+    expect(j.results.safety.findings[0].message).toBe("Unbalanced quote suggests injection breakout (bytes 33-35)")
+    expect(j.results.safety.findings[0].suggestion).toBe("Quote count is odd within a single statement")
+    // Engine severity "high" must normalize to error, not degrade to info —
+    // otherwise --fail-on/--severity filters silently pass high-risk injections.
+    expect(j.results.safety.findings[0].severity).toBe("error")
+  })
+
+  test("pii check surfaces engine PiiColumnAccess shape (classification/query_targets/masking)", async () => {
+    // Real core@0.7.0 query_pii shape: pii_columns[], each
+    // { table, column, classification, query_targets, suggested_masking }.
+    const file = await writeSql(tmpDir.dir, "pii-real.sql", "SELECT email AS contact FROM customers;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: true,
+      data: {
+        accesses_pii: true,
+        risk_level: "Medium",
+        pii_columns: [
+          {
+            table: "customers",
+            column: "email",
+            classification: "Email",
+            query_targets: ["contact"],
+            suggested_masking: "'***MASKED***'",
+          },
+          {
+            table: "customers",
+            column: "employee_ref",
+            // PiiClassification can be { Custom: string }, not just a string.
+            classification: { Custom: "EmployeeId" },
+            query_targets: [],
+            suggested_masking: null,
+          },
+        ],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(2)
+    expect(j.results.pii.findings[0].rule).toBe("Email")
+    expect(j.results.pii.findings[0].message).toContain("customers.email")
+    expect(j.results.pii.findings[0].message).toContain("exposed via: contact")
+    expect(j.results.pii.findings[0].suggestion).toBe("'***MASKED***'")
+    expect(j.results.pii.findings[1].rule).toBe("EmployeeId")
+    // suggested_masking: null must not leak into suggestion as null.
+    expect(j.results.pii.findings[1].suggestion).toBeUndefined()
+  })
+
+  test("policy check surfaces advisory warnings on an allowed result", async () => {
+    const file = await writeSql(tmpDir.dir, "policy-warn.sql", "SELECT 1;")
+    const policyFile = path.join(tmpDir.dir, "policy.json")
+    await fs.writeFile(policyFile, JSON.stringify({ rules: [] }))
+    setDispatcherResponse("altimate_core.policy", () => ({
+      success: true,
+      data: {
+        allowed: true,
+        violations: [],
+        warnings: [{ rule: "row_estimate", category: "cost_control", message: "Query may scan a large table" }],
+        policies_evaluated: 1,
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile } as any))
+    const j = parseJson(r.stdout)
+    expect(j.results.policy.findings).toHaveLength(1)
+    expect(j.results.policy.findings[0].severity).toBe("info")
+    expect(j.results.policy.findings[0].rule).toBe("row_estimate")
+    // Advisory warnings must not fail the check.
+    expect(j.summary.pass).toBe(true)
+  })
+
+  test("pii check fails when the engine abstains via parse_error", async () => {
+    // Unparseable SQL: engine returns success + parse_error + empty pii_columns.
+    // No findings would let --fail-on PASS a file whose PII analysis never ran.
+    const file = await writeSql(tmpDir.dir, "pii-abstain.sql", "SELECT FROM;")
+    setDispatcherResponse("altimate_core.query_pii", () => ({
+      success: true,
+      data: { accesses_pii: false, parse_error: "Syntax error: Expected: identifier", pii_columns: [] },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "pii" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.pii.findings).toHaveLength(1)
+    expect(j.results.pii.findings[0].severity).toBe("error")
+    expect(j.results.pii.findings[0].message).toContain("PII analysis skipped")
+  })
+
+  test("grade check keeps per-file grades on multi-file runs", async () => {
+    const fileA = await writeSql(tmpDir.dir, "grade-a.sql", "SELECT 1;")
+    const fileB = await writeSql(tmpDir.dir, "grade-b.sql", "SELECT * FROM t;")
+    let call = 0
+    setDispatcherResponse("altimate_core.grade", () => {
+      call++
+      return {
+        success: true,
+        data: {
+          overall_grade: call === 1 ? "A" : "C",
+          scores: { overall: call === 1 ? 0.95 : 0.7 },
+          lint: { clean: true, findings: [] },
+        },
+      }
+    })
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [fileA, fileB], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    const grades = j.results.grade.grades as Record<string, { grade: string; score: number }>
+    expect(Object.keys(grades)).toHaveLength(2)
+    expect(new Set(Object.values(grades).map((g) => g.grade))).toEqual(new Set(["A", "C"]))
+    // Flat grade/score only meaningful for single-file runs — must not pick a
+    // racy winner across files.
+    expect(j.results.grade.grade).toBeUndefined()
   })
 
   test("pii check reports PII columns", async () => {
@@ -629,13 +825,22 @@ describe("check command E2E", () => {
     expect(j.results.semantic.findings[0].rule).toBe("cartesian-join")
   })
 
-  test("grade check returns recommendations", async () => {
+  test("grade check maps the real EvalResult shape (overall_grade/scores.overall/lint.findings)", async () => {
+    // Real core@0.7.0 evaluate() shape — the previous mock used grade/recommendations,
+    // fields the engine never returns, which enshrined a dead consumer.
     const file = await writeSql(tmpDir.dir, "grade.sql", "SELECT * FROM big_table;")
     setDispatcherResponse("altimate_core.grade", () => ({
       success: true,
       data: {
-        grade: "C",
-        recommendations: [{ rule: "selectivity", severity: "info", message: "Add WHERE clause" }],
+        overall_grade: "C",
+        scores: { overall: 0.72, complexity: 0.9, safety: 1, style: 0.6, syntax: 1 },
+        lint: {
+          clean: false,
+          findings: [{ rule: "select-star", severity: "info", message: "Add WHERE clause or explicit columns" }],
+        },
+        explain: {},
+        safety: { safe: true },
+        validation: { valid: true },
       },
     }))
     installDispatcherMocks()
@@ -644,6 +849,149 @@ describe("check command E2E", () => {
     const j = parseJson(r.stdout)
     expect(j.results.grade.findings).toHaveLength(1)
     expect(j.results.grade.findings[0].message).toContain("WHERE clause")
+    expect(j.results.grade.grade).toBe("C")
+    expect(j.results.grade.score).toBe(0.72)
+  })
+
+  test("grade check surfaces validation/safety findings when lint is clean", async () => {
+    // EvalResult can carry validation errors or safety threats with zero lint
+    // findings — the grade check must not present an empty (passing) list.
+    const file = await writeSql(tmpDir.dir, "grade-nested.sql", "SELECT zzz FROM t;")
+    setDispatcherResponse("altimate_core.grade", () => ({
+      success: true,
+      data: {
+        overall_grade: "D",
+        scores: { overall: 0.4 },
+        lint: { clean: true, findings: [] },
+        validation: {
+          valid: false,
+          errors: [
+            {
+              code: "E002",
+              message: "Column 'zzz' not found",
+              location: { line: 1, column: 8 },
+              suggestions: [{ kind: "column", message: "Did you mean 'id'?", confidence: 0.9 }],
+            },
+          ],
+        },
+        safety: {
+          safe: false,
+          threats: [
+            {
+              rule: "tautology_attack",
+              severity: "high",
+              message: "OR 1=1 detected",
+              detail: "Remove the always-true predicate",
+              location: [10, 7],
+            },
+          ],
+        },
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.grade.findings.length).toBe(2)
+    const byRule = Object.fromEntries(j.results.grade.findings.map((f: any) => [f.rule, f]))
+    // ValidationError location/suggestions must survive the flat mapper.
+    expect(byRule.validate.severity).toBe("error")
+    expect(byRule.validate.line).toBe(1)
+    expect(byRule.validate.column).toBe(8)
+    expect(byRule.validate.suggestion).toBe("Did you mean 'id'?")
+    // ThreatFinding byte-range location and detail must survive too.
+    expect(byRule.tautology_attack.message).toBe("OR 1=1 detected (bytes 10-16)")
+    expect(byRule.tautology_attack.suggestion).toBe("Remove the always-true predicate")
+  })
+
+  test("grade check fails closed on engine failure envelope", async () => {
+    // Native handlers report failures via {success:false}, not by throwing —
+    // a failed grade run must not pass silently with zero findings.
+    const file = await writeSql(tmpDir.dir, "grade-fail.sql", "SELECT 1;")
+    setDispatcherResponse("altimate_core.grade", () => ({
+      success: false,
+      data: {},
+      error: "Failed to parse JSON schema",
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "grade" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.grade.findings).toHaveLength(1)
+    expect(j.results.grade.findings[0].severity).toBe("error")
+    expect(j.results.grade.findings[0].message).toContain("Failed to parse JSON schema")
+  })
+
+  test("validate check fails invalid SQL despite handler success (dead-gate regression)", async () => {
+    // The native handler returns success=true even for invalid SQL — the
+    // verdict is data.valid. Gating on success alone made validate a no-op.
+    const file = await writeSql(tmpDir.dir, "invalid.sql", "SELECT zzz FROM t;")
+    setDispatcherResponse("altimate_core.validate", () => ({
+      success: true,
+      data: {
+        valid: false,
+        errors: [
+          {
+            code: "E002",
+            kind: { type: "ColumnNotFound", column: "zzz", table: null },
+            message: "Column 'zzz' not found",
+            location: { line: 1, column: 8 },
+            suggestions: [],
+          },
+        ],
+        warnings: [],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.validate.findings).toHaveLength(1)
+    expect(j.results.validate.findings[0].severity).toBe("error")
+    expect(j.results.validate.findings[0].message).toBe("Column 'zzz' not found")
+    expect(j.results.validate.findings[0].line).toBe(1)
+  })
+
+  test("validate check passes valid SQL", async () => {
+    const file = await writeSql(tmpDir.dir, "valid.sql", "SELECT id FROM t;")
+    setDispatcherResponse("altimate_core.validate", () => ({
+      success: true,
+      data: { valid: true, errors: [], warnings: [] },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "validate" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.validate.findings).toHaveLength(0)
+  })
+
+  test("semantic check surfaces findings when valid:true (valid means plannable, not clean)", async () => {
+    const file = await writeSql(tmpDir.dir, "cartesian.sql", "SELECT * FROM a, b;")
+    setDispatcherResponse("altimate_core.semantics", () => ({
+      success: true,
+      data: {
+        valid: true,
+        semantic_score: 0.5,
+        findings: [
+          {
+            rule: "missing_join_condition",
+            severity: "error",
+            message: "Cartesian product detected between 'a' and 'b'",
+            explanation: "…",
+            confidence: 0.95,
+          },
+        ],
+        passed_checks: [],
+        validation_errors: [],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "semantic" }))
+    const j = parseJson(r.stdout)
+    expect(j.results.semantic.findings).toHaveLength(1)
+    expect(j.results.semantic.findings[0].rule).toBe("missing_join_condition")
+    expect(j.results.semantic.findings[0].severity).toBe("error")
   })
 
   // --- Schema resolution ---
@@ -782,6 +1130,93 @@ describe("check command E2E", () => {
 // ===========================================================================
 
 describe("check command adversarial", () => {
+  test("handler filters non-SQL files from positional args — no content parsed or echoed", async () => {
+    // Handler-level integration test (cubic P2 catch on the pure-helper-only
+    // test coverage). This test would fail if CheckCommand.handler stopped
+    // calling isSqlFile — proving the filter is wired end-to-end, not just
+    // present as an unused helper. Reproduces the exact regression path:
+    // a non-SQL file containing "root:x:0" must NOT flow through the engine
+    // path where a rule message could echo its content to stdout.
+    const sqlFile = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
+    const nonSql = path.join(tmpDir.dir, "fake-passwd-no-ext")
+    await fs.writeFile(nonSql, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    const r = await runHandler(baseArgs({ files: [sqlFile, nonSql], checks: "safety" }))
+    const j = parseJson(r.stdout)
+    // Only the .sql file made it through.
+    expect(j.files_checked).toBe(1)
+    // The non-SQL file was rejected with a clear warning on stderr.
+    expect(r.stderr).toMatch(/not a SQL file.*fake-passwd-no-ext/)
+    // Critically: no content leak. Neither the SQL output nor the warning
+    // contains any part of the non-SQL file's content.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
+  test("handler rejects a directory whose name ends in .sql", async () => {
+    // cubic P2: extension check alone would accept ``foo.sql/`` as a file.
+    // The isFile() stat gate must reject it. When ALL positional files
+    // are rejected, check.ts's early "No SQL files found" bail-out fires
+    // and there is no JSON body — assert on stderr instead of parseJson.
+    const dirLikeFile = path.join(tmpDir.dir, "not-a-file.sql")
+    await fs.mkdir(dirLikeFile, { recursive: true })
+    const r = await runHandler(baseArgs({ files: [dirLikeFile], checks: "safety" }))
+    expect(r.stderr).toMatch(/not a regular file.*not-a-file\.sql/)
+    expect(r.stderr).toContain("No SQL files found to check")
+    // No content-leak surface at all when the file is rejected.
+    expect(r.stdout).not.toContain("not-a-file")
+  })
+
+  test("handler rejects ALL symlinks (TOCTOU-safe)", async () => {
+    // coderabbit MAJOR: even a "resolve target + extension check" approach
+    // opens a TOCTOU race — an attacker can swap the symlink target
+    // between validation and readFileSync. Simpler + fully safe: refuse
+    // symlinks entirely. Rejects both attack cases and previously-legit
+    // symlink-to-SQL — users pass the resolved target directly instead.
+    const target = path.join(tmpDir.dir, "fake-passwd.txt")
+    const link = path.join(tmpDir.dir, "passwd.sql")
+    await fs.writeFile(target, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    await fs.symlink(target, link)
+    const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("passwd.sql")
+    expect(r.stderr).toContain("No SQL files found to check")
+    // Critical: no content leak — the file was never read.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
+  test("handler rejects symlink-to-SQL too (blanket ban is intentional)", async () => {
+    // Deliberate revert of an earlier round's behavior: cubic asked to
+    // accept `link.sql -> real.sql` in a prior round, then coderabbit
+    // flagged the TOCTOU race. Blanket-rejecting closes the race
+    // completely at the cost of legitimate symlink-to-SQL, which users
+    // can work around by passing the resolved target path directly.
+    const target = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
+    const link = path.join(tmpDir.dir, "link.sql")
+    await fs.symlink(target, link)
+    const r = await runHandler(baseArgs({ files: [link], checks: "safety" }))
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("link.sql")
+    // The user can still check the resolved target directly.
+    const r2 = await runHandler(baseArgs({ files: [target], checks: "safety" }))
+    const j = parseJson(r2.stdout)
+    expect(j.files_checked).toBe(1)
+  })
+
+  test("handler rejects a dotfile named exactly '.sql'", async () => {
+    // cubic P2: ``.sql`` as a filename is a dotfile with no extension,
+    // not a SQL file. Must be rejected before reaching the engine.
+    const dotSql = path.join(tmpDir.dir, ".sql")
+    await fs.writeFile(dotSql, "root:x:0:0:root:/root:/bin/bash\n", "utf-8")
+    const r = await runHandler(baseArgs({ files: [dotSql], checks: "safety" }))
+    // Same as above — all files rejected → "No SQL files found" bail-out.
+    expect(r.stderr).toMatch(/not a SQL file.*\.sql$/m)
+    expect(r.stderr).toContain("No SQL files found to check")
+    // Critical: the file's content NEVER reaches stdout or stderr.
+    expect(r.stdout).not.toMatch(/root:x:0/i)
+    expect(r.stderr).not.toMatch(/root:x:0/i)
+  })
+
   test("handles SQL with embedded null bytes", async () => {
     const file = await writeSql(tmpDir.dir, "null.sql", "SELECT 1;\0DROP TABLE users;")
     const r = await runHandler(baseArgs({ files: [file], checks: "lint" }))
@@ -964,14 +1399,19 @@ describe("check command adversarial", () => {
   })
 
   test("handles directory with .sql extension", async () => {
+    // Extension filter passes ``dir.sql`` (name ends in .sql) but the
+    // stat/isFile gate rejects it as "not a regular file" before it ever
+    // reaches the readFileSync call. The good.sql file still processes.
+    // (v0.9.6 hotfix: added statSync isFile() check.)
     const good = await writeSql(tmpDir.dir, "good.sql", "SELECT 1;")
     const dir = path.join(tmpDir.dir, "dir.sql")
     await fs.mkdir(dir)
 
     const r = await runHandler(baseArgs({ files: [good, dir], checks: "lint" }))
-    expect(r.stderr).toContain("Error reading")
+    expect(r.stderr).toContain("not a regular file")
+    expect(r.stderr).toContain("dir.sql")
     const j = parseJson(r.stdout)
-    expect(j.files_checked).toBe(2)
+    expect(j.files_checked).toBe(1)
   })
 
   test("processes duplicate file args (each checked separately)", async () => {
@@ -1041,14 +1481,20 @@ describe("check command adversarial", () => {
     expect(j.checks_run).toEqual(["lint", "safety"])
   })
 
-  test("handles symlinked SQL files", async () => {
+  test("symlinks are rejected (superseded by TOCTOU-safe policy)", async () => {
+    // Was: "handles symlinked SQL files" — asserted files_checked===1 when
+    // check followed a symlink. Behavior changed in the v0.9.6 hotfix:
+    // symlinks are blanket-rejected to close a TOCTOU race where an
+    // attacker could swap the symlink target between validate and read.
+    // See handler adversarial cases above.
     const real = await writeSql(tmpDir.dir, "real.sql", "SELECT 1;")
     const link = path.join(tmpDir.dir, "link.sql")
     await fs.symlink(real, link)
 
     const r = await runHandler(baseArgs({ files: [link], checks: "lint" }))
-    const j = parseJson(r.stdout)
-    expect(j.files_checked).toBe(1)
+    expect(r.stderr).toMatch(/symlinks are not accepted/)
+    expect(r.stderr).toContain("link.sql")
+    expect(r.stderr).toContain("No SQL files found to check")
   })
 
   test("handles binary content in .sql file without crashing", async () => {
@@ -1070,6 +1516,76 @@ describe("check command adversarial", () => {
     const r = await runHandler(baseArgs({ files, checks: "lint" }))
     const j = parseJson(r.stdout)
     expect(j.files_checked).toBe(50)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isSqlFile — SQL-extension filter (v0.9.6 sanity regression)
+// ---------------------------------------------------------------------------
+//
+// v0.9.6 shipped an ``altimate-core`` 0.7.0 upgrade whose new
+// ``multi_statement`` safety rule echoes the offending statement text in
+// its error message. When ``check`` was invoked on a non-SQL file (e.g.
+// ``altimate check /etc/passwd``), the engine parsed each line as SQL,
+// failed, and echoed the line back — leaking file content to stdout.
+// The sanity test at ``test/sanity/phases/security.sh:96-103`` has been
+// present + passing since PR #844 (June 2026); v0.9.6's engine upgrade
+// regressed it. Fix: reject non-SQL files by extension BEFORE they
+// reach the engine, so no content is ever parsed and echoed.
+describe("isSqlFile — extension filter (v0.9.6 sanity regression)", () => {
+  test("accepts .sql (both cases)", () => {
+    expect(isSqlFile("query.sql")).toBe(true)
+    expect(isSqlFile("QUERY.SQL")).toBe(true)
+    expect(isSqlFile("/absolute/path/to/query.sql")).toBe(true)
+    expect(isSqlFile("relative/path/query.sql")).toBe(true)
+  })
+  test("accepts .ddl (both cases)", () => {
+    expect(isSqlFile("schema.ddl")).toBe(true)
+    expect(isSqlFile("SCHEMA.DDL")).toBe(true)
+  })
+  test("rejects the exact sanity-test path (system file, no extension)", () => {
+    // The exact input the sanity test at test/sanity/phases/security.sh:96
+    // was leaking through before the fix.
+    expect(isSqlFile("../../../../etc/passwd")).toBe(false)
+    expect(isSqlFile("/etc/passwd")).toBe(false)
+  })
+  test("rejects extensionless files", () => {
+    expect(isSqlFile("passwd")).toBe(false)
+    expect(isSqlFile("/tmp/no-extension")).toBe(false)
+  })
+  test("rejects unrelated extensions", () => {
+    expect(isSqlFile("foo.txt")).toBe(false)
+    expect(isSqlFile("query.yml")).toBe(false)
+    expect(isSqlFile("script.sh")).toBe(false)
+    expect(isSqlFile("archive.tar.gz")).toBe(false)
+  })
+  test("dotfiles without an extension are not SQL", () => {
+    // ``.hidden`` has a leading dot but no proper extension — the
+    // filename ``.hidden`` has ``extname === ""`` under Node's rules.
+    expect(isSqlFile(".hidden")).toBe(false)
+    expect(isSqlFile("/etc/.passwd")).toBe(false)
+  })
+  test("dotfiles with a SQL extension ARE accepted", () => {
+    // Edge case: ``.query.sql`` is a hidden file with a real .sql extension.
+    expect(isSqlFile(".query.sql")).toBe(true)
+  })
+  test("basename that is JUST the extension (bare dotfile) is NOT SQL", () => {
+    // ``.sql`` and ``.ddl`` as filenames are dotfiles per node's
+    // ``path.extname`` — they have NO extension, they're just dot-prefixed
+    // names. Must not be accepted. (cubic P2 catch on release/v0.9.6 hotfix.)
+    expect(isSqlFile(".sql")).toBe(false)
+    expect(isSqlFile(".ddl")).toBe(false)
+    expect(isSqlFile("/some/dir/.sql")).toBe(false)
+    expect(isSqlFile("/some/dir/.ddl")).toBe(false)
+  })
+  test("directory paths (trailing slash) are not SQL files", () => {
+    expect(isSqlFile("/path/to/dir/")).toBe(false)
+    expect(isSqlFile("relative/dir/")).toBe(false)
+  })
+  test("path with dots in directory names but no extension on the file", () => {
+    // ``foo.bar/baz`` — the ``.`` is in the directory, not the file.
+    expect(isSqlFile("foo.bar/baz")).toBe(false)
+    expect(isSqlFile("foo.bar/baz.sql")).toBe(true)
   })
 })
 // altimate_change end

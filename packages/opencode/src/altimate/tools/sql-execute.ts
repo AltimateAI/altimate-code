@@ -13,6 +13,12 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { getCache } from "../native/schema/cache"
 import * as Registry from "../native/connections/registry"
 // altimate_change end
+// altimate_change start — workspace precedence
+import * as Precedence from "../workspace/precedence"
+// altimate_change end
+// altimate_change start — never render a warehouse failure as an empty result
+import { normalizeError } from "./response-normalization"
+// altimate_change end
 
 export const SqlExecuteTool = Tool.define("sql_execute", {
   description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
@@ -38,6 +44,19 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
     }
     // altimate_change end
 
+    // altimate_change start — workspace precedence.
+    // Last, after BOTH native safety checks. A redirect returns early, so anything
+    // above it stops running — and neither check has an equivalent on the other side:
+    // the engine's execution tools apply no hard-deny list, and an engine tool key is
+    // matched by the builder's `"*": "allow"` rule while `sql_execute_write` is "ask".
+    // Redirecting first would let a write reach the warehouse without the confirmation
+    // the same statement needed a moment ago. Approving and then redirecting is not a
+    // wasted prompt: the write still happens, through the engine, and what the user
+    // authorised is the write — not which connection carries it.
+    const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
+    if (precedence.redirect) return precedence.redirect
+    // altimate_change end
+
     // altimate_change start — shadow-mode pre-execution SQL validation
     // Runs validation against cached schema and emits sql_pre_validation telemetry,
     // but does NOT block execution. Used to measure catch rate before deciding
@@ -53,8 +72,38 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         limit: args.limit,
       })
 
-      let output = formatResult(result)
-      // altimate_change start — emit SQL structure fingerprint telemetry
+      // altimate_change start — a failure must not be rendered as "(0 rows)".
+      // sql.execute never throws: it catches every connection and query error
+      // and returns a result-shaped object carrying `error`, so an unresolvable
+      // warehouse used to reach the agent as a successful empty table with no
+      // fault string at all. Surface it the way schema_inspect already does.
+      const responseError = normalizeError((result as SqlExecuteResult & { error?: unknown }).error)
+      if (responseError !== undefined) {
+        const msg = responseError.trim() || "SQL execution failed."
+        // altimate_change: deliberately NOT fingerprinted. `sql.execute` returns this
+        // same result shape both for a warehouse query that ran and failed AND for a
+        // pre-execution failure — no warehouse configured, connector setup failed
+        // (see connections/register.ts). This branch alone cannot tell those apart, so
+        // fingerprinting it would mislabel some never-executed queries as "executed
+        // SQL". De-scoped to fingerprint-on-success-only (below) rather than build a
+        // failed-execution-vs-never-executed taxonomy in this cleanup PR; tracked as
+        // altimate-code#1242.
+        // altimate_change — annotate this failure too, same as the catch block below:
+        // a fail-open notice that only rides on success under-counts fail-open in
+        // precisely the cases most likely to fail.
+        return Precedence.annotate(precedence, {
+          title: "SQL: ERROR",
+          metadata: { rowCount: 0, truncated: false, error: msg },
+          output: `Failed to execute SQL: ${msg}`,
+        })
+      }
+      // altimate_change end
+
+      // altimate_change start — emit SQL structure fingerprint telemetry on the
+      // success path, BEFORE formatting the result. A query that reached this point
+      // genuinely executed against a warehouse; emitting the fingerprint here (rather
+      // than after formatResult()) means a formatting failure below still leaves this
+      // execution counted, instead of silently dropping it from the telemetry.
       try {
         const fp = computeSqlFingerprint(args.query)
         if (fp) {
@@ -76,6 +125,8 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         // Fingerprinting must never break query execution
       }
       // altimate_change end
+
+      let output = formatResult(result)
       // altimate_change start — progressive disclosure suggestions
       const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
       if (suggestion) {
@@ -87,18 +138,27 @@ export const SqlExecuteTool = Tool.define("sql_execute", {
         })
       }
       // altimate_change end
-      return {
+      // altimate_change — carries the fail-open notice when the target could not be
+      // attributed to the workspace; a no-op otherwise.
+      return Precedence.annotate(precedence, {
         title: `SQL: ${args.query.slice(0, 60)}${args.query.length > 60 ? "..." : ""}`,
         metadata: { rowCount: result.row_count, truncated: result.truncated },
         output,
-      }
+      })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      return {
+      // altimate_change: deliberately NOT fingerprinted, same reasoning as the
+      // result-error branch above — this catch only fires when `Dispatcher.call`
+      // itself throws, which never happened after a warehouse actually ran the query.
+      // altimate_change — annotate the failure too. A fail-open notice that only rides
+      // on success is worse than none: the reason vanishes exactly when the call went
+      // wrong, and the `precedence` marker under-counts fail-open in precisely the
+      // cases most likely to fail.
+      return Precedence.annotate(precedence, {
         title: "SQL: ERROR",
         metadata: { rowCount: 0, truncated: false, error: msg },
         output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
-      }
+      })
     }
   },
 })
@@ -115,7 +175,11 @@ interface PreValidationResult {
   error?: string
 }
 
-async function preValidateSql(sql: string, warehouse: string | undefined, queryType: string): Promise<PreValidationResult> {
+async function preValidateSql(
+  sql: string,
+  warehouse: string | undefined,
+  queryType: string,
+): Promise<PreValidationResult> {
   const startTime = Date.now()
   // Yield the event loop before heavy synchronous SQLite work so concurrent
   // tasks aren't blocked. Bun's sqlite API is sync and listColumns can touch

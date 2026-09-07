@@ -2,6 +2,9 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Log } from "../util/log"
 import { Installation } from "../installation"
 import { Auth, OAUTH_DUMMY_KEY } from "../auth"
+// altimate_change start — plan/account diagnostics for wrong-account logins
+import { OAuthClaims } from "../auth/oauth-claims"
+// altimate_change end
 import os from "os"
 import { ProviderTransform } from "@/provider/transform"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -10,11 +13,233 @@ import { createServer } from "http"
 
 const log = Log.create({ service: "plugin.codex" })
 
+// altimate_change start — bound the diagnostic body read
+/** Upper bound on how much of a 400 body gets buffered to check for the plan-
+ * mismatch phrase. A real mismatch payload is one short JSON object (well
+ * under 1KB); this is generous headroom without buffering an arbitrarily
+ * large — or hostile — upstream error body into memory on every Codex 400,
+ * including ones that are not the mismatch shape at all. */
+const MAX_DIAGNOSTIC_BODY_BYTES = 16 * 1024
+
+/**
+ * Read at most `maxBytes` of a response body. Returns undefined if the body
+ * is missing, unreadable, or exceeds the bound — in every one of those cases
+ * the caller treats the response as "not the mismatch shape" and passes the
+ * original, untouched response through instead.
+ */
+async function readBoundedBody(response: Response, maxBytes: number): Promise<string | undefined> {
+  const reader = response.body?.getReader()
+  if (!reader) return undefined
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      total += value.byteLength
+      if (total > maxBytes) return undefined
+      chunks.push(value)
+    }
+  } catch {
+    return undefined
+  } finally {
+    reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).toString("utf-8")
+}
+// altimate_change end
+
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+
+/** Exact set of model ids the ChatGPT-subscription (Codex) tier accepts.
+ *
+ * Every entry was verified against the live backend
+ * (POST https://chatgpt.com/backend-api/codex/responses) on a ChatGPT Pro
+ * credential: entries here returned HTTP 200.
+ *
+ * CONFIRMED REJECTED, so deliberately absent — each returned
+ * ``400 {"detail":"The '<id>' model is not supported when using Codex with a
+ * ChatGPT account."}``: gpt-5, gpt-5.1, gpt-5.2, gpt-5.2-pro,
+ * gpt-5.3-chat-latest, gpt-5.3-codex, gpt-5.4-nano, gpt-5.4-pro, gpt-5.5-pro,
+ * gpt-5.6.
+ *
+ * NOT PROBED, and excluded by default because this list is fail-closed:
+ * gpt-5-mini, gpt-5-nano, gpt-5-pro, gpt-5.2-chat-latest. They are in the
+ * models.dev catalog but are not plausible Codex-tier models, and the
+ * discovery endpoint below does not list them either. An earlier revision of
+ * this comment claimed every other catalog id had been probed; that overstated
+ * the evidence, and these four are the exception.
+ *
+ * TIER SCOPE. All of the above is what ONE ChatGPT Pro account was served.
+ * It has not been verified against a Plus credential, so it is possible Plus
+ * is entitled to a narrower (or wider) set. If a Plus subscriber reports a
+ * model missing from the picker that the official client offers them, that is
+ * the likely cause and the fix is a per-account list, not another id here.
+ *
+ * OLDER CODEX IDS ARE DROPPED, AND THAT DROP IS UNVERIFIED. Reviewers keep
+ * asking why codex-tagged ids appear in neither list above. The honest answer
+ * depends on WHICH catalog is live, because the two disagree:
+ *
+ *   * live https://models.dev/api.json carries exactly two codex ids —
+ *     gpt-5.3-codex and gpt-5.3-codex-spark — both accounted for above.
+ *   * the BUNDLED snapshot (provider/models-snapshot.ts) is staler and still
+ *     carries gpt-5-codex, gpt-5.1-codex, gpt-5.1-codex-max,
+ *     gpt-5.1-codex-mini and gpt-5.2-codex under ``openai``.
+ *
+ * ModelsDev.Data resolves disk cache -> bundled snapshot -> fetch, so on a
+ * fresh install or cold cache the snapshot IS the catalog, and those five ids
+ * do reach this loader. The removed ``includes("codex")`` rule offered them;
+ * exact matching now deletes them. None was individually probed. They are
+ * absent from the discovery endpoint's nine slugs (a Pro account), which is
+ * evidence but not a probe, and consistent with older codex models having been
+ * retired.
+ *
+ * They stay out on the same fail-closed reasoning as the ids above: an
+ * unverified inclusion fails opaquely mid-request, an unverified exclusion
+ * fails visibly at selection with a "did you mean" list. Probe one and move it
+ * into the right list to settle it.
+ *
+ * COLD-CACHE CAVEAT. That same snapshot staleness cuts the other way for the
+ * models this list adds: it contains NO gpt-5.6 variant, so on a cold cache
+ * sol/luna/terra are absent from the catalog entirely and this allowlist cannot
+ * conjure them — the filter only ever deletes. They become selectable once the
+ * catalog refreshes from models.dev (or the bundled snapshot is regenerated at
+ * the next release build). This allowlist is necessary for them to appear, but
+ * on a cold cache it is not sufficient.
+ *
+ * There is no derivable rule here — the tier accepts ``gpt-5.3-codex-spark``
+ * but rejects ``gpt-5.3-codex``, and accepts the gpt-5.6 sol/luna/terra
+ * variants but rejects plain ``gpt-5.6``. So this is an exact-match list by
+ * necessity, not by preference. Only add an id after confirming a 200 from the
+ * endpoint above on a subscription credential; guessing puts a model in the
+ * picker that then fails at request time.
+ *
+ * WHY THIS IS STATIC AND NOT DISCOVERED. There is an authoritative per-account
+ * endpoint — ``GET https://chatgpt.com/backend-api/codex/models?client_version=<v>``
+ * — and it accepts our own identity (``originator: altimate`` plus our
+ * User-Agent; no impersonation needed) and returns exactly the set above, each
+ * entry carrying ``slug``, ``visibility`` and ``minimal_client_version``. Its
+ * ``visibility: "list"`` slugs corroborate this list precisely, which is why
+ * that list is reproduced here rather than derived at runtime:
+ *
+ * ``client_version`` is mandatory (omitted or unparseable ⇒ HTTP 400) and is
+ * gated against each model's ``minimal_client_version``, which at the time of
+ * probing ranged from 0.98.0 to 0.144.0. Those are Codex CLI release numbers —
+ * a numbering line we are not on, so comparing our number against theirs is
+ * meaningless regardless of which way it happens to sort.
+ *
+ * Two different version numbers exist in this repo and it matters which one
+ * reaches the wire. What we would send is ``Installation.VERSION``, i.e. the
+ * build-injected ``OPENCODE_VERSION`` — the NPM-published version, 0.9.7 at
+ * the time of probing, or the literal ``local`` for a dev build. It is NOT the
+ * 1.17.9 in packages/opencode/package.json, which is inherited from the
+ * upstream numbering line and never sent. Both observed values fail, and the
+ * failure is SILENT for one of them: ``client_version=0.9.7`` returns
+ * ``HTTP 200 {"models":[]}`` — no error to debug, just an empty picker — while
+ * a dev build's ``local`` returns
+ * ``400 {"detail":"Invalid client_version format"}``.
+ *
+ * The blocker is not arithmetic, so bumping our version would not lift it: the
+ * field means "which Codex CLI release am I", and answering it is impersonating
+ * the first-party client whatever number we put there. We do not do that, so
+ * the list stays static. If we ever have a legitimate client_version to send,
+ * the mechanism is a small drop-in: fetch, keep ``visibility === "list"``, and
+ * fall back to this set whenever the response is empty or the call fails.
+ *
+ * RETIRED — ``gpt-5.4`` and ``gpt-5.4-mini`` are excluded as of
+ * 2026-08-31T19:00:00Z.
+ * ``openai/codex``'s own shipped catalog
+ * (codex-rs/models-manager/models.json) marks both ``visibility: "hide"`` with
+ * ``upgrade.retirement_at: "2026-08-31T19:00:00Z"`` and the migration text
+ * "GPT-5.4 is no longer available. Codex now uses GPT-5.6 Terra in place of
+ * GPT-5.4." The documented replacements — ``gpt-5.4`` -> ``gpt-5.6-terra``,
+ * ``gpt-5.4-mini`` -> ``gpt-5.6-luna`` — are both already in this set, so
+ * affected users have a working model without further change **provided their
+ * catalog is current**. This filter only ever deletes; it cannot add a model
+ * the catalog lacks, and NEITHER replacement was present in any pre-#1188
+ * bundled catalog. That is why this change was sequenced behind #1188 rather
+ * than shipped on its own: on a cold cache it would have left shipped release
+ * binaries (which embedded the 2026-03-30 ``release.yml`` fixture) with
+ * ``gpt-5.3-codex-spark`` alone, down from three.
+ *
+ * #1188 has since merged (``5993471bad``), so release builds now embed a
+ * release-time models.dev catalog. Measured against one generated by the
+ * post-#1188 build path: 207 providers, 47 openai models, both ``gpt-5.6-terra``
+ * and ``gpt-5.6-luna`` present. A subscription user on such a build goes from
+ * seven selectable models to five here, losing only the two retired ids and
+ * keeping every gpt-5.6 replacement. The gap this comment used to describe is
+ * closed.
+ *
+ * A source checkout is still served by the older committed
+ * ``models-snapshot.ts`` blob, where the same removal is four models down to two
+ * (``gpt-5.3-codex-spark`` and ``gpt-5.5``); that blob carries no gpt-5.6 entry
+ * and is refreshed by the next release build.
+ *
+ * This is a retirement from the ChatGPT-subscription picker, NOT an API
+ * deprecation: both ids still carry ``supported_in_api: true``, neither is on
+ * OpenAI's deprecations page, and models.dev does not mark either
+ * ``deprecated``. API-key auth is unaffected and follows a longer schedule —
+ * this filter only runs when ``auth.type === "oauth"`` (see the models loader
+ * below), so key-authenticated users keep both ids.
+ *
+ * Because models.dev keeps serving these entries (they are still live API
+ * models), leaving them here would NOT self-heal after the deadline: they
+ * would stay in the subscription picker and fail at request time with the same
+ * opaque 400 this allowlist exists to prevent.
+ *
+ * Exported for unit-test coverage — see test/plugin/codex-allowlist.test.ts. */
+export const OAUTH_ALLOWED_MODELS = new Set([
+  "gpt-5.3-codex-spark",
+  "gpt-5.5",
+  "gpt-5.6-luna",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+])
+
+/** OAuth (ChatGPT-subscription) model-filter policy for the ACTIVE plugin
+ * (this file — wired via plugin/index.ts). Exact membership in
+ * ``OAUTH_ALLOWED_MODELS`` — no substring heuristics.
+ *
+ * This previously auto-allowed any id containing ``"codex"``, which admitted
+ * ``gpt-5.3-codex``. The backend rejects that id, so it reached the picker and
+ * then failed at request time with an HTTP 400. Substring matching cannot
+ * express the real policy (``gpt-5.3-codex-spark`` is accepted while
+ * ``gpt-5.3-codex`` is not), so the heuristic is gone.
+ *
+ * The sibling file plugin/openai/codex.ts (an in-progress refactor, currently
+ * NOT wired) has its own separate filter with a ``parseFloat(match[1]) > 5.4``
+ * fallback. Adopting this helper is followup work on that refactor — do NOT
+ * assume the two files share this policy today. */
+export function shouldAllowOAuthModel(modelId: string): boolean {
+  return OAUTH_ALLOWED_MODELS.has(modelId)
+}
+
+/** Map keys to delete from an OAuth (subscription) provider's model record.
+ *
+ * Matches on the UPSTREAM api id, not the map key. The two are equal for every
+ * models.dev catalog entry, but a user can alias a model in config —
+ * ``provider.openai.models.fast-spark.id = "gpt-5.3-codex-spark"`` — which
+ * produces an entry keyed ``fast-spark`` whose ``api.id`` carries the real id.
+ * Config models are folded into the provider database (Provider.state, "extend
+ * database from config") BEFORE auth loaders run, so they do reach this filter;
+ * matching the key would delete a model the backend actually serves.
+ *
+ * Falls back to the key when ``api.id`` is absent: the database only backfills
+ * ``model.api.id ?? model.id ?? modelID`` after this hook has run, so the field
+ * is not guaranteed populated at this point even though the type says so.
+ *
+ * Returns keys rather than mutating, so the caller keeps the in-place delete on
+ * the shared database object and this stays unit-testable. */
+export function disallowedOAuthModelKeys(models: Record<string, { api?: { id?: string } }>): string[] {
+  return Object.entries(models)
+    .filter(([key, model]) => !shouldAllowOAuthModel(model?.api?.id ?? key))
+    .map(([key]) => key)
+}
 
 interface PkceCodes {
   verifier: string
@@ -58,13 +283,10 @@ export interface IdTokenClaims {
 }
 
 export function parseJwtClaims(token: string): IdTokenClaims | undefined {
-  const parts = token.split(".")
-  if (parts.length !== 3) return undefined
-  try {
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString())
-  } catch {
-    return undefined
-  }
+  // altimate_change start — one JWT decoder, shared with auth/oauth-claims which
+  // reads the same tokens for the plan/account diagnostics
+  return OAuthClaims.decodeJwtClaims(token) as IdTokenClaims | undefined
+  // altimate_change end
 }
 
 export function extractAccountIdFromClaims(claims: IdTokenClaims): string | undefined {
@@ -398,20 +620,19 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
         const auth = await getAuth()
         if (auth.type !== "oauth") return {}
 
-        // Filter models to only allowed Codex models for OAuth
-        const allowedModels = new Set([
-          "gpt-5.1-codex",
-          "gpt-5.1-codex-max",
-          "gpt-5.1-codex-mini",
-          "gpt-5.2",
-          "gpt-5.2-codex",
-          "gpt-5.3-codex",
-          "gpt-5.4",
-          "gpt-5.4-mini",
-        ])
-        for (const modelId of Object.keys(provider.models)) {
-          if (modelId.includes("codex")) continue
-          if (allowedModels.has(modelId)) continue
+        // Filter models to only those the ChatGPT-subscription (Codex) tier
+        // accepts. Delegates to ``disallowedOAuthModelKeys`` (module-level,
+        // above), which matches on each model's upstream ``api.id`` so a
+        // config alias of a supported model survives. See OAUTH_ALLOWED_MODELS
+        // for the criteria + how to add new gpt-5.N releases.
+        //
+        // NOTE: this file is the ACTIVE plugin (wired via plugin/index.ts).
+        // The sibling plugin/openai/codex.ts is an unwired in-progress
+        // refactor that keeps its OWN ALLOWED_MODELS + parseFloat > 5.4
+        // fallback — this filter does NOT share a source of truth with it.
+        // Adopting shouldAllowOAuthModel there is followup on that refactor.
+        // (Closes #1132 — GPT 5.6 missing from picker.)
+        for (const modelId of disallowedOAuthModelKeys(provider.models)) {
           delete provider.models[modelId]
         }
 
@@ -504,10 +725,45 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
                 ? new URL(CODEX_API_ENDPOINT)
                 : parsed
 
-            return fetch(url, {
+            const response = await fetch(url, {
               ...init,
               headers,
             })
+
+            // altimate_change start — a wrong-account login is otherwise undiagnosable.
+            // A free-plan ChatGPT credential fails every Codex request with a 400 that
+            // blames the MODEL ("...is not supported when using Codex with a ChatGPT
+            // account"), never the account. Replace that body with one naming the plan
+            // and account the request actually used, plus the commands to switch.
+            // Only this one 400 shape is touched; every other response passes through.
+            if (response.status === 400) {
+              const body = await readBoundedBody(response.clone(), MAX_DIAGNOSTIC_BODY_BYTES)
+              const enriched = OAuthClaims.enrichCodexPlanMismatchBody(
+                body,
+                currentAuth.access,
+                authWithAccount.accountId,
+              )
+              if (enriched) {
+                log.warn("codex request rejected for this account's plan", {
+                  plan: enriched.identity.plan,
+                  account: OAuthClaims.maskAccountId(enriched.identity.accountId),
+                })
+                // Preserve the upstream headers (e.g. a request id) so this failure
+                // stays correlatable with provider-side logs; only content-type and
+                // content-length change because the body is being replaced.
+                const headers = new Headers(response.headers)
+                headers.set("content-type", "application/json")
+                headers.delete("content-length")
+                return new Response(JSON.stringify({ detail: enriched.message }), {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers,
+                })
+              }
+            }
+            // altimate_change end
+
+            return response
           },
         }
       },

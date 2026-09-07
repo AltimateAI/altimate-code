@@ -268,7 +268,9 @@ export const SampleSetupTool = Tool.define("sample_setup", {
  * apply a conservative pattern that stops at whitespace and quotes rather than trying to guess
  * where a path ends. Full detail is kept in `metadata.error`, which the model never sees.
  */
-function redactPaths(message: string, extra: (string | undefined)[] = []): string {
+// altimate_change — exported for direct unit testing (v0.9.5 review, Tech Lead P1).
+// Pure function; no additional risk from exposing it.
+export function redactPaths(message: string, extra: (string | undefined)[] = []): string {
   let out = message
   for (const known of [os.homedir(), process.cwd(), os.tmpdir(), ...extra]) {
     if (!known || known.length < 2) continue
@@ -306,8 +308,9 @@ function countFilesWithExtension(dir: string, extension: string): number {
   return total
 }
 
+// altimate_change — exported for direct unit testing (v0.9.5 review, Tech Lead P1).
 /** dbt models (`models/**\/*.sql`) and seed tables (`seeds/*.csv`) in the shipped sample. */
-function countSampleContents(sampleSourcePath: string): { models: number; tables: number } {
+export function countSampleContents(sampleSourcePath: string): { models: number; tables: number } {
   return {
     models: countFilesWithExtension(path.join(sampleSourcePath, "models"), ".sql"),
     tables: countFilesWithExtension(path.join(sampleSourcePath, "seeds"), ".csv"),

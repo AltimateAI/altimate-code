@@ -1,3 +1,8 @@
+---
+title: "Schema Tools — Altimate Code"
+description: "Inspect table schemas, column types, and metadata with Altimate Code's schema_inspect and related tools."
+---
+
 # Schema Tools
 
 ## schema_inspect

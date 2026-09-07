@@ -1,3 +1,8 @@
+---
+title: "GitLab Merge Request Review — Altimate Code"
+description: "Set up Altimate Code to review GitLab merge requests automatically using a personal access token."
+---
+
 # GitLab
 
 altimate integrates with GitLab for automated merge request review.

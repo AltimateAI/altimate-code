@@ -329,6 +329,23 @@ export interface WarehouseTestParams {
 export interface WarehouseTestResult {
   connected: boolean
   error?: string
+  // altimate_change start — distinguish infrastructure faults from config faults
+  /** Coarse cause, from `categorizeConnectionError` (e.g. `driver_missing`, `auth_failed`). */
+  error_category?: string
+  /**
+   * True when the failure is in the local client — a driver that will not load,
+   * an open that never completed — rather than in the connection's
+   * configuration or the remote warehouse. These are not the caller's fault and
+   * are not fixable by editing the connection.
+   */
+  infrastructure?: boolean
+  /**
+   * True when the failure clears on its own once another process lets go — a
+   * store locked by another writer. Still `infrastructure`, but the response is
+   * to close the conflicting connection and retry, not to stop and report.
+   */
+  recoverable?: boolean
+  // altimate_change end
 }
 
 // --- Warehouse Management ---

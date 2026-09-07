@@ -942,24 +942,54 @@ describe("altimate-core failure isolation", () => {
     }
   })
 
-  test("sql-execute fingerprint try/catch isolates failures from query results", () => {
-    // Verify the code structure: fingerprinting runs AFTER query result is computed
-    // and is wrapped in its own try/catch
+  test("sql-execute fingerprints success only — de-scoped to the minimal honest form (see follow-up issue)", () => {
+    // altimate_change: earlier revisions of this fix tried fingerprinting on both
+    // the success path AND the result-error branch (sql.execute returns a
+    // result-shaped `{ ..., error }` instead of throwing for a connection/query
+    // failure). But that result shape is ALSO what a pre-execution failure returns
+    // — no warehouse configured, connector setup failed (connections/register.ts)
+    // — so the result-error branch cannot reliably tell "warehouse ran the query
+    // and it failed" apart from "never reached a warehouse at all". Fingerprinting
+    // it would mislabel some never-executed queries as executed SQL. After three
+    // review rounds converging on this, it was deliberately de-scoped to
+    // fingerprint-on-success-only (the pre-existing behavior before any of this
+    // started) rather than build a failed-execution-vs-never-executed taxonomy in
+    // this cleanup PR. A distinct execution-phase signal is tracked as
+    // altimate-code#1242.
     const fs = require("fs")
     const src = fs.readFileSync(
       require("path").join(__dirname, "../../src/altimate/tools/sql-execute.ts"),
       "utf8",
     )
-    // Query execution happens first
     const execIdx = src.indexOf('Dispatcher.call("sql.execute"')
-    const formatIdx = src.indexOf("formatResult(result)")
+    const responseErrorIdx = src.indexOf("if (responseError !== undefined) {")
     const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query)")
+    const formatIdx = src.indexOf("formatResult(result)")
     const guardComment = src.indexOf("Fingerprinting must never break query execution")
 
     expect(execIdx).toBeGreaterThan(0)
-    expect(formatIdx).toBeGreaterThan(execIdx) // format after execute
-    expect(fpCallIdx).toBeGreaterThan(formatIdx) // fingerprint after format
-    expect(guardComment).toBeGreaterThan(fpCallIdx) // catch guard exists after fingerprint
+    expect(responseErrorIdx).toBeGreaterThan(execIdx)
+    // The single fingerprint call sits strictly between the error check and
+    // formatResult() — i.e. only on the success path — and BEFORE formatting, so a
+    // formatResult() throw cannot cause a genuinely-executed query to go uncounted.
+    expect(fpCallIdx).toBeGreaterThan(responseErrorIdx)
+    expect(formatIdx).toBeGreaterThan(fpCallIdx)
+    expect(guardComment).toBeGreaterThan(fpCallIdx)
+    expect(guardComment).toBeLessThan(formatIdx)
+
+    // Exactly one call site — no more "every outcome" fan-out.
+    const callSites = [...src.matchAll(/computeSqlFingerprint\(args\.query\)/g)]
+    expect(callSites.length).toBe(1)
+
+    // Neither the result-error branch nor the catch block references it.
+    const resultErrorBlockEnd = src.indexOf("// altimate_change end", responseErrorIdx)
+    const resultErrorBlockBody = src.slice(responseErrorIdx, resultErrorBlockEnd)
+    expect(resultErrorBlockBody.includes("computeSqlFingerprint")).toBe(false)
+
+    const catchBlockStart = src.indexOf("} catch (e) {")
+    const catchBlockEnd = src.indexOf("\n    }\n  },\n})", catchBlockStart)
+    const catchBlockBody = src.slice(catchBlockStart, catchBlockEnd)
+    expect(catchBlockBody.includes("computeSqlFingerprint")).toBe(false)
   })
 
   test("crash-resistant SQL inputs all handled safely", () => {

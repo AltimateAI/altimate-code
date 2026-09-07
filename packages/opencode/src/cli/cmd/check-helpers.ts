@@ -15,6 +15,8 @@ export interface Finding {
   severity: "error" | "warning" | "info"
   message: string
   suggestion?: string
+  /** Machine-readable column name for PII findings (not a position). */
+  columnName?: string
 }
 
 export interface CheckCategoryResult {
@@ -45,6 +47,26 @@ export const SEVERITY_RANK: Record<Severity, number> = { error: 2, warning: 1, i
 
 export const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pii", "semantic", "grade"])
 
+/** Extensions the ``check`` command will treat as SQL. Anything else is
+ * skipped before it reaches the engine, so non-SQL content cannot be
+ * parsed and echoed back through engine error messages (v0.9.6 fix). */
+export const SQL_EXTENSIONS = new Set([".sql", ".ddl"])
+
+/** Case-insensitive SQL-extension test. Matches node's ``path.extname``
+ * semantics: a filename whose only dot is the FIRST character (e.g.
+ * ``.sql`` or ``.ddl``) is a dotfile with NO extension, not a SQL file.
+ * ``.query.sql`` is a dotfile with a real ``.sql`` extension (accepted).
+ * ``foo.bar/baz`` is not SQL (the dot is in the directory, not the
+ * filename). (cubic P2 round on release/v0.9.6 hotfix.) */
+export function isSqlFile(filePath: string): boolean {
+  const slash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"))
+  const basename = slash === -1 ? filePath : filePath.slice(slash + 1)
+  const dot = basename.lastIndexOf(".")
+  // dot === -1: no extension. dot === 0: dotfile with no extension (e.g. ``.sql``).
+  if (dot <= 0) return false
+  return SQL_EXTENSIONS.has(basename.slice(dot).toLowerCase())
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -52,8 +74,12 @@ export const VALID_CHECKS = new Set(["lint", "validate", "safety", "policy", "pi
 export function normalizeSeverity(s?: string | unknown): Severity {
   if (!s || typeof s !== "string") return "warning"
   const lower = s.toLowerCase()
-  if (lower === "error" || lower === "fatal" || lower === "critical") return "error"
-  if (lower === "warning" || lower === "warn") return "warning"
+  // Engine safety severities are low|medium|high|critical — high-risk threats
+  // must not degrade to info or --fail-on/--severity filters silently pass.
+  if (lower === "error" || lower === "fatal" || lower === "critical" || lower === "high") return "error"
+  if (lower === "warning" || lower === "warn" || lower === "medium") return "warning"
+  // Everything else (incl. engine "low") is info by design: low-severity
+  // threats inform but do not trip --fail-on warning.
   return "info"
 }
 

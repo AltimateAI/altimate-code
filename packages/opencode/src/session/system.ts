@@ -149,7 +149,17 @@ export namespace SystemPrompt {
       for (const skill of autoLoaded) {
         parts.push("")
         parts.push(`<auto_loaded_skill name="${escapeXmlAttr(skill.name)}">`)
-        parts.push(skill.content.trim())
+        // altimate_change start — neutralise the closing tag inside the body.
+        // The name is escaped but the body was not, so content containing
+        // `</auto_loaded_skill>` closed the wrapper and continued as unwrapped
+        // system-prompt text — able to impersonate the harness's own framing,
+        // directly after the prompt has told the model to treat this as binding
+        // guidance. Skill bodies are now remote content (a bound workspace
+        // syncs them), so this is reachable by anyone who can upload a skill.
+        // Deliberately not a full XML escape: bodies legitimately contain code
+        // and angle brackets, and mangling those would break working skills.
+        parts.push(neutralizeSkillWrapper(skill.content.trim()))
+        // altimate_change end
         parts.push(`</auto_loaded_skill>`)
       }
       parts.push("")
@@ -194,6 +204,16 @@ export namespace SystemPrompt {
       .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
   }
 
+  // altimate_change start — see the auto-loaded skill block below.
+  // altimate_change — same factory as the skill-body escaper, with its own tag
+  // set. Uses the SAME `BODY_BOUNDARY_TAGS` as the on-demand body renderer:
+  // keeping a private narrower list here recreated the exact site-drift defect
+  // this release exists to close — it silently omitted `skill_content` and
+  // `skill_files`. The listing's structural tags stay out of the body set, so
+  // legitimate `<name>` prose in shipped skills is still untouched. (review)
+  const neutralizeSkillWrapper = Skill.makeWrapperNeutralizer(Skill.BODY_BOUNDARY_TAGS)
+  // altimate_change end
+
   async function collectAutoLoadedSkills(list: Skill.Info[]): Promise<Skill.Info[]> {
     const out: Skill.Info[] = []
     for (const skill of list) {
@@ -225,21 +245,52 @@ export namespace SystemPrompt {
     return v.filter((s) => typeof s === "string" && s.length > 0)
   }
 
+  /**
+   * Directory an `applyPaths` glob is matched against.
+   *
+   * `Project.fromDirectory` reports `/` as the worktree for a directory belonging to no git
+   * project — a sentinel meaning "no project", not a tree to search. Matching against it
+   * auto-loads a skill because an unrelated file exists elsewhere on the machine: an empty
+   * directory picked up the dbt skills from any `dbt_project.yml` anywhere on disk.
+   *
+   * `/` is only that sentinel when there is no VCS. A git repository genuinely rooted at `/`
+   * reports the same worktree but with `vcs: "git"`, and must keep scanning from its root —
+   * the same distinction `fromDirectory` itself draws when it chooses the value.
+   *
+   * The fallback deliberately narrows to at-or-below the session directory. Outside a repo
+   * there is no project boundary to walk up to, so anything wider is a guess about which of
+   * the machine's files are "this project"; the previous behaviour made that guess and got it
+   * wrong. A marker file above the cwd no longer auto-loads its skill in that case, which is
+   * the intended trade against loading skills from unrelated directories.
+   */
+  export function autoLoadScanRoot(worktree: string, directory: string, vcs: string | undefined): string {
+    return worktree === "/" && !vcs ? directory : worktree
+  }
+
   async function anyMatchInWorktree(globs: string[]): Promise<boolean> {
-    // Search from worktree root so a skill that wants `dbt_project.yml`
-    // catches the file no matter how deep the user's cwd is.
+    // Search from the worktree root, so a skill that wants `dbt_project.yml` catches the file
+    // no matter how deep the user's cwd is — within a project. Outside one there is no root to
+    // search and `autoLoadScanRoot` falls back to the session directory; see its docstring for
+    // why that narrowing is deliberate.
     // Errors propagate to the caller's try/catch (collectAutoLoadedSkills)
     // so the warning log there actually fires.
-    const root = Instance.worktree
+    // `Glob.exists` rather than `scan(...).length > 0`: this only needs to know whether any
+    // file matches, and `scan` walks the whole tree before the caller can look. That cost is
+    // paid once per `applyPaths` skill — two ship builtin — and the root is the worktree, which
+    // is `/` for a directory outside any git repo. Measured from such a directory, the two
+    // scans were ~45s of a ~51s startup, all of it before the first token.
+    const root = autoLoadScanRoot(Instance.worktree, Instance.directory, Instance.project.vcs)
     for (const g of globs) {
-      const matches = await Glob.scan(g, {
-        cwd: root,
-        absolute: true,
-        include: "file",
-        dot: false,
-        symlink: false,
-      })
-      if (matches.length > 0) return true
+      if (
+        await Glob.exists(g, {
+          cwd: root,
+          absolute: true,
+          include: "file",
+          dot: false,
+          symlink: false,
+        })
+      )
+        return true
     }
     return false
   }

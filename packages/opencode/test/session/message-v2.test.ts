@@ -484,7 +484,11 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    const result = ProviderTransform.message(await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], anthropicModel), anthropicModel, {})
+    const result = ProviderTransform.message(
+      await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], anthropicModel),
+      anthropicModel,
+      {},
+    )
     expect(result).toHaveLength(3)
     expect(result[2].role).toBe("tool")
     expect(result[2].content[0]).toMatchObject({
@@ -685,7 +689,7 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
-  test("replaces compacted tool output with placeholder", async () => {
+  test("replays a persisted observation mask, with the legacy placeholder as fallback", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
 
@@ -750,6 +754,11 @@ describe("session.message-v2.toModelMessage", () => {
         ],
       },
     ])
+
+    const mask = "[Tool output cleared — bash(cmd: ls) returned 20 lines, 4.2 KB]"
+    ;(input[1]!.parts[0] as any).state.metadata.observation_mask = mask
+    const replayed = await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model)
+    expect((replayed[2] as any).content[0].output.value).toBe(mask)
   })
 
   test("truncates tool output when requested", async () => {
@@ -788,7 +797,9 @@ describe("session.message-v2.toModelMessage", () => {
       },
     ]
 
-    expect(await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model, { toolOutputMaxChars: 4 })).toStrictEqual([
+    expect(
+      await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], model, { toolOutputMaxChars: 4 }),
+    ).toStrictEqual([
       {
         role: "user",
         content: [{ type: "text", text: "run tool" }],
@@ -1096,7 +1107,11 @@ describe("session.message-v2.toModelMessage", () => {
     ]
 
     expect(
-      ProviderTransform.message(await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], openrouterModel), openrouterModel, {}),
+      ProviderTransform.message(
+        await MessageV2.toModelMessages(input as unknown as MessageV2.WithParts[], openrouterModel),
+        openrouterModel,
+        {},
+      ),
     ).toStrictEqual([
       {
         role: "assistant",

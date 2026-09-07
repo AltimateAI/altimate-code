@@ -107,8 +107,22 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
     process.env["ALTIMATE_AUTO_ANSWER"] = "first"
     const tool = await initTool(QuestionTool)
     const questions = [
-      { question: "Q1", header: "Q1", options: [{ label: "A", description: "" }, { label: "B", description: "" }] },
-      { question: "Q2", header: "Q2", options: [{ label: "C", description: "" }, { label: "D", description: "" }] },
+      {
+        question: "Q1",
+        header: "Q1",
+        options: [
+          { label: "A", description: "" },
+          { label: "B", description: "" },
+        ],
+      },
+      {
+        question: "Q2",
+        header: "Q2",
+        options: [
+          { label: "C", description: "" },
+          { label: "D", description: "" },
+        ],
+      },
     ]
 
     const result = await tool.execute({ questions }, ctx)
@@ -124,8 +138,22 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
   test("no ALTIMATE_AUTO_ANSWER returns Unanswered for every question independently", async () => {
     const tool = await initTool(QuestionTool)
     const questions = [
-      { question: "Q1", header: "Q1", options: [{ label: "A", description: "" }, { label: "B", description: "" }] },
-      { question: "Q2", header: "Q2", options: [{ label: "C", description: "" }, { label: "D", description: "" }] },
+      {
+        question: "Q1",
+        header: "Q1",
+        options: [
+          { label: "A", description: "" },
+          { label: "B", description: "" },
+        ],
+      },
+      {
+        question: "Q2",
+        header: "Q2",
+        options: [
+          { label: "C", description: "" },
+          { label: "D", description: "" },
+        ],
+      },
     ]
 
     const result = await tool.execute({ questions }, ctx)
@@ -185,7 +213,9 @@ describe("tool.question non-interactive autoAnswer mapping", () => {
       else process.env["ALTIMATE_AUTO_ANSWER"] = mode
 
       const tool = await initTool(QuestionTool)
-      const questions = [{ question: "Empty?", header: "Empty", options: [] as { label: string; description: string }[] }]
+      const questions = [
+        { question: "Empty?", header: "Empty", options: [] as { label: string; description: string }[] },
+      ]
 
       const result = await tool.execute({ questions }, ctx)
       expect(askSpy).not.toHaveBeenCalled()
@@ -254,6 +284,46 @@ describe("tool.bash strips ALTIMATE_NON_INTERACTIVE from child env", () => {
         expect(out).toBe("MISSING")
         // Parent process env is untouched — only the child's merged env was stripped.
         expect(process.env["ALTIMATE_NON_INTERACTIVE"]).toBe("1")
+      },
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Workspace engine — bash tool strips ALTIMATE_CODE_HEADLESS from child env.
+// `run` sets it so the engine's refusals degrade to a printed line; a nested
+// entrypoint launched from the bash tool may have a TUI and must not inherit it.
+// Same shape as Gap #7 so a future removal of the delete fails here.
+// ---------------------------------------------------------------------------
+describe("tool.bash strips ALTIMATE_CODE_HEADLESS from child env", () => {
+  let prev: string | undefined
+
+  beforeEach(() => {
+    prev = process.env["ALTIMATE_CODE_HEADLESS"]
+    process.env["ALTIMATE_CODE_HEADLESS"] = "1"
+  })
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env["ALTIMATE_CODE_HEADLESS"]
+    else process.env["ALTIMATE_CODE_HEADLESS"] = prev
+  })
+
+  test("child process does not inherit ALTIMATE_CODE_HEADLESS", async () => {
+    const projectRoot = require("path").join(__dirname, "../..")
+    await Instance.provide({
+      directory: projectRoot,
+      fn: async () => {
+        const bash = await initTool(BashTool)
+        const result = await bash.execute(
+          {
+            command: "printenv ALTIMATE_CODE_HEADLESS || echo MISSING",
+            description: "Echo headless env var from child",
+          },
+          ctx,
+        )
+        expect(result.metadata.exit).toBe(0)
+        expect(result.metadata.output.trim()).toBe("MISSING")
+        expect(process.env["ALTIMATE_CODE_HEADLESS"]).toBe("1")
       },
     })
   })

@@ -1,3 +1,8 @@
+---
+title: Built-in Slash Commands — Altimate Code
+description: "Reference for all built-in slash commands in Altimate Code: /init, /discover, /review, /feedback, /configure-claude, and /configure-codex."
+---
+
 # Commands
 
 ## Built-in Commands
@@ -95,7 +100,7 @@ Create markdown files in `.altimate-code/commands/`:
 ```markdown
 ---
 name: review
-description: Review SQL for anti-patterns and best practices
+description: "Review SQL for anti-patterns and best practices"
 ---
 
 Review the following SQL file for:

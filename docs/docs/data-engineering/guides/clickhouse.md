@@ -1,3 +1,8 @@
+---
+title: "ClickHouse Guide — Altimate Code"
+description: "First-class ClickHouse support in Altimate Code. Add a ClickHouse warehouse and start running SQL analysis in minutes."
+---
+
 # ClickHouse Guide
 
 Altimate Code has first-class ClickHouse support — connect to self-hosted clusters, ClickHouse Cloud, or local Docker instances and use the full suite of SQL analysis, schema inspection, and optimization tools.

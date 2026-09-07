@@ -1,13 +1,23 @@
-import { describe, expect, test, beforeEach, beforeAll, afterAll, mock } from "bun:test"
+import { describe, expect, test, beforeEach, mock } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
-// Disable telemetry via env var instead of mock.module
-beforeAll(() => {
-  process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
-})
-afterAll(() => {
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
-})
+// No telemetry disable needed — Dispatcher.call already wraps every
+// Telemetry.track call in try/catch that swallows all errors, so telemetry
+// firing during a test cannot fail the test. The previous env-var
+// mutation was defensive against nothing and wasn't parallel-safe (issue
+// #1130 — https://github.com/AltimateAI/altimate-code/issues/1130).
+//
+// Concurrency contract: the ``Dispatcher`` module is a process-wide
+// singleton (``nativeHandlers`` Map, ``_ensureRegistered`` hook). These
+// tests intentionally mutate that singleton via ``Dispatcher.reset()``
+// and ``Dispatcher.setRegistrationHook()``. This is safe under bun's
+// DEFAULT behaviour of running test files sequentially in one process,
+// but NOT parallel-safe if the runner is later flipped to ``--concurrency
+// N``. Isolating the dispatcher would require an instance-per-test
+// refactor across the whole module; deferred as a broader tech-debt
+// task (issue #1130 tracks the parallel-safety cleanup for this + the
+// sibling release-adversarial file). Same class of finding as the
+// env-var mutation coderabbit flagged.
 
 describe("Dispatcher", () => {
   beforeEach(() => {

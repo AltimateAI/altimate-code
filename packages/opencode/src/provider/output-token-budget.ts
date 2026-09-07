@@ -1,0 +1,532 @@
+// altimate_change start — keep output reservations inside the provider context window
+import type { Provider } from "./provider"
+import { Log } from "@/util/log"
+import { Token } from "@/util/token"
+
+const log = Log.create({ service: "provider.output-token-budget" })
+
+/** Smallest completion budget worth sending for an agent turn. */
+export const OUTPUT_TOKEN_FLOOR = 1_024
+
+const CLAMP_MARGIN_FRACTION = 0.02
+const CLAMP_MARGIN_MIN = 512
+const ESTIMATE_CHUNK_SIZE = 400
+const MEDIA_TOKEN_ALLOWANCE = 2_048
+const FILE_TOKEN_ALLOWANCE = 16_384
+const PDF_TOKEN_ALLOWANCE = 32_768
+const AUDIO_TOKEN_ALLOWANCE = 8_192
+const VIDEO_TOKEN_ALLOWANCE = 8_192
+const SEMANTIC_MEDIA_BYTES_PER_TOKEN = 64
+const DATA_URL_HEADER_LIMIT = 1_024
+const MIN_REASONING_BUDGET = 1_024
+const EMOJI = /\p{Extended_Pictographic}/u
+const DENSE_ASCII_CHARACTER = /[A-Za-z0-9+/_=-]/
+const DENSE_ASCII_MIN_LENGTH = 32
+const DENSE_ASCII_MIN_UNIQUE = 6
+const DENSE_ASCII_EXTRA_FRACTION = 0.75
+const REASONING_BUDGET_KEYS = new Set(["budgetTokens", "thinkingBudget", "budget_tokens"])
+const CONTEXT_WINDOW_BETAS = new Map([["context-1m-2025-08-07", 1_000_000]])
+const MEDIA_PART_TYPES = new Set([
+  "image",
+  "file",
+  "media",
+  "audio",
+  "video",
+  "file-data",
+  "file-url",
+  "file-id",
+  "image-data",
+  "image-url",
+  "image-file-id",
+])
+const MEDIA_PAYLOAD_KEYS = new Set(["data", "image", "file", "audio", "video", "url", "fileId"])
+const FILE_PART_TYPES = new Set(["file", "media", "file-data", "file-url", "file-id"])
+
+type JsonRecord = Record<string, unknown>
+
+/** Numbers captured when a prompt cannot leave a usable completion budget. */
+export type OutputTokenBudgetInfo = {
+  readonly modelID: string
+  readonly providerID: string
+  readonly inputTokens: number
+  readonly requested: number
+  readonly context: number
+  readonly floor: number
+}
+
+/** Numbers captured when a prompt exceeds a model's dedicated input ceiling. */
+export type InputTokenBudgetInfo = {
+  readonly modelID: string
+  readonly providerID: string
+  readonly inputTokens: number
+  readonly inputLimit: number
+  readonly margin: number
+}
+
+/** Thrown before transport when the prompt leaves no usable completion budget. */
+export class OutputTokenBudgetError extends Error {
+  constructor(readonly info: OutputTokenBudgetInfo) {
+    super(
+      [
+        "Context budget exceeded before the request was sent.",
+        `${info.providerID}/${info.modelID} declares a ${info.context}-token context window,`,
+        `the prompt is ~${info.inputTokens} tokens, and ${info.requested} tokens are reserved for`,
+        `the completion — ${info.inputTokens + info.requested} in total.`,
+        `Even after clamping, fewer than ${info.floor} tokens would remain for the response.`,
+        "Reduce the system prompt (fewer instructions, skills, or AGENTS.md content), lower the",
+        "output reservation via OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX, or use a model with a",
+        "larger context window.",
+      ].join(" "),
+    )
+    this.name = "OutputTokenBudgetError"
+  }
+}
+
+/** Thrown before transport when the estimated prompt exceeds a dedicated input limit. */
+export class InputTokenBudgetError extends Error {
+  constructor(readonly info: InputTokenBudgetInfo) {
+    super(
+      [
+        "Input budget exceeded before the request was sent.",
+        `${info.providerID}/${info.modelID} declares a ${info.inputLimit}-token input limit,`,
+        `the prompt is ~${info.inputTokens} tokens, and ${info.margin} safety tokens are required.`,
+        "Reduce the prompt or use a model with a larger input limit.",
+      ].join(" "),
+    )
+    this.name = "InputTokenBudgetError"
+  }
+}
+
+/** Thrown when preserving enabled reasoning would leave no useful visible response. */
+export class ReasoningTokenBudgetError extends Error {
+  constructor(
+    readonly info: {
+      readonly path: string
+      readonly configured: number
+      readonly maxOutputTokens: number
+    },
+  ) {
+    super(
+      [
+        "The context-window clamp cannot preserve the configured reasoning budget.",
+        `${info.path} is ${info.configured} tokens while maxOutputTokens is ${info.maxOutputTokens},`,
+        `which cannot leave ${OUTPUT_TOKEN_FLOOR} tokens for the visible response.`,
+        "Use a larger-context model, shorten the prompt, or select a lower reasoning effort.",
+      ].join(" "),
+    )
+    this.name = "ReasoningTokenBudgetError"
+  }
+}
+
+/** Return true for plain record-like values used in request payloads. */
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** Merge outgoing request headers with HTTP's case-insensitive last-source precedence. */
+export function mergeRequestHeaders(...sources: readonly unknown[]): Record<string, string> {
+  const result: Record<string, string> = {}
+  const set = (name: unknown, value: unknown) => {
+    if (typeof name !== "string" || typeof value !== "string") return
+    result[name.toLowerCase()] = value
+  }
+  for (const source of sources) {
+    if (!source) continue
+    if (source instanceof Headers) {
+      source.forEach((value, name) => set(name, value))
+      continue
+    }
+    if (Array.isArray(source)) {
+      for (const entry of source) {
+        if (Array.isArray(entry)) set(entry[0], entry[1])
+      }
+      continue
+    }
+    if (!isRecord(source)) continue
+    for (const [name, value] of Object.entries(source)) set(name, value)
+  }
+  return result
+}
+
+/** Count opaque ASCII runs in one bounded-memory pass, including across estimator chunks. */
+function denseAsciiCharacters(input: string): number {
+  let total = 0
+  let length = 0
+  const unique = new Set<string>()
+  const flush = () => {
+    if (length >= DENSE_ASCII_MIN_LENGTH && unique.size >= DENSE_ASCII_MIN_UNIQUE) total += length
+    length = 0
+    unique.clear()
+  }
+  for (const character of input) {
+    if (!DENSE_ASCII_CHARACTER.test(character)) {
+      flush()
+      continue
+    }
+    length++
+    if (unique.size < DENSE_ASCII_MIN_UNIQUE) unique.add(character)
+  }
+  flush()
+  return total
+}
+
+/** Estimate heterogeneous text in small chunks and conservatively count dense or non-ASCII text. */
+function estimateTextTokens(input: string): number {
+  let total = 0
+  for (let offset = 0; offset < input.length; offset += ESTIMATE_CHUNK_SIZE) {
+    const chunk = input.slice(offset, offset + ESTIMATE_CHUNK_SIZE)
+    let ascii = ""
+    let nonAscii = 0
+    let emoji = 0
+    for (const character of chunk) {
+      if (character.codePointAt(0)! <= 0x7f) {
+        ascii += character
+      } else {
+        nonAscii++
+        if (EMOJI.test(character)) emoji++
+      }
+    }
+    const multilingualFloor = Token.estimate(ascii) + nonAscii + emoji
+    total += Math.max(Token.estimate(chunk), multilingualFloor)
+  }
+  // Token.estimate already charges at least one token per 3.7 characters. Adding three quarters
+  // of each dense run establishes a conservative one-token-per-character floor.
+  return total + Math.ceil(denseAsciiCharacters(input) * DENSE_ASCII_EXTRA_FRACTION)
+}
+
+/** Return the first transport payload carried by a semantic media part. */
+function mediaPayload(part: JsonRecord): unknown {
+  for (const key of MEDIA_PAYLOAD_KEYS) {
+    if (part[key] !== undefined && part[key] !== null) return part[key]
+  }
+  return undefined
+}
+
+/** Resolve a media part's MIME type from its declared type, data URL, or URL suffix. */
+function mediaType(part: JsonRecord, payload: unknown): string | undefined {
+  const declared =
+    typeof part.mediaType === "string" ? part.mediaType : typeof part.mime === "string" ? part.mime : undefined
+  if (declared) return declared.split(";", 1)[0].trim().toLowerCase()
+
+  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
+  const prefix = value?.slice(0, DATA_URL_HEADER_LIMIT)
+  const dataType = prefix?.match(/^data:([^;,]+)/i)?.[1]
+  if (dataType) return dataType.toLowerCase()
+  if (value && /\.pdf(?:[?#]|$)/i.test(value.slice(-DATA_URL_HEADER_LIMIT))) return "application/pdf"
+  if (String(part.type).startsWith("image")) return "image/*"
+  return undefined
+}
+
+/** Return an inline payload's decoded byte size without allocating its encoded contents. */
+function inlinePayloadSize(payload: unknown): number | undefined {
+  if (ArrayBuffer.isView(payload)) return payload.byteLength
+  if (payload instanceof ArrayBuffer) return payload.byteLength
+  const value = payload instanceof URL ? payload.href : typeof payload === "string" ? payload : undefined
+  if (!value || /^https?:/i.test(value)) return undefined
+
+  const dataURL = /^data:/i.test(value)
+  const prefix = dataURL ? value.slice(0, DATA_URL_HEADER_LIMIT) : ""
+  const comma = dataURL ? prefix.indexOf(",") : -1
+  // A delimiter outside the bounded header prefix is malformed for admission purposes. Charge
+  // its complete encoded length without scanning or copying the attacker-controlled payload.
+  if (dataURL && comma === -1) return value.length
+  const bodyOffset = comma === -1 ? 0 : comma + 1
+  const bodyLength = value.length - bodyOffset
+  if (comma !== -1 && !/;base64(?:;|$)/i.test(prefix.slice(0, comma))) return bodyLength
+
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
+  return Math.max(0, Math.floor((bodyLength * 3) / 4) - padding)
+}
+
+/** Apply a bounded, parser-free PDF heuristic without trusting document metadata. */
+function pdfTokenAllowance(payload: unknown): number {
+  const bytes = inlinePayloadSize(payload) ?? 0
+  // Page expansion cannot be derived safely from raw bytes: lexical page markers are spoofable,
+  // while structural parsing adds decompression and traversal risks to the request path. Keep the
+  // local estimate best-effort and monotonic; the configured provider remains authoritative for
+  // unusually compact or dense documents.
+  return Math.max(PDF_TOKEN_ALLOWANCE, bytes)
+}
+
+/** Keep semantic media usable on small contexts while making very large inline payloads monotonic. */
+function semanticMediaTokenAllowance(payload: unknown, baseline: number): number {
+  const bytes = inlinePayloadSize(payload) ?? 0
+  // Encoded bytes do not map directly to provider tokens, but a coarse size floor prevents an
+  // arbitrarily large inline recording from receiving the same allowance as a tiny or remote one.
+  return Math.max(baseline, Math.ceil(bytes / SEMANTIC_MEDIA_BYTES_PER_TOKEN))
+}
+
+/** Assign an allowance that matches the semantic media kind rather than charging every byte. */
+function mediaTokenAllowance(part: JsonRecord): number {
+  const payload = mediaPayload(part)
+  const mime = mediaType(part, payload)
+  const type = String(part.type)
+  if (mime?.startsWith("image/") || type.startsWith("image")) return MEDIA_TOKEN_ALLOWANCE
+  if (mime === "application/pdf") return pdfTokenAllowance(payload)
+  if (mime?.startsWith("audio/") || type === "audio") {
+    return semanticMediaTokenAllowance(payload, AUDIO_TOKEN_ALLOWANCE)
+  }
+  if (mime?.startsWith("video/") || type === "video") {
+    return semanticMediaTokenAllowance(payload, VIDEO_TOKEN_ALLOWANCE)
+  }
+  if (FILE_PART_TYPES.has(type)) {
+    return Math.max(FILE_TOKEN_ALLOWANCE, inlinePayloadSize(payload) ?? 0)
+  }
+  return MEDIA_TOKEN_ALLOWANCE
+}
+
+/** Mark only actual ModelMessage content parts whose payload is provider media. */
+function messageMediaAllowances(messages: readonly unknown[]): WeakMap<object, number> {
+  const result = new WeakMap<object, number>()
+  const visited = new WeakSet<object>()
+
+  const visitContent = (content: unknown) => {
+    if (!Array.isArray(content) || visited.has(content)) return
+    visited.add(content)
+    for (const part of content) {
+      if (!isRecord(part)) continue
+      if (MEDIA_PART_TYPES.has(String(part.type))) result.set(part, mediaTokenAllowance(part))
+
+      // Tool-result media is nested in the AI SDK's typed content output.
+      if (part.type !== "tool-result" || !isRecord(part.output)) continue
+      if (part.output.type === "content") visitContent(part.output.value)
+    }
+  }
+
+  for (const message of messages) {
+    if (isRecord(message)) visitContent(message.content)
+  }
+  return result
+}
+
+/** Serialize request structures without expanding semantic media payloads into fake text tokens. */
+function serializeForEstimate(
+  value: unknown,
+  mediaContainers?: WeakMap<object, number>,
+): { readonly text: string; readonly mediaTokens: number } {
+  let mediaTokens = 0
+  const ancestors: object[] = []
+  const text =
+    JSON.stringify(value, function (key, child) {
+      while (ancestors.length > 0 && ancestors.at(-1) !== this) ancestors.pop()
+
+      const mediaField =
+        typeof this === "object" && this !== null && mediaContainers?.has(this) && MEDIA_PAYLOAD_KEYS.has(key)
+      if (mediaField && child !== undefined && child !== null) {
+        return "[media omitted]"
+      }
+      if (typeof child === "object" && child !== null) {
+        if (ancestors.includes(child)) return "[circular value omitted]"
+        // Count transport occurrences, not object identities: JSON duplicates shared aliases.
+        mediaTokens += mediaContainers?.get(child) ?? 0
+        ancestors.push(child)
+      }
+      return child
+    }) ?? ""
+  return { text, mediaTokens }
+}
+
+/** Collect Anthropic beta values only from header-shaped records. */
+function anthropicBetaValues(source: unknown, depth = 0): string[] {
+  if (!isRecord(source) || depth > 4) return []
+  const result: string[] = []
+  for (const [key, value] of Object.entries(source)) {
+    const normalized = key.toLowerCase()
+    if (normalized === "anthropic-beta") {
+      if (typeof value === "string") result.push(value)
+      if (Array.isArray(value)) result.push(...value.filter((item): item is string => typeof item === "string"))
+      continue
+    }
+    if (normalized === "headers" || normalized.endsWith("headers")) {
+      result.push(...anthropicBetaValues(value, depth + 1))
+    }
+  }
+  return result
+}
+
+/** Resolve catalog context limits with known provider beta headers applied. */
+export function effectiveContextWindow(input: {
+  readonly model: Provider.Model
+  readonly headerSources?: readonly unknown[]
+}): number {
+  let context = input.model.limit.context
+  let finalValues: string[] = []
+  for (const source of input.headerSources ?? []) {
+    const values = anthropicBetaValues(source)
+    if (values.length > 0) finalValues = values
+  }
+  for (const value of finalValues) {
+    for (const beta of value.split(/[\s,]+/)) {
+      context = Math.max(context, CONTEXT_WINDOW_BETAS.get(beta) ?? 0)
+    }
+  }
+  return context
+}
+
+/** Estimate the text, finalized tools, instructions, and media allowance sent in one request. */
+export function estimateInputTokens(input: {
+  readonly system: readonly string[]
+  readonly messages: readonly unknown[]
+  readonly tools?: Readonly<Record<string, unknown>>
+  readonly instructions?: unknown
+}): number {
+  let total = 0
+  if (input.system.length > 0) {
+    const system = serializeForEstimate(input.system.map((content) => ({ role: "system", content })))
+    total += estimateTextTokens(system.text)
+  }
+
+  const messages = serializeForEstimate(input.messages, messageMediaAllowances(input.messages))
+  total += estimateTextTokens(messages.text) + messages.mediaTokens
+
+  if (input.tools !== undefined) {
+    const tools = serializeForEstimate(input.tools)
+    total += estimateTextTokens(tools.text)
+  }
+
+  if (input.instructions !== undefined) {
+    const serialized = serializeForEstimate(input.instructions)
+    total += estimateTextTokens(serialized.text) + serialized.mediaTokens
+  }
+  return total
+}
+
+/** Resolve a direct or lazy input estimate after cheap no-op checks have passed. */
+function resolveInputTokens(value: number | (() => number)): number {
+  return typeof value === "function" ? value() : value
+}
+
+/** Keep estimator drift proportional when a credible limit is smaller than the default margin. */
+function safetyMargin(inputTokens: number, limit: number): number {
+  const proportionalMinimum = Math.max(1, Math.ceil(limit * CLAMP_MARGIN_FRACTION))
+  return Math.max(Math.ceil(inputTokens * CLAMP_MARGIN_FRACTION), Math.min(CLAMP_MARGIN_MIN, proportionalMinimum))
+}
+
+/** Clamp a completion reservation so estimated input, margin, and output fit the effective window. */
+export function clampOutputTokens(input: {
+  readonly model: Provider.Model
+  readonly requested: number | undefined
+  readonly inputTokens: number | (() => number)
+  readonly context?: number
+}): number | undefined {
+  const requested = input.requested
+  if (requested === undefined) return undefined
+
+  const context = input.context ?? input.model.limit.context
+  const inputLimit = input.model.limit.input
+  if ((!context || context <= 0) && (!inputLimit || inputLimit <= 0)) return requested
+
+  const inputTokens = resolveInputTokens(input.inputTokens)
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0) return requested
+
+  if (inputLimit && inputLimit > 0) {
+    const margin = safetyMargin(inputTokens, inputLimit)
+    if (inputTokens + margin > inputLimit) {
+      throw new InputTokenBudgetError({
+        modelID: input.model.id,
+        providerID: input.model.providerID,
+        inputTokens,
+        inputLimit,
+        margin,
+      })
+    }
+  }
+  if (!context || context <= 0) return requested
+  const margin = safetyMargin(inputTokens, context)
+  if (inputTokens + requested + margin <= context) return requested
+
+  // Do not reject a model for failing to reach a floor above its own reservation.
+  const floor = Math.min(OUTPUT_TOKEN_FLOOR, requested)
+  const clamped = Math.floor(context - inputTokens - margin)
+  if (clamped < floor) {
+    throw new OutputTokenBudgetError({
+      modelID: input.model.id,
+      providerID: input.model.providerID,
+      inputTokens,
+      requested,
+      context,
+      floor,
+    })
+  }
+  log.warn("clamped output token reservation to fit context window", {
+    providerID: input.model.providerID,
+    modelID: input.model.id,
+    context,
+    inputTokens,
+    requested,
+    clamped,
+  })
+  return clamped
+}
+
+/** Recursively copy and clamp explicit reasoning-token fields in provider options. */
+function transformReasoningBudgets(
+  value: JsonRecord,
+  ceiling: number,
+  maxOutputTokens: number,
+  path?: readonly string[],
+): JsonRecord
+function transformReasoningBudgets(
+  value: unknown,
+  ceiling: number,
+  maxOutputTokens: number,
+  path?: readonly string[],
+): unknown
+function transformReasoningBudgets(
+  value: unknown,
+  ceiling: number,
+  maxOutputTokens: number,
+  path: readonly string[] = [],
+): unknown {
+  if (Array.isArray(value)) {
+    let changed = false
+    const result = value.map((item, index) => {
+      const next = transformReasoningBudgets(item, ceiling, maxOutputTokens, [...path, String(index)])
+      changed ||= next !== item
+      return next
+    })
+    return changed ? result : value
+  }
+  if (!isRecord(value)) return value
+
+  let result = value
+  for (const [key, child] of Object.entries(value)) {
+    let next = child
+    if (REASONING_BUDGET_KEYS.has(key) && typeof child === "number" && child > 0 && child > ceiling) {
+      if (ceiling < MIN_REASONING_BUDGET) {
+        throw new ReasoningTokenBudgetError({
+          path: [...path, key].join("."),
+          configured: child,
+          maxOutputTokens,
+        })
+      }
+      next = ceiling
+      log.warn("clamped reasoning token budget with output reservation", {
+        path: [...path, key].join("."),
+        configured: child,
+        clamped: ceiling,
+        maxOutputTokens,
+      })
+    } else {
+      next = transformReasoningBudgets(child, ceiling, maxOutputTokens, [...path, key])
+    }
+    if (next !== child) {
+      if (result === value) result = { ...value }
+      result[key] = next
+    }
+  }
+  return result
+}
+
+/** Clamp explicit thinking budgets while preserving room for a visible response. */
+export function clampReasoningBudget(
+  options: Record<string, any>,
+  maxOutputTokens: number | undefined,
+): Record<string, any> {
+  if (maxOutputTokens === undefined) return options
+  const ceiling = Math.floor(maxOutputTokens - OUTPUT_TOKEN_FLOOR)
+  return transformReasoningBudgets(options, ceiling, maxOutputTokens)
+}
+
+export * as OutputTokenBudget from "./output-token-budget"
+// altimate_change end

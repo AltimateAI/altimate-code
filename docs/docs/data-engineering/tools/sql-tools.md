@@ -1,3 +1,8 @@
+---
+title: "SQL Tools — Altimate Code"
+description: "Execute SQL against any connected warehouse using Altimate Code's sql_execute tool with full type safety."
+---
+
 # SQL Tools
 
 ## sql_execute

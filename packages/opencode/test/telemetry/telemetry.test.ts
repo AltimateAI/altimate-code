@@ -1629,6 +1629,7 @@ describe("telemetry.memory", () => {
         session_id: "",
         version: "0.5.9",
         is_upgrade: false,
+        install_method: "curl",
       })
     }).not.toThrow()
   })

@@ -5,6 +5,121 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0-beta.1] - 2026-09-07
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Added
+
+- **Altimate Base — a free, no-signup, no-API-key hosted model.** Choose it from the first-run picker, `/connect`, or `/model`. Rate limited; requests and responses are logged and may be used to improve Altimate's products, linked to a persistent per-installation identifier (**pseudonymous, not anonymous**) — avoid sending secrets or confidential code. The consent dialog defaults to **No**; nothing is sent until you accept. `ALTIMATE_BASE_GATEWAY_URL` lets operators point it at a self-hosted gateway (HTTPS required, no embedded credentials). (#1199)
+- **Five deterministic completion-gate validators** (`dbt-build-green`, `dbt-nothing-built`, `dbt-deliverable-names`, `dbt-incremental-config`, `dbt-dialect-guard`) that refuse to terminate a session on a broken, vacuous, or misnamed dbt result. **Opt-in, shadow-mode only** for now (`ALTIMATE_VALIDATORS_SHADOW=1`); off by default. (#1175)
+
+### Changed
+
+- **Big Pickle retired** as a new-user option. Existing users are detected on launch and offered Altimate Base through the consent gate (not silently migrated); declining routes to the model picker. (#1199)
+- **Agent `data-qa` renamed to `analyst`**, now the documented "ask questions about your data" agent. Existing `default_agent: "data-qa"` configs keep working — they fall back to `analyst` with a one-time notice. (#1239)
+- Builder prompt split into an invariant core plus named packs (byte-identical assembly), with an opt-in data-qa profile. (#1217)
+
+### Breaking Changes
+
+- **DuckDB and SQLite connections now require an explicit `path`.** A missing `path` used to silently default to an in-memory store — which could read a populated on-disk store as empty — and now errors. Set `"path": ":memory:"` if you want in-memory behavior. See [warehouses.md](docs/docs/configure/warehouses.md). (#1204)
+
+### Fixed
+
+- **Ledger redaction** — a `curl -u user:pass` in tool output could leak unredacted into the compaction ledger after #1117's path-masking ate the `curl` token; redaction now derives curl context from the pre-mask string independently. (#1246)
+- **Telemetry error text** now masks filesystem paths (home directories, cloud URIs, Windows/UNC). (#1117)
+- **Safety threat messages** no longer echo raw non-SQL content that could resurrect a redacted secret. (#1111)
+- `--dir` no longer reads a populated warehouse store as empty. (#1204)
+- Drivers: load from the location the failing runtime named; concurrency-safe installs; a 2s deadline no longer fails healthy DuckDB stores; a broken client now says so. (#1201, #1198)
+- Recovered driver-e2e review debt — false-skip, `file:` URI checks, Windows paths, telemetry, docs. (#1238)
+- `auth login` accepts a provider id and diagnoses plan/account on a Codex 400. (#1181)
+- Skills no longer walk the whole tree to answer "does any file match". (#1213)
+- Main CI `dbt-tools E2E` job un-broken — restored the missing `--version` fallback that killed the setup script under `set -euo pipefail`. (#1252)
+
+## [0.10.0] - 2026-09-02
+
+Workspaces grow from a memory-only pilot into a working surface: a bound workspace now supplies its custom skills, attaches its own engine, and routes warehouse tools through it. Alongside that, a run no longer dies when one oversized tool result overflows the window, and the ChatGPT-subscription model picker was rebuilt against what the backend actually serves. Everything workspace-related stays behind `ALTIMATE_WORKSPACE=1` and is invisible to anyone not opted in — but the harness-reliability changes are the largest part of this release and apply to **every** session, opted in or not.
+
+### Added
+
+- **A bound workspace's custom skills sync into the project.** Skill bundles attached to the workspace are pulled into `.altimate-code/skill/_workspace/<publicId>/`, where the existing discovery finds them with no other change — a synced skill is listed and invoked exactly like a local one. The tree carries its own `.gitignore` so it never reaches version control, is removed when you opt out or disconnect, and a directory the client did not create is never touched. (#1172)
+- **The bound workspace's engine attaches as a derived MCP overlay.** In a bound project the `datamate` MCP entry is derived at config load from the workspace's pinned local engine — never written to disk, overriding IDE, hosted and stale entries. Each turn boundary re-reads the binding, replaces the entry on re-link, and retries a failed handshake once. (#1167)
+- **Warehouse tools route through the workspace's engine.** A native warehouse capability is shadowed only when the engine materialised the matching tool and attach attests the engine is its own; the redirect happens after the native safety checks, and fails open with a reason otherwise. `--integrations=local` turns it off. (#1168)
+- **An offer to install the engine a bound workspace needs.** A missing engine used to be a toast with a command in it. It is now an offer — Install now / Copy command / Not now — and the install only ever runs from an explicit choice; the next turn boundary picks the installed engine up. (#1169)
+- **The model is told what a bound workspace serves.** Redirecting to an engine tool did not make the model choose it first, so every session paid a wasted turn learning the rule. The workspace's capabilities are now stated up front. (#1182)
+- **Installs are counted from the shell installers, not just npm.** (#1096)
+
+### Fixed
+
+- **Warehouse SDKs are resolved from disk instead of reported missing.** A bare `import("snowflake-sdk")` inside the compiled binary resolved against bunfs, which has no `node_modules`, so an SDK the user had already installed was invisible and reported as "not installed" — the single root cause behind nine open issues, five of them filed automatically by the telemetry scanner. (#1122)
+- **Startup scans prune dependency trees again.** `Glob.Options` lost its `ignore` field in the v1.17.9 bridge, so the two `**/mcp.json` scans filtered results after every directory had already been opened and read. On a repo with `node_modules` installed that cost 12.93 CPU-seconds on every startup. Two intended consequences: a `favicon.*` inside `node_modules`/`dist` is no longer eligible as the project icon, and `altimate-code check` with no file arguments no longer picks up vendored SQL. (#1184)
+- **Release binaries embed the live models.dev catalog.** Every platform binary was built with a checked-in test fixture as its bundled catalog, whose newest entry was dated 2026-03-30; verified against the shipped 0.9.7 binary in an isolated `HOME`. (#1188)
+- **The ChatGPT-subscription model allowlist matches the backend.** The filter was built from the models.dev catalog rather than what the Codex endpoint serves, so it was wrong in both directions: `gpt-5.2`, `gpt-5.6` and `gpt-5.3-codex` were offered and rejected with HTTP 400, while the current flagship subscription models `gpt-5.6-sol`, `gpt-5.6-luna` and `gpt-5.6-terra` were hidden. Every id was verified against a live Pro credential and the `includes("codex")` substring auto-allow — which cannot express the real policy — was replaced with exact matching. The filter now matches on `api.id` rather than the config map key, so a model aliased in config is no longer deleted. (#1179, closes #1178)
+- **`gpt-5.4` and `gpt-5.4-mini` are retired from the picker.** Both retired backend-side on 2026-08-31; the replacements are `gpt-5.6-terra` and `gpt-5.6-luna`. (#1190)
+- **A large prompt no longer gets a hard 400 before generating anything.** The per-model output-token reservation never consulted `limit.context`, so on a model where prompt and completion share one window a large system prompt pushed input plus reservation past it. The reservation is now clamped against the context window. (#1196)
+- **A run survives a single oversized tool result.** Previously the recovery compaction resent the full conversation, overflowed the same way and terminated with "Session too large to compact". It now summarizes what fits, with tightened context-safety margins and compaction fidelity. (#1171)
+- **A credential could survive redaction and be replayed.** The mask that replaces cleared tool output is resent on every later request, and two of its fields bypassed the redactor — so an AWS key, an OpenAI key, a `curl` basic-auth value or a signed URL already in the conversation could still be transmitted after the output it came from was pruned. Both fields now go through the same redactor as the rest of the ledger, which also learned to recognise `curl.exe` and path-qualified `curl`. (#1171)
+- **Interactive chat no longer ends answers with a literal `DONE`.** The run-mode completion token was declared on the `builder` agent, which is also the agent behind ordinary conversation, and nothing stripped the token before rendering — so it was appended to final answers in normal chat. It is now scoped to run mode. (#1171)
+- **MCP diagnostics say what actually went wrong.** `mcp status` now reports each configured server's real state, including drift between discovered and on-disk config. (#1160) `server unavailable` logged the constant string `"failed"` and discarded `status.error`, the field holding the real message — a `401 Unauthorized`, a transport error, the actual cause. (#1159)
+- **The marker check runs in a fresh worktree.** `script/upstream/analyze.ts` imported `minimatch` from the repo root, where it was never declared, so the check failed with `Cannot find package minimatch` before it could run. (#1177)
+
+## [0.9.7] - 2026-08-25
+
+Grep/search reliability fix for everyone, a Codex model-picker unblock, and a first, opt-in look at Workspaces — shared project binding with cloud-synced memory.
+
+### Fixed
+
+- **`grep`/`glob` no longer return nothing because of a single bad match.** One oversized, unparseable, or non-UTF-8 ripgrep record — a minified bundle, a source map, a one-line JSON/CSV fixture, anywhere in the searched tree — used to fail the entire search stream and silently discard every match already found in unrelated files. Telemetry showed 74 machines / 83 sessions over 7 days on v0.9.3/v0.9.4. Records are independent of their neighbours, so a bad one is now logged and skipped instead of aborting the rest of the search; the same fix landed in the legacy `/find` parser, and an invalid search pattern now correctly returns HTTP 400 instead of 500. (#1094)
+- **ChatGPT Pro/Plus (Codex tier) users can pick `gpt-5.5` and `gpt-5.6`.** Both were live on OpenAI's side already, but the fork's OAuth allowlist hadn't been bumped past `gpt-5.4-mini` — any snapshot model not on the allowlist (and not containing "codex") was silently deleted from the picker before it ever reached you. Fixed; API-tier-only variants (`pro`, `luna`, `sol`, `terra`) stay out until confirmed available on the subscription tier. (#1133, closes #1132)
+- **The models.dev catalog cache no longer crashes or poisons itself on a bad response.** A non-JSON or malformed 2xx body is now rejected before it's parsed or cached, instead of throwing mid-load or writing garbage the next run would trust. The unconditional fetch that used to run at module import — the cause of a v0.9.4 CI hang under restricted DNS — is gone; short-lived commands now rely on the bundled snapshot / disk cache rather than a live network call, so models added to models.dev between releases won't show up in short-lived commands until the next release. A narrower hang path can still occur in dev-mode builds without the bundled snapshot (tracked in #1144). (#1085)
+
+### Added
+
+- **Workspaces — pilot, opt-in via `ALTIMATE_WORKSPACE=1`, off by default.** A first look at linking a project to a shared Altimate workspace: a post-scan prompt plus a new `altimate-code link` subcommand to create or bind one, a browser-based setup handoff, and memory blocks that sync to the bound workspace so a team shares context. Nothing about this is visible unless the pilot flag is set — no new prompts, network calls, or CLI surface for anyone not opted in. Binding now explicitly tells you that saved memory blocks sync to the workspace if memory is enabled for it. (#1099, #1100, #1116)
+- **`altimate_memory_refresh` tool.** Ask the CLI mid-session to re-fetch workspace memory instead of waiting for a new session — closes a gap where a running session could never pick up a memory block written after it started. `altimate_memory_read` now shows the same workspace-merged view the model actually sees, rather than local content only. (#1123)
+
+### Changed
+
+- **Public-repo hygiene: a pre-push scan for internal tracker references, and a hardened build-staleness guard.** A local pre-push hook scans branch names, commit messages, and diff content for Jira-key-shaped and known internal-hostname references before they can land in the public repo (no CI-side backstop yet — local hook only, tracked in #1141). The staleness guard behind the release smoke test now hashes every embedded build input — workspace packages, `tsconfig.json`, the lockfile — instead of only walking `src/`/`script/` mtimes, closing several ways a binary could go stale without the guard noticing. (#1085)
+
+## [0.9.6] - 2026-08-23
+
+Correctness release: `check --checks {validate,semantic,grade,pii,safety,policy}` and the `altimate-core-*` tools (`migration`, `compare`, `track-lineage`, `query-pii`, `classify-pii`) now tell you the truth. Several previously returned false-clean or wrong output — teams gating CI on `check --fail-on error|warning` may see new failures on unchanged SQL. **These are real findings the tool previously missed, not regressions in your code.** Also fixes a data-hygiene bug where truncated tool-output files were being deleted the moment they were written.
+
+### Changed
+
+- **`check --checks *` now surfaces the findings it was missing — expect newly-failing CI runs.** `altimate-core` upgrade `0.5.1 → 0.7.0` plus a consumer-contract sync catches a class of latent shape-mismatch bugs where the CLI was reading fields the engine no longer emits and rendering false-clean output as a result. Concretely: (a) `check --checks validate` gated on the wrong field and passed every file, now maps `ValidationError.location` and fails closed on engine failure; (b) `check --checks semantic` treated `valid:true` as clean, but `valid` means "plannable" — cartesian products came back "OK" for months, now reads `findings` and never gates on `valid`; (c) `check --checks grade` read fields `evaluate()` doesn't return, so no grade or finding ever surfaced, now reads `overall_grade`/`scores.overall`/`lint.findings` (with nested findings from `validation.errors` + `safety.threats`); (d) `check --checks pii` mapped the column name to the numeric column-position field and printed `[object Object]` for `{ Custom: string }` classifications, now reports the exposing alias and stringifies properly; (e) `check --checks policy` titled on `pass` (engine returns `allowed`), so clean SQL always rendered "VIOLATIONS FOUND", now inverted; (f) `check --checks safety` maps engine `high → error` and `medium → warning` (previously both degraded to `info`), so `--fail-on error|warning` no longer silently passes high-risk SQL injection threats; a new `unbalanced_quote` safety rule ships from the engine. Findings' `rule` field (when set — `lint` findings may omit it if the engine didn't attach one) names the rule in `--format json` output — that's how the safety and policy catalog is discovered in practice. (#1090)
+- **`altimate-core-migration` tool no longer renders "SAFE" for destructive migrations.** Previously read a non-existent `risks` field; every migration including `DROP COLUMN` came back safe. Now reads `findings`/`safe`/`overall_risk` (engine `MigrationResult`); never renders SAFE on engine error; counts only non-"safe" findings as risks. (#1090)
+- **`altimate-core-compare` tool no longer says "IDENTICAL" for different queries.** Read a non-existent `differences` field; different SQL always compared equal. Now reads the engine's `identical`/`diff_count`/`diffs` shape with an error-gated title. (#1090)
+- **`altimate-core-track-lineage` no longer returns "0 edges" for everything.** The tool read `edges` off the top-level result; the engine has always emitted them at `queries[].edges`, so lineage tracking silently produced nothing. Now collects correctly, renders `impact_map`, formats `{table, column}` refs, and renders ERROR instead of "0 edges" when the engine call itself fails. (#1090)
+- **`schema.detect_pii` returned zero findings for every scan.** Same shape-mismatch class: the detector read `piiData.findings`, but the engine's `PiiReport` is `{ columns, pii_count, … }`. Both cache and live paths now filter `classification !== "None"` through the shared `piiColumnsFromReport` helper. Malformed `PiiReport` shapes now throw rather than silently yield zero findings. Failed per-column classifications flip `success` to `false` — the schema-detect-pii tool renders "PII Scan: ERROR" with any partial findings attached, instead of a clean "no findings" verdict. (#1090)
+- **`altimate-core-{compare,column-lineage,extract-metadata,import-ddl}` no longer crash on the default invocation.** Empty-string dialects now coerce to `undefined` before hitting `Schema.fromDdl`, centralized as `dialectHint()` in `native/engine-coerce.ts` and applied across all 7 dialect-forwarding handlers. (#1090)
+
+### Fixed
+
+- **Truncated tool-output files were being deleted the moment they were written (since 2026-08-14).** `Identifier.create` packs `timestamp * 4096 + counter` into 6 bytes and wraps every ~795 days; the 26th wrap landed 2026-08-14T11:19:55Z. Both truncation cleanups (`tool/truncate.ts` Effect service and `tool/truncation.ts` legacy module — used by bootstrap, bash, prompt) computed a pre-wrap cutoff astronomically larger than every post-wrap file's decoded timestamp, so every truncated tool output written after Aug 14 was garbage-collected on the next cleanup pass. Both cleanups now age files by `mtime` (which doesn't wrap); `stat` failures keep the file (deletion fails safe, so a dangling symlink or transient FS error can't wipe real cached truncations). The Effect-service cleanup now `stat`s through the injected `FSUtil.Service` for consistency with every other operation. Tagged `upstream_fix` — the wrap-prone encoding is upstream OpenCode code. (#1113, closes #1112)
+- **Native bridge no longer poisons itself for the process lifetime on a transient NAPI load failure.** The lazy registration hook was nulled *before* the `await fn()` that loads all bridge handler modules; if the altimate-core NAPI binding failed to load mid-sequence (older glibc, unusual arch, permissions), every subsequent `Dispatcher.call` — not just the failing one — threw `No native handler for X` for the rest of the process, and the CLI had to be restarted. Registration is now cached as an in-flight promise: concurrent callers share one attempt, and on failure the cached promise is cleared so subsequent calls can retry. (v0.9.6 review)
+
+## [0.9.5] - 2026-08-10
+
+Windows `grep` back for the ~16% of Windows users it silently broke since v0.9.2, plus a mid-session YOLO toggle and a welcome panel that stops eating half of narrow terminals.
+
+### Added
+
+- **`Ctrl+Y` toggles YOLO mode mid-session.** Previously YOLO was launch-time only — you either started the CLI with `--yolo` / `ALTIMATE_CLI_YOLO=true` or opened a new one. Now you can flip it on or off from inside the TUI. Enabling requires a one-tap confirmation; disabling is instant. The toggle is **session and subagent scoped and lives in memory only** — restart the CLI and it defaults back to whatever `--yolo`, `ALTIMATE_CLI_YOLO`, or `OPENCODE_YOLO` was at launch. Explicit `deny` rules stay enforced (`DROP DATABASE`, `DROP SCHEMA`, `TRUNCATE` remain blocked even with the toggle on). Heads-up: `Ctrl+Y` is `readline`'s "yank" keystroke in some shells — the toggle defaults to "No" on the confirmation, so a stray keypress can't do anything dangerous. (#1078)
+
+### Fixed
+
+- **Windows `grep` for the ~16% of Windows users it was silently broken for.** Since v0.9.2, ripgrep extraction shelled out to `powershell.exe` for the download's zip, and 99 of 617 Windows machines in a 14-day telemetry window couldn't complete the extraction — the tool failed silently on `grep` / `glob` from that point on. Extraction is now in-process via `@zip.js/zip.js` (`checkSignature: true`, exact-pinned) with atomic staged-then-renamed installs, no PowerShell dependency at all. Landed with a real Windows CI job (`windows-ripgrep-e2e`) that runs with PowerShell stripped from `PATH`, so this class of regression can't come back silently. (#1074, closes #1072)
+- **Welcome panel no longer eats 40% of narrow or short terminals.** On anything smaller than ~110 cols wide or ~44 rows tall the panel now scales through three responsive tiers instead of holding the full desktop-sized dimensions. Landed in two rounds — the first added the breakpoint function; the second corrected the width measurement so the `full` tier no longer fired at ~84 usable cols. (#1067, #1069, #1071)
+- **Telemetry opt-out honors `=1` and case-insensitive `true`, and finally wires up `OPENCODE_DISABLE_TELEMETRY`.** `ALTIMATE_TELEMETRY_DISABLED=1` and `=TRUE` used to be silently ignored (only `=true` worked). The v0.9.4 CHANGELOG advertised `OPENCODE_DISABLE_TELEMETRY=1` as an opt-out env var but that name was wired into test fixtures only, never checked in product — users who set it based on the release notes were not opted out. Both env vars now route through a shared helper that accepts `"true"` / `"TRUE"` / `"1"`. If you set either one and expected it to work, this release makes it actually work. (#1086)
+
+### Changed
+
+- **`cli_context` on the sign-in URL for PostHog session correlation.** After successful sign-in, the frontend registers the CLI machine-id as the `cli_machine_id` PostHog super-property so CLI activity is attributed to the authenticated account in aggregate funnel analytics. The value travels in the URL *fragment* (`#cli_context=…`, not a query string) so the durable identifier stays out of server access logs, CDN/WAF, and the `Referer` header — the frontend reads it via `location.hash`. (#1068)
+- **First-run onboarding and review feature usage now emit funnel telemetry.** New event types: `activation_menu_shown`, `activation_job_selected`, `first_prompt_sent`, `environment_scan_completed`, plus review-lane latency and outcome events. All existing opt-out mechanisms (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`, `telemetry.disabled` in config) gate every new event; full list in `docs/docs/reference/telemetry.md`. (#1049, #1064)
+- **UTM parameters on outbound `altimate.ai` marketing links.** Non-functional; helps attribute web traffic back to the CLI. (#1063)
+
 ## [0.9.4] - 2026-07-31
 
 Onboarding UX + first-run OAuth reliability. Ships the CLI's first-run scan + activation menu (Altimate LLM Gateway top of picker; bundled jaffle-shop DuckDB sample for users with no warehouse yet), then hardens the sign-in flow that path leads into.

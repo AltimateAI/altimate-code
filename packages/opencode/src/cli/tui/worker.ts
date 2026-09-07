@@ -34,6 +34,11 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
 // self-repair.
 import { syncDatamateUrlFromVscodeMcp } from "@/altimate/datamate-transport"
 // altimate_change end
+// altimate_change start — register Altimate Base only across the private parent/worker RPC boundary
+import { FreeTier } from "@/altimate/free/client"
+import { FreeTierConsent } from "@/altimate/free/consent"
+import { FreeTierCapability } from "@/altimate/free/capability"
+// altimate_change end
 
 // altimate_change — shared with the withTimeout budget in cli/cmd/tui.ts stop(), so the coupling
 // is enforced by the compiler rather than by a comment.
@@ -85,8 +90,25 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
+// altimate_change start — worker-local, expiring capabilities gate every registration mutation.
+// `issueArmer()` can succeed exactly once per process; this is that one legitimate call — see
+// capability.ts for why that makes the resulting token unforgeable by any other in-process code.
+const altimateBaseRegistration = FreeTierConsent.createRegistrationConsentGate({
+  arm: FreeTierCapability.issueArmer(),
+  register: (token) => FreeTier.registerAfterConsent(token),
+  onUnexpectedError: (error) => console.error("[altimate-base] registration failed", error),
+})
+// altimate_change end
 
 export const rpc = {
+  // altimate_change start — install and consume a private capability only after disclosure acceptance
+  setAltimateBaseConsentToken(input: { token: string }) {
+    altimateBaseRegistration.setToken(input)
+  },
+  async registerAltimateBase(input: { token: string }) {
+    return altimateBaseRegistration.register(input)
+  },
+  // altimate_change end
   async fetch(input: { url: string; method: string; headers: Record<string, string>; body?: string }) {
     // altimate_change start — no request is served until the datamate entry heal
     // completes (already-resolved after the first request; effectively free thereafter).

@@ -1,3 +1,8 @@
+---
+title: LSP Server Integration — Altimate Code
+description: "Built-in Language Server Protocol (LSP) support in Altimate Code for TypeScript, Deno, Vue, ESLint, and more."
+---
+
 # LSP Servers
 
 altimate integrates with Language Server Protocol (LSP) servers for diagnostics, completions, and code intelligence.

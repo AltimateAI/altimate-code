@@ -1,3 +1,8 @@
+---
+title: "Agent Training — Corrections That Stick"
+description: "Teach Altimate Code agents once and they remember forever. Corrections propagate to your whole team via shared training files."
+---
+
 # Training: Corrections That Stick
 
 > **Correct the agent once. It remembers forever. Your team inherits it.**

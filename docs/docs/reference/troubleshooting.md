@@ -1,3 +1,7 @@
+---
+title: "Troubleshooting — Altimate Code"
+description: "Fix common Altimate Code installation and runtime issues including binary naming problems and path configuration."
+---
 # Troubleshooting
 
 ## Installation

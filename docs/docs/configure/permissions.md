@@ -1,3 +1,8 @@
+---
+title: Permissions — Altimate Code
+description: "Set allow, ask, or deny permissions for Altimate Code tool actions globally or per-project."
+---
+
 # Permissions
 
 Permissions control which tools agents can use and what actions they can perform.

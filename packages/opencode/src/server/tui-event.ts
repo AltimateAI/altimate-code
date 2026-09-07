@@ -31,6 +31,12 @@ export const TuiEvent = {
         ]),
         Schema.String,
       ]),
+      // altimate_change start — the workspace engine install offer is published
+      // as a command for the TUI plugin, and an attached headless run reads the
+      // same stream: the session it was raised for lets that run print only its
+      // own offer, not another session's in the same directory.
+      sessionID: Schema.optional(Schema.String),
+      // altimate_change end
     },
   }),
   ToastShow: EventV2.define({

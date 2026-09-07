@@ -10,6 +10,7 @@ import * as core from "@altimateai/altimate-core"
 import { register } from "../dispatcher"
 import { schemaOrEmpty, resolveSchema } from "../schema-resolver"
 import { preprocessIff, postprocessQualify } from "../altimate-core"
+import { EngineCoerce } from "../engine-coerce"
 import type {
   SqlAnalyzeResult,
   SqlAnalyzeIssue,
@@ -37,7 +38,8 @@ export function registerAllSql(): void {
 
       const lint = JSON.parse(JSON.stringify(lintRaw))
       const semantics = JSON.parse(JSON.stringify(semanticsRaw))
-      const safety = JSON.parse(JSON.stringify(safetyRaw))
+      // Redact raw-input echoes (multi_statement quotes the input verbatim).
+      const safety = EngineCoerce.redactScan(JSON.parse(JSON.stringify(safetyRaw))) as any
 
       const issues: SqlAnalyzeIssue[] = []
 
@@ -183,7 +185,7 @@ export function registerAllSql(): void {
   // ---------------------------------------------------------------------------
   register("sql.format", async (params) => {
     try {
-      const raw = core.formatSql(params.sql, params.dialect)
+      const raw = core.formatSql(params.sql, EngineCoerce.dialectHint(params.dialect))
       const result = JSON.parse(JSON.stringify(raw))
       return {
         success: result.success ?? true,
@@ -462,7 +464,7 @@ export function registerAllSql(): void {
   register("lineage.check", async (params) => {
     try {
       const schema = params.schema_context ? (resolveSchema(undefined, params.schema_context) ?? undefined) : undefined
-      const raw = core.columnLineage(params.sql, params.dialect ?? undefined, schema ?? undefined)
+      const raw = core.columnLineage(params.sql, EngineCoerce.dialectHint(params.dialect), schema ?? undefined)
       const result = JSON.parse(JSON.stringify(raw))
       return {
         success: true,

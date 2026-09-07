@@ -1,2 +1,6 @@
 packages/core/migration/**/snapshot.json linguist-generated
 packages/core/src/database/migration.gen.ts linguist-generated
+# Prompt fragments are byte-identity-pinned (sha256 asserted in
+# packages/opencode/test/altimate/prompt-profiles.test.ts); force LF so
+# autocrlf checkouts cannot alter the assembled prompt bytes.
+packages/opencode/src/altimate/prompts/** text eol=lf

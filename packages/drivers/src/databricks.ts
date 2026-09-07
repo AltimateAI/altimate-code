@@ -3,17 +3,12 @@
  */
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import { loadOptionalDriver } from "./resolve"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let databricksModule: any
-  try {
-    databricksModule = await import("@databricks/sql")
-    databricksModule = databricksModule.default || databricksModule
-  } catch {
-    throw new Error(
-      "Databricks driver not installed. Run: npm install @databricks/sql",
-    )
-  }
+  databricksModule = await loadOptionalDriver("databricks", "@databricks/sql")
+  databricksModule = databricksModule.default || databricksModule
 
   let client: any
   let session: any

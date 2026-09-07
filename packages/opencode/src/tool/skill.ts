@@ -28,6 +28,11 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   // `node_modules/<pkg>` isn't tagged as Altimate.
   if (
     normalized.startsWith("builtin:") ||
+    // altimate_change — `<built-in>` is the sentinel used by the embedded
+    // customization skill. Missing it here made `isBuiltin` false, so
+    // `path.dirname("<built-in>")` resolved to "." and the file scan ran over
+    // the user's entire project. (review)
+    normalized === "<built-in>" ||
     /\/node_modules\/(@altimateai\/|altimate-code\/)/.test(normalized) ||
     normalized.includes(".altimate/builtin")
   )
@@ -36,6 +41,97 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   return "project"
 }
 // altimate_change end
+// altimate_change end
+
+// altimate_change start — the `<available_skills>` block the Skill TOOL sends
+// to the model on every turn, extracted so it can be tested directly. Testing
+// the escaping helpers alone did not pin this: reverting these interpolations
+// to raw `${skill.name}` left every test passing, which is how the missing
+// `builtin:` guard survived here after being fixed in the prompt-side listing.
+// Both renderers now share `neutralizeListingWrapper` and `formatSkillLocation`,
+// so the escaping cannot diverge again; consolidating the two into one renderer
+// outright is the remaining follow-up. (review)
+// altimate_change start — the `<skill_content>` block, extracted so the BODY
+// render site can be tested directly. Testing `neutralizeBodyWrapper` alone did
+// not pin this: the regression being defended against is this site forgetting to
+// call it, and the helper-only tests passed with the call removed. Same reason
+// `renderAvailableSkills` exists. (bot review)
+// altimate_change start — extracted so the CALL SITES are testable, not just the
+// predicates they use. A test asserting `hasNoSkillDirectory("<built-in>")` stays
+// true even if this site stops calling it — which is exactly how the previous
+// regression here went unpinned. (review)
+export function resolveSkillBase(location: string): { isBuiltin: boolean; dir: string; base: string } {
+  const isBuiltin = Skill.hasNoSkillDirectory(location)
+  const dir = isBuiltin ? "" : path.dirname(location)
+  return { isBuiltin, dir, base: isBuiltin ? location : pathToFileURL(dir).href }
+}
+
+// altimate_change start — extracted so the FILTER is testable, not just the
+// helper it calls: a test asserting `neutralizeSkillNameText(x) !== x` stays true
+// however this filter is written. (review)
+//
+// The hint is copied verbatim by the model as the `name` argument, so what it
+// advertises must match the real skill on lookup. That rules out escaping it
+// (`&lt;name>` matches nothing) and stripping brackets (`foo <bar>` -> `foobar`,
+// breaking legitimately bracketed names — `isSkillFrontmatter` only requires a
+// string). So: advertise only names the neutralizer leaves untouched, which are
+// exactly the ones both copyable and free of trust-tag text. The authoritative
+// listing carries every skill, escaped.
+export function selectExampleNames(skills: Skill.Info[]): string {
+  return skills
+    .filter((skill) => Skill.neutralizeSkillNameText(skill.name) === skill.name)
+    .map((skill) => `'${skill.name}'`)
+    .slice(0, 3)
+    .join(", ")
+}
+// altimate_change end
+
+export function renderSkillFileEntry(file: string): string {
+  return `<file>${Skill.neutralizeFilePathEntry(file)}</file>`
+}
+// altimate_change end
+
+export function renderSkillContent(skill: Skill.Info, base: string, files: string): string[] {
+  return [
+    `<skill_content name="${Skill.escapeSkillAttr(skill.name)}">`,
+    // The heading interpolates the same attacker-influenced frontmatter one line
+    // below the attribute that was escaped for it — and it sits INSIDE
+    // `<skill_content>`, so it needs the BODY tag set, not the listing one:
+    // `neutralizeListingWrapper`'s `skill\b` does not match `skill_content`, so
+    // a name ending `</skill_content>` broke out of the block entirely. Caught
+    // by the render-site test added alongside this. (bot review)
+    `# Skill: ${Skill.neutralizeSkillNameText(skill.name)}`,
+    "",
+    // The SKILL.md body is remote content for a synced bundle, and this
+    // on-demand path is WIDER than the auto-load path that was already escaped.
+    // Left raw it could close `</skill_content>` or forge a `<system-reminder>`.
+    Skill.neutralizeBodyWrapper(skill.content.trim()),
+    "",
+    `Base directory for this skill: ${base}`,
+    "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
+    "Note: file list is sampled.",
+    "",
+    "<skill_files>",
+    files,
+    "</skill_files>",
+    "</skill_content>",
+  ]
+}
+// altimate_change end
+
+export function renderAvailableSkills(skills: Skill.Info[]): string[] {
+  return [
+    "<available_skills>",
+    ...skills.flatMap((skill) => [
+      `  <skill>`,
+      `    <name>${Skill.neutralizeListingWrapper(skill.name)}</name>`,
+      `    <description>${Skill.neutralizeListingWrapper(skill.description ?? "")}</description>`,
+      `    <location>${Skill.formatSkillLocation(skill.location)}</location>`,
+      `  </skill>`,
+    ]),
+    "</available_skills>",
+  ]
+}
 // altimate_change end
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
@@ -72,15 +168,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           "The following skills provide specialized sets of instructions for particular tasks",
           "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
           "",
-          "<available_skills>",
-          ...displaySkills.flatMap((skill) => [
-            `  <skill>`,
-            `    <name>${skill.name}</name>`,
-            `    <description>${skill.description}</description>`,
-            `    <location>${pathToFileURL(skill.location).href}</location>`,
-            `  </skill>`,
-          ]),
-          "</available_skills>",
+          ...renderAvailableSkills(displaySkills),
           // altimate_change start - add hint when skills are truncated
           ...(hasMore
             ? [
@@ -93,10 +181,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
   // altimate_change end
 
   // altimate_change start - use displaySkills for examples
-  const examples = displaySkills
-    .map((skill) => `'${skill.name}'`)
-    .slice(0, 3)
-    .join(", ")
+  const examples = selectExampleNames(displaySkills)
   const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
   // altimate_change end
 
@@ -128,9 +213,13 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       })
 
       // altimate_change start — handle builtin: skills that have no filesystem directory
-      const isBuiltin = skill.location.startsWith("builtin:")
-      const dir = isBuiltin ? "" : path.dirname(skill.location)
-      const base = isBuiltin ? skill.location : pathToFileURL(dir).href
+      // altimate_change — one predicate for "has no filesystem directory", covering
+  // BOTH sentinels so a new one cannot be handled at one site and missed at
+  // another. Deliberately NOT `classifySkillSource`: that answers "who shipped
+  // this" and returns "builtin" for real directories too (`~/.altimate/builtin`,
+  // Altimate-owned `node_modules`), whose bundled files must still be listed.
+  // Using it here suppressed their resource directories. (bot review)
+      const { isBuiltin, dir, base } = resolveSkillBase(skill.location)
 
       const limit = 10
       const files = isBuiltin
@@ -152,7 +241,14 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
               }
             }
             return arr
-          }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+          }).then((f) =>
+            f
+              // altimate_change — bundle file paths are remote too:
+              // `safeRelativePath` rejects `..`, absolute paths and NUL, but
+              // permits `<` and `>`. (review)
+              .map((file) => renderSkillFileEntry(file))
+              .join("\n"),
+          )
       // altimate_change end
 
       // altimate_change start — append follow-up suggestions after skill content
@@ -187,19 +283,10 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
         title: `Loaded skill: ${skill.name}`,
         output: [
           ...(followups ? [followups, ""] : []),
-          `<skill_content name="${skill.name}">`,
-          `# Skill: ${skill.name}`,
-          "",
-          skill.content.trim(),
-          "",
-          `Base directory for this skill: ${base}`,
-          "Relative paths in this skill (e.g., scripts/, reference/) are relative to this base directory.",
-          "Note: file list is sampled.",
-          "",
-          "<skill_files>",
-          files,
-          "</skill_files>",
-          "</skill_content>",
+          // altimate_change — the name is frontmatter, so for a synced skill it is
+          // attacker-influenced: a `"` breaks out of the attribute. Escaped like
+          // the listing above. (review)
+          ...renderSkillContent(skill, base, files),
         ].join("\n"),
         metadata: {
           name: skill.name,

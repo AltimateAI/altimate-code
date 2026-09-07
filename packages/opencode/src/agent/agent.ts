@@ -18,9 +18,12 @@ import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 // altimate_change start - import custom agent mode prompts
-import PROMPT_BUILDER from "../altimate/prompts/builder.txt"
+// PromptProfiles.PROMPT_BUILDER is assembled from core + pack fragments (byte-identical
+// to the former builder.txt — see profiles.ts and test/altimate/prompt-profiles.test.ts)
+import { PromptProfiles } from "../altimate/prompts/profiles"
 import PROMPT_ANALYST from "../altimate/prompts/analyst.txt"
 import PROMPT_REVIEWER from "../altimate/prompts/reviewer.txt"
+import { Log } from "../util/log"
 // altimate_change end
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
@@ -219,12 +222,18 @@ export const layer = Layer.effect(
         const userWithSafety = Permission.merge(user, safetyDenials)
         // altimate_change end
 
+        // altimate_change start — one-time warning state for the removed data-qa
+        // default-agent migration (see defaultInfo() below)
+        const log = Log.create({ service: "agent" })
+        let warnedRemovedDataQaDefault = false
+        // altimate_change end
+
         const agents: Record<string, Info> = {
           // altimate_change start - 3 modes: builder, analyst, plan (replaces upstream single "build" agent)
           builder: {
             name: "builder",
             description: "Create and modify dbt models, SQL, and data pipelines. Full read/write access.",
-            prompt: PROMPT_BUILDER,
+            prompt: PromptProfiles.PROMPT_BUILDER,
             options: {},
             permission: Permission.merge(
               defaults,
@@ -590,7 +599,28 @@ export const layer = Layer.effect(
         const defaultInfo = Effect.fnUntraced(function* () {
           const c = yield* config.get()
           if (c.default_agent) {
-            const agent = agents[c.default_agent]
+            // altimate_change start — migrate the removed data-qa default to analyst
+            let agent = agents[c.default_agent]
+            // #1217 let `default_agent: "data-qa"` alone (no matching `agent.data-qa`
+            // config entry) opt into the native data-qa profile. That profile is now
+            // removed, so a persisted `default_agent: "data-qa"` would otherwise throw
+            // here and strand every call site that resolves the default agent
+            // (session/prompt.ts, the session HTTP routes, ACP) — upgrading users could
+            // no longer start an ordinary default-agent session. Fall back to `analyst`,
+            // the documented agent for read-only data questions, with a one-time warning
+            // instead of a hard failure. A user who separately defines their own
+            // `agent.data-qa` config entry is unaffected — `agents[c.default_agent]`
+            // already resolves to that legitimate custom agent above.
+            if (!agent && c.default_agent === "data-qa") {
+              if (!warnedRemovedDataQaDefault) {
+                warnedRemovedDataQaDefault = true
+                log.warn(
+                  'the "data-qa" agent was removed; defaulting to "analyst" for read-only data questions — set default_agent to override',
+                )
+              }
+              agent = agents["analyst"]
+            }
+            // altimate_change end
             if (!agent) throw new Error(`default agent "${c.default_agent}" not found`)
             if (agent.mode === "subagent") throw new Error(`default agent "${c.default_agent}" is a subagent`)
             if (agent.hidden === true) throw new Error(`default agent "${c.default_agent}" is hidden`)

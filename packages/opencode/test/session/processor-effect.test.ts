@@ -392,8 +392,8 @@ it.live("session.processor effect tests preserve text start time", () =>
     { config: (url) => providerCfg(url) },
   ),
 )
-// ACCEPT: the fork's overflow guard intentionally leaves this context:20 fixture
-// below the compaction threshold, so processor.process should continue.
+// ACCEPT: the fork's overflow guard intentionally leaves this context:20_000 fixture
+// at the compaction threshold, so processor.process should continue.
 it.live("session.processor effect tests continue when guarded token fixture does not request compaction", () =>
   provideTmpdirServerLegacy(
     ({ dir, llm }) =>
@@ -407,7 +407,7 @@ it.live("session.processor effect tests continue when guarded token fixture does
         const parent = yield* user(chat.id, "compact")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const base = yield* refModel(provider)
-        const mdl = { ...base, limit: { context: 20, output: 10 } }
+        const mdl = { ...base, limit: { context: 20_000, output: 10 } }
         const controller = new AbortController()
         const handle = yield* processors.create({
           assistantMessage: msg as unknown as MessageV2.Assistant,

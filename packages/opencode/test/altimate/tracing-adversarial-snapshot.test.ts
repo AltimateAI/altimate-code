@@ -41,20 +41,32 @@ const ZERO_STEP = {
 // single fixed sleep. Snapshot writes are debounced/async, so a hardcoded delay
 // is too short under heavy parallel CI load (the snapshot hasn't flushed yet) →
 // flaky reads of a stale status. Polling is robust regardless of machine load.
-async function pollStatus(tracer: { getTracePath(): string | undefined }, expected: string, timeoutMs = 4000) {
+async function pollTrace(
+  tracer: { getTracePath(): string | undefined },
+  accept: (snapshot: TraceFile) => boolean,
+  description: string,
+  timeoutMs = 4000,
+) {
   const start = Date.now()
-  let last = "<none>"
+  let last: TraceFile | undefined
   while (Date.now() - start < timeoutMs) {
     try {
       const snap = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
-      last = snap.summary.status
-      if (last === expected) return snap
+      last = snap
+      if (accept(snap)) return snap
     } catch {
       /* file mid-write or not yet created — keep polling */
     }
     await new Promise((r) => setTimeout(r, 25))
   }
-  throw new Error(`timed out after ${timeoutMs}ms waiting for status '${expected}' (last seen '${last}')`)
+  throw new Error(
+    `timed out after ${timeoutMs}ms waiting for ${description} ` +
+      `(last status '${last?.summary.status ?? "<none>"}', spans ${last?.spans.length ?? 0})`,
+  )
+}
+
+async function pollStatus(tracer: { getTracePath(): string | undefined }, expected: string, timeoutMs = 4000) {
+  return pollTrace(tracer, (snapshot) => snapshot.summary.status === expected, `status '${expected}'`, timeoutMs)
 }
 
 // ---------------------------------------------------------------------------
@@ -75,11 +87,13 @@ describe("buildTraceFile — snapshot isolation", () => {
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
 
-    // Wait for snapshot to write
-    await new Promise((r) => setTimeout(r, 50))
-
-    // Read the snapshot
-    const snap1 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
+    // Snapshot writes are asynchronous/debounced; poll instead of racing a
+    // fixed sleep on loaded CI hosts.
+    const snap1 = await pollTrace(
+      tracer,
+      (snapshot) => snapshot.spans.some((span) => span.kind === "tool" && span.name === "bash"),
+      "the first tool span",
+    )
     const snap1Model = snap1.metadata.model
 
     // Now mutate the metadata via enrichFromAssistant
@@ -103,9 +117,11 @@ describe("buildTraceFile — snapshot isolation", () => {
       state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
     })
 
-    // Wait for snapshot
-    await new Promise((r) => setTimeout(r, 50))
-    const snap1 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
+    const snap1 = await pollTrace(
+      tracer,
+      (snapshot) => snapshot.spans.some((span) => span.kind === "tool" && span.name === "bash"),
+      "the first tool span",
+    )
     const span1Count = snap1.spans.length
 
     // Add more spans
@@ -115,9 +131,13 @@ describe("buildTraceFile — snapshot isolation", () => {
       state: { status: "completed", input: {}, output: "content", time: { start: 3, end: 4 } },
     })
 
-    // Wait for second snapshot
-    await new Promise((r) => setTimeout(r, 50))
-    const snap2 = JSON.parse(await fs.readFile(tracer.getTracePath()!, "utf-8")) as TraceFile
+    const snap2 = await pollTrace(
+      tracer,
+      (snapshot) =>
+        snapshot.spans.length > span1Count &&
+        snapshot.spans.some((span) => span.kind === "tool" && span.name === "read"),
+      `the second tool span after ${span1Count} spans`,
+    )
 
     // Second snapshot should have more spans
     expect(snap2.spans.length).toBeGreaterThan(span1Count)

@@ -436,9 +436,11 @@ describe("BUG: modelsModifiedSince mtime boundary and weird names", () => {
     expect(result.some((p) => p.endsWith("top.sql"))).toBe(true)
   })
 
-  test("models/ at root + duplicate models/ deeply nested — both files found", async () => {
-    // dbt allows multiple `models` directories in different package roots
-    // (e.g., dbt_packages/foo/models/). Make sure both are picked up.
+  test("models/ at root is found; an installed package's models/ is not", async () => {
+    // A vendored package's models are not the session's work. `dbt deps`
+    // rewrites every file under `dbt_packages/`, so including them made a
+    // plain dependency install look like the session had edited hundreds of
+    // models and the completion gates demanded a build for all of them.
     const sub1 = join(dir, "models")
     const sub2 = join(dir, "dbt_packages", "foo", "models")
     await fs.mkdir(sub1, { recursive: true })
@@ -447,7 +449,19 @@ describe("BUG: modelsModifiedSince mtime boundary and weird names", () => {
     await fs.writeFile(join(sub2, "b.sql"), "select 1")
     const result = await modelsModifiedSince(dir, 0)
     expect(result.some((p) => p.endsWith("a.sql"))).toBe(true)
-    expect(result.some((p) => p.endsWith("b.sql"))).toBe(true)
+    expect(result.some((p) => p.endsWith("b.sql"))).toBe(false)
+  })
+
+  test("the legacy dbt_modules install directory is skipped too", async () => {
+    const sub1 = join(dir, "models")
+    const sub2 = join(dir, "dbt_modules", "foo", "models")
+    await fs.mkdir(sub1, { recursive: true })
+    await fs.mkdir(sub2, { recursive: true })
+    await fs.writeFile(join(sub1, "a.sql"), "select 1")
+    await fs.writeFile(join(sub2, "b.sql"), "select 1")
+    const result = await modelsModifiedSince(dir, 0)
+    expect(result.some((p) => p.endsWith("a.sql"))).toBe(true)
+    expect(result.some((p) => p.endsWith("b.sql"))).toBe(false)
   })
 })
 // altimate_change end

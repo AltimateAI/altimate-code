@@ -3,9 +3,9 @@ import path from "path"
 import { parse as parseJsonc } from "jsonc-parser"
 import { Log } from "../util/log"
 import { Filesystem } from "../util/filesystem"
-import { Glob } from "../util/glob"
 import { ConfigPaths } from "../config/paths"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+import { DiscoveryFiles } from "./discovery-files"
 
 const log = Log.create({ service: "mcp.discover" })
 
@@ -34,11 +34,137 @@ function resolveServerEnvVars(
       field: context.field,
       unresolved: stats.unresolvedNames.join(", "),
     })
+    // altimate_change start — upstream_fix: remember it for the user, not just the log (#701).
+    // An unresolved `${SNOWFLAKE_PASSWORD}` becomes "" and the server launches with a blank
+    // credential, failing later with something that names neither the variable nor the config
+    // file. The log line already had the answer; nobody reads it. Recorded here so `/mcps` can
+    // say so. Mirrors the `setDiscoveryResult` handoff below.
+    const seen = _unresolvedEnv.get(context.server) ?? new Set<string>()
+    for (const name of stats.unresolvedNames) seen.add(name)
+    _unresolvedEnv.set(context.server, seen)
+    // altimate_change end
   }
   return out
 }
 // altimate_change end
 
+// altimate_change start — upstream_fix: unresolved-variable record for the user surface (#701).
+/** Server name -> variable names that resolved to "" during discovery. */
+const _unresolvedEnv = new Map<string, Set<string>>()
+
+/**
+ * Variable names that silently became "" for `server`, from the most recent discovery.
+ *
+ * The record is cleared at the start of every `discoverExternalMcp` run and then unioned
+ * within that run, because one server is resolved twice — once for `headers` and once for
+ * `environment`. Without the reset the map only ever grew: a server whose `{env:VAR}` had
+ * since been fixed kept its old entry (the recording site below is inside an
+ * `unresolvedNames.length > 0` guard, so a clean run never touched it), and `/mcps` went on
+ * telling the user to set a variable that already resolved.
+ *
+ * Only the latest run's servers are present, so a daemon that discovers for a second project
+ * replaces the first project's entries rather than mixing the two under a shared server name.
+ */
+export function unresolvedEnvVars(server: string): string[] {
+  return [...(_unresolvedEnv.get(server) ?? [])].sort()
+}
+
+/** Drop the previous run's records. Called once per `discoverExternalMcp`. */
+function resetUnresolvedEnv() {
+  _unresolvedEnv.clear()
+}
+// altimate_change end
+
+// altimate_change start — upstream_fix (#878): report drift instead of silently skipping.
+// Discovery is first-source-wins, so a server already present in altimate-code.json is skipped
+// outright and a changed `.vscode/mcp.json` (a new ALTIMATE_EXTENSION_RPC port, a moved command)
+// is never mentioned. Overwriting the user's own config would be worse than the silence, so the
+// differing field names are recorded and a user surface reports them; the user decides.
+const _drift = new Map<string, { source: string; fields: string[] }>()
+
+/**
+ * Fields whose difference is expected and not worth reporting.
+ *
+ * `updatedAt` is the datamate sync change-signal: `normalizeMcpConfig` preserves it on the
+ * configured entry and discovery never produces one, so every comparison saw a value against
+ * `undefined` and reported drift on every `mcp list` for any datamate-synced server.
+ */
+const DRIFT_IGNORED = new Set(["enabled", "updatedAt"])
+
+/** Key order must not read as a difference — `{a,b}` and `{b,a}` are the same config. */
+function stableStringify(value: any): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value)
+  if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]"
+  return (
+    "{" +
+    Object.keys(value)
+      .sort()
+      .map((k) => JSON.stringify(k) + ":" + stableStringify(value[k]))
+      .join(",") +
+    "}"
+  )
+}
+
+const isPlainObject = (v: any): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v)
+
+/**
+ * Field names that differ between a discovered server and the one already configured.
+ * Nested `environment`/`headers` differences are reported per key (`environment.FOO`) so the
+ * message names the thing to fix rather than just "environment".
+ */
+export function driftFields(discovered: Record<string, any>, configured: Record<string, any>): string[] {
+  const fields: string[] = []
+  for (const key of new Set([...Object.keys(discovered), ...Object.keys(configured)])) {
+    if (DRIFT_IGNORED.has(key)) continue
+    const a = discovered[key]
+    const b = configured[key]
+    // Nested when EITHER side has the block: requiring both meant a server that gained or lost
+    // an `environment` wholesale reported the bare word "environment" and lost the key names,
+    // which is the one thing this function exists to provide.
+    if ((key === "environment" || key === "headers") && (isPlainObject(a) || isPlainObject(b))) {
+      const left = isPlainObject(a) ? a : {}
+      const right = isPlainObject(b) ? b : {}
+      const inner = new Set([...Object.keys(left), ...Object.keys(right)])
+      // An empty block against a missing one has no key to name, so report it at the top level
+      // rather than saying nothing at all.
+      if (inner.size === 0) {
+        if (stableStringify(a) !== stableStringify(b)) fields.push(key)
+        continue
+      }
+      for (const name of inner) if (left[name] !== right[name]) fields.push(`${key}.${name}`)
+      continue
+    }
+    if (stableStringify(a) !== stableStringify(b)) fields.push(key)
+  }
+  return fields.sort()
+}
+
+/** Record that `server` is configured differently from what discovery found in `source`. */
+export function setConfigDrift(server: string, source: string, fields: string[]) {
+  if (fields.length > 0) _drift.set(server, { source, fields })
+  else _drift.delete(server)
+}
+
+/** Servers whose configured definition differs from the discovered one. */
+export function configDrift(): { server: string; source: string; fields: string[] }[] {
+  return [..._drift.entries()]
+    .map(([server, info]) => ({ server, ...info }))
+    .sort((a, b) => a.server.localeCompare(b.server))
+}
+
+/** Server name -> the file that actually defined it, for drift attribution. */
+const _discoveredSource = new Map<string, string>()
+
+/** The config file a discovered server came from, or undefined if it was not discovered. */
+export function discoveredSource(server: string): string | undefined {
+  return _discoveredSource.get(server)
+}
+
+/** Test seam — drift accumulates at module level. */
+export function resetConfigDrift() {
+  _drift.clear()
+}
+// altimate_change end
 interface ExternalMcpSource {
   /** Relative path from base directory */
   file: string
@@ -204,6 +330,10 @@ function addServersFromFile(
         ;(transformed as any).enabled = false
       }
       result[name] = transformed
+      // altimate_change start — upstream_fix (#878): attribute drift to the file that defined
+      // this server, not to every file that contributed something to the run.
+      _discoveredSource.set(name, sourceLabel)
+      // altimate_change end
       added++
     }
   }
@@ -302,6 +432,13 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   sources: string[]
 }> {
   log.info("Discovering MCP servers from external AI tool configs...")
+  // Start from a clean slate so a variable fixed since the last run stops being reported.
+  resetUnresolvedEnv()
+  // Same for drift: a server removed from the external config, or a reload that resolved the
+  // difference, otherwise left a stale entry and `mcp status` reported a mismatch that no
+  // longer existed. The setConfigDrift calls after this run repopulate it.
+  resetConfigDrift()
+  _discoveredSource.clear()
   const result: Record<string, ConfigMCPV1.Info> = Object.create(null)
   const contributingSources: string[] = []
   const homedir = os.homedir()
@@ -313,76 +450,51 @@ export async function discoverExternalMcp(projectDir: string): Promise<{
   // dedup is deterministic and keeps the historical .vscode > .cursor > copilot order
   // (a plain alphabetical sort would let .cursor override .vscode).
   const IDE_PRECEDENCE = [".vscode/mcp.json", ".cursor/mcp.json", ".github/copilot/mcp.json"]
-  const toRel = (abs: string) => path.relative(projectDir, abs).split(path.sep).join("/")
-  let mcpJsonFiles: string[] = []
+  let mcpJsonFiles: DiscoveryFiles.ProjectMcpFile[] = []
   try {
-    // altimate_change start — Glob.scan dropped its `ignore` option in v1.17.9; filter
-    // the scan results manually against the same exclusion globs to preserve behavior.
-    const IGNORE_GLOBS = [
-      "**/node_modules/**",
-      "**/.git/**",
-      "**/dist/**",
-      "**/build/**",
-      "**/.pnpm/**",
-      "**/target/**",
-      "**/.next/**",
-      "**/out/**",
-      "**/vendor/**",
-      "**/coverage/**",
-      "**/.venv/**",
-      "**/.turbo/**",
-    ]
-    const scanned = (
-      await Glob.scan("**/mcp.json", {
-        cwd: projectDir,
-        absolute: true,
-        dot: true,
-      })
-    ).filter((abs) => {
-      const rel = toRel(abs)
-      return !IGNORE_GLOBS.some((pattern) => Glob.match(pattern, rel))
-    })
-    // altimate_change end
-    const rank = (abs: string) => {
-      const i = IDE_PRECEDENCE.indexOf(toRel(abs))
+    const scanned = await DiscoveryFiles.scanProjectMcpJsonFiles(projectDir)
+    const rank = (file: DiscoveryFiles.ProjectMcpFile) => {
+      const i = IDE_PRECEDENCE.indexOf(file.relative)
       return i === -1 ? IDE_PRECEDENCE.length : i
     }
     mcpJsonFiles = scanned.sort((a, b) => {
       const ra = rank(a)
       const rb = rank(b)
       if (ra !== rb) return ra - rb
-      const relA = toRel(a)
-      const relB = toRel(b)
-      return relA < relB ? -1 : relA > relB ? 1 : 0
+      return a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0
     })
   } catch {
     log.warn("mcp.json glob scan failed", { cwd: projectDir })
   }
   for (const file of mcpJsonFiles) {
-    const parsed = await readJsonSafe(file)
+    const parsed = await readJsonSafe(file.path)
     if (!parsed || typeof parsed !== "object") continue
-    const label = toRel(file) || path.basename(file)
+    const label = file.relative
     addServersFromFile(mergeServerKeys(parsed), label, result, contributingSources, true)
   }
 
   // Non-"mcp.json" config files (not matched by the glob above), in project and/or home.
   for (const source of SOURCES) {
-    const dirs: Array<{ dir: string; label: string }> = []
+    const dirs: Array<{ dir: string; label: string; projectScoped: boolean }> = []
     if (source.scope === "project" || source.scope === "both") {
-      dirs.push({ dir: projectDir, label: source.file })
+      dirs.push({ dir: projectDir, label: source.file, projectScoped: true })
     }
     if ((source.scope === "home" || source.scope === "both") && projectDir !== homedir) {
-      dirs.push({ dir: homedir, label: `~/${source.file}` })
+      dirs.push({ dir: homedir, label: `~/${source.file}`, projectScoped: false })
     }
 
-    for (const { dir, label } of dirs) {
-      const filePath = path.join(dir, source.file)
+    for (const { dir, label, projectScoped } of dirs) {
+      const candidate = path.join(dir, source.file)
+      const resolved = projectScoped
+        ? await DiscoveryFiles.resolveProjectDiscoveryFile(projectDir, candidate)
+        : undefined
+      if (projectScoped && !resolved) continue
+      const filePath = resolved?.path ?? candidate
       const parsed = await readJsonSafe(filePath)
       if (!parsed || typeof parsed !== "object") continue
 
-      const isProjectScoped = dir === projectDir
       const servers = parsed[source.key]
-      addServersFromFile(servers, label, result, contributingSources, isProjectScoped)
+      addServersFromFile(servers, label, result, contributingSources, projectScoped)
     }
   }
 

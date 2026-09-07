@@ -2,9 +2,9 @@ import { readFile } from "fs/promises"
 import path from "path"
 import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk, findProjectConfigPaths, findGlobalConfigPaths } from "../mcp/config"
+import { DiscoveryFiles } from "../mcp/discovery-files"
 import { Global } from "../global"
 import { Filesystem } from "../util/filesystem"
-import { Glob } from "@opencode-ai/core/util/glob"
 import { Log } from "@/altimate/util/log"
 import type { Config } from "../config/config"
 
@@ -35,10 +35,14 @@ export const DATAMATE_PROVENANCE = "altimate-ide"
 
 /**
  * The only mcp.json locations the extension writes (`.${ide}/mcp.json`, ide ∈
- * vscode|cursor). Anything else in a checkout is not an extension-authored
- * entry and must not become a transport source.
+ * vscode|cursor — mcpServerTools.ts `isCursor() ? "cursor" : "vscode"`).
+ * Anything else in a checkout is not an extension-authored entry and must not
+ * become a transport source. Deliberately excludes `.github/copilot/mcp.json`:
+ * the extension never writes there, so an entry in that file cannot carry the
+ * managed provenance this module relies on; generic MCP discovery
+ * (mcp/discover.ts) still surfaces it for opt-in via /discover-and-add-mcps.
  */
-const IDE_MCP_JSON_PATTERNS = ["**/.vscode/mcp.json", "**/.cursor/mcp.json"]
+const IDE_MCP_JSON_LOCATIONS = [".vscode/mcp.json", ".cursor/mcp.json"]
 
 /**
  * Env keys carried from an IDE entry into the spawn. ELECTRON_RUN_AS_NODE is
@@ -160,29 +164,14 @@ function extractServersMap(
  */
 async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
   try {
-    const paths: string[] = []
-    for (const pattern of IDE_MCP_JSON_PATTERNS) {
-      paths.push(...(await Glob.scan(pattern, { cwd: projectRootDir, absolute: true, dot: true })))
-    }
-    // Exclude build/dependency/output trees. command + args from a discovered
-    // mcp.json are passed to StdioClientTransport, so keep the scan to source the
-    // user actually authors and out of vendored/generated directories. The new core
-    // Glob.Options dropped the `ignore` field, so filter the results instead.
-    const ignoredDirs = [
-      "node_modules",
-      ".git",
-      "dist",
-      "build",
-      ".pnpm",
-      "target",
-      ".next",
-      "out",
-      "vendor",
-      "coverage",
-      ".venv",
-      ".turbo",
-    ]
-    return paths.filter((p) => !ignoredDirs.some((dir) => p.includes(`/${dir}/`))).sort()
+    // DiscoveryFiles prunes dependency/build trees and canonicalizes every
+    // match, so a symlinked .vscode/mcp.json aliasing into node_modules is
+    // rejected before it can become a transport source. On top of that, only
+    // the extension-written locations are accepted (see IDE_MCP_JSON_LOCATIONS).
+    const files = await DiscoveryFiles.scanProjectMcpJsonFiles(projectRootDir)
+    return files
+      .filter((file) => IDE_MCP_JSON_LOCATIONS.some((loc) => file.relative === loc || file.relative.endsWith(`/${loc}`)))
+      .map((file) => file.path)
   } catch {
     log.warn("findAllMcpJsonFiles: glob scan failed", { cwd: projectRootDir })
     return []
@@ -432,4 +421,3 @@ export async function syncDatamateUrlFromVscodeMcp(
   }
   return updated
 }
-

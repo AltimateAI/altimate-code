@@ -19,6 +19,18 @@ export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
  */
 export const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
+// altimate_change start — float32-exact lower bound for the compaction
+// safety fraction.
+//
+// `Schema.toArbitrary`'s fast-check generator requires `.check()` bounds to be
+// exact 32-bit floats, and 0.1 is not float32-representable. Rounding UP to the
+// nearest float32 (`Math.fround(0.1)` ≈ 0.10000000149) makes the schema reject
+// the documented minimum `0.1`, so the bound has to round DOWN instead. This is
+// the nearest float32 strictly below 0.1 (~1.3e-8 under), which satisfies the
+// generator and still accepts the advertised lower endpoint.
+export const SAFETY_FRACTION_MIN = Math.fround(0.1 - 1e-8)
+// altimate_change end
+
 /**
  * Relative file path (e.g., `src/components/Button.tsx`).
  */

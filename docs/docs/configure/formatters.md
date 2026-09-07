@@ -1,3 +1,8 @@
+---
+title: Formatters — Altimate Code
+description: "Altimate Code auto-formats files after editing using language-specific formatters. See the full list of supported languages."
+---
+
 # Formatters
 
 altimate auto-formats files after editing using language-specific formatters.

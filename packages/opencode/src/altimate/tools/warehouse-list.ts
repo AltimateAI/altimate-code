@@ -1,6 +1,9 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+// altimate_change start — workspace precedence
+import * as Precedence from "../workspace/precedence"
+// altimate_change end
 
 export const WarehouseListTool = Tool.define("warehouse_list", {
   description: "List all configured warehouse connections. Shows connection name, type, and database.",
@@ -18,16 +21,29 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
         }
       }
 
-      const lines: string[] = ["Name | Type | Database", "-----|------|--------"]
+      // altimate_change start — workspace precedence.
+      // Annotated here, in this tool's own markdown, rather than on WarehouseInfo:
+      // that struct is shared by every consumer of `warehouse.list`, and a field
+      // added there would surface far beyond this listing. The notes re-validate the
+      // snapshot against the current binding the way the query tools do, so a
+      // re-linked project is not told its rows are served by the old workspace.
+      const notes = await Precedence.warehouseListNotes(ctx.sessionID, warehouses)
+      const shadowedCount = notes.size
+
+      const lines: string[] = shadowedCount
+        ? ["Name | Type | Database | Served by", "-----|------|----------|----------"]
+        : ["Name | Type | Database", "-----|------|--------"]
       for (const wh of warehouses) {
-        lines.push(`${wh.name} | ${wh.type} | ${wh.database ?? "-"}`)
+        const row = `${wh.name} | ${wh.type} | ${wh.database ?? "-"}`
+        lines.push(shadowedCount ? `${row} | ${notes.get(wh.name) ?? "local"}` : row)
       }
 
       return {
         title: `Warehouses: ${warehouses.length} configured`,
-        metadata: { count: warehouses.length },
+        metadata: { count: warehouses.length, shadowed: shadowedCount },
         output: lines.join("\n"),
       }
+      // altimate_change end
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return {

@@ -1,3 +1,8 @@
+---
+title: "SQL Migration Guide — Altimate Code"
+description: "Translate SQL across warehouse dialects using Altimate Code's Builder agent and deterministic SQL migration tools."
+---
+
 # Migration Guide
 
 Use altimate to translate SQL across warehouse dialects while preserving lineage and correctness.

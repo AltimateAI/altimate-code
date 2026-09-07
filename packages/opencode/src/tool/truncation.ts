@@ -1,17 +1,20 @@
 import fs from "fs/promises"
 import path from "path"
 import { Global } from "../global"
-import { Identifier } from "../id/id"
 import { PermissionNext } from "../permission/next"
 import type { Agent } from "../agent/agent"
 import { Scheduler } from "../scheduler"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
 import { ToolID } from "./schema"
+// altimate_change start — shared truncation algorithm (see truncate-core.ts
+// header) so this twin and tool/truncate.ts's Effect Service can't drift.
+import { TruncateCore } from "./truncate-core"
+// altimate_change end
 
 export namespace Truncate {
-  export const MAX_LINES = 2000
-  export const MAX_BYTES = 50 * 1024
+  export const MAX_LINES = TruncateCore.MAX_LINES
+  export const MAX_BYTES = TruncateCore.MAX_BYTES
   export const DIR = path.join(Global.Path.data, "tool-output")
   export const GLOB = path.join(DIR, "*")
   const RETENTION_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
@@ -19,11 +22,7 @@ export namespace Truncate {
 
   export type Result = { content: string; truncated: false } | { content: string; truncated: true; outputPath: string }
 
-  export interface Options {
-    maxLines?: number
-    maxBytes?: number
-    direction?: "head" | "tail"
-  }
+  export type Options = TruncateCore.Options
 
   export function init() {
     Scheduler.register({
@@ -35,20 +34,24 @@ export namespace Truncate {
   }
 
   export async function cleanup() {
-    const cutoff = Identifier.timestamp(Identifier.create("tool", "ascending", Date.now() - RETENTION_MS))
+    // altimate_change start — upstream_fix: age files by mtime, not decoded ID
+    // timestamps. Identifier packs `timestamp * 4096` into 48 bits, wrapping
+    // every 2^36 ms (~795 days; the 26th wrap: 2026-08-14T11:19:55Z), after
+    // which every new ID decoded as "ancient" and cleanup deleted files the
+    // moment they were written. File mtime has no wrap. Stat failures keep
+    // the file — deletion must fail safe.
+    const cutoffMs = Date.now() - RETENTION_MS
     const entries = await Glob.scan("tool_*", { cwd: DIR, include: "file" }).catch(() => [] as string[])
     for (const entry of entries) {
-      // altimate_change start - tolerate stale/malformed tool-output files from older builds.
-      let timestamp: number
-      try {
-        timestamp = Identifier.timestamp(entry)
-      } catch {
-        continue
-      }
-      if (timestamp >= cutoff) continue
-      // altimate_change end
-      await fs.unlink(path.join(DIR, entry)).catch(() => {})
+      const file = path.join(DIR, entry)
+      const mtimeMs = await fs
+        .stat(file)
+        .then((st) => st.mtimeMs)
+        .catch(() => Number.POSITIVE_INFINITY)
+      if (mtimeMs >= cutoffMs) continue
+      await fs.unlink(file).catch(() => {})
     }
+    // altimate_change end
   }
 
   function hasTaskTool(agent?: Agent.Info): boolean {
@@ -57,47 +60,21 @@ export namespace Truncate {
     return rule.action !== "deny"
   }
 
+  // altimate_change start — default direction "middle" (head+tail,
+  // tail-weighted elision) via the shared truncate-core.ts algorithm.
   export async function output(text: string, options: Options = {}, agent?: Agent.Info): Promise<Result> {
     const maxLines = options.maxLines ?? MAX_LINES
     const maxBytes = options.maxBytes ?? MAX_BYTES
-    const direction = options.direction ?? "head"
+    const direction = options.direction ?? TruncateCore.DEFAULT_DIRECTION
+    const headRatio = options.headRatio ?? TruncateCore.DEFAULT_HEAD_RATIO
     const lines = text.split("\n")
     const totalBytes = Buffer.byteLength(text, "utf-8")
 
-    if (lines.length <= maxLines && totalBytes <= maxBytes) {
+    if (TruncateCore.fits(lines, totalBytes, maxLines, maxBytes)) {
       return { content: text, truncated: false }
     }
 
-    const out: string[] = []
-    let i = 0
-    let bytes = 0
-    let hitBytes = false
-
-    if (direction === "head") {
-      for (i = 0; i < lines.length && i < maxLines; i++) {
-        const size = Buffer.byteLength(lines[i], "utf-8") + (i > 0 ? 1 : 0)
-        if (bytes + size > maxBytes) {
-          hitBytes = true
-          break
-        }
-        out.push(lines[i])
-        bytes += size
-      }
-    } else {
-      for (i = lines.length - 1; i >= 0 && out.length < maxLines; i--) {
-        const size = Buffer.byteLength(lines[i], "utf-8") + (out.length > 0 ? 1 : 0)
-        if (bytes + size > maxBytes) {
-          hitBytes = true
-          break
-        }
-        out.unshift(lines[i])
-        bytes += size
-      }
-    }
-
-    const removed = hitBytes ? totalBytes - bytes : lines.length - out.length
-    const unit = hitBytes ? "bytes" : "lines"
-    const preview = out.join("\n")
+    const preview = TruncateCore.preview(lines, totalBytes, { maxLines, maxBytes, direction, headRatio })
 
     const id = ToolID.ascending()
     const filepath = path.join(DIR, id)
@@ -106,11 +83,8 @@ export namespace Truncate {
     const hint = hasTaskTool(agent)
       ? `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
       : `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
-    const message =
-      direction === "head"
-        ? `${preview}\n\n...${removed} ${unit} truncated...\n\n${hint}`
-        : `...${removed} ${unit} truncated...\n\n${hint}\n\n${preview}`
 
-    return { content: message, truncated: true, outputPath: filepath }
+    return { content: TruncateCore.assemble(preview, hint, direction), truncated: true, outputPath: filepath }
   }
+  // altimate_change end
 }

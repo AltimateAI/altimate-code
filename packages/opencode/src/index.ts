@@ -10,6 +10,7 @@ import { UninstallCommand } from "./cli/cmd/uninstall"
 import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
 import { InstallationVersion, InstallationLocal } from "@opencode-ai/core/installation/version"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { FormatError } from "./cli/error"
 import { ServeCommand } from "./cli/cmd/serve"
 // altimate_change start — workspace-serve: dev-only workspace serve command
@@ -43,6 +44,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change end
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
+// altimate_change end
+// altimate_change start — link: workspace-binding subcommand
+import { LinkCommand } from "./cli/cmd/link"
 // altimate_change end
 import { errorMessage } from "./util/error"
 import { PluginCommand } from "./cli/cmd/plug"
@@ -98,12 +102,25 @@ let cli = yargs(args)
     default: false,
   })
   // altimate_change end
+  // altimate_change start - workspace precedence escape hatch
+  .option("integrations", {
+    describe:
+      "where warehouse tools run: 'workspace' (default) lets the bound workspace's engine serve the types it provides; 'local' keeps every connection on the local drivers",
+    type: "string",
+    choices: ["workspace", "local"],
+  })
+  // altimate_change end
   .middleware(async (opts) => {
     if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
     if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
+    // altimate_change start - workspace precedence escape hatch. Process-wide, not
+    // per session: an env var inherited by child processes, and under `serve` it
+    // covers every session that process hosts.
+    if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
+    // altimate_change end
 
     Heap.start()
 
@@ -120,14 +137,22 @@ let cli = yargs(args)
     }
     // altimate_change end
 
+    // altimate_change start - welcome banner on first run after install/upgrade
+    //
+    // MUST run before Telemetry.init(). The banner derives `first_launch.is_upgrade`
+    // by probing whether ~/.altimate/machine-id already exists, and init() mints that
+    // file. Ordering it first makes the probe unconditionally correct instead of
+    // depending on doInit() happening to yield at `await Config.get()` before the
+    // mint — an invariant an added await would silently break, flipping every install
+    // to is_upgrade: true. Telemetry.track() buffers until init completes, so nothing
+    // is lost by emitting before init.
+    showWelcomeBannerIfNeeded()
+    // altimate_change end
+
     // altimate_change start - telemetry init
     // Initialize telemetry early so events from MCP, engine, auth are captured.
     // init() is idempotent — safe to call again later in session prompt.
     Telemetry.init().catch(() => {})
-    // altimate_change end
-
-    // altimate_change start - welcome banner on first run after install/upgrade
-    showWelcomeBannerIfNeeded()
     // altimate_change end
   })
   .usage("")
@@ -169,6 +194,15 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
+  // altimate_change end
+
+// altimate_change start — link: gated on Flag.ALTIMATE_WORKSPACE (pilot)
+// so the command isn't registered — and doesn't show in --help — for users
+// who haven't opted in to the workspaces feature via ALTIMATE_WORKSPACE=1.
+// (M1 in the consensus review.)
+if (Flag.ALTIMATE_WORKSPACE) {
+  cli = cli.command(LinkCommand)
+}
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command

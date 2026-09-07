@@ -84,7 +84,7 @@ function flatToSchemaDefinition(flat: Record<string, any>): Record<string, any> 
  * Normalize a schema_context into SchemaDefinition JSON format.
  * Accepts both flat and SchemaDefinition formats.
  */
-function normalizeSchemaContext(ctx: Record<string, any>): string {
+export function normalizeSchemaContext(ctx: Record<string, any>): string {
   if (isSchemaDefinitionFormat(ctx)) {
     return JSON.stringify(ctx)
   }
@@ -120,3 +120,5 @@ export function schemaOrEmpty(
   if (s !== null) return s
   return Schema.fromDdl("CREATE TABLE _empty_ (id INT);")
 }
+
+export * as SchemaResolver from "./schema-resolver"

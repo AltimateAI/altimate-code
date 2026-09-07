@@ -1,3 +1,8 @@
+---
+title: "Plugins — Custom TypeScript Tools — Altimate Code"
+description: "Build custom tools for Altimate Code using the TypeScript plugin system. Scaffold with npm init in seconds."
+---
+
 # Plugins
 
 Plugins extend altimate with custom tools, hooks, and behaviors. Use plugins to add domain-specific rules, integrate with internal APIs, log telemetry, enforce governance policies, or customize how the agent interacts with your data stack.

@@ -334,9 +334,11 @@ export namespace ProviderTransform {
 
         // Check for empty base64 image data
         if (part.type === "image") {
-          const imageStr = part.image.toString()
-          if (imageStr.startsWith("data:")) {
-            const match = imageStr.match(/^data:([^;]+);base64,(.*)$/)
+          // altimate_change start — support every valid image payload form and case
+          const imageStr =
+            typeof part.image === "string" ? part.image : part.image instanceof URL ? part.image.href : undefined
+          if (imageStr && /^data:/i.test(imageStr)) {
+            const match = imageStr.match(/^data:([^;]+);base64,(.*)$/i)
             if (match && (!match[2] || match[2].length === 0)) {
               return {
                 type: "text" as const,
@@ -344,11 +346,14 @@ export namespace ProviderTransform {
               }
             }
           }
+          // altimate_change end
         }
 
-        const mime = part.type === "image" ? part.image.toString().split(";")[0].replace("data:", "") : part.mediaType
+        // altimate_change start — classify semantic images independently of their payload representation
         const filename = part.type === "file" ? part.filename : undefined
-        const modality = mimeToModality(mime)
+        const modality =
+          part.type === "image" ? "image" : mimeToModality(part.mediaType.split(";", 1)[0]!.trim().toLowerCase())
+        // altimate_change end
         if (!modality) return part
         if (model.capabilities.input[modality]) return part
 
@@ -362,6 +367,30 @@ export namespace ProviderTransform {
       return { ...msg, content: filtered }
     })
   }
+
+  // altimate_change start — expose the pure request projection used before input-budget estimation
+  export function messagesForInputEstimate(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+    const projected = unsupportedParts(msgs, model)
+    const mistral =
+      model.providerID === "mistral" ||
+      model.api.id.toLowerCase().includes("mistral") ||
+      model.api.id.toLowerCase().includes("devstral")
+    if (!mistral) return projected
+
+    // normalizeMessages inserts this bridge before transport because Mistral rejects a tool
+    // message followed directly by a user message. Estimate the same synthetic messages without
+    // mutating the history that the real transform will process later.
+    const result: ModelMessage[] = []
+    for (let index = 0; index < projected.length; index++) {
+      const message = projected[index]
+      result.push(message)
+      if (message.role === "tool" && projected[index + 1]?.role === "user") {
+        result.push({ role: "assistant", content: [{ type: "text", text: "Done." }] })
+      }
+    }
+    return result
+  }
+  // altimate_change end
 
   // altimate_change start — shared providerOptions transform used before request signing
   function mapProviderOptions(
@@ -445,6 +474,10 @@ export namespace ProviderTransform {
     if (id.includes("north-mini-code")) return 1.0
     // altimate_change end
     if (id.includes("qwen")) return 0.55
+    // altimate_change start — the model served behind this stable alias needs the same tuning as
+    // the row above; the gateway does not force sampling params on its own.
+    if (id.includes("altimate-base")) return 0.55
+    // altimate_change end
     if (id.includes("claude")) return undefined
     if (id.includes("gemini")) return 1.0
     if (id.includes("glm-4.6")) return 1.0
@@ -463,6 +496,9 @@ export namespace ProviderTransform {
   export function topP(model: Provider.Model) {
     const id = model.id.toLowerCase()
     if (id.includes("qwen")) return 1
+    // altimate_change start — same served-model reasoning as temperature() above.
+    if (id.includes("altimate-base")) return 1
+    // altimate_change end
     if (["minimax-m2", "gemini", "kimi-k2.5", "kimi-k2p5", "kimi-k2-5"].some((s) => id.includes(s))) {
       return 0.95
     }
@@ -667,7 +703,9 @@ export namespace ProviderTransform {
       id.includes("kimi") ||
       id.includes("k2p") ||
       id.includes("qwen") ||
-      id.includes("big-pickle")
+      id.includes("big-pickle") ||
+      // altimate_change — same served-model reasoning as temperature()/topP() above.
+      id.includes("altimate-base")
     )
       return {}
     // altimate_change end
