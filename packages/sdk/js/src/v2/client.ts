@@ -83,8 +83,11 @@ export function createOpencodeClient(config?: Config & { directory?: string; exp
   )
   client.interceptors.response.use((response) => {
     const contentType = response.headers.get("content-type")
-    if (contentType === "text/html")
+    // altimate_change start — upstream_fix: normalize before comparing; proxies and CDNs
+    // send "text/html; charset=utf-8", which exact equality silently let through
+    if (contentType?.split(";")[0]?.trim().toLowerCase() === "text/html")
       throw new Error("Request is not supported by this version of OpenCode Server (Server responded with text/html)")
+    // altimate_change end
 
     return response
   })

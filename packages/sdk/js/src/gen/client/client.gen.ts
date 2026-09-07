@@ -114,10 +114,38 @@ export const createClient = (config: Config = {}): Client => {
         case "arrayBuffer":
         case "blob":
         case "formData":
-        case "json":
         case "text":
           data = await response[parseAs]()
           break
+        // altimate_change start — upstream_fix: guard JSON parse against non-JSON (HTML) response bodies
+        // "json" is split out of the fall-through group above so its parse can be guarded: a 200
+        // whose body is an HTML error page from a proxy/gateway/CDN otherwise crashes with a raw
+        // "JSON Parse error: Unrecognized token '<'". The body is read OUTSIDE the guard so a
+        // network/body-read failure (socket reset, abort) keeps its own error; only an actual
+        // JSON syntax failure gets the actionable message (mirrors the v2 client).
+        case "json": {
+          const text = await response.text()
+          try {
+            data = text ? JSON.parse(text) : {}
+          } catch (cause) {
+            // Only the page <title> rides on `cause` ("502 Bad Gateway", "Access Denied", "Sign in" — the
+            // diagnostic part of a proxy/gateway/CDN page): util/error.ts serializes `cause` into logs,
+            // and a page body can echo the request URL (query included) or be a malformed real response.
+            // A title carrying URL syntax (any `/ ? = %`) is dropped so the request target cannot echo through; other title text is kept as the only available diagnostic.
+            const title = text.trimStart().startsWith("<")
+              ? /<title>([^<]{1,200})<\/title>/i.exec(text)?.[1]
+              : undefined
+            const body = title && !/[\/?=%]/.test(title) ? title : undefined
+            throw new Error(
+              `Expected a JSON response from ${request.method} ${new URL(request.url).pathname} but the body was not JSON ` +
+                `(HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "unset"}). ` +
+                `This is usually a proxy or gateway error page, not the API.`,
+              { cause: { parseError: cause, status: response.status, body } },
+            )
+          }
+          break
+        }
+        // altimate_change end
         case "stream":
           return opts.responseStyle === "data"
             ? response.body

@@ -172,6 +172,56 @@ jobs:
       # such hang) at --max-concurrency=2, which stays green even under heavy load (~43s locally at
       # load 21). Do not reintroduce OPENCODE_TEST_CLI for these tests without fixing that binary hang.
 
+      - name: SDK codegen is reproducible
+        # The v2 gen tree is committed AND regenerated on every release build
+        # (script/build.ts, clean: true) with post-codegen patches re-applied.
+        # A clean checkout must round-trip to itself, or a release ships
+        # something the review never saw.
+        working-directory: packages/sdk/js
+        run: |
+          # The build mutates the checkout (both gen trees, openapi.json, dist);
+          # restore it whatever happens so later steps see the committed tree.
+          # An EXIT trap runs on `bash -e` aborts too.
+          cleanup() {
+            git checkout -- src/gen src/v2/gen 2>/dev/null
+            git clean -qfd src/gen src/v2/gen 2>/dev/null
+            rm -rf dist openapi.json build.log
+          }
+          trap cleanup EXIT
+          # Prove codegen actually ran: a sentinel comment on the asserted file
+          # (a comment, because the generator itself imports this client) must
+          # be gone afterwards. A failure anywhere before the clean:true wipe
+          # leaves the committed copy — and the sentinel — in place, so it can
+          # no longer pass the drift check untouched.
+          sed -i '1i // CI-SENTINEL: not regenerated' src/v2/gen/client/client.gen.ts
+          build_rc=0; bun script/build.ts > build.log 2>&1 || build_rc=$?
+          cat build.log
+          if grep -q 'CI-SENTINEL: not regenerated' src/v2/gen/client/client.gen.ts; then
+            echo "::error::codegen did not regenerate src/v2/gen/client/client.gen.ts (build exit $build_rc)"
+            exit 1
+          fi
+          drift_rc=0; git diff --exit-code -- src/v2/gen/client/client.gen.ts || drift_rc=$?
+          # build.ts ends with `bun tsc`, which fails on a clean main until the
+          # types.gen.ts round-trip is fixed (issue #1148). That ONE failure is
+          # whitelisted by its EXACT diagnostic set — not merely "tsc failed",
+          # which would silently whitelist new type regressions in the
+          # regenerated SDK (script/check-known-tsc-failure.sh, unit-tested) —
+          # and only when the file was regenerated AND round-trips (the two
+          # assertions above); any other non-zero build — codegen, a patch,
+          # prettier — fails the step. Remove the whitelist with #1148.
+          if [ "$build_rc" -ne 0 ]; then
+            wl_rc=0; bash script/check-known-tsc-failure.sh build.log || wl_rc=$?
+            if [ "$wl_rc" -eq 0 ]; then
+              echo "::warning::build.ts exited $build_rc at tsc with exactly the known #1148 diagnostic (TS2305 FileSystemEntry); codegen+patch asserted above"
+            elif [ "$wl_rc" -eq 2 ]; then
+              echo "::error::build.ts exited $build_rc before tsc — not the whitelisted #1148 failure"
+              exit "$build_rc"
+            else
+              echo "::error::tsc failed with diagnostics beyond the whitelisted #1148 set (see output above)"
+              exit "$build_rc"
+            fi
+          fi
+          exit "$drift_rc"
       - name: Run tests
         working-directory: packages/opencode
         # Cloud E2E tests (Snowflake, BigQuery, Databricks) auto-skip when
