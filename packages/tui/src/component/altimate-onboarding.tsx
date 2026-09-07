@@ -481,12 +481,22 @@ export function DialogAltimateBaseConfirm(props: {
 
     decided = true
     setBusy(false)
+    if (props.origin === "migration") {
+      // A migration also removes the retired implicit model from recents. Re-check eligibility
+      // after registration so a project allowlist or explicit model change made while the dialog
+      // was open cannot be overwritten by the returning-user migration.
+      const migrated = local.model.migrateLegacyDefault()
+      if (!migrated) {
+        // Registration succeeded, but migration is no longer eligible — the user is still on the
+        // retired Big Pickle model. Route to the picker instead of marking setup complete for a
+        // model this session no longer treats as usable.
+        dialog.replace(() => <DialogModelWelcome trigger="altimate_base_back" />)
+        return
+      }
+    } else {
+      local.model.set({ providerID: "altimate-free", modelID: "altimate-base" }, { recent: true })
+    }
     dialog.clear()
-    // A migration also removes the retired implicit model from recents. Re-check eligibility after
-    // registration so a project allowlist or explicit model change made while the dialog was open
-    // cannot be overwritten by the returning-user migration.
-    if (props.origin === "migration") local.model.migrateLegacyDefault()
-    else local.model.set({ providerID: "altimate-free", modelID: "altimate-base" }, { recent: true })
     markSetupComplete()
   }
 

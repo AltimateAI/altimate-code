@@ -330,14 +330,24 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         const isManagedBaseModel = (model: ModelRef) =>
           model.providerID === ALTIMATE_BASE_MODEL.providerID && model.modelID === ALTIMATE_BASE_MODEL.modelID
 
+        // A recent entry is the user's own past pick, so — matching `Provider.defaultModel()`'s
+        // comment on the same tradeoff — it stays honored for every provider except the
+        // consent-gated managed one; a narrowed project allowlist does not retroactively invalidate
+        // an otherwise-valid prior explicit choice.
         for (const item of modelStore.recent) {
           if (isModelValid(item) && (managedBaseAllowed || !isManagedBaseModel(item))) {
             return item
           }
         }
 
+        // Unlike `recent`, this is an IMPLICIT last-resort pick with no history behind it, so it
+        // must honor the full allowlist — not just exclude Altimate Base — or it can land on a
+        // connected provider the project never named either.
+        const configuredProviderIDs = Object.keys(sync.data.config.provider ?? {})
+        const providerAllowed = (id: string) => configuredProviderIDs.length === 0 || configuredProviderIDs.includes(id)
         const provider = sync.data.provider.find(
-          (candidate) => managedBaseAllowed || candidate.id !== ALTIMATE_BASE_MODEL.providerID,
+          (candidate) =>
+            providerAllowed(candidate.id) && (managedBaseAllowed || candidate.id !== ALTIMATE_BASE_MODEL.providerID),
         )
         // altimate_change end
         if (!provider) return undefined
