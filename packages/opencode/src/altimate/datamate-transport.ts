@@ -239,8 +239,11 @@ export async function readDatamateTransportFromIde(
 export async function collectDatamateHealPaths(
   launchDir: string,
   globalConfigDir: string = Global.Path.config,
+  // Callers that already resolved the project root (the sync) pass it to skip
+  // a redundant walk; the reload endpoint omits it.
+  resolvedRoot?: string,
 ): Promise<Array<{ path: string; scope: "project" | "global" }>> {
-  const root = await resolveDatamateSyncRoot(launchDir)
+  const root = resolvedRoot ?? (await resolveDatamateSyncRoot(launchDir))
   const candidates: Array<{ path: string; scope: "project" | "global" }> = []
   const seen = new Set<string>()
   let dir = path.resolve(launchDir)
@@ -373,7 +376,7 @@ export async function syncDatamateUrlFromVscodeMcp(
         return true
       }
 
-      const candidates = await collectDatamateHealPaths(launchDir, globalConfigDir)
+      const candidates = await collectDatamateHealPaths(launchDir, globalConfigDir, root)
 
       let datamateHealed = false
       for (const { path: configPath, scope } of candidates) {

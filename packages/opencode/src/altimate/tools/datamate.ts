@@ -321,7 +321,9 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           const existingOnDisk = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
           const onDisk = (existingOnDisk ?? {}) as Record<string, unknown>
           const restamped = mergeRefreshedEntry(onDisk, mcpConfig, updatedAtField, provenanceFields)
-          const identityChanged = [...TRANSPORT_IDENTITY_FIELDS, "managedBy", "sourceMcpJson"].some(
+          // enabled is compared too: a connected entry disabled on disk must be
+          // re-enabled by an explicit add or the disable resurrects on restart.
+          const identityChanged = [...TRANSPORT_IDENTITY_FIELDS, "enabled", "managedBy", "sourceMcpJson"].some(
             (k) => JSON.stringify(onDisk[k]) !== JSON.stringify(restamped[k]),
           )
           if (identityChanged) {
