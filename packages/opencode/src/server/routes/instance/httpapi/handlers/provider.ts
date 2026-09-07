@@ -10,6 +10,10 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 import { ProviderAuthApiError } from "../groups/provider"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+// altimate_change start — advertise managed Altimate Base before credential consent
+import { FreeTier } from "@/altimate/free/client"
+import { ProviderSchema } from "@/provider/schema"
+// altimate_change end
 
 function mapProviderAuthError<A, R>(self: Effect.Effect<A, ProviderAuth.Error, R>) {
   return self.pipe(
@@ -40,6 +44,9 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
     const list = Effect.fn("ProviderHttpApi.list")(function* () {
       const config = yield* cfg.get()
       const all = yield* ModelsDev.Service.use((s) => s.get())
+      // altimate_change start — add managed model metadata without claiming a connected credential
+      const database = yield* provider.all()
+      // altimate_change end
       const disabled = new Set(config.disabled_providers ?? [])
       const enabled = config.enabled_providers ? new Set(config.enabled_providers) : undefined
       const filtered: Record<string, (typeof all)[string]> = {}
@@ -47,11 +54,21 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
         if ((enabled ? enabled.has(key) : true) && !disabled.has(key)) filtered[key] = value
       }
       const connected = yield* provider.list()
+      // altimate_change start — advertise enabled Altimate Base independently of connected providers
+      const managedBase = database[ProviderSchema.ProviderID.make(FreeTier.PROVIDER_ID)]
+      const managed =
+        managedBase && (enabled ? enabled.has(FreeTier.PROVIDER_ID) : true) && !disabled.has(FreeTier.PROVIDER_ID)
+          ? { [FreeTier.PROVIDER_ID]: managedBase }
+          : {}
+      // altimate_change end
       const providers = Object.assign(
         // altimate_change start — upstream_fix: widen readonly ModelsDev providers for Provider conversion
         // ModelsDev.Service yields a deeply-readonly Provider; fromModelsDevProvider only
         // reads it, so widen the readonly shape to the mutable signature it expects.
         mapValues(filtered, (item) => Provider.fromModelsDevProvider(item as Parameters<typeof Provider.fromModelsDevProvider>[0])),
+        // altimate_change end
+        // altimate_change start — merge managed metadata without adding it to connected
+        managed,
         // altimate_change end
         connected,
       )

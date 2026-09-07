@@ -46,6 +46,54 @@ For pricing, security, and data handling details, see the [Altimate LLM Gateway 
 !!! tip "Automatic model selection"
     When Altimate credentials are configured and no model is explicitly chosen, the Altimate LLM Gateway is selected automatically. You can override this by setting `model` in your config or by restricting the `provider` section to specific providers only.
 
+## Altimate Base
+
+Altimate Base is Altimate's own hosted free model. It requires no signup or user-managed API key
+and is subject to rate limits and abuse protection.
+
+**Data handling:** Requests and responses are logged and may be used to improve Altimate's products,
+including the model. Secrets are automatically masked before storage, but don't rely on it — avoid
+sending secrets or confidential code. Altimate Base is pseudonymous, not anonymous: a stable
+per-installation identifier links your requests across launches and `altimate providers logout
+altimate-base` does not reset it (see the [security FAQ](../reference/security-faq.md)). Usage is
+rate limited.
+
+If you need stronger guarantees — no training on your data, metadata-only retention — use the
+[Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/)
+instead.
+
+Choose **Altimate Base** from the first-run picker or `/connect`. A disclosure is shown before any
+registration request; **No** is selected by default. After registration, the model is available as
+`altimate-free/altimate-base` and becomes the free fallback when no paid Altimate Gateway or
+explicit model is selected. Big Pickle is retired as a new selection — it no longer appears in the
+picker or the full model catalog for users choosing a model for the first time. Users already on
+Big Pickle are still detected on launch and offered Altimate Base through the same consent gate.
+
+Official release binaries embed the current gateway endpoint at build time. Operators and local
+development can override it without changing code:
+
+```bash
+export ALTIMATE_BASE_GATEWAY_URL=https://your-gateway.example
+altimate
+```
+
+The URL must use HTTPS. Credentials,
+query strings, and fragments in the URL are rejected. `ALTIMATE_FREE_GATEWAY_URL` is retained as a
+legacy fallback, but `ALTIMATE_BASE_GATEWAY_URL` takes precedence. If the configured gateway host
+changes, credentials issued by the previous host are not loaded and the consented registration
+flow must run again.
+
+Altimate Base credentials are stored separately from the shared provider-auth file and are never
+returned to the TUI. The installation secret is hashed before registration; the gateway receives
+the hash, not the local secret.
+
+That hash is stable across launches, so it links this installation's logged requests together —
+it is what enforces the free allowance. Running `altimate providers logout altimate-base` clears
+the credential but keeps the installation identity on purpose, so logging out is not a way to
+reset the allowance. Each inference request additionally carries a session identifier used for
+rate limiting. See the security FAQ for what this means for privacy and how to reset the local
+identity.
+
 ## Anthropic
 
 ```json

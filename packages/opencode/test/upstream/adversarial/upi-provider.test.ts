@@ -191,6 +191,8 @@ describe("UPI-16 and UPI-42 provider defaults and gateway prompt routing", () =>
     expect(body.indexOf("for (const entry of recent)")).toBeLessThan(body.indexOf("default to altimate-backend"))
     expect(body).toContain('providers[altimateProviderID]')
     expect(body).toContain('ModelID.make("altimate-default")')
-    expect(body).toContain('Object.keys(cfg.provider).includes(String(altimateProviderID))')
+    // altimate_change start — the managed-consent-aware allowlist helper owns this check now
+    expect(body).toContain("providerAllowed(String(altimateProviderID))")
+    // altimate_change end
   })
 })

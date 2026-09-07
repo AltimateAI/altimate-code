@@ -13,6 +13,26 @@ Answers to the most common security questions about running Altimate Code in you
 
 Altimate Code sends prompts and context to the LLM provider you configure (Anthropic, OpenAI, Azure OpenAI, AWS Bedrock, etc.). **You choose the provider.** No data is sent anywhere else except optional [telemetry](#what-telemetry-is-collected), which contains no code, queries, or credentials.
 
+Altimate Base is an optional hosted provider. Its confirmation dialog explains that requests and
+responses are logged and may be used to improve Altimate products and services; do not send
+secrets or confidential code. The dialog defaults to **No**, and no registration request is made
+unless you explicitly accept. This request logging is part of the Altimate Base service and is
+separate from anonymous product telemetry.
+
+**What identifies you to Altimate Base.** Registration sends a SHA-256 hash of a locally generated
+installation secret — the secret itself never leaves your machine. That hash is stable, so logged
+requests from this installation are linked to one another. This is deliberate: it is how the free
+allowance is enforced. Running `altimate providers logout altimate-base` disconnects the provider
+but **keeps** the installation identity, by design, so that logging out and back in cannot mint a
+fresh allowance. Each inference request also carries a session identifier used for rate limiting
+and abuse control.
+
+Altimate Base is therefore pseudonymous, not anonymous. To reset the local identity completely,
+delete `altimate-base.json` from the application data directory — `$XDG_DATA_HOME/altimate-code/`,
+which defaults to `~/.local/share/altimate-code/` on both macOS and Linux — while the app is
+closed. This is outside the supported flow, and the gateway applies its own network-level rate
+limits.
+
 If you use a self-hosted or VPC-deployed model (e.g., AWS Bedrock, Azure OpenAI), your data never leaves your cloud account.
 
 ## Can the AI read my database credentials?
@@ -90,6 +110,7 @@ You can also configure per-agent permissions. For example, restrict the `analyst
 | Destination | Purpose |
 |-------------|---------|
 | Your configured LLM provider | Model inference |
+| Altimate Base gateway | Registration and inference only after you explicitly enable Altimate Base |
 | Your warehouse endpoints | Database queries |
 | `registry.npmjs.org` | Package updates |
 | `models.dev` | Model catalog (can be disabled) |

@@ -2,7 +2,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import path from "path"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { LLM } from "../../src/session/llm"
-import { Global } from "../../src/global"
 import { Instance } from "../../src/project/instance"
 import { Provider } from "../../src/provider/provider"
 import { ProviderTransform } from "../../src/provider/transform"
@@ -82,6 +81,24 @@ describe("session.llm.toolNamesFromMessages", () => {
     expect(LLM.toolNamesFromMessages(messages)).toEqual(new Set(["bash", "read"]))
   })
 })
+
+// altimate_change start — managed session header must never leak to third-party providers
+describe("session.llm.withManagedSessionHeaders", () => {
+  test("the managed session ID wins over plugin headers without changing other providers", () => {
+    const sessionID = SessionID.make("ses_trusted-session")
+    const pluginHeaders = {
+      "X-Session-Id": "plugin-controlled",
+      "x-session-id": "plugin-controlled-lowercase",
+      "X-Plugin": "preserved",
+    }
+    expect(LLM.withManagedSessionHeaders("altimate-free", sessionID, pluginHeaders)).toEqual({
+      "X-Session-Id": sessionID,
+      "X-Plugin": "preserved",
+    })
+    expect(LLM.withManagedSessionHeaders("anthropic", sessionID, pluginHeaders)).toEqual(pluginHeaders)
+  })
+})
+// altimate_change end
 
 // Harness reliability / item 3: stub injection must be skipped entirely when the call
 // exposes zero real tools AND uses the explicit toolChoice "none" no-tool-call
@@ -346,6 +363,7 @@ describe("session.llm.stream", () => {
         expect(url.pathname.startsWith("/v1/")).toBe(true)
         expect(url.pathname.endsWith("/chat/completions")).toBe(true)
         expect(headers.get("Authorization")).toBe("Bearer test-key")
+        expect(headers.get("X-Session-Id")).toBeNull()
 
         expect(body.model).toBe(resolved.api.id)
         expect(body.temperature).toBe(0.4)

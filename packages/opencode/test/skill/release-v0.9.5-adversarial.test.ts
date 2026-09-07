@@ -113,10 +113,8 @@ describe("v0.9.5 — Telemetry.classifyProvider adversarial", () => {
     expect(({} as any).polluted).toBeUndefined()
   })
 
-  test("modelID with unusual types (empty string, whitespace, unicode) — no big_pickle unless exact", () => {
-    // Contract: `big_pickle` only fires on the exact pair ("opencode","big-pickle").
-    // Anything else on the opencode provider must fall through to "other" with the id kept.
-    for (const modelID of ["", "  big-pickle  ", "BIG-PICKLE", "big-pickle​" /* zero-width */]) {
+  test("legacy Big Pickle model IDs stay in the non-curated OpenCode bucket", () => {
+    for (const modelID of ["", "big-pickle", "  big-pickle  ", "BIG-PICKLE", "big-pickle​" /* zero-width */]) {
       const r = Telemetry.classifyProvider("opencode", modelID)
       expect(r.provider).toBe("other")
       expect(r.provider_id).toBe("opencode")

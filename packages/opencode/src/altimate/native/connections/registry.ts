@@ -114,12 +114,20 @@ function resolveStorePaths(
   for (const [name, config] of Object.entries(entries)) {
     const storePath = config?.path
     const type = typeof config?.type === "string" ? config.type.toLowerCase() : ""
+    // altimate_change start — recognize a Windows-absolute path even when this
+    // process runs on POSIX. path.isAbsolute() is platform-bound: on macOS/Linux
+    // it does not recognize `C:\...`, so a config shared or migrated from a
+    // Windows machine had its already-absolute path re-mangled through
+    // path.resolve(baseDir, ...) below, producing something like
+    // "/project/C:\Users\me\warehouse.duckdb" instead of being left untouched.
     if (
       !FILE_STORE_TYPES.has(type) ||
       typeof storePath !== "string" ||
       !isLocalFilePath(storePath) ||
-      path.isAbsolute(storePath)
+      path.isAbsolute(storePath) ||
+      path.win32.isAbsolute(storePath)
     ) {
+      // altimate_change end
       resolved[name] = config
       continue
     }

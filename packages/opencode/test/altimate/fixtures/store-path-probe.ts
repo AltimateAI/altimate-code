@@ -30,6 +30,9 @@ async function main() {
   // Warming the module cache first keeps that resolution out of the experiment —
   // the behaviour under test (path resolution and create-on-open) all happens
   // inside `new duckdb.Database(...)`, well after this point.
+  // @ts-ignore — duckdb is an optional native addon resolved at runtime via
+  // NODE_PATH in the shipped binary (left external at build); it is not a typed
+  // dependency, so it may be unresolvable at typecheck time in a lean CI install.
   await import("duckdb").catch(() => {})
 
   const connection = arg("connection") ?? "probe"

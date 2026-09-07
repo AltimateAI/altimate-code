@@ -866,6 +866,15 @@ describe("normalizeConfig — ClickHouse", () => {
     expect(normalizeConfig(config)).toEqual(config)
   })
 
+  test("preserves dbt-clickhouse secure intent", () => {
+    const config = {
+      type: "clickhouse",
+      host: "secure.example",
+      secure: true,
+    }
+    expect(normalizeConfig(config)).toEqual(config)
+  })
+
   test("connectionString → connection_string", () => {
     const result = normalizeConfig({
       type: "clickhouse",

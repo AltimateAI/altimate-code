@@ -81,7 +81,7 @@ echo "Available versions:"
 for ver in "${VERSIONS[@]}"; do
   venv_dir="$VENVS_DIR/$ver"
   if [ -f "$venv_dir/bin/dbt" ]; then
-    installed=$("$venv_dir/bin/dbt" --version 2>&1 | grep -oE 'installed: [0-9.a-z]+' | head -1 | sed 's/installed: /core=/' | head -1)
+    installed=$("$venv_dir/bin/dbt" --version 2>&1 | grep -oE 'installed: [0-9.a-z]+' | head -1 | sed 's/installed: /core=/' | head -1 || echo "unknown")
     echo "  $ver → $installed ($venv_dir/bin/dbt)"
   fi
 done

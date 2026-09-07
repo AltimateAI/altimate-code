@@ -19,9 +19,9 @@ export type OnboardingTelemetryEvent =
   | { name: "onboarding_started" }
   | {
       name: "model_picker_shown"
-      /** The picker also opens from /connect, from declining Big Pickle, and from the prompt
+      /** The picker also opens from /connect, from declining Altimate Base, and from the prompt
        *  gate — without this the event reads as a first-run impression every time. */
-      trigger: "first_run" | "connect_command" | "big_pickle_back" | "prompt_gate"
+      trigger: "first_run" | "connect_command" | "altimate_base_back" | "prompt_gate"
     }
   | {
       name: "provider_selected"
@@ -34,8 +34,12 @@ export type OnboardingTelemetryEvent =
       /** Set when the pick came from the full catalogue, i.e. after `searchAll`. */
       via_search?: boolean
     }
-  | { name: "big_pickle_confirm_shown"; origin: "welcome" | "model" }
-  | { name: "big_pickle_choice"; choice: "accept" | "cancel" }
+  | { name: "altimate_base_confirm_shown"; origin: "welcome" | "model" }
+  | { name: "altimate_base_choice"; choice: "accept" | "cancel" }
+  | {
+      name: "altimate_base_register_result"
+      result: "success" | "rate_limited" | "unavailable" | "network" | "error"
+    }
   | { name: "scan_gate_shown" }
   | { name: "scan_gate_choice"; choice: "scan" | "skip" | "dismissed" }
   | { name: "onboarding_completed" }

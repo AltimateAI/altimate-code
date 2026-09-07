@@ -399,3 +399,71 @@ describe("ProviderError.parseAPICallError: error message extraction", () => {
     }
   })
 })
+
+describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
+  const rateLimited = (type: string, message = "", headers?: Record<string, string>) =>
+    makeAPICallError({
+      message: "Too Many Requests",
+      statusCode: 429,
+      responseBody: JSON.stringify({ error: { type, message } }),
+      responseHeaders: headers,
+    })
+
+  test("rewrites an Altimate Base throttle and keeps it retryable", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: rateLimited("throttling_error", "", { "retry-after": "12" }),
+    })
+    expect(result.message).toContain("Too many requests to Altimate Base")
+    expect(result.message).toContain("12s")
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(true)
+      expect(result.responseBody).toBeUndefined()
+      expect(JSON.stringify(result)).not.toContain("throttling_error")
+    }
+  })
+
+  test("does not rewrite another provider's 429", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: rateLimited("throttling_error", "OpenAI-specific limit"),
+    })
+    expect(result.message).toContain("OpenAI-specific limit")
+    expect(result.message).not.toContain("Altimate Base")
+  })
+
+  const oversizedBody = JSON.stringify({
+    error: {
+      message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",
+      code: "413",
+      provider_specific_fields: {
+        error: {
+          code: "request_too_large",
+          message: "Request is 179608 bytes; the free tier limit is 128000 bytes.",
+        },
+      },
+    },
+  })
+
+  test("treats the Altimate Base byte cap as terminal", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: oversizedBody }),
+    })
+    expect(result.type).toBe("api_error")
+    expect(result.message).toContain("too large for Altimate Base")
+    if (result.type === "api_error") {
+      expect(result.isRetryable).toBe(false)
+      expect(result.responseBody).toBeUndefined()
+      expect(JSON.stringify(result)).not.toContain("179608")
+    }
+  })
+
+  test("leaves another provider's 413 on the context-overflow path", () => {
+    const result = ProviderError.parseAPICallError({
+      providerID: "openai" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: oversizedBody }),
+    })
+    expect(result.type).toBe("context_overflow")
+  })
+})

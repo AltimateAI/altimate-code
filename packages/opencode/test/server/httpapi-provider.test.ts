@@ -268,9 +268,7 @@ describe("provider HttpApi", () => {
 
       if (providerResponse.status !== 200) {
         return yield* Effect.fail(
-          new Error(
-            `provider response ${providerResponse.status}: ${yield* Effect.promise(() => providerResponse.text())}`,
-          ),
+          new Error(`provider response ${providerResponse.status}: ${yield* Effect.promise(() => providerResponse.text())}`),
         )
       }
       if (modelResponse.status !== 200) {
@@ -283,6 +281,37 @@ describe("provider HttpApi", () => {
       const modelBody = yield* responseJson(modelResponse)
       expect(isRecord(providerBody) && Array.isArray(providerBody.data)).toBe(true)
       expect(isRecord(modelBody) && Array.isArray(modelBody.data)).toBe(true)
+    }),
+    projectOptions,
+    30000,
+  )
+
+  it.instance(
+    "advertises Altimate Base for consent without marking it connected",
+    Effect.gen(function* () {
+      // altimate_change start — hermetic isolation: `FreeTierStore` resolves its credential path
+      // through the process-wide `Global.Path.data`, not this test's own isolated `TestInstance`
+      // directory. A real registration performed by another Altimate Base suite earlier in this
+      // same `bun test` process (e.g. `test/altimate/*.test.ts` calling
+      // `FreeTier.registerAfterConsent()`) writes to that same shared path; without this reset,
+      // its leftover credential makes `altimate-free` autoload — and this test's "not marked as
+      // connected" assertion below flakes depending on test-file execution order. Clear it
+      // unconditionally before making the request, so this test's outcome depends only on itself.
+      const { FreeTierStore } = yield* Effect.promise(() => import("../../src/altimate/free/store"))
+      yield* Effect.promise(() => FreeTierStore.remove())
+      // altimate_change end
+      const directory = (yield* TestInstance).directory
+      const response = yield* requestDefault("/provider", {
+        headers: { "x-opencode-directory": directory },
+      })
+      expect(response.status).toBe(200)
+
+      const body = yield* responseJson(response)
+      const base = providerByID(body, "all", "altimate-free")
+      expect(base).toBeDefined()
+      expect(isRecord(base) && isRecord(base.models) && "altimate-base" in base.models).toBe(true)
+      expect(isRecord(body) && Array.isArray(body.connected) && body.connected.includes("altimate-free")).toBe(false)
+      expect(JSON.stringify(base)).not.toContain("sk-")
     }),
     projectOptions,
     30000,
@@ -429,7 +458,9 @@ describe("provider HttpApi", () => {
 
       if (providerResponse.status !== 200) {
         return yield* Effect.fail(
-          new Error(`provider response ${providerResponse.status}: ${yield* Effect.promise(() => providerResponse.text())}`),
+          new Error(
+            `provider response ${providerResponse.status}: ${yield* Effect.promise(() => providerResponse.text())}`,
+          ),
         )
       }
       if (configResponse.status !== 200) {

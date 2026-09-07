@@ -60,24 +60,11 @@ export const BUILDER_PROFILE: readonly FragmentName[] = [
   "finish",
 ]
 
-/**
- * Opt-in data-qa profile: the invariant core + skills catalogue + teammate
- * training. Relative to builder it omits the Pre-Execution Protocol
- * (sql-guard) pack and the build-oriented packs: dbt-ops, dbt-verify,
- * dbt-workflow, pitfalls, self-review, finish. Basis: an internal 540-trial
- * paired prompt ablation on a public benchmark found removing these on data-QA
- * workloads had no score effect (permutation p=0.74) and cut wall clock 27.6%.
- * Nothing selects this profile automatically — see `agent.ts`
- * (ALTIMATE_DATA_QA_PROFILE gate).
- */
-export const DATA_QA_PROFILE: readonly FragmentName[] = ["core", "legacy-skills-catalogue", "core-training"]
-
 export function assemble(profile: readonly FragmentName[]): string {
   return profile.map((name) => FRAGMENTS[name]).join("")
 }
 
 export const PROMPT_BUILDER = assemble(BUILDER_PROFILE)
-export const PROMPT_DATA_QA = assemble(DATA_QA_PROFILE)
 
 export * as PromptProfiles from "./profiles"
 // altimate_change end

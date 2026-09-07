@@ -166,7 +166,9 @@ export function make(input: {
   const newSession = Effect.fn("ACP.newSession")(function* (params: NewSessionRequest) {
     const started = performance.now()
     const snapshot = yield* directorySnapshot(params.cwd)
-    const selected = selectDefaultModel(snapshot)
+    // altimate_change start — fail closed when Big Pickle is the only implicit ACP option
+    const selected = yield* requireDefaultModel(snapshot)
+    // altimate_change end
     const variant = selectVariant(snapshot, selected)
     const modeId = snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined
     const created = yield* profiledRequest(
@@ -222,13 +224,19 @@ export function make(input: {
       "session",
     )
     const restored = restoreFromMessages(messages.map((item) => item.info))
-    const model = restored.model ?? selectDefaultModel(snapshot)
+    // altimate_change start — fail closed when a legacy session has no usable model and do not pair a fallback with stale effort
+    const restoredModel = availableModel(snapshot, restored.model)
+    const model = restoredModel ?? (yield* requireDefaultModel(snapshot))
+    const variant = selectRestoredVariant(snapshot, model, restored.variant, restoredModel !== undefined)
+    // altimate_change end
     const state = yield* session.load({
       id: params.sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers,
       model,
-      variant: restored.variant ?? selectVariant(snapshot, model),
+      // altimate_change start — use the model-coupled restored effort selected above
+      variant,
+      // altimate_change end
       modeId: restored.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
     })
     sessionSnapshots.set(state.id, snapshot)
@@ -307,13 +315,19 @@ export function make(input: {
       "session",
     )
     const restored = restoreFromMessages(messages.map((item) => item.info))
-    const model = restored.model ?? selectDefaultModel(snapshot)
+    // altimate_change start — fail closed when a resumed session has no usable model and do not pair a fallback with stale effort
+    const restoredModel = availableModel(snapshot, restored.model)
+    const model = restoredModel ?? (yield* requireDefaultModel(snapshot))
+    const variant = selectRestoredVariant(snapshot, model, restored.variant, restoredModel !== undefined)
+    // altimate_change end
     const state = yield* session.load({
       id: params.sessionId,
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
       model,
-      variant: restored.variant ?? selectVariant(snapshot, model),
+      // altimate_change start — use the model-coupled restored effort selected above
+      variant,
+      // altimate_change end
       modeId: restored.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
     })
     sessionSnapshots.set(state.id, snapshot)
@@ -359,6 +373,20 @@ export function make(input: {
 
   const forkSession = Effect.fn("ACP.forkSession")(function* (params: ForkSessionRequest) {
     const snapshot = yield* directorySnapshot(params.cwd)
+    // altimate_change start — resolve the source model before persisting an ACP fork
+    // Resolve a usable model from the source session before creating any persistent fork. The
+    // forked transcript is read again below because the server may trim it at the fork boundary.
+    const sourceMessages = yield* request(
+      () =>
+        input.sdk.session.messages(
+          { directory: params.cwd, sessionID: params.sessionId, limit: 20 },
+          { throwOnError: true },
+        ),
+      "session",
+    )
+    const sourceRestored = restoreFromMessages(sourceMessages.map((item) => item.info))
+    const fallbackModel = availableModel(snapshot, sourceRestored.model) ?? (yield* requireDefaultModel(snapshot))
+    // altimate_change end
     const forked = yield* request(
       () =>
         input.sdk.session.fork(
@@ -376,13 +404,19 @@ export function make(input: {
       "session",
     )
     const restored = restoreFromMessages(messages.map((item) => item.info))
-    const model = restored.model ?? selectDefaultModel(snapshot)
+    // altimate_change start — fail closed when a fork has no usable model and do not pair a fallback with stale effort
+    const restoredModel = availableModel(snapshot, restored.model)
+    const model = restoredModel ?? fallbackModel
+    const variant = selectRestoredVariant(snapshot, model, restored.variant, restoredModel !== undefined)
+    // altimate_change end
     const state = yield* session.load({
       id: forked.id,
       cwd: params.cwd,
       mcpServers: params.mcpServers ?? [],
       model,
-      variant: restored.variant ?? selectVariant(snapshot, model),
+      // altimate_change start — use the model-coupled restored effort selected above
+      variant,
+      // altimate_change end
       modeId: restored.modeId ?? (snapshot.availableModes.length > 0 ? snapshot.defaultModeID : undefined),
     })
     sessionSnapshots.set(state.id, snapshot)
@@ -426,7 +460,9 @@ export function make(input: {
     }
 
     if (params.configId === "effort") {
-      const model = current.model ?? selectDefaultModel(snapshot)
+      // altimate_change start — effort selection requires a real, advertised model
+      const model = current.model ?? (yield* requireDefaultModel(snapshot))
+      // altimate_change end
       const variants = Directory.variants(snapshot, model)
       if (!variants || !Object.keys(variants).includes(params.value)) {
         return yield* new ACPError.InvalidEffortError({ effort: params.value })
@@ -445,10 +481,15 @@ export function make(input: {
       if (!snapshot.availableModes.some((mode) => mode.id === params.value)) {
         return yield* new ACPError.InvalidModeError({ mode: params.value })
       }
+      // altimate_change start — validate the complete resulting state before mutating the session mode
+      const model = current.model ?? (yield* requireDefaultModel(snapshot))
+      // altimate_change end
       const state = yield* session.setMode(params.sessionId, params.value)
       return {
         configOptions: configOptions(snapshot, {
-          model: state.model ?? selectDefaultModel(snapshot),
+          // altimate_change start — mode selection cannot fabricate an ACP model
+          model: state.model ?? model,
+          // altimate_change end
           variant: state.variant,
           modeId: state.modeId,
         }),
@@ -498,7 +539,9 @@ export function make(input: {
     prompt: Effect.fn("ACP.prompt")(function* (params: PromptRequest) {
       const current = yield* session.get(params.sessionId)
       const snapshot = yield* directorySnapshot(current.cwd)
-      const selected = current.model ?? selectDefaultModel(snapshot)
+      // altimate_change start — prompts require a real, advertised model
+      const selected = current.model ?? (yield* requireDefaultModel(snapshot))
+      // altimate_change end
       if (!current.model) {
         yield* session.setModel(params.sessionId, selected)
       }
@@ -744,12 +787,36 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
       ProviderV2.ID,
       Provider.Info
     >
+    // altimate_change start — keep the managed provider out of ACP unless this project allows it
+    const config = configResponse?.data
+    const configLoaded = config !== undefined
+    const withoutManagedBase = () =>
+      Object.fromEntries(Object.entries(providers).filter(([id]) => id !== "altimate-free")) as Record<
+        ProviderV2.ID,
+        Provider.Info
+      >
+    const hasProviderAllowlist = Object.keys(config?.provider ?? {}).length > 0
+    // `config.provider` is a per-provider CUSTOMIZATION map (apiKey, options, headers) — the docs
+    // demonstrate it as a single-entry block. It gates ONLY the consent-gated managed provider,
+    // which config must never be able to switch on. Every other connected provider stays
+    // advertised, so `provider: { anthropic: {...} }` does not hide the user's other authenticated
+    // models from the ACP catalogue or invalidate a restored session pinned to one of them.
+    // A failed config lookup cannot prove that this project permits the request-logging managed
+    // provider either, so it fails closed the same way an explicit allowlist without it does.
+    const snapshotProviders = configLoaded && !hasProviderAllowlist ? providers : withoutManagedBase()
+    // altimate_change end
     const defaultModelStarted = performance.now()
+    // altimate_change start — resolve the default against the SAME filtered snapshot advertised to
+    // the client. Resolving against the unfiltered `providers` map let a project that sets
+    // `model: "altimate-free/altimate-base"` alongside any `provider` allowlist end up with a
+    // `defaultModel` pointing at a provider this snapshot had just excluded — ACP would still
+    // select and route the managed model even though it was hidden from `modelOptions`.
     const defaultModel = defaultModelFromConfig(
-      configResponse?.data?.model,
-      providers,
-      configResponse?.data?.provider as Record<string, unknown> | undefined,
+      config?.model,
+      snapshotProviders,
+      config?.provider as Record<string, unknown> | undefined,
     )
+    // altimate_change end
     ACPProfile.duration("acp.directory.defaultModel.resolve", defaultModelStarted, { configured: !!defaultModel })
     const modes = agents
       .filter((agent) => agent.mode !== "subagent" && agent.hidden !== true)
@@ -773,7 +840,9 @@ async function loadDirectorySnapshot(sdk: OpencodeClient, directory: string) {
 
     return Directory.build({
       directory,
-      providers,
+      // altimate_change start — expose only providers admitted by the ACP snapshot policy above
+      providers: snapshotProviders,
+      // altimate_change end
       modes,
       defaultModeID: agents.find((agent) => agent.mode === "primary" && agent.hidden !== true)?.name ?? "build",
       commands: commands.toSorted((a, b) => a.name.localeCompare(b.name)),
@@ -797,6 +866,9 @@ export function defaultModelFromConfig(
     : undefined
   if (configured && providers[configured.providerID]?.models[configured.modelID]) return configured
 
+  const configuredProviderEntries = Object.keys(providerFilter ?? {})
+  const hasProviderAllowlist = configuredProviderEntries.length > 0
+
   // Prefer altimate-backend/altimate-default when the fork's backend is available and the user
   // hasn't pinned a model — restores dropped fork behavior (the merge fell straight through to the
   // opencode provider, routing ACP clients away from altimate's backend). Honors an explicit
@@ -805,7 +877,7 @@ export function defaultModelFromConfig(
   if (
     altimateProvider &&
     altimateProvider.models[ModelV2.ID.make("altimate-default")] &&
-    (!providerFilter || Object.keys(providerFilter).includes("altimate-backend"))
+    (!hasProviderAllowlist || configuredProviderEntries.includes("altimate-backend"))
   ) {
     return { providerID: ProviderV2.ID.make("altimate-backend"), modelID: ModelV2.ID.make("altimate-default") }
   }
@@ -813,23 +885,68 @@ export function defaultModelFromConfig(
   // First-session ACP startup must not scan historical sessions just to infer
   // a default. Configured model, opencode provider, then sorted best model keep
   // the protocol response deterministic without extra session/message reads.
-  const opencodeProvider = providers[ProviderV2.ID.make("opencode")]
-  const opencodeModel = opencodeProvider ? Provider.sort(Object.values(opencodeProvider.models))[0] : undefined
+  const providerAllowed = (id: string) =>
+    id !== "altimate-free" && (!hasProviderAllowlist || Object.prototype.hasOwnProperty.call(providerFilter, id))
+  const opencodeProvider = providerAllowed("opencode") ? providers[ProviderV2.ID.make("opencode")] : undefined
+  const opencodeModel = opencodeProvider
+    ? Provider.sort(Object.values(opencodeProvider.models)).find((model) => model.id !== "big-pickle")
+    : undefined
   if (opencodeProvider && opencodeModel)
     return { providerID: ProviderV2.ID.make(opencodeProvider.id), modelID: ModelV2.ID.make(opencodeModel.id) }
 
-  const best = Provider.sort(Object.values(providers).flatMap((provider) => Object.values(provider.models)))[0]
+  const best = Provider.sort(
+    Object.values(providers)
+      .filter((provider) => providerAllowed(provider.id))
+      .flatMap((provider) => Object.values(provider.models)),
+  ).find((model) => !(model.providerID === "opencode" && model.id === "big-pickle"))
   if (best) return { providerID: ProviderV2.ID.make(best.providerID), modelID: ModelV2.ID.make(best.id) }
-  if (configured) return configured
+
+  // Altimate Base replaces Big Pickle as the free fallback, but only as a LAST resort and only
+  // after the user consented and registered (which is why it is present in `providers`). Anything
+  // else connected outranks the request-logging tier. A project provider block cannot force the
+  // managed model; an explicit configured model above remains authoritative.
+  const baseProvider = providers[ProviderV2.ID.make("altimate-free")]
+  if (!hasProviderAllowlist && baseProvider?.models[ModelV2.ID.make("altimate-base")]) {
+    return { providerID: ProviderV2.ID.make("altimate-free"), modelID: ModelV2.ID.make("altimate-base") }
+  }
+  return undefined
   // altimate_change end
 }
 
-function selectDefaultModel(snapshot: Directory.Snapshot) {
+// altimate_change start — keep Big Pickle explicitly selectable but never choose it implicitly
+export function selectDefaultModel(snapshot: Directory.Snapshot) {
   if (snapshot.defaultModel) return snapshot.defaultModel
-  const model = snapshot.modelOptions[0]
+  // Big Pickle remains explicitly selectable for existing users, but Altimate Base replaces it as
+  // the free implicit choice. Do not silently route a new ACP session back to Big Pickle when it is
+  // the first (or only) sorted catalogue entry and no usable default was resolved above.
+  const model = snapshot.modelOptions.find(
+    (item) => !(item.providerID === ProviderV2.ID.make("opencode") && item.modelID === ModelV2.ID.make("big-pickle")),
+  )
   if (model) return { providerID: model.providerID, modelID: model.modelID }
-  return { providerID: "unknown" as ProviderV2.ID, modelID: "unknown" as ModelV2.ID }
+  return undefined
 }
+
+function availableModel(snapshot: Directory.Snapshot, model: Directory.DefaultModel | undefined) {
+  if (!model) return undefined
+  return snapshot.modelOptions.some(
+    (option) => option.providerID === model.providerID && option.modelID === model.modelID,
+  )
+    ? model
+    : undefined
+}
+
+function requireDefaultModel(snapshot: Directory.Snapshot) {
+  const selected = selectDefaultModel(snapshot)
+  return selected
+    ? Effect.succeed(selected)
+    : Effect.fail(
+        new ACPError.ServiceFailureError({
+          safeMessage: "No supported model is configured. Register Altimate Base or configure another provider.",
+          service: "model",
+        }),
+      )
+}
+// altimate_change end
 
 function detectSlashCommand(parts: ReturnType<typeof promptContentToParts>) {
   const text = parts
@@ -874,6 +991,26 @@ function selectVariant(snapshot: Directory.Snapshot, model: Directory.DefaultMod
   if (variants.default) return "default"
   return Object.keys(variants)[0]
 }
+
+// altimate_change start — restored effort belongs to its restored model; validate both as one selection
+function selectRestoredVariant(
+  snapshot: Directory.Snapshot,
+  model: Directory.DefaultModel,
+  restoredVariant: string | undefined,
+  restoredModelRetained: boolean,
+) {
+  const variants = Directory.variants(snapshot, model)
+  if (
+    restoredModelRetained &&
+    restoredVariant &&
+    variants &&
+    Object.prototype.hasOwnProperty.call(variants, restoredVariant)
+  ) {
+    return restoredVariant
+  }
+  return selectVariant(snapshot, model)
+}
+// altimate_change end
 
 function configOptions(snapshot: Directory.Snapshot, session: ConfigState) {
   return buildConfigOptions({
@@ -1083,3 +1220,7 @@ function findProviderID(value: unknown): string | undefined {
   if ("data" in value) return findProviderID(value.data)
   if ("error" in value) return findProviderID(value.error)
 }
+
+// altimate_change start — expose the module through the repository's namespace projection convention
+export * as ACPService from "./service"
+// altimate_change end

@@ -2,8 +2,8 @@ import { readFile } from "fs/promises"
 import path from "path"
 import { parseTree, findNodeAtLocation, getNodeValue } from "jsonc-parser"
 import { resolveConfigPath, addMcpToConfig, readMcpEntryFromDisk } from "../mcp/config"
+import { DiscoveryFiles } from "../mcp/discovery-files"
 import { Filesystem } from "../util/filesystem"
-import { Glob } from "@opencode-ai/core/util/glob"
 import { Log } from "@/altimate/util/log"
 import type { Config } from "../config/config"
 
@@ -45,25 +45,7 @@ function extractServersMap(
  */
 async function findAllMcpJsonFiles(projectRootDir: string): Promise<string[]> {
   try {
-    const ignore = [...Glob.DEFAULT_IGNORE]
-    const paths = await Glob.scan("**/mcp.json", {
-      cwd: projectRootDir,
-      absolute: true,
-      dot: true,
-      // Prune dependency/build trees during traversal. Filtering the results
-      // afterwards still reads every directory: on a monorepo with
-      // node_modules installed that walk costs ~6 CPU-seconds per invocation
-      // because it runs across the whole runtime I/O thread pool.
-      ignore,
-    })
-    // Belt and braces: keep the result filter so a pattern that slips past the
-    // traversal prune (e.g. via a symlinked path) still never reaches
-    // StdioClientTransport, which is handed `command` + `args` from whatever
-    // mcp.json we discover.
-    const toRelativeGlobPath = (file: string) => path.relative(projectRootDir, file).split(path.sep).join("/")
-    return paths
-      .filter((file) => !ignore.some((pattern) => Glob.match(pattern, toRelativeGlobPath(file))))
-      .sort()
+    return (await DiscoveryFiles.scanProjectMcpJsonFiles(projectRootDir)).map((file) => file.path)
   } catch {
     log.warn("findAllMcpJsonFiles: glob scan failed", { cwd: projectRootDir })
     return []

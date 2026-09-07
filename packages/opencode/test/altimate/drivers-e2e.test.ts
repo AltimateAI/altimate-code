@@ -60,6 +60,160 @@ async function waitForPort(
   throw new Error(`Port ${port} not reachable after ${timeoutMs}ms`)
 }
 
+// altimate_change start — retry a flaky setup step, and fail loudly (not silently)
+// once retries are exhausted.
+/**
+ * Run `attempt` up to `maxAttempts` times, with a short backoff between tries,
+ * and return its result on the first success. If every attempt fails, THROW
+ * the last error rather than swallowing it.
+ *
+ * This is the difference between a genuine "not available here" (handled
+ * elsewhere, before this is ever called) and "was available but setup broke":
+ * a caller that catches this and silently leaves some "ready" flag false
+ * recreates the exact vacuous-green failure this file's `probeDuckDB` exists
+ * to prevent, one layer down — every test gated on that flag would then
+ * report as passing via an early `if (!ready) return` instead of failing.
+ */
+async function connectWithRetry<T>(attempt: (attemptNumber: number) => Promise<T>, maxAttempts: number): Promise<T> {
+  let lastError: unknown
+  for (let n = 1; n <= maxAttempts; n++) {
+    try {
+      return await attempt(n)
+    } catch (e) {
+      lastError = e
+      if (n < maxAttempts) await new Promise((r) => setTimeout(r, 100 * n))
+    }
+  }
+  // altimate_change: preserve the original error as `cause` instead of only its
+  // message. A plain `new Error(message)` discarded the last attempt's stack,
+  // type (TypeError vs the driver's own error class), and any extra properties
+  // it carried — exactly the details someone debugging a real setup failure
+  // needs. The friendly summary stays the thrown error's own message; `cause`
+  // carries the original through unmodified.
+  throw new Error(
+    `Setup failed after ${maxAttempts} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    { cause: lastError },
+  )
+}
+// altimate_change end
+
+// altimate_change start — never leak a native handle on a failed connect
+/**
+ * Construct a connector via `make`, then open it. If the open step (`connect()`)
+ * fails, close the half-open connector before rethrowing — otherwise a
+ * connector whose constructor already opened a native handle (as DuckDB's does)
+ * leaks that handle on every failed attempt a retry loop makes.
+ */
+async function connectOrClose<C extends { connect(): Promise<void>; close(): Promise<void> }>(
+  make: () => Promise<C>,
+): Promise<C> {
+  const c = await make()
+  try {
+    await c.connect()
+  } catch (e) {
+    await c.close().catch(() => {
+      // best-effort cleanup of a half-open handle; the original error is what matters
+    })
+    throw e
+  }
+  return c
+}
+// altimate_change end
+
+// altimate_change start — unit-test the retry-then-fail-loudly behavior directly,
+// independent of real DuckDB availability, so this regression is caught even in
+// environments where the DuckDB binding isn't installed at all.
+describe("connectWithRetry", () => {
+  test("throws (does not silently resolve) once every attempt is exhausted", async () => {
+    let calls = 0
+    const alwaysFails = async () => {
+      calls++
+      throw new Error("transient setup failure")
+    }
+    await expect(connectWithRetry(alwaysFails, 3)).rejects.toThrow("Setup failed after 3 attempts")
+    await expect(connectWithRetry(alwaysFails, 3)).rejects.toThrow("transient setup failure")
+    expect(calls).toBe(6) // 3 attempts per call above, called twice
+  })
+
+  // altimate_change: regression — the thrown error used to be a plain
+  // `new Error(message)`, discarding the last attempt's original error object
+  // (its stack, type, and any extra properties) entirely.
+  test("preserves the last attempt's original error as `cause`", async () => {
+    const original = new TypeError("native binding not built")
+    const alwaysFailsWithOriginal = async () => {
+      throw original
+    }
+    try {
+      await connectWithRetry(alwaysFailsWithOriginal, 2)
+      throw new Error("expected connectWithRetry to throw")
+    } catch (e) {
+      expect((e as Error).cause).toBe(original)
+    }
+  })
+
+  test("resolves with the first successful attempt's result, retrying past earlier failures", async () => {
+    let calls = 0
+    const succeedsOnThirdTry = async () => {
+      calls++
+      if (calls < 3) throw new Error("not yet")
+      return "connected"
+    }
+    const result = await connectWithRetry(succeedsOnThirdTry, 5)
+    expect(result).toBe("connected")
+    expect(calls).toBe(3)
+  })
+})
+// altimate_change end
+
+// altimate_change start — regression: a connector whose connect() fails must be
+// closed, not dropped, or a retry loop leaks a native handle per failed attempt.
+describe("connectOrClose", () => {
+  function mockConnector(shouldFailConnect: boolean) {
+    let closed = false
+    return {
+      async connect() {
+        if (shouldFailConnect) throw new Error("open failed")
+      },
+      async close() {
+        closed = true
+      },
+      get closed() {
+        return closed
+      },
+    }
+  }
+
+  test("closes the connector when connect() fails, and rethrows the original error", async () => {
+    const c = mockConnector(true)
+    await expect(connectOrClose(async () => c)).rejects.toThrow("open failed")
+    expect(c.closed).toBe(true)
+  })
+
+  test("does not close a connector that opened successfully", async () => {
+    const c = mockConnector(false)
+    const result = await connectOrClose(async () => c)
+    expect(result).toBe(c)
+    expect(c.closed).toBe(false)
+  })
+
+  test("closes every connector dropped across a full connectWithRetry sequence, only the final success stays open", async () => {
+    const made: ReturnType<typeof mockConnector>[] = []
+    let attempt = 0
+    const result = await connectWithRetry(async () => {
+      attempt++
+      const c = mockConnector(attempt < 3) // fails twice, succeeds on the 3rd
+      made.push(c)
+      return connectOrClose(async () => c)
+    }, 3)
+    expect(attempt).toBe(3)
+    expect(made[0].closed).toBe(true)
+    expect(made[1].closed).toBe(true)
+    expect(made[2].closed).toBe(false)
+    expect(result).toBe(made[2])
+  })
+})
+// altimate_change end
+
 // altimate_change start — authoritative DuckDB availability probe.
 // `require("duckdb")` (isDuckDBAvailable) can return true when the native binding
 // is present in the process module cache but actually fails to CONNECT in this
@@ -72,7 +226,11 @@ async function probeDuckDB(): Promise<boolean> {
   if (!isDuckDBAvailable()) return false
   try {
     const mod = await import("@altimateai/drivers/duckdb")
-    const probe = await mod.connect({ type: "duckdb" })
+    // altimate_change start — requireStorePath() now rejects a missing path;
+    // an in-memory probe must ask for ":memory:" explicitly or every DuckDB
+    // E2E test below silently skips (duckdbAvailable stays false).
+    const probe = await mod.connect({ type: "duckdb", path: ":memory:" })
+    // altimate_change end
     await probe.connect()
     // Guard against a leaked mock.module from another test file (e.g.
     // dbt-first-execution.test.ts mocks @altimateai/drivers/duckdb at module
@@ -109,29 +267,32 @@ describe("DuckDB Driver E2E", () => {
   let duckdbReady = false
 
   // altimate_change start — retry DuckDB connection initialization to handle
-  // transient native binding load failures when the full suite runs in parallel
+  // transient native binding load failures when the full suite runs in parallel,
+  // but FAIL (don't silently skip) if it never recovers.
+  //
+  // `probeDuckDB()` above already proved DuckDB is genuinely available and
+  // working in this process. If setup here still fails after retries, that is
+  // a real regression, not "DuckDB isn't available" — every test below still
+  // runs (test.skipIf keys off `duckdbAvailable`, which stays true regardless
+  // of what happens here), and each one used to just `if (!duckdbReady) return`
+  // and report as passing: the same vacuous-green class the driver-e2e
+  // false-skip fix removed, one layer down. Throwing here fails the whole
+  // describe block instead of letting every test silently "pass" via that
+  // early return.
   beforeAll(async () => {
     if (!duckdbAvailable) return
-    const maxAttempts = 3
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const mod = await import("@altimateai/drivers/duckdb")
-        connector = await mod.connect({ type: "duckdb" })
-        await connector.connect()
-        duckdbReady = true
-        break
-      } catch (e) {
-        if (attempt < maxAttempts) {
-          // Brief delay before retry to let concurrent native-binding loads settle
-          await new Promise((r) => setTimeout(r, 100 * attempt))
-        } else {
-          console.warn(
-            "DuckDB not available (native binding may be missing); skipping DuckDB tests:",
-            (e as Error).message,
-          )
-        }
-      }
-    }
+    connector = await connectWithRetry(
+      // altimate_change: wrapped in connectOrClose — mod.connect() only builds the
+      // connector, the native handle opens in c.connect() below. A failed c.connect()
+      // used to drop `c` without closing it, leaking that handle on every failed retry.
+      () =>
+        connectOrClose(async () => {
+          const mod = await import("@altimateai/drivers/duckdb")
+          return mod.connect({ type: "duckdb", path: ":memory:" })
+        }),
+      3,
+    )
+    duckdbReady = true
   })
   // altimate_change end
 
@@ -286,7 +447,9 @@ describe("DuckDB Driver E2E", () => {
     async () => {
       if (!duckdbReady) return
       const mod = await import("@altimateai/drivers/duckdb")
-      const tmp = await mod.connect({ type: "duckdb" })
+      // altimate_change start — requireStorePath() now rejects a missing path
+      const tmp = await mod.connect({ type: "duckdb", path: ":memory:" })
+      // altimate_change end
       await tmp.connect()
       const result = await tmp.execute("SELECT 42 AS answer")
       expect(result.rows[0][0]).toBe(42)

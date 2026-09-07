@@ -40,9 +40,14 @@ normally.
 
 ## Built-in validators
 
-altimate-code ships two validators out of the box. Both apply only to
+altimate-code ships seven validators out of the box. All apply only to
 sessions inside a dbt project (their `appliesTo` check looks for a
 `dbt_project.yml`).
+
+Two are enabled whenever validators run (`dbt-tests-pass`,
+`dbt-schema-verify`); the other five are **completion gates** added in the
+deterministic-validators work and are currently soak-tested in shadow mode
+— see [Enabling validators](#enabling-validators) before relying on them.
 
 ### `dbt-tests-pass`
 
@@ -66,6 +71,65 @@ reordered, or type-mismatched columns).
 **Catches**: column-level drift that wouldn't be caught by `dbt build`
 alone — equality tests against the spec would fail later but the
 agent has already declared done.
+
+## Completion gates (shadow mode)
+
+The following five validators are the deterministic **completion gates**.
+They are soak-tested in shadow mode (`ALTIMATE_VALIDATORS_SHADOW=1`, which
+records outcomes without blocking) and are **not** recommended for
+enforcement (`ALTIMATE_VALIDATORS_ENABLED=1`) yet. Each applies only inside
+a dbt project.
+
+### `dbt-build-green`
+
+After the agent declares done, refuses to terminate unless a fresh
+successful `dbt build` artifact (`run_results.json` newer than the session
+start, no failing status) covers every model the session edited.
+
+**Catches**: the agent declaring "done" while the build is red or stale.
+
+### `dbt-nothing-built`
+
+Inverse completion gate. When the workspace carries a task document that
+literally names required models or files (or the require-artifacts opt-in
+is set), refuses to terminate a session that authored no project files and
+produced no fresh successful build artifact.
+
+**Catches**: a vacuous "done" where the task named deliverables but nothing
+was actually built.
+
+### `dbt-deliverable-names`
+
+After the agent declares done, compares the deliverable names the task
+document states literally against the model, seed and snapshot names the
+project actually defines, and refuses to terminate when a required name is
+absent.
+
+**Catches**: renames and self-chosen substitutes — the agent building
+something *like* the requested deliverable under a different name.
+
+### `dbt-incremental-config`
+
+After the agent declares done, lints the incremental models the session
+edited for self-contradictory configuration: upsert semantics declared
+without a `unique_key`, a missing `is_incremental()` guard where the task
+demands idempotent re-runs, and non-deterministic functions inside the
+incremental predicate.
+
+**Catches**: incremental models that will silently duplicate or drop rows
+on re-run.
+
+### `dbt-dialect-guard`
+
+After the agent declares done, flags warehouse-specific SQL functions used
+in the models the session edited without the project's prescribed
+`target.type` Jinja guard. Only active in projects that already establish
+the guard convention.
+
+**Catches**: dialect-specific SQL that runs on one warehouse but breaks on
+another. *Known limitation*: a call already wrapped in a
+`{% if target.type != '...' %}` branch is treated as guarded even when it
+is live on every other target — see the internal follow-up notes.
 
 ## Enabling validators
 

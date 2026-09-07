@@ -2940,6 +2940,21 @@ describe("ProviderTransform.temperature - Cohere North", () => {
   })
 })
 
+// altimate_change start — pins the stable "altimate-base" alias's sampling params to the same
+// tuned values applied elsewhere in this file, since the gateway itself does not force them.
+describe("ProviderTransform.temperature - Altimate Base", () => {
+  test("matches the tuned sampling value", () => {
+    expect(ProviderTransform.temperature({ id: "altimate-base" } as any)).toBe(0.55)
+  })
+})
+
+describe("ProviderTransform.topP - Altimate Base", () => {
+  test("matches the tuned sampling value", () => {
+    expect(ProviderTransform.topP({ id: "altimate-base" } as any)).toBe(1)
+  })
+})
+// altimate_change end
+
 describe("ProviderTransform.variants", () => {
   const createMockModel = (overrides: Partial<any> = {}): any => ({
     id: "test/test-model",
@@ -3010,6 +3025,23 @@ describe("ProviderTransform.variants", () => {
     const result = ProviderTransform.variants(model)
     expect(result).toEqual({})
   })
+
+  // altimate_change start — the model served behind the "altimate-base" alias does not support
+  // the reasoning-effort variant controls the other excluded ids above also lack.
+  test("altimate-base returns empty object", () => {
+    const model = createMockModel({
+      id: "altimate-base",
+      providerID: "altimate-free",
+      api: {
+        id: "altimate-base",
+        url: "",
+        npm: "@ai-sdk/openai-compatible",
+      },
+    })
+    const result = ProviderTransform.variants(model)
+    expect(result).toEqual({})
+  })
+  // altimate_change end
 
   test("minimax m3 using anthropic returns thinking toggles", () => {
     const model = createMockModel({
