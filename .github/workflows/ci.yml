@@ -583,7 +583,10 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: packages/dbt-tools/test/.dbt-resolve-envs
-          key: dbt-resolve-envs-${{ runner.os }}-v1
+          # v2: the v1 cache held a uv venv linked to a uv-managed Python that
+          # fresh runners lack (bin/dbt present, exec ENOENT). setup-resolve.sh
+          # now validates cached envs and pins uv to the system interpreter.
+          key: dbt-resolve-envs-${{ runner.os }}-v2
 
       - name: Set up dbt versions
         run: ./test/e2e/setup-versions.sh 1.8 1.10 1.11
