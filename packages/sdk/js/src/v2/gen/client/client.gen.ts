@@ -169,7 +169,29 @@ export const createClient = (config: Config = {}): Client => {
           // Some servers return 200 with no Content-Length and empty body.
           // response.json() would throw; read as text and parse if non-empty.
           const text = await response.text()
-          data = text ? JSON.parse(text) : {}
+          // altimate_change start — upstream_fix: guard JSON parse against non-JSON (HTML) response bodies
+          // A 200 whose body is an HTML error page from a proxy/gateway/CDN otherwise crashes with a
+          // raw "JSON Parse error: Unrecognized token '<'". Surface an actionable error instead.
+          // Re-applied by script/build.ts after codegen (clean: true wipes this tree); edit it THERE.
+          try {
+            data = text ? JSON.parse(text) : {}
+          } catch (cause) {
+            // Only the page <title> rides on `cause` ("502 Bad Gateway", "Access Denied", "Sign in" — the
+            // diagnostic part of a proxy/gateway/CDN page): util/error.ts serializes `cause` into logs,
+            // and a page body can echo the request URL (query included) or be a malformed real response.
+            // A title carrying URL syntax (any `/ ? = %`) is dropped so the request target cannot echo through; other title text is kept as the only available diagnostic.
+            const title = text.trimStart().startsWith("<")
+              ? /<title>([^<]{1,200})<\/title>/i.exec(text)?.[1]
+              : undefined
+            const body = title && !/[\/?=%]/.test(title) ? title : undefined
+            throw new Error(
+              `Expected a JSON response from ${request.method} ${new URL(request.url).pathname} but the body was not JSON ` +
+                `(HTTP ${response.status}, content-type ${response.headers.get("content-type") ?? "unset"}). ` +
+                `This is usually a proxy or gateway error page, not the API.`,
+              { cause: { parseError: cause, status: response.status, body } },
+            )
+          }
+          // altimate_change end
           break
         }
         case "stream":
