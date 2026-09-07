@@ -10,6 +10,7 @@ import {
   readDatamateTransportFromIde,
   syncDatamateUrlFromVscodeMcp,
   resolveDatamateSyncRoot,
+  collectDatamateHealPaths,
   DATAMATE_KEY,
   DATAMATE_PROVENANCE,
 } from "../../src/altimate/datamate-transport"
@@ -549,6 +550,19 @@ describe("review hardening: allowlist, validation, provenance, bounded root, nes
     expect(updated).toContain(DATAMATE_KEY)
     const entry = JSON.parse(await readFile(nestedConfig, "utf-8")).mcp[DATAMATE_KEY]
     expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
+  })
+
+  test("collectDatamateHealPaths from a nested dir includes root-level configs (reload read-back parity)", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    await mkdir(path.join(tmp.path, ".git"), { recursive: true })
+    const rootConfig = path.join(tmp.path, "altimate-code.json")
+    await writeFile(rootConfig, JSON.stringify({ mcp: { [DATAMATE_KEY]: stamped(tmp.path) } }, null, 2))
+    const nested = path.join(tmp.path, "packages", "app")
+    await mkdir(nested, { recursive: true })
+
+    const paths = (await collectDatamateHealPaths(nested, globalDir)).map((c) => c.path)
+    expect(paths).toContain(rootConfig)
   })
 
   test("an mcp.json outside the extension-written locations is never a transport source", async () => {

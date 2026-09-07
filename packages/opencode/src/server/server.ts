@@ -33,11 +33,10 @@ import { McpRoutes } from "./routes/mcp"
 import { MCP } from "../mcp"
 // Import sync + fresh-read helpers directly from the shared transport module.
 // Using datamate-transport.ts instead of serve.ts avoids a dep on a cmd handler.
-import { syncDatamateUrlFromVscodeMcp } from "../altimate/datamate-transport"
+import { syncDatamateUrlFromVscodeMcp, collectDatamateHealPaths } from "../altimate/datamate-transport"
 // altimate_change - workspace mode owns the datamate key
 import { managedWorkspaceLoaded } from "../altimate/workspace/engine-overlay"
 import { readMcpEntryFromDisk } from "../mcp/config"
-import { findAllConfigPaths } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
@@ -710,7 +709,10 @@ export namespace Server {
             // The healed entry may live in any config file the sync covers —
             // project, project subdirs, or the global config (scope: "global"
             // adds) — so scan them all instead of only the project path.
-            const configPaths = await findAllConfigPaths(directory, Global.Path.config)
+            // Same walk the sync heals along — a nested instance directory with
+            // the entry in a root-level config must find the healed file here,
+            // or the reconnect silently no-ops while reporting updated.
+            const configPaths = (await collectDatamateHealPaths(directory)).map((c) => c.path)
             const currentStatus = await MCP.status()
             for (const name of updatedNames) {
               let freshEntry: Awaited<ReturnType<typeof readMcpEntryFromDisk>>

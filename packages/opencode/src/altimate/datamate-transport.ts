@@ -230,6 +230,37 @@ export async function readDatamateTransportFromIde(
 }
 
 /**
+ * Every config file the datamate heal covers, in heal order: project-scope
+ * files from the launch directory up to the resolved project root (each with
+ * its .altimate-code/.opencode subdirs — mirroring the loader's upward walk),
+ * then the global config dir. Shared by the sync and the reload endpoint's
+ * read-back so the two can never disagree about where a healed entry lives.
+ */
+export async function collectDatamateHealPaths(
+  launchDir: string,
+  globalConfigDir: string = Global.Path.config,
+): Promise<Array<{ path: string; scope: "project" | "global" }>> {
+  const root = await resolveDatamateSyncRoot(launchDir)
+  const candidates: Array<{ path: string; scope: "project" | "global" }> = []
+  const seen = new Set<string>()
+  let dir = path.resolve(launchDir)
+  const rootResolved = path.resolve(root)
+  while (true) {
+    for (const p of await findProjectConfigPaths(dir)) {
+      if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "project" }) }
+    }
+    if (dir === rootResolved || !dir.startsWith(rootResolved)) break
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  for (const p of await findGlobalConfigPaths(globalConfigDir)) {
+    if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "global" }) }
+  }
+  return candidates
+}
+
+/**
  * Sync the "datamate" entry (and other remote MCP entries) from the first
  * mcp.json that contains a "datamate" key to altimate-code.json.
  *
@@ -342,24 +373,7 @@ export async function syncDatamateUrlFromVscodeMcp(
         return true
       }
 
-      // Project-scope candidates: every directory from the launch dir up to the
-      // root (inclusive), each with its .altimate-code/.opencode subdirs.
-      const candidates: Array<{ path: string; scope: "project" | "global" }> = []
-      const seen = new Set<string>()
-      let dir = path.resolve(launchDir)
-      const rootResolved = path.resolve(root)
-      while (true) {
-        for (const p of await findProjectConfigPaths(dir)) {
-          if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "project" }) }
-        }
-        if (dir === rootResolved || !dir.startsWith(rootResolved)) break
-        const parent = path.dirname(dir)
-        if (parent === dir) break
-        dir = parent
-      }
-      for (const p of await findGlobalConfigPaths(globalConfigDir)) {
-        if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "global" }) }
-      }
+      const candidates = await collectDatamateHealPaths(launchDir, globalConfigDir)
 
       let datamateHealed = false
       for (const { path: configPath, scope } of candidates) {

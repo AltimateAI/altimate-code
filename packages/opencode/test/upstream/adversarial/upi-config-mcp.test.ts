@@ -200,7 +200,7 @@ describe("UPI-25 through UPI-27 MCP persistence, names, pagination, and resource
     // The disk read scans every config file the heal covers (project, subdirs,
     // global) — the healed entry may live in any of them; the stale-singleton
     // bypass contract is unchanged (readMcpEntryFromDisk + MCP.add, no Config.get()).
-    expect(serverSource).toContain("const configPaths = await findAllConfigPaths(directory, Global.Path.config)")
+    expect(serverSource).toContain("const configPaths = (await collectDatamateHealPaths(directory)).map((c) => c.path)")
     expect(serverSource).toContain("freshEntry = await readMcpEntryFromDisk(name, configPath)")
     expect(serverSource).toContain("await MCP.add(name, freshEntry)")
   })
