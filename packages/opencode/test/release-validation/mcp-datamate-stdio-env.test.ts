@@ -1,4 +1,8 @@
 import { describe, test, expect } from "bun:test"
+
+// Directory symlinks need admin/developer-mode privileges on Windows; skip
+// there, matching discover.test.ts and mcp-datamate-893-codex.test.ts.
+const testSymlink = process.platform === "win32" ? test.skip : test
 import { tmpdir } from "../fixture/fixture"
 import { mkdir, writeFile, readFile } from "fs/promises"
 import path from "path"
@@ -572,7 +576,7 @@ describe("review hardening: allowlist, validation, provenance, bounded root, nes
     }
   })
 
-  test("resolveDatamateSyncRoot: home reached through a symlink is still rejected as a project root", async () => {
+  testSymlink("resolveDatamateSyncRoot: home reached through a symlink is still rejected as a project root", async () => {
     await using tmp = await tmpdir()
     const realHome = path.join(tmp.path, "real-home")
     await mkdir(path.join(realHome, ".git"), { recursive: true })

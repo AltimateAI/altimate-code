@@ -184,6 +184,27 @@ async function handleListIntegrations() {
 
 // DATAMATE_KEY is imported from altimate/datamate-transport.ts (shared constant).
 
+/**
+ * Merge a fresh IDE-derived transport into an existing persisted entry:
+ * user-managed fields (timeout, oauth, headers, …) are carried forward;
+ * transport identity, enabled, updatedAt, and provenance are re-derived.
+ * Shared by the connected-entry stamp and the disconnected refresh so the
+ * exclusion rule and merge order cannot drift apart.
+ */
+function mergeRefreshedEntry(
+  existing: Record<string, unknown>,
+  mcpConfig: Record<string, unknown>,
+  updatedAtField: Record<string, unknown>,
+  provenanceFields: Record<string, unknown>,
+): Record<string, unknown> {
+  const replacedFields = new Set([...TRANSPORT_IDENTITY_FIELDS, "enabled"])
+  const merged: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(existing)) {
+    if (!replacedFields.has(k)) merged[k] = v
+  }
+  return Object.assign(merged, mcpConfig, { enabled: true }, updatedAtField, provenanceFields)
+}
+
 async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "project" | "global" }) {
   if (!args.datamate_id) {
     return {
@@ -288,21 +309,24 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           log.info("handleAdd: already connected, skipping add", {
             serverName: DATAMATE_KEY,
           })
-          // The live client stays untouched, but the provenance stamp must still
-          // be persisted: without it a legacy (pre-provenance) entry can never be
-          // repaired by the boot heal, and the explicit-add remedy would be a
-          // no-op exactly when the entry happens to be connected. Disk-only
-          // update; the fresh transport applies from the next session.
+          // The live client stays untouched, but the persisted entry must still
+          // track the current IDE transport: without the provenance stamp a
+          // legacy entry can never be repaired by the boot heal (the explicit-add
+          // remedy would be a no-op exactly when the entry happens to be
+          // connected), and without the transport comparison a changed command/
+          // env under matching provenance would keep spawning stale settings —
+          // entries without updatedAt are skipped by the boot sync, so this path
+          // is their only repair. Disk-only update; the fresh transport applies
+          // from the next session.
           const existingOnDisk = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
           const onDisk = (existingOnDisk ?? {}) as Record<string, unknown>
-          if (onDisk["managedBy"] !== DATAMATE_PROVENANCE || onDisk["sourceMcpJson"] !== transport.source) {
-            const restamped: Record<string, unknown> = {}
-            for (const [k, v] of Object.entries(onDisk)) {
-              if (!TRANSPORT_IDENTITY_FIELDS.has(k) && k !== "enabled") restamped[k] = v
-            }
-            Object.assign(restamped, mcpConfig, { enabled: true }, updatedAtField, provenanceFields)
+          const restamped = mergeRefreshedEntry(onDisk, mcpConfig, updatedAtField, provenanceFields)
+          const identityChanged = [...TRANSPORT_IDENTITY_FIELDS, "managedBy", "sourceMcpJson"].some(
+            (k) => JSON.stringify(onDisk[k]) !== JSON.stringify(restamped[k]),
+          )
+          if (identityChanged) {
             await addMcpToConfig(DATAMATE_KEY, restamped as Parameters<typeof addMcpToConfig>[1], configPath)
-            log.info("handleAdd: stamped provenance on connected entry (disk only)", {
+            log.info("handleAdd: refreshed connected entry on disk (live client untouched)", {
               serverName: DATAMATE_KEY,
               configPath,
             })
@@ -335,20 +359,12 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           type: mcpConfig.type,
         })
         const existing = await readMcpEntryFromDisk(DATAMATE_KEY, configPath)
-        // enabled joins the shared transport-identity set here because this path
-        // re-derives it too (always written as true below).
-        const replacedFields = new Set([...TRANSPORT_IDENTITY_FIELDS, "enabled"])
-        const preserved: Record<string, unknown> = {}
-        for (const [k, v] of Object.entries(existing ?? {})) {
-          if (!replacedFields.has(k)) preserved[k] = v
-        }
-        const refreshed = {
-          ...preserved,
-          ...mcpConfig,
-          enabled: true,
-          ...updatedAtField,
-          ...provenanceFields,
-        }
+        const refreshed = mergeRefreshedEntry(
+          (existing ?? {}) as Record<string, unknown>,
+          mcpConfig,
+          updatedAtField,
+          provenanceFields,
+        )
         await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
         // The live client must get the same merged entry as the disk write — the
         // bare transport config would drop preserved auth/connection settings

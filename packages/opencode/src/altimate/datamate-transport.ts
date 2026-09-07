@@ -96,14 +96,6 @@ export function parseIdeTransport(entry: unknown, source: string): DatamateTrans
 }
 
 /**
- * Root directory the boot-time heal should scan from: the containing git
- * project root when there is one, else the directory itself. Boot-time callers
- * (TUI worker, `run`) fire the sync before an Instance exists, so they cannot
- * use `Instance.worktree` — but MCP config is scoped to the project root, and
- * a session launched from a subdirectory would otherwise scan the subtree and
- * miss both the IDE config and the persisted entry it needs to repair.
- */
-/**
  * Path identity for the home-root rejection: canonicalize both sides so a
  * symlinked launch path (or differing drive/case on Windows) cannot smuggle
  * `$HOME` past a string comparison and turn the whole home tree into the
@@ -125,6 +117,14 @@ async function isSamePath(a: string, b: string): Promise<boolean> {
   return ca === cb
 }
 
+/**
+ * Root directory the boot-time heal should scan from: the containing git
+ * project root when there is one, else the directory itself. Boot-time callers
+ * (TUI worker, `run`) fire the sync before an Instance exists, so they cannot
+ * use `Instance.worktree` — but MCP config is scoped to the project root, and
+ * a session launched from a subdirectory would otherwise scan the subtree and
+ * miss both the IDE config and the persisted entry it needs to repair.
+ */
 export async function resolveDatamateSyncRoot(directory: string): Promise<string> {
   try {
     // Bounded at the home directory: an unbounded walk reaches `/`, and a home
