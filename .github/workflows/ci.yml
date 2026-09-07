@@ -546,14 +546,17 @@ jobs:
   # altimate_change end
 
   # ---------------------------------------------------------------------------
-  # dbt-tools E2E — slow (~3 min), only on push to main.
+  # dbt-tools E2E — slow (~3 min): on push to main, and on pull requests that
+  # touch packages/dbt-tools (the `dbt-tools` change filter above). Without the
+  # PR path a fix to this job's own environment setup could only be proven
+  # after merging.
   # Tests dbt CLI fallbacks against real dbt versions (1.8, 1.10, 1.11) and
   # real Python environments (venv, uv, system).
   # ---------------------------------------------------------------------------
   dbt-tools-e2e:
     name: "dbt-tools E2E"
     needs: changes
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || needs.changes.outputs.dbt-tools == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
