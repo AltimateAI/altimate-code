@@ -552,6 +552,11 @@ export function DialogAltimateBaseConfirm(props: {
           esc
         </text>
       </box>
+      <Show when={props.origin === "migration"}>
+        <text fg={theme.text} wrapMode="word" width="100%">
+          Big Pickle has been retired.
+        </text>
+      </Show>
       <text fg={theme.textMuted} wrapMode="word" width="100%">
         {ALTIMATE_BASE_DISCLOSURE}
       </text>

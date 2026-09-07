@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0-beta.1] - 2026-09-07
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Added
+
+- **Altimate Base — a free, no-signup, no-API-key hosted model.** Choose it from the first-run picker, `/connect`, or `/model`. Rate limited; requests and responses are logged and may be used to improve Altimate's products, linked to a persistent per-installation identifier (**pseudonymous, not anonymous**) — avoid sending secrets or confidential code. The consent dialog defaults to **No**; nothing is sent until you accept. `ALTIMATE_BASE_GATEWAY_URL` lets operators point it at a self-hosted gateway (HTTPS required, no embedded credentials). (#1199)
+- **Five deterministic completion-gate validators** (`dbt-build-green`, `dbt-nothing-built`, `dbt-deliverable-names`, `dbt-incremental-config`, `dbt-dialect-guard`) that refuse to terminate a session on a broken, vacuous, or misnamed dbt result. **Opt-in, shadow-mode only** for now (`ALTIMATE_VALIDATORS_SHADOW=1`); off by default. (#1175)
+
+### Changed
+
+- **Big Pickle retired** as a new-user option. Existing users are detected on launch and offered Altimate Base through the consent gate (not silently migrated); declining routes to the model picker. (#1199)
+- **Agent `data-qa` renamed to `analyst`**, now the documented "ask questions about your data" agent. Existing `default_agent: "data-qa"` configs keep working — they fall back to `analyst` with a one-time notice. (#1239)
+- Builder prompt split into an invariant core plus named packs (byte-identical assembly), with an opt-in data-qa profile. (#1217)
+
+### Breaking Changes
+
+- **DuckDB and SQLite connections now require an explicit `path`.** A missing `path` used to silently default to an in-memory store — which could read a populated on-disk store as empty — and now errors. Set `"path": ":memory:"` if you want in-memory behavior. See [warehouses.md](docs/docs/configure/warehouses.md). (#1204)
+
+### Fixed
+
+- **Ledger redaction** — a `curl -u user:pass` in tool output could leak unredacted into the compaction ledger after #1117's path-masking ate the `curl` token; redaction now derives curl context from the pre-mask string independently. (#1246)
+- **Telemetry error text** now masks filesystem paths (home directories, cloud URIs, Windows/UNC). (#1117)
+- **Safety threat messages** no longer echo raw non-SQL content that could resurrect a redacted secret. (#1111)
+- `--dir` no longer reads a populated warehouse store as empty. (#1204)
+- Drivers: load from the location the failing runtime named; concurrency-safe installs; a 2s deadline no longer fails healthy DuckDB stores; a broken client now says so. (#1201, #1198)
+- Recovered driver-e2e review debt — false-skip, `file:` URI checks, Windows paths, telemetry, docs. (#1238)
+- `auth login` accepts a provider id and diagnoses plan/account on a Codex 400. (#1181)
+- Skills no longer walk the whole tree to answer "does any file match". (#1213)
+- Main CI `dbt-tools E2E` job un-broken — restored the missing `--version` fallback that killed the setup script under `set -euo pipefail`. (#1252)
+
 ## [0.10.0] - 2026-09-02
 
 Workspaces grow from a memory-only pilot into a working surface: a bound workspace now supplies its custom skills, attaches its own engine, and routes warehouse tools through it. Alongside that, a run no longer dies when one oversized tool result overflows the window, and the ChatGPT-subscription model picker was rebuilt against what the backend actually serves. Everything workspace-related stays behind `ALTIMATE_WORKSPACE=1` and is invisible to anyone not opted in — but the harness-reliability changes are the largest part of this release and apply to **every** session, opted in or not.
