@@ -122,8 +122,9 @@ export function createDialogProviderOptions() {
   const sync = useSync()
   const dialog = useDialog()
   const sdk = useSDK()
-  // altimate_change — availability only; see context/altimate-base-consent.tsx.
+  // altimate_change start — availability only; see context/altimate-base-consent.tsx.
   const altimateBaseConsent = useAltimateBaseConsent()
+  // altimate_change end
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
