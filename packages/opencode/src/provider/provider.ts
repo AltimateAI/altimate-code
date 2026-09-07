@@ -393,6 +393,9 @@ export namespace Provider {
           // authorizedFetch. Provider options are serialized by public provider APIs.
           apiKey: FreeTier.MANAGED_API_KEY_PLACEHOLDER,
           fetch: FreeTier.authorizedFetch,
+          // BUG FIX: without this, a hung gateway response never times out client-side, unlike
+          // the openai loader below which already sets this.
+          headerTimeout: OPENAI_HEADER_TIMEOUT_DEFAULT,
         },
       }
     },

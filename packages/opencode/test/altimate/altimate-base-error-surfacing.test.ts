@@ -150,7 +150,7 @@ describe("malformed JSON response body during inference", () => {
     // The Altimate-Base-specific error mappers must also degrade gracefully on this same malformed
     // body — both already catch a `JSON.parse` failure and return `undefined` rather than crashing.
     expect(FreeTier.describeRateLimit({ body: raw })).toBeUndefined()
-    expect(FreeTier.describeRequestTooLarge(raw)).toBeUndefined()
+    expect(FreeTier.describeRequestTooLarge({ status: response.status, body: raw })).toBeUndefined()
   })
 })
 
