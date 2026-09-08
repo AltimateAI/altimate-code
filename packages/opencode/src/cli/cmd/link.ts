@@ -50,8 +50,12 @@ const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
  * they choose, with our trusted URL as the visible (but inert) prefix.
  * (CodeRabbit + cubic, PR #1274.) */
 function stripControlChars(text: string): string {
+  // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f) — the previous range only
+  // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
+  // vector) was always covered, but the doc comment claimed C1 coverage it
+  // didn't have. (Kilo, PR #1274.)
   // eslint-disable-next-line no-control-regex
-  return text.replace(/[\x00-\x1f\x7f]/g, "")
+  return text.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
 }
 
 /** Conservative allowlist of terminals known to render OSC 8 hyperlinks.
@@ -61,15 +65,21 @@ function stripControlChars(text: string): string {
  * plain text instead of a link, which is a strict improvement over the
  * inverse (underlining text that turns out not to be clickable). Mirrors the
  * checks the `supports-hyperlinks` package uses, inlined to avoid a new
- * dependency for one CLI affordance. */
+ * dependency for one CLI affordance.
+ *
+ * Deliberately excludes ``Apple_Terminal`` (macOS Terminal.app): OSC 8
+ * support only landed there in macOS Sequoia (Sept 2024) — older versions
+ * (Ventura/Sonoma and earlier) only auto-linkify plain-text URLs, not OSC 8.
+ * ``TERM_PROGRAM`` carries no OS/Terminal-version signal to tell those apart,
+ * and this function's own stated bias is toward false negatives, so it's
+ * left off the list rather than guessing the user is on a current-enough
+ * macOS. (Kilo, PR #1274 — corrects an earlier version of this list that
+ * included it.) */
 function terminalSupportsHyperlinks(): boolean {
   if (!process.stdout.isTTY) return false
   if (process.env.TERM === "dumb" || process.env.TERM === "linux") return false
   const termProgram = process.env.TERM_PROGRAM
-  if (
-    termProgram &&
-    ["iTerm.app", "WezTerm", "Hyper", "vscode", "ghostty", "Tabby", "rio", "Apple_Terminal"].includes(termProgram)
-  )
+  if (termProgram && ["iTerm.app", "WezTerm", "Hyper", "vscode", "ghostty", "Tabby", "rio"].includes(termProgram))
     return true
   if (process.env.WT_SESSION) return true // Windows Terminal
   if (process.env.KONSOLE_VERSION) return true
