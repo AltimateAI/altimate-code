@@ -83,6 +83,24 @@ const DEFAULT_CHUNK_TIMEOUT = 300_000
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
+// altimate_change start — Altimate Base needs a far more generous header timeout than OpenAI.
+// Its gateway can queue for a capacity slot, cold-start the backend, or reason before flushing
+// response headers — any of which exceeds OpenAI's near-instant reply. OpenAI's 10s default
+// therefore false-positives on healthy Altimate Base requests ("Provider response headers timed
+// out after 10000ms"). Default to the same 5min the SSE chunk watchdog uses, and expose an env
+// override so it is tunable in the field without a release: a positive number of milliseconds,
+// or 0/off/false/none to disable the header timeout entirely.
+const FREE_TIER_HEADER_TIMEOUT_DEFAULT = 300_000
+function freeTierHeaderTimeout(): number | false {
+  const raw = Env.get("ALTIMATE_BASE_HEADER_TIMEOUT_MS")?.trim()
+  if (raw) {
+    if (["0", "off", "false", "none"].includes(raw.toLowerCase())) return false
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return FREE_TIER_HEADER_TIMEOUT_DEFAULT
+}
+// altimate_change end
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
@@ -393,6 +411,11 @@ export namespace Provider {
           // authorizedFetch. Provider options are serialized by public provider APIs.
           apiKey: FreeTier.MANAGED_API_KEY_PLACEHOLDER,
           fetch: FreeTier.authorizedFetch,
+          // Without a header timeout a hung gateway (connected, never replies) never aborts
+          // client-side — the SSE chunk watchdog only starts once headers arrive. OpenAI's 10s
+          // is far too tight for Altimate Base's queue/cold-start/reasoning latency to first
+          // byte, so use the free tier's generous, env-tunable value instead.
+          headerTimeout: freeTierHeaderTimeout(),
         },
       }
     },

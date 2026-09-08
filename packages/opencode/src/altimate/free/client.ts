@@ -536,27 +536,49 @@ export function describeRateLimit(
   return undefined
 }
 
-export function describeRequestTooLarge(body?: string): string | undefined {
+// altimate_change start — the generic (no byte-count) request-too-large message is shared by two
+// branches below: the parsed-JSON shape whose message didn't match the byte-count pattern, and
+// the unparseable/empty-body 413 fallback (nginx's raw HTML edge rejection).
+const REQUEST_TOO_LARGE_MESSAGE =
+  "This request is too large for Altimate Base. Start a new session, or switch to another model for this task."
+// altimate_change end
+
+export function describeRequestTooLarge(input: { status?: number; body?: string }): string | undefined {
+  const { status, body } = input
   type Inner = { code?: unknown; message?: unknown; provider_specific_fields?: { error?: Inner } }
   let parsed: { error?: Inner } | undefined
+  let validJson = true
   try {
     parsed = body ? JSON.parse(body) : undefined
   } catch {
-    return undefined
+    validJson = false
   }
-  const inner = parsed?.error?.provider_specific_fields?.error
-  if (parsed?.error?.code !== "request_too_large" && inner?.code !== "request_too_large") return undefined
-  const detail =
-    typeof parsed?.error?.message === "string"
-      ? parsed.error.message
-      : typeof inner?.message === "string"
-        ? inner.message
-        : ""
-  const sizes = detail.match(/Request is (\d+) bytes; the free tier limit is (\d+) bytes/)
-  const numbers = sizes
-    ? ` (${Math.round(Number(sizes[1]) / 1024)}KB against a ${Math.round(Number(sizes[2]) / 1024)}KB limit)`
-    : ""
-  return `This request is too large for Altimate Base${numbers}. Start a new session, or switch to another model for this task.`
+  if (validJson) {
+    const inner = parsed?.error?.provider_specific_fields?.error
+    const isRequestTooLarge = parsed?.error?.code === "request_too_large" || inner?.code === "request_too_large"
+    if (isRequestTooLarge) {
+      const detail =
+        typeof parsed?.error?.message === "string"
+          ? parsed.error.message
+          : typeof inner?.message === "string"
+            ? inner.message
+            : ""
+      const sizes = detail.match(/Request is (\d+) bytes; the free tier limit is (\d+) bytes/)
+      if (!sizes) return REQUEST_TOO_LARGE_MESSAGE
+      const numbers = ` (${Math.round(Number(sizes[1]) / 1024)}KB against a ${Math.round(Number(sizes[2]) / 1024)}KB limit)`
+      return `This request is too large for Altimate Base${numbers}. Start a new session, or switch to another model for this task.`
+    }
+    // Valid JSON but a shape unrelated to the free-tier byte cap (e.g. another provider's 413,
+    // or a different gateway error entirely) — never rewrite it, regardless of status.
+    if (body) return undefined
+  }
+  // altimate_change start — in production, an oversized request is rejected by nginx at the edge
+  // with a raw HTML error page, not LiteLLM's JSON `request_too_large` body. That body will never
+  // parse, so the friendly message must key off the actual HTTP status instead of a JSON shape
+  // that this failure mode can never produce.
+  if (status === 413) return REQUEST_TOO_LARGE_MESSAGE
+  // altimate_change end
+  return undefined
 }
 
 export * as FreeTier from "./client"
