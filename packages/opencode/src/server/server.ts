@@ -38,6 +38,14 @@ import { syncDatamateUrlFromVscodeMcp, collectDatamateHealPaths } from "../altim
 import { managedWorkspaceLoaded } from "../altimate/workspace/engine-overlay"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
+// altimate_change - Altimate Base disclosure + consent-gated registration for HTTP hosts
+import { FreeTier } from "../altimate/free/client"
+import { FreeTierConsent } from "../altimate/free/consent"
+// altimate_change start — Altimate Base registration must invalidate BOTH instance registries.
+import { InstanceStore } from "@/project/instance-store"
+import { AppRuntime } from "@/effect/app-runtime"
+// altimate_change end
+import { FreeTierHost } from "../altimate/free/host"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -667,6 +675,190 @@ export namespace Server {
             log.error("prompt enhance failed; using original prompt", { error: err })
             return c.json({ text, enabled: true, enhanced: false })
           }
+        },
+      )
+      // altimate_change end
+      // altimate_change start — Altimate Base disclosure + consent-gated registration
+      // Registration mints a persistent per-installation identifier and opts the user into request
+      // logging, so `FreeTier.registerAfterConsent` only acts on a token armed through the process's
+      // single private consent authority. The TUI arms that token inside its disclosure dialog's
+      // accept handler; these routes are the equivalent for a host that renders its own disclosure
+      // (the VS Code extension's chat panel).
+      //
+      // A host that injected no gate (the TUI worker, which owns its own dialog) serves 501 rather
+      // than a second registration surface that could bypass that dialog.
+      //
+      // The register route additionally requires the caller to echo the disclosure's SHA-256. That
+      // is a text-version check, not consent enforcement — see the comment at the comparison below.
+      //
+      // GET is deliberately READ-ONLY. An earlier revision armed the consent token here, which
+      // meant the store's 30s TTL began when the disclosure was fetched rather than when the user
+      // accepted it — so anyone who actually read the text before consenting was rejected. That
+      // also made GET non-idempotent and let a burst of fetches evict pending tokens. The token is
+      // now minted, armed and redeemed entirely inside POST, in one operation.
+      .get(
+        "/altimate/base/disclosure",
+        describeRoute({
+          summary: "Get the Altimate Base consent disclosure",
+          description:
+            "Returns the text a user must accept before Altimate Base is registered, the picker hint, whether this installation is already registered, and the SHA-256 the client must echo back to POST /altimate/base/register. Read-only.",
+          operationId: "altimateBase.disclosure",
+          responses: {
+            200: {
+              description: "Disclosure text and its hash",
+              content: {
+                "application/json": {
+                  schema: resolver(
+                    z.object({
+                      disclosure: z.string(),
+                      hint: z.string(),
+                      sha256: z.string(),
+                      registered: z.boolean(),
+                    }),
+                  ),
+                },
+              },
+            },
+            501: {
+              description: "This host cannot register Altimate Base",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+          },
+        }),
+        async (c) => {
+          if (!FreeTierHost.canRegister()) {
+            return c.json({ error: "This host cannot register Altimate Base." }, 501)
+          }
+          const registered = await FreeTier.isRegistered().catch((error) => {
+            log.warn("failed to read Altimate Base registration state", { error })
+            return false
+          })
+          return c.json({
+            disclosure: FreeTierConsent.DISCLOSURE,
+            hint: FreeTierConsent.HINT,
+            sha256: FreeTierConsent.disclosureHash(),
+            registered,
+          })
+        },
+      )
+      .post(
+        "/altimate/base/register",
+        describeRoute({
+          summary: "Register Altimate Base after consent",
+          description:
+            "Mints the managed Altimate Base credential. The caller must echo the SHA-256 of the disclosure it displayed, which is verified against the canonical text, so a caller that never fetched the current disclosure cannot register. On success this disposes EVERY cached instance in the process — both registries — so provider loaders re-read the new credential. That is deliberately process-wide because the credential is a single global file, and it is disruptive: instance-scoped state elsewhere on this server (sessions, LSPs, PTYs, MCP connections, file watchers) is torn down and re-created, and `server.instance.disposed` is emitted for each. `staleProviders: true` in the response means the credential was written but at least one registry could not be invalidated, so provider lists may still show Altimate Base as disconnected.",
+          operationId: "altimateBase.register",
+          responses: {
+            200: {
+              description: "Registration outcome",
+              content: {
+                "application/json": {
+                  schema: resolver(
+                    z.union([
+                      z.object({ ok: z.literal(true), staleProviders: z.literal(true).optional() }),
+                      z.object({
+                        ok: z.literal(false),
+                        result: z.enum(["rate_limited", "unavailable", "network", "error"]),
+                        message: z.string(),
+                      }),
+                    ]),
+                  ),
+                },
+              },
+            },
+            ...errors(400),
+            403: {
+              description: "Refused: browser origin on an unsecured server",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+            501: {
+              description: "This host cannot register Altimate Base",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+          },
+        }),
+        validator("json", z.object({ acceptedDisclosureSha256: z.string() })),
+        async (c) => {
+          if (!FreeTierHost.canRegister()) {
+            return c.json({ error: "This host cannot register Altimate Base." }, 501)
+          }
+
+          // A browser on a CORS-allowed origin can reach this port without being a local process,
+          // which is a different reachability class from "can already execute tools here". Native
+          // clients (the extension host, curl) send no Origin, so refusing an Origin-bearing
+          // request on an unsecured server closes that vector without affecting them. When a server
+          // password is set the global basicAuth middleware has already authenticated the caller.
+          if (c.req.header("origin") && !Flag.OPENCODE_SERVER_PASSWORD) {
+            log.warn("refused browser-originated Altimate Base registration on an unsecured server", {
+              origin: c.req.header("origin"),
+            })
+            return c.json(
+              {
+                error:
+                  "Altimate Base cannot be registered from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.",
+              },
+              403,
+            )
+          }
+
+          const { acceptedDisclosureSha256 } = c.req.valid("json")
+          // Hash verification, mint, arm and redeem all happen inside `FreeTierHost`, so this route
+          // cannot mint without checking and no other module can borrow the mint primitive. See
+          // `altimate/free/host.ts` for why the gate is never handed back out.
+          const attempt = await FreeTierHost.registerWithAcceptedDisclosure(acceptedDisclosureSha256)
+          if (attempt.kind === "unavailable") {
+            return c.json({ error: "This host cannot register Altimate Base." }, 501)
+          }
+          if (attempt.kind === "staleDisclosure") {
+            return c.json(
+              {
+                ok: false as const,
+                result: "error" as const,
+                message: "The accepted disclosure is out of date. Reopen setup and try again.",
+              },
+              200,
+            )
+          }
+          const outcome = attempt.result
+
+          // The provider loader caches its credential read, so a freshly registered Base stays out
+          // of `/provider`'s `connected` list until the instance cache is dropped. Doing it here
+          // rather than making every client remember keeps the invariant server-side.
+          //
+          // `disposeAll()`, not `dispose()`: the Base credential is a single global file, but
+          // `Instance.dispose()` only evicts `cache.delete(Instance.directory)` — the directory this
+          // request happened to carry. A multi-root workspace, or several windows against one
+          // `serve`, would keep every other instance's provider list showing Base as disconnected.
+          // Invalidation has to be as wide as the state that changed.
+          //
+          // BOTH registries, because there are two. Legacy `Instance` backs the Hono routes below,
+          // while `/api/*` is forwarded to the typed HttpApi bridge before that middleware runs and
+          // is backed by a separate `InstanceStore`. Disposing only the legacy one left a directory
+          // reached exclusively through `/api/*` holding its old provider state — precisely the
+          // "other window still shows Base as disconnected" case this is here to prevent.
+          //
+          // A failure in either leaves the credential written but provider lists possibly stale, so
+          // it is reported rather than swallowed: the client needs to know its picker may be wrong.
+          if (outcome.ok) {
+            const disposed = await Promise.all([
+              Instance.disposeAll().then(
+                () => true,
+                (error) => {
+                  log.error("Altimate Base registered but legacy instance disposal failed", { error })
+                  return false
+                },
+              ),
+              AppRuntime.runPromise(InstanceStore.Service.use((store) => store.disposeAll())).then(
+                () => true,
+                (error) => {
+                  log.error("Altimate Base registered but InstanceStore disposal failed", { error })
+                  return false
+                },
+              ),
+            ]).then((results) => results.every(Boolean))
+            return c.json(disposed ? outcome : { ...outcome, staleProviders: true as const })
+          }
+          return c.json(outcome)
         },
       )
       // altimate_change end

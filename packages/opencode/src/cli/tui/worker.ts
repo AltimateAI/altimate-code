@@ -91,8 +91,9 @@ GlobalBus.on("event", (event) => {
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
 // altimate_change start — worker-local, expiring capabilities gate every registration mutation.
-// `issueArmer()` can succeed exactly once per process; this is that one legitimate call — see
-// capability.ts for why that makes the resulting token unforgeable by any other in-process code.
+// `issueArmer()` can succeed exactly once per process; this is this process's claim — see
+// capability.ts for the canonical list of entrypoints that may claim it, and for why that makes the
+// resulting token unforgeable by any other in-process code.
 const altimateBaseRegistration = FreeTierConsent.createRegistrationConsentGate({
   arm: FreeTierCapability.issueArmer(),
   register: (token) => FreeTier.registerAfterConsent(token),

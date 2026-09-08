@@ -25,6 +25,8 @@ import { useConnected } from "./use-connected"
 import { markSetupComplete, useFirstRunActive, DialogAltimateBaseConfirm } from "./altimate-onboarding"
 // altimate_change — funnel: provider identity for a pick made from the full catalogue
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
+// altimate_change — one definition of the Base picker hint
+import { ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
 
 // altimate_change start — DialogModel restructured from the upstream flat
 // favorites/recent/provider list into READY / NEEDS-SETUP sections with an Altimate Base
@@ -175,7 +177,7 @@ export function DialogModel(props: {
           const altimateBase = {
             value: "altimate-base" as { providerID: string; modelID: string } | string,
             title: "Altimate Base",
-            description: "free, no signup — rate limited",
+            description: ALTIMATE_BASE_HINT,
             category: "NEEDS SETUP",
             footer: undefined as string | undefined,
             onSelect() {

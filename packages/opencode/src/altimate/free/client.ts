@@ -345,9 +345,16 @@ async function registerOnce(
  * by the discipline of its callers. A caller cannot forge a token by constructing their own
  * `ConsentCapabilityStore`: that class's `arm`/`consume` only ever validate against the instance
  * you built, and the ONE instance this function actually checks is never exported — the only way
- * to arm it is `FreeTierCapability.issueArmer()`, claimed once by the TUI worker's consent gate at
- * boot. A future CLI, HTTP route, or plugin cannot register by importing this: it would have to
- * obtain a token minted by that gate. Provider discovery and inference never call it.
+ * to arm it is `FreeTierCapability.issueArmer()`, which is claimable exactly once per process. See
+ * that function's docstring for which entrypoints may claim it — deliberately not repeated here.
+ *
+ * So importing this function is not enough to register: a caller must obtain a token minted by
+ * whichever gate claimed the armer in its process. Provider discovery and inference never call it.
+ *
+ * What this guarantees: the token is authentic. What it does not: that a human read anything. Over
+ * HTTP that remains an assertion by the caller, narrowed only by the disclosure-hash check in
+ * `FreeTierHost.registerWithAcceptedDisclosure` — and that hash is derived from public text, so it
+ * proves the caller holds the current wording, not that anyone read it.
  */
 export async function registerAfterConsent(
   token: string,

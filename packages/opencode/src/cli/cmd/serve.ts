@@ -8,6 +8,17 @@ import { subscribeTraceConsumer } from "../../altimate/observability/trace-consu
 // altimate_change start — self-update on headless serve startup
 import { scheduleStartupUpgradeCheck } from "./serve-upgrade-check"
 // altimate_change end
+// altimate_change start — Altimate Base registration capability for the headless server
+import { FreeTier } from "../../altimate/free/client"
+import { FreeTierCapability } from "../../altimate/free/capability"
+import { FreeTierConsent } from "../../altimate/free/consent"
+import { FreeTierHost } from "../../altimate/free/host"
+import { Log } from "../../util/log"
+// altimate_change end
+
+// altimate_change start — logger for the Base registration gate's onUnexpectedError hook
+const log = Log.create({ service: "serve" })
+// altimate_change end
 
 export const ServeCommand = effectCmd({
   command: "serve",
@@ -24,6 +35,21 @@ export const ServeCommand = effectCmd({
     // under the `datamate` key, and the overlay must leave it alone. An env var
     // because it must be readable from every module realm.
     process.env["ALTIMATE_CODE_SERVE"] = "1"
+    // altimate_change end
+    // altimate_change start — claim the process's one Altimate Base consent capability here, at the
+    // entrypoint, before the server can accept a request. `serve` is the extension's host and has no
+    // TUI to show the disclosure dialog, so the disclosure + registration routes are how a Base
+    // credential gets minted in this process. Claiming it here (rather than in the routes module)
+    // keeps the TUI worker — which claims the same capability for its own dialog — unaffected.
+    yield* Effect.sync(() =>
+      FreeTierHost.provide(
+        FreeTierConsent.createRegistrationConsentGate({
+          arm: FreeTierCapability.issueArmer(),
+          register: (token) => FreeTier.registerAfterConsent(token),
+          onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
+        }),
+      ),
+    )
     // altimate_change end
     const { Server } = yield* Effect.promise(() => import("../../server/server"))
     if (!Flag.OPENCODE_SERVER_PASSWORD) {

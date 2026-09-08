@@ -20,6 +20,8 @@ import { useSync } from "../context/sync"
 import { useToast } from "../ui/toast"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
+// altimate_change — the Base consent disclosure has one definition, shared with the HTTP route
+import { ALTIMATE_BASE_DISCLOSURE, ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
 // chooses Altimate Base, or finishes the gateway flow. Combined with
@@ -185,7 +187,7 @@ export function DialogModelWelcome(props: {
       ? [
           {
             name: "Altimate Base",
-            note: "free · no signup · rate limited",
+            note: ALTIMATE_BASE_HINT,
             tone: "warning" as const,
             providerID: "altimate-free",
             modelID: "altimate-base",
@@ -345,14 +347,18 @@ export function DialogModelWelcome(props: {
   )
 }
 
-// altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate before any Base
-// credential is minted. This is the text a user actually consents against before any registration
-// request, so it states the core data terms up front: requests/responses may be logged and used to
-// improve Altimate's products (including the model), so users should not send secrets. The
-// persistent per-install-id linkage detail is disclosed in docs/docs/configure/providers.md
-// ("Data handling"), not repeated in this gate; keep the core terms in sync with that note.
-export const ALTIMATE_BASE_DISCLOSURE =
-  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Usage can be rate limited."
+// altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate below before any
+// Base credential is minted. This is the text a user actually consents against before any
+// registration request, so it states the core data terms up front: requests/responses may be
+// logged and used to improve Altimate's products (including the model), so users should not send
+// secrets. The persistent per-install-id linkage detail is disclosed in
+// docs/docs/configure/providers.md ("Data handling"), not repeated in this gate; keep the core
+// terms in sync with that note.
+//
+// Defined once in core (imported at the top of this file) and re-exported here for existing
+// consumers, so this dialog and the HTTP disclosure route (packages/opencode, for hosts that
+// render their own dialog) cannot drift apart — a copy change like #1268 now lands on both.
+export { ALTIMATE_BASE_DISCLOSURE }
 // altimate_change end
 
 type RegisterOutcome =
