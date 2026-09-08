@@ -93,7 +93,18 @@ export function terminalSupportsHyperlinks(): boolean {
  * ``ALTIMATE_WORKSPACE_WEB_URL`` override (resolveWorkspaceWebUrl) can carry
  * its own path/query/fragment (e.g. a local dev server), and naive
  * concatenation would land ``/w/<id>`` inside the query string instead of the
- * path — clears search/hash for the same reason. (CodeRabbit + cubic, PR #1274.) */
+ * path — clears search/hash for the same reason. (CodeRabbit + cubic, PR #1274.)
+ *
+ * Both in-file callers (``currentManageUrl`` in the handler, and
+ * ``manageUrlFor`` below) now go through this one implementation. The
+ * identical ``workspace.tsx``/``workspace-sidebar.tsx`` copy
+ * (``joinManageUrlPath``) is deliberately NOT unified with this one across a
+ * shared module, though: same
+ * CLI/TUI self-containment reasoning as ``isSafeHttpUrl``'s split (see
+ * ``cli/cmd/link.ts``'s other comment on that). cubic suggested a shared
+ * module (PR #1274 round 3); declined for that reason — but *within* this
+ * file, keep it to one implementation (see ``manageUrlFor``'s comment on
+ * why two near-identical copies in the same file already drifted once). */
 export function buildManageUrl(base: URL, workspaceId: number): string {
   const u = new URL(base)
   u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
@@ -105,17 +116,23 @@ export function buildManageUrl(base: URL, workspaceId: number): string {
 /** Wrap ``text`` in an OSC 8 terminal hyperlink pointing at ``url``, or return
  * ``text`` unchanged when ``url`` is null. Unlike the TUI's `<a href>` (which
  * crashes in the current @opentui/solid JSX layer — see workspace-sidebar.tsx),
- * plain stdout can emit OSC 8 directly: supporting terminals render it as a
- * real clickable link, and terminals that don't recognize the sequence just
- * skip the invisible control bytes — the visible text is unaffected either
- * way, so the OSC 8 wrapping itself needs no capability check. The
- * *underline*, however, is a much older and more universally-rendered SGR
- * code — emitting it unconditionally would make the name look clickable in
- * terminals where it isn't, so it's gated on ``terminalSupportsHyperlinks``
- * (cubic, PR #1274). */
+ * plain stdout can emit OSC 8 directly: a terminal directly interpreting the
+ * bytes either renders a real clickable link or silently skips the sequence
+ * it doesn't recognize — the visible text is unaffected either way. That
+ * "harmless when unrecognized" argument only holds when a terminal emulator
+ * is actually the one reading the bytes, though: with stdout redirected to a
+ * file or piped into another program (stdin can still be a TTY — the
+ * interactive-stdin check in the handler doesn't imply stdout is a terminal
+ * too), there's no interpreter to skip them, so the raw escape sequence
+ * would land as literal junk in the captured output. Skip the OSC 8 wrapping
+ * entirely in that case. The *underline* is additionally gated on
+ * ``terminalSupportsHyperlinks`` — a much older and more universally-rendered
+ * SGR code than OSC 8, so emitting it unconditionally would make the name
+ * look clickable in terminals where it isn't. (cubic, PR #1274, rounds 2 + 3.) */
 export function hyperlink(text: string, url: string | null): string {
   if (!url || !text) return text
   const safeText = stripControlChars(text)
+  if (!process.stdout.isTTY) return safeText
   const OSC8 = "\x1b]8;;"
   const ST = "\x1b\\"
   if (!terminalSupportsHyperlinks()) return `${OSC8}${url}${ST}${safeText}${OSC8}${ST}`
@@ -382,13 +399,17 @@ async function runBrowserHandoff(
 }
 
 /** Best-effort manage-workspace URL for the current credentials. Returns null
- * on BYOK / unresolvable deployments — callers omit the "Manage it at" line. */
+ * on BYOK / unresolvable deployments — callers omit the "Manage it at" line.
+ * Delegates the actual join to ``buildManageUrl`` rather than re-deriving it —
+ * this function had its own copy of the pre-fix string-concatenation bug
+ * (cubic, PR #1274 round 3): two near-identical builders in the same file
+ * drifted, and only one got fixed the first time around. */
 async function manageUrlFor(workspaceId: number): Promise<string | null> {
   try {
     const creds = await AltimateApi.getCredentials()
     const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     if (!base) return null
-    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    return buildManageUrl(base, workspaceId)
   } catch {
     return null
   }

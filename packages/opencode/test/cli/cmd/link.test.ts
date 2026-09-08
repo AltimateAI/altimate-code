@@ -137,8 +137,21 @@ describe("hyperlink", () => {
     expect(hyperlink("anas-skill-test", null)).toBe("anas-skill-test")
   })
 
-  test("wraps text in OSC 8 with no underline when the terminal isn't recognized", () => {
+  test("returns bare sanitized text with no escape bytes at all when stdout isn't a TTY", () => {
+    // Even with a recognized TERM_PROGRAM — stdin can be a TTY (satisfying
+    // the handler's interactive-input check) while stdout is redirected to
+    // a file or piped, in which case no terminal is reading these bytes and
+    // raw OSC 8 would land as literal junk in the captured output.
     Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+    process.env.TERM_PROGRAM = "iTerm.app"
+    const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
+    expect(out).toBe("anas-skill-test")
+    expect(out).not.toContain("\x1b")
+  })
+
+  test("wraps text in OSC 8 with no underline on a TTY whose terminal isn't recognized", () => {
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    delete process.env.TERM_PROGRAM
     const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
     expect(out).toBe("\x1b]8;;https://tenant.ws.myaltimate.com/w/4242\x1b\\anas-skill-test\x1b]8;;\x1b\\")
     expect(out).not.toContain("\x1b[4m")
@@ -154,7 +167,8 @@ describe("hyperlink", () => {
   })
 
   test("sanitizes an adversarial name so it cannot open a second, spoofed link", () => {
-    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    delete process.env.TERM_PROGRAM
     const malicious = "name\x1b]8;;http://evil.example\x1b\\CLICK ME\x1b]8;;\x1b\\"
     const out = hyperlink(malicious, "https://tenant.ws.myaltimate.com/w/4242")
     // Exactly one real OSC 8 open + one real OSC 8 close — the malicious
