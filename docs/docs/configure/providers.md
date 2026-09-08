@@ -83,6 +83,19 @@ legacy fallback, but `ALTIMATE_BASE_GATEWAY_URL` takes precedence. If the config
 changes, credentials issued by the previous host are not loaded and the consented registration
 flow must run again.
 
+Altimate Base waits up to **5 minutes** for the gateway to send response headers, because the
+backend can queue, cold-start, or reason before the first token arrives (a shorter wait would
+abort healthy requests with `Provider response headers timed out`). Override this in the field with
+`ALTIMATE_BASE_HEADER_TIMEOUT_MS` — a whole number of milliseconds, minimum `1000`; values below
+the floor or non-numeric values are ignored and fall back to the default:
+
+```bash
+export ALTIMATE_BASE_HEADER_TIMEOUT_MS=600000  # wait up to 10 minutes for the first byte
+```
+
+This bounds only the wait for the first response byte; once the stream starts, a separate
+5-minute watchdog guards against mid-stream stalls.
+
 Altimate Base credentials are stored separately from the shared provider-auth file and are never
 returned to the TUI. The installation secret is hashed before registration; the gateway receives
 the hash, not the local secret.
