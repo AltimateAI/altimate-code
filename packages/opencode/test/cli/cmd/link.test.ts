@@ -29,8 +29,28 @@ function setTTY(value: boolean) {
 }
 
 function restoreTTY() {
+  // `isTTY` is not an own property of process.stdout in the common case
+  // (stdout piped/redirected, as it always is under a test runner) — Node
+  // only sets it as an own property when the stream genuinely is a TTY. So
+  // ORIGINAL_TTY_DESCRIPTOR is `undefined` in virtually every real test run,
+  // and restoring by re-defining only when it's truthy was a no-op: the
+  // property setTTY() added stayed shadowed on process.stdout for the rest
+  // of the process. Delete it in that case instead of leaving it dangling.
+  // (cubic, PR #1274 round 5 — caught in the very helper meant to fix the
+  // previous round's descriptor-restoration finding.)
   if (ORIGINAL_TTY_DESCRIPTOR) Object.defineProperty(process.stdout, "isTTY", ORIGINAL_TTY_DESCRIPTOR)
+  else delete (process.stdout as { isTTY?: boolean }).isTTY
 }
+
+describe("restoreTTY (test-helper regression)", () => {
+  test("actually removes the isTTY property setTTY() added, instead of leaving it dangling", () => {
+    const before = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+    setTTY(true)
+    expect(Object.getOwnPropertyDescriptor(process.stdout, "isTTY")).toBeDefined()
+    restoreTTY()
+    expect(Object.getOwnPropertyDescriptor(process.stdout, "isTTY")).toEqual(before)
+  })
+})
 
 describe("stripControlChars", () => {
   test("removes C0 control bytes including ESC", () => {
