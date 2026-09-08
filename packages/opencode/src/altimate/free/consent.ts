@@ -1,6 +1,15 @@
 import { FreeTier } from "./client"
 import { FreeTierStore } from "./store"
 
+/**
+ * The text a user consents against before any Base credential is minted, served to hosts that
+ * render their own disclosure (the VS Code extension's chat panel, via GET /altimate/base/disclosure).
+ *
+ * Defined once in `@opencode-ai/core/altimate-base-disclosure` and re-exported here, so the TUI
+ * dialog and this route can never drift apart.
+ */
+export { ALTIMATE_BASE_DISCLOSURE as DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
+
 export type RegistrationResult =
   | { ok: true }
   | {

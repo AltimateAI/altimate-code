@@ -39,6 +39,11 @@ import { managedWorkspaceLoaded } from "../altimate/workspace/engine-overlay"
 import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
+// altimate_change - Altimate Base disclosure + consent-gated registration for HTTP hosts
+import { randomBytes } from "node:crypto"
+import { FreeTier } from "../altimate/free/client"
+import { FreeTierConsent } from "../altimate/free/consent"
+import { FreeTierHost } from "../altimate/free/host"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
@@ -668,6 +673,54 @@ export namespace Server {
             log.error("prompt enhance failed; using original prompt", { error: err })
             return c.json({ text, enabled: true, enhanced: false })
           }
+        },
+      )
+      // altimate_change end
+      // altimate_change start — Altimate Base disclosure + consent-gated registration
+      // Registration mints a persistent per-installation identifier and opts the user into request
+      // logging, so `FreeTier.registerAfterConsent` will only act on a token armed through the
+      // process's single private consent authority. The TUI arms that token from its disclosure
+      // dialog; these two routes are the equivalent for a host that renders its own disclosure
+      // (the VS Code extension's chat panel), and they are the ONLY place an HTTP caller can obtain
+      // a token: GET returns the exact text the user must see, and arms one token for it.
+      //
+      // A host that did not inject a gate (the TUI worker, which owns its own dialog) serves 501
+      // rather than a registration surface that bypasses that dialog.
+      //
+      // Note this makes "the disclosure was actually shown" an assertion by the caller rather than
+      // a property enforced by construction, as it is in the TUI. Anything that can reach this
+      // server can already execute tools, so it is not a new privilege boundary — but it is a
+      // deliberate, narrower guarantee.
+      .get("/altimate/base/disclosure", async (c) => {
+        const gate = FreeTierHost.current()
+        if (!gate) {
+          return c.json({ error: "This host cannot register Altimate Base." }, 501)
+        }
+        // 32 bytes → the 64-hex shape ConsentCapabilityStore requires. Armed here and nowhere else,
+        // single-use, and expiring on the store's own TTL.
+        const token = randomBytes(32).toString("hex")
+        gate.setToken({ token })
+        const registered = await FreeTier.isRegistered().catch((error) => {
+          log.warn("failed to read Altimate Base registration state", { error })
+          return false
+        })
+        return c.json({ disclosure: FreeTierConsent.DISCLOSURE, token, registered })
+      })
+      .post(
+        "/altimate/base/register",
+        validator("json", z.object({ token: z.string() })),
+        async (c) => {
+          const gate = FreeTierHost.current()
+          if (!gate) {
+            return c.json({ error: "This host cannot register Altimate Base." }, 501)
+          }
+          const { token } = c.req.valid("json")
+          // The gate maps every failure onto its own result taxonomy
+          // (rate_limited | unavailable | network | error) with a user-facing message, so the
+          // outcome is returned as a 200 body for the client to branch on — the same values the
+          // TUI's disclosure dialog renders.
+          const outcome = await gate.register({ token })
+          return c.json(outcome)
         },
       )
       // altimate_change end

@@ -20,6 +20,8 @@ import { useSync } from "../context/sync"
 import { useToast } from "../ui/toast"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
+// altimate_change — the Base consent disclosure has one definition, shared with the HTTP route
+import { ALTIMATE_BASE_DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
 // chooses Altimate Base, or finishes the gateway flow. Combined with
@@ -345,13 +347,11 @@ export function DialogModelWelcome(props: {
   )
 }
 
-// altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate before any Base
-// credential is minted. This is the text a user actually consents against before any registration
-// request, so it must disclose that requests are linkable across launches — not defer that to
-// docs/docs/configure/providers.md, which a user never sees before accepting. Keep this in sync
-// with that fuller "Data handling" note.
-export const ALTIMATE_BASE_DISCLOSURE =
-  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Logs are linked to a persistent per-installation identifier. Usage is rate limited."
+// altimate_change start — surfaced in the DialogAltimateBaseConfirm consent gate below before any
+// Base credential is minted. Defined once in core (imported at the top of this file) and
+// re-exported here for existing consumers, so this dialog and the HTTP disclosure route
+// (packages/opencode, for hosts that render their own dialog) cannot drift apart.
+export { ALTIMATE_BASE_DISCLOSURE }
 // altimate_change end
 
 type RegisterOutcome =
