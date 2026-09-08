@@ -33,8 +33,39 @@ ok() { echo "  ✓ $1"; }
 skip() { echo "  ⊘ $1 — skipped ($2)"; }
 fail() { echo "  ✗ $1 — $2"; }
 
+# A restored cache can hold an environment whose interpreter no longer exists:
+# CI caches only this directory, and a venv's `bin/python` is a symlink (or a
+# launcher shebang) into an interpreter outside it. uv in particular links to
+# its own managed Python under ~/.local/share/uv, which a fresh runner lacks,
+# so `bin/dbt` is present on disk yet fails with ENOENT when executed. The
+# `.done` marker alone therefore proves nothing; a cached environment counts
+# only if its dbt actually runs.
+with_timeout() {
+  # GNU timeout on Linux; Homebrew coreutils installs it as gtimeout on macOS.
+  # Without either, the check still runs, just unbounded.
+  if has timeout; then timeout "$TIMEOUT" "$@"
+  elif has gtimeout; then gtimeout "$TIMEOUT" "$@"
+  else "$@"; fi
+}
+env_ok() {
+  [ -x "$1" ] && with_timeout "$1" --version >/dev/null 2>&1
+}
+# Usage: cached_or_rebuild <scenario> <dbt binary>; returns 0 when the cached
+# environment is usable (caller returns), 1 when it must be rebuilt.
+cached_or_rebuild() {
+  local dir="$ENVS_DIR/$1"
+  [ -f "$dir/.done" ] || return 1
+  if env_ok "$2"; then ok "$1 (cached)"; return 0; fi
+  echo "  ↻ $1 cache is stale (dbt does not run) — rebuilding..."
+  return 1
+}
+
 # Find a real (non-shim) python3 for venv creation
 find_real_python() {
+  # An explicit interpreter wins. CI sets DBT_E2E_PYTHON to the interpreter
+  # actions/setup-python installed, so the venvs build on the Python the
+  # workflow chose rather than whatever the runner image happens to ship.
+  if [ -n "${DBT_E2E_PYTHON:-}" ] && [ -x "$DBT_E2E_PYTHON" ]; then echo "$DBT_E2E_PYTHON"; return; fi
   # Try pyenv's actual python first
   if has pyenv; then
     local p
@@ -55,7 +86,7 @@ echo "Using Python: $REAL_PYTHON ($($REAL_PYTHON --version 2>&1))"
 
 setup_venv() {
   local dir="$ENVS_DIR/venv"
-  if [ -f "$dir/.done" ]; then ok "venv (cached)"; return; fi
+  cached_or_rebuild venv "$dir/bin/dbt" && return
   rm -rf "$dir"
   echo "  → Setting up venv..."
   "$REAL_PYTHON" -m venv "$dir"
@@ -68,12 +99,14 @@ setup_venv() {
 setup_uv() {
   local dir="$ENVS_DIR/uv"
   if ! has uv; then skip "uv" "uv not installed"; return; fi
-  if [ -f "$dir/.done" ]; then ok "uv (cached)"; return; fi
+  cached_or_rebuild uv "$dir/.venv/bin/dbt" && return
   rm -rf "$dir"
   echo "  → Setting up uv..."
   mkdir -p "$dir"
-  # uv project mode: create .venv in dir
-  uv venv "$dir/.venv" --quiet
+  # uv project mode: create .venv in dir. Pin the interpreter to the system
+  # Python so the venv survives a cache restore on a fresh runner; left to
+  # itself uv links a managed Python that lives outside the cached directory.
+  uv venv "$dir/.venv" --python "$REAL_PYTHON" --quiet
   uv pip install --quiet --python "$dir/.venv/bin/python" "$DBT_SPEC"
   touch "$dir/.done"
   ok "uv ($("$dir/.venv/bin/dbt" --version 2>&1 | grep -oE 'installed:\s+\S+' | head -1))"
@@ -82,7 +115,7 @@ setup_uv() {
 setup_pipx() {
   local dir="$ENVS_DIR/pipx"
   if ! has pipx; then skip "pipx" "pipx not installed"; return; fi
-  if [ -f "$dir/.done" ]; then ok "pipx (cached)"; return; fi
+  cached_or_rebuild pipx "$dir/bin/dbt" && return
   rm -rf "$dir"
   echo "  → Setting up pipx..."
   mkdir -p "$dir/bin" "$dir/venvs"
@@ -100,7 +133,7 @@ setup_pipx() {
 setup_conda() {
   local dir="$ENVS_DIR/conda"
   if ! has conda; then skip "conda" "conda not installed"; return; fi
-  if [ -f "$dir/.done" ]; then ok "conda (cached)"; return; fi
+  cached_or_rebuild conda "$dir/bin/dbt" && return
   rm -rf "$dir"
   echo "  → Setting up conda..."
   conda create -y -p "$dir" python=3.11 --quiet 2>/dev/null
@@ -117,7 +150,7 @@ setup_conda() {
 setup_poetry() {
   local dir="$ENVS_DIR/poetry"
   if ! has poetry; then skip "poetry" "poetry not installed"; return; fi
-  if [ -f "$dir/.done" ]; then ok "poetry (cached)"; return; fi
+  cached_or_rebuild poetry "$dir/.venv/bin/dbt" && return
   rm -rf "$dir"
   echo "  → Setting up poetry (in-project venv)..."
   mkdir -p "$dir"
@@ -153,7 +186,7 @@ setup_pyenv_venv() {
   # Simulates a pyenv user who creates a venv with their pyenv-managed python
   local dir="$ENVS_DIR/pyenv-venv"
   if ! has pyenv; then skip "pyenv-venv" "pyenv not installed"; return; fi
-  if [ -f "$dir/.done" ]; then ok "pyenv-venv (cached)"; return; fi
+  cached_or_rebuild pyenv-venv "$dir/bin/dbt" && return
   rm -rf "$dir"
   echo "  → Setting up pyenv + venv..."
   local pyenv_python
