@@ -559,14 +559,21 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.dbt-tools == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Runs pull-request code (setup scripts, tests), so it gets the same
+    # read-only token scope and no persisted credentials as tracker-leaks.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2
         with:
           bun-version: "1.3.14"
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: python
         with:
           python-version: "3.11"
 
@@ -598,6 +605,10 @@ jobs:
       - name: Set up Python env scenarios
         run: ./test/e2e/setup-resolve.sh venv uv system
         working-directory: packages/dbt-tools
+        env:
+          # Build the scenario venvs on the interpreter setup-python installed,
+          # not the image's /usr/bin/python3; setup-resolve.sh honours this.
+          DBT_E2E_PYTHON: ${{ steps.python.outputs.python-path }}
 
       - name: Run dbt-tools E2E tests
         run: bun run test:e2e

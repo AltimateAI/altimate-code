@@ -41,7 +41,11 @@ fail() { echo "  ✗ $1 — $2"; }
 # `.done` marker alone therefore proves nothing; a cached environment counts
 # only if its dbt actually runs.
 with_timeout() {
-  if has timeout; then timeout "$TIMEOUT" "$@"; else "$@"; fi
+  # GNU timeout on Linux; Homebrew coreutils installs it as gtimeout on macOS.
+  # Without either, the check still runs, just unbounded.
+  if has timeout; then timeout "$TIMEOUT" "$@"
+  elif has gtimeout; then gtimeout "$TIMEOUT" "$@"
+  else "$@"; fi
 }
 env_ok() {
   [ -x "$1" ] && with_timeout "$1" --version >/dev/null 2>&1
@@ -58,6 +62,10 @@ cached_or_rebuild() {
 
 # Find a real (non-shim) python3 for venv creation
 find_real_python() {
+  # An explicit interpreter wins. CI sets DBT_E2E_PYTHON to the interpreter
+  # actions/setup-python installed, so the venvs build on the Python the
+  # workflow chose rather than whatever the runner image happens to ship.
+  if [ -n "${DBT_E2E_PYTHON:-}" ] && [ -x "$DBT_E2E_PYTHON" ]; then echo "$DBT_E2E_PYTHON"; return; fi
   # Try pyenv's actual python first
   if has pyenv; then
     local p
