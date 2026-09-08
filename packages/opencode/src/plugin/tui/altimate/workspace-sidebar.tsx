@@ -13,6 +13,7 @@ import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state
 import { resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 import { AltimateApi } from "@/altimate/api/client"
+import { openManageUrl } from "./workspace"
 
 const id = "altimate:sidebar-workspace"
 
@@ -97,8 +98,26 @@ function View(props: { api: TuiPluginApi }) {
       >
         {(b) => (
           <>
-            <text fg={theme().textMuted}>
-              {b().datamateName}
+            {/* Clicking the name (or the URL line below) opens the workspace
+              * in the browser — the manage URL is deterministic from tenant
+              * + id (see resolveManageBase above), so there's no extra
+              * round-trip before it's clickable. The whole line is the
+              * click target (mouse events only land on block-level
+              * `<text>`/`<box>`, not inline `<span>`/`<a>` nodes), while only
+              * the name itself is styled to look like a link — matching the
+              * footer's community/docs links (sidebar/footer.tsx), which use
+              * the same span-style + onMouseUp pair because raw `<a href>`
+              * hyperlink nodes crash in this JSX layer. */}
+            <text
+              fg={theme().textMuted}
+              onMouseUp={() => {
+                const url = manageUrl()
+                if (url) openManageUrl(props.api, url)
+              }}
+            >
+              <Show when={manageUrl()} fallback={b().datamateName}>
+                {(_u) => <span style={{ fg: theme().accent, underline: true }}>{b().datamateName}</span>}
+              </Show>
               {/* ``pinned via --workspace`` means "this SESSION was launched
                 * with --workspace and it resolved to this id". It does NOT
                 * mean "the current binding was set by --workspace" — if the
@@ -117,7 +136,11 @@ function View(props: { api: TuiPluginApi }) {
               </Show>
             </text>
             <Show when={manageUrl()}>
-              {(u) => <text fg={theme().textMuted}>{u()}</text>}
+              {(u) => (
+                <text fg={theme().textMuted} onMouseUp={() => openManageUrl(props.api, u())}>
+                  <span style={{ fg: theme().accent, underline: true }}>{u()}</span>
+                </text>
+              )}
             </Show>
           </>
         )}

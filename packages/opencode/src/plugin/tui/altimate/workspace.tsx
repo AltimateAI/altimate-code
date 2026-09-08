@@ -297,26 +297,11 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
       current={props.manageUrl ? "open" : "done"}
       onSelect={(option) => {
         if (option.value === "open" && props.manageUrl) {
-          const url = props.manageUrl
           // Guard before delegating to open() — a rogue manage_url with a
           // non-http protocol would otherwise dispatch to an unrelated OS
           // scheme handler. buildManageUrl only ever emits http(s) URLs from
           // resolveWorkspaceWebUrl, but the guard survives future changes.
-          if (!isSafeHttpUrl(url)) {
-            props.api.ui.toast({
-              variant: "warning",
-              message: `Refused to open a non-http URL: ${url}`,
-              duration: 15_000,
-            })
-          } else {
-            open(url).catch(() => {
-              props.api.ui.toast({
-                variant: "warning",
-                message: `Could not open browser. Copy this URL: ${url}`,
-                duration: 15_000,
-              })
-            })
-          }
+          openManageUrl(props.api, props.manageUrl)
         }
         props.api.ui.dialog.clear()
       }}
@@ -579,15 +564,39 @@ async function createAndBindInline(
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
  * dispatch to whatever OS scheme handler matches the protocol). Kept exported
- * as a top-level helper because both ``showLinkedConfirmation`` (below) and
- * the on-demand link paths need the same guard. */
-function isSafeHttpUrl(url: string): boolean {
+ * as a top-level helper — ``openManageUrl`` below is the sole in-module caller,
+ * but ``cli/cmd/link.ts`` deliberately keeps its own copy (CLI/TUI split, see
+ * that file's comment) rather than importing this one. */
+export function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
     return u.protocol === "http:" || u.protocol === "https:"
   } catch {
     return false
   }
+}
+
+/** Guarded ``open(url)`` for a workspace manage-URL, with the same
+ * refuse-and-toast / catch-and-toast behavior as ``WorkspaceLinkedDialog``'s
+ * "open" action below. Shared with ``workspace-sidebar.tsx`` (both live under
+ * this TUI plugin path — unlike ``isSafeHttpUrl``'s CLI/TUI split, there's no
+ * reason for these two call sites to diverge). */
+export function openManageUrl(api: TuiPluginApi, url: string) {
+  if (!isSafeHttpUrl(url)) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Refused to open a non-http URL: ${url}`,
+      duration: 15_000,
+    })
+    return
+  }
+  open(url).catch(() => {
+    api.ui.toast({
+      variant: "warning",
+      message: `Could not open browser. Copy this URL: ${url}`,
+      duration: 15_000,
+    })
+  })
 }
 
 /** Pick the rebind endpoint that matches which identifier the pre-check
@@ -636,9 +645,24 @@ interface AlreadyLinkedProps {
 }
 
 function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
+  // Best-effort — same deterministic tenant+id derivation as buildManageUrl's
+  // other callers. null on BYOK/unresolvable, in which case the "Open in
+  // browser" option below is simply omitted.
+  const [manageUrl, setManageUrl] = createSignal<string | null>(null)
+  onMount(async () => {
+    setManageUrl(await buildManageUrl(props.workspaceId))
+  })
+
   // Title carries the primary context (workspace name + drift/unverified hint)
   // since DialogSelect doesn't take a top-level description block. Verbose but
   // it puts the critical info in the user's field of view before they pick.
+  //
+  // The plugin-facing ``TuiDialogSelectProps`` (packages/plugin/src/tui.ts)
+  // only takes a plain ``title: string`` — no ``titleView``/JSX escape hatch
+  // like the native ``packages/tui`` DialogSelect has (see
+  // dialog-move-session.tsx) — so the workspace name inside the title can't
+  // be made clickable the way the sidebar tile is. "Open in browser" as a
+  // selectable option (below) is the equivalent affordance within that API.
   const title = () => {
     const parts: string[] = [`Project is linked to workspace "${props.workspaceName}"`]
     const now = props.identifier.repoRemote ?? props.identifier.projectPath
@@ -646,30 +670,48 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
     if (props.unverified) parts.push("(⚠ unverified — server unreachable, showing cached value)")
     return parts.join(" ")
   }
+  const options = () => {
+    const opts = [
+      {
+        title: "Attach and continue",
+        value: "attach",
+        description: "Use this workspace for the session.",
+      },
+      {
+        title: "Re-link to a different workspace",
+        value: "relink",
+        description: "Swap this project's workspace.",
+      },
+    ]
+    if (manageUrl()) {
+      opts.push({
+        title: "Open in browser",
+        value: "open",
+        description: "View this workspace on the web.",
+      })
+    }
+    opts.push({
+      title: "Skip for now",
+      value: "skip",
+      description: "Close this prompt without changing the link.",
+    })
+    return opts
+  }
   return (
     <props.api.ui.DialogSelect
       title={title()}
-      options={[
-        {
-          title: "Attach and continue",
-          value: "attach",
-          description: "Use this workspace for the session.",
-        },
-        {
-          title: "Re-link to a different workspace",
-          value: "relink",
-          description: "Swap this project's workspace.",
-        },
-        {
-          title: "Skip for now",
-          value: "skip",
-          description: "Close this prompt without changing the link.",
-        },
-      ]}
+      options={options()}
       current={props.hasDrift ? "relink" : "attach"}
       onSelect={(option) => {
         if (option.value === "attach" || option.value === "skip") {
           props.api.ui.dialog.clear()
+          return
+        }
+        if (option.value === "open") {
+          const url = manageUrl()
+          if (url) openManageUrl(props.api, url)
+          // Stay open — opening the browser isn't a decision about the link
+          // itself, so the user can still Attach/Re-link/Skip afterward.
           return
         }
         // relink → picker with the current workspace id as expected_current so

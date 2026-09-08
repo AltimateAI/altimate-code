@@ -42,6 +42,27 @@ import { recordApprovedBinding } from "@/altimate/workspace/state"
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
 
+/** Wrap ``text`` in an OSC 8 terminal hyperlink pointing at ``url``, or return
+ * ``text`` unchanged when ``url`` is null. Unlike the TUI's `<a href>` (which
+ * crashes in the current @opentui/solid JSX layer — see workspace-sidebar.tsx),
+ * plain stdout can emit OSC 8 directly: supporting terminals (iTerm2, Ghostty,
+ * kitty, Windows Terminal, ...) render it as a real clickable link, and
+ * terminals that don't recognize the sequence just skip the invisible control
+ * bytes — the visible text is unaffected either way, so no capability check
+ * is needed before emitting it. */
+function hyperlink(text: string, url: string | null): string {
+  if (!url) return text
+  const OSC8 = "\x1b]8;;"
+  const ST = "\x1b\\"
+  // Underline as a visual affordance that this text is clickable — OSC 8
+  // alone carries no default styling. ``\x1b[24m`` (underline-off only, not
+  // a full ``\x1b[0m`` reset) so it doesn't clobber a color clack already
+  // applied around the whole line (e.g. the dim wrapper on a submitted value).
+  const UNDERLINE = "\x1b[4m"
+  const UNDERLINE_OFF = "\x1b[24m"
+  return `${OSC8}${url}${ST}${UNDERLINE}${text}${UNDERLINE_OFF}${OSC8}${ST}`
+}
+
 export const LinkCommand = cmd({
   command: "link",
   describe: "Link this project to an Altimate workspace",
@@ -128,8 +149,15 @@ export const LinkCommand = cmd({
     // (freemium only today). Enterprise / localhost / custom-domain callers
     // silently fall back to the CLI-side quick create.
     const creds = await AltimateApi.getCredentials()
-    const browserAvailable =
-      resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName) !== null
+    const workspaceWebBase = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
+    const browserAvailable = workspaceWebBase !== null
+    // Deterministic from tenant + id, same derivation as the TUI's
+    // buildManageUrl (workspace.tsx) — null on BYOK/unresolvable, in which
+    // case the name below prints as plain (non-clickable) text.
+    const currentManageUrl =
+      currentId !== undefined && workspaceWebBase
+        ? `${workspaceWebBase.toString().replace(/\/$/, "")}/w/${currentId}`
+        : null
 
     const options: Array<{ value: string; label: string; hint?: string }> = [
       // Only offer browser handoff for UNLINKED projects (CodeRabbit cycle 5).
@@ -162,14 +190,15 @@ export const LinkCommand = cmd({
       },
       ...list.map((dm) => ({
         value: String(dm.id),
-        label: dm.id === currentId ? `● ${dm.name}` : `  ${dm.name}`,
+        label:
+          dm.id === currentId ? `● ${hyperlink(dm.name, currentManageUrl)}` : `  ${dm.name}`,
         hint: dm.id === currentId ? "currently linked here" : undefined,
       })),
     ]
 
     const pick = await prompts.select<string>({
       message: existing
-        ? `Currently linked to "${currentName}". Pick a workspace (or create a new one):`
+        ? `Currently linked to "${hyperlink(currentName!, currentManageUrl)}". Pick a workspace (or create a new one):`
         : "Pick a workspace to link (or create a new one):",
       options,
       initialValue: currentId !== undefined ? String(currentId) : CREATE_NEW_SENTINEL,
