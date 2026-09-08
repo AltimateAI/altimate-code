@@ -352,8 +352,9 @@ async function registerOnce(
  * whichever gate claimed the armer in its process. Provider discovery and inference never call it.
  *
  * What this guarantees: the token is authentic. What it does not: that a human read anything. Over
- * HTTP that remains an assertion by the caller, narrowed only by the disclosure-hash check in the
- * register route.
+ * HTTP that remains an assertion by the caller, narrowed only by the disclosure-hash check in
+ * `FreeTierHost.registerWithAcceptedDisclosure` — and that hash is derived from public text, so it
+ * proves the caller holds the current wording, not that anyone read it.
  */
 export async function registerAfterConsent(
   token: string,

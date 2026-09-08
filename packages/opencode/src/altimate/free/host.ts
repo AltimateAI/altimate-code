@@ -12,9 +12,26 @@
 //
 // `altimate serve` provides a gate. The TUI worker deliberately does NOT — the TUI owns its own
 // disclosure dialog, and a second registration surface inside that process would let a caller
-// register without the dialog ever being shown. Consumers must treat `undefined` as "this host
-// cannot register Altimate Base" and refuse, exactly as the TUI's provider picker does.
-import type { createRegistrationConsentGate } from "./consent"
+// register without the dialog ever being shown. Consumers must treat "cannot register" as final
+// and refuse, exactly as the TUI's provider picker does.
+//
+// The gate itself is NEVER handed back out. An earlier revision exposed `current()`, which returned
+// the whole gate — including `setToken` (closing over the real armer) and `register` (redeeming
+// against the real authority) — so any importer held a raw mint primitive and could register
+// without going near the disclosure, in any order it liked. The check now happens *inside* this
+// module, in the same call that mints, arms and redeems: there is no ordering for a caller to get
+// wrong and no primitive to borrow.
+//
+// What this is NOT: a trust boundary against in-process code. `registerWithAcceptedDisclosure` is
+// exported, and the hash it demands is a SHA-256 of public text that any caller can recompute via
+// `FreeTierConsent.disclosureHash()`. In-process code can therefore still cause a registration —
+// it simply cannot do so while bypassing the documented precondition, and there is now one
+// audited path instead of a capability handed to every importer. The real boundary is the process:
+// anything running here is already trusted to execute tools. What this closes is accidental
+// misuse and the drift that comes from re-implementing the check at each call site.
+import { randomBytes } from "node:crypto"
+import type { createRegistrationConsentGate, RegistrationResult } from "./consent"
+import { FreeTierConsent } from "./consent"
 
 export type Registration = ReturnType<typeof createRegistrationConsentGate>
 
@@ -36,9 +53,38 @@ export function provide(value: Registration): void {
   registration = value
 }
 
-/** The host-injected gate, or `undefined` when this host cannot register Altimate Base. */
-export function current(): Registration | undefined {
-  return registration
+/** Whether this host can register Altimate Base at all, i.e. whether an entrypoint provided a gate. */
+export function canRegister(): boolean {
+  return registration !== undefined
+}
+
+export type RegisterOutcome =
+  /** No gate was provided; this host cannot register Altimate Base. */
+  | { kind: "unavailable" }
+  /** The caller echoed a hash that is not the current disclosure's. */
+  | { kind: "staleDisclosure" }
+  /** The gate ran; `result` carries its success or its classified failure. */
+  | { kind: "done"; result: RegistrationResult }
+
+/**
+ * Verify the caller accepted the current disclosure text, then mint, arm and redeem in one step.
+ *
+ * The hash comparison lives here rather than in the caller so that holding the current disclosure
+ * text is a precondition of minting, not a convention the caller is trusted to follow. It is a
+ * **text-version agreement, not proof of consent**: it establishes that the caller holds the
+ * current wording, so a client still rendering superseded text cannot register people against text
+ * they were never shown. Any caller can fetch the disclosure and echo the hash, so "a human read
+ * this" remains an assertion by the caller.
+ */
+export async function registerWithAcceptedDisclosure(acceptedDisclosureSha256: string): Promise<RegisterOutcome> {
+  const gate = registration
+  if (!gate) return { kind: "unavailable" }
+  if (acceptedDisclosureSha256.toLowerCase() !== FreeTierConsent.disclosureHash()) {
+    return { kind: "staleDisclosure" }
+  }
+  const token = randomBytes(32).toString("hex")
+  gate.setToken({ token })
+  return { kind: "done", result: await gate.register({ token }) }
 }
 
 export * as FreeTierHost from "./host"

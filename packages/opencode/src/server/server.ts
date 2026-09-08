@@ -40,9 +40,12 @@ import { readMcpEntryFromDisk } from "../mcp/config"
 import { resolveConfigPath } from "../mcp/config"
 import { enhancePrompt, isAutoEnhanceEnabled } from "../altimate/enhance-prompt"
 // altimate_change - Altimate Base disclosure + consent-gated registration for HTTP hosts
-import { randomBytes } from "node:crypto"
 import { FreeTier } from "../altimate/free/client"
 import { FreeTierConsent } from "../altimate/free/consent"
+// altimate_change start — Altimate Base registration must invalidate BOTH instance registries.
+import { InstanceStore } from "@/project/instance-store"
+import { AppRuntime } from "@/effect/app-runtime"
+// altimate_change end
 import { FreeTierHost } from "../altimate/free/host"
 // altimate_change end
 import { FileRoutes } from "./routes/file"
@@ -724,7 +727,7 @@ export namespace Server {
           },
         }),
         async (c) => {
-          if (!FreeTierHost.current()) {
+          if (!FreeTierHost.canRegister()) {
             return c.json({ error: "This host cannot register Altimate Base." }, 501)
           }
           const registered = await FreeTier.isRegistered().catch((error) => {
@@ -744,7 +747,7 @@ export namespace Server {
         describeRoute({
           summary: "Register Altimate Base after consent",
           description:
-            "Mints the managed Altimate Base credential. The caller must echo the SHA-256 of the disclosure it displayed, which is verified against the canonical text, so a caller that never fetched the current disclosure cannot register. Disposes the instance on success so the provider loader re-reads the new credential.",
+            "Mints the managed Altimate Base credential. The caller must echo the SHA-256 of the disclosure it displayed, which is verified against the canonical text, so a caller that never fetched the current disclosure cannot register. On success this disposes EVERY cached instance in the process — both registries — so provider loaders re-read the new credential. That is deliberately process-wide because the credential is a single global file, and it is disruptive: instance-scoped state elsewhere on this server (sessions, LSPs, PTYs, MCP connections, file watchers) is torn down and re-created, and `server.instance.disposed` is emitted for each. `staleProviders: true` in the response means the credential was written but at least one registry could not be invalidated, so provider lists may still show Altimate Base as disconnected.",
           operationId: "altimateBase.register",
           responses: {
             200: {
@@ -777,8 +780,7 @@ export namespace Server {
         }),
         validator("json", z.object({ acceptedDisclosureSha256: z.string() })),
         async (c) => {
-          const gate = FreeTierHost.current()
-          if (!gate) {
+          if (!FreeTierHost.canRegister()) {
             return c.json({ error: "This host cannot register Altimate Base." }, 501)
           }
 
@@ -801,12 +803,14 @@ export namespace Server {
           }
 
           const { acceptedDisclosureSha256 } = c.req.valid("json")
-          if (acceptedDisclosureSha256.toLowerCase() !== FreeTierConsent.disclosureHash()) {
-            // A text-version agreement, NOT proof of consent. It establishes that the caller holds
-            // the current disclosure, so a client rendering superseded wording cannot register
-            // people against text they were never shown. It does not establish that a human read
-            // anything — any caller can GET the disclosure and echo the hash back. "A human saw
-            // this" remains an assertion by the caller, exactly as it was.
+          // Hash verification, mint, arm and redeem all happen inside `FreeTierHost`, so this route
+          // cannot mint without checking and no other module can borrow the mint primitive. See
+          // `altimate/free/host.ts` for why the gate is never handed back out.
+          const attempt = await FreeTierHost.registerWithAcceptedDisclosure(acceptedDisclosureSha256)
+          if (attempt.kind === "unavailable") {
+            return c.json({ error: "This host cannot register Altimate Base." }, 501)
+          }
+          if (attempt.kind === "staleDisclosure") {
             return c.json(
               {
                 ok: false as const,
@@ -816,12 +820,7 @@ export namespace Server {
               200,
             )
           }
-
-          // Mint, arm and redeem in one operation, mirroring the TUI's accept handler. Nothing
-          // outside this handler can obtain a token that the private authority will accept.
-          const token = randomBytes(32).toString("hex")
-          gate.setToken({ token })
-          const outcome = await gate.register({ token })
+          const outcome = attempt.result
 
           // The provider loader caches its credential read, so a freshly registered Base stays out
           // of `/provider`'s `connected` list until the instance cache is dropped. Doing it here
@@ -833,16 +832,31 @@ export namespace Server {
           // `serve`, would keep every other instance's provider list showing Base as disconnected.
           // Invalidation has to be as wide as the state that changed.
           //
-          // A failure here leaves the credential written but provider lists stale, so it is reported
-          // rather than swallowed: the client needs to know its picker may be out of date.
+          // BOTH registries, because there are two. Legacy `Instance` backs the Hono routes below,
+          // while `/api/*` is forwarded to the typed HttpApi bridge before that middleware runs and
+          // is backed by a separate `InstanceStore`. Disposing only the legacy one left a directory
+          // reached exclusively through `/api/*` holding its old provider state — precisely the
+          // "other window still shows Base as disconnected" case this is here to prevent.
+          //
+          // A failure in either leaves the credential written but provider lists possibly stale, so
+          // it is reported rather than swallowed: the client needs to know its picker may be wrong.
           if (outcome.ok) {
-            const disposed = await Instance.disposeAll().then(
-              () => true,
-              (error) => {
-                log.error("Altimate Base registered but instance disposal failed", { error })
-                return false
-              },
-            )
+            const disposed = await Promise.all([
+              Instance.disposeAll().then(
+                () => true,
+                (error) => {
+                  log.error("Altimate Base registered but legacy instance disposal failed", { error })
+                  return false
+                },
+              ),
+              AppRuntime.runPromise(InstanceStore.Service.use((store) => store.disposeAll())).then(
+                () => true,
+                (error) => {
+                  log.error("Altimate Base registered but InstanceStore disposal failed", { error })
+                  return false
+                },
+              ),
+            ]).then((results) => results.every(Boolean))
             return c.json(disposed ? outcome : { ...outcome, staleProviders: true as const })
           }
           return c.json(outcome)
