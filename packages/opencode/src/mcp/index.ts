@@ -326,6 +326,12 @@ export interface Interface {
   readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
   readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean>
   readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus>
+  // altimate_change start — the effective config for one key: runtime-added
+  // entries win over file config, the same precedence the connect path uses.
+  // Lets callers mirror connectLocal's spawn environment (notably `cwd`)
+  // without re-deriving the merge.
+  readonly entry: (name: string) => Effect.Effect<ConfigMCPV1.Info | undefined>
+  // altimate_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -1372,6 +1378,9 @@ export const layer = Layer.effect(
       supportsOAuth,
       hasStoredTokens,
       getAuthStatus,
+      // altimate_change start — see Interface.entry
+      entry: getMcpConfig,
+      // altimate_change end
     })
   }),
 )
@@ -1404,6 +1413,11 @@ export async function status() {
 export async function tools() {
   return runMcp((svc) => svc.tools())
 }
+// altimate_change start — see Interface.entry
+export async function entry(name: string) {
+  return runMcp((svc) => svc.entry(name))
+}
+// altimate_change end
 export async function add(name: string, mcp: ConfigMCPV1.Info) {
   return runMcp((svc) => svc.add(name, mcp))
 }

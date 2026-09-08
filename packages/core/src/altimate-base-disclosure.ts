@@ -9,11 +9,11 @@
 // A new leaf file rather than an addition to an existing core module, so it adds no upstream
 // rebase surface.
 //
-// It discloses that requests are linkable across launches rather than deferring that to
-// docs/docs/configure/providers.md, which a user never sees before accepting. Keep it in sync with
-// that fuller "Data handling" note.
+// It states the core data terms up front. The persistent per-install-id linkage detail is
+// disclosed in docs/docs/configure/providers.md ("Data handling") rather than repeated in the
+// gate (see #1268); keep the core terms in sync with that note.
 export const ALTIMATE_BASE_DISCLOSURE =
-  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Logs are linked to a persistent per-installation identifier. Usage is rate limited."
+  "Altimate Base is free and requires no signup. Requests and responses may be logged and used to improve Altimate's products, including the model. Secrets are automatically masked before storage, but don't rely on it — avoid sending secrets or confidential code. Usage can be rate limited."
 
 /**
  * The one-line subtitle shown next to Altimate Base in a provider or model picker. Shared for the

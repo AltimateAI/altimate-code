@@ -83,9 +83,51 @@ const DEFAULT_CHUNK_TIMEOUT = 300_000
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
+// altimate_change start — Altimate Base needs a far more generous header timeout than OpenAI.
+// Its gateway can queue for a capacity slot, cold-start the backend, or reason before flushing
+// response headers — any of which exceeds OpenAI's near-instant reply. OpenAI's 10s default
+// therefore false-positives on healthy Altimate Base requests ("Provider response headers timed
+// out after 10000ms"). Default to the same 5min the SSE chunk watchdog uses; the value is
+// tunable in the field without a release via ALTIMATE_BASE_HEADER_TIMEOUT_MS (see
+// Provider.freeTierHeaderTimeout).
+const FREE_TIER_HEADER_TIMEOUT_DEFAULT = 300_000
+// Reject sub-second overrides: a header timeout below ~1s aborts virtually every request, so a
+// typo like ALTIMATE_BASE_HEADER_TIMEOUT_MS=1.5 — or =10 read as seconds — would be a footgun
+// worse than the bug this fixes. Anything below the floor falls back to the default.
+const FREE_TIER_HEADER_TIMEOUT_MIN = 1_000
+// altimate_change end
 
 export namespace Provider {
   const log = Log.create({ service: "provider" })
+
+  // altimate_change start — resolve the Altimate Base header timeout, honoring the field override.
+  // Pure parser (no env/IO, so it is directly unit-testable). Accepts a positive integer
+  // >= FREE_TIER_HEADER_TIMEOUT_MIN milliseconds and floors it. `undefined`/blank means "unset"
+  // and returns the 5-minute default; a present-but-invalid value (non-numeric or sub-floor)
+  // returns `null` so the caller can warn. There is intentionally no "disable" value: with the
+  // header abort off, a dead-but-connected gateway (headers never arrive, so the SSE chunk
+  // watchdog never starts) would hang the CLI forever — a user who wants a very long ceiling sets
+  // a large number instead.
+  export function resolveFreeTierHeaderTimeout(raw: string | undefined): number | null {
+    const trimmed = raw?.trim()
+    if (!trimmed) return FREE_TIER_HEADER_TIMEOUT_DEFAULT
+    const parsed = Number(trimmed)
+    if (Number.isFinite(parsed) && parsed >= FREE_TIER_HEADER_TIMEOUT_MIN) return Math.floor(parsed)
+    return null
+  }
+
+  export function freeTierHeaderTimeout(): number {
+    const raw = Env.get("ALTIMATE_BASE_HEADER_TIMEOUT_MS")
+    const resolved = resolveFreeTierHeaderTimeout(raw)
+    if (resolved !== null) return resolved
+    log.warn("ignoring invalid ALTIMATE_BASE_HEADER_TIMEOUT_MS; using default", {
+      value: raw?.trim(),
+      defaultMs: FREE_TIER_HEADER_TIMEOUT_DEFAULT,
+      minimumMs: FREE_TIER_HEADER_TIMEOUT_MIN,
+    })
+    return FREE_TIER_HEADER_TIMEOUT_DEFAULT
+  }
+  // altimate_change end
 
   function shouldUseCopilotResponsesApi(modelID: string): boolean {
     const match = /^gpt-(\d+)/.exec(modelID)
@@ -393,9 +435,11 @@ export namespace Provider {
           // authorizedFetch. Provider options are serialized by public provider APIs.
           apiKey: FreeTier.MANAGED_API_KEY_PLACEHOLDER,
           fetch: FreeTier.authorizedFetch,
-          // BUG FIX: without this, a hung gateway response never times out client-side, unlike
-          // the openai loader below which already sets this.
-          headerTimeout: OPENAI_HEADER_TIMEOUT_DEFAULT,
+          // Without a header timeout a hung gateway (connected, never replies) never aborts
+          // client-side — the SSE chunk watchdog only starts once headers arrive. OpenAI's 10s
+          // is far too tight for Altimate Base's queue/cold-start/reasoning latency to first
+          // byte, so use the free tier's generous, env-tunable value instead.
+          headerTimeout: freeTierHeaderTimeout(),
         },
       }
     },

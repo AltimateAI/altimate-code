@@ -80,9 +80,12 @@ test("Altimate Base is pinned to the hosted model contract without affecting oth
         expect(base.env).toEqual([])
         expect(base.options.baseURL).toBe(`${ALTIMATE_BASE_GATEWAY_URL}/v1`)
         expect(base.options.apiKey).toBe(FreeTier.MANAGED_API_KEY_PLACEHOLDER)
-        // BUG FIX: without a client-side header timeout, a hung gateway response never resolves
-        // or rejects — the CLI just hangs. This mirrors the openai loader's default.
-        expect(base.options.headerTimeout).toBe(10_000)
+        // A client-side header timeout is required (without it a hung gateway hangs the CLI
+        // forever). The default is 5min (FREE_TIER_HEADER_TIMEOUT_DEFAULT), not the openai
+        // loader's 10s: Altimate Base's gateway holds the response until the backend's first
+        // token, so 10s false-positived on healthy requests (#1260). Overridable via
+        // ALTIMATE_BASE_HEADER_TIMEOUT_MS; unset here → the default.
+        expect(base.options.headerTimeout).toBe(300_000)
         expect(JSON.stringify(base)).not.toContain("sk-altimate-base")
 
         const model = base.models[FreeTier.MODEL_ID]

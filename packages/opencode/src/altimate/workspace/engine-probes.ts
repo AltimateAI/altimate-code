@@ -2,7 +2,9 @@
 //
 // Everything that asks the outside world a question: the binary, its
 // version, the workspace allowlist, and the user-facing surfaces.
-import { statSync } from "fs"
+import { readFileSync, readdirSync, statSync } from "fs"
+import { homedir } from "os"
+import { isAbsolute, join, relative, resolve, sep } from "path"
 import launch from "cross-spawn"
 import { which as whichBinary } from "@opencode-ai/core/util/which"
 import { AltimateApi } from "@/altimate/api/client"
@@ -161,6 +163,85 @@ export async function declaredBounded(workspaceId: string): Promise<Declared | n
     ])
   } finally {
     if (timer) clearTimeout(timer)
+  }
+}
+
+/** Whether a live VS Code bridge would serve `cwd`, resolved the way the
+ * engine resolves it at spawn (see the engine's extensionRpcDiscovery): a
+ * sidecar whose recorded workspaceFolders contain `cwd`, else the sole live
+ * bridge. Read-only — a dead pid is skipped, never unlinked; GC of stale
+ * sidecars belongs to the engine and the extension. Presentation only: the
+ * engine remains the authority on what actually connects. */
+export function liveBridge(cwd: string, dir: string = join(homedir(), ".altimate", "extension-rpc")): boolean {
+  if (syncInternals.liveBridge) return syncInternals.liveBridge(cwd)
+  const bridges: string[][] = []
+  try {
+    for (const entry of readdirSync(dir)) {
+      if (!entry.endsWith(".json")) continue
+      try {
+        const data = JSON.parse(readFileSync(join(dir, entry), "utf8")) as {
+          socketPath?: string
+          workspaceFolders?: string[]
+          pid?: number
+        }
+        if (typeof data.socketPath !== "string" || !data.socketPath) continue
+        // A sidecar without a pid counts as live, matching the engine's own
+        // discovery. A PRESENT pid must be a live real process: the bridge
+        // extension always writes a positive integer, so a string, null, or
+        // non-positive value is a corrupt record, not a legacy shape — and
+        // unlike the engine, this probe has no connection attempt behind it
+        // to catch a bad guess. kill(0)/kill(-1) probe process groups, which
+        // would read garbage pids as alive. (codex r3, cubic)
+        if ("pid" in data && !(typeof data.pid === "number" && Number.isInteger(data.pid) && data.pid > 0 && pidAlive(data.pid)))
+          continue
+        // Validate the folders shape: this is an unvalidated JSON file, and a
+        // non-array must degrade to "live bridge, no recorded folders", not
+        // throw out of the probe. Only fully qualified strings survive —
+        // anything resolve() would complete from the process's own cwd or
+        // drive could spuriously match and bypass the two-bridge decline.
+        // (codex r3+r4)
+        const folders = Array.isArray(data.workspaceFolders)
+          ? data.workspaceFolders.filter((f): f is string => typeof f === "string" && qualifiedFolder(f))
+          : []
+        bridges.push(folders)
+      } catch {
+        // An unreadable sidecar is not a live bridge.
+      }
+    }
+  } catch {
+    return false
+  }
+  if (bridges.length === 0) return false
+  const within = (folder: string) => {
+    const rel = relative(resolve(folder), resolve(cwd))
+    // ".." must be a complete path component: a child literally named
+    // "..cache" yields rel "..cache", which is inside. (bot review)
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+  }
+  if (bridges.some((folders) => folders.some(within))) return true
+  return bridges.length === 1
+}
+
+/** A recorded folder must be fully qualified. On Windows, drive-relative
+ * paths like "\repo" count as absolute to Node, but resolve() completes them
+ * with the process's CURRENT drive — so a corrupt entry could match any cwd
+ * on that drive and defeat the two-bridge decline. Drive-qualified (C:\ or
+ * C:/) or complete UNC only: a UNC value needs nonempty server AND share
+ * components — resolve("\\\\") is "C:\\" and resolve("\\\\server") is
+ * "C:\\server", both on the current drive again. POSIX keeps plain
+ * isAbsolute. The platform parameter exists for tests. (codex r4+r5) */
+export function qualifiedFolder(f: string, win: boolean = process.platform === "win32"): boolean {
+  if (!f) return false
+  return win ? /^([a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/]+[^\\/]+)/.test(f) : isAbsolute(f)
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    // EPERM is a live process owned by someone else.
+    return (err as NodeJS.ErrnoException).code === "EPERM"
   }
 }
 

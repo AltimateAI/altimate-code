@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test"
 import { chmodSync, mkdtempSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { fingerprint, versionOf } from "../../../src/altimate/workspace/engine-probes"
+import { fingerprint, liveBridge, qualifiedFolder, versionOf } from "../../../src/altimate/workspace/engine-probes"
 
 const posix = process.platform !== "win32"
 
@@ -57,5 +57,136 @@ describe("versionOf", () => {
   })
   test("a binary that cannot be spawned is unreadable", async () => {
     expect(await versionOf(path.join(os.tmpdir(), "definitely-not-here-" + process.pid))).toBeNull()
+  })
+})
+
+describe("liveBridge", () => {
+  // A pid above any realistic pid_max, so the liveness check reports it dead —
+  // the same trick the engine's own discovery tests use.
+  const DEAD_PID = 2 ** 31 - 1
+
+  function sidecars(entries: Record<string, object>): string {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "bridge-sidecar-"))
+    for (const [name, data] of Object.entries(entries)) {
+      writeFileSync(path.join(dir, name), JSON.stringify(data))
+    }
+    return dir
+  }
+
+  test("a live bridge recording this directory is found, from the folder or below it", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // A second live bridge keeps the single-bridge fallback out of play, so
+    // these assertions exercise the cwd match alone.
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true)
+    expect(liveBridge(path.join(cwd, "models", "staging"), dir)).toBe(true)
+    // A child literally named "..cache" is inside: ".." only counts as a
+    // complete path component.
+    expect(liveBridge(path.join(cwd, "..cache"), dir)).toBe(true)
+    // A sibling directory that merely shares the prefix string is not within.
+    expect(liveBridge(cwd + "-other", dir)).toBe(false)
+  })
+
+  test("a dead bridge is skipped and its sidecar is left for the engine to GC", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: DEAD_PID },
+    })
+    expect(liveBridge(cwd, dir)).toBe(false)
+    expect(statSync(path.join(dir, "a.json")).isFile()).toBe(true)
+  })
+
+  test("a present-but-invalid pid is a corrupt record, never a live pid-less sidecar", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Non-positive and non-integer: kill(0)/kill(-1) probe process groups.
+    // Wrong type entirely: the extension always writes a positive integer.
+    for (const pid of [0, -1, 1.5, "1234", null, {}] as unknown[]) {
+      const dir = sidecars({
+        "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd], pid: pid as number },
+      })
+      expect(liveBridge(cwd, dir)).toBe(false)
+    }
+  })
+
+  test("a recorded folder must be fully qualified on Windows — drive-relative resolves onto the current drive", () => {
+    // win branch
+    expect(qualifiedFolder("C:\\ws", true)).toBe(true)
+    expect(qualifiedFolder("c:/ws", true)).toBe(true)
+    expect(qualifiedFolder("\\\\server\\share\\ws", true)).toBe(true)
+    expect(qualifiedFolder("\\\\server\\share", true)).toBe(true)
+    expect(qualifiedFolder("\\repo", true)).toBe(false)
+    expect(qualifiedFolder("\\", true)).toBe(false)
+    // Incomplete pseudo-UNC: resolve("\\\\") is "C:\\", resolve("\\\\server")
+    // is "C:\\server" — the current drive again, not a UNC device.
+    expect(qualifiedFolder("\\\\", true)).toBe(false)
+    expect(qualifiedFolder("\\\\server", true)).toBe(false)
+    expect(qualifiedFolder("\\\\server\\", true)).toBe(false)
+    expect(qualifiedFolder("C:relative", true)).toBe(false)
+    expect(qualifiedFolder("", true)).toBe(false)
+    // posix branch
+    expect(qualifiedFolder("/home/ws", false)).toBe(true)
+    expect(qualifiedFolder("relative/dir", false)).toBe(false)
+    expect(qualifiedFolder("", false)).toBe(false)
+  })
+
+  test("empty and relative folder strings are dropped — resolve('') is the process cwd", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Bridge A is malformed, bridge B is live elsewhere: A must not match via
+    // resolve("") and must not defeat the two-bridge decline.
+    const dir = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["", "relative/dir"], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(process.cwd(), dir)).toBe(false)
+    expect(liveBridge(cwd, dir)).toBe(false)
+  })
+
+  test("the sole live bridge counts even for an unrelated directory; two decline to guess", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const one = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, one)).toBe(true)
+    const two = sidecars({
+      "a.json": { socketPath: "/tmp/a.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+      "b.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/third"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, two)).toBe(false)
+  })
+
+  test("garbage is not a bridge: no dir, no socketPath, unparseable JSON", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    expect(liveBridge(cwd, path.join(os.tmpdir(), "no-such-dir-" + process.pid))).toBe(false)
+    const dir = sidecars({
+      "no-sock.json": { workspaceFolders: [cwd], pid: process.pid },
+    })
+    writeFileSync(path.join(dir, "broken.json"), "{not json")
+    writeFileSync(path.join(dir, "not-a-sidecar.txt"), "ignored")
+    expect(liveBridge(cwd, dir)).toBe(false)
+  })
+
+  test("a malformed folders shape degrades to a folderless live bridge, never a throw", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    // Object-valued and mixed-type folders come from an unvalidated JSON file.
+    const dir = sidecars({
+      "obj.json": { socketPath: "/tmp/a.sock", workspaceFolders: {}, pid: process.pid },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true) // sole live bridge, no folders — fallback
+    const mixed = sidecars({
+      "mixed.json": { socketPath: "/tmp/a.sock", workspaceFolders: [42, cwd], pid: process.pid },
+      "other.json": { socketPath: "/tmp/b.sock", workspaceFolders: ["/somewhere/else"], pid: process.pid },
+    })
+    expect(liveBridge(cwd, mixed)).toBe(true) // the string folder still matches
+  })
+
+  test("a sidecar without a pid counts as live, matching the engine's discovery", () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "bridge-ws-"))
+    const dir = sidecars({
+      "no-pid.json": { socketPath: "/tmp/a.sock", workspaceFolders: [cwd] },
+    })
+    expect(liveBridge(cwd, dir)).toBe(true)
   })
 })
