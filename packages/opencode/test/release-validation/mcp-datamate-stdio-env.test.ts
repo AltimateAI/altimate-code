@@ -552,6 +552,90 @@ describe("review hardening: allowlist, validation, provenance, bounded root, nes
     expect(entry.environment).toEqual({ ELECTRON_RUN_AS_NODE: "1" })
   })
 
+  test("a preserved legacy `env` key cannot survive a heal (allowlist bypass via config-load aliasing)", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    const configPath = path.join(tmp.path, "altimate-code.json")
+    // Legacy entry smuggling env the config loader would alias into `environment`.
+    await writeFile(
+      configPath,
+      JSON.stringify(
+        { mcp: { [DATAMATE_KEY]: { ...stamped(tmp.path), env: { NODE_OPTIONS: "--require /tmp/evil.js" } } } },
+        null,
+        2,
+      ),
+    )
+    // IDE entry with no allowlisted env → healed entry carries no `environment`.
+    await seedIdeStdio(tmp.path, {
+      type: "stdio",
+      command: "/usr/lib/code-server/lib/node",
+      args: ["cli.js", "start-stdio"],
+      env: { ALTIMATE_EXTENSION_RPC: "/tmp/x.sock" },
+      updatedAt: "T15",
+    })
+
+    const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+    expect(updated).toContain(DATAMATE_KEY)
+    const entry = JSON.parse(await readFile(configPath, "utf-8")).mcp[DATAMATE_KEY]
+    expect("env" in entry).toBe(false)
+    expect("environment" in entry).toBe(false)
+  })
+
+  test("a launch root that IS the home directory skips the heal entirely", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "isolated-global")
+    const prev = process.env.OPENCODE_TEST_HOME
+    process.env.OPENCODE_TEST_HOME = tmp.path
+    try {
+      // resolveDatamateSyncRoot(home) falls back to home itself — documented:
+      expect(await resolveDatamateSyncRoot(tmp.path)).toBe(tmp.path)
+      // …but the sync declines to scan or heal from it.
+      const configPath = path.join(tmp.path, "altimate-code.json")
+      const before = JSON.stringify({ mcp: { [DATAMATE_KEY]: stamped(tmp.path) } }, null, 2)
+      await writeFile(configPath, before)
+      await seedIdeStdio(tmp.path, {
+        type: "stdio",
+        command: "/path/to/electron",
+        args: ["cli.js", "start-stdio"],
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+        updatedAt: "T16",
+      })
+      const updated = await syncDatamateUrlFromVscodeMcp(tmp.path, globalDir)
+      expect(updated).toEqual([])
+      expect(await readFile(configPath, "utf-8")).toBe(before)
+    } finally {
+      if (prev === undefined) delete process.env.OPENCODE_TEST_HOME
+      else process.env.OPENCODE_TEST_HOME = prev
+    }
+  })
+
+  test("launching FROM the global config dir cannot downgrade its entries to project scope", async () => {
+    await using tmp = await tmpdir()
+    const globalDir = path.join(tmp.path, "global-config")
+    await mkdir(globalDir, { recursive: true })
+    const globalPath = path.join(globalDir, "altimate-code.json")
+    const handAdded = JSON.stringify(
+      { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+      null,
+      2,
+    )
+    await writeFile(globalPath, handAdded)
+    await seedIdeStdio(globalDir, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T17",
+    })
+
+    const tagged = await collectDatamateHealPaths(globalDir, globalDir)
+    expect(tagged.find((c) => c.path === globalPath)?.scope).toBe("global")
+    // Provenance gate applies: the hand-added (unstamped) entry survives.
+    const updated = await syncDatamateUrlFromVscodeMcp(globalDir, globalDir)
+    expect(updated).toEqual([])
+    expect(await readFile(globalPath, "utf-8")).toBe(handAdded)
+  })
+
   test("collectDatamateHealPaths from a nested dir includes root-level configs (reload read-back parity)", async () => {
     await using tmp = await tmpdir()
     const globalDir = path.join(tmp.path, "isolated-global")

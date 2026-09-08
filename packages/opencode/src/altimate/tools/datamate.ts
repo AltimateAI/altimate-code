@@ -323,7 +323,7 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           const restamped = mergeRefreshedEntry(onDisk, mcpConfig, updatedAtField, provenanceFields)
           // enabled is compared too: a connected entry disabled on disk must be
           // re-enabled by an explicit add or the disable resurrects on restart.
-          const identityChanged = [...TRANSPORT_IDENTITY_FIELDS, "enabled", "managedBy", "sourceMcpJson"].some(
+          const identityChanged = [...TRANSPORT_IDENTITY_FIELDS, "enabled"].some(
             (k) => JSON.stringify(onDisk[k]) !== JSON.stringify(restamped[k]),
           )
           if (identityChanged) {
@@ -368,10 +368,12 @@ async function handleAdd(args: { datamate_id?: string; name?: string; scope?: "p
           provenanceFields,
         )
         await addMcpToConfig(DATAMATE_KEY, refreshed as Parameters<typeof addMcpToConfig>[1], configPath)
+        // Disk-only fields stay off the live config handed to MCP.add.
+        const { updatedAt: _u, managedBy: _m, sourceMcpJson: _s, ...liveEntry } = refreshed
         // The live client must get the same merged entry as the disk write — the
         // bare transport config would drop preserved auth/connection settings
         // (headers, oauth, timeout) for the session being connected right now.
-        await MCP.add(DATAMATE_KEY, refreshed as Parameters<typeof MCP.add>[1])
+        await MCP.add(DATAMATE_KEY, liveEntry as Parameters<typeof MCP.add>[1])
       } else {
         // Not in config yet — write to disk then connect.
         log.info("handleAdd: adding new datamate entry", {

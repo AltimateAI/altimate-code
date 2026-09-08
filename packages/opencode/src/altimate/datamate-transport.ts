@@ -158,6 +158,11 @@ export const TRANSPORT_IDENTITY_FIELDS: ReadonlySet<string> = new Set([
   "command",
   "args",
   "environment",
+  // Legacy alias: config load maps `env` to `environment` when no
+  // `environment` key is present (config.ts normalizeMcpConfig), so a
+  // preserved `env` on a healed entry would reach the spawn spread and bypass
+  // the allowlist exactly on the legacy entries the heal exists to repair.
+  "env",
   "url",
   "updatedAt",
   "managedBy",
@@ -246,13 +251,20 @@ export async function collectDatamateHealPaths(
   const root = resolvedRoot ?? (await resolveDatamateSyncRoot(launchDir))
   const candidates: Array<{ path: string; scope: "project" | "global" }> = []
   const seen = new Set<string>()
+  // Scope is canonical ownership, not discovery order: a file at or under the
+  // global config dir is global no matter which loop reached it first —
+  // otherwise a launch from that dir would tag the physical global config as
+  // "project" and skip the provenance gate.
+  const globalResolved = path.resolve(globalConfigDir)
+  const scopeOf = (p: string): "project" | "global" =>
+    p === globalResolved || p.startsWith(globalResolved + path.sep) ? "global" : "project"
   let dir = path.resolve(launchDir)
   const rootResolved = path.resolve(root)
   while (true) {
     for (const p of await findProjectConfigPaths(dir)) {
-      if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: "project" }) }
+      if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: scopeOf(p) }) }
     }
-    if (dir === rootResolved || !dir.startsWith(rootResolved)) break
+    if (dir === rootResolved || !(dir === rootResolved || dir.startsWith(rootResolved + path.sep))) break
     const parent = path.dirname(dir)
     if (parent === dir) break
     dir = parent
@@ -285,6 +297,14 @@ export async function syncDatamateUrlFromVscodeMcp(
     // package's own opencode.json is loaded and overrides the root entry, so
     // it must be healed too — Codex review on this PR).
     const root = await resolveDatamateSyncRoot(launchDir)
+    // $HOME is never a scannable project root: healing from it would glob the
+    // whole home tree, where any unrelated checkout's IDE entry could win
+    // source selection. This declines only the automatic heal — a dotfiles
+    // project AT home keeps the explicit datamate_manager add path.
+    if (await isSamePath(root, Global.Path.home)) {
+      log.info("syncDatamateUrlFromVscodeMcp: launch root is the home directory, skipping heal", { root })
+      return updated
+    }
     const cwd = root
     log.info("syncDatamateUrlFromVscodeMcp: start", { launchDir, root })
 
