@@ -616,25 +616,21 @@ async function runQueue<T>(
   return { ok, failed, declined, skipped }
 }
 
-/** Push a set of blocks — the sweep that runs when a project is bound to a
- * workspace. Throttled and resumable: blocks whose payload is already synced
- * are skipped, so a re-run after a partial failure sends only what is missing. */
-export async function backfill(
+/** Split blocks into those the workspace still needs and those already there at
+ * their current payload.
+ *
+ * Extracted so ``backfill`` and ``pendingCount`` cannot drift: a status line that
+ * says "3 not synced" and a sweep that then sends a different number is worse than
+ * no status line, because it makes the user distrust both.
+ *
+ * A project-scoped block with no binding to attach to counts as skipped, not
+ * pending — there is nowhere to send it, and reporting it as outstanding would
+ * describe a backlog that no action can clear. */
+function partitionPending(
   blocks: MemoryBlock[],
-  explicitBinding?: CachedBinding,
-  sweepDirectory?: string,
-): Promise<{ ok: number; failed: number; skipped: number; declined: number; gated: boolean }> {
-  // ``gated`` says the sweep never ran, as opposed to running and storing
-  // nothing. A caller recording "this binding is seeded" must be able to tell
-  // those apart: memory being off is not a completed seed.
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, gated: true }
-  // The bind path passes the binding it just recorded; there is no ambient
-  // instance to resolve one from on the `link` subcommand.
-  const binding = explicitBinding ?? (await currentBinding())
-  if (!binding || !(await memoryEnabled(binding)))
-    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, gated: true }
-  const index = await readIndex()
-
+  binding: CachedBinding | null,
+  index: Record<string, { contentHash?: string }>,
+): { pending: { block: MemoryBlock; binding: CachedBinding | null }[]; skipped: number } {
   const pending: { block: MemoryBlock; binding: CachedBinding | null }[] = []
   let skipped = 0
   for (const block of blocks) {
@@ -655,6 +651,39 @@ export async function backfill(
     }
     pending.push({ block, binding: target })
   }
+  return { pending, skipped }
+}
+
+/** How many of these blocks the workspace has not received at their current
+ * payload. Index read only — no network, no writes — so a status line can call it.
+ *
+ * Deliberately shares ``partitionPending`` with the sweep rather than re-deriving
+ * the comparison: this number is a promise about what ``backfill`` would do. */
+export async function pendingCount(blocks: MemoryBlock[], binding: CachedBinding | null): Promise<number> {
+  if (blocks.length === 0) return 0
+  return partitionPending(blocks, binding, await readIndex()).pending.length
+}
+
+/** Push a set of blocks — the sweep that runs when a project is bound to a
+ * workspace. Throttled and resumable: blocks whose payload is already synced
+ * are skipped, so a re-run after a partial failure sends only what is missing. */
+export async function backfill(
+  blocks: MemoryBlock[],
+  explicitBinding?: CachedBinding,
+  sweepDirectory?: string,
+): Promise<{ ok: number; failed: number; skipped: number; declined: number; gated: boolean }> {
+  // ``gated`` says the sweep never ran, as opposed to running and storing
+  // nothing. A caller recording "this binding is seeded" must be able to tell
+  // those apart: memory being off is not a completed seed.
+  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, gated: true }
+  // The bind path passes the binding it just recorded; there is no ambient
+  // instance to resolve one from on the `link` subcommand.
+  const binding = explicitBinding ?? (await currentBinding())
+  if (!binding || !(await memoryEnabled(binding)))
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, gated: true }
+  const index = await readIndex()
+
+  const { pending, skipped } = partitionPending(blocks, binding, index)
 
   if (pending.length === 0) return { ok: 0, failed: 0, skipped, declined: 0, gated: false }
 

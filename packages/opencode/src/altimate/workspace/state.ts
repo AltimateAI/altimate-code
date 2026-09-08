@@ -488,6 +488,26 @@ async function lookupBinding(
   return { status: "bound", binding: adopted }
 }
 
+/** Drop this project's cached binding after a server-side unlink.
+ *
+ * Also memoizes the miss. Without that, the next resolve pays a round trip to
+ * re-learn what this call just did — and if the server delete had NOT actually
+ * happened, the lookup would re-adopt the binding and silently undo the unlink.
+ * Marking the miss makes the local state agree with the request that was made,
+ * and the ordinary ``MISS_TTL_MS`` revalidation still corrects it if the server
+ * disagrees.
+ *
+ * Best-effort, like every other write to this cache: the server-side binding is
+ * the source of truth, and a read-only state directory must not turn a
+ * successful unlink into a reported failure. */
+export async function clearLocalBinding(directory: string): Promise<void> {
+  const key = await tenantKey()
+  if (!key) return
+  forgetBinding(directory, key)
+  lastValidatedAt.delete(accountScopedKey(directory, key))
+  serverLookupMissed.set(accountScopedKey(directory, key), Date.now())
+}
+
 export async function recordApprovedBinding(
   directory: string,
   binding: CachedBinding,
