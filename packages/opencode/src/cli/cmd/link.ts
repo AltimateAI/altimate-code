@@ -42,25 +42,76 @@ import { recordApprovedBinding } from "@/altimate/workspace/state"
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
 
+/** Strip C0/C1 control bytes (including ESC) from server-controlled text
+ * before it reaches a raw-stdout escape-sequence wrapper. Workspace names
+ * come from ``WorkspaceApi.listDatamates()`` with no charset validation — an
+ * attacker-controlled name containing its own ``\x1b]8;;`` could otherwise
+ * prematurely close our hyperlink and open a spoofed one pointing wherever
+ * they choose, with our trusted URL as the visible (but inert) prefix.
+ * (CodeRabbit + cubic, PR #1274.) */
+function stripControlChars(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x1f\x7f]/g, "")
+}
+
+/** Conservative allowlist of terminals known to render OSC 8 hyperlinks.
+ * There's no capability query as reliable as opentui's device-attribute
+ * detection (used by the TUI side) available to a plain CLI process, so this
+ * errs toward false negatives — worst case a supporting terminal renders
+ * plain text instead of a link, which is a strict improvement over the
+ * inverse (underlining text that turns out not to be clickable). Mirrors the
+ * checks the `supports-hyperlinks` package uses, inlined to avoid a new
+ * dependency for one CLI affordance. */
+function terminalSupportsHyperlinks(): boolean {
+  if (!process.stdout.isTTY) return false
+  if (process.env.TERM === "dumb" || process.env.TERM === "linux") return false
+  const termProgram = process.env.TERM_PROGRAM
+  if (
+    termProgram &&
+    ["iTerm.app", "WezTerm", "Hyper", "vscode", "ghostty", "Tabby", "rio", "Apple_Terminal"].includes(termProgram)
+  )
+    return true
+  if (process.env.WT_SESSION) return true // Windows Terminal
+  if (process.env.KONSOLE_VERSION) return true
+  const vte = Number(process.env.VTE_VERSION)
+  if (!Number.isNaN(vte) && vte >= 5000) return true // VTE >= 0.50.0 (GNOME Terminal and other VTE-based terms)
+  return false
+}
+
+/** Append ``/w/<id>`` to ``base``'s pathname using real URL semantics, rather
+ * than string-concatenating ``toString()``. The dev-only
+ * ``ALTIMATE_WORKSPACE_WEB_URL`` override (resolveWorkspaceWebUrl) can carry
+ * its own path/query/fragment (e.g. a local dev server), and naive
+ * concatenation would land ``/w/<id>`` inside the query string instead of the
+ * path — clears search/hash for the same reason. (CodeRabbit + cubic, PR #1274.) */
+function buildManageUrl(base: URL, workspaceId: number): string {
+  const u = new URL(base)
+  u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
+  u.search = ""
+  u.hash = ""
+  return u.toString()
+}
+
 /** Wrap ``text`` in an OSC 8 terminal hyperlink pointing at ``url``, or return
  * ``text`` unchanged when ``url`` is null. Unlike the TUI's `<a href>` (which
  * crashes in the current @opentui/solid JSX layer — see workspace-sidebar.tsx),
- * plain stdout can emit OSC 8 directly: supporting terminals (iTerm2, Ghostty,
- * kitty, Windows Terminal, ...) render it as a real clickable link, and
- * terminals that don't recognize the sequence just skip the invisible control
- * bytes — the visible text is unaffected either way, so no capability check
- * is needed before emitting it. */
+ * plain stdout can emit OSC 8 directly: supporting terminals render it as a
+ * real clickable link, and terminals that don't recognize the sequence just
+ * skip the invisible control bytes — the visible text is unaffected either
+ * way, so the OSC 8 wrapping itself needs no capability check. The
+ * *underline*, however, is a much older and more universally-rendered SGR
+ * code — emitting it unconditionally would make the name look clickable in
+ * terminals where it isn't, so it's gated on ``terminalSupportsHyperlinks``
+ * (cubic, PR #1274). */
 function hyperlink(text: string, url: string | null): string {
   if (!url) return text
+  const safeText = stripControlChars(text)
   const OSC8 = "\x1b]8;;"
   const ST = "\x1b\\"
-  // Underline as a visual affordance that this text is clickable — OSC 8
-  // alone carries no default styling. ``\x1b[24m`` (underline-off only, not
-  // a full ``\x1b[0m`` reset) so it doesn't clobber a color clack already
-  // applied around the whole line (e.g. the dim wrapper on a submitted value).
+  if (!terminalSupportsHyperlinks()) return `${OSC8}${url}${ST}${safeText}${OSC8}${ST}`
   const UNDERLINE = "\x1b[4m"
   const UNDERLINE_OFF = "\x1b[24m"
-  return `${OSC8}${url}${ST}${UNDERLINE}${text}${UNDERLINE_OFF}${OSC8}${ST}`
+  return `${OSC8}${url}${ST}${UNDERLINE}${safeText}${UNDERLINE_OFF}${OSC8}${ST}`
 }
 
 export const LinkCommand = cmd({
@@ -155,9 +206,7 @@ export const LinkCommand = cmd({
     // buildManageUrl (workspace.tsx) — null on BYOK/unresolvable, in which
     // case the name below prints as plain (non-clickable) text.
     const currentManageUrl =
-      currentId !== undefined && workspaceWebBase
-        ? `${workspaceWebBase.toString().replace(/\/$/, "")}/w/${currentId}`
-        : null
+      currentId !== undefined && workspaceWebBase ? buildManageUrl(workspaceWebBase, currentId) : null
 
     const options: Array<{ value: string; label: string; hint?: string }> = [
       // Only offer browser handoff for UNLINKED projects (CodeRabbit cycle 5).

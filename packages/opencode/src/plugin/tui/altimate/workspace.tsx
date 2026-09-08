@@ -241,6 +241,21 @@ function OfferDialog(props: OfferProps) {
   )
 }
 
+/** Append ``/w/<id>`` to ``base``'s pathname using real URL semantics, rather
+ * than string-concatenating ``toString()``. The dev-only
+ * ``ALTIMATE_WORKSPACE_WEB_URL`` override (resolveWorkspaceWebUrl) can carry
+ * its own path/query/fragment (e.g. a local dev server), and naive
+ * concatenation would land ``/w/<id>`` inside the query string instead of the
+ * path — clears search/hash for the same reason. (CodeRabbit + cubic on
+ * PR #1274's identical bug in cli/cmd/link.ts.) */
+export function joinManageUrlPath(base: URL, workspaceId: number): string {
+  const u = new URL(base)
+  u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
+  u.search = ""
+  u.hash = ""
+  return u.toString()
+}
+
 /** Build the SaaS manage-workspace URL for a bound workspace. Deterministic
  * from tenant + id, so any caller can construct it without an extra round-trip.
  * Returns null when the current deployment isn't the freemium web (BYOK or
@@ -250,7 +265,7 @@ async function buildManageUrl(workspaceId: number): Promise<string | null> {
     const creds = await AltimateApi.getCredentials()
     const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     if (!base) return null
-    return `${base.toString().replace(/\/$/, "")}/w/${workspaceId}`
+    return joinManageUrlPath(base, workspaceId)
   } catch {
     return null
   }
@@ -563,11 +578,12 @@ async function createAndBindInline(
 
 /** True when the URL parses and its protocol is exactly ``http:`` or ``https:``.
  * Used before handing a server-supplied URL to ``open()`` (which would otherwise
- * dispatch to whatever OS scheme handler matches the protocol). Kept exported
- * as a top-level helper — ``openManageUrl`` below is the sole in-module caller,
- * but ``cli/cmd/link.ts`` deliberately keeps its own copy (CLI/TUI split, see
- * that file's comment) rather than importing this one. */
-export function isSafeHttpUrl(url: string): boolean {
+ * dispatch to whatever OS scheme handler matches the protocol). Not exported —
+ * ``openManageUrl`` below is the sole caller; ``cli/cmd/link.ts`` deliberately
+ * keeps its own private copy (CLI/TUI split, see that file's comment) rather
+ * than importing this one. (Kilo, PR #1274 — the prior `export` had no
+ * external importers.) */
+function isSafeHttpUrl(url: string): boolean {
   try {
     const u = new URL(url)
     return u.protocol === "http:" || u.protocol === "https:"

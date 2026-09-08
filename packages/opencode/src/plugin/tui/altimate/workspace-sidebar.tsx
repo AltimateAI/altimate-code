@@ -13,7 +13,7 @@ import { readLocalBinding, type CachedBinding } from "@/altimate/workspace/state
 import { resolveWorkspaceWebUrl } from "@/altimate/workspace/browser-handoff"
 import { getResolvedWorkspaceId } from "@/altimate/workspace/session-context"
 import { AltimateApi } from "@/altimate/api/client"
-import { openManageUrl } from "./workspace"
+import { openManageUrl, joinManageUrlPath } from "./workspace"
 
 const id = "altimate:sidebar-workspace"
 
@@ -31,8 +31,8 @@ const POLL_MS = 30_000
  * base per (apiUrl, tenant) pair for the life of the process; if the file
  * changes mid-session, the binding cache invalidation (in state.ts) still
  * catches it via its own (tenant, apiUrl) top-level scoping. */
-let cachedManageBase: { apiUrl: string; tenant: string; base: string | null } | null = null
-async function resolveManageBase(): Promise<string | null> {
+let cachedManageBase: { apiUrl: string; tenant: string; base: URL | null } | null = null
+async function resolveManageBase(): Promise<URL | null> {
   try {
     const creds = await AltimateApi.getCredentials()
     if (
@@ -42,8 +42,7 @@ async function resolveManageBase(): Promise<string | null> {
     ) {
       return cachedManageBase.base
     }
-    const url = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
-    const base = url ? url.toString().replace(/\/$/, "") : null
+    const base = resolveWorkspaceWebUrl(creds.altimateUrl, creds.altimateInstanceName)
     cachedManageBase = { apiUrl: creds.altimateUrl, tenant: creds.altimateInstanceName, base }
     return base
   } catch {
@@ -69,7 +68,7 @@ function View(props: { api: TuiPluginApi }) {
         return
       }
       const base = await resolveManageBase()
-      setManageUrl(base ? `${base}/w/${b.datamateId}` : null)
+      setManageUrl(base ? joinManageUrlPath(base, b.datamateId) : null)
     } finally {
       refreshInFlight = false
     }
