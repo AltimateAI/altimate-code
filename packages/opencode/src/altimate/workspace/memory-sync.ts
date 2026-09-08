@@ -658,9 +658,18 @@ function partitionPending(
  * payload. Index read only — no network, no writes — so a status line can call it.
  *
  * Deliberately shares ``partitionPending`` with the sweep rather than re-deriving
- * the comparison: this number is a promise about what ``backfill`` would do. */
+ * the comparison: this number is a promise about what ``backfill`` would do.
+ *
+ * That promise includes the workspace's own memory setting, not just the pilot
+ * flag. ``backfill`` refuses outright when the bound workspace has memory off,
+ * so counting index misses in that state advertises a backlog no action can
+ * clear — a status line saying "14 not synced" above a sync that answers
+ * "memory is off for this project". Found end-to-end; both gates have to be the
+ * same gate. */
 export async function pendingCount(blocks: MemoryBlock[], binding: CachedBinding | null): Promise<number> {
   if (blocks.length === 0) return 0
+  if (!isEnabled()) return 0
+  if (binding && !(await memoryEnabled(binding))) return 0
   return partitionPending(blocks, binding, await readIndex()).pending.length
 }
 
