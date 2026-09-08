@@ -652,6 +652,9 @@ interface AlreadyLinkedProps {
   hasDrift: boolean
   driftedWas?: string | null
   unverified?: boolean
+  /** Pre-resolved by the caller — see ``AlreadyLinkedDialog``'s comment for
+   * why this must not be fetched async inside the dialog itself. */
+  manageUrl: string | null
   /** Which identifier arm resolved the binding — remote-matched projects
    * rebind via ``/by-remote``, path-matched via ``/by-path``. Not the same
    * as ``identifier.repoRemote`` / ``identifier.projectPath``, which reflect
@@ -661,13 +664,20 @@ interface AlreadyLinkedProps {
 }
 
 function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
-  // Best-effort — same deterministic tenant+id derivation as buildManageUrl's
-  // other callers. null on BYOK/unresolvable, in which case the "Open in
-  // browser" option below is simply omitted.
-  const [manageUrl, setManageUrl] = createSignal<string | null>(null)
-  onMount(async () => {
-    setManageUrl(await buildManageUrl(props.workspaceId))
-  })
+  // ``manageUrl`` is a plain prop, resolved by the caller (``runFlow``)
+  // BEFORE this dialog is shown — not fetched async in an onMount here.
+  // dialog-select.tsx's ``store.selected`` is a raw numeric index, and
+  // nothing re-syncs it when ``props.options`` changes shape (the only
+  // effect that resyncs selection fires on `props.current`/`store.filter`
+  // changes, not on the options array). Options here start at 3 items and
+  // conditionally grow to 4 when "Open in browser" becomes available — if
+  // that insertion landed asynchronously after the dialog painted, a user
+  // who already pressed Down to reach "Skip for now" (index 2) would find
+  // Enter now submits "Open in browser" instead, since the array grew out
+  // from under a stale index. Keeping this component fully synchronous
+  // (matching ``WorkspaceLinkedDialog``'s ``manageUrl`` prop, resolved via
+  // ``showLinkedConfirmation`` before render) removes the moving target
+  // instead of trying to resync around it. (multi-model review, PR #1274.)
 
   // Title carries the primary context (workspace name + drift/unverified hint)
   // since DialogSelect doesn't take a top-level description block. Verbose but
@@ -699,7 +709,7 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
         description: "Swap this project's workspace.",
       },
     ]
-    if (manageUrl()) {
+    if (props.manageUrl) {
       opts.push({
         title: "Open in browser",
         value: "open",
@@ -724,8 +734,7 @@ function AlreadyLinkedDialog(props: AlreadyLinkedProps) {
           return
         }
         if (option.value === "open") {
-          const url = manageUrl()
-          if (url) openManageUrl(props.api, url)
+          if (props.manageUrl) openManageUrl(props.api, props.manageUrl)
           // Stay open — opening the browser isn't a decision about the link
           // itself, so the user can still Attach/Re-link/Skip afterward.
           return
@@ -1145,6 +1154,9 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
+    // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
+    // on why this can't be fetched async inside the dialog itself.
+    const manageUrl = await buildManageUrl(serverBinding.datamate.id)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1154,6 +1166,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         matchedBy={serverBinding!.matchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? boundIdent : undefined}
+        manageUrl={manageUrl}
       />
     ))
     return
@@ -1183,6 +1196,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const currentIdent =
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
     const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
+    const manageUrl = await buildManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
         api={api}
@@ -1192,6 +1206,7 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
         matchedBy={cachedMatchedBy}
         hasDrift={hasDrift}
         driftedWas={hasDrift ? cachedIdent : undefined}
+        manageUrl={manageUrl}
         unverified
       />
     ))

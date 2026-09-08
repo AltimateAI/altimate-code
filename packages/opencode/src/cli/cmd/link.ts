@@ -49,7 +49,7 @@ const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
  * prematurely close our hyperlink and open a spoofed one pointing wherever
  * they choose, with our trusted URL as the visible (but inert) prefix.
  * (CodeRabbit + cubic, PR #1274.) */
-function stripControlChars(text: string): string {
+export function stripControlChars(text: string): string {
   // C0 (\x00-\x1f) + DEL (\x7f) + C1 (\x80-\x9f) — the previous range only
   // covered C0/DEL, leaving C1 controls unstripped. ESC (the OSC 8 breakout
   // vector) was always covered, but the doc comment claimed C1 coverage it
@@ -75,7 +75,7 @@ function stripControlChars(text: string): string {
  * left off the list rather than guessing the user is on a current-enough
  * macOS. (Kilo, PR #1274 — corrects an earlier version of this list that
  * included it.) */
-function terminalSupportsHyperlinks(): boolean {
+export function terminalSupportsHyperlinks(): boolean {
   if (!process.stdout.isTTY) return false
   if (process.env.TERM === "dumb" || process.env.TERM === "linux") return false
   const termProgram = process.env.TERM_PROGRAM
@@ -94,7 +94,7 @@ function terminalSupportsHyperlinks(): boolean {
  * its own path/query/fragment (e.g. a local dev server), and naive
  * concatenation would land ``/w/<id>`` inside the query string instead of the
  * path — clears search/hash for the same reason. (CodeRabbit + cubic, PR #1274.) */
-function buildManageUrl(base: URL, workspaceId: number): string {
+export function buildManageUrl(base: URL, workspaceId: number): string {
   const u = new URL(base)
   u.pathname = `${u.pathname.replace(/\/+$/, "")}/w/${workspaceId}`
   u.search = ""
@@ -113,8 +113,8 @@ function buildManageUrl(base: URL, workspaceId: number): string {
  * code — emitting it unconditionally would make the name look clickable in
  * terminals where it isn't, so it's gated on ``terminalSupportsHyperlinks``
  * (cubic, PR #1274). */
-function hyperlink(text: string, url: string | null): string {
-  if (!url) return text
+export function hyperlink(text: string, url: string | null): string {
+  if (!url || !text) return text
   const safeText = stripControlChars(text)
   const OSC8 = "\x1b]8;;"
   const ST = "\x1b\\"
@@ -217,6 +217,16 @@ export const LinkCommand = cmd({
     // case the name below prints as plain (non-clickable) text.
     const currentManageUrl =
       currentId !== undefined && workspaceWebBase ? buildManageUrl(workspaceWebBase, currentId) : null
+    // On a terminal `terminalSupportsHyperlinks()` doesn't recognize, the
+    // OSC 8 wrapping below is invisible bytes and the name renders as plain
+    // text with no indication a URL exists at all — unlike the TUI, which
+    // falls back to a toast ("Could not open browser. Copy this URL: ...").
+    // Print the plain URL once as a fallback the terminal can't hide, rather
+    // than leaving it unreachable outside the allowlist. (multi-model
+    // review, PR #1274.)
+    if (currentManageUrl && !terminalSupportsHyperlinks()) {
+      prompts.log.info(`Manage it at: ${currentManageUrl}`)
+    }
 
     const options: Array<{ value: string; label: string; hint?: string }> = [
       // Only offer browser handoff for UNLINKED projects (CodeRabbit cycle 5).
