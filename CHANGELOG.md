@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0-beta.4] - 2026-09-08
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Fixed
+
+- **Altimate Base no longer times out healthy requests.** beta.3's `altimate-free` header timeout borrowed the `openai` provider's 10-second default, but the Altimate Base gateway holds the response until the backend's first token — queue wait, cold start, and reasoning routinely exceed 10s, so real requests failed with `Provider response headers timed out after 10000ms`. The free tier now waits up to **5 minutes** for the first response byte (matching the existing mid-stream stall watchdog), tunable in the field via `ALTIMATE_BASE_HEADER_TIMEOUT_MS` — a whole number of milliseconds, minimum `1000`; smaller, non-numeric, or negative values are ignored and fall back to the default. Once the stream starts, the separate 5-minute stall watchdog still applies. (#1260)
+
 ## [0.11.0-beta.3] - 2026-09-08
 
 > **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
