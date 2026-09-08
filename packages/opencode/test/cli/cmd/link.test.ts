@@ -8,6 +8,30 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { buildManageUrl, hyperlink, stripControlChars, terminalSupportsHyperlinks } from "../../../src/cli/cmd/link"
 
+// Shared by both describe blocks below that exercise terminalSupportsHyperlinks
+// (directly, or indirectly via hyperlink()). Object.defineProperty defaults
+// omitted attributes (enumerable/writable) to false, so restoring via
+// `{ value, configurable: true }` alone would silently collapse those flags
+// from whatever the real descriptor had — capture and restore the full
+// descriptor instead. (CodeRabbit, PR #1274 round 4.) The env vars cleared
+// here are every signal terminalSupportsHyperlinks() reads — an ambient
+// WT_SESSION/KONSOLE_VERSION/VTE_VERSION on the host or CI runner would
+// otherwise make an "unsupported" test spuriously pass.
+const TERMINAL_ENV_KEYS = ["TERM", "TERM_PROGRAM", "WT_SESSION", "KONSOLE_VERSION", "VTE_VERSION"] as const
+const ORIGINAL_TTY_DESCRIPTOR = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+
+function clearTerminalEnv() {
+  for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+}
+
+function setTTY(value: boolean) {
+  Object.defineProperty(process.stdout, "isTTY", { value, configurable: true })
+}
+
+function restoreTTY() {
+  if (ORIGINAL_TTY_DESCRIPTOR) Object.defineProperty(process.stdout, "isTTY", ORIGINAL_TTY_DESCRIPTOR)
+}
+
 describe("stripControlChars", () => {
   test("removes C0 control bytes including ESC", () => {
     expect(stripControlChars("a\x1bb\x00c")).toBe("abc")
@@ -33,22 +57,13 @@ describe("stripControlChars", () => {
 
 describe("terminalSupportsHyperlinks", () => {
   const ORIGINAL_ENV = { ...process.env }
-  const ORIGINAL_TTY = process.stdout.isTTY
 
-  beforeEach(() => {
-    for (const key of ["TERM", "TERM_PROGRAM", "WT_SESSION", "KONSOLE_VERSION", "VTE_VERSION"]) {
-      delete process.env[key]
-    }
-  })
+  beforeEach(clearTerminalEnv)
 
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV }
-    Object.defineProperty(process.stdout, "isTTY", { value: ORIGINAL_TTY, configurable: true })
+    restoreTTY()
   })
-
-  function setTTY(value: boolean) {
-    Object.defineProperty(process.stdout, "isTTY", { value, configurable: true })
-  }
 
   test("false when stdout is not a TTY, regardless of TERM_PROGRAM", () => {
     setTTY(false)
@@ -126,15 +141,23 @@ describe("buildManageUrl", () => {
 
 describe("hyperlink", () => {
   const ORIGINAL_ENV = { ...process.env }
-  const ORIGINAL_TTY = process.stdout.isTTY
+
+  beforeEach(clearTerminalEnv)
 
   afterEach(() => {
     process.env = { ...ORIGINAL_ENV }
-    Object.defineProperty(process.stdout, "isTTY", { value: ORIGINAL_TTY, configurable: true })
+    restoreTTY()
   })
 
   test("returns text unchanged when url is null", () => {
     expect(hyperlink("anas-skill-test", null)).toBe("anas-skill-test")
+  })
+
+  test("sanitizes text even when url is null", () => {
+    const malicious = "name\x1b]8;;http://evil.example\x1b\\CLICK ME\x1b]8;;\x1b\\"
+    const out = hyperlink(malicious, null)
+    expect(out).not.toContain("\x1b")
+    expect(out).toBe("name]8;;http://evil.example\\CLICK ME]8;;\\")
   })
 
   test("returns bare sanitized text with no escape bytes at all when stdout isn't a TTY", () => {
@@ -142,7 +165,7 @@ describe("hyperlink", () => {
     // the handler's interactive-input check) while stdout is redirected to
     // a file or piped, in which case no terminal is reading these bytes and
     // raw OSC 8 would land as literal junk in the captured output.
-    Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
+    setTTY(false)
     process.env.TERM_PROGRAM = "iTerm.app"
     const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
     expect(out).toBe("anas-skill-test")
@@ -150,7 +173,7 @@ describe("hyperlink", () => {
   })
 
   test("wraps text in OSC 8 with no underline on a TTY whose terminal isn't recognized", () => {
-    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    setTTY(true)
     delete process.env.TERM_PROGRAM
     const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
     expect(out).toBe("\x1b]8;;https://tenant.ws.myaltimate.com/w/4242\x1b\\anas-skill-test\x1b]8;;\x1b\\")
@@ -158,7 +181,7 @@ describe("hyperlink", () => {
   })
 
   test("wraps text in OSC 8 plus underline when the terminal is recognized as supporting", () => {
-    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    setTTY(true)
     process.env.TERM_PROGRAM = "iTerm.app"
     const out = hyperlink("anas-skill-test", "https://tenant.ws.myaltimate.com/w/4242")
     expect(out).toBe(
@@ -167,7 +190,7 @@ describe("hyperlink", () => {
   })
 
   test("sanitizes an adversarial name so it cannot open a second, spoofed link", () => {
-    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true })
+    setTTY(true)
     delete process.env.TERM_PROGRAM
     const malicious = "name\x1b]8;;http://evil.example\x1b\\CLICK ME\x1b]8;;\x1b\\"
     const out = hyperlink(malicious, "https://tenant.ws.myaltimate.com/w/4242")

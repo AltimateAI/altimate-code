@@ -130,8 +130,16 @@ export function buildManageUrl(base: URL, workspaceId: number): string {
  * SGR code than OSC 8, so emitting it unconditionally would make the name
  * look clickable in terminals where it isn't. (cubic, PR #1274, rounds 2 + 3.) */
 export function hyperlink(text: string, url: string | null): string {
-  if (!url || !text) return text
+  if (!text) return text
   const safeText = stripControlChars(text)
+  // Sanitize before checking `url` — the null-URL early return used to skip
+  // stripControlChars entirely, so a caller relying on hyperlink() as its
+  // sanitization boundary got the raw name whenever no manage URL existed
+  // (BYOK/unresolvable deployments). Every caller in this file now also
+  // sanitizes independently before calling this (defense in depth, not the
+  // sole boundary), but this fixes the function's own contract too.
+  // (CodeRabbit, PR #1274 round 4.)
+  if (!url) return safeText
   if (!process.stdout.isTTY) return safeText
   const OSC8 = "\x1b]8;;"
   const ST = "\x1b\\"
@@ -221,7 +229,13 @@ export const LinkCommand = cmd({
       ? projectNameFromRemote(identifier.repoRemote)
       : projectNameFromPath(identifier.projectPath)
     const currentId = existing?.datamate.id
-    const currentName = existing?.datamate.name
+    // Sanitized once here so every downstream display (the picker message,
+    // the "Kept" outro, hyperlink()'s own text) is covered — hyperlink()
+    // only sanitized its own `text` param, not the raw name reaching
+    // `prompts.outro`/`prompts.select`'s message directly. (CodeRabbit,
+    // PR #1274 round 4 — flagged one call site; the underlying gap was
+    // every raw name-interpolation in this file, not just that one.)
+    const currentName = existing ? stripControlChars(existing.datamate.name) : undefined
 
     // Only offer the browser-based handoff when the deployment supports it
     // (freemium only today). Enterprise / localhost / custom-domain callers
@@ -274,12 +288,17 @@ export const LinkCommand = cmd({
           ? "Creates a new workspace and repoints this project to it (no browser step)."
           : "No browser step; configure integrations later in the SaaS.",
       },
-      ...list.map((dm) => ({
-        value: String(dm.id),
-        label:
-          dm.id === currentId ? `● ${hyperlink(dm.name, currentManageUrl)}` : `  ${dm.name}`,
-        hint: dm.id === currentId ? "currently linked here" : undefined,
-      })),
+      ...list.map((dm) => {
+        // Every row's name is server-controlled (any workspace the account
+        // can see, not just ones this user created) — sanitize regardless
+        // of whether this row also goes through hyperlink() below.
+        const safeDmName = stripControlChars(dm.name)
+        return {
+          value: String(dm.id),
+          label: dm.id === currentId ? `● ${hyperlink(safeDmName, currentManageUrl)}` : `  ${safeDmName}`,
+          hint: dm.id === currentId ? "currently linked here" : undefined,
+        }
+      }),
     ]
 
     const pick = await prompts.select<string>({
@@ -376,7 +395,7 @@ async function runBrowserHandoff(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
-    bindSpin.stop(`Linked to "${res.binding.datamate_name}".`)
+    bindSpin.stop(`Linked to "${stripControlChars(res.binding.datamate_name)}".`)
     prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
@@ -384,8 +403,11 @@ async function runBrowserHandoff(
   } catch (err) {
     bindSpin.stop("Link failed.", 1)
     if (err instanceof ConflictError) {
+      const existingName = err.detail.existing_datamate_name
+        ? stripControlChars(err.detail.existing_datamate_name)
+        : "another workspace"
       prompts.log.error(
-        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
+        `This project is already linked to "${existingName}". Workspace "${projectName}" was created but is not linked — re-run \`altimate-code link\` and pick a different action to switch, or delete the new workspace in the SaaS.`,
       )
     } else if (err instanceof NotFoundError) {
       prompts.log.error("Workspace not found — the tenant or workspace may have changed.")
@@ -462,8 +484,11 @@ async function createThenBindOrRebind(
     // can pick from the list; if the pre-check missed it, this is the
     // authoritative signal — surface it and hint the picker.
     if (err instanceof ConflictError) {
+      const existingName = err.detail.existing_datamate_name
+        ? stripControlChars(err.detail.existing_datamate_name)
+        : "another workspace"
       prompts.log.error(
-        `This project is already linked to "${err.detail.existing_datamate_name ?? "another workspace"}". Re-run \`altimate-code link\` to switch to a different workspace.`,
+        `This project is already linked to "${existingName}". Re-run \`altimate-code link\` to switch to a different workspace.`,
       )
     } else {
       prompts.log.error(err instanceof Error ? err.message : String(err))
@@ -471,7 +496,11 @@ async function createThenBindOrRebind(
     process.exitCode = 1
     return
   }
-  spin.stop(`Workspace "${created.datamate.name}" created.`)
+  // Sanitized once — echoed back from the create-workspace API response
+  // (not the locally-typed `name` param), so it's technically server data
+  // even though it usually just round-trips the caller's own auto-name.
+  const safeCreatedName = stripControlChars(created.datamate.name)
+  spin.stop(`Workspace "${safeCreatedName}" created.`)
 
   // If the project was already linked, the new workspace exists but the
   // binding still points at the OLD workspace — rebind so the project is
@@ -479,7 +508,7 @@ async function createThenBindOrRebind(
   // wrote the binding as part of the atomic create; we're done.
   if (existing) {
     const rebindSpin = prompts.spinner()
-    rebindSpin.start(`Repointing project at "${created.datamate.name}"...`)
+    rebindSpin.start(`Repointing project at "${safeCreatedName}"...`)
     try {
       await rebindByMatchedIdentifier({
         identifier,
@@ -487,11 +516,11 @@ async function createThenBindOrRebind(
         expectedCurrentDatamateId: existing.datamate.id,
         matchedBy: existing.matchedBy,
       })
-      rebindSpin.stop(`Project is now linked to "${created.datamate.name}".`)
+      rebindSpin.stop(`Project is now linked to "${safeCreatedName}".`)
     } catch (err) {
       rebindSpin.stop("Could not repoint the project.", 1)
       prompts.log.error(
-        `Workspace "${created.datamate.name}" was CREATED but could not be linked to this project. ${err instanceof Error ? err.message : String(err)} — re-run \`altimate-code link\` to retry (or delete the workspace in the SaaS).`,
+        `Workspace "${safeCreatedName}" was CREATED but could not be linked to this project. ${err instanceof Error ? err.message : String(err)} — re-run \`altimate-code link\` to retry (or delete the workspace in the SaaS).`,
       )
       process.exitCode = 1
       return
@@ -609,7 +638,7 @@ async function bindOrRebind(
                     targetDatamateId,
                   })
             }
-            rebindSpin.stop(`Re-linked to "${res.binding.datamate_name}".`)
+            rebindSpin.stop(`Re-linked to "${stripControlChars(res.binding.datamate_name)}".`)
           } catch (retryErr) {
             rebindSpin.stop("Re-link failed.", 1)
             throw retryErr
@@ -627,11 +656,8 @@ async function bindOrRebind(
       projectPath: res.binding.project_path,
       linkedAt: Date.now(),
     }, { awaitBackfill: true })
-    spin.stop(
-      isRebind
-        ? `Re-linked to "${res.binding.datamate_name}".`
-        : `Linked to "${res.binding.datamate_name}".`,
-    )
+    const safeResName = stripControlChars(res.binding.datamate_name)
+    spin.stop(isRebind ? `Re-linked to "${safeResName}".` : `Linked to "${safeResName}".`)
     prompts.log.info("Saved memory blocks will sync to this workspace if memory is enabled for it.")
     const manageUrl = await manageUrlFor(res.binding.datamate_id)
     if (manageUrl) prompts.log.info(`Manage it at: ${manageUrl}`)
