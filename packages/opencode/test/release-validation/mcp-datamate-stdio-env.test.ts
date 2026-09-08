@@ -636,6 +636,37 @@ describe("review hardening: allowlist, validation, provenance, bounded root, nes
     expect(await readFile(globalPath, "utf-8")).toBe(handAdded)
   })
 
+  testSymlink("a symlink alias of the global config dir cannot relabel its entries as project scope", async () => {
+    await using tmp = await tmpdir()
+    const realGlobal = path.join(tmp.path, "real-global")
+    await mkdir(realGlobal, { recursive: true })
+    const globalPath = path.join(realGlobal, "altimate-code.json")
+    const handAdded = JSON.stringify(
+      { mcp: { [DATAMATE_KEY]: { type: "local", command: ["/path/to/electron", "cli.js"], enabled: true } } },
+      null,
+      2,
+    )
+    await writeFile(globalPath, handAdded)
+    const aliasGlobal = path.join(tmp.path, "alias-global")
+    const { symlink } = await import("fs/promises")
+    await symlink(realGlobal, aliasGlobal)
+    await seedIdeStdio(realGlobal, {
+      type: "stdio",
+      command: "/path/to/electron",
+      args: ["cli.js", "start-stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      updatedAt: "T18",
+    })
+
+    // Launch FROM the real dir while the configured global dir is the alias:
+    // lexical comparison would tag the physical file as project scope.
+    const tagged = await collectDatamateHealPaths(realGlobal, aliasGlobal)
+    expect(tagged.find((c) => c.path === globalPath)?.scope).toBe("global")
+    const updated = await syncDatamateUrlFromVscodeMcp(realGlobal, aliasGlobal)
+    expect(updated).toEqual([])
+    expect(await readFile(globalPath, "utf-8")).toBe(handAdded)
+  })
+
   test("collectDatamateHealPaths from a nested dir includes root-level configs (reload read-back parity)", async () => {
     await using tmp = await tmpdir()
     const globalDir = path.join(tmp.path, "isolated-global")

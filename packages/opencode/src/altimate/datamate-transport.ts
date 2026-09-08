@@ -101,19 +101,18 @@ export function parseIdeTransport(entry: unknown, source: string): DatamateTrans
  * `$HOME` past a string comparison and turn the whole home tree into the
  * "project". realpath failures fall back to the lexical paths.
  */
+async function canonicalPath(p: string): Promise<string> {
+  let c: string
+  try {
+    c = await realpath(p)
+  } catch {
+    c = path.resolve(p)
+  }
+  return process.platform === "win32" ? c.toLowerCase() : c
+}
+
 async function isSamePath(a: string, b: string): Promise<boolean> {
-  const canon = async (p: string) => {
-    try {
-      return await realpath(p)
-    } catch {
-      return path.resolve(p)
-    }
-  }
-  let [ca, cb] = await Promise.all([canon(a), canon(b)])
-  if (process.platform === "win32") {
-    ca = ca.toLowerCase()
-    cb = cb.toLowerCase()
-  }
+  const [ca, cb] = await Promise.all([canonicalPath(a), canonicalPath(b)])
   return ca === cb
 }
 
@@ -254,17 +253,21 @@ export async function collectDatamateHealPaths(
   // Scope is canonical ownership, not discovery order: a file at or under the
   // global config dir is global no matter which loop reached it first —
   // otherwise a launch from that dir would tag the physical global config as
-  // "project" and skip the provenance gate.
-  const globalResolved = path.resolve(globalConfigDir)
-  const scopeOf = (p: string): "project" | "global" =>
-    p === globalResolved || p.startsWith(globalResolved + path.sep) ? "global" : "project"
+  // "project" and skip the provenance gate. Ownership is decided on canonical
+  // paths so a symlink alias (or Windows casing) of the global dir cannot
+  // relabel the physical global config as project scope.
+  const globalCanon = await canonicalPath(globalConfigDir)
+  const scopeOf = async (p: string): Promise<"project" | "global"> => {
+    const cp = await canonicalPath(p)
+    return cp === globalCanon || cp.startsWith(globalCanon + path.sep) ? "global" : "project"
+  }
   let dir = path.resolve(launchDir)
   const rootResolved = path.resolve(root)
   while (true) {
     for (const p of await findProjectConfigPaths(dir)) {
-      if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: scopeOf(p) }) }
+      if (!seen.has(p)) { seen.add(p); candidates.push({ path: p, scope: await scopeOf(p) }) }
     }
-    if (dir === rootResolved || !(dir === rootResolved || dir.startsWith(rootResolved + path.sep))) break
+    if (dir === rootResolved || !dir.startsWith(rootResolved + path.sep)) break
     const parent = path.dirname(dir)
     if (parent === dir) break
     dir = parent
