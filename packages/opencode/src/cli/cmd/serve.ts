@@ -16,7 +16,9 @@ import { FreeTierHost } from "../../altimate/free/host"
 import { Log } from "../../util/log"
 // altimate_change end
 
+// altimate_change start — logger for the Base registration gate's onUnexpectedError hook
 const log = Log.create({ service: "serve" })
+// altimate_change end
 
 export const ServeCommand = effectCmd({
   command: "serve",
