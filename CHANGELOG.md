@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0-beta.3] - 2026-09-08
+
+> **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
+
+### Fixed
+
+- **Altimate Base "request too large" errors are legible again.** When an oversized request is rejected at the gateway edge with a raw HTML `413` (rather than a JSON error), the CLI now surfaces the friendly "request too large — start a new session or shorten it" guidance on any `413` regardless of body shape, instead of a generic fallback. (#1256)
+- **`altimate-free` now sets a client-side header timeout** (matching the `openai` provider's default), so a hung gateway can no longer hang the CLI indefinitely. (#1256)
+- **Clear error on non-JSON API responses.** The SDK client no longer crashes when an API returns a non-JSON body (e.g. an HTML error page); it surfaces a clear, actionable error instead. (#1093)
+
 ## [0.11.0-beta.1] - 2026-09-07
 
 > **Beta channel release.** Publishes to the npm `beta` dist-tag; `latest` (0.10.0) is unaffected. Install: `npm i -g @altimateai/altimate-code@beta`.
