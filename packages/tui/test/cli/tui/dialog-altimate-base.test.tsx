@@ -205,7 +205,9 @@ test.serial("Altimate Base shows the privacy disclosure before registration and 
   const confirm = await mountConfirm()
   try {
     const frame = confirm.app.captureCharFrame()
-    expect(confirm.disclosure).toContain("Requests and responses may be logged")
+    expect(confirm.disclosure).toContain("Requests and responses may be logged and used")
+    // The persistent per-install-id linkage line is intentionally not in the gate (it lives in docs).
+    expect(confirm.disclosure).not.toContain("per-installation identifier")
     expect(frame).toContain("Use Altimate Base?")
     expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses may be logged and used")
     expect(frame).toContain("No — pick something else")
