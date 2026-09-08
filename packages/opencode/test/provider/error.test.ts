@@ -466,4 +466,24 @@ describe("ProviderError.parseAPICallError: Altimate Base isolation", () => {
     })
     expect(result.type).toBe("context_overflow")
   })
+
+  // altimate_change start — BUG FIX: production rejects oversized requests with nginx's raw HTML
+  // edge page, not LiteLLM's JSON body. That body never parses, so this must still resolve to the
+  // friendly Altimate Base message instead of falling through to the generic context_overflow path.
+  test("a 413 with an unparseable HTML body (nginx edge rejection) still gets the friendly Altimate Base message", () => {
+    const htmlBody =
+      "<html>\n<head><title>413 Request Entity Too Large</title></head>\n<body>\n<center>413 Request Entity Too Large</center>\n<hr><center>nginx</center>\n</body>\n</html>"
+    const result = ProviderError.parseAPICallError({
+      providerID: "altimate-free" as any,
+      error: makeAPICallError({ message: "Payload Too Large", statusCode: 413, responseBody: htmlBody }),
+    })
+    expect(result.type).toBe("api_error")
+    if (result.type === "api_error") {
+      expect(result.message).toBe(
+        "This request is too large for Altimate Base. Start a new session, or switch to another model for this task.",
+      )
+      expect(result.isRetryable).toBe(false)
+    }
+  })
+  // altimate_change end
 })

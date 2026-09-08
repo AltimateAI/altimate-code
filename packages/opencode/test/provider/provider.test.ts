@@ -80,6 +80,9 @@ test("Altimate Base is pinned to the hosted model contract without affecting oth
         expect(base.env).toEqual([])
         expect(base.options.baseURL).toBe(`${ALTIMATE_BASE_GATEWAY_URL}/v1`)
         expect(base.options.apiKey).toBe(FreeTier.MANAGED_API_KEY_PLACEHOLDER)
+        // BUG FIX: without a client-side header timeout, a hung gateway response never resolves
+        // or rejects — the CLI just hangs. This mirrors the openai loader's default.
+        expect(base.options.headerTimeout).toBe(10_000)
         expect(JSON.stringify(base)).not.toContain("sk-altimate-base")
 
         const model = base.models[FreeTier.MODEL_ID]

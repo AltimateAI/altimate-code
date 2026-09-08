@@ -333,7 +333,10 @@ export namespace ProviderError {
     // The gateway's fixed request-byte cap is not a context overflow. Retrying compaction can
     // never help when system instructions and tool schemas alone exceed it.
     if (String(input.providerID) === FreeTier.PROVIDER_ID && input.error.statusCode === 413) {
-      const described = FreeTier.describeRequestTooLarge(input.error.responseBody)
+      const described = FreeTier.describeRequestTooLarge({
+        status: input.error.statusCode,
+        body: input.error.responseBody,
+      })
       if (described) {
         return {
           type: "api_error",
