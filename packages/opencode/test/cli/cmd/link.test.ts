@@ -29,15 +29,23 @@ function setTTY(value: boolean) {
 }
 
 function restoreTTY() {
-  // `isTTY` is not an own property of process.stdout in the common case
-  // (stdout piped/redirected, as it always is under a test runner) — Node
-  // only sets it as an own property when the stream genuinely is a TTY. So
-  // ORIGINAL_TTY_DESCRIPTOR is `undefined` in virtually every real test run,
-  // and restoring by re-defining only when it's truthy was a no-op: the
-  // property setTTY() added stayed shadowed on process.stdout for the rest
-  // of the process. Delete it in that case instead of leaving it dangling.
-  // (cubic, PR #1274 round 5 — caught in the very helper meant to fix the
-  // previous round's descriptor-restoration finding.)
+  // Whether `isTTY` is an own property of process.stdout genuinely depends
+  // on whether stdout IS a real TTY — it is NOT always inherited/undefined
+  // (a later review round claimed otherwise; verified wrong empirically, see
+  // below). Node backs `process.stdout` with different stream classes
+  // depending on what fd 1 actually is: a `tty.WriteStream` when it's a
+  // terminal (which sets `this.isTTY = true` as a genuine own instance
+  // property — confirmed via `Object.getOwnPropertyDescriptor` inside a real
+  // pty, e.g. `tmux new-session ... bun -e '...'`, where it returns
+  // `{value: true, writable: true, enumerable: true, configurable: true}`,
+  // not undefined), versus a plain stream with no `isTTY` at all when piped/
+  // redirected (which is how it always runs under `bun test`/CI, hence
+  // ORIGINAL_TTY_DESCRIPTOR being undefined in THAT case specifically).
+  // So: re-define when there was a real descriptor to restore (interactive
+  // `bun test` run), delete when there wasn't (everywhere else) — both
+  // branches are reachable and necessary, not dead code. (cubic, PR #1274
+  // round 5, on the previous version of this function that always no-op'd
+  // for the common non-TTY case.)
   if (ORIGINAL_TTY_DESCRIPTOR) Object.defineProperty(process.stdout, "isTTY", ORIGINAL_TTY_DESCRIPTOR)
   else delete (process.stdout as { isTTY?: boolean }).isTTY
 }
@@ -46,8 +54,14 @@ describe("restoreTTY (test-helper regression)", () => {
   test("actually removes the isTTY property setTTY() added, instead of leaving it dangling", () => {
     const before = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
     setTTY(true)
-    expect(Object.getOwnPropertyDescriptor(process.stdout, "isTTY")).toBeDefined()
-    restoreTTY()
+    // If the assertion below throws, restoreTTY() must still run — otherwise
+    // this test's own process-global mutation leaks into every test after
+    // it. (cubic, PR #1274 round 6.)
+    try {
+      expect(Object.getOwnPropertyDescriptor(process.stdout, "isTTY")).toBeDefined()
+    } finally {
+      restoreTTY()
+    }
     expect(Object.getOwnPropertyDescriptor(process.stdout, "isTTY")).toEqual(before)
   })
 })
