@@ -12,6 +12,10 @@ import { DEFAULT_AI_MAX_OUTPUT_TOKENS, type AiReasoningEffort } from "./config"
 
 const log = Log.create({ service: "ai-review" })
 
+/** Skip reason when the change touched no model SQL the AI lane can read. */
+export const NO_MODEL_FILES_REASON =
+  "no changed model files (the AI lane reads model SQL only; schema, macro, snapshot and test changes are covered by the deterministic lanes)"
+
 const MAX_DIFF_CHARS = 6_000 // per file, keep the prompt bounded
 const MAX_FILES = 20
 
@@ -219,7 +223,10 @@ export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult>
   }
 
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
-  if (!files.length) return finish({ findings: [], status: "skipped", reason: "no reviewable files" })
+  // The orchestrator hands this lane model files only. A schema-, macro-,
+  // snapshot- or test-only change is still reviewed deterministically, so the
+  // reason must say what the lane covers rather than deny the files exist.
+  if (!files.length) return finish({ findings: [], status: "skipped", reason: NO_MODEL_FILES_REASON })
 
   const userMessage = buildUserMessage({ ...input, files })
   promptChars = userMessage.length

@@ -110,7 +110,10 @@ export function renderSummary(env: VerdictEnvelope, delta?: FindingDelta): strin
 
   if (env.summary.artifactHints?.length) {
     lines.push(
-      `> 🧩 Missing artifacts: ${env.summary.artifactHints.join(" · ")} — equivalence and lineage run at reduced fidelity`,
+      // Which analysis degrades depends on the artifact (compiled base SQL
+      // affects equivalence only; manifest/catalog affect lineage and impact),
+      // so the banner stays neutral and each finding names its own gap.
+      `> 🧩 Missing artifacts: ${env.summary.artifactHints.join(" · ")} — some analyses run at reduced fidelity; affected findings say which`,
       "",
     )
   }

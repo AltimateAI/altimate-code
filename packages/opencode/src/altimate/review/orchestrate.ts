@@ -1188,13 +1188,21 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
   const aiLaneEnabled = input.config.ai !== false && lanes.has("ai_review")
+  // The signature describes CONFIGURED policy: an explicit reviewer list that
+  // omits the AI lane is configuration and excludes the model, but a lane the
+  // TIER added or removed (trivial → lite under default reviewers) is scope,
+  // not settings. So a rerun that merely crosses a tier reads as an
+  // analysis-scope change (compared from the tier marker), never as "review
+  // settings changed".
+  const aiConfigured =
+    input.config.ai !== false && (input.config.reviewers.length === 0 || input.config.reviewers.includes("ai_review"))
   const policySignature = makeReviewPolicySignature({
     severityThreshold: input.config.severityThreshold,
     enabledReviewers: input.config.reviewers,
     dialect,
     rubric: input.rubric,
-    aiEnabled: aiLaneEnabled,
-    aiModel: aiLaneEnabled ? input.aiModel ?? (input.allowSessionModel ? "session" : undefined) : undefined,
+    aiEnabled: aiConfigured,
+    aiModel: aiConfigured ? input.aiModel ?? (input.allowSessionModel ? "session" : undefined) : undefined,
     dataDiff: input.config.dataDiff,
   })
 

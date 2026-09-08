@@ -2006,9 +2006,9 @@ describe("orchestrate", () => {
       findings: [],
       tier: "trivial",
       mode: "comment",
-      aiReview: { status: "skipped", reason: "no reviewable files", findings: 0 },
+      aiReview: { status: "skipped", reason: "no changed model files", findings: 0 },
     })
-    expect(renderSummary(trivial)).toContain("🤖 AI reviewer: skipped — no reviewable files")
+    expect(renderSummary(trivial)).toContain("🤖 AI reviewer: skipped — no changed model files")
 
     const withoutAiReview = buildEnvelope({ findings: [], tier: "trivial", mode: "comment" })
     expect(renderSummary(withoutAiReview)).not.toContain("AI reviewer:")
@@ -2731,7 +2731,10 @@ describe("orchestrate", () => {
     expect((await review(false)).summary.lintOnly).toBe(true)
   })
 
-  test("tier-derived AI lane changes the user review policy signature only when it toggles", async () => {
+  test("the policy signature reflects configured policy, not the tier-derived lane set", async () => {
+    // A rerun that crosses trivial → lite gains the AI lane under default
+    // reviewers. That is an analysis-scope change (reported from the tier
+    // marker), not a settings change, so the signature must not move.
     const input = {
       changedFiles: [{ path: "models/staging/model.sql", status: "added" as const, diff: "+select 1\n" }],
       config: { ...DEFAULT_REVIEW_CONFIG, reviewers: [] },
@@ -2745,7 +2748,11 @@ describe("orchestrate", () => {
     const trivial = await runReview({ ...input, forceTier: "trivial" })
 
     expect(lite.policySignature).toBe(full.policySignature)
-    expect(trivial.policySignature).not.toBe(lite.policySignature)
+    expect(trivial.policySignature).toBe(lite.policySignature)
+
+    // Turning the AI lane off in configuration IS a settings change.
+    const disabled = await runReview({ ...input, config: { ...input.config, ai: false }, forceTier: "lite" })
+    expect(disabled.policySignature).not.toBe(lite.policySignature)
   })
 
   test("an AI model does not affect policy when the selected reviewers omit the AI lane", async () => {
@@ -2969,7 +2976,7 @@ describe("orchestrate", () => {
       artifactHints: ["catalog.json (run `dbt docs generate`)", "target-base/compiled (compile the base ref)"],
     })
     expect(renderSummary(env)).toContain(
-      "🧩 Missing artifacts: catalog.json (run `dbt docs generate`) · target-base/compiled (compile the base ref) — equivalence and lineage run at reduced fidelity",
+      "🧩 Missing artifacts: catalog.json (run `dbt docs generate`) · target-base/compiled (compile the base ref) — some analyses run at reduced fidelity; affected findings say which",
     )
   })
 })

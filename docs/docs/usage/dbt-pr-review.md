@@ -274,9 +274,10 @@ free `altimate-base` model; use `ai_model: altimate-gateway/altimate-pro` to
 select the pro model. The gateway URL defaults to the production gateway,
 `https://altimate-gateway.onealtimate.com`; set `altimate_gateway_url` only
 for a self-hosted gateway (it must use HTTPS). The key is issued per
-repository by Altimate on request; it has a daily budget and does not expire. Do not use a self-serve gateway key from the `altimate` CLI
-here: those keys expire after seven days and carry only a one-time starter
-credit, so the review lane would start reporting `error` within days.
+repository by Altimate on request; it has a daily budget and does not expire.
+Do not use a self-serve gateway key from the `altimate` CLI here: those keys
+expire after seven days and carry only a one-time starter credit, so the
+review lane would start reporting `error` within days.
 
 ```yaml
 with:
