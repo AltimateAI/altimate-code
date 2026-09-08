@@ -30,6 +30,8 @@ import {
 // altimate_change end
 // altimate_change start — first-run provider selection telemetry
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
+// altimate_change — one definition of the Base picker hint
+import { ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
 // altimate_change end
 
 export const PROVIDER_PRIORITY: Record<string, number> = {
@@ -94,7 +96,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
-          "altimate-free": "Free · no signup · rate limited",
+          "altimate-free": ALTIMATE_BASE_HINT,
           opencode: "Bring your own Zen key",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],

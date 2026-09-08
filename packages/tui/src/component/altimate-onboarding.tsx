@@ -21,7 +21,7 @@ import { useToast } from "../ui/toast"
 // altimate_change — onboarding funnel telemetry seam
 import { useOnboardingTelemetry } from "../context/onboarding-telemetry"
 // altimate_change — the Base consent disclosure has one definition, shared with the HTTP route
-import { ALTIMATE_BASE_DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
+import { ALTIMATE_BASE_DISCLOSURE, ALTIMATE_BASE_HINT } from "@opencode-ai/core/altimate-base-disclosure"
 
 // Session-scoped "setup complete" flag. Set when the user picks a ready model,
 // chooses Altimate Base, or finishes the gateway flow. Combined with
@@ -187,7 +187,7 @@ export function DialogModelWelcome(props: {
       ? [
           {
             name: "Altimate Base",
-            note: "free · no signup · rate limited",
+            note: ALTIMATE_BASE_HINT,
             tone: "warning" as const,
             providerID: "altimate-free",
             modelID: "altimate-base",

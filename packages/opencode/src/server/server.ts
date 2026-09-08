@@ -678,48 +678,155 @@ export namespace Server {
       // altimate_change end
       // altimate_change start — Altimate Base disclosure + consent-gated registration
       // Registration mints a persistent per-installation identifier and opts the user into request
-      // logging, so `FreeTier.registerAfterConsent` will only act on a token armed through the
-      // process's single private consent authority. The TUI arms that token from its disclosure
-      // dialog; these two routes are the equivalent for a host that renders its own disclosure
-      // (the VS Code extension's chat panel), and they are the ONLY place an HTTP caller can obtain
-      // a token: GET returns the exact text the user must see, and arms one token for it.
+      // logging, so `FreeTier.registerAfterConsent` only acts on a token armed through the process's
+      // single private consent authority. The TUI arms that token inside its disclosure dialog's
+      // accept handler; these routes are the equivalent for a host that renders its own disclosure
+      // (the VS Code extension's chat panel).
       //
-      // A host that did not inject a gate (the TUI worker, which owns its own dialog) serves 501
-      // rather than a registration surface that bypasses that dialog.
+      // A host that injected no gate (the TUI worker, which owns its own dialog) serves 501 rather
+      // than a second registration surface that could bypass that dialog.
       //
-      // Note this makes "the disclosure was actually shown" an assertion by the caller rather than
-      // a property enforced by construction, as it is in the TUI. Anything that can reach this
-      // server can already execute tools, so it is not a new privilege boundary — but it is a
-      // deliberate, narrower guarantee.
-      .get("/altimate/base/disclosure", async (c) => {
-        const gate = FreeTierHost.current()
-        if (!gate) {
-          return c.json({ error: "This host cannot register Altimate Base." }, 501)
-        }
-        // 32 bytes → the 64-hex shape ConsentCapabilityStore requires. Armed here and nowhere else,
-        // single-use, and expiring on the store's own TTL.
-        const token = randomBytes(32).toString("hex")
-        gate.setToken({ token })
-        const registered = await FreeTier.isRegistered().catch((error) => {
-          log.warn("failed to read Altimate Base registration state", { error })
-          return false
-        })
-        return c.json({ disclosure: FreeTierConsent.DISCLOSURE, token, registered })
-      })
+      // GET is deliberately READ-ONLY. An earlier revision armed the consent token here, which
+      // meant the store's 30s TTL began when the disclosure was fetched rather than when the user
+      // accepted it — so anyone who actually read the text before consenting was rejected. That
+      // also made GET non-idempotent and let a burst of fetches evict pending tokens. The token is
+      // now minted, armed and redeemed entirely inside POST, in one operation.
+      .get(
+        "/altimate/base/disclosure",
+        describeRoute({
+          summary: "Get the Altimate Base consent disclosure",
+          description:
+            "Returns the text a user must accept before Altimate Base is registered, the picker hint, whether this installation is already registered, and the SHA-256 the client must echo back to POST /altimate/base/register. Read-only.",
+          operationId: "altimateBase.disclosure",
+          responses: {
+            200: {
+              description: "Disclosure text and its hash",
+              content: {
+                "application/json": {
+                  schema: resolver(
+                    z.object({
+                      disclosure: z.string(),
+                      hint: z.string(),
+                      sha256: z.string(),
+                      registered: z.boolean(),
+                    }),
+                  ),
+                },
+              },
+            },
+            501: {
+              description: "This host cannot register Altimate Base",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+          },
+        }),
+        async (c) => {
+          if (!FreeTierHost.current()) {
+            return c.json({ error: "This host cannot register Altimate Base." }, 501)
+          }
+          const registered = await FreeTier.isRegistered().catch((error) => {
+            log.warn("failed to read Altimate Base registration state", { error })
+            return false
+          })
+          return c.json({
+            disclosure: FreeTierConsent.DISCLOSURE,
+            hint: FreeTierConsent.HINT,
+            sha256: FreeTierConsent.disclosureHash(),
+            registered,
+          })
+        },
+      )
       .post(
         "/altimate/base/register",
-        validator("json", z.object({ token: z.string() })),
+        describeRoute({
+          summary: "Register Altimate Base after consent",
+          description:
+            "Mints the managed Altimate Base credential. The caller must echo the SHA-256 of the disclosure it displayed, which is verified against the canonical text, so a caller that never fetched the current disclosure cannot register. Disposes the instance on success so the provider loader re-reads the new credential.",
+          operationId: "altimateBase.register",
+          responses: {
+            200: {
+              description: "Registration outcome",
+              content: {
+                "application/json": {
+                  schema: resolver(
+                    z.union([
+                      z.object({ ok: z.literal(true) }),
+                      z.object({
+                        ok: z.literal(false),
+                        result: z.enum(["rate_limited", "unavailable", "network", "error"]),
+                        message: z.string(),
+                      }),
+                    ]),
+                  ),
+                },
+              },
+            },
+            ...errors(400),
+            403: {
+              description: "Refused: browser origin on an unsecured server",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+            501: {
+              description: "This host cannot register Altimate Base",
+              content: { "application/json": { schema: resolver(z.object({ error: z.string() })) } },
+            },
+          },
+        }),
+        validator("json", z.object({ acceptedDisclosureSha256: z.string() })),
         async (c) => {
           const gate = FreeTierHost.current()
           if (!gate) {
             return c.json({ error: "This host cannot register Altimate Base." }, 501)
           }
-          const { token } = c.req.valid("json")
-          // The gate maps every failure onto its own result taxonomy
-          // (rate_limited | unavailable | network | error) with a user-facing message, so the
-          // outcome is returned as a 200 body for the client to branch on — the same values the
-          // TUI's disclosure dialog renders.
+
+          // A browser on a CORS-allowed origin can reach this port without being a local process,
+          // which is a different reachability class from "can already execute tools here". Native
+          // clients (the extension host, curl) send no Origin, so refusing an Origin-bearing
+          // request on an unsecured server closes that vector without affecting them. When a server
+          // password is set the global basicAuth middleware has already authenticated the caller.
+          if (c.req.header("origin") && !Flag.OPENCODE_SERVER_PASSWORD) {
+            log.warn("refused browser-originated Altimate Base registration on an unsecured server", {
+              origin: c.req.header("origin"),
+            })
+            return c.json(
+              {
+                error:
+                  "Altimate Base cannot be registered from a browser origin on an unsecured server. Set OPENCODE_SERVER_PASSWORD.",
+              },
+              403,
+            )
+          }
+
+          const { acceptedDisclosureSha256 } = c.req.valid("json")
+          if (acceptedDisclosureSha256.toLowerCase() !== FreeTierConsent.disclosureHash()) {
+            // Either a stale client showing superseded text, or a caller that never fetched the
+            // disclosure at all. Both must fail: this hash is what makes "the user saw the current
+            // disclosure" checkable rather than merely asserted.
+            return c.json(
+              {
+                ok: false as const,
+                result: "error" as const,
+                message: "The accepted disclosure is out of date. Reopen setup and try again.",
+              },
+              200,
+            )
+          }
+
+          // Mint, arm and redeem in one operation, mirroring the TUI's accept handler. Nothing
+          // outside this handler can obtain a token that the private authority will accept.
+          const token = randomBytes(32).toString("hex")
+          gate.setToken({ token })
           const outcome = await gate.register({ token })
+
+          // The provider loader caches its credential read, so a freshly registered Base stays out
+          // of `/provider`'s `connected` list until the instance is dropped. Doing it here rather
+          // than making every client remember keeps that invariant server-side, and means other
+          // attached windows see the new provider too.
+          if (outcome.ok) {
+            await Instance.dispose().catch((error) =>
+              log.error("Altimate Base registered but instance dispose failed", { error }),
+            )
+          }
           return c.json(outcome)
         },
       )

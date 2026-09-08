@@ -22,11 +22,17 @@ let registration: Registration | undefined
 
 /**
  * Install the process's registration gate. Called once by the entrypoint, before the server starts
- * accepting requests. A second call replaces the gate rather than throwing: the capability itself is
- * already single-claim, so there is nothing to protect here, and throwing would only turn a
- * misordered startup into a crash.
+ * accepting requests.
+ *
+ * Single-shot, matching every other capability in this area: a second call throws rather than
+ * silently replacing the gate. The earlier last-write-wins behaviour let any in-process caller swap
+ * the gate out from under the routes after `serve` installed the real one. That was never a
+ * privilege escalation — such code is already trusted and still cannot forge a token the private
+ * authority accepts — but it was a weaker invariant than `issueArmer()`/`issueRedeemer()` next door,
+ * for no benefit.
  */
 export function provide(value: Registration): void {
+  if (registration) throw new Error("Altimate Base registration gate already provided for this process")
   registration = value
 }
 

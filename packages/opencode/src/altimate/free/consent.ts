@@ -1,14 +1,33 @@
+import { createHash } from "node:crypto"
+import { ALTIMATE_BASE_DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
 import { FreeTier } from "./client"
 import { FreeTierStore } from "./store"
 
 /**
- * The text a user consents against before any Base credential is minted, served to hosts that
- * render their own disclosure (the VS Code extension's chat panel, via GET /altimate/base/disclosure).
+ * The text a user consents against before any Base credential is minted, plus the picker hint,
+ * served to hosts that render their own disclosure (the VS Code extension's chat panel, via
+ * GET /altimate/base/disclosure).
  *
- * Defined once in `@opencode-ai/core/altimate-base-disclosure` and re-exported here, so the TUI
- * dialog and this route can never drift apart.
+ * Both are defined once in `@opencode-ai/core/altimate-base-disclosure` and re-exported here, so
+ * the TUI dialog and this route can never drift apart.
  */
-export { ALTIMATE_BASE_DISCLOSURE as DISCLOSURE } from "@opencode-ai/core/altimate-base-disclosure"
+export {
+  ALTIMATE_BASE_DISCLOSURE as DISCLOSURE,
+  ALTIMATE_BASE_HINT as HINT,
+} from "@opencode-ai/core/altimate-base-disclosure"
+
+/**
+ * SHA-256 of the canonical disclosure, hex-encoded.
+ *
+ * `POST /altimate/base/register` requires the caller to echo this back, which is what turns "the
+ * user was shown the current disclosure" into something the server can check rather than merely
+ * trust. Not a secret — it is derived from public text — so a plain comparison is fine; its value
+ * is that a caller which never fetched the disclosure cannot produce it, and a stale client showing
+ * superseded text produces the wrong one.
+ */
+export function disclosureHash(): string {
+  return createHash("sha256").update(ALTIMATE_BASE_DISCLOSURE, "utf8").digest("hex")
+}
 
 export type RegistrationResult =
   | { ok: true }
