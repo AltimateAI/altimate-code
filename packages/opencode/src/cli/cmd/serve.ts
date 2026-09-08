@@ -13,7 +13,10 @@ import { FreeTier } from "../../altimate/free/client"
 import { FreeTierCapability } from "../../altimate/free/capability"
 import { FreeTierConsent } from "../../altimate/free/consent"
 import { FreeTierHost } from "../../altimate/free/host"
+import { Log } from "../../util/log"
 // altimate_change end
+
+const log = Log.create({ service: "serve" })
 
 export const ServeCommand = effectCmd({
   command: "serve",
@@ -41,7 +44,7 @@ export const ServeCommand = effectCmd({
         FreeTierConsent.createRegistrationConsentGate({
           arm: FreeTierCapability.issueArmer(),
           register: (token) => FreeTier.registerAfterConsent(token),
-          onUnexpectedError: (error) => console.error("[altimate-base] registration failed", error),
+          onUnexpectedError: (error) => log.error("Altimate Base registration failed", { error }),
         }),
       ),
     )
