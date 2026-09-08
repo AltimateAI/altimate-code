@@ -66,9 +66,19 @@ let redeemerIssued = false
 
 /**
  * Hands out the ability to arm Altimate Base's production consent authority. Callable exactly
- * once per process: a second call throws. The sole legitimate caller is the registration consent
- * gate built once at TUI worker boot (`cli/tui/worker.ts`), before any plugin, tool, or session
- * code has a chance to run. Because this is the only way to arm the authority that
+ * once per process: a second call throws.
+ *
+ * THIS DOCSTRING IS THE CANONICAL DESCRIPTION of who may claim it. `client.ts` and the entrypoints
+ * point here rather than restating it — the claim was previously paraphrased in three files and went
+ * stale in two of them when a second entrypoint was added.
+ *
+ * Legitimate callers, one per process, each owning a surface that shows a disclosure:
+ *   - `cli/tui/worker.ts`  — the terminal consent dialog
+ *   - `cli/cmd/serve.ts`   — the consent-gated HTTP routes the VS Code extension drives
+ * `test/altimate/altimate-base-armer-callsites.test.ts` asserts that list against the source, so
+ * adding a claimer fails there and forces this comment to be revisited.
+ *
+ * Because this is the only way to arm the authority that
  * `registerAfterConsent` checks against, no other in-process code — however it constructs its
  * own `ConsentCapabilityStore` or calls this function again — can mint a token that will ever be
  * accepted; a self-armed store only ever validates against itself.

@@ -686,6 +686,9 @@ export namespace Server {
       // A host that injected no gate (the TUI worker, which owns its own dialog) serves 501 rather
       // than a second registration surface that could bypass that dialog.
       //
+      // The register route additionally requires the caller to echo the disclosure's SHA-256. That
+      // is a text-version check, not consent enforcement — see the comment at the comparison below.
+      //
       // GET is deliberately READ-ONLY. An earlier revision armed the consent token here, which
       // meant the store's 30s TTL began when the disclosure was fetched rather than when the user
       // accepted it — so anyone who actually read the text before consenting was rejected. That
@@ -750,7 +753,7 @@ export namespace Server {
                 "application/json": {
                   schema: resolver(
                     z.union([
-                      z.object({ ok: z.literal(true) }),
+                      z.object({ ok: z.literal(true), staleProviders: z.literal(true).optional() }),
                       z.object({
                         ok: z.literal(false),
                         result: z.enum(["rate_limited", "unavailable", "network", "error"]),
@@ -799,9 +802,11 @@ export namespace Server {
 
           const { acceptedDisclosureSha256 } = c.req.valid("json")
           if (acceptedDisclosureSha256.toLowerCase() !== FreeTierConsent.disclosureHash()) {
-            // Either a stale client showing superseded text, or a caller that never fetched the
-            // disclosure at all. Both must fail: this hash is what makes "the user saw the current
-            // disclosure" checkable rather than merely asserted.
+            // A text-version agreement, NOT proof of consent. It establishes that the caller holds
+            // the current disclosure, so a client rendering superseded wording cannot register
+            // people against text they were never shown. It does not establish that a human read
+            // anything — any caller can GET the disclosure and echo the hash back. "A human saw
+            // this" remains an assertion by the caller, exactly as it was.
             return c.json(
               {
                 ok: false as const,
@@ -819,13 +824,26 @@ export namespace Server {
           const outcome = await gate.register({ token })
 
           // The provider loader caches its credential read, so a freshly registered Base stays out
-          // of `/provider`'s `connected` list until the instance is dropped. Doing it here rather
-          // than making every client remember keeps that invariant server-side, and means other
-          // attached windows see the new provider too.
+          // of `/provider`'s `connected` list until the instance cache is dropped. Doing it here
+          // rather than making every client remember keeps the invariant server-side.
+          //
+          // `disposeAll()`, not `dispose()`: the Base credential is a single global file, but
+          // `Instance.dispose()` only evicts `cache.delete(Instance.directory)` — the directory this
+          // request happened to carry. A multi-root workspace, or several windows against one
+          // `serve`, would keep every other instance's provider list showing Base as disconnected.
+          // Invalidation has to be as wide as the state that changed.
+          //
+          // A failure here leaves the credential written but provider lists stale, so it is reported
+          // rather than swallowed: the client needs to know its picker may be out of date.
           if (outcome.ok) {
-            await Instance.dispose().catch((error) =>
-              log.error("Altimate Base registered but instance dispose failed", { error }),
+            const disposed = await Instance.disposeAll().then(
+              () => true,
+              (error) => {
+                log.error("Altimate Base registered but instance disposal failed", { error })
+                return false
+              },
             )
+            return c.json(disposed ? outcome : { ...outcome, staleProviders: true as const })
           }
           return c.json(outcome)
         },

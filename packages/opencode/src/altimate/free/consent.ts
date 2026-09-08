@@ -19,11 +19,13 @@ export {
 /**
  * SHA-256 of the canonical disclosure, hex-encoded.
  *
- * `POST /altimate/base/register` requires the caller to echo this back, which is what turns "the
- * user was shown the current disclosure" into something the server can check rather than merely
- * trust. Not a secret — it is derived from public text — so a plain comparison is fine; its value
- * is that a caller which never fetched the disclosure cannot produce it, and a stale client showing
- * superseded text produces the wrong one.
+ * `POST /altimate/base/register` requires the caller to echo this back. This is a **text-version
+ * agreement, not proof of consent**: it establishes that the caller holds the current disclosure,
+ * so a client still rendering superseded wording cannot register people against text they were
+ * never shown. It does NOT establish that a human read anything — any caller can GET the disclosure
+ * and echo the hash. Whether a person actually saw the text remains an assertion by the caller.
+ *
+ * Not a secret (it is derived from public text), so a plain comparison is fine.
  */
 export function disclosureHash(): string {
   return createHash("sha256").update(ALTIMATE_BASE_DISCLOSURE, "utf8").digest("hex")

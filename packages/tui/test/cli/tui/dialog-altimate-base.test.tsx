@@ -205,15 +205,39 @@ test.serial("Altimate Base shows the privacy disclosure before registration and 
   const confirm = await mountConfirm()
   try {
     const frame = confirm.app.captureCharFrame()
+    const flat = frame.replace(/\s+/g, " ")
     expect(confirm.disclosure).toContain("Requests and responses may be logged and used")
     // The persistent per-install-id linkage line is intentionally not in the gate (it lives in docs).
     expect(confirm.disclosure).not.toContain("per-installation identifier")
     expect(frame).toContain("Use Altimate Base?")
-    expect(frame.replace(/\s+/g, " ")).toContain("Requests and responses may be logged and used")
+    expect(flat).toContain("Requests and responses may be logged and used")
+    // Both options are always visible.
     expect(frame).toContain("No — pick something else")
-    expect(frame).toContain("(default)")
+    expect(frame).toContain("Yes — use Altimate Base")
+    // Assert WHICH option is default, not merely that the word appears. The previous version of
+    // this test checked only `toContain("(default)")` and the presence of the No label, so it
+    // passed both before and after the default was inverted — it asserted its own name away.
+    // The cursor glyph marks the selected row, and Return runs it.
+    expect(flat).toContain("› No — pick something else (default)")
+    expect(flat).not.toContain("› Yes — use Altimate Base")
     expect(confirm.registrations()).toHaveLength(0)
     expect(confirm.events).toEqual([{ name: "altimate_base_confirm_shown", origin: "welcome" }])
+  } finally {
+    confirm.cleanup()
+  }
+})
+
+test.serial("Return declines, because No is the default — it must never register", async () => {
+  const confirm = await mountConfirm()
+  try {
+    // NOTE: KeyInput is `string | keyof typeof KeyCodes`, so a lowercase "return" would be sent as
+    // the literal characters r,e,t,u,r,n. The Enter key is the uppercase KeyCodes name — nothing
+    // else in this suite exercises it, so this path was previously unverified in either direction.
+    confirm.app.mockInput.pressKey("RETURN")
+    await waitUntil(() => confirm.events.some((event) => event.name === "altimate_base_choice"))
+    expect(confirm.events).toContainEqual({ name: "altimate_base_choice", choice: "cancel" })
+    // The property that matters: an unread Return cannot opt the installation into request logging.
+    expect(confirm.registrations()).toHaveLength(0)
   } finally {
     confirm.cleanup()
   }
