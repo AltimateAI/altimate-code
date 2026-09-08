@@ -45,8 +45,12 @@ export interface RefreshReport {
   /** True when the skill snapshot on disk changed. The caller owns the registry
    * invalidation this implies; see the note at the top of the file. */
   skillsChanged: boolean
-  /** Absent when workspace memory is off for this project. */
+  /** Absent when workspace memory is off, or when no session was supplied. */
   memory?: MemorySync.RefreshResult
+  /** Set when there was no session to reload in place, so the overlay was
+   * invalidated instead and the next turn re-hydrates it. Callers should say so
+   * rather than claim a reload that has not happened yet. */
+  memoryInvalidated?: boolean
   /** Set when a half failed. `refresh` never throws: a failed re-sync must leave
    * the session with what it already had rather than take the turn down. */
   errors: string[]
@@ -83,8 +87,14 @@ export async function status(directory: string): Promise<StatusReport> {
  * Both halves are attempted even if one fails — they are independent, and a
  * memory outage is no reason to leave skills stale. Neither call self-throttles:
  * `recentlySynced` is a caller-side skip on the per-message path, so an explicit
- * refresh gets a real one. */
-export async function refresh(directory: string, sessionID: string): Promise<RefreshReport> {
+ * refresh gets a real one.
+ *
+ * ``sessionID`` is optional because the two callers differ. A palette command has
+ * no session to hand us — the plugin API exposes ``session.get(id)`` but nothing
+ * that names the current one — so the memory overlay is invalidated and reloads on
+ * the next turn. The server route, which the extension uses, does have one, and
+ * gets the reload (and its block count) immediately. */
+export async function refresh(directory: string, sessionID?: string): Promise<RefreshReport> {
   const errors: string[] = []
 
   let skillsChanged = false
@@ -98,17 +108,26 @@ export async function refresh(directory: string, sessionID: string): Promise<Ref
   }
 
   let memory: MemorySync.RefreshResult | undefined
+  let memoryInvalidated = false
   if (MemorySync.isEnabled()) {
     try {
-      memory = await MemorySync.refresh(sessionID)
-      if (!memory.ok && memory.status === "error") errors.push("memory: could not be reloaded")
+      if (sessionID) {
+        memory = await MemorySync.refresh(sessionID)
+        if (!memory.ok && memory.status === "error") errors.push("memory: could not be reloaded")
+      } else {
+        // Forget every session's hydration. `hydrate` is idempotent for the life
+        // of a session, so without this the overlay a session already holds is
+        // never re-read — which is the staleness the user is asking us to fix.
+        MemorySync.resetOverlay()
+        memoryInvalidated = true
+      }
     } catch (err) {
       errors.push(`memory: ${String(err)}`)
       log.warn("workspace memory refresh failed", { err: String(err) })
     }
   }
 
-  return { skillsChanged, memory, errors }
+  return { skillsChanged, memory, memoryInvalidated, errors }
 }
 
 /** Push: re-send local memory the workspace never received.

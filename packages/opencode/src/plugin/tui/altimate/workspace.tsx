@@ -26,6 +26,9 @@ import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import open from "open"
+// altimate_change start - the /workspace action menu
+import * as Manage from "@/altimate/workspace/manage"
+// altimate_change end
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
   ConflictError,
@@ -1567,6 +1570,155 @@ async function showEngineInstallOffer(api: TuiPluginApi): Promise<void> {
 // Plugin registration
 // ─────────────────────────────────────────────────────────────────────────────
 
+// altimate_change start - the /workspace action menu
+//
+// One entry point rather than a command per verb. The palette dispatches by name
+// only — `useCommandSlashes` calls `dispatchCommand(name)` and drops anything
+// typed after it — so `/workspace refresh` as an argument is not expressible
+// without changing shared TUI plugin infrastructure. A menu keeps the single
+// entry point that shape was meant to give.
+
+/** Headline for the menu: what this project is linked to, and what has drifted. */
+function manageTitle(report: Manage.StatusReport): string {
+  if (!report.binding) return "Workspace — this project is not linked"
+  const parts = [`Workspace — ${report.binding.datamateName}`]
+  if (report.memory) {
+    // The unsynced count is the reason `sync` exists, so it belongs in the
+    // headline rather than behind the row it explains.
+    parts.push(
+      report.memory.unsynced > 0
+        ? `${report.memory.local} memories, ${report.memory.unsynced} not synced`
+        : `${report.memory.local} memories`,
+    )
+  }
+  return parts.join(" · ")
+}
+
+/** Confirm before detaching. Unlink is the one action here that cannot be undone
+ * by re-running it — re-linking is a separate flow — so it does not share the
+ * one-keypress path with the two idempotent ones. */
+function confirmUnlink(api: TuiPluginApi, directory: string, workspaceName: string): void {
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={`Unlink this project from "${workspaceName}"?`}
+      options={[
+        {
+          title: "Cancel",
+          value: "cancel",
+          description: "Keep the project linked.",
+        },
+        {
+          title: "Unlink",
+          value: "unlink",
+          description: "Detach the project and remove the workspace's skills from it.",
+        },
+      ]}
+      current="cancel"
+      onSelect={(option) => {
+        api.ui.dialog.clear()
+        if (option.value !== "unlink") return
+        Manage.unlink(directory)
+          .then((report) => {
+            api.ui.toast({
+              variant: "success",
+              message: report.removedServerSide
+                ? `Unlinked from "${report.was?.datamateName ?? workspaceName}".`
+                : // The server had no binding to remove. Saying "unlinked" would
+                  // imply this call did it; the local state was simply stale.
+                  "This project was already unlinked. Local state has been cleared.",
+              duration: 8_000,
+            })
+          })
+          .catch((err) => {
+            api.ui.toast({
+              variant: "warning",
+              message: `Could not unlink: ${String(err)}. The project is still linked.`,
+              duration: 15_000,
+            })
+          })
+      }}
+    />
+  ))
+}
+
+/** The `/workspace` menu. */
+async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
+  const report = await Manage.status(directory)
+  const linked = report.binding !== null
+
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={manageTitle(report)}
+      options={
+        linked
+          ? [
+              {
+                title: "Refresh",
+                value: "refresh",
+                description: "Pull the workspace's skills and memory into this project.",
+              },
+              {
+                title: "Sync",
+                value: "sync",
+                description: "Re-send local memory the workspace never received.",
+              },
+              { title: "Unlink", value: "unlink", description: "Detach this project from the workspace." },
+              { title: "Done", value: "done", description: "Close this menu." },
+            ]
+          : [{ title: "Done", value: "done", description: "Link a project with /altimate.workspace.link." }]
+      }
+      current={linked ? "refresh" : "done"}
+      onSelect={(option) => {
+        if (option.value === "unlink") {
+          confirmUnlink(api, directory, report.binding?.datamateName ?? "this workspace")
+          return
+        }
+        api.ui.dialog.clear()
+        if (option.value === "refresh") {
+          Manage.refresh(directory)
+            .then((result) => {
+              const said = [
+                result.skillsChanged ? "skills updated" : "skills already current",
+                result.memoryInvalidated ? "memory reloads on your next message" : null,
+              ].filter(Boolean)
+              api.ui.toast({
+                variant: result.errors.length > 0 ? "warning" : "success",
+                message:
+                  result.errors.length > 0
+                    ? `Refreshed with problems — ${result.errors.join("; ")}`
+                    : `Refreshed: ${said.join(", ")}.`,
+                duration: 8_000,
+              })
+            })
+            .catch((err) => reportFlowFailure(api, err))
+          return
+        }
+        if (option.value === "sync") {
+          Manage.sync(directory)
+            .then((result) => {
+              api.ui.toast({
+                variant: result.failed > 0 ? "warning" : "success",
+                message: result.gated
+                  ? "Nothing to sync — workspace memory is off for this project."
+                  : result.sent === 0 && result.failed === 0
+                    ? // The healthy answer. Blocks mirror as they are written, so
+                      // an empty sweep means nothing was ever stranded.
+                      "Everything is already in the workspace."
+                    : `Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}` +
+                      (result.failed > 0 ? `, ${result.failed} failed` : "") +
+                      (result.declined > 0 ? `, ${result.declined} declined` : "") +
+                      ".",
+                duration: 8_000,
+              })
+            })
+            .catch((err) => reportFlowFailure(api, err))
+        }
+      }}
+    />
+  ))
+}
+// altimate_change end
+
 /** Report a fire-and-forget flow failure. The keymap ``run()`` callbacks
  * discard the returned promise with ``void``, so any rejection from
  * ``recordApprovedBinding`` / ``readLocalBinding`` / anything else awaited
@@ -1604,6 +1756,19 @@ const tui: TuiPlugin = async (api) => {
           showEngineInstallOffer(api).catch((err) => reportFlowFailure(api, err))
         },
       },
+      // altimate_change start - the /workspace action menu
+      {
+        name: "altimate.workspace.manage",
+        title: "Workspace",
+        desc: "Refresh, sync or unlink this project's workspace",
+        category: "Altimate",
+        namespace: "palette",
+        slashName: "workspace",
+        run() {
+          runWorkspaceManage(api, api.state.path.directory).catch((err) => reportFlowFailure(api, err))
+        },
+      },
+      // altimate_change end
       {
         name: "altimate.workspace.link",
         title: "Link this project to a workspace",
