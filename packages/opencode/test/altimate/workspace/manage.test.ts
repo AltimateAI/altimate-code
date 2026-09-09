@@ -40,7 +40,9 @@ afterAll(() => {
 
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { unlink, sync, status } = await import("../../../src/altimate/workspace/manage")
-const { readLocalBinding, recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+const { readLocalBinding, recordApprovedBinding, onBindingChanged } = await import(
+  "../../../src/altimate/workspace/state",
+)
 const { resetPollMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -223,5 +225,77 @@ describe("status", () => {
     // would refuse to send any of it.
     expect(report.memory?.unsynced).toBe(0)
     expect(report.binding?.datamateName).toBe("Growth")
+  })
+})
+
+describe("binding-change notifications", () => {
+  // The sidebar tile polls every 30s. Without these, Unlink shows a success
+  // toast while the pane beside it keeps naming the workspace until the next
+  // tick — the UI contradicting itself, with the stale half looking
+  // authoritative. Found by watching the real TUI, like the rest of this file.
+  test("unlink wakes subscribers so the tile does not wait out the poll", async () => {
+    await bind(projectDir)
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await unlink(projectDir)
+      expect(fired).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
+  })
+
+  test("a new bind wakes subscribers", async () => {
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await bind(projectDir)
+      expect(fired).toBeGreaterThan(0)
+    } finally {
+      stop()
+    }
+  })
+
+  test("re-recording the SAME binding does not", async () => {
+    // A warm cache re-read is not a change. Waking the tile on every resolve
+    // would undo the point of the poll interval.
+    await bind(projectDir)
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    try {
+      await bind(projectDir)
+      expect(fired).toBe(0)
+    } finally {
+      stop()
+    }
+  })
+
+  test("unsubscribing stops them", async () => {
+    let fired = 0
+    const stop = onBindingChanged(() => {
+      fired++
+    })
+    stop()
+    await bind(projectDir)
+    expect(fired).toBe(0)
+  })
+
+  test("a listener that throws does not fail the unlink", async () => {
+    await bind(projectDir)
+    const stop = onBindingChanged(() => {
+      throw new Error("subscriber blew up")
+    })
+    try {
+      const report = await unlink(projectDir)
+      expect(report.removedServerSide).toBe(true)
+    } finally {
+      stop()
+    }
   })
 })

@@ -9,7 +9,7 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, onCleanup, onMount, Show } from "solid-js"
-import { resolveBindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
+import { onBindingChanged, resolveBindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 // altimate_change start - status lines
 import * as Manage from "@/altimate/workspace/manage"
 // altimate_change end
@@ -79,8 +79,17 @@ function View(props: { api: TuiPluginApi }) {
   // altimate_change end
 
   let refreshInFlight = false
+  let refreshQueued = false
   const refresh = async () => {
-    if (refreshInFlight) return
+    // Coalesce rather than drop. A binding-change notification can land while a
+    // poll is mid-flight, and that pass may already have read the old binding —
+    // returning early would leave the tile stale until the next tick, which is
+    // exactly the lag the listener exists to remove. One queued re-run is
+    // enough however many notifications arrive while we are busy.
+    if (refreshInFlight) {
+      refreshQueued = true
+      return
+    }
     refreshInFlight = true
     try {
       const dir = props.api.state.path.directory
@@ -118,6 +127,10 @@ function View(props: { api: TuiPluginApi }) {
       // altimate_change end
     } finally {
       refreshInFlight = false
+      if (refreshQueued) {
+        refreshQueued = false
+        void refresh()
+      }
     }
   }
 
@@ -126,7 +139,17 @@ function View(props: { api: TuiPluginApi }) {
     const timer = setInterval(() => void refresh(), POLL_MS)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ;(timer as any)?.unref?.()
-    onCleanup(() => clearInterval(timer))
+    // Link and unlink happen in THIS process, so the tile can hear about them
+    // directly instead of waiting out the poll. Without this, Unlink shows a
+    // success toast while the pane beside it keeps naming the workspace for up
+    // to POLL_MS — the UI contradicting itself, with the stale half looking
+    // authoritative. The interval stays: it is what catches a change made by
+    // another process, which no in-process listener can see.
+    const unsubscribe = onBindingChanged(() => void refresh())
+    onCleanup(() => {
+      clearInterval(timer)
+      unsubscribe()
+    })
   })
 
   return (

@@ -403,15 +403,62 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
 
 /** Drop a cached row the server no longer recognises, so later reads do not
  * resurrect it from disk. */
+/** Listeners fired when THIS process changes a project's binding.
+ *
+ * Exists for the sidebar tile, which otherwise learns about a link or unlink
+ * only on its next 30s poll: the user hits Unlink, gets a success toast, and
+ * watches the pane next to it keep naming the workspace for up to half a
+ * minute. The stale half is the one that looks authoritative.
+ *
+ * Deliberately a plain listener set rather than an event bus. Every binding
+ * write already funnels through this module, so one hook here covers link,
+ * unlink and rebind; a bus would mean plumbing a dependency through each
+ * writer for a single subscriber. The poll stays as the backstop — it is what
+ * catches a change made by ANOTHER process, which no in-process notifier can
+ * see. */
+const bindingChangeListeners = new Set<() => void>()
+
+export function onBindingChanged(listener: () => void): () => void {
+  bindingChangeListeners.add(listener)
+  return () => {
+    bindingChangeListeners.delete(listener)
+  }
+}
+
+/** Never throws: a listener is a UI refresh, and one bad subscriber must not
+ * fail the link or unlink that notified it. Iterates a copy so a listener that
+ * unsubscribes itself mid-notify cannot skip the next one. */
+function notifyBindingChanged(): void {
+  // Snapshot first: a listener may subscribe or unsubscribe while being
+  // notified, and iterating the live Set would then walk a collection that
+  // changed underneath us.
+  const listeners = Array.from(bindingChangeListeners)
+  for (const listener of listeners) {
+    try {
+      listener()
+    } catch (err) {
+      log.warn("a binding-change listener threw", { err: String(err) })
+    }
+  }
+}
+
 function forgetBinding(directory: string, key: { tenant: string; apiUrl: string }): void {
+  let dropped = false
   try {
     const cache = readCache()
     if (!cache || cache.tenant !== key.tenant || cache.apiUrl !== key.apiUrl) return
     delete cache.bindings[canonicalizeKey(directory)]
     writeCache(cache)
+    dropped = true
   } catch (err) {
     log.warn("could not drop a binding the server no longer recognises", { err: String(err) })
   }
+  // Outside the try on purpose. A listener is a UI refresh; its failure is not
+  // a failed cache drop, and notifying from inside would log a throwing
+  // subscriber as "could not drop a binding" — a misleading line about a write
+  // that had already succeeded. Only on a real drop: the early return above
+  // covers the case where there was nothing of ours to remove.
+  if (dropped) notifyBindingChanged()
 }
 
 /** The server's answer for this project, with no cache consulted. */
@@ -557,6 +604,11 @@ export async function recordApprovedBinding(
       err: String(err),
     })
   }
+
+  // Only when the row actually changed: `bindingChanged` is false for a warm
+  // cache, and a flow that merely re-reads the binding it already had must not
+  // wake subscribers into a pointless refresh on every resolve.
+  if (bindingChanged) notifyBindingChanged()
 
   // altimate_change start - seed the workspace with the memory this machine
   // already holds. Deliberately OUTSIDE the try above: a failed cache write
