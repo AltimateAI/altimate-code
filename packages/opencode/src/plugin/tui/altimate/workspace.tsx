@@ -1641,6 +1641,38 @@ function confirmUnlink(api: TuiPluginApi, directory: string, workspaceName: stri
   ))
 }
 
+export { syncMessage as syncMessageForTests }
+
+/** What a sweep actually did.
+ *
+ * `declined` is counted, not folded into silence. It means the service refused
+ * the blocks — quota, permissions, a workspace setting — which is a different
+ * outcome from "nothing needed sending", and reporting it as the latter tells the
+ * user their memory reached the workspace when none of it did. That is exactly
+ * what an earlier version of this said, on a project whose every block was
+ * refused: "Everything is already in the workspace."
+ *
+ * `skipped` is deliberately NOT surfaced on its own — a block already present at
+ * its current payload is the ordinary case, and naming it invites the reader to
+ * think something went wrong. */
+function syncMessage(result: Manage.SyncReport): string {
+  if (result.gated) return "Nothing to sync — workspace memory is off for this project."
+  if (result.declined > 0 && result.sent === 0)
+    return `The workspace refused all ${result.declined} memor${result.declined === 1 ? "y" : "ies"} — nothing was sent.`
+  // No `declined === 0` here: the branch above already took every refused sweep
+  // with nothing sent, so repeating the condition would be a second guard that
+  // can never be the one that fires — and a reader has to prove that to
+  // themselves before trusting either.
+  if (result.sent === 0 && result.failed === 0)
+    // Blocks mirror as they are written, so an empty sweep means nothing was
+    // ever stranded. This is the healthy answer.
+    return "Everything is already in the workspace."
+  const parts = [`Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}`]
+  if (result.failed > 0) parts.push(`${result.failed} failed`)
+  if (result.declined > 0) parts.push(`${result.declined} refused by the workspace`)
+  return parts.join(", ") + "."
+}
+
 /** The `/workspace` menu. */
 async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise<void> {
   const report = await Manage.status(directory)
@@ -1697,17 +1729,8 @@ async function runWorkspaceManage(api: TuiPluginApi, directory: string): Promise
           Manage.sync(directory)
             .then((result) => {
               api.ui.toast({
-                variant: result.failed > 0 ? "warning" : "success",
-                message: result.gated
-                  ? "Nothing to sync — workspace memory is off for this project."
-                  : result.sent === 0 && result.failed === 0
-                    ? // The healthy answer. Blocks mirror as they are written, so
-                      // an empty sweep means nothing was ever stranded.
-                      "Everything is already in the workspace."
-                    : `Sent ${result.sent} memor${result.sent === 1 ? "y" : "ies"}` +
-                      (result.failed > 0 ? `, ${result.failed} failed` : "") +
-                      (result.declined > 0 ? `, ${result.declined} declined` : "") +
-                      ".",
+                variant: result.failed > 0 || result.declined > 0 ? "warning" : "success",
+                message: syncMessage(result),
                 duration: 8_000,
               })
             })

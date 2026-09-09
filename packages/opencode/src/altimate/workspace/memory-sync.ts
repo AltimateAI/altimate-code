@@ -616,18 +616,38 @@ async function runQueue<T>(
   return { ok, failed, declined, skipped }
 }
 
-/** What the enablement cache already knows about this workspace, without asking
- * the service. `null` means unknown — not disabled.
+/** How long a poller remembers a "no". Deliberately separate from
+ * `MEMORY_ENABLED_TTL_MS` and from the main cache: `memoryEnabled` stays
+ * positive-only so the WRITE path picks up a newly enabled workspace at once,
+ * which is the property that matters for not losing memory. A poller can afford
+ * to be a few minutes behind; what it cannot afford is a request every tick. */
+const POLL_NEGATIVE_TTL_MS = 5 * 60 * 1000
+const pollNegativeMemo = new Map<number, number>()
+
+/** Whether this workspace has memory on, for a caller that polls.
  *
- * For pollers. The cache is deliberately positive-only (a workspace that has
- * memory switched off is never memoized, so switching it on is picked up at
- * once), which means a caller that polls and asks the network on every miss
- * issues a request per poll, forever, for exactly the workspaces where the
- * answer is "no". A sidebar refreshing every 30s must not do that. */
-export function memoryEnabledCached(binding: CachedBinding): boolean | null {
+ * Resolves over the network at most once per `POLL_NEGATIVE_TTL_MS` when the
+ * answer is "no", and not at all once the answer is "yes" (the shared cache
+ * holds positives). The shape exists because the main cache is positive-only:
+ * asking it directly on every tick means a request every tick, forever, for
+ * exactly the workspaces whose answer is "no" — while never asking at all means
+ * a sidebar that shows nothing until something else happens to warm the cache,
+ * which is the cold-start hole this replaced. */
+export async function memoryEnabledForPoller(binding: CachedBinding): Promise<boolean> {
   const cached = memoryEnabledCache.get(binding.datamateId)
-  if (!cached) return null
-  return Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS ? true : null
+  if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return true
+  const refusedAt = pollNegativeMemo.get(binding.datamateId)
+  if (refusedAt !== undefined && Date.now() - refusedAt < POLL_NEGATIVE_TTL_MS) return false
+  const value = await memoryEnabled(binding)
+  if (value) pollNegativeMemo.delete(binding.datamateId)
+  else pollNegativeMemo.set(binding.datamateId, Date.now())
+  return value
+}
+
+/** Test seam: the poller memo is process-global and would otherwise leak between
+ * cases in the same file. */
+export function resetPollMemoForTests(): void {
+  pollNegativeMemo.clear()
 }
 
 /** Split blocks into those the workspace still needs and those already there at

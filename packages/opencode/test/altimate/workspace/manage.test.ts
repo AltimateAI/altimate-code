@@ -41,6 +41,7 @@ afterAll(() => {
 const { AltimateApi } = await import("../../../src/altimate/api/client")
 const { unlink, sync, status } = await import("../../../src/altimate/workspace/manage")
 const { readLocalBinding, recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
+const { resetPollMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
 
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 const originalIsConfigured = AltimateApi.isConfigured
@@ -179,23 +180,48 @@ describe("status", () => {
     expect(report.binding).toBeNull()
   })
 
-  test("issues no request when the caller forbids the network", async () => {
-    // The sidebar calls this every 30 seconds. The memory-enabled cache is
+  test("a poller resolves the workspace setting once, not on every tick", async () => {
+    // The sidebar calls this every 30 seconds. The shared enablement cache is
     // positive-only — a workspace with memory switched OFF is never memoized —
-    // so asking the service on a cache miss would put a request on the wire on
-    // every single poll, for the lifetime of the session, for exactly the
-    // workspaces whose answer is "no".
+    // so asking it directly on each tick would put a request on the wire every
+    // 30 seconds, forever, for exactly the workspaces whose answer is "no".
+    //
+    // The fix is a bound, NOT a ban. An earlier version refused the network
+    // outright and the counts then never appeared at all on a session where
+    // nothing else warmed the cache — the very drift the line exists to surface.
     await bind(projectDir)
-    const before = requests.length
+    resetPollMemoForTests()
+    // Counted against the workspace-list endpoint specifically, not every
+    // request: `recordApprovedBinding` starts a fire-and-forget backfill whose
+    // traffic lands at an unpredictable moment, so a total-request assertion
+    // passes alone and fails in a full run.
+    const listCalls = () => requests.filter((r) => r.url.includes("/datamates")).length
+    const before = listCalls()
+
+    await status(projectDir, { allowNetwork: false })
+    const afterFirst = listCalls()
+    await status(projectDir, { allowNetwork: false })
+    await status(projectDir, { allowNetwork: false })
+
+    // The first poll asks.
+    expect(afterFirst).toBeGreaterThan(before)
+    // The next two do not.
+    expect(listCalls()).toBe(afterFirst)
+  })
+
+  test("a poller still reports the local block count when memory is off", async () => {
+    // "How many memories do I have" is answerable without the service; only
+    // "how many are outstanding" depends on the workspace setting. Reporting
+    // nothing at all would hide the first fact to protect the second.
+    await bind(projectDir)
+    resetPollMemoForTests()
 
     const report = await status(projectDir, { allowNetwork: false })
 
-    expect(requests.length).toBe(before)
-    // Unknown is reported as unknown. Treating it as enabled would show a
-    // backlog on a workspace that has memory off; treating it as disabled would
-    // hide a real one.
-    expect(report.memory).toBeNull()
-    // The binding still comes back — that read is local.
+    expect(report.memory).not.toBeNull()
+    // The stub workspace has memory off, so nothing is outstanding — a sweep
+    // would refuse to send any of it.
+    expect(report.memory?.unsynced).toBe(0)
     expect(report.binding?.datamateName).toBe("Growth")
   })
 })

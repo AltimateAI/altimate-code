@@ -81,12 +81,15 @@ export interface SyncReport {
 export async function status(
   directory: string,
   opts: {
-    /** Set false for pollers. The memory-enabled cache is positive-only, so a
-     * workspace with memory switched OFF is never memoized — a 30-second poller
-     * that asks the service on every miss issues a request every 30 seconds,
-     * forever, for precisely the workspaces where the answer is "no". With this
-     * false the memory counts are reported only when the cache already knows,
-     * and omitted otherwise. */
+    /** Set false for pollers. Resolves the workspace's memory setting through the
+     * poller path, which asks the service at most once every few minutes when the
+     * answer is "no" and not at all once it is "yes" — rather than on every tick,
+     * which is what asking the positive-only cache directly would cost.
+     *
+     * It does NOT mean "never touch the network": an earlier version of this took
+     * that literally, and the result was a sidebar whose counts never appeared at
+     * all on a session where nothing else warmed the cache — the exact drift the
+     * line exists to surface. Bounded, not forbidden. */
     allowNetwork?: boolean
   } = {},
 ): Promise<StatusReport> {
@@ -195,10 +198,13 @@ async function memoryCounts(
   if (!MemorySync.isEnabled()) return null
   try {
     const binding = await readLocalBinding(directory).catch(() => null)
-    // Report nothing rather than guess. Treating "unknown" as enabled would show
-    // a backlog on a workspace that has memory off; treating it as disabled would
-    // hide a real one.
-    if (!allowNetwork && binding && MemorySync.memoryEnabledCached(binding) === null) return null
+    // A poller resolves through the rate-limited path; everything else asks
+    // directly. Either way the answer is real, so the counts a status line shows
+    // agree with what a sweep would actually send.
+    if (!allowNetwork && binding && !(await MemorySync.memoryEnabledForPoller(binding))) {
+      const blocks = await MemoryStore.listAll({ directory })
+      return { local: blocks.length, unsynced: 0 }
+    }
     const blocks = await MemoryStore.listAll({ directory })
     return { local: blocks.length, unsynced: await MemorySync.pendingCount(blocks, binding) }
   } catch (err) {
