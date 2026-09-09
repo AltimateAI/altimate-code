@@ -75,23 +75,30 @@ issues the release workflow (full `bun turbo typecheck` + Verdaccio + npm publis
 will hit. Do NOT skip any of these:
 
 ```bash
-# 0. CHANGELOG entry — MUST exist in the tagged commit, not after. The changelog
-#    is baked into the compiled binary + every npm package at build time
-#    (script/build.ts / script/publish.ts). A follow-up commit does NOT fix the
-#    binary about to be built — only the *next* beta will read the corrected
-#    entry, so this is not a "fix forward later" gate like the others below.
+# 0. CHANGELOG entry — MUST exist in the commit you are about to tag, not after.
+#    The changelog is baked into the compiled binary + every npm package at
+#    build time (packages/opencode/script/build.ts reads CHANGELOG.md into
+#    OPENCODE_CHANGELOG; packages/opencode/script/publish.ts ships it). The
+#    workflow builds from the TAGGED COMMIT, wherever it lives — a follow-up
+#    commit does NOT fix the binary about to be built from THIS tag, only the
+#    *next* beta will read the corrected entry, so this is not a "fix forward
+#    later" gate like the others below.
 #    Every prior beta (beta.1, beta.3, beta.4, ...) has its own
 #    "## [X.Y.Z-beta.N] - YYYY-MM-DD" section — match that format and voice.
-git log <last-beta-tag>..HEAD --oneline   # the commits this beta actually adds
+LAST_BETA_TAG=$(git tag --list 'v*-beta.*' --sort=-version:refname | head -1)
+test -n "$LAST_BETA_TAG" || { echo "No previous beta tag found — STOP"; exit 1; }
+git log "${LAST_BETA_TAG}..HEAD" --oneline   # the commits this beta actually adds
 # Read the actual PR for each one (gh pr view <PR#>) — do not write the entry
 # from commit subjects alone, they're too terse to be useful changelog copy.
 # Then add the section to CHANGELOG.md and commit it.
 #
-# Direct pushes to main are normally blocked (branch protection). If you're
-# tagging from anywhere other than main itself — including a same-commit
-# worktree — this commit has to land on main via a normal PR BEFORE the tag
-# is cut, or the built binary ships one entry behind. Budget time for that
-# PR before Step 4, don't tag first and try to fix forward.
+# The invariant is "in the tagged commit", not "on main" — Step 4 explicitly
+# supports tagging from a branch, and the workflow builds whatever ref you
+# tag regardless of main. main's branch protection is a separate, situational
+# fact: if you can't push directly there (the usual case) and you're tagging
+# main's own tip, this commit needs a normal PR merged first, or the tag you
+# push next is missing it. A branch-beta tagged straight off its own branch
+# has no such dependency — commit it there and tag.
 
 # 1. FULL monorepo typecheck (what the release workflow runs — clean install to match CI)
 rm -rf node_modules && bun install --frozen-lockfile
@@ -202,11 +209,16 @@ Only after the beta has soaked and the round-trip is proven:
 
 - The tag MUST contain `-beta.N`. A plain `vX.Y.Z` from this skill would hit
   `latest` — never do that here.
-- **The CHANGELOG entry (Step 3, gate 0) must be committed and, if not on main
-  already, merged to main BEFORE the tag exists.** Discovered the hard way on
-  beta.5: tagging first and adding the entry afterward ships a binary with a
-  stale embedded changelog, and there is no way to fix that specific binary
-  short of a new tag. This is not a "fix forward" gate like the others.
+- **The CHANGELOG entry (Step 3, gate 0) must be committed into the commit you
+  tag, before the tag exists** — not "on main," specifically: the workflow
+  builds from the tagged ref, and Step 4 explicitly supports tagging a branch
+  that isn't main. Whether that commit needs a PR first is a separate,
+  situational fact about whether *you personally* can push directly to
+  whatever ref you're tagging (usually blocked for main, not for your own
+  branch). Discovered the hard way on beta.5: tagging first and adding the
+  entry afterward ships a binary with a stale embedded changelog, and there is
+  no way to fix that specific binary short of a new tag. This is not a "fix
+  forward" gate like the others.
 - Never skip Step 6 (the `latest`-didn't-move assertion). It is the one check
   that catches a channel-routing regression before it bricks everyone.
 - npm publishes are effectively irreversible — get the explicit user yes at
